@@ -177,7 +177,7 @@ impl Tree {
             }
         }
         for &node in &ids {
-            if self.path(node).is_none() && self.nodes.get(&self.nodes[&node].parent).is_some() {
+            if self.path(node).is_none() && self.nodes.contains_key(&self.nodes[&node].parent) {
                 // Connected parents but no path to the root: a cycle (report each member once).
                 let cycle_member_min = self.cycle_members(node).into_iter().min();
                 if cycle_member_min == Some(node) {
