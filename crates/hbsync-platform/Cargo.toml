@@ -12,7 +12,7 @@ workspace = true
 [dependencies]
 caseless = "0.2.2"
 filetime = "0.2.29"
-tempfile = "3.27"
+tempfile.workspace = true
 unicode-normalization = "0.1.25"
 
 [target.'cfg(unix)'.dependencies]

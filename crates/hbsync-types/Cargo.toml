@@ -1,0 +1,16 @@
+[package]
+name = "hbsync-types"
+description = "Node vocabulary shared by the state DB, the remote layer and the sync engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hbsync-fileio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
