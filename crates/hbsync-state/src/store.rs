@@ -512,6 +512,28 @@ impl<'a> Store<'a> {
         rows.map(|r| codec::node(&r?)).collect()
     }
 
+    /// Synced files among the dirty nodes that are gone locally (and would be deleted
+    /// remotely), and those gone remotely (would be trashed locally). Online-only files have
+    /// no local copy by design and don't count. Used by the mass-delete guard, which must see
+    /// the whole delete, not one planning batch.
+    pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
+        let local_gone: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM dirty d JOIN base b ON b.node_id = d.node_id \
+             WHERE b.kind = 0 AND b.content_state != 2 \
+             AND NOT EXISTS (SELECT 1 FROM local_items l WHERE l.node_id = d.node_id)",
+            [],
+            |r| r.get(0),
+        )?;
+        let remote_gone: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM dirty d JOIN base b ON b.node_id = d.node_id \
+             WHERE b.kind = 0 \
+             AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.node_id = d.node_id)",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok((local_gone as u64, remote_gone as u64))
+    }
+
     pub fn dirty_count(&self) -> Result<u64> {
         Ok(self
             .conn

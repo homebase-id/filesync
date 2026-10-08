@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
+use hbsync_platform::name::name_key;
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
 use hbsync_remote::{NewNode, Remote, RemoteError};
 use hbsync_state::{
@@ -43,6 +44,20 @@ pub struct ExecConfig {
     /// Attempts per operation within one run (ordering blocks and transient errors).
     pub attempts: u8,
     pub transfer: TransferConfig,
+    /// Names that differ only in case (or Unicode normalization) are the same file here
+    /// (Windows, default macOS). Probe with [`probe_case_insensitive`].
+    pub case_insensitive: bool,
+}
+
+/// Probes the volume of the sync root, inside the client's own state folder so nothing shows
+/// up in the user's tree. Falls back to the OS default.
+pub fn probe_case_insensitive(root: &Path) -> bool {
+    let dir = root.join(hbsync_local::STATE_DIR);
+    let _ = fs::create_dir_all(&dir);
+    match hbsync_platform::fskind::probe_case_sensitive(&dir) {
+        Ok(sensitive) => !sensitive,
+        Err(_) => cfg!(any(windows, target_os = "macos")),
+    }
 }
 
 impl ExecConfig {
@@ -219,17 +234,25 @@ impl<'a> Executor<'a> {
             jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
             pending.insert(p.job.node(), p);
         }
+        // Commit each transfer as soon as it finishes: small files don't wait for a large
+        // one, and a crash loses only transfers still in flight.
         let remote = self.remote;
-        let mut finished = Vec::new();
-        run_jobs(remote, self.cfg.transfer, jobs, |job, result| {
-            finished.push((job.node(), result))
-        });
-        for (node, result) in finished {
-            let Some(p) = pending.remove(&node) else {
-                continue;
+        let transfer = self.cfg.transfer;
+        let mut first_error = None;
+        run_jobs(remote, transfer, jobs, |job, result| {
+            if first_error.is_some() {
+                return; // the DB failed; leave the rest dirty for the next sync
+            }
+            let Some(p) = pending.remove(&job.node()) else {
+                return;
             };
             let outcome = self.commit(p.ctx, result).unwrap_or_else(Outcome::from);
-            self.handle(p.op, p.attempts, outcome)?;
+            if let Err(e) = self.handle(p.op, p.attempts, outcome) {
+                first_error = Some(e);
+            }
+        });
+        if let Some(e) = first_error {
+            return Err(e);
         }
         Ok(())
     }
@@ -311,10 +334,31 @@ impl<'a> Executor<'a> {
 
     /// Frees `target` if a node that the plan is about to move away holds it: that node is
     /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
+    /// The tracked item that holds `target` on disk: the row at that exact path, or, on a
+    /// case-insensitive volume, a sibling whose name differs only in case or normalization.
+    fn occupant(&mut self, target: &RelPath) -> Result<Option<LocalRow>, StateError> {
+        if let Some(row) = self.db.read(|s| s.get_local(target))? {
+            return Ok(Some(row));
+        }
+        if !self.cfg.case_insensitive {
+            return Ok(None);
+        }
+        let (Some(name), parent) = (target.name(), target.parent().unwrap_or_default()) else {
+            return Ok(None);
+        };
+        let key = name_key(name);
+        let siblings = self.db.read(|s| s.local_children(&parent))?;
+        Ok(siblings
+            .into_iter()
+            .find(|r| r.path.name().is_some_and(|n| name_key(n) == key)))
+    }
+
+    /// Frees `target` if a node that the plan is about to move away holds it: that node is
+    /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
+    /// The mover itself may hold it under another case (a case-only rename).
     fn free_target(&mut self, target: &RelPath, mover: Option<NodeId>) -> Result<bool, StateError> {
-        let occupant_row = self.db.read(|s| s.get_local(target))?;
         let on_disk = fs::symlink_metadata(self.abs(target)).is_ok();
-        let Some(occupant) = occupant_row else {
+        let Some(occupant) = self.occupant(target)? else {
             return Ok(!on_disk);
         };
         if Some(occupant.node) == mover {
@@ -334,14 +378,14 @@ impl<'a> Executor<'a> {
         if !leaving || !self.on_disk_unchanged(&occupant) {
             return Ok(false);
         }
-        let parent = target.parent().unwrap_or_default();
+        let parent = occupant.path.parent().unwrap_or_default();
         let Ok(parked) = parent.join(&parked_name(occupant.node)) else {
             return Ok(false);
         };
-        if ops::rename_noreplace(&self.abs(target), &self.abs(&parked)).is_err() {
+        if ops::rename_noreplace(&self.abs(&occupant.path), &self.abs(&parked)).is_err() {
             return Ok(false);
         }
-        let original = target.clone();
+        let original = occupant.path.clone();
         self.db.write(|s| {
             s.move_local_subtree(&original, &parked)?;
             s.put_parked(occupant.node, &parked, &original)
@@ -394,8 +438,9 @@ impl<'a> Executor<'a> {
             return Ok(Outcome::Retry("parent not local yet".into()));
         };
         let abs = self.abs(&target);
-        // Idempotent: a folder left by an interrupted run, unknown to the DB, is adopted.
-        let adopt = self.db.read(|s| s.get_local(&target))?.is_none()
+        // Idempotent: a folder left by an interrupted run, unknown to the DB (under any case),
+        // is adopted. One the DB tracks for another node is never taken over.
+        let adopt = self.occupant(&target)?.is_none()
             && fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
         if !adopt {
             if !self.free_target(&target, None)? {

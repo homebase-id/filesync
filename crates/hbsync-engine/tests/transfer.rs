@@ -181,3 +181,34 @@ fn bandwidth_cap_slows_transfers() -> R {
     );
     Ok(())
 }
+
+#[test]
+fn results_arrive_while_other_transfers_still_run() -> R {
+    let dir = tempfile::tempdir()?;
+    let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
+    let jobs = vec![
+        (false, upload_job(dir.path(), "small", 10)?),
+        // Throttled so it takes a while.
+        (false, upload_job(dir.path(), "large", 400_000)?),
+    ];
+    let start = Instant::now();
+    let mut arrivals = Vec::new();
+    run_jobs(
+        &remote,
+        TransferConfig {
+            workers: 2,
+            max_bytes_per_sec: Some(800_000),
+        },
+        jobs,
+        |job, _| {
+            arrivals.push((job.size(), start.elapsed()));
+        },
+    );
+    let (small, large) = (arrivals[0], arrivals[1]);
+    assert_eq!((small.0, large.0), (10, 400_000));
+    assert!(
+        small.1 + Duration::from_millis(200) < large.1,
+        "{arrivals:?}"
+    );
+    Ok(())
+}

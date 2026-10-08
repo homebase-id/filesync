@@ -53,6 +53,10 @@ pub struct Options {
     pub synced_files: usize,
     /// Let held deletes through (the user confirmed them).
     pub allow_mass_delete: bool,
+    /// Files pending deletion across the whole dirty set, not just this plan's batch:
+    /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
+    /// totals too, so a large delete split over several batches is still held.
+    pub pending_deletes: (usize, usize),
 }
 
 impl Default for Options {
@@ -64,6 +68,7 @@ impl Default for Options {
             mass_delete_fraction: 0.25,
             synced_files: 0,
             allow_mass_delete: false,
+            pending_deletes: (0, 0),
         }
     }
 }
@@ -910,7 +915,10 @@ impl<'a> Reconciler<'a> {
             .mass_delete_min
             .max((synced as f64 * self.opts.mass_delete_fraction) as usize);
         let trips = |n: usize| n > limit || (synced > 0 && n >= synced && n > 1);
-        let (hold_local, hold_remote) = (trips(local_files), trips(remote_files));
+        let (gone_locally, gone_remotely) = self.opts.pending_deletes;
+        // Trashing locally follows remote deletes; remote deletes follow local ones.
+        let hold_local = trips(local_files) || trips(gone_remotely);
+        let hold_remote = trips(remote_files) || trips(gone_locally);
         if !hold_local && !hold_remote {
             return;
         }

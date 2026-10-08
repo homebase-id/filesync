@@ -413,6 +413,30 @@ fn deleting_everything_is_held() -> R {
     Ok(())
 }
 
+#[test]
+fn a_mass_delete_split_over_batches_is_still_held() -> R {
+    let server = server();
+    let small_batches = |c: &mut EngineConfig| {
+        c.batch = 10;
+        c.mass_delete_min = 20;
+    };
+    let mut a = Client::new(&server, "a", small_batches)?;
+    for i in 0..30 {
+        a.write(&format!("dir/f{i:02}"), format!("{i}").as_bytes())?;
+    }
+    a.sync()?;
+    // 30 deletes, planned 10 at a time: each batch alone is under the limit of 20.
+    fs::remove_dir_all(a.root.join("dir"))?;
+    let report = a.sync()?;
+    assert!(!report.held.is_empty());
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live().count(),
+        31,
+        "nothing was deleted remotely"
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn executable_bit_syncs() -> R {

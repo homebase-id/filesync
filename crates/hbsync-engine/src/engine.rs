@@ -37,6 +37,7 @@ impl EngineConfig {
                 algorithm: hbsync_fileio::HashAlgorithm::Blake3,
                 attempts: 4,
                 transfer: crate::transfer::TransferConfig::default(),
+                case_insensitive: crate::exec::probe_case_insensitive(root),
             },
             device: device.to_owned(),
             feed_page_size: 500,
@@ -186,6 +187,9 @@ impl Engine {
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
 
+        // The guard must judge the whole delete, even when it is planned in several batches.
+        let pending_deletes = self.db.read(|s| s.pending_file_deletes())?;
+        let pending_deletes = (pending_deletes.0 as usize, pending_deletes.1 as usize);
         for _ in 0..self.cfg.max_rounds {
             let dirty = self.db.read(|s| s.dirty_nodes(self.cfg.batch))?;
             if dirty.is_empty() {
@@ -201,6 +205,7 @@ impl Engine {
                 mass_delete_fraction: self.cfg.mass_delete_fraction,
                 synced_files: self.db.read(|s| s.base_file_count())? as usize,
                 allow_mass_delete: self.cfg.allow_mass_delete,
+                pending_deletes,
             };
             let plan = reconcile(&input, &opts);
             self.db

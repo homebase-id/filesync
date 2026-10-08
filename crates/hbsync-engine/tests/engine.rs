@@ -402,3 +402,50 @@ fn crossing_moves_park_the_occupant_in_one_pass() -> R {
     assert_eq!(a.tree(), b.tree());
     Ok(())
 }
+
+#[test]
+fn case_only_rename_converges() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("report.pdf", "r")?;
+    a.write("photos/p.jpg", "p")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("report.pdf"), a.root.join("Report.pdf"))?;
+    fs::rename(a.root.join("photos"), a.root.join("Photos"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(b.tree(), ["Photos/", "Photos/p.jpg = p", "Report.pdf = r"]);
+    assert_eq!(a.tree(), b.tree());
+    Ok(())
+}
+
+#[test]
+fn new_folder_differing_only_in_case_from_a_leaving_one() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("photos/old.jpg", "old")?;
+    a.sync()?;
+    b.sync()?;
+    // a renames photos away and creates a new Photos, in separate syncs.
+    fs::rename(a.root.join("photos"), a.root.join("archive"))?;
+    a.sync()?;
+    a.write("Photos/new.jpg", "new")?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(
+        b.tree(),
+        [
+            "Photos/",
+            "Photos/new.jpg = new",
+            "archive/",
+            "archive/old.jpg = old"
+        ]
+    );
+    assert_eq!(a.tree(), b.tree());
+    Ok(())
+}
