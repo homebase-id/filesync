@@ -555,6 +555,15 @@ impl<'a> Store<'a> {
         Ok(())
     }
 
+    pub fn is_dirty(&self, node: NodeId) -> Result<bool> {
+        Ok(self
+            .conn
+            .prepare_cached("SELECT 1 FROM dirty WHERE node_id = ?1")?
+            .query_row([node.0.as_bytes()], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
     pub fn dirty_nodes(&self, limit: usize) -> Result<Vec<NodeId>> {
         let mut stmt = self
             .conn

@@ -8,7 +8,7 @@ use hbsync_remote::Remote;
 use hbsync_state::{StateDb, StateError};
 
 use crate::adopt::adopt;
-use crate::exec::{ExecConfig, ExecError, Executor, recover_forks, unpark};
+use crate::exec::{ExecConfig, ExecError, Executor, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
 use crate::view;
@@ -188,6 +188,7 @@ impl Engine {
         let mut report = SyncReport::default();
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec.root)?;
+        sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
 

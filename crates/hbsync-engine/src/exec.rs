@@ -610,8 +610,8 @@ impl<'a> Executor<'a> {
             size: file.size,
             mtime_ms: file.mtime_ms,
             executable: (self.cfg.os != Os::Windows).then_some(file.executable),
-            tmp_dir: self.cfg.state_dir().join("tmp"),
-            key: format!("{}-{}", node.0.simple(), &expected.to_hex()[..16]),
+            tmp_dir: self.cfg.state_dir().join(TMP_DIR),
+            key: download_key(node, &expected),
             local_algorithm: self.cfg.algorithm,
         };
         Ok(Ok((
@@ -745,7 +745,7 @@ impl<'a> Executor<'a> {
         if let Some(row) = &current
             && self.db.read(|s| s.local_by_node(node))?.as_ref() != Some(row)
         {
-            let _ = done.discard();
+            done.keep_for_retry();
             return Ok(Outcome::Skip(
                 "local item changed during the transfer".into(),
             ));
@@ -756,20 +756,20 @@ impl<'a> Executor<'a> {
             }
             Some(row) => {
                 if !self.on_disk_unchanged(row) || !self.free_target(target, Some(node))? {
-                    let _ = done.discard();
+                    done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
                 match self.move_to_trash(&row.path, node) {
                     Ok(()) => done.persist_new(&self.abs(target)),
                     Err(e) => {
-                        let _ = done.discard();
+                        done.keep_for_retry();
                         return Ok(io_outcome(e));
                     }
                 }
             }
             None => {
                 if !self.free_target(target, Some(node))? {
-                    let _ = done.discard();
+                    done.keep_for_retry();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
                 done.persist_new(&self.abs(target))
@@ -1164,6 +1164,56 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
         }
     }
     Ok(completed)
+}
+
+/// The temp folder for downloads, inside the state folder.
+const TMP_DIR: &str = "tmp";
+
+/// The temp file name stem of a download: node and content, so a partial file is resumed only
+/// for the same bytes.
+fn download_key(node: NodeId, expected: &hbsync_types::ContentHash) -> String {
+    format!("{}-{}", node.0.simple(), &expected.to_hex()[..16])
+}
+
+/// Removes temp files no download can use any more: anything that isn't a partial download of
+/// the current remote content of a node that still needs syncing (interrupted downloads of
+/// content since replaced, files that were placed by other means, leftovers of other
+/// versions). Run before each plan, while no transfer is running.
+pub fn sweep_tmp(db: &mut StateDb, state_dir: &Path) -> Result<usize, StateError> {
+    let Ok(entries) = fs::read_dir(state_dir.join(TMP_DIR)) else {
+        return Ok(0);
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let wanted = match entry.file_name().to_str() {
+            Some(name) => wanted_download(db, name)?,
+            None => false,
+        };
+        if !wanted && fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+fn wanted_download(db: &mut StateDb, file_name: &str) -> Result<bool, StateError> {
+    let Some(node) = file_name
+        .strip_suffix(".partial")
+        .and_then(|key| key.split_once('-'))
+        .and_then(|(node, _)| hbsync_types::Uuid::try_parse(node).ok())
+        .map(NodeId)
+    else {
+        return Ok(false);
+    };
+    db.read(|s| {
+        let current = s
+            .get_mirror(node)?
+            .and_then(|m| m.file)
+            .and_then(|f| f.hash)
+            .map(|h| download_key(node, &h));
+        Ok(s.is_dirty(node)?
+            && current.is_some_and(|key| file_name.strip_suffix(".partial") == Some(&key)))
+    })
 }
 
 /// Puts parked items back where they came from when that is possible, and drops records that

@@ -206,6 +206,7 @@ impl CompletedFile {
     }
 
     /// Moves the file to `target`, which must not exist. Returns the metadata at the target.
+    /// On failure the file stays in the temp folder (see [`CompletedFile::keep_for_retry`]).
     pub fn persist_new(self, target: &Path) -> Result<LocalMeta, FileIoError> {
         ops::rename_noreplace(&self.path, target)?;
         sync_parent(target)?;
@@ -234,6 +235,10 @@ impl CompletedFile {
     pub fn discard(self) -> io::Result<()> {
         fs::remove_file(&self.path)
     }
+
+    /// Leaves the verified file in the temp folder: reopening its [`PartialFile`] finds it
+    /// complete, so a retry needs no transfer. The caller cleans up files nobody resumes.
+    pub fn keep_for_retry(self) {}
 }
 
 fn sync_parent(path: &Path) -> io::Result<()> {

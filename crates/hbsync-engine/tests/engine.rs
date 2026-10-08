@@ -585,3 +585,41 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
     assert!(took.as_secs() < 10, "adoption took {took:?}");
     Ok(())
 }
+
+#[test]
+fn temp_files_no_download_wants_are_swept() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "v1")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    let tmp = b.root.join(".hbsync").join("tmp");
+    fs::create_dir_all(&tmp)?;
+    // Left by a crash or a failed placement: an unrelated file, a partial download of a node
+    // that is in sync, and one of content that has been replaced since.
+    let synced = server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .live()
+        .find_map(|h| match &h.body {
+            hbsync_remote::RemoteBody::Live { node, .. } => Some(*node),
+            _ => None,
+        })
+        .ok_or("doc.txt is on the server")?;
+    fs::write(tmp.join("junk"), "x")?;
+    fs::write(
+        tmp.join(format!("{}-0123456789abcdef.partial", synced.0.simple())),
+        "v1",
+    )?;
+    a.write("doc.txt", "v2")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read("doc.txt")?, "v2");
+    let left: Vec<_> = fs::read_dir(&tmp)?
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    Ok(())
+}
