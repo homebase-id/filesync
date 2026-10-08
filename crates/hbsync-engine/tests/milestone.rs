@@ -316,58 +316,81 @@ fn unicode_and_case_clashes() -> R {
     Ok(())
 }
 
+/// Asserts a sync went cleanly: nothing failed, skipped, held or in conflict.
+fn assert_clean(report: &SyncReport) {
+    assert!(
+        report.failed.is_empty() && report.held.is_empty() && report.conflicts.is_empty(),
+        "{report:?}"
+    );
+}
+
 #[test]
 fn windows_illegal_names_are_mapped_locally_only() -> R {
-    use hbsync_remote::{NewNode, Remote, Upload};
-    use hbsync_types::schema::NodeContent;
-    use hbsync_types::{NodeId, NodeKind};
+    use hbsync_fileio::HashAlgorithm::Blake3;
+    use hbsync_types::NodeId;
 
     let server = server();
-    // Another (Linux) client created names Windows can't hold; put them on the server directly.
-    let other = FakeRemote::new(server.clone());
-    for (name, data) in [("what?.txt", &b"q"[..]), ("CON", &b"device name"[..])] {
-        let node = NodeId::new();
-        let new = NewNode {
-            node,
-            parent: NodeId::ROOT,
-            kind: NodeKind::File,
-            content: NodeContent::file(name, 1_700_000_000_000, data.len() as u64, false),
-        };
-        let hash = hbsync_fileio::hash_bytes(data, hbsync_fileio::HashAlgorithm::Blake3);
-        other.create(
-            &new,
-            Some(Upload {
-                hash,
-                size: data.len() as u64,
-                reader: &mut &data[..],
-            }),
-        )?;
-    }
+    // Names Windows can't hold, created by a Linux client elsewhere.
+    let (question, _) = server.lock().map_err(|_| "poisoned")?.seed_file(
+        NodeId::ROOT,
+        "what?.txt",
+        b"q",
+        Blake3,
+    )?;
+    server.lock().map_err(|_| "poisoned")?.seed_file(
+        NodeId::ROOT,
+        "CON",
+        b"device name",
+        Blake3,
+    )?;
+
     // A client applying the Windows rules (works on any disk: the escaped names are legal).
     let mut win = Client::new(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
-    win.sync()?;
+    assert_clean(&win.sync()?);
     let names: BTreeSet<String> = win.tree().into_iter().map(|(p, _)| p).collect();
-    assert!(names.contains("what\u{F025}.txt"), "{names:?}");
-    assert!(names.contains("CON\u{F02A}"), "{names:?}");
-
-    // An edit on the Windows side goes back under the original remote name.
-    win.write("what\u{F025}.txt", b"edited on windows")?;
-    win.sync()?;
-    let srv = server.lock().map_err(|_| "poisoned")?;
-    let remote_names: BTreeSet<String> = srv
-        .live()
-        .filter_map(|h| h.state().map(|s| s.name))
-        .collect();
     assert_eq!(
-        remote_names,
-        BTreeSet::from(["CON".to_owned(), "what?.txt".to_owned()])
+        names,
+        BTreeSet::from(["CON\u{F02A}".to_owned(), "what\u{F025}.txt".to_owned()])
     );
-    let edited = srv
-        .live()
-        .find(|h| h.state().is_some_and(|s| s.name == "what?.txt"))
-        .map(|h| h.file_id)
-        .ok_or("what?.txt")?;
-    assert_eq!(srv.payload(edited)?.as_slice(), b"edited on windows");
+
+    // An edit on the Windows side updates the same node under its original remote name.
+    win.write("what\u{F025}.txt", b"edited on windows")?;
+    assert_clean(&win.sync()?);
+    {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        assert_eq!(
+            srv.live_names(),
+            ["CON", "what?.txt"],
+            "no escaped name reached the server"
+        );
+        let file = srv
+            .file_id_of(question)
+            .ok_or("the original node is still live")?;
+        assert_eq!(srv.payload(file)?.as_slice(), b"edited on windows");
+    }
+
+    // A client with Unix rules round-trips the original names (NTFS can't hold them).
+    #[cfg(not(windows))]
+    {
+        let mut unix = Client::new(&server, "unix", |c| c.exec.os = hbsync_platform::Os::Linux)?;
+        assert_clean(&unix.sync()?);
+        assert_eq!(fs::read(unix.root.join("what?.txt"))?, b"edited on windows");
+        unix.write("new:name.txt", b"from unix")?;
+        assert_clean(&unix.sync()?);
+        assert_clean(&win.sync()?);
+        assert_eq!(
+            fs::read(win.root.join("new\u{F022}name.txt"))?,
+            b"from unix"
+        );
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        assert_eq!(srv.live_names(), ["CON", "new:name.txt", "what?.txt"]);
+        assert_eq!(
+            srv.file_id_of(question)
+                .map(|f| srv.payload(f).map(|p| p.len()))
+                .transpose()?,
+            Some(17)
+        );
+    }
     Ok(())
 }
 

@@ -323,6 +323,46 @@ impl FakeServer {
         })
     }
 
+    /// Creates a file the way another client would (for tests): returns its node id and the
+    /// write result.
+    pub fn seed_file(
+        &mut self,
+        parent: NodeId,
+        name: &str,
+        data: &[u8],
+        algorithm: hbsync_fileio::HashAlgorithm,
+    ) -> Result<(NodeId, Written)> {
+        let node = NodeId::new();
+        let new = NewNode {
+            node,
+            parent,
+            kind: NodeKind::File,
+            content: NodeContent::file(name, 1_700_000_000_000, data.len() as u64, false),
+        };
+        let hash = hbsync_fileio::hash_bytes(data, algorithm);
+        let upload = Upload {
+            hash,
+            size: data.len() as u64,
+            reader: &mut &data[..],
+        };
+        Ok((node, self.create(&new, Some(upload))?))
+    }
+
+    /// The content names of all live files, straight from their headers (also for files
+    /// without a hash), for test assertions.
+    pub fn live_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .files
+            .values()
+            .filter_map(|f| match &f.header.body {
+                RemoteBody::Live { content, .. } => Some(content.name.clone()),
+                RemoteBody::Deleted => None,
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Live files, for test assertions.
     pub fn live(&self) -> impl Iterator<Item = &RemoteHeader> {
         self.files
