@@ -527,6 +527,46 @@ fn a_mass_delete_split_over_batches_is_still_held() -> R {
     Ok(())
 }
 
+/// On Windows, where files have no x bit, an edit keeps the bit the file has elsewhere (on Unix
+/// the bit is read from disk, so this holds trivially there).
+#[test]
+fn an_edit_keeps_the_executable_bit() -> R {
+    use hbsync_remote::{NewNode, RemoteBody, Upload};
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeId, NodeKind};
+
+    let server = server();
+    // A Unix client uploaded an executable script.
+    let script = b"#!/bin/sh\necho hi\n";
+    server.lock().map_err(|_| "poisoned")?.create(
+        &NewNode {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            content: NodeContent::file("run.sh", 1_700_000_000_000, script.len() as u64, true),
+        },
+        Some(Upload {
+            hash: hbsync_fileio::hash_bytes(script, hbsync_fileio::HashAlgorithm::Blake3),
+            size: script.len() as u64,
+            reader: &mut &script[..],
+        }),
+    )?;
+    let mut a = Client::new(&server, "a", |_| {})?;
+    assert_clean(&a.sync()?);
+    a.write("run.sh", b"#!/bin/sh\necho edited\n")?;
+    assert_clean(&a.sync()?);
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let x: Vec<bool> = srv
+        .live()
+        .filter_map(|h| match &h.body {
+            RemoteBody::Live { content, .. } => Some(content.x),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(x, [true]);
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn executable_bit_syncs() -> R {

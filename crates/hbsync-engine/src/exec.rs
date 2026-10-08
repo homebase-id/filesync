@@ -632,16 +632,24 @@ impl<'a> Executor<'a> {
         name: &str,
         kind: NodeKind,
     ) -> Result<Result<(Job, Ctx), Outcome>, StateError> {
-        let (row, mirror) = self
-            .db
-            .read(|s| Ok((s.local_by_node(node)?, s.get_mirror(node)?)))?;
+        let (row, mirror, base) = self.db.read(|s| {
+            Ok((
+                s.local_by_node(node)?,
+                s.get_mirror(node)?,
+                s.get_base(node)?,
+            ))
+        })?;
         let Some(row) = row else {
             return Ok(Err(Outcome::Skip("gone locally".into())));
         };
         if !self.on_disk_unchanged(&row) {
             return Ok(Err(rescan(&mut self.report, &row.path)));
         }
-        let (mut content, payload) = match self.content_for(&row, name) {
+        // Where the OS has no x bit, the synced value is kept (as the view does).
+        let synced_executable = base
+            .and_then(|b| b.state.content)
+            .is_some_and(|c| c.executable);
+        let (mut content, payload) = match self.content_for(&row, name, synced_executable) {
             Ok(x) => x,
             Err(o) => return Ok(Err(o)),
         };
@@ -960,11 +968,13 @@ impl<'a> Executor<'a> {
         Ok(Outcome::Done)
     }
 
-    /// The content JSON and payload (hash, size) to send for a local item.
+    /// The content JSON and payload (hash, size) to send for a local item. `synced_executable`
+    /// stands in for an x bit the local OS doesn't have.
     fn content_for(
         &self,
         row: &LocalRow,
         name: &str,
+        synced_executable: bool,
     ) -> Result<(NodeContent, Option<(hbsync_types::ContentHash, u64)>), Outcome> {
         match row.kind {
             NodeKind::Folder => Ok((NodeContent::folder(name), None)),
@@ -975,7 +985,12 @@ impl<'a> Executor<'a> {
                 let size = row.fingerprint.size;
                 let mtime_ms = row.fingerprint.mtime_ns.div_euclid(1_000_000);
                 Ok((
-                    NodeContent::file(name, mtime_ms, size, row.executable.unwrap_or(false)),
+                    NodeContent::file(
+                        name,
+                        mtime_ms,
+                        size,
+                        row.executable.unwrap_or(synced_executable),
+                    ),
                     Some((hash, size)),
                 ))
             }
