@@ -55,7 +55,9 @@ impl StateDb {
     }
 
     fn setup(mut conn: Connection) -> Result<Self> {
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Start-up runs the local catch-up and the feed on two connections; a long scan
+        // transaction must not make the other writer give up.
+        conn.busy_timeout(std::time::Duration::from_secs(120))?;
         // WAL keeps readers off the writer's back; FULL fsyncs each commit so a committed base
         // update survives power loss.
         conn.pragma_update(None, "journal_mode", "WAL")?;

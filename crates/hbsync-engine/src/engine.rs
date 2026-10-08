@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
-use hbsync_local::{ScanOptions, ScanReport, rescan_dirs, scan};
+use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_platform::FsFamily;
 use hbsync_remote::Remote;
 use hbsync_state::{StateDb, StateError};
 
+use crate::adopt::adopt;
 use crate::exec::{ExecConfig, ExecError, Executor, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
@@ -58,6 +59,18 @@ pub enum EngineError {
     Exec(#[from] ExecError),
     #[error(transparent)]
     Scan(#[from] hbsync_local::ScanError),
+    #[error("{0} panicked")]
+    Panic(&'static str),
+}
+
+/// What start-up did.
+#[derive(Debug)]
+pub struct StartupReport {
+    /// How the local side caught up (journal or full walk).
+    pub local: CatchUp,
+    pub feed: FeedReport,
+    /// The first sync after both catch-ups.
+    pub sync: SyncReport,
 }
 
 /// What one sync did.
@@ -73,6 +86,8 @@ pub struct SyncReport {
     pub conflicts: Vec<Conflict>,
     /// Nodes still dirty at the end (deferred, failed or held).
     pub pending: u64,
+    /// Local items recognized as copies of remote nodes (no transfer needed).
+    pub adopted: usize,
 }
 
 impl SyncReport {
@@ -132,6 +147,32 @@ impl Engine {
         &self.scan_opts
     }
 
+    /// Start-up: the local catch-up (journal or walk, on its own connection to the state DB
+    /// at `db_path`) and the remote feed run in parallel. Planning starts only when both are
+    /// done, so nothing is uploaded while the local state is still unknown.
+    pub fn start_up(
+        &mut self,
+        observer: &mut LocalObserver,
+        db_path: &Path,
+        date: &str,
+    ) -> Result<StartupReport, EngineError> {
+        let remote = self.remote.as_ref();
+        let page = self.cfg.feed_page_size;
+        let db = &mut self.db;
+        let (local, feed) = std::thread::scope(|scope| {
+            let local = scope.spawn(|| -> Result<CatchUp, EngineError> {
+                let mut own = StateDb::open(db_path)?;
+                Ok(observer.catch_up(&mut own)?)
+            });
+            let feed = feed::pull(db, remote, page);
+            (local.join(), feed)
+        });
+        let local = local.map_err(|_| EngineError::Panic("local catch-up"))??;
+        let feed = feed?;
+        let sync = self.sync_once(date)?;
+        Ok(StartupReport { local, feed, sync })
+    }
+
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
         Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)
@@ -143,6 +184,7 @@ impl Engine {
         let mut report = SyncReport::default();
         unpark(&mut self.db, &self.cfg.exec.root)?;
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
 
         for _ in 0..self.cfg.max_rounds {
             let dirty = self.db.read(|s| s.dirty_nodes(self.cfg.batch))?;

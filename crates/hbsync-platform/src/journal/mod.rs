@@ -42,7 +42,7 @@ pub enum JournalError {
 }
 
 /// An OS change journal for the volume holding the sync root.
-pub trait ChangeJournal: std::fmt::Debug {
+pub trait ChangeJournal: std::fmt::Debug + Send {
     /// The current position.
     fn now(&mut self) -> Result<String, JournalError>;
     /// The folders touched since `cursor` (a value returned by [`ChangeJournal::now`] or a

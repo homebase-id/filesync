@@ -289,3 +289,83 @@ fn parked_item_from_a_crash_is_put_back() -> R {
     );
     Ok(())
 }
+
+#[test]
+fn first_run_adopts_an_existing_copy_without_downloading() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    for (path, data) in [
+        ("Photos/2024/img1.jpg", "jpeg1"),
+        ("Photos/2024/img2.jpg", "jpeg2"),
+        ("notes.md", "# notes"),
+    ] {
+        a.write(path, data)?;
+    }
+    a.sync()?;
+
+    // b starts with the same files already on disk (restored from a backup, say).
+    let mut b = Client::new(&server, "b")?;
+    for (path, data) in [
+        ("Photos/2024/img1.jpg", "jpeg1"),
+        ("Photos/2024/img2.jpg", "jpeg2"),
+        ("notes.md", "# notes"),
+    ] {
+        b.write(path, data)?;
+    }
+    let report = b.sync()?;
+    assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert_eq!(b.tree(), a.tree());
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live().count(),
+        5,
+        "no duplicates were uploaded"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_differing_copy_keeps_both_versions() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "remote version")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.write("doc.txt", "local version")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree(), b.tree());
+    let contents: Vec<String> = b
+        .tree()
+        .into_iter()
+        .map(|e| e.split(" = ").nth(1).unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        contents.contains(&"remote version".to_owned())
+            && contents.contains(&"local version".to_owned()),
+        "{:?}",
+        b.tree()
+    );
+    Ok(())
+}
+
+#[test]
+fn start_up_catches_up_both_sides_in_parallel() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("from-a/one.txt", "1")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.write("from-b/two.txt", "2")?;
+    let opts = b.engine.scan_options().clone();
+    let mut observer = hbsync_local::LocalObserver::start(&b.root, opts);
+    let db_path = b.root.join(".hbsync").join("state.db");
+    let report = b.engine.start_up(&mut observer, &db_path, "2026-10-08")?;
+    assert!(report.feed.live >= 2, "{:?}", report.feed);
+    assert_eq!(report.local.report.added, 2);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.read("from-b/two.txt")?, "2");
+    Ok(())
+}
