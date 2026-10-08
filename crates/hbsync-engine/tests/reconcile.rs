@@ -441,10 +441,10 @@ fn online_only_files_are_not_deleted_or_downloaded() {
     let [f] = ids(1)[..] else { unreachable!() };
     let mut w = World::default();
     w.synced(f, file(ROOT, "big.iso", "1"));
-    w.input.base_extra.get_mut(&f).map(|e| {
+    if let Some(e) = w.input.base_extra.get_mut(&f) {
         e.content_state = ContentState::OnlineOnly;
         e.local_hash = None;
-    });
+    }
     w.local(f, None);
     assert!(w.plan().ops.is_empty(), "no local bytes is not a delete");
     w.remote(f, Some(file(ROOT, "big.iso", "2")));

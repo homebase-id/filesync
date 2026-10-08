@@ -699,23 +699,23 @@ impl<'a> Reconciler<'a> {
                     let upload = self.origin.get(&node) == Some(&Origin::Local)
                         && t.kind == NodeKind::File
                         && !self.remote_has(r, t);
-                    if !t.same_place(r) || upload {
-                        if let Some(rr) = i.remote_refs.get(&node) {
-                            let op = Op::RemoteUpdate {
-                                node,
-                                file_id: rr.file_id,
-                                expected: rr.version,
-                                parent: t.parent,
-                                name: t.name.clone(),
-                                upload,
-                            };
-                            if upload {
-                                content.push(op)
-                            } else {
-                                moves.push(op)
-                            }
-                            remote_ops = true;
+                    if (!t.same_place(r) || upload)
+                        && let Some(rr) = i.remote_refs.get(&node)
+                    {
+                        let op = Op::RemoteUpdate {
+                            node,
+                            file_id: rr.file_id,
+                            expected: rr.version,
+                            parent: t.parent,
+                            name: t.name.clone(),
+                            upload,
+                        };
+                        if upload {
+                            content.push(op)
+                        } else {
+                            moves.push(op)
                         }
+                        remote_ops = true;
                     }
                 }
                 (None, None) => {}
