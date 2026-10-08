@@ -397,8 +397,9 @@ pub struct Faults {
     pub cut_upload_after: Option<u64>,
     /// The next download breaks after this many bytes.
     pub cut_download_after: Option<u64>,
-    /// Creates of nodes with this name fail transiently (an endpoint that keeps failing).
-    pub fail_creates_named: Option<String>,
+    /// Creates, updates and deletes of nodes with this name fail transiently (a write that
+    /// keeps failing).
+    pub fail_writes_named: Option<String>,
     /// Added to every request.
     pub latency: Duration,
     /// Requests seen, for assertions.
@@ -450,6 +451,14 @@ impl FakeRemote {
 }
 
 impl FakeRemote {
+    /// Fails a write to a node named `name` if that is injected.
+    fn gate_name(&self, name: &str) -> Result<()> {
+        if self.faults().fail_writes_named.as_deref() == Some(name) {
+            return Err(RemoteError::Transient("injected write failure".into()));
+        }
+        Ok(())
+    }
+
     /// Reads an upload stream outside the server lock, applying an injected connection cut.
     fn receive(
         &self,
@@ -487,9 +496,7 @@ impl Remote for FakeRemote {
 
     fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<Written> {
         self.gate()?;
-        if self.faults().fail_creates_named.as_deref() == Some(node.content.name.as_str()) {
-            return Err(RemoteError::Transient("injected create failure".into()));
-        }
+        self.gate_name(&node.content.name)?;
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
@@ -511,6 +518,7 @@ impl Remote for FakeRemote {
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
         self.gate()?;
+        self.gate_name(&content.name)?;
         let received = self.receive(payload)?;
         let mut bytes: &[u8] = received.as_ref().map_or(&[], |(_, b)| b.as_slice());
         let upload = received.as_ref().map(|(hash, b)| Upload {
@@ -526,6 +534,9 @@ impl Remote for FakeRemote {
         // Check, then act: the server's delete has no version guard.
         self.gate()?;
         let current = self.server().header(file_id)?;
+        if let RemoteBody::Live { content, .. } = &current.body {
+            self.gate_name(&content.name)?;
+        }
         if current.version != expected {
             return Err(RemoteError::VersionMismatch);
         }

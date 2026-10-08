@@ -977,6 +977,14 @@ impl<'a> Executor<'a> {
         file_id: hbsync_types::RemoteFileId,
         expected: hbsync_types::VersionTag,
     ) -> Result<Outcome, StateError> {
+        // Children go first (the plan deletes bottom-up). One whose delete failed or was
+        // skipped, or that someone just added, keeps the folder: deleting it would leave the
+        // child live under a tombstone.
+        if !self.db.read(|s| s.mirror_children(node))?.is_empty() {
+            return Ok(Outcome::Retry(
+                "folder still has children on the server".into(),
+            ));
+        }
         match self.remote.delete(file_id, expected) {
             Ok(()) | Err(RemoteError::NotFound) => {}
             Err(e) => return Ok(remote_outcome(e)),

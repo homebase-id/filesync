@@ -124,7 +124,8 @@ struct Client {
     parked: HashMap<NodeId, (NodeId, String)>,
     /// The local tree when the pending plan was made (for the fingerprint guard).
     planned_local: Tree,
-    /// The server snapshot the pending plan was made from (contents to download).
+    /// The server snapshot the pending plan was made from (contents to download), updated
+    /// by the client's own remote writes: what the executor's mirror holds.
     planned_remote: Tree,
 }
 
@@ -535,8 +536,8 @@ impl Sim {
                 if self.server.live.contains_key(&node) {
                     return Done; // 4105: an earlier attempt landed
                 }
-                // The executor creates only under a folder the server has (its mirror).
-                if !parent.is_root() && !self.server.live.contains_key(&parent) {
+                // The executor creates only under a folder its mirror has.
+                if !in_mirror(&self.clients[c], parent) {
                     return Retry;
                 }
                 let client = &self.clients[c];
@@ -562,6 +563,7 @@ impl Sim {
                     VersionTag(self.server.uuid()),
                 );
                 self.server.ever.insert(node);
+                self.clients[c].planned_remote.insert(node, state.clone());
                 self.server.live.insert(
                     node,
                     ServerNode {
@@ -581,7 +583,7 @@ impl Sim {
                 ..
             } => {
                 let local_content = self.clients[c].local.get(node).and_then(|s| s.content);
-                if !parent.is_root() && !self.server.live.contains_key(&parent) {
+                if !in_mirror(&self.clients[c], parent) {
                     return Retry;
                 }
                 let version = VersionTag(self.server.uuid());
@@ -600,15 +602,30 @@ impl Sim {
                 server.state.parent = parent;
                 server.state.name = name;
                 server.version = version;
+                let state = server.state.clone();
+                self.clients[c].planned_remote.insert(node, state);
                 Done
             }
-            Op::RemoteDelete { node, expected, .. } => match self.server.live.get(&node) {
-                Some(server) if server.version == expected => {
-                    self.server.live.remove(&node);
-                    Done
+            Op::RemoteDelete { node, expected, .. } => {
+                // A folder goes only once the mirror has no child left in it (one whose delete
+                // failed keeps it).
+                if self.clients[c]
+                    .planned_remote
+                    .children(node)
+                    .next()
+                    .is_some()
+                {
+                    return Retry;
                 }
-                _ => Skip,
-            },
+                match self.server.live.get(&node) {
+                    Some(server) if server.version == expected => {
+                        self.server.live.remove(&node);
+                        self.clients[c].planned_remote.remove(node);
+                        Done
+                    }
+                    _ => Skip,
+                }
+            }
             Op::Settle { .. } => Done,
         }
     }
@@ -792,6 +809,12 @@ fn park_occupant(client: &mut Client, parent: NodeId, name: &str, except: Option
     client.local.insert(occupant, parked.clone());
     client.planned_local.insert(occupant, parked);
     true
+}
+
+/// Whether the client's mirror (the snapshot it planned from, plus its own writes since) has
+/// `folder`, as the executor checks before creating or moving something into it.
+fn in_mirror(client: &Client, folder: NodeId) -> bool {
+    folder.is_root() || client.planned_remote.contains(folder)
 }
 
 fn parked_name(node: NodeId) -> String {
