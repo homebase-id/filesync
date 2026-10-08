@@ -393,6 +393,19 @@ mod targeted {
     }
 
     #[test]
+    fn an_event_inside_a_new_folder_records_the_folder_too() -> R {
+        let mut f = Fixture::new()?;
+        f.write("old", b"o")?;
+        f.scan()?;
+        f.write("new/sub/file", b"n")?;
+        // The watcher delivered only the event for the file (the folder's came separately).
+        let (report, _) = f.rescan(&["new/sub"])?;
+        assert_eq!(report.added, 3, "{report:?}");
+        assert!(f.node("new").is_ok() && f.node("new/sub").is_ok());
+        Ok(())
+    }
+
+    #[test]
     fn untouched_sibling_subtrees_are_left_alone() -> R {
         let mut f = Fixture::new()?;
         f.write("deep/er/file", b"x")?;

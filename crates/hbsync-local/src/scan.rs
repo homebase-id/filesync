@@ -72,8 +72,9 @@ pub fn scan(db: &mut StateDb, root: &Path, opts: &ScanOptions) -> Result<ScanRep
 /// Rescans only the given folders: their direct entries, plus the full contents of any child
 /// folder that is new or was replaced. This is what a journal or watcher event leads to.
 ///
-/// A folder that no longer exists is replaced by its nearest existing ancestor. Moves between
-/// the rescanned folders are detected, since all of them go through one identity pass.
+/// A folder that no longer exists, or that the DB doesn't know yet, is replaced by its nearest
+/// known ancestor. Moves between the rescanned folders are detected, since all of them go
+/// through one identity pass.
 pub fn rescan_dirs(
     db: &mut StateDb,
     root: &Path,
@@ -92,7 +93,17 @@ pub fn rescan_dirs(
         {
             continue;
         }
-        targets.insert(real_dir_prefix(root, dir));
+        // A folder the DB doesn't know yet is new: its parent's rescan finds it and walks it in
+        // full (its own creation event may come in a later batch, or never).
+        let mut dir = real_dir_prefix(root, dir);
+        while !dir.is_root()
+            && !db
+                .read(|s| s.get_local(&dir))?
+                .is_some_and(|r| r.kind == NodeKind::Folder)
+        {
+            dir = dir.parent().unwrap_or_default();
+        }
+        targets.insert(dir);
     }
 
     let mut report = ScanReport::default();
