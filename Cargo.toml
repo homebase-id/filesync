@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 hbsync-platform = { path = "crates/hbsync-platform" }
+proptest = "1.11"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
