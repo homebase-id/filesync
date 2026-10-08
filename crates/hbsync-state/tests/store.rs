@@ -200,7 +200,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 1);
+    assert_eq!(db.schema_version()?, 2);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -211,4 +211,94 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
         Err(StateError::TooNew { found: 99, .. })
     ));
     Ok(())
+}
+
+mod mirror {
+    use super::*;
+    use hbsync_state::{MirrorFile, MirrorRow};
+
+    fn row(node: NodeId, parent: NodeId, name: &str, file: Option<MirrorFile>) -> MirrorRow {
+        MirrorRow {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            node,
+            parent,
+            name: name.into(),
+            kind: if file.is_some() {
+                NodeKind::File
+            } else {
+                NodeKind::Folder
+            },
+            file,
+            content_extra: Some(r#"{"future":1}"#.into()),
+        }
+    }
+
+    #[test]
+    fn round_trip_and_lookups() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let folder = row(NodeId::new(), NodeId::ROOT, "d", None);
+        let c = content(b"x");
+        let file = row(
+            NodeId::new(),
+            folder.node,
+            "f",
+            Some(MirrorFile {
+                hash: Some(c.hash),
+                size: c.size,
+                mtime_ms: c.mtime_ms,
+                executable: true,
+            }),
+        );
+        let unhashed = row(
+            NodeId::new(),
+            folder.node,
+            "legacy",
+            Some(MirrorFile {
+                hash: None,
+                size: 3,
+                mtime_ms: 0,
+                executable: false,
+            }),
+        );
+        db.write(|s| {
+            s.put_mirror(&folder)?;
+            s.put_mirror(&file)?;
+            s.put_mirror(&unhashed)
+        })?;
+        db.read(|s| {
+            assert_eq!(s.get_mirror(file.node)?, Some(file.clone()));
+            assert_eq!(s.mirror_by_file(folder.file_id)?, Some(folder.clone()));
+            assert_eq!(s.mirror_children(folder.node)?.len(), 2);
+            assert_eq!(s.mirror_count()?, 3);
+            Ok(())
+        })?;
+        assert_eq!(file.state().map(|st| st.name), Some("f".into()));
+        assert_eq!(
+            unhashed.state(),
+            None,
+            "a file without hash has no complete state"
+        );
+        let removed = db.write(|s| s.delete_mirror(file.file_id))?;
+        assert_eq!(removed, Some(file.clone()));
+        assert_eq!(db.read(|s| s.get_mirror(file.node))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn recreated_node_replaces_old_file_id() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let node = NodeId::new();
+        let old = row(node, NodeId::ROOT, "n", None);
+        let new = row(node, NodeId::ROOT, "n", None);
+        db.write(|s| {
+            s.put_mirror(&old)?;
+            s.put_mirror(&new)
+        })?;
+        db.read(|s| {
+            assert_eq!(s.mirror_by_file(old.file_id)?, None);
+            assert_eq!(s.get_mirror(node)?.map(|r| r.file_id), Some(new.file_id));
+            Ok(())
+        })
+    }
 }

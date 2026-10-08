@@ -18,7 +18,10 @@ use std::path::Path;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-pub use store::{BaseRow, LocalRow, RemoteRef, Store};
+pub use store::{BaseRow, LocalRow, MirrorFile, MirrorRow, RemoteRef, Store};
+
+/// The state DB key of the remote change-feed cursor.
+pub const REMOTE_CURSOR_KEY: &str = "remote.cursor";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
