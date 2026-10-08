@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
-use hbsync_platform::name::name_key;
+use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
 use hbsync_remote::{NewNode, Remote, RemoteError};
 use hbsync_state::{
@@ -301,20 +301,27 @@ impl<'a> Executor<'a> {
         path.to_native(&self.cfg.root)
     }
 
-    /// The local path where (parent, name) lives, if the parent is local.
-    fn target_path(&mut self, parent: NodeId, name: &str) -> Result<Option<RelPath>, StateError> {
+    /// The local path where (parent, name) lives. Retried while the parent isn't local yet;
+    /// skipped if the name can't be spelled on this OS (it stays remote-only and is reported).
+    fn target_path(
+        &mut self,
+        parent: NodeId,
+        name: &str,
+    ) -> Result<Result<RelPath, Outcome>, StateError> {
         let parent_path = if parent.is_root() {
             RelPath::root()
         } else {
             match self.db.read(|s| s.local_by_node(parent))? {
                 Some(row) if row.kind == NodeKind::Folder => row.path,
-                _ => return Ok(None),
+                _ => return Ok(Err(Outcome::Retry("parent not local yet".into()))),
             }
         };
-        let Ok(local) = to_local(name, self.cfg.os) else {
-            return Ok(None);
+        let unspellable = |e: NameIssue| Outcome::Skip(format!("name can't be used here: {e}"));
+        let local = match to_local(name, self.cfg.os) {
+            Ok(local) => local,
+            Err(e) => return Ok(Err(unspellable(e))),
         };
-        Ok(parent_path.join(&local.name).ok())
+        Ok(parent_path.join(&local.name).map_err(unspellable))
     }
 
     /// Whether the item on disk still matches its row.
@@ -440,8 +447,9 @@ impl<'a> Executor<'a> {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
             return Ok(Outcome::Skip("already local".into()));
         }
-        let Some(target) = self.target_path(parent, name)? else {
-            return Ok(Outcome::Retry("parent not local yet".into()));
+        let target = match self.target_path(parent, name)? {
+            Ok(target) => target,
+            Err(outcome) => return Ok(outcome),
         };
         let abs = self.abs(&target);
         // Idempotent: a folder left by an interrupted run, unknown to the DB (under any case),
@@ -485,8 +493,9 @@ impl<'a> Executor<'a> {
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let Some(target) = self.target_path(parent, name)? else {
-            return Ok(Outcome::Retry("parent not local yet".into()));
+        let target = match self.target_path(parent, name)? {
+            Ok(target) => target,
+            Err(outcome) => return Ok(outcome),
         };
         if target == row.path {
             self.db.write(|s| s.delete_parked(node))?;
@@ -590,8 +599,9 @@ impl<'a> Executor<'a> {
         {
             return Ok(Err(rescan(&mut self.report, &row.path)));
         }
-        let Some(target) = self.target_path(parent, name)? else {
-            return Ok(Err(Outcome::Retry("parent not local yet".into())));
+        let target = match self.target_path(parent, name)? {
+            Ok(target) => target,
+            Err(outcome) => return Ok(Err(outcome)),
         };
         let job = Job::Download {
             node,

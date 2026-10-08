@@ -43,16 +43,16 @@ pub struct LocalName {
 }
 
 /// Spells a valid remote name for the local file system of `os`.
+///
+/// Fails for the few names that can't be spelled at all: on Windows, a device name whose
+/// marker would take it past 255 UTF-16 units (`"CON."` followed by 251 more characters).
 pub fn to_local(remote: &str, os: Os) -> Result<LocalName, NameIssue> {
     check_remote_name(remote)?;
     let name = match os {
         Os::Windows => escape_windows(remote),
         Os::MacOs | Os::Linux => remote.to_owned(),
     };
-    debug_assert!(
-        check_local_name(&name, os).is_ok(),
-        "escaped name {name:?} is illegal"
-    );
+    check_local_name(&name, os)?;
     let recorded = to_remote(&name, os).as_deref() != Ok(remote);
     Ok(LocalName { name, recorded })
 }
@@ -162,6 +162,22 @@ mod tests {
     }
 
     #[test]
+    fn long_names_on_windows() {
+        // Every character escaped: three times the UTF-8 bytes, the same UTF-16 units.
+        let all_escaped = "?".repeat(255);
+        let l = local(&all_escaped, Os::Windows);
+        assert_eq!(l.name.encode_utf16().count(), 255);
+        assert_eq!(
+            to_remote(&l.name, Os::Windows).as_deref(),
+            Ok(all_escaped.as_str())
+        );
+        // The device-name marker is one unit more than the name can take.
+        let device = format!("CON.{}", "x".repeat(251));
+        assert_eq!(to_local(&device, Os::Windows), Err(NameIssue::TooLong));
+        assert!(to_local(&device, Os::Linux).is_ok());
+    }
+
+    #[test]
     fn unix_keeps_windows_illegal_names() {
         assert_eq!(local("a:b?", Os::Linux).name, "a:b?");
         assert_eq!(local("CON", Os::MacOs).name, "CON");
@@ -191,12 +207,20 @@ mod tests {
     proptest! {
         #[test]
         fn escaped_names_are_legal_and_round_trip(
-            raw in "[a-zA-Z0-9 .:*?\"<>|\\\\\\t\\u{1}-\\u{1f}éß😀\\u{F020}-\\u{F02A}-]{1,30}",
+            raw in "[a-zA-Z0-9 .:*?\"<>|\\\\\\t\\u{1}-\\u{1f}éß😀\\u{F020}-\\u{F02A}-]{1,300}",
             os in any_os(),
         ) {
             let remote = nfc(&raw);
             prop_assume!(check_remote_name(&remote).is_ok());
-            let l = to_local(&remote, os)?;
+            let l = match to_local(&remote, os) {
+                Ok(l) => l,
+                Err(e) => {
+                    // Only a device name at the length limit can't be spelled.
+                    prop_assert_eq!(os, Os::Windows);
+                    prop_assert!(is_windows_reserved(&remote) && remote.len() >= 255, "{:?}", e);
+                    return Ok(());
+                }
+            };
             prop_assert!(check_local_name(&l.name, os).is_ok(), "{:?} → {:?}", remote, l.name);
             if !l.recorded {
                 prop_assert_eq!(to_remote(&l.name, os)?, remote);

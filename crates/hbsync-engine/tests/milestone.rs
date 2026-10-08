@@ -54,6 +54,7 @@ impl Client {
             total.ops_done += pass.ops_done;
             total.conflicts.extend(pass.conflicts);
             total.failed.extend(pass.failed);
+            total.skipped.extend(pass.skipped);
             total.held = pass.held;
             total.pending = pass.pending;
             if pass.ops_done == 0 {
@@ -391,6 +392,39 @@ fn windows_illegal_names_are_mapped_locally_only() -> R {
             Some(17)
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
+    use hbsync_fileio::HashAlgorithm::Blake3;
+    use hbsync_types::NodeId;
+
+    let server = server();
+    // A device name at the length limit: its escape marker would be the 256th UTF-16 unit.
+    let device = format!("CON.{}", "x".repeat(251));
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        srv.seed_file(NodeId::ROOT, &device, b"d", Blake3)?;
+        srv.seed_file(NodeId::ROOT, "fine.txt", b"f", Blake3)?;
+    }
+    let mut win = Client::new(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
+    let report = win.sync()?;
+    assert_clean(&report);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(_, why)| why.starts_with("name can't be used here")),
+        "{report:?}"
+    );
+    let names: Vec<String> = win.tree().into_iter().map(|(p, _)| p).collect();
+    assert_eq!(names, ["fine.txt"]);
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live().count(),
+        2,
+        "the remote file is untouched"
+    );
     Ok(())
 }
 

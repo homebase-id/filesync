@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use hbsync_platform::name::{name_key, split_extension};
+use hbsync_platform::name::{MAX_NAME_BYTES, name_key, split_extension};
 use hbsync_types::{NodeId, NodeKind, NodeState};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -232,14 +232,37 @@ impl Tree {
 
 /// `"report (conflict 2).pdf"`: the name a node gets when another node keeps its name.
 pub fn numbered_conflict_name(name: &str, n: usize) -> String {
-    let (stem, ext) = split_extension(name);
-    format!("{stem} (conflict {n}){ext}")
+    with_tag(name, &format!(" (conflict {n})"))
 }
 
 /// `"report (conflict laptop 2026-10-08).pdf"`: the name of a conflict copy of an edit.
 pub fn conflict_copy_name(name: &str, device: &str, date: &str) -> String {
+    // The device name is configured; keep it from crowding out the file's own name.
+    let device = truncate_bytes(device, 64);
+    with_tag(name, &format!(" (conflict {device} {date})"))
+}
+
+/// Inserts `tag` before the extension, shortening the stem (or, if the extension is what makes
+/// the name long, the whole name) so the result stays within [`MAX_NAME_BYTES`].
+fn with_tag(name: &str, tag: &str) -> String {
     let (stem, ext) = split_extension(name);
-    format!("{stem} (conflict {device} {date}){ext}")
+    let (stem, ext) = if tag.len() + ext.len() < MAX_NAME_BYTES {
+        (stem, ext)
+    } else {
+        (name, "")
+    };
+    let budget = MAX_NAME_BYTES.saturating_sub(tag.len() + ext.len());
+    let stem = truncate_bytes(stem, budget);
+    format!("{stem}{tag}{ext}")
+}
+
+/// The longest prefix of `s` of at most `max` bytes that ends on a character boundary.
+fn truncate_bytes(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 #[cfg(test)]
@@ -368,6 +391,28 @@ mod tests {
         assert_eq!(
             conflict_copy_name("Report.pdf", "laptop", "2026-10-08"),
             "Report (conflict laptop 2026-10-08).pdf"
+        );
+    }
+
+    #[test]
+    fn conflict_names_stay_within_the_name_limit() {
+        use hbsync_platform::name::check_remote_name;
+        let long_stem = format!("{}.txt", "é".repeat(125)); // 254 bytes
+        let long_ext = format!("a.{}", "x".repeat(253));
+        for name in [long_stem.as_str(), long_ext.as_str(), &"x".repeat(255)] {
+            let numbered = numbered_conflict_name(name, 12);
+            let copy = conflict_copy_name(name, &"d".repeat(300), "2026-10-08");
+            for n in [&numbered, &copy] {
+                assert!(n.len() <= MAX_NAME_BYTES, "{} bytes: {n}", n.len());
+                assert_eq!(check_remote_name(n), Ok(()));
+            }
+            assert!(numbered.contains(" (conflict 12)"), "{numbered}");
+            assert!(copy.contains(" 2026-10-08)"), "{copy}");
+        }
+        assert!(numbered_conflict_name(&long_stem, 1).ends_with(" (conflict 1).txt"));
+        assert_ne!(
+            numbered_conflict_name(&long_stem, 1),
+            numbered_conflict_name(&long_stem, 2)
         );
     }
 }

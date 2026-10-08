@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use hbsync_engine::reconcile::{BaseExtra, Input, Op, Options, RemoteRef, reconcile};
 use hbsync_engine::tree::Tree;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
-use hbsync_platform::name::name_key;
+use hbsync_platform::name::{check_remote_name, name_key};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, Uuid,
     VersionTag,
@@ -67,8 +67,18 @@ pub enum Event {
     },
 }
 
-/// Names drawn from a small pool so clashes (including case-only ones) are common.
-const NAMES: &[&str] = &["a", "b", "A", "c.txt", "C.TXT", "d"];
+/// Names drawn from a small pool so clashes (including case-only ones) are common. The last
+/// two are as long as a name may be, so conflict names have to shorten them.
+const NAMES: &[&str] = &[
+    "a",
+    "b",
+    "A",
+    "c.txt",
+    "C.TXT",
+    "d",
+    "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL.txt",
+    "lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll.TXT",
+];
 
 #[derive(Debug, Clone)]
 struct ServerNode {
@@ -700,6 +710,12 @@ impl Sim {
         }
         if !server.violations().is_empty() {
             return Err(format!("server: {:?}", server.violations()));
+        }
+        if let Some((_, bad)) = server
+            .iter()
+            .find(|(_, s)| check_remote_name(&s.name).is_err())
+        {
+            return Err(format!("server: invalid name {:?}", bad.name));
         }
         let present: BTreeSet<u64> = server
             .iter()

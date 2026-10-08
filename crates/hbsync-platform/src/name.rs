@@ -89,6 +89,15 @@ impl std::error::Error for NameIssue {}
 
 /// Checks a remote (portable) name: what node schema v1 allows, independent of any OS.
 pub fn check_remote_name(name: &str) -> Result<(), NameIssue> {
+    check_component(name)?;
+    if name.len() > MAX_NAME_BYTES {
+        return Err(NameIssue::TooLong);
+    }
+    Ok(())
+}
+
+/// What every OS and the remote require of one path component.
+fn check_component(name: &str) -> Result<(), NameIssue> {
     if name.is_empty() {
         return Err(NameIssue::Empty);
     }
@@ -98,9 +107,6 @@ pub fn check_remote_name(name: &str) -> Result<(), NameIssue> {
     if name.contains(['/', '\0']) {
         return Err(NameIssue::Separator);
     }
-    if name.len() > MAX_NAME_BYTES {
-        return Err(NameIssue::TooLong);
-    }
     Ok(())
 }
 
@@ -109,11 +115,16 @@ pub fn check_remote_name(name: &str) -> Result<(), NameIssue> {
 /// The first problem found is returned. A name that fails here is escaped locally by the name
 /// map and keeps its remote spelling.
 pub fn check_local_name(name: &str, os: Os) -> Result<(), NameIssue> {
-    check_remote_name(name)?;
+    check_component(name)?;
+    if os != Os::Windows && name.len() > MAX_NAME_BYTES {
+        return Err(NameIssue::TooLong);
+    }
     if os == Os::Windows {
         if let Some(c) = name.chars().find(|&c| is_windows_illegal(c)) {
             return Err(NameIssue::IllegalChar(c));
         }
+        // NTFS counts UTF-16 units: an escaped name may be longer in UTF-8 than its remote
+        // spelling while still fitting.
         if name.encode_utf16().count() > MAX_WINDOWS_NAME_UNITS {
             return Err(NameIssue::TooLong);
         }
@@ -230,9 +241,14 @@ mod tests {
         }
         // "€" is 3 UTF-8 bytes and 1 UTF-16 unit: 85 of them = 255 bytes, 85 units.
         assert_eq!(check_local_name(&"€".repeat(85), w), Ok(()));
-        // 64 emoji = 256 UTF-8 bytes: already too long for the remote.
+        // 64 emoji = 256 UTF-8 bytes but 128 units: fine for NTFS (not for the remote).
+        assert_eq!(check_local_name(&"😀".repeat(64), w), Ok(()));
         assert_eq!(
-            check_local_name(&"😀".repeat(64), w),
+            check_local_name(&"😀".repeat(128), w),
+            Err(NameIssue::TooLong)
+        );
+        assert_eq!(
+            check_local_name(&"😀".repeat(64), Os::Linux),
             Err(NameIssue::TooLong)
         );
     }
