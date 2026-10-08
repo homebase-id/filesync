@@ -360,6 +360,8 @@ pub struct Faults {
     pub latency: Duration,
     /// Requests seen, for assertions.
     pub requests: usize,
+    /// Payload bytes handed out by `read`, for assertions about resumed downloads.
+    pub served: u64,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -462,10 +464,12 @@ impl Remote for FakeRemote {
         match cut {
             Some(limit) if (limit as usize) < slice.len() => {
                 sink.write_all(&slice[..limit as usize])?;
+                self.faults().served += limit;
                 Err(RemoteError::Transient("injected download cut".into()))
             }
             _ => {
                 sink.write_all(slice)?;
+                self.faults().served += slice.len() as u64;
                 Ok(slice.len() as u64)
             }
         }

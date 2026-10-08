@@ -35,6 +35,7 @@ impl EngineConfig {
                 os: hbsync_platform::Os::current(),
                 algorithm: hbsync_fileio::HashAlgorithm::Blake3,
                 attempts: 4,
+                transfer: crate::transfer::TransferConfig::default(),
             },
             device: device.to_owned(),
             feed_page_size: 500,
@@ -85,6 +86,8 @@ pub struct Engine {
     remote: Box<dyn Remote>,
     cfg: EngineConfig,
     scan_opts: ScanOptions,
+    /// Nodes whose transfers go first (a file the user just opened).
+    urgent: std::collections::HashSet<hbsync_types::NodeId>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -108,7 +111,13 @@ impl Engine {
             remote,
             cfg,
             scan_opts,
+            urgent: Default::default(),
         }
+    }
+
+    /// Transfers of these nodes go before all others in the next syncs.
+    pub fn set_urgent(&mut self, nodes: impl IntoIterator<Item = hbsync_types::NodeId>) {
+        self.urgent = nodes.into_iter().collect();
     }
 
     pub fn db(&mut self) -> &mut StateDb {
@@ -159,8 +168,9 @@ impl Engine {
             if plan.ops.is_empty() {
                 break;
             }
-            let exec =
-                Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec).run(&plan)?;
+            let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
+                .with_urgent(self.urgent.clone())
+                .run(&plan)?;
             report.ops_done += exec.done;
             report.skipped.extend(exec.skipped);
             report.failed.extend(exec.failed);

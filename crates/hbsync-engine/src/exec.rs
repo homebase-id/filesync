@@ -13,15 +13,15 @@
 //! After each operation the affected rows (`local_items`, mirror) are updated and the node is
 //! **settled**: the base takes each attribute both sides now agree on.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use hbsync_fileio::{FileIoError, HashAlgorithm, PartialFile, hash_file};
+use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
-use hbsync_remote::{NewNode, Remote, RemoteError, Upload};
+use hbsync_remote::{NewNode, Remote, RemoteError};
 use hbsync_state::{
     BaseRow, LocalRow, MirrorFile, MirrorRow, RemoteRef as BaseRemoteRef, StateDb, StateError,
     Store,
@@ -30,6 +30,7 @@ use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind};
 
 use crate::reconcile::{Op, Plan};
+use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs};
 use crate::view;
 
 /// Where the executor works.
@@ -41,6 +42,7 @@ pub struct ExecConfig {
     pub algorithm: HashAlgorithm,
     /// Attempts per operation within one run (ordering blocks and transient errors).
     pub attempts: u8,
+    pub transfer: TransferConfig,
 }
 
 impl ExecConfig {
@@ -86,6 +88,45 @@ pub struct Executor<'a> {
     cfg: &'a ExecConfig,
     queue: VecDeque<(Op, u8)>,
     report: ExecReport,
+    urgent: HashSet<NodeId>,
+}
+
+/// A transfer whose guards passed, waiting for a worker.
+struct Prepared {
+    op: Op,
+    attempts: u8,
+    job: Job,
+    ctx: Ctx,
+}
+
+/// What the commit of a transfer needs to know.
+enum Ctx {
+    Download {
+        node: NodeId,
+        target: RelPath,
+        current: Option<LocalRow>,
+    },
+    Upload {
+        node: NodeId,
+        parent: NodeId,
+        kind: NodeKind,
+        content: NodeContent,
+        hash: hbsync_types::ContentHash,
+        extra: Option<String>,
+    },
+}
+
+/// Operations that move file bytes and run on the worker pool.
+fn is_transfer(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::LocalDownload { .. }
+            | Op::RemoteCreate {
+                kind: NodeKind::File,
+                ..
+            }
+            | Op::RemoteUpdate { upload: true, .. }
+    )
 }
 
 impl std::fmt::Debug for Executor<'_> {
@@ -104,36 +145,93 @@ impl<'a> Executor<'a> {
             cfg,
             queue: VecDeque::new(),
             report: ExecReport::default(),
+            urgent: HashSet::new(),
         }
+    }
+
+    /// Marks nodes whose transfers go first (files the user is waiting for).
+    pub fn with_urgent(mut self, urgent: HashSet<NodeId>) -> Self {
+        self.urgent = urgent;
+        self
     }
 
     pub fn run(mut self, plan: &Plan) -> Result<ExecReport, ExecError> {
         self.queue = plan.ops.iter().cloned().map(|op| (op, 0)).collect();
-        while let Some((op, attempts)) = self.queue.pop_front() {
-            let outcome = self.execute(&op);
-            match outcome {
-                Outcome::Done => {
-                    self.report.done += 1;
-                    if let Op::LocalFork { new_node, .. } = op {
-                        self.settle(new_node, false)?;
-                    }
-                    let hint = matches!(op, Op::LocalDownload { .. } | Op::RemoteCreate { .. })
-                        || matches!(op, Op::RemoteUpdate { upload: true, .. });
-                    self.settle(op.node(), hint)?;
+        let mut batch: Vec<Prepared> = Vec::new();
+        loop {
+            let Some((op, attempts)) = self.queue.pop_front() else {
+                if batch.is_empty() {
+                    break;
                 }
-                Outcome::Retry(why) if attempts + 1 < self.cfg.attempts => {
-                    self.queue.push_back((op, attempts + 1));
-                    let _ = why;
+                self.flush(&mut batch)?;
+                continue;
+            };
+            if is_transfer(&op) {
+                // Transfers are collected and run together on the worker pool.
+                match self.prepare(&op) {
+                    Ok(Ok((job, ctx))) => batch.push(Prepared {
+                        op,
+                        attempts,
+                        job,
+                        ctx,
+                    }),
+                    Ok(Err(outcome)) => self.handle(op, attempts, outcome)?,
+                    Err(e) => self.handle(op, attempts, Outcome::from(e))?,
                 }
-                Outcome::Retry(why) => self.report.failed.push((op, why)),
-                Outcome::Skip(why) => {
-                    let node = op.node();
-                    self.db.write(|s| s.mark_dirty(node))?;
-                    self.report.skipped.push((op, why));
-                }
+                continue;
             }
+            if !batch.is_empty() {
+                self.flush(&mut batch)?;
+            }
+            let outcome = self.execute(&op);
+            self.handle(op, attempts, outcome)?;
         }
         Ok(self.report)
+    }
+
+    fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), ExecError> {
+        match outcome {
+            Outcome::Done => {
+                self.report.done += 1;
+                if let Op::LocalFork { new_node, .. } = op {
+                    self.settle(new_node, false)?;
+                }
+                self.settle(op.node(), is_transfer(&op))?;
+            }
+            Outcome::Retry(_) if attempts + 1 < self.cfg.attempts => {
+                self.queue.push_back((op, attempts + 1));
+            }
+            Outcome::Retry(why) => self.report.failed.push((op, why)),
+            Outcome::Skip(why) => {
+                let node = op.node();
+                self.db.write(|s| s.mark_dirty(node))?;
+                self.report.skipped.push((op, why));
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs the collected transfers in parallel and commits each as it finishes.
+    fn flush(&mut self, batch: &mut Vec<Prepared>) -> Result<(), ExecError> {
+        let mut pending: HashMap<NodeId, Prepared> = HashMap::new();
+        let mut jobs = Vec::new();
+        for p in batch.drain(..) {
+            jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
+            pending.insert(p.job.node(), p);
+        }
+        let remote = self.remote;
+        let mut finished = Vec::new();
+        run_jobs(remote, self.cfg.transfer, jobs, |job, result| {
+            finished.push((job.node(), result))
+        });
+        for (node, result) in finished {
+            let Some(p) = pending.remove(&node) else {
+                continue;
+            };
+            let outcome = self.commit(p.ctx, result).unwrap_or_else(Outcome::from);
+            self.handle(p.op, p.attempts, outcome)?;
+        }
+        Ok(())
     }
 
     fn execute(&mut self, op: &Op) -> Outcome {
@@ -145,19 +243,14 @@ impl<'a> Executor<'a> {
             } => self.fork(*node, *new_node, name),
             Op::LocalMkdir { node, parent, name } => self.mkdir(*node, *parent, name),
             Op::LocalMove { node, parent, name } => self.local_move(*node, *parent, name),
-            Op::LocalDownload {
-                node,
-                parent,
-                name,
-                replace,
-            } => self.download(*node, *parent, name, *replace),
+            Op::LocalDownload { .. } => unreachable!("transfers run through flush"),
             Op::LocalTrash { node, subtree } => self.trash(*node, subtree),
             Op::RemoteCreate {
                 node,
                 parent,
                 name,
                 kind,
-            } => self.create(*node, *parent, name, *kind),
+            } => self.create_folder(*node, *parent, name, *kind),
             Op::RemoteUpdate {
                 node,
                 file_id,
@@ -165,7 +258,10 @@ impl<'a> Executor<'a> {
                 parent,
                 name,
                 upload,
-            } => self.update(*node, *file_id, *expected, *parent, name, *upload),
+            } => {
+                debug_assert!(!upload, "uploads run through flush");
+                self.rename_remote(*node, *file_id, *expected, *parent, name)
+            }
             Op::RemoteDelete {
                 node,
                 file_id,
@@ -380,92 +476,228 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    fn download(
+    // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
+
+    fn prepare(&mut self, op: &Op) -> Result<Result<(Job, Ctx), Outcome>, StateError> {
+        match op {
+            Op::LocalDownload {
+                node,
+                parent,
+                name,
+                replace,
+            } => self.prepare_download(*node, *parent, name, *replace),
+            Op::RemoteCreate {
+                node,
+                parent,
+                name,
+                kind,
+            } => self.prepare_upload(*node, None, *parent, name, *kind),
+            Op::RemoteUpdate {
+                node,
+                file_id,
+                expected,
+                parent,
+                name,
+                ..
+            } => self.prepare_upload(
+                *node,
+                Some((*file_id, *expected)),
+                *parent,
+                name,
+                NodeKind::File,
+            ),
+            _ => Ok(Err(Outcome::Skip("not a transfer".into()))),
+        }
+    }
+
+    fn prepare_download(
         &mut self,
         node: NodeId,
         parent: NodeId,
         name: &str,
         replace: bool,
-    ) -> Result<Outcome, StateError> {
+    ) -> Result<Result<(Job, Ctx), Outcome>, StateError> {
         let (mirror, current) = self
             .db
             .read(|s| Ok((s.get_mirror(node)?, s.local_by_node(node)?)))?;
         let Some(mirror) = mirror else {
-            return Ok(Outcome::Skip("gone remotely".into()));
+            return Ok(Err(Outcome::Skip("gone remotely".into())));
         };
         let Some(file) = mirror.file else {
-            return Ok(Outcome::Skip("not a file".into()));
+            return Ok(Err(Outcome::Skip("not a file".into())));
         };
         let Some(expected) = file.hash else {
-            return Ok(Outcome::Skip("no remote hash".into()));
+            return Ok(Err(Outcome::Skip("no remote hash".into())));
         };
         if replace != current.is_some() {
-            return Ok(Outcome::Skip("local presence changed".into()));
+            return Ok(Err(Outcome::Skip("local presence changed".into())));
         }
         if let Some(row) = &current
             && !self.on_disk_unchanged(row)
         {
-            return Ok(rescan(&mut self.report, &row.path));
+            return Ok(Err(rescan(&mut self.report, &row.path)));
         }
         let Some(target) = self.target_path(parent, name)? else {
-            return Ok(Outcome::Retry("parent not local yet".into()));
+            return Ok(Err(Outcome::Retry("parent not local yet".into())));
         };
+        let job = Job::Download {
+            node,
+            file_id: mirror.file_id,
+            expected,
+            size: file.size,
+            mtime_ms: file.mtime_ms,
+            executable: (self.cfg.os != Os::Windows).then_some(file.executable),
+            tmp_dir: self.cfg.state_dir().join("tmp"),
+            key: format!("{}-{}", node.0.simple(), &expected.to_hex()[..16]),
+            local_algorithm: self.cfg.algorithm,
+        };
+        Ok(Ok((
+            job,
+            Ctx::Download {
+                node,
+                target,
+                current,
+            },
+        )))
+    }
 
-        // Fetch into a resumable temp file keyed by node and content.
-        let tmp = self.cfg.state_dir().join("tmp");
-        let key = format!("{}-{}", node.0.simple(), &expected.to_hex()[..16]);
-        let mut partial = match PartialFile::open(&tmp, &key, expected.algorithm) {
-            Ok(p) => p,
-            Err(e) => return Ok(io_outcome(e)),
+    fn prepare_upload(
+        &mut self,
+        node: NodeId,
+        existing: Option<(hbsync_types::RemoteFileId, hbsync_types::VersionTag)>,
+        parent: NodeId,
+        name: &str,
+        kind: NodeKind,
+    ) -> Result<Result<(Job, Ctx), Outcome>, StateError> {
+        let (row, mirror) = self
+            .db
+            .read(|s| Ok((s.local_by_node(node)?, s.get_mirror(node)?)))?;
+        let Some(row) = row else {
+            return Ok(Err(Outcome::Skip("gone locally".into())));
         };
-        let offset = partial.offset();
-        let range = (offset > 0).then_some(offset..file.size);
-        match self
-            .remote
-            .read(mirror.file_id, range, &mut WriteTo(&mut partial))
+        if !self.on_disk_unchanged(&row) {
+            return Ok(Err(rescan(&mut self.report, &row.path)));
+        }
+        let (mut content, payload) = match self.content_for(&row, name) {
+            Ok(x) => x,
+            Err(o) => return Ok(Err(o)),
+        };
+        let Some((hash, size)) = payload else {
+            return Ok(Err(Outcome::Skip("no payload".into())));
+        };
+        let path = self.abs(&row.path);
+        let extra = mirror.as_ref().and_then(|m| m.content_extra.clone());
+        let job = match existing {
+            None => Job::Create {
+                node,
+                new: NewNode {
+                    node,
+                    parent,
+                    kind,
+                    content: content.clone(),
+                },
+                path,
+                hash,
+                size,
+            },
+            Some((file_id, expected)) => {
+                if mirror.is_none() {
+                    return Ok(Err(Outcome::Skip("gone remotely".into())));
+                }
+                if let Some(extra) = &extra
+                    && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(extra)
+                {
+                    content.unknown = map;
+                }
+                Job::Update {
+                    node,
+                    file_id,
+                    expected,
+                    parent,
+                    content: content.clone(),
+                    path,
+                    hash,
+                    size,
+                }
+            }
+        };
+        Ok(Ok((
+            job,
+            Ctx::Upload {
+                node,
+                parent,
+                kind,
+                content,
+                hash,
+                extra,
+            },
+        )))
+    }
+
+    fn commit(&mut self, ctx: Ctx, result: JobResult) -> Result<Outcome, StateError> {
+        match (ctx, result) {
+            (_, JobResult::Failed(e)) => Ok(match e {
+                JobError::Remote(RemoteError::AlreadyExists) => Outcome::Done, // an earlier try landed
+                JobError::Remote(r) => remote_outcome(r),
+                e if e.is_transient() => Outcome::Retry(e.to_string()),
+                e => Outcome::Skip(e.to_string()),
+            }),
+            (
+                Ctx::Download {
+                    node,
+                    target,
+                    current,
+                },
+                JobResult::Downloaded { file, local_hash },
+            ) => self.place_download(node, &target, current, file, local_hash),
+            (
+                Ctx::Upload {
+                    node,
+                    parent,
+                    kind,
+                    content,
+                    hash,
+                    extra,
+                },
+                JobResult::Uploaded(written),
+            ) => {
+                let row = mirror_from(node, parent, kind, &content, Some(hash), written, extra);
+                self.db.write(|s| s.put_mirror(&row))?;
+                Ok(Outcome::Done)
+            }
+            _ => Ok(Outcome::Skip("mismatched transfer result".into())),
+        }
+    }
+
+    /// Puts a verified download into place: over the old version (if it's still what the plan
+    /// saw) or as a new file; an old version at another path goes to the trash first.
+    fn place_download(
+        &mut self,
+        node: NodeId,
+        target: &RelPath,
+        current: Option<LocalRow>,
+        done: hbsync_fileio::CompletedFile,
+        local_hash: hbsync_types::ContentHash,
+    ) -> Result<Outcome, StateError> {
+        if let Some(row) = &current
+            && self.db.read(|s| s.local_by_node(node))?.as_ref() != Some(row)
         {
-            Ok(_) => {}
-            Err(e) => return Ok(remote_outcome(e)),
+            let _ = done.discard();
+            return Ok(Outcome::Skip(
+                "local item changed during the transfer".into(),
+            ));
         }
-        let done = match partial.finish(Some(expected), Some(file.size)) {
-            Ok(d) => d,
-            Err(FileIoError::HashMismatch { .. } | FileIoError::SizeMismatch { .. }) => {
-                return Ok(Outcome::Retry(
-                    "downloaded bytes don't match the remote hash".into(),
-                ));
-            }
-            Err(e) => return Ok(Outcome::Retry(e.to_string())),
-        };
-        let exec = if self.cfg.os == Os::Windows {
-            None
-        } else {
-            Some(file.executable)
-        };
-        if let Err(e) = done.set_attributes(Some(file.mtime_ms.saturating_mul(1_000_000)), exec) {
-            return Ok(io_outcome(e));
-        }
-        let local_hash = if expected.algorithm == self.cfg.algorithm {
-            expected
-        } else {
-            match hash_file(done.path(), self.cfg.algorithm) {
-                Ok(h) => h.hash,
-                Err(e) => return Ok(Outcome::Retry(e.to_string())),
-            }
-        };
-
-        // Into place: over the old version (if it's still what the plan saw), or as a new file.
         let placed = match &current {
-            Some(row) if row.path == target => {
-                done.persist_over(&self.abs(&target), &row.fingerprint)
+            Some(row) if &row.path == target => {
+                done.persist_over(&self.abs(target), &row.fingerprint)
             }
             Some(row) => {
-                if !self.free_target(&target, Some(node))? {
+                if !self.on_disk_unchanged(row) || !self.free_target(target, Some(node))? {
                     let _ = done.discard();
-                    return Ok(Outcome::Retry("name taken".into()));
+                    return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                // Move the old version aside to the trash, then place the new one.
                 match self.move_to_trash(&row.path, node) {
-                    Ok(()) => done.persist_new(&self.abs(&target)),
+                    Ok(()) => done.persist_new(&self.abs(target)),
                     Err(e) => {
                         let _ = done.discard();
                         return Ok(io_outcome(e));
@@ -473,19 +705,20 @@ impl<'a> Executor<'a> {
                 }
             }
             None => {
-                if !self.free_target(&target, Some(node))? {
+                if !self.free_target(target, Some(node))? {
                     let _ = done.discard();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
-                done.persist_new(&self.abs(&target))
+                done.persist_new(&self.abs(target))
             }
         };
         let meta = match placed {
             Ok(m) => m,
-            Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, &target)),
+            Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, target)),
             Err(FileIoError::Io(e)) => return Ok(io_outcome(e)),
             Err(e) => return Ok(Outcome::Retry(e.to_string())),
         };
+        let target = target.clone();
         self.db.write(|s| {
             if let Some(row) = &current {
                 s.delete_local(&row.path)?;
@@ -571,147 +804,79 @@ impl<'a> Executor<'a> {
 
     // ---- remote operations ----
 
-    fn create(
+    fn create_folder(
         &mut self,
         node: NodeId,
         parent: NodeId,
         name: &str,
         kind: NodeKind,
     ) -> Result<Outcome, StateError> {
+        debug_assert_eq!(kind, NodeKind::Folder, "file creates run through flush");
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Skip("gone locally".into()));
         };
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let (content, payload) = match self.content_for(&row, name) {
-            Ok(x) => x,
-            Err(o) => return Ok(o),
-        };
+        let content = NodeContent::folder(name);
         let new = NewNode {
             node,
             parent,
             kind,
             content: content.clone(),
         };
-        let written = match payload {
-            None => self.remote.create(&new, None),
-            Some((hash, size)) => {
-                let mut file = match fs::File::open(self.abs(&row.path)) {
-                    Ok(f) => f,
-                    Err(e) => return Ok(io_outcome(e)),
-                };
-                self.remote.create(
-                    &new,
-                    Some(Upload {
-                        hash,
-                        size,
-                        reader: &mut file,
-                    }),
-                )
-            }
-        };
-        let written = match written {
+        let written = match self.remote.create(&new, None) {
             Ok(w) => w,
-            // An earlier attempt landed; the feed brings its header.
             Err(RemoteError::AlreadyExists) => return Ok(Outcome::Done),
             Err(e) => return Ok(remote_outcome(e)),
         };
         self.db.write(|s| {
             s.put_mirror(&mirror_from(
-                node,
-                parent,
-                kind,
-                &content,
-                payload.map(|p| p.0),
-                written,
-                None,
+                node, parent, kind, &content, None, written, None,
             ))
         })?;
         Ok(Outcome::Done)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn update(
+    /// A metadata-only update: move or rename, keeping the payload.
+    fn rename_remote(
         &mut self,
         node: NodeId,
         file_id: hbsync_types::RemoteFileId,
         expected: hbsync_types::VersionTag,
         parent: NodeId,
         name: &str,
-        upload: bool,
     ) -> Result<Outcome, StateError> {
-        let (mirror, row) = self
-            .db
-            .read(|s| Ok((s.get_mirror(node)?, s.local_by_node(node)?)))?;
-        let Some(mirror) = mirror else {
+        let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
             return Ok(Outcome::Skip("gone remotely".into()));
         };
-        let extra = mirror.content_extra.clone();
-        let (content, payload, source) = if upload {
-            let Some(row) = row else {
-                return Ok(Outcome::Skip("gone locally".into()));
-            };
-            if !self.on_disk_unchanged(&row) {
-                return Ok(rescan(&mut self.report, &row.path));
-            }
-            match self.content_for(&row, name) {
-                Ok((c, p)) => (c, p, Some(row.path)),
-                Err(o) => return Ok(o),
-            }
-        } else {
-            let content = match (&mirror.kind, &mirror.file) {
-                (NodeKind::File, Some(f)) => {
-                    NodeContent::file(name, f.mtime_ms, f.size, f.executable)
-                }
-                _ => NodeContent::folder(name),
-            };
-            (content, None, None)
+        let mut content = match (&mirror.kind, &mirror.file) {
+            (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
+            _ => NodeContent::folder(name),
         };
-        let mut content = content;
-        if let Some(extra) = &extra
+        if let Some(extra) = &mirror.content_extra
             && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(extra)
         {
             content.unknown = map;
         }
-        let written = match (payload, &source) {
-            (Some((hash, size)), Some(path)) => {
-                let mut file = match fs::File::open(self.abs(path)) {
-                    Ok(f) => f,
-                    Err(e) => return Ok(io_outcome(e)),
-                };
-                self.remote.update(
-                    file_id,
-                    expected,
-                    parent,
-                    &content,
-                    Some(Upload {
-                        hash,
-                        size,
-                        reader: &mut file,
-                    }),
-                )
-            }
-            _ => self
-                .remote
-                .update(file_id, expected, parent, &content, None),
-        };
-        let written = match written {
+        let written = match self
+            .remote
+            .update(file_id, expected, parent, &content, None)
+        {
             Ok(w) => w,
             Err(e) => return Ok(remote_outcome(e)),
         };
-        let hash = payload.map(|p| p.0).or(mirror.file.and_then(|f| f.hash));
-        self.db.write(|s| {
-            s.put_mirror(&mirror_from(
-                node,
-                parent,
-                mirror.kind,
-                &content,
-                hash,
-                written,
-                extra.clone(),
-            ))
-        })?;
+        let hash = mirror.file.and_then(|f| f.hash);
+        let row = mirror_from(
+            node,
+            parent,
+            mirror.kind,
+            &content,
+            hash,
+            written,
+            mirror.content_extra.clone(),
+        );
+        self.db.write(|s| s.put_mirror(&row))?;
         Ok(Outcome::Done)
     }
 
@@ -891,19 +1056,6 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         RemoteError::Transient(_) | RemoteError::Io(_) => Outcome::Retry(e.to_string()),
         // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
         _ => Outcome::Skip(e.to_string()),
-    }
-}
-
-/// Adapts a [`PartialFile`] to `io::Write` for the remote's sink.
-struct WriteTo<'a>(&'a mut PartialFile);
-
-impl io::Write for WriteTo<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write_all(buf)?;
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 

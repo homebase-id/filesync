@@ -5,6 +5,7 @@ pub mod engine;
 pub mod exec;
 pub mod feed;
 pub mod reconcile;
+pub mod transfer;
 pub mod tree;
 pub mod view;
 
