@@ -1,0 +1,183 @@
+//! The sync loop for one sync root.
+
+use std::path::Path;
+
+use hbsync_local::{ScanOptions, ScanReport, rescan_dirs, scan};
+use hbsync_platform::FsFamily;
+use hbsync_remote::Remote;
+use hbsync_state::{StateDb, StateError};
+
+use crate::exec::{ExecConfig, ExecError, Executor, unpark};
+use crate::feed::{self, FeedError, FeedReport};
+use crate::reconcile::{Conflict, Op, Options, reconcile};
+use crate::view;
+
+#[derive(Debug, Clone)]
+pub struct EngineConfig {
+    pub exec: ExecConfig,
+    /// Shown in conflict-copy names.
+    pub device: String,
+    pub feed_page_size: usize,
+    /// Plan/execute rounds per sync before giving the rest to the next sync.
+    pub max_rounds: usize,
+    /// Dirty nodes planned per round.
+    pub batch: usize,
+    pub mass_delete_min: usize,
+    pub mass_delete_fraction: f64,
+    pub allow_mass_delete: bool,
+}
+
+impl EngineConfig {
+    pub fn new(root: &Path, device: &str) -> Self {
+        EngineConfig {
+            exec: ExecConfig {
+                root: root.to_path_buf(),
+                os: hbsync_platform::Os::current(),
+                algorithm: hbsync_fileio::HashAlgorithm::Blake3,
+                attempts: 4,
+            },
+            device: device.to_owned(),
+            feed_page_size: 500,
+            max_rounds: 8,
+            batch: 20_000,
+            mass_delete_min: 50,
+            mass_delete_fraction: 0.25,
+            allow_mass_delete: false,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EngineError {
+    #[error(transparent)]
+    State(#[from] StateError),
+    #[error(transparent)]
+    Feed(#[from] FeedError),
+    #[error(transparent)]
+    Exec(#[from] ExecError),
+    #[error(transparent)]
+    Scan(#[from] hbsync_local::ScanError),
+}
+
+/// What one sync did.
+#[derive(Debug, Default)]
+pub struct SyncReport {
+    pub feed: FeedReport,
+    pub rounds: usize,
+    pub ops_done: usize,
+    pub skipped: Vec<(Op, String)>,
+    pub failed: Vec<(Op, String)>,
+    /// Deletes held by the mass-delete guard, waiting for confirmation.
+    pub held: Vec<Op>,
+    pub conflicts: Vec<Conflict>,
+    /// Nodes still dirty at the end (deferred, failed or held).
+    pub pending: u64,
+}
+
+impl SyncReport {
+    pub fn is_idle(&self) -> bool {
+        self.ops_done == 0 && self.pending == 0
+    }
+}
+
+pub struct Engine {
+    db: StateDb,
+    remote: Box<dyn Remote>,
+    cfg: EngineConfig,
+    scan_opts: ScanOptions,
+}
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("root", &self.cfg.exec.root)
+            .finish()
+    }
+}
+
+impl Engine {
+    pub fn new(db: StateDb, remote: Box<dyn Remote>, cfg: EngineConfig) -> Self {
+        let fs_family = hbsync_platform::fskind::detect(&cfg.exec.root).unwrap_or(FsFamily::Other);
+        let scan_opts = ScanOptions {
+            algorithm: cfg.exec.algorithm,
+            fs_family,
+            exclude_at_root: vec![hbsync_local::STATE_DIR.to_owned()],
+        };
+        Engine {
+            db,
+            remote,
+            cfg,
+            scan_opts,
+        }
+    }
+
+    pub fn db(&mut self) -> &mut StateDb {
+        &mut self.db
+    }
+
+    pub fn config(&self) -> &EngineConfig {
+        &self.cfg
+    }
+
+    pub fn scan_options(&self) -> &ScanOptions {
+        &self.scan_opts
+    }
+
+    /// A full local scan (tier C). The live observer does this incrementally in production.
+    pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
+        Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)
+    }
+
+    /// Pulls remote changes, then plans and executes until nothing is left to do (or the
+    /// round limit is hit). `date` (`YYYY-MM-DD`) is used for conflict-copy names.
+    pub fn sync_once(&mut self, date: &str) -> Result<SyncReport, EngineError> {
+        let mut report = SyncReport::default();
+        unpark(&mut self.db, &self.cfg.exec.root)?;
+        report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+
+        for _ in 0..self.cfg.max_rounds {
+            let dirty = self.db.read(|s| s.dirty_nodes(self.cfg.batch))?;
+            if dirty.is_empty() {
+                break;
+            }
+            report.rounds += 1;
+            let os = self.cfg.exec.os;
+            let input = self.db.read(|s| view::build_input(s, &dirty, os, true))?;
+            let opts = Options {
+                device: self.cfg.device.clone(),
+                date: date.to_owned(),
+                mass_delete_min: self.cfg.mass_delete_min,
+                mass_delete_fraction: self.cfg.mass_delete_fraction,
+                synced_files: self.db.read(|s| s.base_file_count())? as usize,
+                allow_mass_delete: self.cfg.allow_mass_delete,
+            };
+            let plan = reconcile(&input, &opts);
+            self.db
+                .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;
+            report.conflicts.extend(plan.conflicts.iter().cloned());
+            report.held = plan.held.clone();
+            if plan.ops.is_empty() {
+                break;
+            }
+            let exec =
+                Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec).run(&plan)?;
+            report.ops_done += exec.done;
+            report.skipped.extend(exec.skipped);
+            report.failed.extend(exec.failed);
+            if !exec.rescan.is_empty() {
+                rescan_dirs(
+                    &mut self.db,
+                    &self.cfg.exec.root,
+                    &exec.rescan,
+                    &self.scan_opts,
+                )?;
+            }
+            let more = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+            report.feed.pages += more.pages;
+            report.feed.live += more.live;
+            report.feed.deleted += more.deleted;
+        }
+        report.pending = self.db.read(|s| s.dirty_count())?;
+        Ok(report)
+    }
+}

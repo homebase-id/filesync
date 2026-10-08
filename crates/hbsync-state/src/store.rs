@@ -25,6 +25,9 @@ pub struct BaseRow {
     pub content_state: ContentState,
     /// The local spelling, when the name map says it must be recorded.
     pub local_name: Option<String>,
+    /// Hash of the local bytes when the content was agreed (`state.content.hash` is the
+    /// remote's representation, which may use another algorithm).
+    pub local_hash: Option<hbsync_types::ContentHash>,
 }
 
 /// What the last observation saw at one local path.
@@ -92,7 +95,7 @@ pub struct Store<'a> {
 }
 
 const BASE_COLS: &str = "node_id, parent_id, name, kind, hash, size, mtime_ms, executable, \
-                         remote_file_id, version_tag, content_state, local_name";
+                         remote_file_id, version_tag, content_state, local_name, local_hash";
 const MIRROR_COLS: &str = "file_id, version_tag, node_id, parent_id, kind, name, hash, size, \
                            mtime_ms, executable, content_extra";
 const LOCAL_COLS: &str =
@@ -141,7 +144,7 @@ impl<'a> Store<'a> {
         self.conn
             .prepare_cached(&format!(
                 "INSERT OR REPLACE INTO base ({BASE_COLS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
             ))?
             .execute(params![
                 row.node.0.as_bytes(),
@@ -156,6 +159,7 @@ impl<'a> Store<'a> {
                 row.remote.version.0.as_bytes(),
                 codec::content_state_to(row.content_state),
                 row.local_name,
+                row.local_hash.as_ref().map(codec::hash_to),
             ])?;
         Ok(())
     }
@@ -239,8 +243,8 @@ impl<'a> Store<'a> {
         let fp = &row.fingerprint;
         self.conn
             .prepare_cached(&format!(
-                "INSERT OR REPLACE INTO local_items ({LOCAL_COLS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                "INSERT OR REPLACE INTO local_items ({LOCAL_COLS}, parent_path) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
             ))?
             .execute(params![
                 row.path.as_str(),
@@ -253,6 +257,7 @@ impl<'a> Store<'a> {
                 file_id_bytes(&fp.file_id),
                 row.executable,
                 row.hash.as_ref().map(codec::hash_to),
+                row.path.parent().unwrap_or_default().as_str(),
             ])?;
         Ok(())
     }
@@ -292,6 +297,82 @@ impl<'a> Store<'a> {
         ))?;
         let rows = stmt.query_map(params![path.as_str(), lo, hi], |r| Ok(local_row(r)))?;
         rows.map(|r| r?).collect()
+    }
+
+    /// The direct children of the folder at `parent` (the root for an empty path).
+    pub fn local_children(&self, parent: &RelPath) -> Result<Vec<LocalRow>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {LOCAL_COLS} FROM local_items WHERE parent_path = ?1 ORDER BY path"
+        ))?;
+        let rows = stmt.query_map([parent.as_str()], |r| Ok(local_row(r)))?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// Re-roots the rows of `from` and everything below it at `to` (a folder was moved).
+    /// Returns the number of rows moved. Fails if a target path is taken.
+    pub fn move_local_subtree(&self, from: &RelPath, to: &RelPath) -> Result<usize> {
+        if from.is_root() || to.starts_with(from) {
+            return Err(StateError::Conflict(format!("can't move {from} to {to}")));
+        }
+        let to_parent = to.parent().unwrap_or_default();
+        // Lengths in characters, as SQLite's substr counts them.
+        let n = self.conn.execute(
+            "UPDATE local_items SET \
+               parent_path = CASE WHEN path = ?1 THEN ?3 \
+                             ELSE ?2 || substr(parent_path, length(?1) + 1) END, \
+               path = ?2 || substr(path, length(?1) + 1) \
+             WHERE path = ?1 OR (path >= ?1 || '/' AND path < ?1 || char(1))",
+            params![from.as_str(), to.as_str(), to_parent.as_str()],
+        )?;
+        Ok(n)
+    }
+
+    /// Deletes the rows of `path` and everything below it and returns them.
+    pub fn delete_local_subtree(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
+        let rows = self.local_subtree(path)?;
+        for row in &rows {
+            self.delete_local(&row.path)?;
+        }
+        Ok(rows)
+    }
+
+    // ---- parked items ----
+
+    /// Records that `node` was moved from `original` to the temporary `parked` path.
+    pub fn put_parked(&self, node: NodeId, parked: &RelPath, original: &RelPath) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO parked (node_id, parked_path, original_path) VALUES (?1, ?2, ?3)",
+            params![node.0.as_bytes(), parked.as_str(), original.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// `(node, parked path, original path)` of every parked item.
+    pub fn all_parked(&self) -> Result<Vec<(NodeId, RelPath, RelPath)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT node_id, parked_path, original_path FROM parked")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (node, parked, original) = r?;
+            let path = |p: &str| {
+                RelPath::new(p).map_err(|e| StateError::Corrupt(format!("parked path {p:?}: {e}")))
+            };
+            Ok((codec::node(&node)?, path(&parked)?, path(&original)?))
+        })
+        .collect()
+    }
+
+    pub fn delete_parked(&self, node: NodeId) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM parked WHERE node_id = ?1", [node.0.as_bytes()])?;
+        Ok(())
     }
 
     pub fn local_count(&self) -> Result<u64> {
@@ -472,6 +553,11 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
         },
         content_state: codec::content_state_from(r.get(10)?)?,
         local_name: r.get(11)?,
+        local_hash: r
+            .get::<_, Option<Vec<u8>>>(12)?
+            .as_deref()
+            .map(codec::hash_from)
+            .transpose()?,
     })
 }
 

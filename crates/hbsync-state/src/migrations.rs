@@ -1,13 +1,21 @@
 //! Schema migrations. `PRAGMA user_version` holds the number of migrations applied. Migrations
 //! are append-only: never edit one that has shipped.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use crate::{Result, StateError};
 
-const MIGRATIONS: &[&str] = &[
+/// One schema step: SQL, or code for what SQL can't express.
+enum Migration {
+    Sql(&'static str),
+    Code(fn(&Transaction<'_>) -> Result<()>),
+}
+
+use Migration::{Code, Sql};
+
+const MIGRATIONS: &[Migration] = &[
     // 1: base, local observations, dirty set, key/value.
-    r#"
+    Sql(r#"
     CREATE TABLE base (
         node_id        BLOB PRIMARY KEY NOT NULL,
         parent_id      BLOB NOT NULL,
@@ -47,9 +55,9 @@ const MIGRATIONS: &[&str] = &[
         key   TEXT PRIMARY KEY NOT NULL,
         value TEXT NOT NULL
     ) WITHOUT ROWID;
-    "#,
+    "#),
     // 2: the remote mirror (live nodes only; the remote side of the three-way merge).
-    r#"
+    Sql(r#"
     CREATE TABLE remote (
         file_id       BLOB PRIMARY KEY NOT NULL,
         version_tag   BLOB NOT NULL,
@@ -64,8 +72,35 @@ const MIGRATIONS: &[&str] = &[
         content_extra TEXT                        -- unknown content keys (JSON), kept on rewrite
     ) WITHOUT ROWID;
     CREATE INDEX remote_parent ON remote(parent_id);
-    "#,
+    "#),
+    // 3: the base's local hash, local parent paths (folder listings without subtree scans),
+    //    and parked items (temporary names the executor uses for swaps).
+    Sql(r#"
+    ALTER TABLE base ADD COLUMN local_hash BLOB;
+    ALTER TABLE local_items ADD COLUMN parent_path TEXT;
+    CREATE INDEX local_parent ON local_items(parent_path);
+    CREATE TABLE parked (
+        node_id       BLOB PRIMARY KEY NOT NULL,
+        parked_path   TEXT NOT NULL,
+        original_path TEXT NOT NULL
+    ) WITHOUT ROWID;
+    "#),
+    Code(backfill_parent_paths),
 ];
+
+fn backfill_parent_paths(tx: &Transaction<'_>) -> Result<()> {
+    let paths: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT path FROM local_items WHERE parent_path IS NULL")?;
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let mut update = tx.prepare("UPDATE local_items SET parent_path = ?2 WHERE path = ?1")?;
+    for path in paths {
+        let parent = path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
+        update.execute([&path, &parent])?;
+    }
+    Ok(())
+}
 
 pub fn apply(conn: &mut Connection) -> Result<()> {
     let current: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -76,9 +111,12 @@ pub fn apply(conn: &mut Connection) -> Result<()> {
             supported,
         });
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+    for (i, migration) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let tx = conn.transaction()?;
-        tx.execute_batch(sql)?;
+        match migration {
+            Sql(sql) => tx.execute_batch(sql)?,
+            Code(f) => f(&tx)?,
+        }
         tx.pragma_update(None, "user_version", i as u32 + 1)?;
         tx.commit()?;
     }
@@ -94,9 +132,17 @@ mod tests {
         let mut conn = Connection::open_in_memory()?;
         conn.create_collation("hbpath", hbsync_platform::path_cmp)?;
         // A DB as the first release left it: only migration 1.
-        conn.execute_batch(MIGRATIONS[0])?;
+        let Sql(first) = MIGRATIONS[0] else {
+            unreachable!("migration 1 is SQL")
+        };
+        conn.execute_batch(first)?;
         conn.pragma_update(None, "user_version", 1)?;
         conn.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", [])?;
+        conn.execute(
+            "INSERT INTO local_items (path, node_id, kind, size, mtime_ns, ctime_ns, volume, file_id) \
+             VALUES ('a/b', x'00', 0, 0, 0, 0, 0, x'00')",
+            [],
+        )?;
 
         apply(&mut conn)?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -106,6 +152,12 @@ mod tests {
         assert_eq!(value, "v");
         let mirrored: i64 = conn.query_row("SELECT COUNT(*) FROM remote", [], |r| r.get(0))?;
         assert_eq!(mirrored, 0);
+        let parent: String = conn.query_row(
+            "SELECT parent_path FROM local_items WHERE path = 'a/b'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(parent, "a");
         Ok(())
     }
 }

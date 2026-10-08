@@ -127,6 +127,28 @@ Every operation is **idempotent**: a remote create that returns `ExistingFileWit
 (4105) is treated as already done; a local move whose source is gone and whose target holds the
 expected fingerprint is treated as done.
 
+## 8a. Execution rules (found necessary by the simulator)
+
+- **Settling.** After each successful operation the base takes each attribute (location,
+  content) that both sides now hold; never a value only one side has. A plan that stops half
+  way can therefore never make the next round revert what did succeed.
+- **Retry within a plan.** An operation blocked only by order (target parent not created yet,
+  a folder temporarily inside its own destination) goes to the back of the queue.
+- **Parking.** If a target name is held by a node the plan is about to move, trash or replace,
+  that node is renamed to `.hbsync-move-<node id>` first, and the parking is recorded in the
+  state DB. The local view reports a parked node at its original place, but only while it
+  still sits at the parked name: a user move voids the record. Before each plan, parked items
+  whose original name is free again are moved back.
+- **Trash guard.** `LocalTrash` carries the nodes the plan expects in the subtree; if the
+  folder holds anything else (in the DB or on disk), it is not trashed and the folder is
+  rescanned.
+- **Creates** run only while the local node still exists unchanged.
+- **Orphans.** With a fully drained feed, a remote node whose parent is unknown everywhere (a
+  child created while another client deleted its folder) is moved to the root.
+- **Crash recovery** needs no operation log: every operation is idempotent or detectable
+  (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
+  feed, and parked items come back from their records.
+
 ## 9. Properties the simulator checks
 1. **Convergence:** after edits stop and every client syncs twice, all local trees and the
    remote are equal (names, structure, content hashes).

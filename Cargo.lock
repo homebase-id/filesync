@@ -279,9 +279,16 @@ name = "hbsync-engine"
 version = "0.1.0"
 dependencies = [
  "hbsync-fileio",
+ "hbsync-local",
+ "hbsync-namemap",
  "hbsync-platform",
+ "hbsync-remote",
+ "hbsync-state",
  "hbsync-types",
  "proptest",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

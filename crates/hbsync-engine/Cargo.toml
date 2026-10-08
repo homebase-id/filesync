@@ -8,11 +8,18 @@ publish.workspace = true
 
 [dependencies]
 hbsync-fileio.workspace = true
+hbsync-local.workspace = true
+hbsync-namemap.workspace = true
 hbsync-platform.workspace = true
+hbsync-remote.workspace = true
+hbsync-state.workspace = true
 hbsync-types.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -30,6 +30,7 @@ fn base(state: NodeState) -> BaseRow {
         remote: remote(),
         content_state: ContentState::Local,
         local_name: None,
+        local_hash: None,
     }
 }
 
@@ -63,6 +64,7 @@ fn base_round_trip() -> R {
     let mut file = base(NodeState::file(folder.node, "a.txt", content(b"a")));
     file.content_state = ContentState::Pinned;
     file.local_name = Some("a\u{F022}.txt".into());
+    file.local_hash = Some(content(b"local").hash);
     db.write(|s| {
         s.put_base(&folder)?;
         s.put_base(&file)
@@ -200,7 +202,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 2);
+    assert_eq!(db.schema_version()?, 4);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -301,4 +303,67 @@ mod mirror {
             Ok(())
         })
     }
+}
+
+#[test]
+fn children_subtree_moves_and_parking() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    let rows = [
+        local("a", NodeKind::Folder, 1),
+        local("a/x", NodeKind::File, 2),
+        local("a/sub", NodeKind::Folder, 3),
+        local("a/sub/y", NodeKind::File, 4),
+        local("a-b", NodeKind::File, 5),
+        local("top", NodeKind::File, 6),
+    ];
+    db.write(|s| rows.iter().try_for_each(|r| s.put_local(r)))?;
+    let names = |rows: Vec<LocalRow>| {
+        rows.into_iter()
+            .map(|r| r.path.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(db.read(|s| s.local_children(&RelPath::root()))?),
+        ["a", "a-b", "top"]
+    );
+    assert_eq!(
+        names(db.read(|s| s.local_children(&path("a")))?),
+        ["a/sub", "a/x"]
+    );
+
+    // Move folder "a" to "moved".
+    assert_eq!(
+        db.write(|s| s.move_local_subtree(&path("a"), &path("moved")))?,
+        4
+    );
+    assert_eq!(
+        names(db.read(|s| s.local_children(&RelPath::root()))?),
+        ["a-b", "moved", "top"]
+    );
+    assert_eq!(
+        names(db.read(|s| s.local_children(&path("moved/sub")))?),
+        ["moved/sub/y"]
+    );
+    assert_eq!(
+        db.read(|s| s.local_by_node(rows[3].node))?.map(|r| r.path),
+        Some(path("moved/sub/y"))
+    );
+    // Moving onto an occupied path fails and changes nothing.
+    assert!(
+        db.write(|s| s.move_local_subtree(&path("moved"), &path("top")))
+            .is_err()
+    );
+    assert_eq!(db.read(|s| s.local_count())?, 6);
+
+    let gone = db.write(|s| s.delete_local_subtree(&path("moved")))?;
+    assert_eq!(gone.len(), 4);
+
+    db.write(|s| s.put_parked(rows[5].node, &path(".hbsync-move-x"), &path("top")))?;
+    assert_eq!(
+        db.read(|s| s.all_parked())?,
+        vec![(rows[5].node, path(".hbsync-move-x"), path("top"))]
+    );
+    db.write(|s| s.delete_parked(rows[5].node))?;
+    assert!(db.read(|s| s.all_parked())?.is_empty());
+    Ok(())
 }
