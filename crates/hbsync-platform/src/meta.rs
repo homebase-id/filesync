@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn negative_and_positive_system_time() {
         use std::time::{Duration, UNIX_EPOCH};
-        assert_eq!(system_time_ns(UNIX_EPOCH + Duration::from_nanos(5)), 5);
-        assert_eq!(system_time_ns(UNIX_EPOCH - Duration::from_nanos(5)), -5);
+        assert_eq!(system_time_ns(UNIX_EPOCH + Duration::from_nanos(500)), 500);
+        assert_eq!(system_time_ns(UNIX_EPOCH - Duration::from_nanos(500)), -500);
     }
 }
