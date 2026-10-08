@@ -275,6 +275,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hbsync-engine"
+version = "0.1.0"
+dependencies = [
+ "hbsync-fileio",
+ "hbsync-platform",
+ "hbsync-types",
+ "proptest",
+]
+
+[[package]]
 name = "hbsync-fileio"
 version = "0.1.0"
 dependencies = [

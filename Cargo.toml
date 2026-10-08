@@ -9,6 +9,7 @@ rust-version = "1.99"
 publish = false
 
 [workspace.dependencies]
+hbsync-engine = { path = "crates/hbsync-engine" }
 hbsync-fileio = { path = "crates/hbsync-fileio" }
 hbsync-local = { path = "crates/hbsync-local" }
 hbsync-namemap = { path = "crates/hbsync-namemap" }
