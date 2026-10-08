@@ -623,3 +623,28 @@ fn temp_files_no_download_wants_are_swept() -> R {
     assert!(left.is_empty(), "{left:?}");
     Ok(())
 }
+
+#[test]
+fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("docs/report.txt", "r")?;
+    a.write("docs/sub/deep.txt", "d")?;
+    // The folder's create keeps failing during this sync.
+    a.remote.faults().fail_creates_named = Some("docs".into());
+    let report = a.sync()?;
+    assert!(!report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live().count(),
+        0,
+        "nothing was created under the missing folder"
+    );
+    // Once the server takes the folder, everything follows.
+    a.remote.faults().fail_creates_named = None;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    let report = b.sync()?;
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert_eq!(b.tree(), a.tree());
+    Ok(())
+}

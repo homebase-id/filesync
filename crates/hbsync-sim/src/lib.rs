@@ -91,6 +91,10 @@ struct ServerNode {
 struct Server {
     live: BTreeMap<NodeId, ServerNode>,
     next: u128,
+    /// Every node that was ever live (the server doesn't check parents, like Homebase).
+    ever: BTreeSet<NodeId>,
+    /// The first write that pointed a node at a folder the server never had.
+    dangling: Option<String>,
 }
 
 impl Server {
@@ -370,6 +374,14 @@ impl Sim {
         };
         let node = op.node();
         let outcome = self.execute(c, &op);
+        if outcome == Outcome::Done && self.server.dangling.is_none() {
+            let parent_unknown = self.server.live.get(&node).is_some_and(|n| {
+                !n.state.parent.is_root() && !self.server.ever.contains(&n.state.parent)
+            });
+            if parent_unknown {
+                self.server.dangling = Some(format!("c{c} {op:?}"));
+            }
+        }
         if self.verbose && outcome != Outcome::Done {
             self.trace.push(format!("  {outcome:?} {op:?}"));
         }
@@ -523,6 +535,10 @@ impl Sim {
                 if self.server.live.contains_key(&node) {
                     return Done; // 4105: an earlier attempt landed
                 }
+                // The executor creates only under a folder the server has (its mirror).
+                if !parent.is_root() && !self.server.live.contains_key(&parent) {
+                    return Retry;
+                }
                 let client = &self.clients[c];
                 // The local node must still be there, as planned (the executor reads it).
                 let Some(local) = client.local.get(node) else {
@@ -545,6 +561,7 @@ impl Sim {
                     RemoteFileId(self.server.uuid()),
                     VersionTag(self.server.uuid()),
                 );
+                self.server.ever.insert(node);
                 self.server.live.insert(
                     node,
                     ServerNode {
@@ -564,6 +581,9 @@ impl Sim {
                 ..
             } => {
                 let local_content = self.clients[c].local.get(node).and_then(|s| s.content);
+                if !parent.is_root() && !self.server.live.contains_key(&parent) {
+                    return Retry;
+                }
                 let version = VersionTag(self.server.uuid());
                 let Some(server) = self.server.live.get_mut(&node) else {
                     return Skip;
@@ -691,6 +711,9 @@ impl Sim {
     /// Checks convergence, invariants and no data loss. Returns a description of the first
     /// failure.
     pub fn check(&self) -> Result<(), String> {
+        if let Some(op) = &self.server.dangling {
+            return Err(format!("created under a folder the server never had: {op}"));
+        }
         let server = self.server.tree();
         let server_view = view(&server);
         for client in &self.clients {

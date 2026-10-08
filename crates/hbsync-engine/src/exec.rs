@@ -324,6 +324,17 @@ impl<'a> Executor<'a> {
         Ok(parent_path.join(&local.name).map_err(unspellable))
     }
 
+    /// A node is created or moved remotely only into a folder the server has: one whose own
+    /// create failed (and is queued again) would otherwise get children pointing at nothing,
+    /// which other clients treat as orphans.
+    fn parent_on_server(&mut self, parent: NodeId) -> Result<Option<Outcome>, StateError> {
+        if parent.is_root() || self.db.read(|s| s.get_mirror(parent))?.is_some() {
+            Ok(None)
+        } else {
+            Ok(Some(Outcome::Retry("parent not on the server yet".into())))
+        }
+    }
+
     /// Whether the item on disk still matches its row.
     fn on_disk_unchanged(&self, row: &LocalRow) -> bool {
         match hbsync_platform::stat(&self.abs(&row.path)) {
@@ -645,6 +656,9 @@ impl<'a> Executor<'a> {
         if !self.on_disk_unchanged(&row) {
             return Ok(Err(rescan(&mut self.report, &row.path)));
         }
+        if let Some(wait) = self.parent_on_server(parent)? {
+            return Ok(Err(wait));
+        }
         // Where the OS has no x bit, the synced value is kept (as the view does).
         let synced_executable = base
             .and_then(|b| b.state.content)
@@ -886,6 +900,9 @@ impl<'a> Executor<'a> {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Skip("gone locally".into()));
         };
+        if let Some(wait) = self.parent_on_server(parent)? {
+            return Ok(wait);
+        }
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
@@ -921,6 +938,9 @@ impl<'a> Executor<'a> {
         let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
             return Ok(Outcome::Skip("gone remotely".into()));
         };
+        if let Some(wait) = self.parent_on_server(parent)? {
+            return Ok(wait);
+        }
         let mut content = match (&mirror.kind, &mirror.file) {
             (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
             _ => NodeContent::folder(name),
