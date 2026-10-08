@@ -57,10 +57,11 @@ An encrypting client gets both in a single pass: hash the plaintext going in and
 - **The server never computes a hash on its own.** No hash from the client means no hash stored.
 - **Scope:** payloads only; thumbnails are not hashed.
 
-**Where they live:** on `PayloadDescriptor`, next to `Uid` and `LastModified`:
-- `hashAlgorithm`
-- `storedHash`
-- `contentHash` (encrypted when the payload is)
+**Where they live:** on `PayloadDescriptor`, next to `Uid` and `LastModified`, as one optional
+object (as implemented in odin-core #1895 / PR #1899, see `../odin-core/docs/payload-hashes.md`):
+- `hash.algorithm` (`"sha256"` | `"blake3"`)
+- `hash.storedHash`
+- `hash.contentHash` (encrypted when the payload is)
 
 They are stored in the existing header JSON (`hdrFileMetaData`; there is no payload table), so no DB migration is needed. Hashes are byte arrays serialized as **base64**, about 160 characters per payload against the column's 60,000-character cap. Tracked in odin-core **#1895**. A main-index column or hash→fileId table is added only if lookups by hash (dedupe) are ever wanted.
 

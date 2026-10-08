@@ -4,6 +4,10 @@ Bottom-up. Each layer is usable and tested on all three OSes before the next one
 Decisions referenced here are in [foundations.md](foundations.md).
 
 ## Layer 0: Specs (shared with Homebase)
+Written: [spec/sync-semantics.md](spec/sync-semantics.md),
+[spec/node-schema-v1.md](spec/node-schema-v1.md), [spec/perf-budget.md](spec/perf-budget.md),
+[spec/homebase-api-notes.md](spec/homebase-api-notes.md).
+
 - **Sync semantics spec**:
   - node model
   - invariants: unique names under NFC + case-fold, no cycles, orphan resurrection, delete safety

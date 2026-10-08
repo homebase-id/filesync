@@ -1,0 +1,18 @@
+{
+  "fileId": "5f0a1b7c-3e2d-4a6b-8c9d-0e1f2a3b4c5d",
+  "fileState": "active",
+  "fileMetadata": {
+    "isEncrypted": false,
+    "versionTag": "0199c4a2-7e10-7000-8000-000000000001",
+    "created": 1759920000000,
+    "updated": 1759920000000,
+    "appData": {
+      "uniqueId": "8f14e45f-ceea-467a-9575-5a1b2c3d4e5f",
+      "groupId": "2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e",
+      "fileType": 7101,
+      "dataType": 0,
+      "content": "{\"v\":1,\"name\":\"Projects\"}"
+    },
+    "payloads": []
+  }
+}
