@@ -353,6 +353,14 @@ mod imp {
         let _dir = c.u32()?;
         let returned_file = c.u32()?;
         let _fork = c.u32()?;
+        // The error code is not packed in bit order: when present (only for an entry the
+        // kernel couldn't read) it comes first, before the name (getattrlistbulk(2) example;
+        // XNU `get_error_attributes`).
+        let error = if returned_common & ATTR_CMN_ERROR != 0 {
+            c.u32()?
+        } else {
+            0
+        };
 
         let mut name = None;
         if returned_common & ATTR_CMN_NAME != 0 {
@@ -402,21 +410,18 @@ mod imp {
         } else {
             0
         };
-        let error = if returned_common & ATTR_CMN_ERROR != 0 {
-            c.u32()?
-        } else {
-            0
-        };
         let size = if returned_file & ATTR_FILE_DATALENGTH != 0 {
             c.i64()? as u64
         } else {
             0
         };
 
-        let Some(name) = name else { return Ok(None) };
+        // An unreadable entry fails the whole listing, as in the portable path: dropping it
+        // would look like a delete.
         if error != 0 {
             return Err(io::Error::from_raw_os_error(error as i32));
         }
+        let Some(name) = name else { return Ok(None) };
         let kind = match objtype {
             VREG => EntryKind::File,
             VDIR => EntryKind::Dir,
@@ -438,6 +443,38 @@ mod imp {
                 executable: Some(mode & 0o111 != 0),
             },
         }))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// An entry as XNU packs it for an object it failed to read: the returned set, the
+        /// error, then the name.
+        fn error_entry(errno: u32, name: &[u8]) -> Vec<u8> {
+            let mut e = Vec::new();
+            let header = 4 + 5 * 4 + 4;
+            let name_ref = header + 8;
+            let len = (name_ref + name.len() + 1) as u32;
+            e.extend(len.to_ne_bytes());
+            let returned = ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME | ATTR_CMN_ERROR;
+            for v in [returned, 0, 0, 0, 0, errno] {
+                e.extend(v.to_ne_bytes());
+            }
+            // attrreference_t: offset from the reference itself, then length with the NUL.
+            e.extend(8i32.to_ne_bytes());
+            e.extend((name.len() as u32 + 1).to_ne_bytes());
+            e.extend(name);
+            e.push(0);
+            e
+        }
+
+        #[test]
+        fn an_entry_error_is_read_before_the_name() {
+            let entry = error_entry(libc::EACCES as u32, b"locked");
+            let err = parse_entry(&entry).expect_err("an unreadable entry is an error");
+            assert_eq!(err.raw_os_error(), Some(libc::EACCES));
+        }
     }
 }
 

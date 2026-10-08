@@ -453,6 +453,25 @@ mod targeted {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_replaced_by_a_symlink_is_not_followed() -> R {
+        let mut f = Fixture::new()?;
+        f.write("a/inner/mine", b"m")?;
+        f.scan()?;
+        let outside = tempfile::tempdir()?;
+        fs::create_dir_all(outside.path().join("inner"))?;
+        fs::write(outside.path().join("inner/secret"), b"s")?;
+        fs::write(outside.path().join("other"), b"o")?;
+        fs::remove_dir_all(f.root().join("a"))?;
+        std::os::unix::fs::symlink(outside.path(), f.root().join("a"))?;
+        // The watcher reports both the link and the folder that was inside it.
+        f.rescan(&["a/inner", "a"])?;
+        let rows = f.snapshot()?;
+        assert!(rows.iter().all(|r| !r.starts_with("a")), "{rows:?}");
+        Ok(())
+    }
+
     #[test]
     fn deleted_folder_removes_its_subtree() -> R {
         let mut f = Fixture::new()?;

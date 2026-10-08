@@ -548,3 +548,33 @@ fn adopting_a_copy_of_a_sha256_file_downloads_nothing() -> R {
     );
     Ok(())
 }
+
+#[test]
+fn adopting_a_wide_folder_takes_linear_time() -> R {
+    const N: usize = 3000;
+    let server = server();
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        for i in 0..N {
+            s.seed_file(
+                hbsync_types::NodeId::ROOT,
+                &format!("f{i}.txt"),
+                format!("data {i}").as_bytes(),
+                hbsync_fileio::HashAlgorithm::Blake3,
+            )?;
+        }
+    }
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..N {
+        b.write(&format!("f{i}.txt"), &format!("data {i}"))?;
+    }
+    b.engine.scan_local()?;
+    let started = std::time::Instant::now();
+    let report = b.engine.sync_once("2026-10-08")?;
+    let took = started.elapsed();
+    assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
+    assert_eq!(report.adopted, N);
+    // Matching each file against all its siblings took 50 s here (debug); grouped, 3 s.
+    assert!(took.as_secs() < 20, "adoption took {took:?}");
+    Ok(())
+}

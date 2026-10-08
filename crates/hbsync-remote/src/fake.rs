@@ -72,7 +72,7 @@ pub struct FakeServer {
     clock_ms: i64,
     next_row: u64,
     /// Deterministic id source.
-    next_id: u128,
+    next_id: u64,
 }
 
 impl FakeServer {
@@ -95,8 +95,9 @@ impl FakeServer {
 
     fn fresh_uuid(&mut self) -> Uuid {
         self.next_id += 1;
-        // Deterministic, but with the version bits of a v4 UUID so it looks like one.
-        Uuid::from_u128((self.next_id << 64) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
+        // Deterministic, but with the version and variant bits of a v4 UUID so it looks like
+        // one. The counter goes in the low 62 bits, below the variant bits, so no two ids meet.
+        Uuid::from_u128(u128::from(self.next_id) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
     }
 
     fn touch(&mut self, file_id: RemoteFileId) {
@@ -551,6 +552,24 @@ impl Remote for FakeRemote {
                 self.faults().served += slice.len() as u64;
                 Ok(slice.len() as u64)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_ids_are_unique_and_look_like_v4() {
+        let server = FakeServer::new(ServerConfig::default());
+        let mut s = server.lock().unwrap_or_else(|p| p.into_inner());
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..40_000 {
+            let id = s.fresh_uuid();
+            assert_eq!(id.get_version_num(), 4);
+            assert_eq!(id.as_u128() >> 62 & 0b11, 0b10, "RFC 4122 variant");
+            assert!(seen.insert(id), "id {id} handed out twice");
         }
     }
 }

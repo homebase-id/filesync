@@ -92,11 +92,7 @@ pub fn rescan_dirs(
         {
             continue;
         }
-        let mut dir = dir.clone();
-        while !dir.is_root() && !dir.to_native(root).is_dir() {
-            dir = dir.parent().unwrap_or_default();
-        }
-        targets.insert(dir);
+        targets.insert(real_dir_prefix(root, dir));
     }
 
     let mut report = ScanReport::default();
@@ -163,6 +159,21 @@ pub fn rescan_dirs(
     let plan = resolve(db, root, diff, opts, &mut report)?;
     apply(db, plan, &mut report)?;
     Ok(report)
+}
+
+/// The longest leading part of `dir` that is a real folder: a folder that no longer exists, or
+/// that a symlink (or junction) now stands in for, is replaced by its nearest real ancestor.
+/// Links are never followed, so a rescan can't reach outside the root through one.
+fn real_dir_prefix(root: &Path, dir: &RelPath) -> RelPath {
+    let mut real = RelPath::default();
+    for name in dir.components() {
+        let Ok(next) = real.join(name) else { break };
+        match std::fs::symlink_metadata(next.to_native(root)) {
+            Ok(m) if m.is_dir() => real = next,
+            _ => break,
+        }
+    }
+    real
 }
 
 /// The differences between the walk and the DB.

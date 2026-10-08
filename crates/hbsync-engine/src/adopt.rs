@@ -7,16 +7,19 @@
 //! they agree on parent, name (under [`name_key`]), kind and, for files, content. The
 //! reconciler then finds both sides equal and only records the base: nothing is transferred.
 //!
-//! Folders are adopted before their contents (walk order), so children of an adopted folder
-//! find the remote folder as their parent.
+//! Folders are adopted before their contents (candidates go folder by folder, shallowest
+//! first), so children of an adopted folder find the remote folder as their parent. Each
+//! folder's remote children are loaded and indexed once, so adoption is linear in the number of
+//! items however wide the folders are.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use hbsync_fileio::hash_file;
 use hbsync_namemap::to_remote;
 use hbsync_platform::name::name_key;
 use hbsync_platform::{Os, RelPath};
-use hbsync_state::{LocalRow, StateDb, StateError};
+use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError};
 use hbsync_types::{NodeId, NodeKind};
 
 /// Adopts what it can among the dirty nodes. Returns the number of adoptions.
@@ -35,11 +38,47 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
         }
         Ok(())
     })?;
-    candidates.sort_by(|a, b| a.path.cmp(&b.path));
+    // Grouped by folder, parents before children.
+    candidates.sort_by_cached_key(|r| {
+        let parent = r.path.parent().unwrap_or_default();
+        (r.path.depth(), parent, r.path.clone())
+    });
 
     let mut adopted = 0;
-    for row in candidates {
-        if let Some((remote_node, proven_equal)) = find_match(db, root, os, &row)? {
+    let mut start = 0;
+    while start < candidates.len() {
+        let parent_path = candidates[start].path.parent().unwrap_or_default();
+        let end = start
+            + candidates[start..]
+                .iter()
+                .take_while(|r| r.path.parent().unwrap_or_default() == parent_path)
+                .count();
+        let group = &candidates[start..end];
+        start = end;
+
+        let parent = if parent_path.is_root() {
+            NodeId::ROOT
+        } else {
+            match db.read(|s| s.get_local(&parent_path))? {
+                Some(p) => p.node,
+                None => continue,
+            }
+        };
+        let mut siblings: HashMap<String, Vec<MirrorRow>> = HashMap::new();
+        for remote in db.read(|s| s.mirror_children(parent))? {
+            siblings
+                .entry(name_key(&remote.name))
+                .or_default()
+                .push(remote);
+        }
+        if siblings.is_empty() {
+            continue;
+        }
+        for row in group {
+            let Some((remote_node, proven_equal)) = find_match(db, root, os, row, &siblings)?
+            else {
+                continue;
+            };
             db.write(|s| {
                 s.delete_local(&row.path)?;
                 s.put_local(&LocalRow {
@@ -62,12 +101,14 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
 }
 
 /// The remote node `row` is a copy of, if any, and whether equality was proven across hash
-/// algorithms (which only this function can know).
+/// algorithms (which only this function can know). `siblings` are the remote children of the
+/// row's parent by [`name_key`].
 fn find_match(
     db: &mut StateDb,
     root: &Path,
     os: Os,
     row: &LocalRow,
+    siblings: &HashMap<String, Vec<MirrorRow>>,
 ) -> Result<Option<(NodeId, bool)>, StateError> {
     let Some(local_name) = row.path.name() else {
         return Ok(None);
@@ -75,19 +116,11 @@ fn find_match(
     let Ok(name) = to_remote(local_name, os) else {
         return Ok(None);
     };
-    let parent_path = row.path.parent().unwrap_or_default();
-    let parent = if parent_path.is_root() {
-        NodeId::ROOT
-    } else {
-        match db.read(|s| s.get_local(&parent_path))? {
-            Some(p) => p.node,
-            None => return Ok(None),
-        }
+    let Some(same_key) = siblings.get(&name_key(&name)) else {
+        return Ok(None);
     };
-    let key = name_key(&name);
-    let siblings = db.read(|s| s.mirror_children(parent))?;
-    for remote in siblings {
-        if remote.kind != row.kind || name_key(&remote.name) != key {
+    for remote in same_key {
+        if remote.kind != row.kind {
             continue;
         }
         // Only a remote node that has no local copy and no history yet.
