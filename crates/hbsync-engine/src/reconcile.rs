@@ -83,6 +83,10 @@ pub struct Input {
     /// Remote files without a hash: their content can only be compared after a download.
     pub remote_unhashed: HashSet<NodeId>,
     pub dirty: BTreeSet<NodeId>,
+    /// The remote tree holds every live node the remote has that matters here (the feed is
+    /// drained and parents were looked up). Then a remote node whose parent is unknown
+    /// everywhere is a true orphan and is moved to the root instead of waiting forever.
+    pub remote_complete: bool,
 }
 
 /// One step for the executor. Locations are (parent node, remote name); the executor turns
@@ -114,8 +118,10 @@ pub enum Op {
         name: String,
         replace: bool,
     },
-    /// Move the local item (and everything below it) to the sync root's trash.
-    LocalTrash { node: NodeId },
+    /// Move the local item and everything below it to the sync root's trash. `subtree` is
+    /// every node the plan expects there (sorted, `node` included): if the folder holds
+    /// anything else by the time this runs, it is not trashed.
+    LocalTrash { node: NodeId, subtree: Vec<NodeId> },
     /// Create the node remotely; files upload the local bytes.
     RemoteCreate {
         node: NodeId,
@@ -148,7 +154,7 @@ impl Op {
             | Op::LocalMkdir { node, .. }
             | Op::LocalMove { node, .. }
             | Op::LocalDownload { node, .. }
-            | Op::LocalTrash { node }
+            | Op::LocalTrash { node, .. }
             | Op::RemoteCreate { node, .. }
             | Op::RemoteUpdate { node, .. }
             | Op::RemoteDelete { node, .. }
@@ -174,6 +180,8 @@ pub enum Conflict {
     NameClash { node: NodeId },
     /// A move would have created a cycle and was undone.
     Cycle { node: NodeId },
+    /// The node's folder no longer exists anywhere; it was moved to the root.
+    Orphan { node: NodeId },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -516,6 +524,17 @@ impl<'a> Reconciler<'a> {
                     self.origin.insert(parent, Origin::Base);
                     queue.push(parent);
                 }
+                None if self.input.remote_complete && self.input.remote.contains(node) => {
+                    // Nobody knows the parent: the server kept a child of a folder deleted
+                    // concurrently. Keep the data visible by moving it to the root.
+                    if let Some(mut state) = self.merged.get(node).cloned() {
+                        state.parent = NodeId::ROOT;
+                        self.merged.insert(node, state);
+                        self.scope.insert(node);
+                        self.origin.entry(node).or_insert(Origin::Base);
+                        self.plan.conflicts.push(Conflict::Orphan { node });
+                    }
+                }
                 _ => {
                     // The parent is unknown (or not a folder): wait for more information.
                     self.merged.remove(node);
@@ -726,7 +745,9 @@ impl<'a> Reconciler<'a> {
             if !fork_copies.contains(&node) {
                 match (&target, local_real.filter(|_| forked.is_none())) {
                     (None, Some(_)) => {
-                        deletes.push((depth(&i.local), Op::LocalTrash { node }));
+                        let mut subtree = i.local.subtree(node);
+                        subtree.sort();
+                        deletes.push((depth(&i.local), Op::LocalTrash { node, subtree }));
                         local_ops = true;
                     }
                     (Some(t), None) => {
@@ -803,7 +824,7 @@ impl<'a> Reconciler<'a> {
             .into_iter()
             .map(|(_, op)| op)
             .filter(|op| match op {
-                Op::LocalTrash { node } => {
+                Op::LocalTrash { node, .. } => {
                     !i.local.ancestors(*node).iter().any(|a| trashed.contains(a))
                 }
                 _ => true,
@@ -872,7 +893,7 @@ impl<'a> Reconciler<'a> {
         let (mut local_files, mut remote_files) = (0usize, 0usize);
         for op in &self.plan.ops {
             match op {
-                Op::LocalTrash { node } => local_files += files_under(&i.local, *node),
+                Op::LocalTrash { node, .. } => local_files += files_under(&i.local, *node),
                 Op::RemoteDelete { node, .. }
                     if i.remote
                         .get(*node)

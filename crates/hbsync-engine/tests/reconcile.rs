@@ -204,7 +204,9 @@ fn remote_folder_delete_trashes_only_the_top() {
     w.synced(d, folder(ROOT, "d")).synced(f, file(d, "f", "1"));
     w.remote(f, None).remote(d, None);
     let plan = w.plan();
-    assert_eq!(plan.ops, [Op::LocalTrash { node: d }]);
+    let mut subtree = vec![d, f];
+    subtree.sort();
+    assert_eq!(plan.ops, [Op::LocalTrash { node: d, subtree }]);
 }
 
 #[test]
@@ -494,4 +496,50 @@ fn sha256_remote_node_moved_locally_is_not_re_uploaded() {
     w.local(f, Some(file(ROOT, "f-renamed", "1")));
     let plan = w.plan();
     assert_eq!(kinds(&plan.ops), ["rename"], "{plan:?}");
+}
+
+#[test]
+fn file_moved_into_remotely_deleted_folder_keeps_the_folder() {
+    let [d, f] = ids(2)[..] else { unreachable!() };
+    for (folder_id, file_id) in [(d, f), (f, d)] {
+        let mut w = World::default();
+        w.synced(file_id, file(ROOT, "c.txt", "2"))
+            .synced(folder_id, folder(ROOT, "c.txt"));
+        // Locally the file moved into the folder; remotely the folder was deleted.
+        w.local(file_id, Some(file(folder_id, "a", "2")));
+        w.remote(folder_id, None);
+        let plan = w.plan();
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::LocalTrash { node, .. } if *node == folder_id)),
+            "{plan:#?}"
+        );
+        assert!(
+            plan.ops
+                .iter()
+                .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == folder_id)),
+            "{plan:#?}"
+        );
+    }
+}
+
+#[test]
+fn orphan_with_unknown_parent_moves_to_root_when_mirror_is_complete() {
+    let [gone, child] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.remote(child, Some(folder(gone, "kept")));
+    assert_eq!(w.plan().deferred, [child], "incomplete mirror: wait");
+    w.input.remote_complete = true;
+    let plan = w.plan();
+    assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == child && *parent == ROOT)));
+    assert!(plan.ops.contains(&Op::LocalMkdir {
+        node: child,
+        parent: ROOT,
+        name: "kept".into()
+    }));
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: child }]);
 }

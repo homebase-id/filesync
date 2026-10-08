@@ -341,6 +341,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hbsync-sim"
+version = "0.1.0"
+dependencies = [
+ "hbsync-engine",
+ "hbsync-fileio",
+ "hbsync-platform",
+ "hbsync-types",
+ "proptest",
+]
+
+[[package]]
 name = "hbsync-state"
 version = "0.1.0"
 dependencies = [

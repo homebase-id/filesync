@@ -70,8 +70,9 @@ impl fmt::Debug for VersionTag {
     }
 }
 
+/// The last 8 hex digits: UUIDv7 ids share their leading timestamp digits.
 fn short(id: Uuid) -> String {
-    id.simple().to_string()[..8].to_owned()
+    id.simple().to_string()[24..].to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

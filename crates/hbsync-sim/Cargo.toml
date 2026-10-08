@@ -1,0 +1,19 @@
+[package]
+name = "hbsync-sim"
+description = "Deterministic multi-client simulator and property tests for the reconciler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hbsync-engine.workspace = true
+hbsync-fileio.workspace = true
+hbsync-platform.workspace = true
+hbsync-types.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
