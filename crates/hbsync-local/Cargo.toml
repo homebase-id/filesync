@@ -1,0 +1,20 @@
+[package]
+name = "hbsync-local"
+description = "Local observation: bulk listing, tier-C walk, scan merge into the state DB"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hbsync-fileio.workspace = true
+hbsync-platform.workspace = true
+hbsync-state.workspace = true
+hbsync-types.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -5,6 +5,7 @@
 
 pub mod errors;
 pub mod fskind;
+pub mod listdir;
 pub mod meta;
 pub mod name;
 pub mod ops;

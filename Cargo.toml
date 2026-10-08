@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 hbsync-fileio = { path = "crates/hbsync-fileio" }
+hbsync-local = { path = "crates/hbsync-local" }
 hbsync-namemap = { path = "crates/hbsync-namemap" }
 hbsync-platform = { path = "crates/hbsync-platform" }
 hbsync-state = { path = "crates/hbsync-state" }

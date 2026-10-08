@@ -278,6 +278,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hbsync-local"
+version = "0.1.0"
+dependencies = [
+ "hbsync-fileio",
+ "hbsync-platform",
+ "hbsync-state",
+ "hbsync-types",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "hbsync-namemap"
 version = "0.1.0"
 dependencies = [
