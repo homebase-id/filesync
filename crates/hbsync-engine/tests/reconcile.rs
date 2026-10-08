@@ -545,3 +545,77 @@ fn orphan_with_unknown_parent_moves_to_root_when_mirror_is_complete() {
     }));
     assert_eq!(plan.conflicts, [Conflict::Orphan { node: child }]);
 }
+
+#[test]
+fn a_file_still_being_written_keeps_its_remotely_deleted_folder() {
+    let [d, new] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.synced(d, folder(ROOT, "d"));
+    w.remote(d, None);
+    // A new local file the scan couldn't hash yet (locked, still being written).
+    w.local(
+        new,
+        Some(NodeState {
+            content: None,
+            ..file(d, "new", "?")
+        }),
+    );
+    w.input.local_unhashed.insert(new);
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { .. })),
+        "{plan:#?}"
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == d)),
+        "{plan:#?}"
+    );
+    assert_eq!(plan.deferred, [new]);
+}
+
+#[test]
+fn a_file_still_being_written_keeps_its_name() {
+    let [first, writing] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.remote(first, Some(file(ROOT, "Report.txt", "theirs")));
+    w.local(
+        writing,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "report.txt", "?")
+        }),
+    );
+    w.input.local_unhashed.insert(writing);
+    let plan = w.plan();
+    // The remote file comes down under another name; the local one isn't touched.
+    assert!(plan.ops.iter().all(|op| op.node() != writing), "{plan:#?}");
+    assert!(plan.ops.contains(&Op::LocalDownload {
+        node: first,
+        parent: ROOT,
+        name: "Report (conflict 1).txt".into(),
+        replace: false
+    }));
+}
+
+#[test]
+fn children_of_a_withdrawn_orphan_are_withdrawn_too() {
+    // Ids ascend: the child is looked at before its parent.
+    let [gone, parent, child] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.remote(parent, Some(folder(gone, "p")));
+    w.remote(child, Some(file(parent, "c", "1")));
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{plan:#?}");
+    let mut deferred = plan.deferred.clone();
+    deferred.sort();
+    assert_eq!(deferred, [parent, child]);
+}

@@ -376,9 +376,17 @@ impl<'a> Reconciler<'a> {
         }
     }
 
+    /// Leaves `node` for a later plan, keeping it in the merged tree where it is now, so that
+    /// a new local file still being written keeps its folder alive (§6.3) and its name.
     fn defer(&mut self, node: NodeId) {
         self.plan.deferred.push(node);
-        if let Some(state) = self.input.remote.get(node).or(self.input.base.get(node)) {
+        let i = self.input;
+        if let Some(state) = i
+            .remote
+            .get(node)
+            .or(i.base.get(node))
+            .or(i.local.get(node))
+        {
             self.merged.insert(node, state.clone());
         }
     }
@@ -519,6 +527,8 @@ impl<'a> Reconciler<'a> {
     fn fix_orphans(&mut self) {
         let mut queue: Vec<NodeId> = self.merged.ids().collect();
         queue.sort();
+        // Nodes taken out below; their children follow them.
+        let mut withdrawn: HashSet<NodeId> = HashSet::new();
         while let Some(node) = queue.pop() {
             let Some(parent) = self.merged.get(node).map(|s| s.parent) else {
                 continue;
@@ -526,7 +536,12 @@ impl<'a> Reconciler<'a> {
             if self.merged.exists(parent) {
                 continue;
             }
-            match self.known_state(parent) {
+            let parent_state = if withdrawn.contains(&parent) {
+                None
+            } else {
+                self.known_state(parent)
+            };
+            match parent_state {
                 Some(state) if state.kind == NodeKind::Folder => {
                     // A live child keeps its folder alive (§6.3).
                     self.merged.insert(parent, state);
@@ -534,7 +549,10 @@ impl<'a> Reconciler<'a> {
                     self.origin.insert(parent, Origin::Base);
                     queue.push(parent);
                 }
-                None if self.input.remote_complete && self.input.remote.contains(node) => {
+                None if self.input.remote_complete
+                    && self.input.remote.contains(node)
+                    && !withdrawn.contains(&parent) =>
+                {
                     // Nobody knows the parent: the server kept a child of a folder deleted
                     // concurrently. Keep the data visible by moving it to the root.
                     if let Some(mut state) = self.merged.get(node).cloned() {
@@ -546,10 +564,13 @@ impl<'a> Reconciler<'a> {
                     }
                 }
                 _ => {
-                    // The parent is unknown (or not a folder): wait for more information.
+                    // The parent is unknown (or not a folder, or itself waiting): wait for more
+                    // information. Children already checked against this node are re-checked.
+                    queue.extend(self.merged.children(node).collect::<Vec<_>>());
                     self.merged.remove(node);
                     self.scope.remove(&node);
-                    if self.input.dirty.contains(&node) {
+                    withdrawn.insert(node);
+                    if self.input.dirty.contains(&node) && !self.plan.deferred.contains(&node) {
                         self.plan.deferred.push(node);
                     }
                 }
@@ -605,6 +626,7 @@ impl<'a> Reconciler<'a> {
     }
 
     fn fix_names(&mut self) {
+        let deferred: HashSet<NodeId> = self.plan.deferred.iter().copied().collect();
         let parents: BTreeSet<NodeId> = self
             .scope
             .iter()
@@ -621,8 +643,13 @@ impl<'a> Reconciler<'a> {
                 if group.len() < 2 {
                     continue;
                 }
-                group.sort();
+                // The lowest id keeps the name, except that a deferred node (a file still
+                // being written) is never renamed: it wins, and is left alone if it loses.
+                group.sort_by_key(|n| (!deferred.contains(n), *n));
                 for loser in group.into_iter().skip(1) {
+                    if deferred.contains(&loser) {
+                        continue;
+                    }
                     let Some(mut state) = self.merged.get(loser).cloned() else {
                         continue;
                     };
