@@ -446,6 +446,31 @@ impl FakeRemote {
     }
 }
 
+impl FakeRemote {
+    /// Reads an upload stream outside the server lock, applying an injected connection cut.
+    fn receive(
+        &self,
+        payload: Option<Upload<'_>>,
+    ) -> Result<Option<(hbsync_types::ContentHash, Vec<u8>)>> {
+        let Some(upload) = payload else {
+            return Ok(None);
+        };
+        let cut = self.faults().cut_upload_after.take();
+        let mut bytes = Vec::with_capacity(upload.size as usize);
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            if cut.is_some_and(|limit| bytes.len() as u64 >= limit) {
+                return Err(RemoteError::Transient("injected upload cut".into()));
+            }
+            let n = upload.reader.read(&mut buf)?;
+            if n == 0 {
+                return Ok(Some((upload.hash, bytes)));
+            }
+            bytes.extend_from_slice(&buf[..n]);
+        }
+    }
+}
+
 impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
@@ -459,8 +484,16 @@ impl Remote for FakeRemote {
 
     fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<Written> {
         self.gate()?;
-        let cut = self.faults().cut_upload_after.take();
-        self.server().create_cut(node, payload, cut)
+        // Receive the bytes before taking the server lock, as a real server handles several
+        // uploads at once; only the commit is serialized.
+        let received = self.receive(payload)?;
+        let mut bytes: &[u8] = received.as_ref().map_or(&[], |(_, b)| b.as_slice());
+        let upload = received.as_ref().map(|(hash, b)| Upload {
+            hash: *hash,
+            size: b.len() as u64,
+            reader: &mut bytes,
+        });
+        self.server().create(node, upload)
     }
 
     fn update(
@@ -472,9 +505,15 @@ impl Remote for FakeRemote {
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
         self.gate()?;
-        let cut = self.faults().cut_upload_after.take();
+        let received = self.receive(payload)?;
+        let mut bytes: &[u8] = received.as_ref().map_or(&[], |(_, b)| b.as_slice());
+        let upload = received.as_ref().map(|(hash, b)| Upload {
+            hash: *hash,
+            size: b.len() as u64,
+            reader: &mut bytes,
+        });
         self.server()
-            .update_cut(file_id, expected, parent, content, payload, cut)
+            .update(file_id, expected, parent, content, upload)
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
