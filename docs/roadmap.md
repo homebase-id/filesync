@@ -1,5 +1,13 @@
 # Roadmap: layered build plan
 
+Progress (2026-10-08): Layers 0–4 are built against the fake remote; Layer 5 is next.
+Open items in those layers:
+- catch-up at background I/O and CPU priority (Layer 2) is not implemented yet;
+- the performance budget isn't measured in CI yet (no 10^6-file benchmark job);
+- Linux uses `getdents64` + `fstatat` through std; batching `statx` via io_uring is not done;
+- resumable upload is not in the `Remote` trait (Homebase has no resumable upload yet);
+- the unprivileged USN read is untested as a non-admin (CI runners are administrators).
+
 Bottom-up. Each layer is usable and tested on all three OSes before the next one leans on it.
 Decisions referenced here are in [foundations.md](foundations.md).
 
@@ -47,7 +55,7 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Journal catch-up (tier B)**:
   - USN journal replay on Windows; FSEvents `sinceWhen` on macOS
   - detects when the journal is no longer usable and falls back to the walker
-- **Live watchers**: debounced and coalesced; on overflow, run a targeted rescan
+- **Live watchers**: debounced and coalesced; on overflow, run a full rescan
 - **Local observation interface**: walker, journal, watchers (and later File Provider) all feed one "dirty set"
 
 ## Layer 3: Remote abstraction
@@ -86,6 +94,7 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Start-up orchestrator**: remote cursor catch-up and local catch-up run in parallel; uploads of local state that is still unknown wait for it
 - **First-run adoption**: match existing local files to remote nodes by hash, with no download
 - **Milestone**: two-client sync through the fake remote, green on all three OSes
+  (`crates/hbsync-engine/tests/milestone.rs`)
 
 ## Layer 5: Homebase (server prerequisites can start in parallel with Layer 1)
 - **odin-core prerequisites**:

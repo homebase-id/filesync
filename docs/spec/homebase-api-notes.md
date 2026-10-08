@@ -70,5 +70,6 @@ header must be present even when unencrypted (chat-kmp encrypts an all-zero `Key
 
 ## Known gaps
 - Delete has no VersionTag guard → a delete can wipe a concurrent edit. Proposed: optional
-  `versionTag` on delete, 4160 on mismatch (to file in odin-core).
+  `versionTag` on delete, 4160 on mismatch; draft in
+  [../issues/odin-core-delete-version-tag.md](../issues/odin-core-delete-version-tag.md).
 - `FileChunk` ranges are `int` (odin-core #1893, being fixed separately).
