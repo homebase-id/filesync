@@ -39,7 +39,7 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
 
     let mut adopted = 0;
     for row in candidates {
-        if let Some(remote_node) = find_match(db, root, os, &row)? {
+        if let Some((remote_node, proven_equal)) = find_match(db, root, os, &row)? {
             db.write(|s| {
                 s.delete_local(&row.path)?;
                 s.put_local(&LocalRow {
@@ -47,7 +47,13 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
                     ..row.clone()
                 })?;
                 s.clear_dirty(row.node)?;
-                s.mark_dirty(remote_node)
+                s.mark_dirty(remote_node)?;
+                // A match proven by hashing with the remote's algorithm is recorded right away:
+                // the reconciler can't compare hashes of different algorithms by itself.
+                if proven_equal {
+                    crate::exec::settle(s, remote_node, os, true)?;
+                }
+                Ok(())
             })?;
             adopted += 1;
         }
@@ -55,13 +61,14 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
     Ok(adopted)
 }
 
-/// The remote node `row` is a copy of, if any.
+/// The remote node `row` is a copy of, if any, and whether equality was proven across hash
+/// algorithms (which only this function can know).
 fn find_match(
     db: &mut StateDb,
     root: &Path,
     os: Os,
     row: &LocalRow,
-) -> Result<Option<NodeId>, StateError> {
+) -> Result<Option<(NodeId, bool)>, StateError> {
     let Some(local_name) = row.path.name() else {
         return Ok(None);
     };
@@ -91,7 +98,7 @@ fn find_match(
             continue;
         }
         if row.kind == NodeKind::Folder {
-            return Ok(Some(remote.node));
+            return Ok(Some((remote.node, false)));
         }
         let (Some(local_hash), Some(file)) = (row.hash, remote.file) else {
             continue;
@@ -102,7 +109,12 @@ fn find_match(
         if file.size != row.fingerprint.size {
             continue;
         }
-        let same = if local_hash.algorithm == remote_hash.algorithm {
+        let cross = local_hash.algorithm != remote_hash.algorithm;
+        // Recorded as agreed at once (see `adopt`), so the place must match exactly.
+        if cross && remote.name != name {
+            continue;
+        }
+        let same = if !cross {
             local_hash == remote_hash
         } else {
             // Another client's algorithm: hash this one file the same way.
@@ -110,7 +122,7 @@ fn find_match(
                 .is_ok_and(|h| h.hash == remote_hash && h.meta.fingerprint() == row.fingerprint)
         };
         if same {
-            return Ok(Some(remote.node));
+            return Ok(Some((remote.node, cross)));
         }
     }
     Ok(None)

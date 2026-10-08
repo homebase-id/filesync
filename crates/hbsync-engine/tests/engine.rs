@@ -522,3 +522,45 @@ fn a_second_conflict_with_the_same_bytes_gets_its_own_copy() -> R {
     assert_eq!(b.read("f.txt")?, "a2");
     Ok(())
 }
+
+#[test]
+fn adopting_a_copy_of_a_sha256_file_downloads_nothing() -> R {
+    use hbsync_remote::{NewNode, Remote, Upload};
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeId, NodeKind};
+
+    let server = server();
+    // Another client (say, mobile) uploaded with SHA-256.
+    let other = FakeRemote::new(server.clone());
+    let data = b"photo bytes";
+    let node = NodeId::new();
+    let new = NewNode {
+        node,
+        parent: NodeId::ROOT,
+        kind: NodeKind::File,
+        content: NodeContent::file("photo.jpg", 1_700_000_000_000, data.len() as u64, false),
+    };
+    let hash = hbsync_fileio::hash_bytes(data, hbsync_fileio::HashAlgorithm::Sha256);
+    other.create(
+        &new,
+        Some(Upload {
+            hash,
+            size: data.len() as u64,
+            reader: &mut &data[..],
+        }),
+    )?;
+
+    // This client already has the same file.
+    let mut b = Client::new(&server, "b")?;
+    b.write("photo.jpg", "photo bytes")?;
+    let report = b.sync()?;
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
+    assert_eq!(b.tree(), ["photo.jpg = photo bytes"]);
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live().count(),
+        1,
+        "nothing was uploaded"
+    );
+    Ok(())
+}
