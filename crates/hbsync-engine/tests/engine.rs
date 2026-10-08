@@ -369,3 +369,36 @@ fn start_up_catches_up_both_sides_in_parallel() -> R {
     assert_eq!(a.read("from-b/two.txt")?, "2");
     Ok(())
 }
+
+#[test]
+fn crossing_moves_park_the_occupant_in_one_pass() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("a", "A")?;
+    a.write("b", "B")?;
+    a.write("sub/keep", "k")?;
+    a.sync()?;
+    b.sync()?;
+    // On a: b moves into sub, then a takes the name b. On client b, the move of a lands on a
+    // name still held by b, which is about to leave: b gets parked first.
+    // Two separate syncs on a, so both are moves (in one pass, a name taken over at the same
+    // path counts as an edit of the node that was there).
+    fs::rename(a.root.join("b"), a.root.join("sub/b"))?;
+    a.sync()?;
+    fs::rename(a.root.join("a"), a.root.join("b"))?;
+    a.sync()?;
+    // File-system clocks are coarse: let ctime move past b's recorded fingerprints.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    b.engine.scan_local()?;
+    let pass = b.engine.sync_once("2026-10-08")?;
+    assert!(
+        pass.skipped.is_empty(),
+        "the parked file's own move must not trip on its ctime: {:?}",
+        pass.skipped
+    );
+    assert_eq!(b.read("b")?, "A");
+    assert_eq!(b.read("sub/b")?, "B");
+    assert_eq!(a.tree(), b.tree());
+    Ok(())
+}

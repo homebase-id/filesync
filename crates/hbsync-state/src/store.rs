@@ -347,6 +347,24 @@ impl<'a> Store<'a> {
         Ok(())
     }
 
+    /// `(parked path, original path)` of a parked node.
+    pub fn get_parked(&self, node: NodeId) -> Result<Option<(RelPath, RelPath)>> {
+        let row = self
+            .conn
+            .prepare_cached("SELECT parked_path, original_path FROM parked WHERE node_id = ?1")?
+            .query_row([node.0.as_bytes()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .optional()?;
+        row.map(|(parked, original)| {
+            let path = |p: &str| {
+                RelPath::new(p).map_err(|e| StateError::Corrupt(format!("parked path {p:?}: {e}")))
+            };
+            Ok((path(&parked)?, path(&original)?))
+        })
+        .transpose()
+    }
+
     /// `(node, parked path, original path)` of every parked item.
     pub fn all_parked(&self) -> Result<Vec<(NodeId, RelPath, RelPath)>> {
         let mut stmt = self

@@ -38,11 +38,8 @@ pub fn local_node(s: &Store<'_>, node: NodeId, os: Os) -> Result<Option<LocalNod
 fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState>, StateError> {
     let base = s.get_base(row.node)?;
     // A parked node counts as being at its original place.
-    let parked = s
-        .all_parked()?
-        .into_iter()
-        .find(|(n, p, _)| *n == row.node && *p == row.path);
-    let path = parked.map_or_else(|| row.path.clone(), |(_, _, original)| original);
+    let parked = s.get_parked(row.node)?.filter(|(p, _)| *p == row.path);
+    let path = parked.map_or_else(|| row.path.clone(), |(_, original)| original);
     let Some(local_name) = path.name() else {
         return Ok(None);
     };

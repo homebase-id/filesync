@@ -346,6 +346,8 @@ impl<'a> Executor<'a> {
             s.move_local_subtree(&original, &parked)?;
             s.put_parked(occupant.node, &parked, &original)
         })?;
+        // The rename changed ctime: record it, or the occupant's own next step fails its check.
+        self.refresh_fingerprint(&parked, &occupant)?;
         Ok(true)
     }
 
@@ -1073,8 +1075,22 @@ pub fn unpark(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
             && db.read(|s| s.get_local(&original))?.is_none();
         if free && ops::rename_noreplace(&parked.to_native(root), &original.to_native(root)).is_ok()
         {
+            // Keep the fingerprint current: the rename changed ctime, not the content.
+            let refreshed = row.as_ref().and_then(|r| {
+                let meta = hbsync_platform::stat(&original.to_native(root)).ok()?;
+                let same =
+                    meta.size == r.fingerprint.size && meta.mtime_ns == r.fingerprint.mtime_ns;
+                (r.kind == NodeKind::File && same).then(|| LocalRow {
+                    path: original.clone(),
+                    fingerprint: meta.fingerprint(),
+                    ..r.clone()
+                })
+            });
             db.write(|s| {
                 s.move_local_subtree(&parked, &original)?;
+                if let Some(r) = &refreshed {
+                    s.put_local(r)?;
+                }
                 s.delete_parked(node)
             })?;
             restored += 1;
