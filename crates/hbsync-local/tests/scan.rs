@@ -131,8 +131,10 @@ fn rename_keeps_node_without_rehash() -> R {
         (1, 0, 0),
         "{report:?}"
     );
+    // Only file systems that never recycle ids can skip the hash on a lone rename.
+    let expected_hashes = usize::from(f.opts.fs_family.reuses_file_ids());
     if f.opts.fs_family.has_stable_file_ids() {
-        assert_eq!(report.hashed, 0);
+        assert_eq!(report.hashed, expected_hashes);
     }
     assert_eq!(f.node("new.txt")?, node);
     assert_eq!(dirty, [node]);
@@ -149,6 +151,10 @@ fn folder_rename_dirties_only_the_folder() -> R {
     fs::rename(f.root().join("dir"), f.root().join("renamed"))?;
     let (report, dirty) = f.scan()?;
     assert_eq!(report.moved, 1, "{report:?}");
+    assert_eq!(
+        report.hashed, 0,
+        "files that moved with their folder aren't re-hashed"
+    );
     assert_eq!(dirty, [folder]);
     assert_eq!((f.node("renamed/x")?, f.node("renamed/sub/y")?), (x, y));
     Ok(())
@@ -208,6 +214,75 @@ fn recycled_inode_with_new_content_is_not_a_move() -> R {
             "{report:?}"
         );
         assert_ne!(f.node("new")?, old);
+    }
+    Ok(())
+}
+
+#[test]
+fn recycled_inode_with_same_size_and_mtime_is_rehashed() -> R {
+    let mut f = Fixture::new()?;
+    f.write("a.bin", b"AAAA")?;
+    f.scan()?;
+    let old = f.node("a.bin")?;
+    let meta = hbsync_platform::stat(&f.root().join("a.bin"))?;
+    // Replace with different bytes of the same size and the same mtime (like `rsync -a`),
+    // through a rename so the inode is certainly the old one.
+    fs::write(f.root().join("tmp"), b"BBBB")?;
+    hbsync_platform::ops::set_mtime(&f.root().join("tmp"), meta.mtime_ns)?;
+    fs::remove_file(f.root().join("a.bin"))?;
+    let tmp_meta = hbsync_platform::stat(&f.root().join("tmp"))?;
+    fs::rename(f.root().join("tmp"), f.root().join("b.bin"))?;
+    let (report, _) = f.scan()?;
+    let b =
+        f.db.read(|s| {
+            s.get_local(
+                &RelPath::new("b.bin")
+                    .map_err(|e| hbsync_state::StateError::Corrupt(e.to_string()))?,
+            )
+        })?
+        .ok_or("row")?;
+    // Whatever identity it gets, the recorded hash must be the real one.
+    assert_eq!(
+        b.hash,
+        Some(hbsync_fileio::hash_bytes(
+            b"BBBB",
+            hbsync_fileio::HashAlgorithm::Blake3
+        ))
+    );
+    if f.opts.fs_family.reuses_file_ids() && tmp_meta.file_id == meta.file_id {
+        assert_ne!(b.node, old, "{report:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn file_id_spoof_cannot_skip_hashing() -> R {
+    // A file that keeps the old id, size and mtime but has new bytes, appearing under a new
+    // name, is re-hashed on file systems that recycle ids.
+    let mut f = Fixture::new()?;
+    f.write("x", b"1111")?;
+    f.scan()?;
+    let meta = hbsync_platform::stat(&f.root().join("x"))?;
+    fs::rename(f.root().join("x"), f.root().join("y"))?;
+    fs::write(f.root().join("y"), b"2222")?;
+    hbsync_platform::ops::set_mtime(&f.root().join("y"), meta.mtime_ns)?;
+    let (report, _) = f.scan()?;
+    let y =
+        f.db.read(|s| {
+            s.get_local(
+                &RelPath::new("y").map_err(|e| hbsync_state::StateError::Corrupt(e.to_string()))?,
+            )
+        })?
+        .ok_or("row")?;
+    if f.opts.fs_family.reuses_file_ids() {
+        assert_eq!(
+            y.hash,
+            Some(hbsync_fileio::hash_bytes(
+                b"2222",
+                hbsync_fileio::HashAlgorithm::Blake3
+            )),
+            "{report:?}"
+        );
     }
     Ok(())
 }
@@ -361,6 +436,20 @@ mod targeted {
         assert_eq!(report.moved, 1, "{report:?}");
         assert_eq!(dirty, [folder]);
         assert_eq!((f.node("y/x")?, f.node("y/x/inner/file")?), (folder, file));
+        Ok(())
+    }
+
+    #[test]
+    fn the_state_folder_is_never_rescanned() -> R {
+        let mut f = Fixture::new()?;
+        f.write("real.txt", b"r")?;
+        f.write(".hbsync/state.db", b"db")?;
+        f.write(".hbsync/trash/1-x/old.txt", b"old")?;
+        f.scan()?;
+        // A journal reports changes inside .hbsync (it changes on every run).
+        let (report, dirty) = f.rescan(&[".hbsync", ".hbsync/trash/1-x"])?;
+        assert_eq!((report.added, dirty.len()), (0, 0), "{report:?}");
+        assert_eq!(f.db.read(|s| s.local_count())?, 1);
         Ok(())
     }
 

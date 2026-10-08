@@ -83,6 +83,15 @@ pub fn rescan_dirs(
     let excludes: Vec<&str> = opts.exclude_at_root.iter().map(String::as_str).collect();
     let mut targets = std::collections::BTreeSet::new();
     for dir in dirs {
+        // Never look inside excluded root folders (the client's own state, temp files, trash),
+        // whoever reported them.
+        if dir
+            .components()
+            .next()
+            .is_some_and(|first| excludes.contains(&first))
+        {
+            continue;
+        }
         let mut dir = dir.clone();
         while !dir.is_root() && !dir.to_native(root).is_dir() {
             dir = dir.parent().unwrap_or_default();
@@ -107,7 +116,7 @@ pub fn rescan_dirs(
             .collect();
 
         let mut descended: Vec<RelPath> = Vec::new();
-        let mut present: Vec<RelPath> = Vec::new();
+        let mut present: std::collections::HashSet<RelPath> = std::collections::HashSet::new();
         let events: Vec<WalkEvent> = {
             let descend = |path: &RelPath, meta: &LocalMeta| {
                 if !is_child(path) {
@@ -125,7 +134,7 @@ pub fn rescan_dirs(
                     if let WalkEvent::Entry { path, .. } = e
                         && is_child(path)
                     {
-                        present.push(path.clone());
+                        present.insert(path.clone());
                     }
                 })
                 .collect()
@@ -358,6 +367,8 @@ fn resolve(
     let mut fresh: Vec<(RelPath, LocalMeta, Option<Option<ContentHash>>)> = Vec::new();
     // node id → (old path, new path) for every moved node, to decide which moves are real.
     let mut moved: Vec<(LocalRow, RelPath)> = Vec::new();
+    // Folders matched by id, old path → new path. Walk order puts a folder before its contents.
+    let mut moved_folders: HashMap<RelPath, RelPath> = HashMap::new();
     for (path, meta) in added {
         let hit = removed_by_id
             .get(&meta.file_id)
@@ -373,7 +384,15 @@ fn resolve(
             // A rename changes ctime on most file systems; size and mtime are what matter here.
             let same =
                 old.fingerprint.size == meta.size && old.fingerprint.mtime_ns == meta.mtime_ns;
-            if !same || old.hash.is_none() {
+            // Where inode numbers get recycled, a matching id plus size and mtime is still not
+            // proof (an extracted or rsynced file can match all three). It is when the file
+            // moved together with its folder: same name inside a folder that moved as well.
+            let moved_with_parent = old.path.name() == path.name()
+                && old.path.parent().and_then(|p| moved_folders.get(&p)) == path.parent().as_ref();
+            let trusted = same
+                && old.hash.is_some()
+                && (!opts.fs_family.reuses_file_ids() || moved_with_parent);
+            if !trusted {
                 new.hash = hash_now(&path, &meta, report);
                 let content_changed = new.hash.is_none() || new.hash != old.hash;
                 if content_changed && opts.fs_family.reuses_file_ids() {
@@ -388,6 +407,9 @@ fn resolve(
             }
         }
         matched[i] = true;
+        if old.kind == NodeKind::Folder {
+            moved_folders.insert(old.path.clone(), path.clone());
+        }
         moved.push((old.clone(), path));
         plan.put_rows.push(new);
     }
