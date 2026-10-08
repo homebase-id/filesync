@@ -471,6 +471,39 @@ fn deleting_everything_is_held() -> R {
 }
 
 #[test]
+fn held_deletes_do_not_hold_up_other_changes() -> R {
+    let server = server();
+    // 5 nodes per round, 2 rounds per sync: one sync sees 10 of the 61 dirty nodes.
+    let mut a = Client::new(&server, "a", |c| {
+        c.batch = 5;
+        c.max_rounds = 2;
+    })?;
+    for i in 0..60 {
+        a.write(&format!("f{i:02}"), format!("{i}").as_bytes())?;
+    }
+    a.sync()?;
+    for i in 0..60 {
+        fs::remove_file(a.root.join(format!("f{i:02}")))?;
+    }
+    a.write("new.txt", b"new")?;
+    a.engine.scan_local()?;
+    let mut held = std::collections::BTreeSet::new();
+    for _ in 0..8 {
+        let report = a.engine.sync_once("2026-10-08")?;
+        held.extend(report.held.iter().map(|op| format!("{op:?}")));
+    }
+    assert_eq!(held.len(), 60, "every delete was seen and held");
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!(
+        srv.live().count(),
+        61,
+        "the deletes are held, the new file is up"
+    );
+    assert!(srv.live_names().iter().any(|n| n == "new.txt"));
+    Ok(())
+}
+
+#[test]
 fn a_mass_delete_split_over_batches_is_still_held() -> R {
     let server = server();
     let small_batches = |c: &mut EngineConfig| {

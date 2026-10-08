@@ -192,6 +192,30 @@ fn dirty_and_kv() -> R {
 }
 
 #[test]
+fn dirty_pages_visit_every_node_once() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    let mut nodes: Vec<NodeId> = (0..23).map(|_| NodeId::new()).collect();
+    db.write(|s| nodes.iter().try_for_each(|n| s.mark_dirty(*n)))?;
+    let mut seen: Vec<NodeId> = Vec::new();
+    let mut after = None;
+    loop {
+        let page = db.read(|s| s.dirty_page(after, 5))?;
+        seen.extend(&page);
+        after = page.last().copied();
+        if page.len() < 5 {
+            break;
+        }
+    }
+    nodes.sort();
+    assert_eq!(seen, nodes);
+    // A cursor that has gone clean still works.
+    let gone = nodes[10];
+    db.write(|s| s.clear_dirty(gone))?;
+    assert_eq!(db.read(|s| s.dirty_page(Some(gone), 2))?, nodes[11..13]);
+    Ok(())
+}
+
+#[test]
 fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
     let db_path = dir.path().join("state.db");

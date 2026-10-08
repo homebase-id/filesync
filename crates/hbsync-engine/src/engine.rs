@@ -6,6 +6,7 @@ use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs,
 use hbsync_platform::FsFamily;
 use hbsync_remote::Remote;
 use hbsync_state::{StateDb, StateError};
+use hbsync_types::NodeId;
 
 use crate::adopt::adopt;
 use crate::exec::{ExecConfig, ExecError, Executor, recover_forks, sweep_tmp, unpark};
@@ -104,6 +105,8 @@ pub struct Engine {
     scan_opts: ScanOptions,
     /// Nodes whose transfers go first (a file the user just opened).
     urgent: std::collections::HashSet<hbsync_types::NodeId>,
+    /// Where the sweep over the dirty set stopped when the last sync hit its round limit.
+    sweep_after: Option<NodeId>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -128,6 +131,7 @@ impl Engine {
             cfg,
             scan_opts,
             urgent: Default::default(),
+            sweep_after: None,
         }
     }
 
@@ -195,51 +199,98 @@ impl Engine {
         // The guard must judge the whole delete, even when it is planned in several batches.
         let pending_deletes = self.db.read(|s| s.pending_file_deletes())?;
         let pending_deletes = (pending_deletes.0 as usize, pending_deletes.1 as usize);
+        // The dirty set is planned page by page in node id order and swept round after
+        // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
+        // the rest. A sync stops after a full sweep in which nothing was done.
+        let mut after = self.sweep_after.take();
+        let mut progress = false;
+        let mut held: Vec<Op> = Vec::new();
+        let mut swept = false;
         for _ in 0..self.cfg.max_rounds {
-            let dirty = self.db.read(|s| s.dirty_nodes(self.cfg.batch))?;
-            if dirty.is_empty() {
-                break;
+            let dirty = self.db.read(|s| s.dirty_page(after, self.cfg.batch))?;
+            if !dirty.is_empty() {
+                report.rounds += 1;
+                let done = self.plan_and_execute(&dirty, date, pending_deletes, &mut report)?;
+                held.extend(done.held);
+                progress |= done.ops_done > 0;
             }
-            report.rounds += 1;
-            let os = self.cfg.exec.os;
-            let input = self.db.read(|s| view::build_input(s, &dirty, os, true))?;
-            let opts = Options {
-                device: self.cfg.device.clone(),
-                date: date.to_owned(),
-                mass_delete_min: self.cfg.mass_delete_min,
-                mass_delete_fraction: self.cfg.mass_delete_fraction,
-                synced_files: self.db.read(|s| s.base_file_count())? as usize,
-                allow_mass_delete: self.cfg.allow_mass_delete,
-                pending_deletes,
-            };
-            let plan = reconcile(&input, &opts);
-            self.db
-                .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;
-            report.conflicts.extend(plan.conflicts.iter().cloned());
-            report.held = plan.held.clone();
-            if plan.ops.is_empty() {
-                break;
+            after = dirty.last().copied();
+            if dirty.len() < self.cfg.batch {
+                // End of a sweep.
+                report.held = std::mem::take(&mut held);
+                swept = true;
+                after = None;
+                if !progress {
+                    break;
+                }
+                progress = false;
             }
-            let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
-                .with_urgent(self.urgent.clone())
-                .run(&plan)?;
-            report.ops_done += exec.done;
-            report.skipped.extend(exec.skipped);
-            report.failed.extend(exec.failed);
-            if !exec.rescan.is_empty() {
-                rescan_dirs(
-                    &mut self.db,
-                    &self.cfg.exec.root,
-                    &exec.rescan,
-                    &self.scan_opts,
-                )?;
-            }
-            let more = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-            report.feed.pages += more.pages;
-            report.feed.live += more.live;
-            report.feed.deleted += more.deleted;
         }
+        if !swept {
+            report.held = held;
+        }
+        // A sync cut short by the round limit leaves the rest of the sweep to the next one (the
+        // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
+        self.sweep_after = after;
         report.pending = self.db.read(|s| s.dirty_count())?;
         Ok(report)
     }
+
+    /// Plans one page of dirty nodes and executes the plan; then pulls the feed again.
+    fn plan_and_execute(
+        &mut self,
+        dirty: &[NodeId],
+        date: &str,
+        pending_deletes: (usize, usize),
+        report: &mut SyncReport,
+    ) -> Result<PageResult, EngineError> {
+        let os = self.cfg.exec.os;
+        let input = self.db.read(|s| view::build_input(s, dirty, os, true))?;
+        let opts = Options {
+            device: self.cfg.device.clone(),
+            date: date.to_owned(),
+            mass_delete_min: self.cfg.mass_delete_min,
+            mass_delete_fraction: self.cfg.mass_delete_fraction,
+            synced_files: self.db.read(|s| s.base_file_count())? as usize,
+            allow_mass_delete: self.cfg.allow_mass_delete,
+            pending_deletes,
+        };
+        let plan = reconcile(&input, &opts);
+        self.db
+            .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;
+        report.conflicts.extend(plan.conflicts.iter().cloned());
+        let mut result = PageResult {
+            held: plan.held.clone(),
+            ops_done: 0,
+        };
+        if plan.ops.is_empty() {
+            return Ok(result);
+        }
+        let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
+            .with_urgent(self.urgent.clone())
+            .run(&plan)?;
+        result.ops_done = exec.done;
+        report.ops_done += exec.done;
+        report.skipped.extend(exec.skipped);
+        report.failed.extend(exec.failed);
+        if !exec.rescan.is_empty() {
+            rescan_dirs(
+                &mut self.db,
+                &self.cfg.exec.root,
+                &exec.rescan,
+                &self.scan_opts,
+            )?;
+        }
+        let more = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        report.feed.pages += more.pages;
+        report.feed.live += more.live;
+        report.feed.deleted += more.deleted;
+        Ok(result)
+    }
+}
+
+/// What planning and executing one page did.
+struct PageResult {
+    held: Vec<Op>,
+    ops_done: usize,
 }

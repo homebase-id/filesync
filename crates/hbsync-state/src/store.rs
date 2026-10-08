@@ -564,6 +564,17 @@ impl<'a> Store<'a> {
             .is_some())
     }
 
+    /// Up to `limit` dirty nodes in node id order, starting after `after`: successive pages
+    /// visit the whole set, so nodes that stay dirty can't keep the others waiting.
+    pub fn dirty_page(&self, after: Option<NodeId>, limit: usize) -> Result<Vec<NodeId>> {
+        let after = after.map(|n| n.0.as_bytes().to_vec()).unwrap_or_default();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT node_id FROM dirty WHERE node_id > ?1 ORDER BY node_id LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after, limit as i64], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.map(|r| codec::node(&r?)).collect()
+    }
+
     pub fn dirty_nodes(&self, limit: usize) -> Result<Vec<NodeId>> {
         let mut stmt = self
             .conn
