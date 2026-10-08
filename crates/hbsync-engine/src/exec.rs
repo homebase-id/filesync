@@ -350,8 +350,6 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Frees `target` if a node that the plan is about to move away holds it: that node is
-    /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
     /// The tracked item that holds `target` on disk: the row at that exact path, or, on a
     /// case-insensitive volume, a sibling whose name differs only in case or normalization.
     fn occupant(&mut self, target: &RelPath) -> Result<Option<LocalRow>, StateError> {
@@ -1260,30 +1258,37 @@ fn wanted_download(db: &mut StateDb, file_name: &str) -> Result<bool, StateError
 }
 
 /// Puts parked items back where they came from when that is possible, and drops records that
-/// no longer apply (the item was moved on, by us or by the user). Run before each plan.
+/// no longer apply (the item was renamed, by us or by the user). Run before each plan.
 pub fn unpark(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
     let mut restored = 0;
-    for (node, parked, original) in db.read(|s| s.all_parked())? {
-        let row = db.read(|s| s.local_by_node(node))?;
-        if row.as_ref().map(|r| &r.path) != Some(&parked) {
+    for (node, _, _) in db.read(|s| s.all_parked())? {
+        let place = db.read(|s| {
+            let Some(row) = s.local_by_node(node)? else {
+                return Ok(None);
+            };
+            Ok(view::parked_place(s, &row)?.map(|original| (row, original)))
+        })?;
+        let Some((current, original)) = place else {
             db.write(|s| s.delete_parked(node))?;
             continue;
-        }
+        };
+        let parked = current.path.clone();
         let free = fs::symlink_metadata(original.to_native(root)).is_err()
             && db.read(|s| s.get_local(&original))?.is_none();
         if free && ops::rename_noreplace(&parked.to_native(root), &original.to_native(root)).is_ok()
         {
             // Keep the fingerprint current: the rename changed ctime, not the content.
-            let refreshed = row.as_ref().and_then(|r| {
-                let meta = hbsync_platform::stat(&original.to_native(root)).ok()?;
-                let same =
-                    meta.size == r.fingerprint.size && meta.mtime_ns == r.fingerprint.mtime_ns;
-                (r.kind == NodeKind::File && same).then(|| LocalRow {
-                    path: original.clone(),
-                    fingerprint: meta.fingerprint(),
-                    ..r.clone()
-                })
-            });
+            let refreshed = hbsync_platform::stat(&original.to_native(root))
+                .ok()
+                .and_then(|meta| {
+                    let same = meta.size == current.fingerprint.size
+                        && meta.mtime_ns == current.fingerprint.mtime_ns;
+                    (current.kind == NodeKind::File && same).then(|| LocalRow {
+                        path: original.clone(),
+                        fingerprint: meta.fingerprint(),
+                        ..current.clone()
+                    })
+                });
             db.write(|s| {
                 s.move_local_subtree(&parked, &original)?;
                 if let Some(r) = &refreshed {

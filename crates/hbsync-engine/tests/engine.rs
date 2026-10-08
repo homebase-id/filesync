@@ -291,6 +291,39 @@ fn parked_item_from_a_crash_is_put_back() -> R {
 }
 
 #[test]
+fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("A/doc.txt", "keep me")?;
+    a.sync()?;
+    // A crash right after parking, then the user renames the folder before the next run.
+    let from = hbsync_platform::RelPath::new("A/doc.txt")?;
+    let node = a
+        .engine
+        .db()
+        .read(|s| s.get_local(&from))?
+        .ok_or("row")?
+        .node;
+    let to = hbsync_platform::RelPath::new(&format!("A/.hbsync-move-{}", node.0.simple()))?;
+    fs::rename(from.to_native(&a.root), to.to_native(&a.root))?;
+    a.engine.db().write(|s| {
+        s.move_local_subtree(&from, &to)?;
+        s.put_parked(node, &to, &from)
+    })?;
+    fs::rename(a.root.join("A"), a.root.join("B"))?;
+    a.sync()?;
+    assert_eq!(a.read("B/doc.txt")?, "keep me");
+    let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
+    names.sort();
+    assert_eq!(
+        names,
+        ["B", "doc.txt"],
+        "the temporary name never reached the remote"
+    );
+    Ok(())
+}
+
+#[test]
 fn first_run_adopts_an_existing_copy_without_downloading() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;

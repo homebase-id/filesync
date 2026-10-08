@@ -7,7 +7,7 @@
 //!
 //! The local side is translated from paths to the node model here: the parent is the node at
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
-//! node parked under a temporary name is reported at its original place.
+//! node parked under a temporary name is reported at its original place ([`parked_place`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -16,6 +16,7 @@ use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState};
 
+use crate::exec::parked_name;
 use crate::reconcile::{BaseExtra, Input, RemoteRef};
 
 /// The local state of one node, as the reconciler sees it.
@@ -38,8 +39,7 @@ pub fn local_node(s: &Store<'_>, node: NodeId, os: Os) -> Result<Option<LocalNod
 fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState>, StateError> {
     let base = s.get_base(row.node)?;
     // A parked node counts as being at its original place.
-    let parked = s.get_parked(row.node)?.filter(|(p, _)| *p == row.path);
-    let path = parked.map_or_else(|| row.path.clone(), |(_, original)| original);
+    let path = parked_place(s, row)?.unwrap_or_else(|| row.path.clone());
     let Some(local_name) = path.name() else {
         return Ok(None);
     };
@@ -88,6 +88,23 @@ fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState
         kind: row.kind,
         content,
     }))
+}
+
+/// Where a parked node really belongs: its current folder, under the name it had before it
+/// was parked. `None` if it isn't parked: no record, or it no longer carries its temporary
+/// name (the user renamed it, and the record is void). Parking never leaves the folder, so the
+/// place follows the folder (or the item) wherever it is moved meanwhile.
+pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
+    let Some((_, original)) = s.get_parked(row.node)? else {
+        return Ok(None);
+    };
+    if row.path.name() != Some(parked_name(row.node).as_str()) {
+        return Ok(None);
+    }
+    let Some(name) = original.name() else {
+        return Ok(None);
+    };
+    Ok(row.path.parent().unwrap_or_default().join(name).ok())
 }
 
 /// Loads everything the reconciler needs for `dirty`.
