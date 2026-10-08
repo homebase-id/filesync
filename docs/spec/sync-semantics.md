@@ -135,14 +135,26 @@ expected fingerprint is treated as done.
 - **Retry within a plan.** An operation blocked only by order (target parent not created yet,
   a folder temporarily inside its own destination) goes to the back of the queue.
 - **Parking.** If a target name is held by a node the plan is about to move, trash or replace,
-  that node is renamed to `.hbsync-move-<node id>` first, and the parking is recorded in the
-  state DB. The local view reports a parked node at its original place, but only while it
-  still sits at the parked name: a user move voids the record. Before each plan, parked items
-  whose original name is free again are moved back.
+  that node is renamed to `.hbsync-move-<node id>` first, in its own folder, and the parking
+  is recorded in the state DB. The local view reports a parked node under its original name
+  in whatever folder it is in now, but only while it still carries the parked name: a rename
+  voids the record. Before each plan, parked items whose original name is free again are
+  moved back.
 - **Trash guard.** `LocalTrash` carries the nodes the plan expects in the subtree; if the
   folder holds anything else (in the DB or on disk), it is not trashed and the folder is
   rescanned.
 - **Creates** run only while the local node still exists unchanged.
+- **Parents first on the server.** A remote create, upload or move waits (retry) until its
+  parent folder is in the mirror; the server doesn't check parents, and a child of a folder
+  whose create failed would look like an orphan to every other client.
+- **Folders are deleted last.** A remote folder delete waits while the mirror still has a
+  child in it (a child delete that failed or was skipped, or a child just added): the folder
+  stays, and the next plan resurrects it if needed.
+- **No starvation.** The dirty set is planned in pages, in node id order, swept round after
+  round and across syncs, so nodes that stay dirty (held, deferred, failing) can't keep the
+  rest waiting. A sync ends after a full sweep in which nothing was done.
+- **Names that can't be spelled** locally (a Windows device name at the length limit) are
+  skipped and reported, not retried; conflict names are shortened to fit 255 bytes.
 - **Conflict copies are write-ahead.** The fork is recorded before the rename and the record
   is removed with the DB update after it; recovery runs before any scan and completes or
   forgets an interrupted fork. A copy id derives from the node, the local bytes and the base's
@@ -153,7 +165,11 @@ expected fingerprint is treated as done.
   child created while another client deleted its folder) is moved to the root.
 - **Crash recovery** needs no operation log: every operation is idempotent or detectable
   (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
-  feed, and parked items come back from their records.
+  feed, and parked items come back from their records. A verified download that couldn't be
+  placed stays in the temp folder for the retry; temp files no pending download wants are
+  removed before each plan. The stored journal position never passes a change that isn't
+  recorded: it is taken before waiting for events and stored only once the event queue has
+  drained.
 
 ## 9. Properties the simulator checks
 1. **Convergence:** after edits stop and every client syncs twice, all local trees and the
