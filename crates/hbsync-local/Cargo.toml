@@ -11,6 +11,7 @@ hbsync-fileio.workspace = true
 hbsync-platform.workspace = true
 hbsync-state.workspace = true
 hbsync-types.workspace = true
+notify = "8.2"
 thiserror.workspace = true
 
 [dev-dependencies]

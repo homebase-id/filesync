@@ -6,10 +6,12 @@
 pub mod journal;
 pub mod scan;
 pub mod walk;
+pub mod watch;
 
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
 pub use scan::{ScanError, ScanOptions, ScanReport, rescan_dirs, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
+pub use watch::{Debounce, LiveWatcher, LocalObserver, WatchBatch};
 
 /// The client's own folder at the top of the sync root (state, temp files, trash). Never synced.
 pub const STATE_DIR: &str = ".hbsync";
