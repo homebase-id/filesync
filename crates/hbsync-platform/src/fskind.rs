@@ -47,6 +47,13 @@ impl FsFamily {
         )
     }
 
+    /// `true` if a deleted file's id can be handed to a new, unrelated file soon after
+    /// (Unix inode reuse). NTFS ids carry a sequence number and APFS ids are never reused, so
+    /// there an id match alone proves identity; elsewhere a move also needs content evidence.
+    pub fn reuses_file_ids(self) -> bool {
+        !matches!(self, FsFamily::Ntfs | FsFamily::ReFs | FsFamily::Apfs)
+    }
+
     /// `true` if an OS change journal (USN / FSEvents) can be trusted on this file system.
     pub fn supports_journal(self) -> bool {
         matches!(

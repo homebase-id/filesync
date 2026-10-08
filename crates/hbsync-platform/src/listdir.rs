@@ -9,6 +9,11 @@
 //!
 //! Every bulk path falls back to [`list_dir_portable`] when the volume doesn't support it, and
 //! tests check that both agree.
+//!
+//! NTFS caveat: listings report the copy of each entry's times and size kept in the parent
+//! folder's index, which NTFS refreshes lazily (folder times; a file still open for writing).
+//! Such a lag is caught by the journal or watcher event when the writer closes the file, and by
+//! the idle verification walk.
 
 use std::ffi::OsString;
 use std::fs;
@@ -456,12 +461,30 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink("small.txt", dir.path().join("link"))?;
 
-        let bulk = sorted(list_dir(dir.path())?);
-        let portable = sorted(list_dir_portable(dir.path())?);
+        // NTFS keeps a cached copy of each entry's times in the parent's index and updates a
+        // folder's copy lazily, so folder times from a listing can lag. Sync never uses folder
+        // times; compare folders by kind and id only.
+        let comparable = |items: Vec<DirItem>| -> Vec<DirItem> {
+            sorted(items)
+                .into_iter()
+                .map(|mut item| {
+                    if item.meta.kind == crate::EntryKind::Dir {
+                        item.meta.mtime_ns = 0;
+                        item.meta.ctime_ns = 0;
+                    }
+                    item
+                })
+                .collect()
+        };
+        let bulk = comparable(list_dir(dir.path())?);
+        let portable = comparable(list_dir_portable(dir.path())?);
         assert_eq!(bulk, portable);
         assert_eq!(bulk.len(), if cfg!(unix) { 5 } else { 4 });
         for item in &bulk {
-            let stat = crate::stat(&dir.path().join(&item.name))?;
+            let mut stat = crate::stat(&dir.path().join(&item.name))?;
+            if stat.kind == crate::EntryKind::Dir {
+                (stat.mtime_ns, stat.ctime_ns) = (0, 0);
+            }
             assert_eq!(item.meta, stat, "{:?}", item.name);
         }
         Ok(())

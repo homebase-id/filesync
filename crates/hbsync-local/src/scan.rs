@@ -354,7 +354,8 @@ fn resolve(
         }
     }
     let mut matched = vec![false; removed.len()];
-    let mut fresh: Vec<(RelPath, LocalMeta)> = Vec::new();
+    // New entries without an identity yet, with their hash if one was already computed.
+    let mut fresh: Vec<(RelPath, LocalMeta, Option<Option<ContentHash>>)> = Vec::new();
     // node id → (old path, new path) for every moved node, to decide which moves are real.
     let mut moved: Vec<(LocalRow, RelPath)> = Vec::new();
     for (path, meta) in added {
@@ -363,10 +364,9 @@ fn resolve(
             .copied()
             .filter(|&i| !matched[i] && removed[i].kind == kind_of(&meta));
         let Some(i) = hit else {
-            fresh.push((path, meta));
+            fresh.push((path, meta, None));
             continue;
         };
-        matched[i] = true;
         let old = &removed[i];
         let mut new = row_from(&path, old.node, &meta, old.hash);
         if old.kind == NodeKind::File {
@@ -375,12 +375,19 @@ fn resolve(
                 old.fingerprint.size == meta.size && old.fingerprint.mtime_ns == meta.mtime_ns;
             if !same || old.hash.is_none() {
                 new.hash = hash_now(&path, &meta, report);
-                if new.hash.is_none() || new.hash != old.hash {
+                let content_changed = new.hash.is_none() || new.hash != old.hash;
+                if content_changed && opts.fs_family.reuses_file_ids() {
+                    // Probably a recycled inode, not the same file: no identity from the id.
+                    fresh.push((path, meta, Some(new.hash)));
+                    continue;
+                }
+                if content_changed {
                     report.modified += 1;
                     plan.dirty.push(old.node);
                 }
             }
         }
+        matched[i] = true;
         moved.push((old.clone(), path));
         plan.put_rows.push(new);
     }
@@ -393,12 +400,12 @@ fn resolve(
         }
     }
     let mut new_nodes = Vec::new();
-    for (path, meta) in fresh {
+    for (path, meta, known_hash) in fresh {
         let kind = kind_of(&meta);
-        let hash = if kind == NodeKind::File {
-            hash_now(&path, &meta, report)
-        } else {
-            None
+        let hash = match known_hash {
+            Some(h) => h,
+            None if kind == NodeKind::File => hash_now(&path, &meta, report),
+            None => None,
         };
         let candidate = hash
             .and_then(|h| by_hash.get(&h))

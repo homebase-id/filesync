@@ -177,11 +177,38 @@ fn ambiguous_hash_is_not_a_move() -> R {
     f.write("one", b"same")?;
     f.write("two", b"same")?;
     f.scan()?;
+    // Hard links outside the root keep both inodes alive, so the new file can't reuse one of
+    // them (which would be a legitimate id match).
+    let keep = tempfile::tempdir()?;
+    fs::hard_link(f.root().join("one"), keep.path().join("one"))?;
+    fs::hard_link(f.root().join("two"), keep.path().join("two"))?;
     fs::remove_file(f.root().join("one"))?;
     fs::remove_file(f.root().join("two"))?;
     f.write("three", b"same")?;
     let (report, _) = f.scan()?;
     assert_eq!((report.added, report.removed, report.moved), (1, 2, 0));
+    Ok(())
+}
+
+#[test]
+fn recycled_inode_with_new_content_is_not_a_move() -> R {
+    let mut f = Fixture::new()?;
+    f.write("old", b"old content")?;
+    f.scan()?;
+    let old = f.node("old")?;
+    let old_id = hbsync_platform::stat(&f.root().join("old"))?.file_id;
+    fs::remove_file(f.root().join("old"))?;
+    f.write("new", b"different")?;
+    let new_id = hbsync_platform::stat(&f.root().join("new"))?.file_id;
+    let (report, _) = f.scan()?;
+    if f.opts.fs_family.reuses_file_ids() || old_id != new_id {
+        assert_eq!(
+            (report.added, report.removed, report.moved),
+            (1, 1, 0),
+            "{report:?}"
+        );
+        assert_ne!(f.node("new")?, old);
+    }
     Ok(())
 }
 
