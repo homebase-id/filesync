@@ -318,25 +318,43 @@ fn unicode_and_case_clashes() -> R {
 
 #[test]
 fn windows_illegal_names_are_mapped_locally_only() -> R {
+    use hbsync_remote::{NewNode, Remote, Upload};
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeId, NodeKind};
+
     let server = server();
-    let mut unix = Client::new(&server, "unix", |c| c.exec.os = hbsync_platform::Os::Linux)?;
-    // A client that applies the Windows rules (works on any disk: the escaped names are legal).
+    // Another (Linux) client created names Windows can't hold; put them on the server directly.
+    let other = FakeRemote::new(server.clone());
+    for (name, data) in [("what?.txt", &b"q"[..]), ("CON", &b"device name"[..])] {
+        let node = NodeId::new();
+        let new = NewNode {
+            node,
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            content: NodeContent::file(name, 1_700_000_000_000, data.len() as u64, false),
+        };
+        let hash = hbsync_fileio::hash_bytes(data, hbsync_fileio::HashAlgorithm::Blake3);
+        other.create(
+            &new,
+            Some(Upload {
+                hash,
+                size: data.len() as u64,
+                reader: &mut &data[..],
+            }),
+        )?;
+    }
+    // A client applying the Windows rules (works on any disk: the escaped names are legal).
     let mut win = Client::new(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
-    unix.write("what?.txt", b"q")?;
-    unix.write("CON", b"device name")?;
-    unix.sync()?;
     win.sync()?;
     let names: BTreeSet<String> = win.tree().into_iter().map(|(p, _)| p).collect();
     assert!(names.contains("what\u{F025}.txt"), "{names:?}");
     assert!(names.contains("CON\u{F02A}"), "{names:?}");
+
     // An edit on the Windows side goes back under the original remote name.
     win.write("what\u{F025}.txt", b"edited on windows")?;
     win.sync()?;
-    unix.sync()?;
-    assert_eq!(fs::read(unix.root.join("what?.txt"))?, b"edited on windows");
-    let remote_names: BTreeSet<String> = server
-        .lock()
-        .map_err(|_| "poisoned")?
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let remote_names: BTreeSet<String> = srv
         .live()
         .filter_map(|h| h.state().map(|s| s.name))
         .collect();
@@ -344,6 +362,12 @@ fn windows_illegal_names_are_mapped_locally_only() -> R {
         remote_names,
         BTreeSet::from(["CON".to_owned(), "what?.txt".to_owned()])
     );
+    let edited = srv
+        .live()
+        .find(|h| h.state().is_some_and(|s| s.name == "what?.txt"))
+        .map(|h| h.file_id)
+        .ok_or("what?.txt")?;
+    assert_eq!(srv.payload(edited)?.as_slice(), b"edited on windows");
     Ok(())
 }
 
