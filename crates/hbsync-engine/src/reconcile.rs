@@ -30,6 +30,10 @@ pub struct BaseExtra {
     /// remote's representation).
     pub local_hash: Option<ContentHash>,
     pub content_state: ContentState,
+    /// The remote version the base was agreed at. Distinguishes conflict instances: a
+    /// conflict copy id derived from it is stable across replans of one conflict and new for
+    /// the next one.
+    pub version: Option<VersionTag>,
 }
 
 /// The server's handle on a node, for guarded writes.
@@ -476,7 +480,8 @@ impl<'a> Reconciler<'a> {
             };
             if l_edited && r_edited && !same_edit {
                 // Keep both: the remote version keeps the node, the local bytes become a copy.
-                let copy = fork_id(node, l.content.map(|c| c.hash));
+                let base_version = self.input.base_extra.get(&node).and_then(|e| e.version);
+                let copy = fork_id(node, l.content.map(|c| c.hash), base_version);
                 self.forks.insert(node, copy);
                 self.plan.conflicts.push(Conflict::EditEdit { node, copy });
                 let copy_state = NodeState {
@@ -938,13 +943,23 @@ impl<'a> Reconciler<'a> {
     }
 }
 
-/// A deterministic id for the conflict copy of `node`'s local bytes: a re-planned fork (after
-/// a crash) reuses the same id, and a later conflict with other bytes gets a different one.
-fn fork_id(node: NodeId, local_hash: Option<ContentHash>) -> NodeId {
+/// A deterministic id for the conflict copy of `node`'s local bytes. The same conflict
+/// (same bytes, same base version) gets the same id when it is replanned after a crash; a later
+/// conflict, even with identical bytes, has another base version and gets another id.
+fn fork_id(
+    node: NodeId,
+    local_hash: Option<ContentHash>,
+    base_version: Option<VersionTag>,
+) -> NodeId {
     let mut bytes = *node.0.as_bytes();
     if let Some(h) = local_hash {
         for (b, x) in bytes.iter_mut().zip(h.bytes) {
             *b ^= x;
+        }
+    }
+    if let Some(v) = base_version {
+        for (b, x) in bytes.iter_mut().zip(v.0.as_bytes().iter().rev()) {
+            *b = b.rotate_left(3) ^ x;
         }
     }
     bytes[0] ^= 0xA5;

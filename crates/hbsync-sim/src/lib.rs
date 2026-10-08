@@ -401,7 +401,7 @@ impl Sim {
                 let Some(state) = client.local.get(node).cloned() else {
                     return Skip;
                 };
-                if !unchanged(client, node) {
+                if !unchanged(client, node) || client.local.contains(new_node) {
                     return Skip;
                 }
                 if client
@@ -619,6 +619,7 @@ impl Sim {
     /// The executor's settle rule: the base takes each attribute both sides agree on.
     fn settle(&mut self, c: usize, node: NodeId) {
         let remote = self.server.live.get(&node).map(|n| n.state.clone());
+        let version = self.server.live.get(&node).map(|n| n.version);
         let client = &mut self.clients[c];
         let local = client.local.get(node).cloned();
         match (local, remote) {
@@ -631,7 +632,7 @@ impl Sim {
                 let content = l.same_content(&r);
                 match client.base.get(node).cloned() {
                     None if place && content => {
-                        client.extra.insert(node, extra(&l));
+                        client.extra.insert(node, extra(&l, version));
                         client.base.insert(node, r);
                     }
                     None => {}
@@ -642,7 +643,7 @@ impl Sim {
                         }
                         if content {
                             b.content = r.content;
-                            client.extra.insert(node, extra(&l));
+                            client.extra.insert(node, extra(&l, version));
                         }
                         client.base.insert(node, b);
                     }
@@ -769,10 +770,11 @@ enum Outcome {
     Skip,
 }
 
-fn extra(local: &NodeState) -> BaseExtra {
+fn extra(local: &NodeState, version: Option<VersionTag>) -> BaseExtra {
     BaseExtra {
         local_hash: local.content.map(|c| c.hash),
         content_state: ContentState::Local,
+        version,
     }
 }
 

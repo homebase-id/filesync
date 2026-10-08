@@ -387,6 +387,57 @@ impl<'a> Store<'a> {
         .collect()
     }
 
+    // ---- forks in progress ----
+
+    /// Records, before renaming, that `node`'s file at `from` becomes `new_node` at `to`.
+    pub fn put_fork(
+        &self,
+        node: NodeId,
+        new_node: NodeId,
+        from: &RelPath,
+        to: &RelPath,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO forks (node_id, new_node, from_path, to_path) VALUES (?1, ?2, ?3, ?4)",
+            params![node.0.as_bytes(), new_node.0.as_bytes(), from.as_str(), to.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// `(node, new node, from, to)` of every fork in progress.
+    pub fn all_forks(&self) -> Result<Vec<(NodeId, NodeId, RelPath, RelPath)>> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT node_id, new_node, from_path, to_path FROM forks")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (node, new_node, from, to) = r?;
+            let path = |p: &str| {
+                RelPath::new(p).map_err(|e| StateError::Corrupt(format!("fork path {p:?}: {e}")))
+            };
+            Ok((
+                codec::node(&node)?,
+                codec::node(&new_node)?,
+                path(&from)?,
+                path(&to)?,
+            ))
+        })
+        .collect()
+    }
+
+    pub fn delete_fork(&self, node: NodeId) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM forks WHERE node_id = ?1", [node.0.as_bytes()])?;
+        Ok(())
+    }
+
     pub fn delete_parked(&self, node: NodeId) -> Result<()> {
         self.conn
             .execute("DELETE FROM parked WHERE node_id = ?1", [node.0.as_bytes()])?;

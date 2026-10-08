@@ -143,6 +143,12 @@ expected fingerprint is treated as done.
   folder holds anything else (in the DB or on disk), it is not trashed and the folder is
   rescanned.
 - **Creates** run only while the local node still exists unchanged.
+- **Conflict copies are write-ahead.** The fork is recorded before the rename and the record
+  is removed with the DB update after it; recovery runs before any scan and completes or
+  forgets an interrupted fork. A copy id derives from the node, the local bytes and the base's
+  remote version: stable when one conflict is replanned, new for the next conflict.
+- **Case-insensitive volumes** (probed once): a name's occupant is any sibling with the same
+  name key; a node may take its own name in another case.
 - **Orphans.** With a fully drained feed, a remote node whose parent is unknown everywhere (a
   child created while another client deleted its folder) is moved to the root.
 - **Crash recovery** needs no operation log: every operation is idempotent or detectable

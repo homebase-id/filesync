@@ -202,7 +202,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 4);
+    assert_eq!(db.schema_version()?, 5);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;

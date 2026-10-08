@@ -86,6 +86,16 @@ const MIGRATIONS: &[Migration] = &[
     ) WITHOUT ROWID;
     "#),
     Code(backfill_parent_paths),
+    // 5: conflict-copy forks in progress (written before the rename, removed with the
+    //    DB update after it), so a crash in between can be completed instead of misread.
+    Sql(r#"
+    CREATE TABLE forks (
+        node_id   BLOB PRIMARY KEY NOT NULL,
+        new_node  BLOB NOT NULL,
+        from_path TEXT NOT NULL,
+        to_path   TEXT NOT NULL
+    ) WITHOUT ROWID;
+    "#),
 ];
 
 fn backfill_parent_paths(tx: &Transaction<'_>) -> Result<()> {

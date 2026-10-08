@@ -8,7 +8,7 @@ use hbsync_remote::Remote;
 use hbsync_state::{StateDb, StateError};
 
 use crate::adopt::adopt;
-use crate::exec::{ExecConfig, ExecError, Executor, unpark};
+use crate::exec::{ExecConfig, ExecError, Executor, recover_forks, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
 use crate::view;
@@ -157,6 +157,8 @@ impl Engine {
         db_path: &Path,
         date: &str,
     ) -> Result<StartupReport, EngineError> {
+        // Before the local catch-up reads the disk: see recover_forks.
+        recover_forks(&mut self.db, &self.cfg.exec.root)?;
         let remote = self.remote.as_ref();
         let page = self.cfg.feed_page_size;
         let db = &mut self.db;
@@ -176,6 +178,7 @@ impl Engine {
 
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
+        recover_forks(&mut self.db, &self.cfg.exec.root)?;
         Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)
     }
 
@@ -183,6 +186,7 @@ impl Engine {
     /// round limit is hit). `date` (`YYYY-MM-DD`) is used for conflict-copy names.
     pub fn sync_once(&mut self, date: &str) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
+        recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec.root)?;
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;

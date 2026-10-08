@@ -206,6 +206,7 @@ impl Builder<'_, '_> {
             BaseExtra {
                 local_hash: row.local_hash,
                 content_state: row.content_state,
+                version: Some(row.remote.version),
             },
         );
         self.input.base.insert(row.node, row.state);

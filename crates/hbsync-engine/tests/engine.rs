@@ -449,3 +449,76 @@ fn new_folder_differing_only_in_case_from_a_leaving_one() -> R {
     assert_eq!(a.tree(), b.tree());
     Ok(())
 }
+
+#[test]
+fn crash_right_after_a_fork_rename_is_completed_not_published() -> R {
+    use hbsync_platform::RelPath;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("notes.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("notes.txt", "a's edit")?;
+    a.sync()?;
+    b.write("notes.txt", "b's edit")?;
+    b.engine.scan_local()?;
+    // b starts the fork and "crashes" right after the rename, before the DB update.
+    let from = RelPath::new("notes.txt")?;
+    let to = RelPath::new("notes (conflict b 2026-10-08).txt")?;
+    let node = b
+        .engine
+        .db()
+        .read(|s| s.get_local(&from))?
+        .ok_or("row")?
+        .node;
+    let copy = hbsync_types::NodeId::new();
+    b.engine
+        .db()
+        .write(|s| s.put_fork(node, copy, &from, &to))?;
+    fs::rename(b.root.join("notes.txt"), b.root.join(to.as_str()))?;
+
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    a.sync()?;
+    assert_eq!(a.tree(), b.tree());
+    assert_eq!(b.read("notes.txt")?, "a's edit");
+    assert_eq!(b.read(to.as_str())?, "b's edit");
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let original = srv.file_id_of(node).ok_or("original node is still live")?;
+    assert_eq!(
+        srv.header(original)?.state().map(|s| s.name).as_deref(),
+        Some("notes.txt")
+    );
+    Ok(())
+}
+
+#[test]
+fn a_second_conflict_with_the_same_bytes_gets_its_own_copy() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    for remote_edit in ["a1", "a2"] {
+        a.write("f.txt", remote_edit)?;
+        a.sync()?;
+        b.write("f.txt", "same local bytes")?;
+        let report = b.sync()?;
+        assert!(
+            report.failed.is_empty() && report.skipped.is_empty(),
+            "{report:?}"
+        );
+        a.sync()?;
+    }
+    assert_eq!(a.tree(), b.tree());
+    let copies = b
+        .tree()
+        .iter()
+        .filter(|e| e.ends_with("= same local bytes"))
+        .count();
+    assert_eq!(copies, 2, "{:?}", b.tree());
+    assert_eq!(b.read("f.txt")?, "a2");
+    Ok(())
+}

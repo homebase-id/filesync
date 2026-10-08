@@ -411,22 +411,28 @@ impl<'a> Executor<'a> {
         let Ok(target) = parent.join(&local.name) else {
             return Ok(Outcome::Skip("bad name".into()));
         };
+        if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
+            return Ok(Outcome::Skip("conflict copy id already in use".into()));
+        }
         if !self.free_target(&target, None)? {
             return Ok(Outcome::Retry("conflict name taken".into()));
         }
+        // Write-ahead: if we crash after the rename, recovery completes the fork instead of a
+        // scan mistaking it for the user renaming the original.
+        self.db
+            .write(|s| s.put_fork(node, new_node, &row.path, &target))?;
         if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&target)) {
+            self.db.write(|s| s.delete_fork(node))?;
             return Ok(io_outcome(e));
         }
-        self.db.write(|s| {
-            s.delete_local(&row.path)?;
-            s.put_local(&LocalRow {
-                path: target.clone(),
-                node: new_node,
-                ..row.clone()
-            })?;
-            s.delete_parked(node)?;
-            s.mark_dirty(new_node)
-        })?;
+        let moved = LocalRow {
+            path: target.clone(),
+            node: new_node,
+            ..row.clone()
+        };
+        self.db
+            .write(|s| complete_fork(s, node, &row.path, &moved))?;
+        self.refresh_fingerprint(&target, &moved)?;
         Ok(Outcome::Done)
     }
 
@@ -1104,6 +1110,50 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
         _ => Outcome::Skip(e.to_string()),
     }
+}
+
+/// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
+fn complete_fork(
+    s: &Store<'_>,
+    node: NodeId,
+    from: &RelPath,
+    moved: &LocalRow,
+) -> Result<(), StateError> {
+    s.delete_local(from)?;
+    s.put_local(moved)?;
+    s.delete_parked(node)?;
+    s.delete_fork(node)?;
+    s.mark_dirty(moved.node)?;
+    s.mark_dirty(node)
+}
+
+/// Finishes or forgets forks interrupted by a crash. Run before scanning: a scan would read a
+/// finished rename without its DB update as the user renaming the original.
+pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+    let mut completed = 0;
+    for (node, new_node, from, to) in db.read(|s| s.all_forks())? {
+        let row = db.read(|s| s.get_local(&from))?.filter(|r| r.node == node);
+        let at_to = hbsync_platform::stat(&to.to_native(root)).ok();
+        let from_gone = fs::symlink_metadata(from.to_native(root)).is_err();
+        match (row, at_to) {
+            (Some(row), Some(meta)) if from_gone && meta.file_id == row.fingerprint.file_id => {
+                // The bytes are the forked ones only if size and mtime agree; else rehash later.
+                let same =
+                    meta.size == row.fingerprint.size && meta.mtime_ns == row.fingerprint.mtime_ns;
+                let moved = LocalRow {
+                    path: to.clone(),
+                    node: new_node,
+                    fingerprint: meta.fingerprint(),
+                    hash: if same { row.hash } else { None },
+                    ..row
+                };
+                db.write(|s| complete_fork(s, node, &from, &moved))?;
+                completed += 1;
+            }
+            _ => db.write(|s| s.delete_fork(node))?,
+        }
+    }
+    Ok(completed)
 }
 
 /// Puts parked items back where they came from when that is possible, and drops records that

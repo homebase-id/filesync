@@ -45,6 +45,7 @@ impl World {
             BaseExtra {
                 local_hash,
                 content_state: ContentState::Local,
+                version: None,
             },
         );
         self.input.remote_refs.insert(node, remote_ref());
@@ -490,6 +491,7 @@ fn sha256_remote_node_moved_locally_is_not_re_uploaded() {
         BaseExtra {
             local_hash: local.content.map(|c| c.hash),
             content_state: ContentState::Local,
+            version: None,
         },
     );
     w.input.remote_refs.insert(f, remote_ref());
