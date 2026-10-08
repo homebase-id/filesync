@@ -26,4 +26,4 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-proptest = "1.11"
+proptest.workspace = true

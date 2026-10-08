@@ -1,0 +1,16 @@
+[package]
+name = "hbsync-namemap"
+description = "Reversible local spelling of remote names that are illegal on this OS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hbsync-platform.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
