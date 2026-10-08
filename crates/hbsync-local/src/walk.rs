@@ -37,13 +37,25 @@ pub enum SkipReason {
     Excluded,
 }
 
+/// Decides whether the walk enters a folder.
+pub type DescendFn<'a> = Box<dyn FnMut(&RelPath, &LocalMeta) -> bool + 'a>;
+
 /// A lazy depth-first walk.
-#[derive(Debug)]
-pub struct Walker {
+pub struct Walker<'a> {
     root: PathBuf,
     exclude_at_root: Vec<String>,
     stack: Vec<Frame>,
     queued: Vec<WalkEvent>,
+    descend: Option<DescendFn<'a>>,
+}
+
+impl std::fmt::Debug for Walker<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Walker")
+            .field("root", &self.root)
+            .field("depth", &self.stack.len())
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -53,16 +65,28 @@ struct Frame {
     items: Vec<DirItem>,
 }
 
-impl Walker {
+impl<'a> Walker<'a> {
     /// Walks everything below `root`, skipping the root-level names in `exclude_at_root`.
     pub fn new(root: &Path, exclude_at_root: &[&str]) -> Self {
+        Self::at(root, RelPath::root(), exclude_at_root, None)
+    }
+
+    /// Walks below `start` (which itself is not returned). `descend` decides for each folder
+    /// whether its contents are walked; `None` walks everything.
+    pub fn at(
+        root: &Path,
+        start: RelPath,
+        exclude_at_root: &[&str],
+        descend: Option<DescendFn<'a>>,
+    ) -> Self {
         let mut walker = Walker {
             root: root.to_path_buf(),
             exclude_at_root: exclude_at_root.iter().map(|s| (*s).to_owned()).collect(),
             stack: Vec::new(),
             queued: Vec::new(),
+            descend,
         };
-        walker.open(RelPath::root());
+        walker.open(start);
         walker
     }
 
@@ -118,7 +142,7 @@ impl Walker {
     }
 }
 
-impl Iterator for Walker {
+impl Iterator for Walker<'_> {
     type Item = WalkEvent;
 
     fn next(&mut self) -> Option<WalkEvent> {
@@ -135,6 +159,10 @@ impl Iterator for Walker {
             let event = self.classify(&dir, item);
             if let WalkEvent::Entry { path, meta } = &event
                 && meta.kind == EntryKind::Dir
+                && self
+                    .descend
+                    .as_mut()
+                    .is_none_or(|descend| descend(path, meta))
             {
                 // Pre-order: the folder is returned now, its contents on the next calls.
                 // `open` may queue an Unreadable event, which must come right after the folder.

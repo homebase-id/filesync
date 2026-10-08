@@ -306,6 +306,7 @@ dependencies = [
  "libc",
  "proptest",
  "tempfile",
+ "thiserror",
  "unicode-normalization",
  "windows-sys",
 ]

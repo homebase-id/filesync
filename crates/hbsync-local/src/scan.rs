@@ -57,18 +57,100 @@ pub enum ScanError {
 /// Runs a full tier-C scan of `root` and records the result in `db`.
 pub fn scan(db: &mut StateDb, root: &Path, opts: &ScanOptions) -> Result<ScanReport, ScanError> {
     let excludes: Vec<&str> = opts.exclude_at_root.iter().map(String::as_str).collect();
-    scan_events(db, root, Walker::new(root, &excludes), opts)
+    let mut report = ScanReport::default();
+    let diff = merge(
+        db,
+        Walker::new(root, &excludes),
+        DbRows::paged(),
+        &mut report,
+    )?;
+    let plan = resolve(db, root, diff, opts, &mut report)?;
+    apply(db, plan, &mut report)?;
+    Ok(report)
 }
 
-/// Like [`scan`], over any event source in walk order (used by tests and the journal path).
-pub fn scan_events(
+/// Rescans only the given folders: their direct entries, plus the full contents of any child
+/// folder that is new or was replaced. This is what a journal or watcher event leads to.
+///
+/// A folder that no longer exists is replaced by its nearest existing ancestor. Moves between
+/// the rescanned folders are detected, since all of them go through one identity pass.
+pub fn rescan_dirs(
     db: &mut StateDb,
     root: &Path,
-    events: impl Iterator<Item = WalkEvent>,
+    dirs: &[RelPath],
     opts: &ScanOptions,
 ) -> Result<ScanReport, ScanError> {
+    let excludes: Vec<&str> = opts.exclude_at_root.iter().map(String::as_str).collect();
+    let mut targets = std::collections::BTreeSet::new();
+    for dir in dirs {
+        let mut dir = dir.clone();
+        while !dir.is_root() && !dir.to_native(root).is_dir() {
+            dir = dir.parent().unwrap_or_default();
+        }
+        targets.insert(dir);
+    }
+
     let mut report = ScanReport::default();
-    let diff = merge(db, events, &mut report)?;
+    let mut diff = Diff::default();
+    // Subtrees already walked in full; targets inside them are covered.
+    let mut covered: Vec<RelPath> = Vec::new();
+    for dir in targets {
+        if covered.iter().any(|c| dir.starts_with(c)) {
+            continue;
+        }
+        let known = db.read(|s| s.local_subtree(&dir))?;
+        let is_child = |p: &RelPath| p.parent().as_ref() == Some(&dir);
+        let known_children: HashMap<RelPath, (NodeKind, FileId)> = known
+            .iter()
+            .filter(|r| is_child(&r.path))
+            .map(|r| (r.path.clone(), (r.kind, r.fingerprint.file_id)))
+            .collect();
+
+        let mut descended: Vec<RelPath> = Vec::new();
+        let mut present: Vec<RelPath> = Vec::new();
+        let events: Vec<WalkEvent> = {
+            let descend = |path: &RelPath, meta: &LocalMeta| {
+                if !is_child(path) {
+                    return true; // inside a folder we already decided to walk in full
+                }
+                let unchanged = known_children.get(path) == Some(&(NodeKind::Folder, meta.file_id));
+                if !unchanged {
+                    descended.push(path.clone());
+                }
+                !unchanged
+            };
+            let walker = Walker::at(root, dir.clone(), &excludes, Some(Box::new(descend)));
+            walker
+                .inspect(|e| {
+                    if let WalkEvent::Entry { path, .. } = e
+                        && is_child(path)
+                    {
+                        present.push(path.clone());
+                    }
+                })
+                .collect()
+        };
+        let gone: Vec<&RelPath> = known_children
+            .keys()
+            .filter(|p| !present.contains(p))
+            .collect();
+        let rows: Vec<LocalRow> = known
+            .into_iter()
+            .filter(|r| {
+                r.path != dir
+                    && (is_child(&r.path)
+                        || descended
+                            .iter()
+                            .chain(gone.iter().copied())
+                            .any(|d| r.path.starts_with(d)))
+            })
+            .collect();
+        let part = merge(db, events.into_iter(), DbRows::fixed(rows), &mut report)?;
+        diff.added.extend(part.added);
+        diff.removed.extend(part.removed);
+        diff.changed.extend(part.changed);
+        covered.extend(descended);
+    }
     let plan = resolve(db, root, diff, opts, &mut report)?;
     apply(db, plan, &mut report)?;
     Ok(report)
@@ -85,10 +167,10 @@ struct Diff {
 fn merge(
     db: &mut StateDb,
     events: impl Iterator<Item = WalkEvent>,
+    mut rows: DbRows,
     report: &mut ScanReport,
 ) -> Result<Diff, ScanError> {
     let mut diff = Diff::default();
-    let mut rows = DbRows::new();
     let mut unknown: Vec<RelPath> = Vec::new();
     let under_unknown =
         |unknown: &[RelPath], p: &RelPath| unknown.iter().any(|u| p != u && p.starts_with(u));
@@ -150,7 +232,7 @@ fn kind_of(meta: &LocalMeta) -> NodeKind {
     }
 }
 
-/// Pages through `local_items` in walk order.
+/// Pages through `local_items` in walk order, or serves a fixed, already sorted set of rows.
 struct DbRows {
     page: std::collections::VecDeque<LocalRow>,
     last: Option<RelPath>,
@@ -158,11 +240,19 @@ struct DbRows {
 }
 
 impl DbRows {
-    fn new() -> Self {
+    fn paged() -> Self {
         DbRows {
             page: Default::default(),
             last: None,
             done: false,
+        }
+    }
+
+    fn fixed(rows: Vec<LocalRow>) -> Self {
+        DbRows {
+            page: rows.into(),
+            last: None,
+            done: true,
         }
     }
 

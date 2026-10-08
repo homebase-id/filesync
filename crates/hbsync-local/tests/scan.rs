@@ -240,3 +240,143 @@ fn executable_bit_change_is_a_change() -> R {
     assert_eq!(dirty, [node]);
     Ok(())
 }
+
+mod targeted {
+    use super::*;
+    use hbsync_local::rescan_dirs;
+
+    fn p(s: &str) -> RelPath {
+        RelPath::new(s).expect("valid path")
+    }
+
+    impl Fixture {
+        fn rescan(
+            &mut self,
+            dirs: &[&str],
+        ) -> Result<(ScanReport, Vec<NodeId>), Box<dyn std::error::Error>> {
+            let root = self.dir.path().to_path_buf();
+            let dirs: Vec<RelPath> = dirs.iter().map(|d| p(d)).collect();
+            let report = rescan_dirs(&mut self.db, &root, &dirs, &self.opts)?;
+            let dirty = self.db.write(|s| {
+                let nodes = s.dirty_nodes(usize::MAX >> 1)?;
+                for n in &nodes {
+                    s.clear_dirty(*n)?;
+                }
+                Ok(nodes)
+            })?;
+            Ok((report, dirty))
+        }
+
+        /// (path, kind, hash) of every row: what a full scan would record, minus node ids.
+        fn snapshot(&mut self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            Ok(self
+                .db
+                .read(|s| s.local_page(None, usize::MAX >> 1))?
+                .into_iter()
+                .map(|r| format!("{} {:?} {:?}", r.path, r.kind, r.hash))
+                .collect())
+        }
+    }
+
+    #[test]
+    fn added_file_in_subfolder() -> R {
+        let mut f = Fixture::new()?;
+        f.write("a/b/old", b"1")?;
+        f.scan()?;
+        f.write("a/b/new", b"2")?;
+        let (report, dirty) = f.rescan(&["a/b"])?;
+        assert_eq!((report.added, report.removed), (1, 0));
+        assert_eq!(dirty, [f.node("a/b/new")?]);
+        Ok(())
+    }
+
+    #[test]
+    fn untouched_sibling_subtrees_are_left_alone() -> R {
+        let mut f = Fixture::new()?;
+        f.write("deep/er/file", b"x")?;
+        f.write("top", b"t")?;
+        f.scan()?;
+        f.write("top2", b"t2")?;
+        let (report, _) = f.rescan(&[""])?;
+        assert_eq!((report.added, report.removed), (1, 0), "{report:?}");
+        assert!(f.node("deep/er/file").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn move_between_folders_keeps_node() -> R {
+        let mut f = Fixture::new()?;
+        f.write("a/doc.txt", b"doc")?;
+        fs::create_dir(f.root().join("b"))?;
+        f.scan()?;
+        let node = f.node("a/doc.txt")?;
+        fs::rename(f.root().join("a/doc.txt"), f.root().join("b/doc.txt"))?;
+        let (report, dirty) = f.rescan(&["a", "b"])?;
+        assert_eq!(
+            (report.moved, report.added, report.removed),
+            (1, 0, 0),
+            "{report:?}"
+        );
+        assert_eq!(f.node("b/doc.txt")?, node);
+        assert_eq!(dirty, [node]);
+        Ok(())
+    }
+
+    #[test]
+    fn moved_folder_brings_its_subtree() -> R {
+        let mut f = Fixture::new()?;
+        f.write("x/inner/file", b"f")?;
+        fs::create_dir(f.root().join("y"))?;
+        f.scan()?;
+        let (folder, file) = (f.node("x")?, f.node("x/inner/file")?);
+        fs::rename(f.root().join("x"), f.root().join("y/x"))?;
+        let (report, dirty) = f.rescan(&["", "y"])?;
+        assert_eq!(report.moved, 1, "{report:?}");
+        assert_eq!(dirty, [folder]);
+        assert_eq!((f.node("y/x")?, f.node("y/x/inner/file")?), (folder, file));
+        Ok(())
+    }
+
+    #[test]
+    fn deleted_folder_removes_its_subtree() -> R {
+        let mut f = Fixture::new()?;
+        f.write("gone/a/b", b"b")?;
+        f.write("stay", b"s")?;
+        f.scan()?;
+        fs::remove_dir_all(f.root().join("gone"))?;
+        // The journal reported the vanished folder itself; the rescan climbs to its parent.
+        let (report, _) = f.rescan(&["gone/a"])?;
+        assert_eq!(report.removed, 3, "{report:?}");
+        assert!(f.node("stay").is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn targeted_rescan_equals_full_scan() -> R {
+        let mut f = Fixture::new()?;
+        for path in ["a/1", "a/2", "a/s/3", "b/4", "c/d/e/5", "6"] {
+            f.write(path, path.as_bytes())?;
+        }
+        f.scan()?;
+
+        // A batch of edits, with the folders a journal would report.
+        f.write("a/1", b"edited")?;
+        fs::remove_file(f.root().join("a/2"))?;
+        fs::rename(f.root().join("a/s"), f.root().join("b/s"))?;
+        fs::rename(f.root().join("c/d"), f.root().join("dd"))?;
+        f.write("c/new/deep/7", b"7")?;
+        f.write("8", b"8")?;
+        f.rescan(&["a", "b", "c", "c/d", "c/new", ""])?;
+        let targeted = f.snapshot()?;
+
+        let mut fresh = Fixture {
+            dir: tempfile::tempdir()?,
+            db: StateDb::open_in_memory()?,
+            opts: f.opts.clone(),
+        };
+        std::mem::swap(&mut fresh.dir, &mut f.dir);
+        fresh.scan()?;
+        assert_eq!(targeted, fresh.snapshot()?);
+        Ok(())
+    }
+}
