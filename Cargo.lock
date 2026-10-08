@@ -322,6 +322,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hbsync-remote"
+version = "0.1.0"
+dependencies = [
+ "hbsync-fileio",
+ "hbsync-types",
+ "thiserror",
+]
+
+[[package]]
 name = "hbsync-state"
 version = "0.1.0"
 dependencies = [

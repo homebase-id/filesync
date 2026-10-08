@@ -13,6 +13,7 @@ hbsync-fileio = { path = "crates/hbsync-fileio" }
 hbsync-local = { path = "crates/hbsync-local" }
 hbsync-namemap = { path = "crates/hbsync-namemap" }
 hbsync-platform = { path = "crates/hbsync-platform" }
+hbsync-remote = { path = "crates/hbsync-remote" }
 hbsync-state = { path = "crates/hbsync-state" }
 hbsync-types = { path = "crates/hbsync-types" }
 proptest = "1.11"
