@@ -564,17 +564,24 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
             )?;
         }
     }
-    let mut b = Client::new(&server, "b")?;
+    let dir = tempfile::tempdir()?;
     for i in 0..N {
-        b.write(&format!("f{i}.txt"), &format!("data {i}"))?;
+        fs::write(dir.path().join(format!("f{i}.txt")), format!("data {i}"))?;
     }
-    b.engine.scan_local()?;
+    // Adoption alone, on an in-memory DB: no disk syncs in the measurement.
+    let mut db = StateDb::open_in_memory()?;
+    let opts = hbsync_local::ScanOptions {
+        algorithm: hbsync_fileio::HashAlgorithm::Blake3,
+        fs_family: hbsync_platform::FsFamily::Other,
+        exclude_at_root: Vec::new(),
+    };
+    hbsync_local::scan(&mut db, dir.path(), &opts)?;
+    hbsync_engine::feed::pull(&mut db, &FakeRemote::new(server.clone()), 500)?;
     let started = std::time::Instant::now();
-    let report = b.engine.sync_once("2026-10-08")?;
+    let adopted = hbsync_engine::adopt::adopt(&mut db, dir.path(), hbsync_platform::Os::current())?;
     let took = started.elapsed();
-    assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
-    assert_eq!(report.adopted, N);
-    // Matching each file against all its siblings took 50 s here (debug); grouped, 3 s.
-    assert!(took.as_secs() < 20, "adoption took {took:?}");
+    assert_eq!(adopted, N);
+    // Matching each file against all its siblings took 50 s here (debug); grouped, under 1 s.
+    assert!(took.as_secs() < 10, "adoption took {took:?}");
     Ok(())
 }

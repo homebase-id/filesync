@@ -9,10 +9,10 @@
 //!
 //! Folders are adopted before their contents (candidates go folder by folder, shallowest
 //! first), so children of an adopted folder find the remote folder as their parent. Each
-//! folder's remote children are loaded and indexed once, so adoption is linear in the number of
-//! items however wide the folders are.
+//! folder's remote children are loaded and indexed once, and its matches are written in one
+//! transaction, so adoption is linear in the number of items however wide the folders are.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use hbsync_fileio::hash_file;
@@ -74,28 +74,35 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
         if siblings.is_empty() {
             continue;
         }
+        // Matches are written per folder, in one transaction each.
+        let mut claimed: HashSet<NodeId> = HashSet::new();
+        let mut matches: Vec<(&LocalRow, NodeId, bool)> = Vec::new();
         for row in group {
-            let Some((remote_node, proven_equal)) = find_match(db, root, os, row, &siblings)?
-            else {
-                continue;
-            };
-            db.write(|s| {
+            if let Some((remote_node, proven_equal)) =
+                find_match(db, root, os, row, &siblings, &claimed)?
+            {
+                claimed.insert(remote_node);
+                matches.push((row, remote_node, proven_equal));
+            }
+        }
+        db.write(|s| {
+            for (row, remote_node, proven_equal) in &matches {
                 s.delete_local(&row.path)?;
                 s.put_local(&LocalRow {
-                    node: remote_node,
-                    ..row.clone()
+                    node: *remote_node,
+                    ..(*row).clone()
                 })?;
                 s.clear_dirty(row.node)?;
-                s.mark_dirty(remote_node)?;
+                s.mark_dirty(*remote_node)?;
                 // A match proven by hashing with the remote's algorithm is recorded right away:
                 // the reconciler can't compare hashes of different algorithms by itself.
-                if proven_equal {
-                    crate::exec::settle(s, remote_node, os, true)?;
+                if *proven_equal {
+                    crate::exec::settle(s, *remote_node, os, true)?;
                 }
-                Ok(())
-            })?;
-            adopted += 1;
-        }
+            }
+            Ok(())
+        })?;
+        adopted += matches.len();
     }
     Ok(adopted)
 }
@@ -109,6 +116,7 @@ fn find_match(
     os: Os,
     row: &LocalRow,
     siblings: &HashMap<String, Vec<MirrorRow>>,
+    claimed: &HashSet<NodeId>,
 ) -> Result<Option<(NodeId, bool)>, StateError> {
     let Some(local_name) = row.path.name() else {
         return Ok(None);
@@ -120,7 +128,7 @@ fn find_match(
         return Ok(None);
     };
     for remote in same_key {
-        if remote.kind != row.kind {
+        if remote.kind != row.kind || claimed.contains(&remote.node) {
             continue;
         }
         // Only a remote node that has no local copy and no history yet.
