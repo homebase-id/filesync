@@ -245,7 +245,8 @@ impl Remote for HomebaseRemote {
         );
         match written {
             // odin-core answers a content update of a deleted file with 500 (a null payload
-            // list in `ProcessAppendOrOverwrite`) instead of 4002: look before retrying.
+            // list in `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002: look before
+            // retrying.
             Err(RemoteError::Transient(why)) => match self.header(file_id) {
                 Ok(h) if h.is_deleted() => Err(RemoteError::NotFound),
                 Ok(h) if h.version != expected => Err(RemoteError::VersionMismatch),

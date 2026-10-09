@@ -184,4 +184,5 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   `appendOrOverwrite` payload on a tombstone throws a NullReferenceException in
   `DriveStorageServiceBase.UpdateBatchCopyFilesAsync` / `ProcessAppendOrOverwrite` (the
   tombstone's payload list is null) before the 4002 check. Workaround in the client: after a
-  failed update, read the header; a tombstone means `NotFound`. Not filed yet.
+  failed update, read the header; a tombstone means `NotFound`. Filed as odin-core #1904
+  (a header-only update of a tombstone correctly answers 4002).
