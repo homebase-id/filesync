@@ -163,7 +163,10 @@ mod tests {
         let key = random::<16>()?;
         let sealed = Envelope::seal(&key, b"{\"a\":1}")?;
         assert_eq!(sealed.open(&key)?, b"{\"a\":1}");
-        assert!(sealed.open(&random::<16>()?).is_err());
+        // A wrong key fails, or (when the garbage happens to end in valid padding, about 1 in
+        // 256) gives other bytes.
+        let wrong = sealed.open(&random::<16>()?);
+        assert!(wrong.map_or(true, |bytes| bytes != b"{\"a\":1}"));
         Ok(())
     }
 
