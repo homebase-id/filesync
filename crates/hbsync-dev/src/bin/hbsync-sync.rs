@@ -47,7 +47,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::fs::canonicalize(folder)?;
     std::fs::create_dir_all(root.join(STATE_DIR))?;
     let db_path = state_db_path(&root);
-    let mut cfg = EngineConfig::new(&root, &hbsync_dev::device_name());
+    let mut cfg = EngineConfig::new(&root, &hbsync_platform::host::device_name());
     cfg.allow_mass_delete = args.iter().any(|a| a == "--allow-mass-delete");
     cfg.exec.filter = Arc::new(Filter::load(&root, cfg.exec.case_insensitive)?);
     let rules = cfg.exec.filter.rule_count();
@@ -65,7 +65,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let started = Instant::now();
-    let startup = engine.start_up(&mut observer, &db_path, &hbsync_dev::today());
+    let startup = engine.start_up(&mut observer, &db_path, &hbsync_app::today());
     match startup {
         Ok(r) => {
             println!(
@@ -125,7 +125,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         let started = Instant::now();
-        match engine.sync_once(&hbsync_dev::today()) {
+        match engine.sync_once(&hbsync_app::today()) {
             Ok(report) => {
                 if !report.is_idle() || report.feed.live + report.feed.deleted > 0 {
                     print!("Sync in {:.1?}: ", started.elapsed());

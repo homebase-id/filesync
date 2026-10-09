@@ -42,7 +42,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             c
         }
         None => {
-            let device = hbsync_dev::device_name();
+            let device = hbsync_platform::host::device_name();
             let pending = hbsync_homebase::begin(&identity, &format!("Filesync on {device}"))?;
             println!("Opening the browser to authorize Homebase Filesync on {identity}...");
             println!("If it doesn't open, visit:\n{}\n", pending.authorize_url);

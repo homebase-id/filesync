@@ -74,4 +74,5 @@ the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-wind
 | `hbsync-engine` | tree, pure reconciler, view builder, executor, transfer pool, adoption, sync loop |
 | `hbsync-sim` | deterministic multi-client simulator with convergence/no-loss properties |
 | `hbsync-homebase` | YouAuth app registration (P-384 ECDH, HKDF), the AES-CBC shared-secret envelope, a V2 API client, the Filesync app definition, the drive as a `Remote`, the notification WebSocket |
+| `hbsync-app` | the product shell: paths, `config.toml` (later: credentials, the sync runner, the control socket, autostart) |
 | `hbsync-dev` | development tools: `hbsync-register`, `hbsync-sync` (a folder synced with a live identity), the live end-to-end test |

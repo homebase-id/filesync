@@ -70,7 +70,7 @@ impl Client {
             // Homebase holds back feed rows of the current millisecond.
             std::thread::sleep(Duration::from_millis(20));
             self.engine.scan_local()?;
-            let pass = self.engine.sync_once(&hbsync_dev::today())?;
+            let pass = self.engine.sync_once(&hbsync_app::today())?;
             let idle = pass.ops_done == 0;
             total.absorb(pass);
             if idle {
