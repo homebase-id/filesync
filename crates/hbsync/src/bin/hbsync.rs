@@ -366,6 +366,8 @@ fn start(paths: &Paths) -> Res<()> {
         return wait_until_running(paths, None);
     }
     let exe = autostart::daemon_exe()?;
+    #[cfg(windows)]
+    keep_std_handles_from_children();
     let mut process = Process::new(&exe);
     process
         .stdin(Stdio::null())
@@ -382,6 +384,29 @@ fn start(paths: &Paths) -> Res<()> {
         .spawn()
         .map_err(|e| format!("can't start {}: {e}", exe.display()))?;
     wait_until_running(paths, Some(child))
+}
+
+/// Windows children inherit every inheritable handle, and ours are when we were started with
+/// redirected output: the daemon would hold our stdout open, and whoever reads it would wait
+/// until the daemon stops.
+#[cfg(windows)]
+fn keep_std_handles_from_children() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle has no preconditions; SetHandleInformation gets a handle of
+        // this process (or fails harmlessly on a missing one).
+        unsafe {
+            let handle = GetStdHandle(which);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 /// Waits until the daemon answers, or `child` (when we started it) exits.
