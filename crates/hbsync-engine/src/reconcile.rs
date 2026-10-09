@@ -18,8 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use hbsync_platform::name::name_key;
 use hbsync_types::{
-    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    VersionTag,
+    ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
 
 use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
@@ -168,6 +167,89 @@ impl Op {
     pub fn is_delete(&self) -> bool {
         matches!(self, Op::LocalTrash { .. } | Op::RemoteDelete { .. })
     }
+
+    /// The node whose local name this op gives up (it moves away, is trashed, forked, or
+    /// replaced by a download that may land elsewhere). A target held by that node can be
+    /// freed early by parking the node under a temporary name.
+    pub fn vacates_local_name(&self) -> Option<NodeId> {
+        match self {
+            Op::LocalMove { node, .. }
+            | Op::LocalTrash { node, .. }
+            | Op::LocalFork { node, .. }
+            | Op::LocalDownload {
+                node,
+                replace: true,
+                ..
+            } => Some(*node),
+            _ => None,
+        }
+    }
+
+    /// What the server must already show (in the client's mirror) for this op to run; until
+    /// then it waits (sync-semantics §8a).
+    pub fn requires(&self) -> Option<Requirement> {
+        match self {
+            Op::RemoteCreate { parent, .. } | Op::RemoteUpdate { parent, .. }
+                if !parent.is_root() =>
+            {
+                Some(Requirement::RemoteFolder(*parent))
+            }
+            Op::RemoteDelete { node, .. } => Some(Requirement::NoRemoteChildren(*node)),
+            _ => None,
+        }
+    }
+}
+
+/// An ordering condition on the server side (see [`Op::requires`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Requirement {
+    /// The folder exists remotely: nothing is created or moved into a folder whose own create
+    /// failed, or other clients would see children pointing at nothing.
+    RemoteFolder(NodeId),
+    /// The node has no remote children left: a folder goes only after its contents, so a child
+    /// whose delete failed is never left live under a tombstone.
+    NoRemoteChildren(NodeId),
+}
+
+/// Which attributes of a node both sides hold once an operation is done. Settling records
+/// exactly those in the base (sync-semantics: the base only takes a value when both sides
+/// hold it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Agreement {
+    pub place: bool,
+    pub content: bool,
+}
+
+impl Agreement {
+    /// Where `local` and `remote` agree. `same_bytes`: the operation just made the bytes equal
+    /// (a transfer), even if their hashes use different algorithms.
+    pub fn of(local: &NodeState, remote: &NodeState, same_bytes: bool) -> Self {
+        let content = match (&local.content, &remote.content) {
+            (None, None) => true,
+            (Some(l), Some(r)) => same_bytes || (l.hash == r.hash && l.executable == r.executable),
+            _ => false,
+        };
+        Agreement {
+            place: local.same_place(remote),
+            content,
+        }
+    }
+
+    /// The base after settling: the agreed attributes are taken from `remote`. A node without a
+    /// base gets one only when both sides agree on everything.
+    pub fn settle(self, base: Option<NodeState>, remote: &NodeState) -> Option<NodeState> {
+        let Some(mut b) = base else {
+            return (self.place && self.content).then(|| remote.clone());
+        };
+        if self.place {
+            b.parent = remote.parent;
+            b.name = remote.name.clone();
+        }
+        if self.content {
+            b.content = remote.content;
+        }
+        Some(b)
+    }
 }
 
 /// A conflict the user should hear about.
@@ -242,6 +324,8 @@ struct Reconciler<'a> {
     origin: HashMap<NodeId, Origin>,
     /// Local file of `node` becomes the conflict copy `copy`.
     forks: BTreeMap<NodeId, NodeId>,
+    /// Becomes `plan.deferred`.
+    deferred: BTreeSet<NodeId>,
     plan: Plan,
 }
 
@@ -254,6 +338,7 @@ impl<'a> Reconciler<'a> {
             scope: BTreeSet::new(),
             origin: HashMap::new(),
             forks: BTreeMap::new(),
+            deferred: BTreeSet::new(),
             plan: Plan::default(),
         }
     }
@@ -269,6 +354,7 @@ impl<'a> Reconciler<'a> {
         self.fix_names();
         self.emit();
         self.guard_mass_delete();
+        self.plan.deferred = self.deferred.into_iter().collect();
         self.plan
     }
 
@@ -373,7 +459,7 @@ impl<'a> Reconciler<'a> {
     /// Leaves `node` for a later plan, keeping it in the merged tree where it is now, so that
     /// a new local file still being written keeps its folder alive (§6.3) and its name.
     fn defer(&mut self, node: NodeId) {
-        self.plan.deferred.push(node);
+        self.deferred.insert(node);
         let i = self.input;
         if let Some(state) = i
             .remote
@@ -397,9 +483,8 @@ impl<'a> Reconciler<'a> {
             (Change::Absent | Change::Unchanged, Change::Absent | Change::Unchanged) => {
                 (r.or(l.as_ref()).or(b).cloned(), Origin::Base)
             }
-            (Change::Deleted, Change::Deleted) => (None, Origin::Base),
-            (Change::Deleted, Change::Unchanged) => (None, Origin::Base),
-            (Change::Unchanged, Change::Deleted) => (None, Origin::Base),
+            (Change::Deleted, Change::Deleted | Change::Unchanged)
+            | (Change::Unchanged, Change::Deleted) => (None, Origin::Base),
             (Change::Deleted, Change::Created | Change::Changed { .. }) => {
                 self.plan.conflicts.push(Conflict::EditDelete { node });
                 (r.cloned(), Origin::Remote)
@@ -430,7 +515,7 @@ impl<'a> Reconciler<'a> {
                     self.defer(node);
                     return;
                 };
-                self.merge_both(node, b, l, r, lc, rc)
+                self.merge_both(node, l, r, lc, rc)
             }
         };
         self.scope.insert(node);
@@ -449,7 +534,6 @@ impl<'a> Reconciler<'a> {
     fn merge_both(
         &mut self,
         node: NodeId,
-        b: Option<&NodeState>,
         l: &NodeState,
         r: &NodeState,
         lc: Change,
@@ -502,11 +586,17 @@ impl<'a> Reconciler<'a> {
                 origin = Origin::Base;
             }
         }
-        let _ = b;
         (Some(target), origin)
     }
 
     // ---- 3: invariants on the merged tree ----
+
+    /// A repair puts `node` at `state` in the merged tree; ops follow for it.
+    fn retarget(&mut self, node: NodeId, state: NodeState) {
+        self.merged.insert(node, state);
+        self.scope.insert(node);
+        self.origin.entry(node).or_insert(Origin::Base);
+    }
 
     /// The best known state of a node that the merge removed or never saw.
     fn known_state(&self, node: NodeId) -> Option<NodeState> {
@@ -538,9 +628,7 @@ impl<'a> Reconciler<'a> {
             match parent_state {
                 Some(state) if state.kind == NodeKind::Folder => {
                     // A live child keeps its folder alive (§6.3).
-                    self.merged.insert(parent, state);
-                    self.scope.insert(parent);
-                    self.origin.insert(parent, Origin::Base);
+                    self.retarget(parent, state);
                     queue.push(parent);
                 }
                 None if self.input.remote_complete
@@ -551,9 +639,7 @@ impl<'a> Reconciler<'a> {
                     // concurrently. Keep the data visible by moving it to the root.
                     if let Some(mut state) = self.merged.get(node).cloned() {
                         state.parent = NodeId::ROOT;
-                        self.merged.insert(node, state);
-                        self.scope.insert(node);
-                        self.origin.entry(node).or_insert(Origin::Base);
+                        self.retarget(node, state);
                         self.plan.conflicts.push(Conflict::Orphan { node });
                     }
                 }
@@ -564,8 +650,8 @@ impl<'a> Reconciler<'a> {
                     self.merged.remove(node);
                     self.scope.remove(&node);
                     withdrawn.insert(node);
-                    if self.input.dirty.contains(&node) && !self.plan.deferred.contains(&node) {
-                        self.plan.deferred.push(node);
+                    if self.input.dirty.contains(&node) {
+                        self.deferred.insert(node);
                     }
                 }
             }
@@ -611,16 +697,13 @@ impl<'a> Reconciler<'a> {
                     }
                     _ => state.parent = NodeId::ROOT,
                 }
-                self.merged.insert(victim, state);
-                self.scope.insert(victim);
-                self.origin.entry(victim).or_insert(Origin::Base);
+                self.retarget(victim, state);
                 self.plan.conflicts.push(Conflict::Cycle { node: victim });
             }
         }
     }
 
     fn fix_names(&mut self) {
-        let deferred: HashSet<NodeId> = self.plan.deferred.iter().copied().collect();
         let parents: BTreeSet<NodeId> = self
             .scope
             .iter()
@@ -639,9 +722,9 @@ impl<'a> Reconciler<'a> {
                 }
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses.
-                group.sort_by_key(|n| (!deferred.contains(n), *n));
+                group.sort_by_key(|n| (!self.deferred.contains(n), *n));
                 for loser in group.into_iter().skip(1) {
-                    if deferred.contains(&loser) {
+                    if self.deferred.contains(&loser) {
                         continue;
                     }
                     let Some(mut state) = self.merged.get(loser).cloned() else {
@@ -661,9 +744,7 @@ impl<'a> Reconciler<'a> {
                         n += 1;
                     };
                     state.name = new_name;
-                    self.merged.insert(loser, state);
-                    self.scope.insert(loser);
-                    self.origin.entry(loser).or_insert(Origin::Base);
+                    self.retarget(loser, state);
                     self.plan
                         .conflicts
                         .push(Conflict::NameClash { node: loser });
@@ -742,7 +823,7 @@ impl<'a> Reconciler<'a> {
                         ));
                         remote_ops = true;
                     } else {
-                        self.plan.deferred.push(node);
+                        self.deferred.insert(node);
                     }
                 }
                 (Some(t), Some(r)) => {
@@ -828,7 +909,7 @@ impl<'a> Reconciler<'a> {
                 }
             }
 
-            if !remote_ops && !local_ops && !self.plan.deferred.contains(&node) {
+            if !remote_ops && !local_ops && !self.deferred.contains(&node) {
                 let needs_settle = match (&target, i.base.get(node)) {
                     (Some(t), Some(b)) => t != b || self.base_local_hash_stale(node, t),
                     (Some(_), None) | (None, Some(_)) => true,
@@ -868,8 +949,6 @@ impl<'a> Reconciler<'a> {
         self.plan.ops.extend(content);
         self.plan.ops.extend(deletes);
         self.plan.ops.extend(settles);
-        self.plan.deferred.sort();
-        self.plan.deferred.dedup();
     }
 
     /// Whether the remote already holds the target content (same algorithm, same hash).
@@ -991,18 +1070,4 @@ fn fork_id(
 
 fn content_changed(c: Change) -> bool {
     matches!(c, Change::Created | Change::Changed { edited: true, .. })
-}
-
-/// Helper for tests and the simulator: a file state.
-pub fn file_state(parent: NodeId, name: &str, hash: ContentHash, size: u64) -> NodeState {
-    NodeState::file(
-        parent,
-        name,
-        FileContent {
-            hash,
-            size,
-            mtime_ms: 0,
-            executable: false,
-        },
-    )
 }

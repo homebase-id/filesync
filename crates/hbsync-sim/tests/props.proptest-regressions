@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 68c4923cc0fcbc4644acf14dce087cf343bd7b91ca1b0117142cd63b8bd279fe # shrinks to events = [Act { client: 1, action: CreateFolder { parent: 0, name: 0 } }, Act { client: 1, action: CreateFolder { parent: 0, name: 0 } }, Act { client: 1, action: CreateFolder { parent: 10, name: 0 } }, Plan { client: 1 }, Act { client: 1, action: Move { node: 4, parent: 3, name: 1 } }, Step { client: 1 }, Step { client: 1 }, Step { client: 1 }]
+cc e9add0665e439e4958cb3b005418d8162e9ba06ac1159b612c43f0ee3790a827 # shrinks to events = [Act { client: 1, action: CreateFolder { parent: 0, name: 0 } }, Act { client: 0, action: CreateFolder { parent: 0, name: 5 } }, Act { client: 0, action: CreateFolder { parent: 7, name: 0 } }, Plan { client: 1 }, Step { client: 1 }, Act { client: 0, action: Move { node: 6, parent: 10, name: 0 } }, Plan { client: 0 }, Step { client: 0 }, Act { client: 0, action: Move { node: 2, parent: 0, name: 0 } }, Step { client: 0 }, Step { client: 0 }]

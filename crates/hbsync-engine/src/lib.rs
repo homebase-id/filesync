@@ -11,5 +11,7 @@ pub mod tree;
 pub mod view;
 
 pub use engine::{Engine, EngineConfig, EngineError, StartupReport, SyncReport};
-pub use reconcile::{BaseExtra, Conflict, Input, Op, Options, Plan, reconcile};
+pub use reconcile::{
+    Agreement, BaseExtra, Conflict, Input, Op, Options, Plan, Requirement, reconcile,
+};
 pub use tree::{Tree, Violation, conflict_copy_name, numbered_conflict_name};

@@ -1,15 +1,27 @@
 //! One test per rule of `docs/spec/sync-semantics.md`.
 
-use hbsync_engine::reconcile::file_state;
 use hbsync_engine::{BaseExtra, Conflict, Input, Op, Options, reconcile};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
-use hbsync_types::RemoteRef;
 use hbsync_types::{
-    ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, Uuid, VersionTag,
+    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
+    Uuid, VersionTag,
 };
 
 fn h(data: &str) -> ContentHash {
     hash_bytes(data.as_bytes(), HashAlgorithm::Blake3)
+}
+
+fn file_state(parent: NodeId, name: &str, hash: ContentHash, size: u64) -> NodeState {
+    NodeState::file(
+        parent,
+        name,
+        FileContent {
+            hash,
+            size,
+            mtime_ms: 0,
+            executable: false,
+        },
+    )
 }
 
 fn file(parent: NodeId, name: &str, data: &str) -> NodeState {

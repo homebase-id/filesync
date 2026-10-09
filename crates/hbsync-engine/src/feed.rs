@@ -119,7 +119,17 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
         name: content.name.clone(),
         kind: header.kind,
         file,
+        // Read back by `unknown_keys`.
         content_extra: (!content.unknown.is_empty())
             .then(|| serde_json::Value::Object(content.unknown.clone()).to_string()),
     })
+}
+
+/// The content keys of `row` this client doesn't know (stored by [`mirror_row`]), to be written
+/// back unchanged.
+pub(crate) fn unknown_keys(row: &MirrorRow) -> serde_json::Map<String, serde_json::Value> {
+    row.content_extra
+        .as_deref()
+        .and_then(|extra| serde_json::from_str(extra).ok())
+        .unwrap_or_default()
 }

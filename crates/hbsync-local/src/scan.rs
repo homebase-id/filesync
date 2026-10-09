@@ -397,9 +397,7 @@ fn resolve(
         let old = &removed[i];
         let mut new = row_from(&path, old.node, &meta, old.hash);
         if old.kind == NodeKind::File {
-            // A rename changes ctime on most file systems; size and mtime are what matter here.
-            let same =
-                old.fingerprint.size == meta.size && old.fingerprint.mtime_ns == meta.mtime_ns;
+            let same = old.fingerprint.same_after_rename(&meta);
             // Where inode numbers get recycled, a matching id plus size and mtime is still not
             // proof (an extracted or rsynced file can match all three). It is when the file
             // moved together with its folder: same name inside a folder that moved as well.

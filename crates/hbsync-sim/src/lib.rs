@@ -16,10 +16,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use hbsync_engine::reconcile::{BaseExtra, Input, Op, Options, reconcile};
+use hbsync_engine::exec::parked_name;
+use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile};
 use hbsync_engine::tree::Tree;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
-use hbsync_platform::name::{check_remote_name, name_key};
+use hbsync_platform::name::check_remote_name;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
     Uuid, VersionTag,
@@ -410,6 +411,10 @@ impl Sim {
         let unchanged = |client: &Client, node: NodeId| {
             client.local.get(node) == client.planned_local.get(node)
         };
+        // The executor's server-side order guards, against the client's mirror.
+        if !ready(&self.clients[c], op) {
+            return Retry;
+        }
         match op.clone() {
             Op::LocalFork {
                 node,
@@ -532,10 +537,6 @@ impl Sim {
                 if self.server.live.contains_key(&node) {
                     return Done; // 4105: an earlier attempt landed
                 }
-                // The executor creates only under a folder its mirror has.
-                if !in_mirror(&self.clients[c], parent) {
-                    return Retry;
-                }
                 let client = &self.clients[c];
                 // The local node must still be there, as planned (the executor reads it).
                 let Some(local) = client.local.get(node) else {
@@ -572,9 +573,6 @@ impl Sim {
                 ..
             } => {
                 let local_content = self.clients[c].local.get(node).and_then(|s| s.content);
-                if !in_mirror(&self.clients[c], parent) {
-                    return Retry;
-                }
                 let version = VersionTag(self.server.uuid());
                 let Some(server) = self.server.live.get_mut(&node) else {
                     return Skip;
@@ -595,26 +593,14 @@ impl Sim {
                 self.clients[c].planned_remote.insert(node, state);
                 Done
             }
-            Op::RemoteDelete { node, expected, .. } => {
-                // A folder goes only once the mirror has no child left in it (one whose delete
-                // failed keeps it).
-                if self.clients[c]
-                    .planned_remote
-                    .children(node)
-                    .next()
-                    .is_some()
-                {
-                    return Retry;
+            Op::RemoteDelete { node, expected, .. } => match self.server.live.get(&node) {
+                Some(server) if server.remote.version == expected => {
+                    self.server.live.remove(&node);
+                    self.clients[c].planned_remote.remove(node);
+                    Done
                 }
-                match self.server.live.get(&node) {
-                    Some(server) if server.remote.version == expected => {
-                        self.server.live.remove(&node);
-                        self.clients[c].planned_remote.remove(node);
-                        Done
-                    }
-                    _ => Skip,
-                }
-            }
+                _ => Skip,
+            },
             Op::Settle { .. } => Done,
         }
     }
@@ -652,7 +638,7 @@ impl Sim {
         }
     }
 
-    /// The executor's settle rule: the base takes each attribute both sides agree on.
+    /// The executor's settle rule ([`Agreement`]) on the simulated sides.
     fn settle(&mut self, c: usize, node: NodeId) {
         let remote = self.server.live.get(&node).map(|n| n.state.clone());
         let version = self.server.live.get(&node).map(|n| n.remote.version);
@@ -664,25 +650,12 @@ impl Sim {
                 client.extra.remove(&node);
             }
             (Some(l), Some(r)) => {
-                let place = l.same_place(&r);
-                let content = l.same_content(&r);
-                match client.base.get(node).cloned() {
-                    None if place && content => {
+                let agreed = Agreement::of(&l, &r, false);
+                if let Some(b) = agreed.settle(client.base.get(node).cloned(), &r) {
+                    if agreed.content {
                         client.extra.insert(node, extra(&l, version));
-                        client.base.insert(node, r);
                     }
-                    None => {}
-                    Some(mut b) => {
-                        if place {
-                            b.parent = r.parent;
-                            b.name = r.name.clone();
-                        }
-                        if content {
-                            b.content = r.content;
-                            client.extra.insert(node, extra(&l, version));
-                        }
-                        client.base.insert(node, b);
-                    }
+                    client.base.insert(node, b);
                 }
             }
             _ => {}
@@ -770,17 +743,10 @@ fn park_occupant(client: &mut Client, parent: NodeId, name: &str, except: Option
     let Some(occupant) = client.local.child_named(parent, name, except) else {
         return true;
     };
-    let leaving = client.plan.iter().any(|(p, _)| match p {
-        Op::LocalMove { node, .. }
-        | Op::LocalTrash { node, .. }
-        | Op::LocalFork { node, .. }
-        | Op::LocalDownload {
-            node,
-            replace: true,
-            ..
-        } => *node == occupant,
-        _ => false,
-    });
+    let leaving = client
+        .plan
+        .iter()
+        .any(|(p, _)| p.vacates_local_name() == Some(occupant));
     let Some(state) = client.local.get(occupant).cloned() else {
         return false;
     };
@@ -800,14 +766,16 @@ fn park_occupant(client: &mut Client, parent: NodeId, name: &str, except: Option
     true
 }
 
-/// Whether the client's mirror (the snapshot it planned from, plus its own writes since) has
-/// `folder`, as the executor checks before creating or moving something into it.
-fn in_mirror(client: &Client, folder: NodeId) -> bool {
-    folder.is_root() || client.planned_remote.contains(folder)
-}
-
-fn parked_name(node: NodeId) -> String {
-    format!(".hbsync-move-{}", node.0.simple())
+/// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
+/// from, plus its own writes since), as the executor checks them.
+fn ready(client: &Client, op: &Op) -> bool {
+    match op.requires() {
+        None => true,
+        Some(Requirement::RemoteFolder(folder)) => client.planned_remote.contains(folder),
+        Some(Requirement::NoRemoteChildren(node)) => {
+            client.planned_remote.children(node).next().is_none()
+        }
+    }
 }
 
 /// What happened to one operation.
@@ -829,8 +797,8 @@ fn extra(local: &NodeState, version: Option<VersionTag>) -> BaseExtra {
     }
 }
 
-/// A tree as a sorted list of `path kind content`, independent of node ids... except that
-/// node ids are part of identity across clients, so they are included too.
+/// A tree as a sorted list of `path kind content id`: node ids are part of identity across
+/// clients, so two trees only match if the same nodes sit at the same paths.
 fn view(tree: &Tree) -> Vec<String> {
     view_with(tree, &HashMap::new())
 }
@@ -859,11 +827,4 @@ fn view_with(tree: &Tree, blobs: &HashMap<ContentHash, u64>) -> Vec<String> {
         .collect();
     out.sort();
     out
-}
-
-/// Name keys must be unique per folder; exposed for tests.
-pub fn has_duplicate_names(tree: &Tree) -> bool {
-    let mut seen = BTreeSet::new();
-    tree.iter()
-        .any(|(_, s)| !seen.insert((s.parent, name_key(&s.name))))
 }

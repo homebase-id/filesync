@@ -53,35 +53,30 @@ fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState
             Err(_) => return Ok(None),
         },
     };
-    let content = match (row.kind, row.hash) {
-        (NodeKind::Folder, _) => None,
-        (NodeKind::File, Some(hash)) => Some(FileContent {
-            hash,
-            size: row.fingerprint.size,
-            mtime_ms: row.fingerprint.mtime_ns.div_euclid(1_000_000),
-            // Where the OS has no x bit, keep the synced value.
-            executable: row.executable.unwrap_or_else(|| {
-                base.as_ref()
-                    .and_then(|b| b.state.content)
-                    .is_some_and(|c| c.executable)
-            }),
-        }),
-        (NodeKind::File, None) => {
-            // Unhashed: report the place, with a placeholder; the caller defers it.
-            return Ok(Some(NodeState {
-                parent,
-                name,
-                kind: NodeKind::File,
-                content: None,
-            }));
-        }
-    };
     Ok(Some(NodeState {
         parent,
         name,
         kind: row.kind,
-        content,
+        // An unhashed file is reported without content; the caller defers it.
+        content: local_content(row, base.as_ref()),
     }))
+}
+
+/// The synced content of a local file: `None` for folders and files not hashed yet. Where the
+/// OS has no x bit, the base's value is kept.
+pub fn local_content(row: &LocalRow, base: Option<&BaseRow>) -> Option<FileContent> {
+    if row.kind != NodeKind::File {
+        return None;
+    }
+    Some(FileContent {
+        hash: row.hash?,
+        size: row.fingerprint.size,
+        mtime_ms: row.fingerprint.mtime_ns.div_euclid(1_000_000),
+        executable: row.executable.unwrap_or_else(|| {
+            base.and_then(|b| b.state.content)
+                .is_some_and(|c| c.executable)
+        }),
+    })
 }
 
 /// Where a parked node really belongs: its current folder, under the name it had before it

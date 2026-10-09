@@ -59,6 +59,14 @@ pub struct Fingerprint {
     pub file_id: FileId,
 }
 
+impl Fingerprint {
+    /// Whether `meta` still shows the bytes this fingerprint was taken of, after a rename:
+    /// size and mtime agree. A rename changes ctime on most systems, so ctime can't count.
+    pub fn same_after_rename(&self, meta: &LocalMeta) -> bool {
+        self.size == meta.size && self.mtime_ns == meta.mtime_ns
+    }
+}
+
 /// Reads the metadata of `path` itself (a symlink is reported as a symlink).
 pub fn stat(path: &Path) -> io::Result<LocalMeta> {
     imp::stat(path)

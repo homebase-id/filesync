@@ -27,9 +27,9 @@ use hbsync_state::{BaseRow, LocalRow, MirrorFile, MirrorRow, StateDb, StateError
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind};
 
-use crate::reconcile::Op;
+use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs};
-use crate::view;
+use crate::{feed, view};
 
 /// Where the executor works.
 #[derive(Debug, Clone)]
@@ -82,11 +82,15 @@ enum Outcome {
     Skip(String),
 }
 
+/// A DB error inside an operation is retried like any transient failure.
 impl From<StateError> for Outcome {
     fn from(e: StateError) -> Self {
         Outcome::Retry(e.to_string())
     }
 }
+
+/// An operation's result. `Err` ends it early: a guard that stopped it, or a DB error.
+type Step<T = Outcome> = Result<T, Outcome>;
 
 pub struct Executor<'a> {
     db: &'a mut StateDb,
@@ -173,27 +177,71 @@ impl<'a> Executor<'a> {
                 self.flush(&mut batch)?;
                 continue;
             };
+            if let Err(wait) = self.ready(&op) {
+                self.handle(op, attempts, wait)?;
+                continue;
+            }
             if is_transfer(&op) {
                 // Transfers are collected and run together on the worker pool.
                 match self.prepare(&op) {
-                    Ok(Ok((job, ctx))) => batch.push(Prepared {
+                    Ok((job, ctx)) => batch.push(Prepared {
                         op,
                         attempts,
                         job,
                         ctx,
                     }),
-                    Ok(Err(outcome)) => self.handle(op, attempts, outcome)?,
-                    Err(e) => self.handle(op, attempts, Outcome::from(e))?,
+                    Err(outcome) => self.handle(op, attempts, outcome)?,
                 }
                 continue;
             }
             if !batch.is_empty() {
                 self.flush(&mut batch)?;
             }
+            if let Op::Settle { node } = op {
+                self.settle_run(node)?;
+                continue;
+            }
             let outcome = self.execute(&op);
             self.handle(op, attempts, outcome)?;
         }
         Ok(self.report)
+    }
+
+    /// Settles `first` and the run of `Settle` ops after it (the plan puts them last) in
+    /// one transaction: they need no disk or network work, and a commit per node would cost an
+    /// fsync each.
+    fn settle_run(&mut self, first: NodeId) -> Result<(), StateError> {
+        const CHUNK: usize = 1000;
+        let mut nodes = vec![first];
+        while nodes.len() < CHUNK
+            && let Some((Op::Settle { node }, _)) = self.queue.front()
+        {
+            nodes.push(*node);
+            self.queue.pop_front();
+        }
+        let os = self.cfg.os;
+        self.db
+            .write(|s| nodes.iter().try_for_each(|n| settle(s, *n, os, false)))?;
+        self.report.done += nodes.len();
+        Ok(())
+    }
+
+    /// The server-side order guards ([`Op::requires`]), checked against the mirror.
+    fn ready(&mut self, op: &Op) -> Step<()> {
+        let met = match op.requires() {
+            None => true,
+            Some(Requirement::RemoteFolder(folder)) => {
+                self.db.read(|s| s.get_mirror(folder))?.is_some()
+            }
+            Some(Requirement::NoRemoteChildren(node)) => {
+                self.db.read(|s| s.mirror_children(node))?.is_empty()
+            }
+        };
+        if met {
+            Ok(())
+        } else {
+            Err(Outcome::Retry(format!("waiting for {:?}", op.requires())))
+        }
     }
 
     fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), StateError> {
@@ -238,7 +286,7 @@ impl<'a> Executor<'a> {
             let Some(p) = pending.remove(&job.node()) else {
                 return;
             };
-            let outcome = self.commit(p.ctx, result).unwrap_or_else(Outcome::from);
+            let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
             if let Err(e) = self.handle(p.op, p.attempts, outcome) {
                 first_error = Some(e);
             }
@@ -284,7 +332,7 @@ impl<'a> Executor<'a> {
             } => self.delete(*node, *file_id, *expected),
             Op::Settle { .. } => Ok(Outcome::Done),
         };
-        result.unwrap_or_else(Outcome::from)
+        result.unwrap_or_else(|o| o)
     }
 
     // ---- paths ----
@@ -295,36 +343,18 @@ impl<'a> Executor<'a> {
 
     /// The local path where (parent, name) lives. Retried while the parent isn't local yet;
     /// skipped if the name can't be spelled on this OS (it stays remote-only and is reported).
-    fn target_path(
-        &mut self,
-        parent: NodeId,
-        name: &str,
-    ) -> Result<Result<RelPath, Outcome>, StateError> {
+    fn target_path(&mut self, parent: NodeId, name: &str) -> Step<RelPath> {
         let parent_path = if parent.is_root() {
             RelPath::root()
         } else {
             match self.db.read(|s| s.local_by_node(parent))? {
                 Some(row) if row.kind == NodeKind::Folder => row.path,
-                _ => return Ok(Err(Outcome::Retry("parent not local yet".into()))),
+                _ => return Err(Outcome::Retry("parent not local yet".into())),
             }
         };
         let unspellable = |e: NameIssue| Outcome::Skip(format!("name can't be used here: {e}"));
-        let local = match to_local(name, self.cfg.os) {
-            Ok(local) => local,
-            Err(e) => return Ok(Err(unspellable(e))),
-        };
-        Ok(parent_path.join(&local.name).map_err(unspellable))
-    }
-
-    /// A node is created or moved remotely only into a folder the server has: one whose own
-    /// create failed (and is queued again) would otherwise get children pointing at nothing,
-    /// which other clients treat as orphans.
-    fn parent_on_server(&mut self, parent: NodeId) -> Result<Option<Outcome>, StateError> {
-        if parent.is_root() || self.db.read(|s| s.get_mirror(parent))?.is_some() {
-            Ok(None)
-        } else {
-            Ok(Some(Outcome::Retry("parent not on the server yet".into())))
-        }
+        let local = to_local(name, self.cfg.os).map_err(unspellable)?;
+        parent_path.join(&local.name).map_err(unspellable)
     }
 
     /// Whether the item on disk still matches its row.
@@ -372,17 +402,10 @@ impl<'a> Executor<'a> {
         if Some(occupant.node) == mover {
             return Ok(true);
         }
-        let leaving = self.queue.iter().any(|(op, _)| match op {
-            Op::LocalMove { node, .. }
-            | Op::LocalTrash { node, .. }
-            | Op::LocalFork { node, .. }
-            | Op::LocalDownload {
-                node,
-                replace: true,
-                ..
-            } => *node == occupant.node,
-            _ => false,
-        });
+        let leaving = self
+            .queue
+            .iter()
+            .any(|(op, _)| op.vacates_local_name() == Some(occupant.node));
         if !leaving || !self.on_disk_unchanged(&occupant) {
             return Ok(false);
         }
@@ -393,19 +416,18 @@ impl<'a> Executor<'a> {
         if ops::rename_noreplace(&self.abs(&occupant.path), &self.abs(&parked)).is_err() {
             return Ok(false);
         }
-        let original = occupant.path.clone();
+        let refreshed = self.renamed(&occupant, &parked);
         self.db.write(|s| {
-            s.move_local_subtree(&original, &parked)?;
-            s.put_parked(occupant.node, &original)
+            s.move_local_subtree(&occupant.path, &parked)?;
+            s.put_parked(occupant.node, &occupant.path)?;
+            refreshed.as_ref().map_or(Ok(()), |r| s.put_local(r))
         })?;
-        // The rename changed ctime: record it, or the occupant's own next step fails its check.
-        self.refresh_fingerprint(&parked, &occupant)?;
         Ok(true)
     }
 
     // ---- local operations ----
 
-    fn fork(&mut self, node: NodeId, new_node: NodeId, name: &str) -> Result<Outcome, StateError> {
+    fn fork(&mut self, node: NodeId, new_node: NodeId, name: &str) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Skip("gone".into()));
         };
@@ -434,24 +456,22 @@ impl<'a> Executor<'a> {
             return Ok(io_outcome(e));
         }
         let moved = LocalRow {
-            path: target.clone(),
             node: new_node,
-            ..row.clone()
+            ..self.renamed(&row, &target).unwrap_or_else(|| LocalRow {
+                path: target.clone(),
+                ..row.clone()
+            })
         };
         self.db
             .write(|s| complete_fork(s, node, &row.path, &moved))?;
-        self.refresh_fingerprint(&target, &moved)?;
         Ok(Outcome::Done)
     }
 
-    fn mkdir(&mut self, node: NodeId, parent: NodeId, name: &str) -> Result<Outcome, StateError> {
+    fn mkdir(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
             return Ok(Outcome::Skip("already local".into()));
         }
-        let target = match self.target_path(parent, name)? {
-            Ok(target) => target,
-            Err(outcome) => return Ok(outcome),
-        };
+        let target = self.target_path(parent, name)?;
         let abs = self.abs(&target);
         // Idempotent: a folder left by an interrupted run, unknown to the DB (under any case),
         // is adopted. One the DB tracks for another node is never taken over.
@@ -482,22 +502,14 @@ impl<'a> Executor<'a> {
         Ok(Outcome::Done)
     }
 
-    fn local_move(
-        &mut self,
-        node: NodeId,
-        parent: NodeId,
-        name: &str,
-    ) -> Result<Outcome, StateError> {
+    fn local_move(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Skip("gone".into()));
         };
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let target = match self.target_path(parent, name)? {
-            Ok(target) => target,
-            Err(outcome) => return Ok(outcome),
-        };
+        let target = self.target_path(parent, name)?;
         if target == row.path {
             self.db.write(|s| s.delete_parked(node))?;
             return Ok(Outcome::Done);
@@ -513,35 +525,23 @@ impl<'a> Executor<'a> {
         if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&target)) {
             return Ok(io_outcome(e));
         }
+        let refreshed = self.renamed(&row, &target);
         self.db.write(|s| {
             s.move_local_subtree(&row.path, &target)?;
-            s.delete_parked(node)
+            s.delete_parked(node)?;
+            refreshed.as_ref().map_or(Ok(()), |r| s.put_local(r))
         })?;
-        self.refresh_fingerprint(&target, &row)?;
         Ok(Outcome::Done)
     }
 
-    /// A rename changes ctime on most systems: record the new fingerprint, keeping the hash,
-    /// if size and mtime show the content didn't change.
-    fn refresh_fingerprint(&mut self, path: &RelPath, old: &LocalRow) -> Result<(), StateError> {
-        let Ok(meta) = hbsync_platform::stat(&self.abs(path)) else {
-            return Ok(());
-        };
-        let same = meta.size == old.fingerprint.size && meta.mtime_ns == old.fingerprint.mtime_ns;
-        if old.kind == NodeKind::File && same {
-            let row = LocalRow {
-                path: path.clone(),
-                fingerprint: meta.fingerprint(),
-                ..old.clone()
-            };
-            self.db.write(|s| s.put_local(&row))?;
-        }
-        Ok(())
+    /// See [`renamed_row`].
+    fn renamed(&self, old: &LocalRow, path: &RelPath) -> Option<LocalRow> {
+        renamed_row(&self.cfg.root, old, path)
     }
 
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
 
-    fn prepare(&mut self, op: &Op) -> Result<Result<(Job, Ctx), Outcome>, StateError> {
+    fn prepare(&mut self, op: &Op) -> Step<(Job, Ctx)> {
         match op {
             Op::LocalDownload {
                 node,
@@ -569,7 +569,7 @@ impl<'a> Executor<'a> {
                 name,
                 NodeKind::File,
             ),
-            _ => Ok(Err(Outcome::Skip("not a transfer".into()))),
+            _ => Err(Outcome::Skip("not a transfer".into())),
         }
     }
 
@@ -579,31 +579,28 @@ impl<'a> Executor<'a> {
         parent: NodeId,
         name: &str,
         replace: bool,
-    ) -> Result<Result<(Job, Ctx), Outcome>, StateError> {
+    ) -> Step<(Job, Ctx)> {
         let (mirror, current) = self
             .db
             .read(|s| Ok((s.get_mirror(node)?, s.local_by_node(node)?)))?;
         let Some(mirror) = mirror else {
-            return Ok(Err(Outcome::Skip("gone remotely".into())));
+            return Err(Outcome::Skip("gone remotely".into()));
         };
         let Some(file) = mirror.file else {
-            return Ok(Err(Outcome::Skip("not a file".into())));
+            return Err(Outcome::Skip("not a file".into()));
         };
         let Some(expected) = file.hash else {
-            return Ok(Err(Outcome::Skip("no remote hash".into())));
+            return Err(Outcome::Skip("no remote hash".into()));
         };
         if replace != current.is_some() {
-            return Ok(Err(Outcome::Skip("local presence changed".into())));
+            return Err(Outcome::Skip("local presence changed".into()));
         }
         if let Some(row) = &current
             && !self.on_disk_unchanged(row)
         {
-            return Ok(Err(rescan(&mut self.report, &row.path)));
+            return Err(rescan(&mut self.report, &row.path));
         }
-        let target = match self.target_path(parent, name)? {
-            Ok(target) => target,
-            Err(outcome) => return Ok(Err(outcome)),
-        };
+        let target = self.target_path(parent, name)?;
         let job = Job::Download {
             node,
             file_id: mirror.file_id,
@@ -615,14 +612,14 @@ impl<'a> Executor<'a> {
             key: download_key(node, &expected),
             local_algorithm: self.cfg.algorithm,
         };
-        Ok(Ok((
+        Ok((
             job,
             Ctx::Download {
                 node,
                 target,
                 current,
             },
-        )))
+        ))
     }
 
     fn prepare_upload(
@@ -632,7 +629,7 @@ impl<'a> Executor<'a> {
         parent: NodeId,
         name: &str,
         kind: NodeKind,
-    ) -> Result<Result<(Job, Ctx), Outcome>, StateError> {
+    ) -> Step<(Job, Ctx)> {
         let (row, mirror, base) = self.db.read(|s| {
             Ok((
                 s.local_by_node(node)?,
@@ -641,25 +638,16 @@ impl<'a> Executor<'a> {
             ))
         })?;
         let Some(row) = row else {
-            return Ok(Err(Outcome::Skip("gone locally".into())));
+            return Err(Outcome::Skip("gone locally".into()));
         };
         if !self.on_disk_unchanged(&row) {
-            return Ok(Err(rescan(&mut self.report, &row.path)));
+            return Err(rescan(&mut self.report, &row.path));
         }
-        if let Some(wait) = self.parent_on_server(parent)? {
-            return Ok(Err(wait));
-        }
-        // Where the OS has no x bit, the synced value is kept (as the view does).
-        let synced_executable = base
-            .and_then(|b| b.state.content)
-            .is_some_and(|c| c.executable);
-        let (mut content, payload) = match self.content_for(&row, name, synced_executable) {
-            Ok(x) => x,
-            Err(o) => return Ok(Err(o)),
+        let Some(file) = view::local_content(&row, base.as_ref()) else {
+            return Err(Outcome::Skip("not hashed yet".into()));
         };
-        let Some((hash, size)) = payload else {
-            return Ok(Err(Outcome::Skip("no payload".into())));
-        };
+        let mut content = NodeContent::file(name, file.mtime_ms, file.size, file.executable);
+        let (hash, size) = (file.hash, file.size);
         let path = self.abs(&row.path);
         let extra = mirror.as_ref().and_then(|m| m.content_extra.clone());
         let job = match existing {
@@ -676,14 +664,10 @@ impl<'a> Executor<'a> {
                 size,
             },
             Some((file_id, expected)) => {
-                if mirror.is_none() {
-                    return Ok(Err(Outcome::Skip("gone remotely".into())));
-                }
-                if let Some(extra) = &extra
-                    && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(extra)
-                {
-                    content.unknown = map;
-                }
+                let Some(mirror) = &mirror else {
+                    return Err(Outcome::Skip("gone remotely".into()));
+                };
+                content.unknown = feed::unknown_keys(mirror);
                 Job::Update {
                     node,
                     file_id,
@@ -696,7 +680,7 @@ impl<'a> Executor<'a> {
                 }
             }
         };
-        Ok(Ok((
+        Ok((
             job,
             Ctx::Upload {
                 node,
@@ -706,16 +690,16 @@ impl<'a> Executor<'a> {
                 hash,
                 extra,
             },
-        )))
+        ))
     }
 
-    fn commit(&mut self, ctx: Ctx, result: JobResult) -> Result<Outcome, StateError> {
+    fn commit(&mut self, ctx: Ctx, result: JobResult) -> Step {
         match (ctx, result) {
             (_, JobResult::Failed(e)) => Ok(match e {
                 JobError::Remote(RemoteError::AlreadyExists) => Outcome::Done, // an earlier try landed
                 JobError::Remote(r) => remote_outcome(r),
-                e if e.is_transient() => Outcome::Retry(e.to_string()),
-                e => Outcome::Skip(e.to_string()),
+                // Local file errors (locked, changed mid-read, short) are worth another try.
+                e => Outcome::Retry(e.to_string()),
             }),
             (
                 Ctx::Download {
@@ -753,7 +737,7 @@ impl<'a> Executor<'a> {
         current: Option<LocalRow>,
         done: hbsync_fileio::CompletedFile,
         local_hash: hbsync_types::ContentHash,
-    ) -> Result<Outcome, StateError> {
+    ) -> Step {
         if let Some(row) = &current
             && self.db.read(|s| s.local_by_node(node))?.as_ref() != Some(row)
         {
@@ -811,7 +795,7 @@ impl<'a> Executor<'a> {
         Ok(Outcome::Done)
     }
 
-    fn trash(&mut self, node: NodeId, expected: &[NodeId]) -> Result<Outcome, StateError> {
+    fn trash(&mut self, node: NodeId, expected: &[NodeId]) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Done); // already gone
         };
@@ -879,20 +863,11 @@ impl<'a> Executor<'a> {
 
     // ---- remote operations ----
 
-    fn create_folder(
-        &mut self,
-        node: NodeId,
-        parent: NodeId,
-        name: &str,
-        kind: NodeKind,
-    ) -> Result<Outcome, StateError> {
+    fn create_folder(&mut self, node: NodeId, parent: NodeId, name: &str, kind: NodeKind) -> Step {
         debug_assert_eq!(kind, NodeKind::Folder, "file creates run through flush");
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Skip("gone locally".into()));
         };
-        if let Some(wait) = self.parent_on_server(parent)? {
-            return Ok(wait);
-        }
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
@@ -924,22 +899,15 @@ impl<'a> Executor<'a> {
         expected: hbsync_types::VersionTag,
         parent: NodeId,
         name: &str,
-    ) -> Result<Outcome, StateError> {
+    ) -> Step {
         let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
             return Ok(Outcome::Skip("gone remotely".into()));
         };
-        if let Some(wait) = self.parent_on_server(parent)? {
-            return Ok(wait);
-        }
         let mut content = match (&mirror.kind, &mirror.file) {
             (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
             _ => NodeContent::folder(name),
         };
-        if let Some(extra) = &mirror.content_extra
-            && let Ok(serde_json::Value::Object(map)) = serde_json::from_str(extra)
-        {
-            content.unknown = map;
-        }
+        content.unknown = feed::unknown_keys(&mirror);
         let written = match self
             .remote
             .update(file_id, expected, parent, &content, None)
@@ -966,15 +934,7 @@ impl<'a> Executor<'a> {
         node: NodeId,
         file_id: hbsync_types::RemoteFileId,
         expected: hbsync_types::VersionTag,
-    ) -> Result<Outcome, StateError> {
-        // Children go first (the plan deletes bottom-up). One whose delete failed or was
-        // skipped, or that someone just added, keeps the folder: deleting it would leave the
-        // child live under a tombstone.
-        if !self.db.read(|s| s.mirror_children(node))?.is_empty() {
-            return Ok(Outcome::Retry(
-                "folder still has children on the server".into(),
-            ));
-        }
+    ) -> Step {
         match self.remote.delete(file_id, expected) {
             Ok(()) | Err(RemoteError::NotFound) => {}
             Err(e) => return Ok(remote_outcome(e)),
@@ -984,35 +944,6 @@ impl<'a> Executor<'a> {
             s.mark_dirty(node)
         })?;
         Ok(Outcome::Done)
-    }
-
-    /// The content JSON and payload (hash, size) to send for a local item. `synced_executable`
-    /// stands in for an x bit the local OS doesn't have.
-    fn content_for(
-        &self,
-        row: &LocalRow,
-        name: &str,
-        synced_executable: bool,
-    ) -> Result<(NodeContent, Option<(hbsync_types::ContentHash, u64)>), Outcome> {
-        match row.kind {
-            NodeKind::Folder => Ok((NodeContent::folder(name), None)),
-            NodeKind::File => {
-                let Some(hash) = row.hash else {
-                    return Err(Outcome::Skip("not hashed yet".into()));
-                };
-                let size = row.fingerprint.size;
-                let mtime_ms = row.fingerprint.mtime_ns.div_euclid(1_000_000);
-                Ok((
-                    NodeContent::file(
-                        name,
-                        mtime_ms,
-                        size,
-                        row.executable.unwrap_or(synced_executable),
-                    ),
-                    Some((hash, size)),
-                ))
-            }
-        }
     }
 
     // ---- settling ----
@@ -1054,48 +985,33 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
     let (Some(l), Some(r)) = (local.state.clone(), mirror.state()) else {
         return Ok(());
     };
-    let place = l.same_place(&r);
-    let content = match (&l.content, &r.content) {
-        (None, None) => true,
-        (Some(lc), Some(rc)) => {
-            content_hint || (lc.hash == rc.hash && lc.executable == rc.executable)
-        }
-        _ => false,
+    let agreed = Agreement::of(&l, &r, content_hint);
+    let Some(state) = agreed.settle(base.as_ref().map(|b| b.state.clone()), &r) else {
+        return Ok(());
     };
-    let local_name = local.row.path.name().map(str::to_owned);
-    let recorded = |name: &str| {
-        local_name
-            .clone()
-            .filter(|ln| to_remote(ln, os).as_deref() != Ok(name))
-    };
-    let remote_ref = mirror.remote_ref();
-    match base {
-        None if place && content => {
-            s.put_base(&BaseRow {
-                node,
-                local_name: recorded(&r.name),
-                local_hash: l.content.map(|c| c.hash),
-                state: r,
-                remote: remote_ref,
-                content_state: ContentState::Local,
-            })?;
-        }
-        None => {}
-        Some(mut b) => {
-            if place {
-                b.state.parent = r.parent;
-                b.local_name = recorded(&r.name);
-                b.state.name = r.name.clone();
-            }
-            if content {
-                b.state.content = r.content;
-                b.local_hash = l.content.map(|c| c.hash);
-            }
-            b.remote = remote_ref;
-            s.put_base(&b)?;
-        }
+    let mut row = base.unwrap_or(BaseRow {
+        node,
+        state: r.clone(),
+        remote: mirror.remote_ref(),
+        content_state: ContentState::Local,
+        local_name: None,
+        local_hash: None,
+    });
+    row.state = state;
+    row.remote = mirror.remote_ref();
+    if agreed.place {
+        // The local spelling is recorded when the name map wouldn't give it back.
+        row.local_name = local
+            .row
+            .path
+            .name()
+            .filter(|ln| to_remote(ln, os).as_deref() != Ok(r.name.as_str()))
+            .map(str::to_owned);
     }
-    Ok(())
+    if agreed.content {
+        row.local_hash = l.content.map(|c| c.hash);
+    }
+    s.put_base(&row)
 }
 
 fn mirror_from(
@@ -1124,7 +1040,8 @@ fn mirror_from(
     }
 }
 
-pub(crate) fn parked_name(node: NodeId) -> String {
+/// The temporary name a node is parked under (see [`Executor`]).
+pub fn parked_name(node: NodeId) -> String {
     format!(".hbsync-move-{}", node.0.simple())
 }
 
@@ -1147,6 +1064,18 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
         _ => Outcome::Skip(e.to_string()),
     }
+}
+
+/// A rename changes ctime on most systems: the row of a file renamed from `old` to `path`,
+/// with the new fingerprint and the old hash, if size and mtime show the content didn't
+/// change. `None` for folders, or if the content may have changed (a rescan decides then).
+fn renamed_row(root: &Path, old: &LocalRow, path: &RelPath) -> Option<LocalRow> {
+    let meta = hbsync_platform::stat(&path.to_native(root)).ok()?;
+    (old.kind == NodeKind::File && old.fingerprint.same_after_rename(&meta)).then(|| LocalRow {
+        path: path.clone(),
+        fingerprint: meta.fingerprint(),
+        ..old.clone()
+    })
 }
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
@@ -1175,13 +1104,13 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
         match (row, at_to) {
             (Some(row), Some(meta)) if from_gone && meta.file_id == row.fingerprint.file_id => {
                 // The bytes are the forked ones only if size and mtime agree; else rehash later.
-                let same =
-                    meta.size == row.fingerprint.size && meta.mtime_ns == row.fingerprint.mtime_ns;
                 let moved = LocalRow {
                     path: to.clone(),
                     node: new_node,
                     fingerprint: meta.fingerprint(),
-                    hash: if same { row.hash } else { None },
+                    hash: row
+                        .hash
+                        .filter(|_| row.fingerprint.same_after_rename(&meta)),
                     ..row
                 };
                 db.write(|s| complete_fork(s, node, &from, &moved))?;
@@ -1263,18 +1192,7 @@ pub fn unpark(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
             && db.read(|s| s.get_local(&original))?.is_none();
         if free && ops::rename_noreplace(&parked.to_native(root), &original.to_native(root)).is_ok()
         {
-            // Keep the fingerprint current: the rename changed ctime, not the content.
-            let refreshed = hbsync_platform::stat(&original.to_native(root))
-                .ok()
-                .and_then(|meta| {
-                    let same = meta.size == current.fingerprint.size
-                        && meta.mtime_ns == current.fingerprint.mtime_ns;
-                    (current.kind == NodeKind::File && same).then(|| LocalRow {
-                        path: original.clone(),
-                        fingerprint: meta.fingerprint(),
-                        ..current.clone()
-                    })
-                });
+            let refreshed = renamed_row(root, &current, &original);
             db.write(|s| {
                 s.move_local_subtree(&parked, &original)?;
                 if let Some(r) = &refreshed {
