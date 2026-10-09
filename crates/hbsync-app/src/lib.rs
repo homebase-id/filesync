@@ -1,14 +1,16 @@
 //! The product shell around the sync engine: where the client keeps its files, the config,
-//! the credentials, setting the app up on an identity, and (in later steps) the sync runner,
+//! the credentials, setting the app up on an identity, the sync runner, and (in later steps)
 //! the control socket and autostart.
 
 pub mod config;
 pub mod paths;
+pub mod runner;
 pub mod secrets;
 pub mod setup;
 
 pub use config::{Config, ConfigError, MassDelete, Root};
 pub use paths::{NoHome, Paths};
+pub use runner::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
 pub use secrets::{CredentialError, CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -56,6 +56,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 pub struct Notifier {
     stop: Arc<AtomicBool>,
+    reconnect: Arc<AtomicBool>,
 }
 
 impl Notifier {
@@ -63,12 +64,20 @@ impl Notifier {
     /// events go to `events` until it is closed or the notifier dropped.
     pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
+        let reconnect = Arc::new(AtomicBool::new(false));
+        let (flag, kick) = (stop.clone(), reconnect.clone());
         // Without a thread there are no hints; the sync loop's poll still catches up.
         let _ = std::thread::Builder::new()
             .name("hbsync-notify".into())
-            .spawn(move || run(&client, drive, &events, &flag));
-        Notifier { stop }
+            .spawn(move || run(&client, drive, &events, &flag, &kick));
+        Notifier { stop, reconnect }
+    }
+
+    /// Drops the connection and connects again at once, without waiting out a backoff: after
+    /// the machine woke up or the network changed, the old connection is most likely dead
+    /// but would take a while to look it.
+    pub fn reconnect(&self) {
+        self.reconnect.store(true, Ordering::Relaxed);
     }
 }
 
@@ -78,17 +87,28 @@ impl Drop for Notifier {
     }
 }
 
-fn run(client: &Client, drive: TargetDrive, events: &Sender<Event>, stop: &AtomicBool) {
-    let mut backoff = Duration::from_secs(1);
+fn run(
+    client: &Client,
+    drive: TargetDrive,
+    events: &Sender<Event>,
+    stop: &AtomicBool,
+    reconnect: &AtomicBool,
+) {
+    const FIRST: Duration = Duration::from_secs(1);
+    let mut backoff = FIRST;
     while !stop.load(Ordering::Relaxed) {
         let mut connected = false;
-        let result = session(client, drive, events, stop, &mut connected);
+        let result = session(client, drive, events, stop, reconnect, &mut connected);
         if connected {
-            backoff = Duration::from_secs(1);
+            backoff = FIRST;
         }
         let Err(why) = result else {
             return; // stopped, or nobody listens any more
         };
+        if reconnect.swap(false, Ordering::Relaxed) {
+            backoff = FIRST;
+            continue;
+        }
         if events.send(Event::Lost(why)).is_err() {
             return;
         }
@@ -96,10 +116,17 @@ fn run(client: &Client, drive: TargetDrive, events: &Sender<Event>, stop: &Atomi
         let jitter = random::<1>().map_or(0, |b| b[0]) as f64 / 255.0;
         let wait = backoff.mul_f64(0.8 + 0.4 * jitter);
         let until = Instant::now() + wait;
-        while Instant::now() < until && !stop.load(Ordering::Relaxed) {
+        while Instant::now() < until
+            && !stop.load(Ordering::Relaxed)
+            && !reconnect.load(Ordering::Relaxed)
+        {
             std::thread::sleep(TICK.min(until.saturating_duration_since(Instant::now())));
         }
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        backoff = if reconnect.swap(false, Ordering::Relaxed) {
+            FIRST
+        } else {
+            (backoff * 2).min(MAX_BACKOFF)
+        };
     }
 }
 
@@ -111,6 +138,7 @@ fn session(
     drive: TargetDrive,
     events: &Sender<Event>,
     stop: &AtomicBool,
+    reconnect: &AtomicBool,
     connected: &mut bool,
 ) -> Result<(), String> {
     let mut socket = connect(client)?;
@@ -130,6 +158,10 @@ fn session(
         if stop.load(Ordering::Relaxed) {
             let _ = socket.close(None);
             return Ok(());
+        }
+        if reconnect.load(Ordering::Relaxed) {
+            let _ = socket.close(None);
+            return Err("reconnecting on request".into());
         }
         match socket.read() {
             Ok(Message::Text(text)) => {

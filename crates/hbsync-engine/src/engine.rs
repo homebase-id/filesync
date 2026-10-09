@@ -253,6 +253,28 @@ impl Engine {
         })
     }
 
+    /// Where `node` is, for people: its local path, or else the path it had when last synced
+    /// (a node deleted here). `None` for a node this device never had.
+    pub fn path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
+        self.db.read(|s| {
+            if let Some(row) = s.local_by_node(node)? {
+                return Ok(Some(row.path.as_str().to_owned()));
+            }
+            let mut names = Vec::new();
+            let mut at = node;
+            // Bounded: the base is a tree, but a damaged DB must not hang the status.
+            while !at.is_root() && names.len() < 256 {
+                let Some(base) = s.get_base(at)? else {
+                    return Ok(None);
+                };
+                names.push(base.local_name.unwrap_or(base.state.name));
+                at = base.state.parent;
+            }
+            names.reverse();
+            Ok(Some(names.join("/")))
+        })
+    }
+
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
         Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)

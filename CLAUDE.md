@@ -11,7 +11,7 @@ sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebas
 WebSocket; two folders converge through a live identity. Facts and server bugs:
 `docs/spec/homebase-api-notes.md`. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
-syntax, read at start-up); an ignored item is kept on its device only. Dev tools (`hbsync-dev`), credentials in
+syntax, picked up within a minute of an edit); an ignored item is kept on its device only. Dev tools (`hbsync-dev`), credentials in
 `~/.config/hbsync/dev/<identity>.json`:
 - `cargo run -p hbsync-dev --bin hbsync-register -- <identity> [--browser firefox]`
 - `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]
@@ -74,5 +74,5 @@ the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-wind
 | `hbsync-engine` | tree, pure reconciler, view builder, executor, transfer pool, adoption, sync loop |
 | `hbsync-sim` | deterministic multi-client simulator with convergence/no-loss properties |
 | `hbsync-homebase` | YouAuth app registration (P-384 ECDH, HKDF), the AES-CBC shared-secret envelope, a V2 API client, the Filesync app definition, the drive as a `Remote`, the notification WebSocket |
-| `hbsync-app` | the product shell: paths, `config.toml`, credentials in the OS keychain (a 0600 file when there is none), setting the app up on an identity (later: the sync runner, the control socket, autostart) |
+| `hbsync-app` | the product shell: paths, `config.toml`, credentials in the OS keychain (a 0600 file when there is none), setting the app up on an identity, the sync runner (the daemon's loop: pause, sync now, confirming held deletes, sleep, live rule changes) (later: the control socket, autostart) |
 | `hbsync-dev` | development tools: `hbsync-register`, `hbsync-sync` (a folder synced with a live identity), the live end-to-end test |
