@@ -66,6 +66,21 @@ impl Credentials {
         }
     }
 
+    /// Where development tools keep the credentials of `identity`:
+    /// `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json` (default `~/.config`).
+    pub fn dev_path(identity: &str) -> Result<std::path::PathBuf, HomebaseError> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+            })
+            .ok_or_else(|| HomebaseError::Protocol("no config folder (HOME unset)".into()))?;
+        Ok(base
+            .join("hbsync")
+            .join("dev")
+            .join(format!("{identity}.json")))
+    }
+
     /// Saves to `path`, readable by this user only (on Unix). Development storage: the product
     /// keeps these in the OS keychain.
     pub fn save(&self, path: &Path) -> Result<(), HomebaseError> {

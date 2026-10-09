@@ -9,11 +9,10 @@
 //! and its drive), keeps the credentials in `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json`
 //! (mode 0600), and is safe to run again: a saved registration is reused.
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use hbsync_homebase::{Client, Credentials, HomebaseError, app};
+use hbsync_homebase::{Client, Credentials, app};
 use serde_json::{Value, json};
 
 fn main() {
@@ -33,7 +32,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .position(|a| a == "--browser")
         .and_then(|i| args.get(i + 1))
         .cloned();
-    let path = credentials_path(&identity)?;
+    let path = Credentials::dev_path(&identity)?;
 
     let mut creds = match Credentials::load(&path)? {
         Some(c) => {
@@ -111,17 +110,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let files = page["searchResults"].as_array().map_or(0, Vec::len);
     println!("Query on the sync drive works: {files} file(s) on the first page.");
     Ok(())
-}
-
-fn credentials_path(identity: &str) -> Result<PathBuf, HomebaseError> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .ok_or_else(|| HomebaseError::Protocol("no config folder (HOME unset)".into()))?;
-    Ok(base
-        .join("hbsync")
-        .join("dev")
-        .join(format!("{identity}.json")))
 }
 
 fn hostname() -> String {

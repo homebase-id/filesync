@@ -73,6 +73,11 @@ impl Client {
         &self.identity
     }
 
+    /// The shared secret: the key of every envelope and of upload metadata.
+    pub(crate) fn key(&self) -> &Key {
+        &self.key
+    }
+
     /// `GET {path}` with `query` encrypted into `ss`.
     pub fn get<T: DeserializeOwned>(
         &self,
