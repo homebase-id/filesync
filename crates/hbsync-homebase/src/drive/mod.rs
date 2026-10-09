@@ -6,7 +6,6 @@
 
 use std::io::Write;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteError, RemoteHeader, Result, Upload};
 use hbsync_types::schema::PAYLOAD_KEY;
@@ -46,8 +45,6 @@ pub struct HomebaseRemote {
     drive: TargetDrive,
     /// Feed rows that aren't usable sync nodes, with the reason; for the caller to report.
     skipped: Mutex<Vec<String>>,
-    /// Feed queries so far; varies the page size (see [`HomebaseRemote::changes`]).
-    queries: AtomicU64,
 }
 
 #[derive(Deserialize)]
@@ -85,7 +82,6 @@ impl HomebaseRemote {
             client,
             drive: answer.target_drive,
             skipped: Mutex::new(Vec::new()),
-            queries: AtomicU64::new(0),
         })
     }
 
@@ -178,15 +174,7 @@ fn transfer_iv() -> Result<[u8; 16], HomebaseError> {
 
 impl Remote for HomebaseRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
-        // odin-core caches query results for two hours and drops them only when the drive is
-        // written (`QueryBatchCached`). A feed query in the same millisecond as a write is
-        // cached without that row (rows of the current millisecond are held back), and the
-        // same query would then miss it until the next write. The page size is part of the
-        // cache key: never ask the same page size twice in a row, so the next query is fresh.
-        // odin-core #1905, tracked in filesync #1.
-        let n = self.queries.fetch_add(1, Ordering::Relaxed);
-        let limit = limit.max(1);
-        let size = limit - (n as usize % limit.min(16));
+        let size = limit.max(1);
         let page: wire::QueryBatchResponse = self
             .client
             .post(

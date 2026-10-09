@@ -176,16 +176,17 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   client reads in chunks and refuses payloads of 2 GiB or more until #1893 lands.
 - App clients can't read the drive's `requirePayloadHashes` **[verified]** (`ClientDriveData`
   has no such field); the client always sends hashes.
-- **The feed can hide a write until the next one** **[verified, tried]**: `QueryBatchCached`
-  caches query-batch results for two hours (`AbstractTableCaching.DefaultTtl`) and drops
-  them only when the drive is written. An `anyChangeDate` result also depends on the clock
-  (`modified < now`). A query in the same millisecond as a write is therefore cached without
-  that row, and every identical query (same cursor, same page size) misses it until the next
-  write to the drive. On frodo, about one write in twelve stayed invisible to a polling
-  client. Workaround in the client: never send the same page size twice in a row (it is
-  part of the cache key). Contract scenario `every_write_shows_up_promptly`. Filed as
-  odin-core #1905 (fix: don't cache an answer that left out rows with `modified >= now`);
-  tracked in filesync #1.
+- **The feed could hide a write until the next one** (fixed in odin-core #1906, 2026-10-09)
+  **[verified, tried]**: `QueryBatchCached` cached query-batch results until the next write
+  to the drive, and an `anyChangeDate` result depends on the clock (`modified < now`). A
+  query in the same millisecond as a write was cached without that row, and identical
+  queries missed it until the next write. It took a query landing within the write's
+  millisecond, so it showed on a local dev host (about one write in twelve on frodo, polling
+  right after the WebSocket wake-up) more than over a real network. Since the fix, such an
+  answer isn't cached; an oldest-first page can come back short or empty with
+  `hasMoreRows: true`, and the next query returns the held-back rows. The contract scenario
+  `every_write_shows_up_promptly` passes without any client workaround (odin-core #1905,
+  filesync #1).
 - **A content update of a deleted file is a 500** **[verified, tried]**: a PATCH with an
   `appendOrOverwrite` payload on a tombstone throws a NullReferenceException in
   `DriveStorageServiceBase.UpdateBatchCopyFilesAsync` / `ProcessAppendOrOverwrite` (the
