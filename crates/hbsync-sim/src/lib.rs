@@ -83,6 +83,11 @@ pub enum Event {
     Step {
         client: usize,
     },
+    /// The user confirms the deletes the mass-delete guard held in the client's last plan
+    /// (with [`Sim::guard`] set).
+    Confirm {
+        client: usize,
+    },
 }
 
 /// Names drawn from a small pool so clashes (including case-only ones) are common. The last
@@ -145,6 +150,10 @@ struct Client {
     /// by the client's own remote writes: what the executor's mirror holds.
     planned_remote: Tree,
     filter: Arc<Filter>,
+    /// The nodes of the deletes the guard held in the last plan.
+    held: Vec<NodeId>,
+    /// The nodes whose deletes the user confirmed, until no delete is pending for them.
+    confirmed: HashSet<NodeId>,
 }
 
 /// The simulation.
@@ -166,6 +175,11 @@ pub struct Sim {
     /// Record every plan and skipped operation in `trace` (debugging).
     pub verbose: bool,
     pub trace: Vec<String>,
+    /// The mass-delete guard, on with this minimum (the fraction 0), else off. With it on,
+    /// [`Sim::quiesce`] confirms what is held, as a user eventually does.
+    pub guard: Option<usize>,
+    /// The first plan that deleted more than the guard allows without a confirmation.
+    unguarded: Option<String>,
 }
 
 impl Sim {
@@ -187,6 +201,8 @@ impl Sim {
                     } else {
                         Filter::default()
                     }),
+                    held: Vec::new(),
+                    confirmed: HashSet::new(),
                 })
                 .collect(),
             next_blob: 0,
@@ -198,6 +214,8 @@ impl Sim {
             released: 0,
             verbose: false,
             trace: Vec::new(),
+            guard: None,
+            unguarded: None,
         }
     }
 
@@ -232,6 +250,12 @@ impl Sim {
                 Event::Step { client } => {
                     let c = client % self.clients.len();
                     self.step(c);
+                }
+                Event::Confirm { client } => {
+                    let c = client % self.clients.len();
+                    let client = &mut self.clients[c];
+                    let held = std::mem::take(&mut client.held);
+                    client.confirmed.extend(held);
                 }
             }
         }
@@ -386,15 +410,55 @@ impl Sim {
             .chain(client.local.ids())
             .chain(remote.ids())
             .collect();
+        let confirmed = client.confirmed.clone();
+        let synced_files = client
+            .base
+            .iter()
+            .filter(|(_, s)| s.kind == NodeKind::File)
+            .count();
         let opts = Options {
             device: client.name.clone(),
             date: "2026-10-08".into(),
-            allow_mass_delete: true,
-            synced_files: 0,
+            allow_mass_delete: self.guard.is_none(),
+            mass_delete_min: self.guard.unwrap_or_default(),
+            mass_delete_fraction: 0.0,
+            synced_files,
+            confirmed: Arc::new(confirmed.clone()),
             filter: Arc::clone(&client.filter),
             ..Options::default()
         };
         let plan = reconcile(&input, &opts);
+        // The guard's rule, checked independently: no plan deletes more files on a side than
+        // the limit (or every file) without the user's confirmation.
+        if let Some(min) = self.guard
+            && self.unguarded.is_none()
+        {
+            let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
+            let files_under = |tree: &Tree, node: NodeId| {
+                tree.subtree(node)
+                    .into_iter()
+                    .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
+                    .count()
+            };
+            let (mut deleted, mut trashed) = (0, 0);
+            for op in plan.ops.iter().filter(|op| !confirmed.contains(&op.node())) {
+                match op {
+                    Op::RemoteDelete { node, .. }
+                        if remote.get(*node).is_some_and(|s| s.kind == NodeKind::File) =>
+                    {
+                        deleted += 1;
+                    }
+                    _ => trashed += op.trashes().map_or(0, |n| files_under(&input.local, n)),
+                }
+            }
+            if trips(deleted) || trips(trashed) {
+                self.unguarded = Some(format!(
+                    "{} deletes {deleted} remote and trashes {trashed} local files unconfirmed \
+                     (limit {min}, {synced_files} synced): {:?}",
+                    client.name, plan.ops
+                ));
+            }
+        }
         if self.verbose && !plan.ops.is_empty() {
             self.trace
                 .push(format!("plan {}: {:?}", client.name, plan.ops));
@@ -407,6 +471,10 @@ impl Sim {
         }
         self.conflicts += plan.conflicts.len();
         let client = &mut self.clients[c];
+        // A confirmation lasts while the plan deletes its node.
+        let deleting: HashSet<NodeId> = plan.ops.iter().filter_map(Op::deletes).collect();
+        client.confirmed = confirmed.intersection(&deleting).copied().collect();
+        client.held = plan.held.iter().map(Op::node).collect();
         client.plan = plan.ops.into_iter().map(|op| (op, 0)).collect();
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
@@ -902,7 +970,13 @@ impl Sim {
             let mut any_planned = false;
             for c in 0..self.clients.len() {
                 self.plan(c);
-                any_planned |= !self.clients[c].plan.is_empty();
+                if self.guard.is_some() && !self.clients[c].held.is_empty() {
+                    // The user looks at what is held and confirms it.
+                    self.run(&[Event::Confirm { client: c }]);
+                    self.plan(c);
+                }
+                // Still held after a confirmation would be a bug: keep going, and fail.
+                any_planned |= !self.clients[c].plan.is_empty() || !self.clients[c].held.is_empty();
                 while self.step(c) {}
             }
             if !any_planned || (self.ops_executed == before && self.all_settled()) {
@@ -915,7 +989,7 @@ impl Sim {
     fn all_settled(&mut self) -> bool {
         (0..self.clients.len()).all(|c| {
             self.plan(c);
-            self.clients[c].plan.is_empty()
+            self.clients[c].plan.is_empty() && self.clients[c].held.is_empty()
         })
     }
 
@@ -924,6 +998,9 @@ impl Sim {
     pub fn check(&self) -> Result<(), String> {
         if let Some(op) = &self.server.dangling {
             return Err(format!("created under a folder the server never had: {op}"));
+        }
+        if let Some(plan) = &self.unguarded {
+            return Err(format!("a mass delete went through unconfirmed: {plan}"));
         }
         let server = self.server.tree();
         let mut kept_here: BTreeSet<u64> = BTreeSet::new();

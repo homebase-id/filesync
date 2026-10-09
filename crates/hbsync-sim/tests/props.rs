@@ -23,9 +23,24 @@ fn event(clients: usize) -> impl Strategy<Value = Event> {
     ]
 }
 
+/// Events with the user confirming held deletes now and then.
+fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
+    prop_oneof![
+        8 => event(clients),
+        1 => (0..clients).prop_map(|client| Event::Confirm { client }),
+    ]
+}
+
 fn run(clients: usize, events: &[Event]) -> Result<(), TestCaseError> {
+    run_with(clients, None, events)
+}
+
+/// Runs `events` with the mass-delete guard at `guard` (its minimum), then lets every client
+/// settle (confirming what the guard holds, with the guard on) and checks the outcome.
+fn run_with(clients: usize, guard: Option<usize>, events: &[Event]) -> Result<(), TestCaseError> {
     let outcome = |verbose: bool| {
         let mut sim = Sim::new(clients);
+        sim.guard = guard;
         sim.verbose = verbose;
         sim.run(events);
         let result = if sim.quiesce(30) {
@@ -63,6 +78,17 @@ proptest! {
     #[test]
     fn three_clients_converge_without_loss(events in proptest::collection::vec(event(3), 0..120)) {
         run(3, &events)?;
+    }
+
+    /// With the mass-delete guard on (a low limit, so it trips often), no plan deletes more
+    /// than it allows unless the user confirmed those very deletes, and once the user confirms
+    /// what is held, the clients still converge without loss.
+    #[test]
+    fn guarded_clients_delete_only_what_was_confirmed(
+        events in proptest::collection::vec(guarded_event(2), 0..80),
+        min in 1usize..3,
+    ) {
+        run_with(2, Some(min), &events)?;
     }
 }
 
@@ -763,4 +789,41 @@ fn regression_forget_of_a_cycle_of_bases() {
     run(3, &events)
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// A device confirms trashing a folder another device moved into a name it ignores. The drive
+/// keeps the folder, so the confirmation must not be dropped as "nothing to delete any more"
+/// before the trash ran: it would stay held for good.
+#[test]
+fn regression_confirmed_trash_of_a_folder_moved_into_an_ignored_name() {
+    use Action::*;
+    use Event::*;
+    let act = |client, action| Act { client, action };
+    let events = [
+        act(1, ToggleIgnore),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        act(0, ToggleIgnore),
+        act(0, CreateJunk { parent: 0 }),
+        act(0, ToggleIgnore),
+        act(0, ToggleIgnore),
+        Plan { client: 0 },
+        Step { client: 0 },
+        act(0, CreateJunk { parent: 0 }),
+        act(0, CreateFile { parent: 0, name: 1 }),
+        Plan { client: 1 },
+        act(0, CreateFile { parent: 4, name: 0 }),
+        Step { client: 1 },
+        act(
+            1,
+            Move {
+                node: 0,
+                parent: 1,
+                name: 13,
+            },
+        ),
+    ];
+    if let Err(e) = run_with(2, Some(1), &events) {
+        panic!("{e}");
+    }
 }

@@ -318,8 +318,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         let confirm = Control::ConfirmDeletes {
-            here: 60,
-            remotely: 0,
+            token: "0123456789abcdef-60".into(),
         };
         assert_eq!(
             call(&paths, &Request::new(Ask::Control(confirm.clone())))?,
@@ -333,6 +332,23 @@ mod tests {
             ask: Ask::Status,
         };
         assert!(matches!(call(&paths, &old)?, Reply::Refused(why) if why.contains("restart")));
+        Ok(())
+    }
+
+    /// The wire format docs/spec/daemon.md documents for protocol 1.
+    #[test]
+    fn requests_look_as_documented() -> Result<(), serde_json::Error> {
+        let json = |ask| serde_json::to_string(&Request::new(ask));
+        assert_eq!(json(Ask::Status)?, r#"{"protocol":1,"ask":"status"}"#);
+        assert_eq!(
+            json(Ask::Control(Control::SyncNow))?,
+            r#"{"protocol":1,"ask":{"control":"sync_now"}}"#
+        );
+        assert_eq!(
+            json(Ask::Control(Control::ConfirmDeletes { token: "t".into() }))?,
+            r#"{"protocol":1,"ask":{"control":{"confirm_deletes":{"token":"t"}}}}"#
+        );
+        assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);
         Ok(())
     }
 

@@ -16,12 +16,10 @@ use hbsync_homebase::{Client, HomebaseError};
 use crate::ipc::{self, Ask, Reply, Request};
 use crate::lock::{InstanceLock, LockError};
 use crate::runner::{
-    Control, Handle, HintSource, Runner, RunnerConfig, RunnerError, State, Status,
+    Control, FIRST_BACKOFF, Handle, HintSource, MAX_BACKOFF, Runner, RunnerConfig, RunnerError,
+    State, Status, lock,
 };
 use crate::{Config, ConfigError, CredentialError, CredentialStore, Location, Paths, Root};
-
-const FIRST_BACKOFF: Duration = Duration::from_secs(5);
-const MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -44,7 +42,12 @@ pub enum DaemonError {
 
 /// Before the runner starts, the control socket still answers.
 enum Phase {
-    Connecting { error: Option<String> },
+    /// Waiting for the credentials (a locked keychain) or the identity.
+    Waiting {
+        state: State,
+        error: Option<String>,
+        warning: Option<String>,
+    },
     Running(Handle),
 }
 
@@ -57,35 +60,30 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         .root()?
         .ok_or_else(|| DaemonError::NotSetUp("no folder to sync".into()))?
         .clone();
-    let store = CredentialStore::open(paths);
-    let (creds, location) = store
-        .load(&root.identity)?
-        .ok_or_else(|| DaemonError::NotSetUp(format!("no credentials for {}", root.identity)))?;
-    let warning = match location {
-        Location::Keychain => None,
-        Location::File { path, why } => {
-            tracing::warn!("credentials in {} (no keychain: {why})", path.display());
-            Some(format!("kept in {} (no keychain: {why})", path.display()))
-        }
-    };
 
-    let phase = Arc::new(Mutex::new(Phase::Connecting { error: None }));
+    let phase = Arc::new(Mutex::new(Phase::Waiting {
+        state: State::Starting,
+        error: None,
+        warning: None,
+    }));
+    let set = |state: State, error: String, warning: &Option<String>| {
+        *lock(&phase) = Phase::Waiting {
+            state,
+            error: Some(error),
+            warning: warning.clone(),
+        };
+    };
     let listener = ipc::listen(paths).map_err(DaemonError::Ipc)?;
     {
-        let (phase, stop, root, warning, paths) = (
+        let (phase, stop, root, paths) = (
             Arc::clone(&phase),
             Arc::clone(&stop),
             root.clone(),
-            warning.clone(),
             paths.clone(),
         );
         std::thread::Builder::new()
             .name("hbsync-control".into())
-            .spawn(move || {
-                ipc::serve(listener, move |r| {
-                    answer(r, &phase, &stop, &root, warning.as_deref(), &paths)
-                })
-            })
+            .spawn(move || ipc::serve(listener, move |r| answer(r, &phase, &stop, &root, &paths)))
             .map_err(DaemonError::Ipc)?;
     }
     tracing::info!(
@@ -95,24 +93,66 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         root.folder.display()
     );
 
+    // The credentials: a keychain locked at logon is waited for, not taken for "not set up".
+    let store = CredentialStore::open(paths);
+    let mut backoff = FIRST_BACKOFF;
+    let (creds, location) = loop {
+        match store.load(&root.identity) {
+            Ok(Some(found)) => break found,
+            Ok(None) => {
+                return Err(DaemonError::NotSetUp(format!(
+                    "no credentials for {}",
+                    root.identity
+                )));
+            }
+            Err(CredentialError::Keychain(why)) => {
+                tracing::warn!("can't read the keychain ({why}); trying again in {backoff:?}");
+                set(
+                    State::Failing,
+                    format!("can't read the keychain: {why}"),
+                    &None,
+                );
+                if wait(backoff, &stop) {
+                    return Ok(());
+                }
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let warning = match location {
+        Location::Keychain => None,
+        Location::File { path, why } => {
+            tracing::warn!("credentials in {} (no keychain: {why})", path.display());
+            Some(format!("kept in {} (no keychain: {why})", path.display()))
+        }
+    };
+    if let Phase::Waiting { warning: w, .. } = &mut *lock(&phase) {
+        w.clone_from(&warning);
+    }
+
     // Connect: finding the drive takes a request.
     let client = Client::new(&creds)?;
     let mut backoff = FIRST_BACKOFF;
     let remote = loop {
-        if stop.load(Ordering::Relaxed) {
-            return Ok(());
-        }
         match HomebaseRemote::connect(client.clone()) {
             Ok(r) => break Arc::new(r),
             Err(e) => {
+                // A refusal won't change until this computer is authorized again (which
+                // restarts the daemon): ask rarely.
+                let (state, wait_for) = match &e {
+                    HomebaseError::Denied(_) => (State::Denied, MAX_BACKOFF),
+                    HomebaseError::Network(_) => (State::Offline, backoff),
+                    _ => (State::Failing, backoff),
+                };
                 tracing::warn!(
-                    "can't reach {} ({e}); trying again in {backoff:?}",
+                    "can't connect to {} ({e}); trying again in {wait_for:?}",
                     root.identity
                 );
-                *lock(&phase) = Phase::Connecting {
-                    error: Some(e.to_string()),
-                };
-                wait(backoff, &stop);
+                set(state, e.to_string(), &warning);
+                if wait(wait_for, &stop) {
+                    return Ok(());
+                }
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
@@ -122,6 +162,8 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         notifier: Some(Notifier::spawn(client, remote.drive(), tx)),
         events: rx,
     };
+    // The config again: a pause may have come in meanwhile.
+    let config = Config::load(&paths.config_file())?.unwrap_or(config);
     let mut cfg = RunnerConfig::new(&root.folder, &root.identity, &config.device_name());
     cfg.mass_delete = config.mass_delete;
     cfg.paused = config.paused;
@@ -145,19 +187,26 @@ fn answer(
     phase: &Mutex<Phase>,
     stop: &AtomicBool,
     root: &Root,
-    warning: Option<&str>,
     paths: &Paths,
 ) -> Reply {
     let phase = lock(phase);
     match (request.ask, &*phase) {
         (Ask::Status, Phase::Running(h)) => Reply::Status(Box::new(h.status())),
-        (Ask::Status, Phase::Connecting { error }) => {
+        (
+            Ask::Status,
+            Phase::Waiting {
+                state,
+                error,
+                warning,
+            },
+        ) => {
             let mut s = Status::new(&root.identity, &root.folder);
-            if error.is_some() {
-                s.state = State::Offline;
+            s.state = *state;
+            if Config::load(&paths.config_file()).is_ok_and(|c| c.is_some_and(|c| c.paused)) {
+                s.state = State::Paused;
             }
             s.error.clone_from(error);
-            s.credentials_warning = warning.map(str::to_owned);
+            s.credentials_warning.clone_from(warning);
             Reply::Status(Box::new(s))
         }
         (Ask::Control(Control::Stop), phase) => {
@@ -167,25 +216,33 @@ fn answer(
             }
             Reply::Done
         }
-        (Ask::Control(c), Phase::Running(h)) => {
-            // Pausing survives a restart.
-            let paused = match c {
-                Control::Pause => Some(true),
-                Control::Resume => Some(false),
-                _ => None,
-            };
-            if let Some(paused) = paused
-                && let Err(e) = remember_paused(paths, paused)
-            {
-                tracing::warn!("couldn't save the pause in the config: {e}");
+        (Ask::Control(Control::ConfirmDeletes { token }), Phase::Running(h))
+            if h.status().held_deletes.map(|held| held.token) != Some(token.clone()) =>
+        {
+            Reply::Refused(
+                "the held deletes changed since you looked: check them again with \
+                 `hbsync confirm-deletes`"
+                    .into(),
+            )
+        }
+        (Ask::Control(c @ (Control::Pause | Control::Resume)), phase) => {
+            // Pausing survives a restart, and is kept until the sync starts.
+            if let Err(e) = remember_paused(paths, c == Control::Pause) {
+                return Reply::Refused(format!("couldn't save the pause in the config: {e}"));
             }
+            match phase {
+                Phase::Running(h) if !h.send(c) => Reply::Refused("the sync has stopped".into()),
+                _ => Reply::Done,
+            }
+        }
+        (Ask::Control(c), Phase::Running(h)) => {
             if h.send(c) {
                 Reply::Done
             } else {
                 Reply::Refused("the sync has stopped".into())
             }
         }
-        (Ask::Control(_), Phase::Connecting { error }) => Reply::Refused(format!(
+        (Ask::Control(_), Phase::Waiting { error, .. }) => Reply::Refused(format!(
             "not connected to {} yet{}",
             root.identity,
             error.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
@@ -203,14 +260,11 @@ fn remember_paused(paths: &Paths, paused: bool) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Waits `time`, or less if `stop` is set meanwhile.
-fn wait(time: Duration, stop: &AtomicBool) {
+/// Waits `time`, or less if `stop` is set meanwhile. Returns whether it was.
+fn wait(time: Duration, stop: &AtomicBool) -> bool {
     let until = Instant::now() + time;
     while Instant::now() < until && !stop.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(200));
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
+    stop.load(Ordering::Relaxed)
 }

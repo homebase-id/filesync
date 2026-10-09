@@ -24,15 +24,17 @@ use hbsync_engine::feed::FeedError;
 use hbsync_engine::{Conflict, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
-use hbsync_local::{Filter, FilterError, IGNORE_FILE, LocalObserver, STATE_DIR, state_db_path};
+use hbsync_local::{Filter, FilterError, LocalObserver, STATE_DIR, state_db_path};
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{StateDb, StateError};
+use hbsync_types::NodeId;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
 
-const FIRST_BACKOFF: Duration = Duration::from_secs(5);
-const MAX_BACKOFF: Duration = Duration::from_secs(300);
+/// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
+pub(crate) const FIRST_BACKOFF: Duration = Duration::from_secs(5);
+pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// How long the loop waits for local changes before looking at everything else.
 const TICK: Duration = Duration::from_millis(250);
 /// A wall-clock gap this much longer than a tick means the machine slept.
@@ -102,16 +104,16 @@ impl RunnerConfig {
 
 /// Requests to the runner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Control {
     /// Sync now, without waiting out a backoff.
     SyncNow,
     Pause,
     Resume,
-    /// Let the held deletes through: (gone here, gone remotely) as the user saw them in
-    /// [`Status::held_deletes`]. More than that are held again.
+    /// Let the held deletes the user was shown through: `token` is
+    /// [`HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
     ConfirmDeletes {
-        here: u64,
-        remotely: u64,
+        token: String,
     },
     /// Stop the runner (between operations).
     Stop,
@@ -206,12 +208,27 @@ pub struct LastSync {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeldDeletes {
-    /// Files deleted here, to be deleted on the drive.
+    /// Items deleted here, to be deleted on the drive.
     pub here: u64,
-    /// Files deleted elsewhere, to be moved to the trash here.
+    /// Items deleted elsewhere, to be moved to the trash here.
     pub remotely: u64,
     /// Some of them.
     pub examples: Vec<String>,
+    /// Names exactly these deletes: a confirmation carries it back.
+    pub token: String,
+}
+
+/// The token of the held deletes of `nodes`: FNV-1a over their sorted ids.
+fn held_token(nodes: &[NodeId]) -> String {
+    let mut sorted = nodes.to_vec();
+    sorted.sort();
+    let hash = sorted
+        .iter()
+        .flat_map(|n| n.0.as_bytes().to_owned())
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("{hash:016x}-{}", sorted.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,8 +282,9 @@ impl Handle {
     }
 }
 
-fn lock(status: &Mutex<Status>) -> std::sync::MutexGuard<'_, Status> {
-    status.lock().unwrap_or_else(|e| e.into_inner())
+/// The lock, also after a panic elsewhere (the data is plain values).
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub struct Runner {
@@ -276,6 +294,10 @@ pub struct Runner {
     control: Receiver<Control>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
+    /// The nodes of the deletes held in the last sync (what the status shows).
+    held: Vec<NodeId>,
+    /// The conflicts and failures of the last sync, to tell each one only once.
+    last_notes: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for Runner {
@@ -290,8 +312,19 @@ impl std::fmt::Debug for Runner {
 struct Parts {
     engine: Engine,
     observer: LocalObserver,
-    /// The ignore file as it was read: (modified, length), `None` when absent.
-    rules_file: Option<(SystemTime, u64)>,
+    /// The filter's fingerprint (sync semantics §10): the rules changed when it does.
+    fingerprint: String,
+    case_insensitive: bool,
+}
+
+impl Parts {
+    /// Whether the ignore rules on disk differ from the ones in use (or don't parse).
+    fn rules_changed(&self, root: &Path) -> bool {
+        Filter::load(root, self.case_insensitive)
+            .map(|f| f.fingerprint())
+            .ok()
+            != Some(self.fingerprint.clone())
+    }
 }
 
 impl Runner {
@@ -321,6 +354,8 @@ impl Runner {
             control: rx,
             stop,
             status,
+            held: Vec::new(),
+            last_notes: Default::default(),
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -348,8 +383,9 @@ impl Runner {
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.mass_delete_min = self.cfg.mass_delete.min_files;
         cfg.mass_delete_fraction = self.cfg.mass_delete.fraction;
-        let rules_file = rules_file(root);
         cfg.exec.filter = Arc::new(Filter::load(root, cfg.exec.case_insensitive)?);
+        let (fingerprint, case_insensitive) =
+            (cfg.exec.filter.fingerprint(), cfg.exec.case_insensitive);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
@@ -380,11 +416,12 @@ impl Runner {
         Ok(Parts {
             engine,
             observer,
-            rules_file,
+            fingerprint,
+            case_insensitive,
         })
     }
 
-    fn run(self) -> Result<(), RunnerError> {
+    fn run(mut self) -> Result<(), RunnerError> {
         // Opened when there is something to sync and the folder is there; dropped when the
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
@@ -409,7 +446,8 @@ impl Runner {
         }
         loop {
             // Local changes: the watcher's batches are recorded in the DB as they come.
-            let before = SystemTime::now();
+            let (wall, mono) = (SystemTime::now(), Instant::now());
+            let mut worked = false;
             match &mut parts {
                 Some(p) => {
                     if p.observer
@@ -417,11 +455,16 @@ impl Runner {
                         .is_some()
                     {
                         wanted = true;
+                        worked = true;
                     }
                 }
                 None => std::thread::sleep(TICK),
             }
-            if slept(before, SystemTime::now()) {
+            if slept(
+                SystemTime::now().duration_since(wall).ok(),
+                mono.elapsed(),
+                worked,
+            ) {
                 tracing::info!("the machine woke up: syncing now");
                 wanted = true;
                 backoff = FIRST_BACKOFF;
@@ -453,9 +496,13 @@ impl Runner {
                         not_before = Instant::now();
                         self.set(|s| s.state = State::Idle);
                     }
-                    Ok(Control::ConfirmDeletes { here, remotely }) => {
-                        tracing::info!("deletes confirmed: {here} here, {remotely} remotely");
-                        confirmed = Some((here, remotely));
+                    Ok(Control::ConfirmDeletes { token }) => {
+                        if token != held_token(&self.held) {
+                            tracing::warn!("a confirmation of deletes that changed since: ignored");
+                            continue;
+                        }
+                        tracing::info!("{} held deletes confirmed", self.held.len());
+                        confirmed = Some(self.held.clone());
                         wanted = true;
                         not_before = Instant::now();
                     }
@@ -504,6 +551,7 @@ impl Runner {
                 wanted = true;
                 check_rules = true;
                 if let Some(p) = &mut parts
+                    && !paused
                     && !p.observer.has_watcher()
                     && let Err(e) = p.engine.scan_local()
                 {
@@ -513,7 +561,7 @@ impl Runner {
             if std::mem::take(&mut check_rules)
                 && parts
                     .as_ref()
-                    .is_some_and(|p| rules_file(&self.cfg.folder) != p.rules_file)
+                    .is_some_and(|p| p.rules_changed(&self.cfg.folder))
             {
                 tracing::info!("the ignore rules changed: starting over");
                 parts = None;
@@ -546,7 +594,7 @@ impl Runner {
                         parts.insert(p)
                     }
                     // Rules that don't parse: say so, and try again at the next poll.
-                    Err(RunnerError::Filter(e)) => {
+                    Err(RunnerError::Filter(e)) if !self.cfg.once => {
                         tracing::warn!("{e}");
                         not_before = Instant::now() + self.cfg.poll;
                         self.set(|s| {
@@ -582,17 +630,17 @@ impl Runner {
             match result {
                 Ok(report) => {
                     started = true;
-                    wanted = false;
                     backoff = FIRST_BACKOFF;
                     self.record(&mut p.engine, &report, began.elapsed())?;
+                    if report.stopped {
+                        // Paused (or stopping): the rest waits for resume.
+                        self.set(|s| s.state = State::Paused);
+                    } else {
+                        wanted = false;
+                    }
                     if self.cfg.once {
                         return Ok(());
                     }
-                }
-                // Catching up is done by the time a sync can be stopped.
-                Err(e) if e.is_stop_request() => {
-                    started = true;
-                    self.set(|s| s.state = State::Paused);
                 }
                 Err(e) => {
                     let (state, wait) = if e.is_denied() {
@@ -620,12 +668,14 @@ impl Runner {
 
     /// Publishes a finished sync.
     fn record(
-        &self,
+        &mut self,
         engine: &mut Engine,
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), RunnerError> {
         let at = unix_now();
+        // Each conflict and failure, worded for people. One that keeps coming back sync after
+        // sync (a file that can't be read) is told once, not every minute.
         let mut notes = Vec::new();
         for c in &report.conflicts {
             notes.push(describe_conflict(engine, c)?);
@@ -634,18 +684,27 @@ impl Runner {
             let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
             notes.push(format!("{path}: {} ({why})", op_name(op)));
         }
+        let seen = std::mem::take(&mut self.last_notes);
+        self.last_notes = notes.iter().cloned().collect();
+        notes.retain(|n| !seen.contains(n));
+        self.held = report.held.iter().map(|op| op.node()).collect();
         let held = if report.held.is_empty() {
             None
         } else {
-            let (here, remotely) = engine.pending_deletes()?;
+            let here = report
+                .held
+                .iter()
+                .filter(|op| matches!(op, hbsync_engine::Op::RemoteDelete { .. }))
+                .count() as u64;
             let mut examples = Vec::new();
             for op in report.held.iter().take(EXAMPLES) {
                 examples.extend(engine.path_of(op.node())?);
             }
             Some(HeldDeletes {
                 here,
-                remotely,
+                remotely: report.held.len() as u64 - here,
                 examples,
+                token: held_token(&self.held),
             })
         };
         if report.ops_done > 0 || !notes.is_empty() {
@@ -667,8 +726,14 @@ impl Runner {
                 h.remotely
             );
         }
+        // A sync that ended as a pause came in stays paused (the pause is what counts).
+        let state = if self.stop.load(Ordering::Relaxed) {
+            State::Paused
+        } else {
+            State::Idle
+        };
         self.set(|s| {
-            s.state = State::Idle;
+            s.state = state;
             s.error = None;
             s.retry_at = None;
             s.pending = report.pending;
@@ -689,18 +754,16 @@ impl Runner {
     }
 }
 
-/// The ignore file's (modified, length), to notice an edit.
-fn rules_file(root: &Path) -> Option<(SystemTime, u64)> {
-    let meta = std::fs::metadata(root.join(STATE_DIR).join(IGNORE_FILE)).ok()?;
-    Some((meta.modified().ok()?, meta.len()))
-}
-
-/// Whether the wall clock moved on much more than a tick between `before` and `after`: the
-/// machine slept (or the clock was set, which only costs a sync).
-fn slept(before: SystemTime, after: SystemTime) -> bool {
-    after
-        .duration_since(before)
-        .is_ok_and(|gap| gap > TICK + SLEPT)
+/// Whether the machine slept during a wait that took `wall` by the wall clock (`None`: it was
+/// set back) and `mono` by the monotonic clock, `worked` telling whether the wait also did
+/// work (recorded a batch, rescanned). The monotonic clock stops in sleep on Linux and macOS:
+/// a wall clock far ahead of it is a sleep. On Windows it runs on, so a long wait that did no
+/// work counts too. A clock set forward only costs a sync.
+fn slept(wall: Option<Duration>, mono: Duration, worked: bool) -> bool {
+    let Some(wall) = wall else {
+        return false;
+    };
+    wall > mono + SLEPT || (!worked && wall > TICK + SLEPT)
 }
 
 fn is_offline(e: &EngineError) -> bool {
@@ -766,12 +829,17 @@ mod tests {
 
     #[test]
     fn a_long_wall_clock_gap_means_the_machine_slept() {
-        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        assert!(!slept(t, t + TICK));
-        assert!(!slept(t, t + Duration::from_secs(20)));
-        assert!(slept(t, t + Duration::from_secs(31)));
-        assert!(slept(t, t + Duration::from_secs(3600)));
-        // The clock set back: not a sleep.
-        assert!(!slept(t, t - Duration::from_secs(3600)));
+        let s = Duration::from_secs;
+        // A tick.
+        assert!(!slept(Some(TICK), TICK, false));
+        // Linux, macOS: the monotonic clock stood still.
+        assert!(slept(Some(s(3600)), TICK, false));
+        assert!(slept(Some(s(3600)), TICK, true));
+        // Windows: both ran on, and the wait did nothing else.
+        assert!(slept(Some(s(3600)), s(3600), false));
+        // A long scan in the wait is no sleep.
+        assert!(!slept(Some(s(45)), s(45), true));
+        // The clock set back.
+        assert!(!slept(None, TICK, false));
     }
 }

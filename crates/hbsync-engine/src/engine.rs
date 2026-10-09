@@ -72,11 +72,6 @@ pub enum EngineError {
 }
 
 impl EngineError {
-    /// The sync stopped because the caller asked it to ([`Engine::set_stop`]).
-    pub fn is_stop_request(&self) -> bool {
-        matches!(self, EngineError::Stopped(Stopped::Requested))
-    }
-
     /// The remote refused access (a sync, a feed read): retrying won't help.
     pub fn is_denied(&self) -> bool {
         matches!(
@@ -112,6 +107,9 @@ pub struct SyncReport {
     pub pending: u64,
     /// Local items recognized as copies of remote nodes (no transfer needed).
     pub adopted: usize,
+    /// Stopped on request ([`Engine::set_stop`]) before the end: what was done is in the
+    /// report, the rest stays dirty.
+    pub stopped: bool,
 }
 
 impl SyncReport {
@@ -131,6 +129,7 @@ impl SyncReport {
         self.conflicts.extend(later.conflicts);
         self.pending = later.pending;
         self.adopted += later.adopted;
+        self.stopped = later.stopped;
     }
 }
 
@@ -145,8 +144,8 @@ pub struct Engine {
     sweep_after: Option<DirtyCursor>,
     /// Set by the caller to stop a sync between operations.
     stop: Arc<AtomicBool>,
-    /// File deletes the user confirmed: (gone here, gone remotely), as they saw them.
-    confirmed: Option<(u64, u64)>,
+    /// Nodes whose held deletes the user confirmed, until they are done (or undone).
+    confirmed: std::collections::HashSet<NodeId>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -169,11 +168,11 @@ impl Engine {
             urgent: Default::default(),
             sweep_after: None,
             stop: Arc::default(),
-            confirmed: None,
+            confirmed: Default::default(),
         }
     }
 
-    /// A sync stops between operations, with [`Stopped::Requested`], while `stop` is set.
+    /// A sync stops between operations while `stop` is set, with [`SyncReport::stopped`].
     /// What was done is kept; the rest stays dirty for a later sync.
     pub fn set_stop(&mut self, stop: Arc<AtomicBool>) {
         self.stop = stop;
@@ -185,11 +184,11 @@ impl Engine {
         self.db.read(|s| s.pending_file_deletes())
     }
 
-    /// Lets the deletes the mass-delete guard holds through, until a sync completes, as long
-    /// as there are no more of them than `seen` ([`pending_deletes`](Self::pending_deletes)
-    /// when the user confirmed). More deletes since then are held again, for the user to see.
-    pub fn confirm_deletes(&mut self, seen: (u64, u64)) {
-        self.confirmed = Some(seen);
+    /// Lets the held deletes of `nodes` (those of [`SyncReport::held`] the user was shown)
+    /// through, until they are done or undone. Deletes of other nodes are judged as before:
+    /// one the user didn't see is never let through by a confirmation.
+    pub fn confirm_deletes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+        self.confirmed.extend(nodes);
     }
 
     /// Transfers of these nodes go before all others in the next syncs.
@@ -291,20 +290,32 @@ impl Engine {
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
 
-        // The guard must judge the whole delete, even when it is planned in several batches.
-        let (pending_deletes, synced_files) = self
-            .db
-            .read(|s| Ok((s.pending_file_deletes()?, s.base_file_count()?)))?;
-        let confirmed = self
-            .confirmed
-            .is_some_and(|(here, there)| pending_deletes.0 <= here && pending_deletes.1 <= there);
+        // The guard must judge the whole delete, even when it is planned in several batches;
+        // confirmed deletes don't count. Confirmations of nodes with nothing left to do are
+        // dropped (those whose plan no longer deletes them, in plan_and_execute).
+        let confirmed = std::mem::take(&mut self.confirmed);
+        let (pending_deletes, synced_files, confirmed) = self.db.read(|s| {
+            let (mut here, mut there) = s.pending_file_deletes()?;
+            let mut still = std::collections::HashSet::new();
+            for node in confirmed {
+                if s.is_dirty(node)? {
+                    let (h, t) = s.pending_file_delete(node)?;
+                    here = here.saturating_sub(u64::from(h));
+                    there = there.saturating_sub(u64::from(t));
+                    still.insert(node);
+                }
+            }
+            Ok(((here, there), s.base_file_count()?, still))
+        })?;
+        self.confirmed = confirmed;
         let opts = Options {
             device: self.cfg.device.clone(),
             date: date.to_owned(),
             mass_delete_min: self.cfg.mass_delete_min,
             mass_delete_fraction: self.cfg.mass_delete_fraction,
             synced_files: synced_files as usize,
-            allow_mass_delete: self.cfg.allow_mass_delete || confirmed,
+            allow_mass_delete: self.cfg.allow_mass_delete,
+            confirmed: Arc::new(self.confirmed.clone()),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
             filter: Arc::clone(&self.cfg.exec.filter),
         };
@@ -316,8 +327,9 @@ impl Engine {
         let mut held: Vec<Op> = Vec::new();
         let mut swept = false;
         for _ in 0..self.cfg.max_rounds {
-            if self.stop.load(Ordering::Relaxed) {
-                return Err(Stopped::Requested.into());
+            if report.stopped || self.stop.load(Ordering::Relaxed) {
+                report.stopped = true;
+                break;
             }
             let (dirty, next) = self.db.read(|s| s.dirty_page(after, self.cfg.batch))?;
             if !dirty.is_empty() {
@@ -349,8 +361,6 @@ impl Engine {
             // Ids of nodes gone everywhere.
             self.db.write(|s| s.collect_nodes())?;
         }
-        // The confirmed deletes went through (or were undone): a later one is asked again.
-        self.confirmed = None;
         Ok(report)
     }
 
@@ -367,6 +377,15 @@ impl Engine {
             .db
             .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter))?;
         let plan = reconcile(&input, opts);
+        // A confirmation lasts while its node's plan deletes it: one whose delete was undone
+        // (the file back) is forgotten, so a later delete is judged anew.
+        let deleting: std::collections::HashSet<NodeId> =
+            plan.ops.iter().filter_map(Op::deletes).collect();
+        for node in dirty {
+            if !deleting.contains(node) {
+                self.confirmed.remove(node);
+            }
+        }
         self.db
             .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;
         report.conflicts.extend(plan.conflicts);
@@ -377,9 +396,8 @@ impl Engine {
             .with_urgent(self.urgent.clone())
             .with_stop(Arc::clone(&self.stop))
             .run(plan.ops)?;
-        if let Some(stopped) = exec.stopped {
-            return Err(stopped.into());
-        }
+        // What was done counts, and the folders it asks to look at are looked at, however
+        // the run ended.
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
@@ -390,6 +408,14 @@ impl Engine {
                 &exec.rescan,
                 &self.scan_opts,
             )?;
+        }
+        match exec.stopped {
+            None => {}
+            Some(Stopped::Requested) => {
+                report.stopped = true;
+                return Ok(plan.held);
+            }
+            Some(stopped) => return Err(stopped.into()),
         }
         let more = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         report.feed += more;

@@ -52,8 +52,10 @@ pub struct Options {
     pub mass_delete_fraction: f64,
     /// Number of synced files (the base's file count), the guard's denominator.
     pub synced_files: usize,
-    /// Let held deletes through (the user confirmed them).
+    /// Let every delete through (the user turned the guard off).
     pub allow_mass_delete: bool,
+    /// Nodes whose deletes the user confirmed: neither counted by the guard nor held.
+    pub confirmed: Arc<HashSet<NodeId>>,
     /// Files pending deletion across the whole dirty set, not just this plan's batch:
     /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
     /// totals too, so a large delete split over several batches is still held.
@@ -71,6 +73,7 @@ impl Default for Options {
             mass_delete_fraction: 0.25,
             synced_files: 0,
             allow_mass_delete: false,
+            confirmed: Arc::default(),
             pending_deletes: (0, 0),
             filter: Arc::default(),
         }
@@ -187,6 +190,15 @@ impl Op {
     }
 
     /// The node whose local item (with everything below it) this op moves to the trash.
+    /// The node this op deletes on the drive or trashes here: what the mass-delete guard
+    /// judges, and what a user confirms.
+    pub fn deletes(&self) -> Option<NodeId> {
+        match self {
+            Op::RemoteDelete { node, .. } => Some(*node),
+            _ => self.trashes(),
+        }
+    }
+
     pub fn trashes(&self) -> Option<NodeId> {
         match self {
             Op::LocalTrash { node, .. } => Some(*node),
@@ -1077,8 +1089,10 @@ impl<'a> Reconciler<'a> {
                 .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
                 .count()
         };
+        // Deletes the user confirmed are theirs: only the others are judged.
+        let confirmed = |op: &Op| self.opts.confirmed.contains(&op.node());
         let (mut local_files, mut remote_files) = (0usize, 0usize);
-        for op in &self.plan.ops {
+        for op in self.plan.ops.iter().filter(|op| !confirmed(op)) {
             match op {
                 Op::RemoteDelete { node, .. }
                     if i.remote
@@ -1109,10 +1123,11 @@ impl<'a> Reconciler<'a> {
         }
         let ops = std::mem::take(&mut self.plan.ops);
         for op in ops {
-            let held = match op {
-                Op::RemoteDelete { .. } => hold_remote,
-                _ => op.trashes().is_some() && hold_local,
-            };
+            let held = !confirmed(&op)
+                && match op {
+                    Op::RemoteDelete { .. } => hold_remote,
+                    _ => op.trashes().is_some() && hold_local,
+                };
             if held {
                 self.plan.held.push(op);
             } else {

@@ -110,9 +110,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   deleting and compares (a small race window remains until the server accepts a VersionTag).
 - **Mass-delete guard.** If one plan deletes more than `max(50, 25 % of synced files)` files on
   either side, or every file on a side, the deletes are held and the user must confirm. The
-  rest of the plan proceeds. A confirmation covers the pending file deletes the user was shown
-  (gone here, gone remotely) and lasts until a sync completes: if more are pending by then,
-  all of them are held again and shown anew.
+  rest of the plan proceeds. A confirmation names the held deletes the user was shown, node
+  by node: those go through, and are neither counted nor held again; it lasts while a delete
+  is pending for the node (done or undone, it is forgotten). Any other delete is judged as if
+  the confirmed ones weren't there: one the user didn't see is never let through by a
+  confirmation. Simulator: `guarded_clients_delete_only_what_was_confirmed`.
 - **Online-only files** are never deleted remotely just because they have no local bytes.
 
 ## 8. Operations

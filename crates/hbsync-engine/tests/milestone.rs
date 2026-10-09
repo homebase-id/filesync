@@ -387,7 +387,7 @@ fn deleting_everything_is_held() -> R {
 }
 
 #[test]
-fn confirmed_deletes_go_through_once_and_no_more_than_were_seen() -> R {
+fn a_confirmation_lets_through_exactly_the_deletes_the_user_saw() -> R {
     let server = server();
     let mut a = Client::with_config(&server, "a", |_| {})?;
     for i in 0..120 {
@@ -400,34 +400,68 @@ fn confirmed_deletes_go_through_once_and_no_more_than_were_seen() -> R {
             .map(|s| s.live().count())
             .map_err(|_| "poisoned")
     };
-    for i in 0..60 {
-        fs::remove_file(a.root.join(format!("f{i:03}")))?;
-    }
-    assert_eq!(a.sync()?.held.len(), 60);
-    let seen = a.engine.pending_deletes()?;
-    assert_eq!(seen, (60, 0));
-
-    // Ten more deletes after the user looked: more than they confirmed, so all are held.
-    for i in 60..70 {
-        fs::remove_file(a.root.join(format!("f{i:03}")))?;
-    }
-    a.engine.confirm_deletes(seen);
-    assert_eq!(a.sync()?.held.len(), 70);
-    assert_eq!(live(&server)?, 120);
-
-    // Confirmed as they are now: they go through.
-    let now = a.engine.pending_deletes()?;
-    a.engine.confirm_deletes(now);
+    let gone = |a: &Client, range: std::ops::Range<usize>| -> std::io::Result<()> {
+        range
+            .into_iter()
+            .try_for_each(|i| fs::remove_file(a.root.join(format!("f{i:03}"))))
+    };
+    gone(&a, 0..60)?;
     let report = a.sync()?;
-    assert!(report.held.is_empty(), "{report:?}");
-    assert_eq!(live(&server)?, 50);
+    assert_eq!(report.held.len(), 60);
+    assert_eq!(a.engine.pending_deletes()?, (60, 0));
+    let seen: Vec<_> = report.held.iter().map(|op| op.node()).collect();
 
-    // The confirmation was used up: deleting the rest is held again.
-    for i in 70..120 {
-        fs::remove_file(a.root.join(format!("f{i:03}")))?;
+    // 55 more deletes after the user looked: not part of what they confirm. Alone they are
+    // over the limit (max(50, 25 % of 120)), so they are held; the confirmed 60 go through.
+    gone(&a, 60..115)?;
+    a.engine.confirm_deletes(seen.iter().copied());
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 55, "{report:?}");
+    assert!(report.held.iter().all(|op| !seen.contains(&op.node())));
+    assert_eq!(live(&server)?, 60);
+
+    // Confirming those too lets them through.
+    a.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    assert!(a.sync()?.held.is_empty());
+    assert_eq!(live(&server)?, 5);
+
+    // A confirmation doesn't outlive its deletes: deleting the last five, now every file, is
+    // held again.
+    gone(&a, 115..120)?;
+    assert_eq!(a.sync()?.held.len(), 5);
+    assert_eq!(live(&server)?, 5);
+    Ok(())
+}
+
+#[test]
+fn a_confirmed_delete_that_was_undone_is_forgotten() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.mass_delete_min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("f{i}"), format!("{i}").as_bytes())?;
     }
-    assert_eq!(a.sync()?.held.len(), 50);
-    assert_eq!(live(&server)?, 50);
+    a.sync()?;
+    for i in 0..4 {
+        fs::remove_file(a.root.join(format!("f{i}")))?;
+    }
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 4);
+    let seen: Vec<_> = report.held.iter().map(|op| op.node()).collect();
+    // The user brings the files back (the deletes undone) before the next sync, then
+    // confirms what they were shown.
+    for i in 0..4 {
+        a.write(&format!("f{i}"), format!("{i}").as_bytes())?;
+    }
+    a.sync()?;
+    a.engine.confirm_deletes(seen);
+    a.sync()?;
+    // The same files deleted again later: a new delete, held again.
+    for i in 0..4 {
+        fs::remove_file(a.root.join(format!("f{i}")))?;
+    }
+    assert_eq!(a.sync()?.held.len(), 4);
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 4);
     Ok(())
 }
 

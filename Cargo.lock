@@ -1078,6 +1078,7 @@ dependencies = [
  "hbsync-platform",
  "hbsync-remote",
  "hbsync-state",
+ "hbsync-types",
  "interprocess",
  "keyring-core",
  "libc",

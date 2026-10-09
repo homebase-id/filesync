@@ -20,11 +20,19 @@ pub const UNIT: &str = "hbsync.service";
 pub const RUN_VALUE: &str = "Homebase Filesync";
 
 /// The environment variables passed on to the daemon, as they are set now.
+/// They decide where the daemon keeps its files ([`crate::Paths`]): the daemon must use the
+/// same files as the command line that set it up. (`XDG_RUNTIME_DIR` is the session's own,
+/// set by systemd.)
 pub fn passed_env() -> Vec<(String, String)> {
-    ["HBSYNC_HOME", "HBSYNC_CREDENTIALS"]
-        .into_iter()
-        .filter_map(|k| Some((k.to_owned(), std::env::var(k).ok()?)))
-        .collect()
+    [
+        "HBSYNC_HOME",
+        "HBSYNC_CREDENTIALS",
+        "XDG_CONFIG_HOME",
+        "XDG_STATE_HOME",
+    ]
+    .into_iter()
+    .filter_map(|k| Some((k.to_owned(), std::env::var(k).ok()?)))
+    .collect()
 }
 
 /// The launchd agent for `daemon`.
@@ -76,19 +84,19 @@ pub fn launchd_plist(daemon: &Path, env: &[(String, String)]) -> String {
 /// The systemd user unit for `daemon`.
 pub fn systemd_unit(daemon: &Path, env: &[(String, String)]) -> String {
     // systemd's quoting: double quotes, with backslashes and quotes escaped, and its
-    // specifiers (`%`) and variables (`$`) doubled.
+    // specifiers (`%`) doubled; `ExecStart` also expands variables (`$`), `Environment` not.
     let quote = |s: &str| {
         let s = s
             .replace('\\', "\\\\")
             .replace('"', "\\\"")
-            .replace('%', "%%")
-            .replace('$', "$$");
+            .replace('%', "%%");
         format!("\"{s}\"")
     };
     let mut env_lines = String::new();
     for (k, v) in env {
         env_lines.push_str(&format!("Environment={}\n", quote(&format!("{k}={v}"))));
     }
+    let exec = quote(&daemon.display().to_string()).replace('$', "$$");
     format!(
         "[Unit]\n\
          Description=Homebase Filesync\n\
@@ -101,7 +109,7 @@ pub fn systemd_unit(daemon: &Path, env: &[(String, String)]) -> String {
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        quote(&daemon.display().to_string())
+        exec
     )
 }
 
@@ -172,6 +180,10 @@ mod os {
             "launchctl",
             &["bootstrap", &domain(), &path.display().to_string()],
         )
+        // An agent launchd didn't take mustn't look installed.
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&path);
+        })
     }
 
     pub fn uninstall() -> io::Result<()> {
@@ -196,12 +208,10 @@ mod os {
 mod os {
     use super::*;
 
+    /// Where the user's systemd looks by default (its own `XDG_CONFIG_HOME`, not the
+    /// shell's, decides; it is rarely set).
     fn unit() -> io::Result<PathBuf> {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .map_or_else(|| home().map(|h| h.join(".config")), Ok)?;
-        Ok(config.join("systemd/user").join(UNIT))
+        Ok(home()?.join(".config/systemd/user").join(UNIT))
     }
 
     fn systemctl(args: &[&str]) -> io::Result<()> {
@@ -225,8 +235,13 @@ mod os {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(&path, systemd_unit(daemon, &passed_env()))?;
-        systemctl(&["daemon-reload"])?;
-        systemctl(&["enable", UNIT])
+        systemctl(&["daemon-reload"])
+            .and_then(|()| systemctl(&["enable", UNIT]))
+            // A unit systemd didn't take mustn't look installed.
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(&path);
+                let _ = systemctl(&["daemon-reload"]);
+            })
     }
 
     pub fn uninstall() -> io::Result<()> {
@@ -344,7 +359,7 @@ mod tests {
     use super::*;
 
     fn env() -> Vec<(String, String)> {
-        vec![("HBSYNC_HOME".into(), "/tmp/a b & <c> 100%".into())]
+        vec![("HBSYNC_HOME".into(), "/tmp/a b & <c> 100% $x".into())]
     }
 
     #[test]
@@ -356,7 +371,7 @@ mod tests {
         assert!(!plist.contains("EnvironmentVariables"));
         let plist = launchd_plist(Path::new("/x/hbsyncd"), &env());
         assert!(plist.contains(
-            "<key>HBSYNC_HOME</key>\n    <string>/tmp/a b &amp; &lt;c&gt; 100%</string>"
+            "<key>HBSYNC_HOME</key>\n    <string>/tmp/a b &amp; &lt;c&gt; 100% $x</string>"
         ));
     }
 
@@ -368,7 +383,7 @@ mod tests {
             "{unit}"
         );
         assert!(
-            unit.contains("Environment=\"HBSYNC_HOME=/tmp/a b & <c> 100%%\"\n"),
+            unit.contains("Environment=\"HBSYNC_HOME=/tmp/a b & <c> 100%% $x\"\n"),
             "{unit}"
         );
         assert!(unit.contains("Restart=on-failure\n"));

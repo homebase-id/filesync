@@ -11,6 +11,7 @@ use hbsync_app::runner::{Hints, IDENTITY_KEY};
 use hbsync_app::{
     Config, Control, CredentialStore, Location, Paths, Root, State, Status, autostart, setup,
 };
+use hbsync_homebase::{Credentials, HomebaseError};
 use hbsync_local::{STATE_DIR, state_db_path};
 use hbsync_state::StateDb;
 
@@ -167,7 +168,13 @@ fn run(command: Command) -> Res<ExitCode> {
             };
             stop(&paths)?;
             autostart_off_unless_dev()?;
-            CredentialStore::open(&paths).delete(&root.identity)?;
+            if let Some(why) = CredentialStore::open(&paths).delete(&root.identity)? {
+                println!(
+                    "The system keychain couldn't be reached ({why}): if it holds the \
+                     credentials, run `hbsync logout` again where it can be (your desktop \
+                     session)."
+                );
+            }
             println!(
                 "Logged out of {}. {} and its files stay; `hbsync setup {}` signs in again.",
                 root.identity,
@@ -183,6 +190,8 @@ fn run(command: Command) -> Res<ExitCode> {
             };
             stop(&paths)?;
             autostart_off_unless_dev()?;
+            // Setting a folder up again starts afresh.
+            config.paused = false;
             for root in config.roots.drain(..) {
                 println!(
                     "{} is no longer synced with {}. Its files stay.",
@@ -258,24 +267,35 @@ fn set_up(
         .into());
     }
 
-    // This computer, authorized on the identity.
+    // This computer, authorized on the identity. New credentials are kept at once: an
+    // approval lost to a later failure would have to be given again.
     let store = CredentialStore::open(paths);
+    let authorize = || -> Res<Credentials> {
+        println!("Opening your browser to authorize this computer on {identity}...");
+        let creds = setup::authorize(&identity, &config.device_name(), browser, |url| {
+            println!("If it doesn't open, visit:\n{url}\n");
+        })?;
+        store.save(&creds)?;
+        Ok(creds)
+    };
+    let save = |c: &Credentials| store.save(c).map(drop);
     let mut creds = match store.load(&identity)? {
         Some((creds, _)) => {
             println!("This computer is already authorized on {identity}.");
             creds
         }
-        None => {
-            println!("Opening your browser to authorize this computer on {identity}...");
-            let device = Config::load(&config_path)?
-                .unwrap_or_default()
-                .device_name();
-            setup::authorize(&identity, &device, browser, |url| {
-                println!("If it doesn't open, visit:\n{url}\n");
-            })?
-        }
+        None => authorize()?,
     };
-    setup::prepare(&mut creds)?;
+    match setup::prepare(&mut creds, save) {
+        // Revoked since: authorize again.
+        Err(HomebaseError::Denied(why)) => {
+            println!("{identity} no longer accepts this computer's authorization ({why}).");
+            store.delete(&identity)?;
+            creds = authorize()?;
+            setup::prepare(&mut creds, save)?;
+        }
+        other => drop(other?),
+    }
     match store.save(&creds)? {
         Location::Keychain => println!("Credentials saved in the system keychain."),
         Location::File { path, why } => println!(
@@ -436,12 +456,22 @@ fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> 
 fn stop(paths: &Paths) -> Res<bool> {
     match ask(paths, Ask::Control(Control::Stop)) {
         Err(IpcError::NotRunning) => return Ok(false),
+        // The daemon may exit before its answer is out: the connection just ends.
+        Err(IpcError::Protocol(_)) => {}
+        Err(IpcError::Io(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            ) => {}
         Err(e) => return Err(e.into()),
         Ok(_) => {}
     }
     let until = Instant::now() + Duration::from_secs(60);
     while Instant::now() < until {
-        if !running(paths)? {
+        // A daemon on its way out may drop a connection: that's not an answer.
+        if matches!(running(paths), Ok(false)) {
             return Ok(true);
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -460,13 +490,13 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
     };
     if held.here > 0 {
         println!(
-            "{} files deleted on this computer will be deleted from {} and your other devices.",
+            "{} items deleted on this computer will be deleted from {} and your other devices.",
             held.here, status.identity
         );
     }
     if held.remotely > 0 {
         println!(
-            "{} files deleted elsewhere will be moved to this computer's trash.",
+            "{} items deleted elsewhere will be moved to this computer's trash.",
             held.remotely
         );
     }
@@ -486,13 +516,8 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
             return Ok(());
         }
     }
-    control(
-        paths,
-        Control::ConfirmDeletes {
-            here: held.here,
-            remotely: held.remotely,
-        },
-    )?;
+    // Exactly these: any delete since is held again, for another look.
+    control(paths, Control::ConfirmDeletes { token: held.token })?;
     println!("Confirmed.");
     Ok(())
 }

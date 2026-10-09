@@ -47,7 +47,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             creds
         }
     };
-    let prepared = setup::prepare(&mut creds)?;
+    let prepared = setup::prepare(&mut creds, |c| c.save(&path))?;
     let drive = prepared.remote.drive();
     println!(
         "Sync drive: alias {}, type {}",
@@ -56,7 +56,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     match prepared.circle_created {
         Some(id) => {
-            creds.save(&path)?;
             println!(
                 "Created the circle '{}' ({id})",
                 hbsync_homebase::app::CIRCLE_NAME

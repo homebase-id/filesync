@@ -151,9 +151,19 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     assert!(status["credentials_warning"].is_string(), "{status}");
     let out = home.hbsync(&["status"])?;
     assert!(text(&out).contains("offline"), "{}", text(&out));
-    let out = home.hbsync(&["pause"])?;
+    // Syncing needs the identity; pausing doesn't, and is kept for when it starts.
+    let out = home.hbsync(&["sync"])?;
     assert!(!out.status.success());
     assert!(text(&out).contains("not connected"), "{}", text(&out));
+    let out = home.hbsync(&["pause"])?;
+    assert!(out.status.success(), "{}", text(&out));
+    let status: serde_json::Value =
+        serde_json::from_slice(&home.hbsync(&["status", "--json"])?.stdout)?;
+    assert_eq!(status["state"], "paused", "{status}");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(config.contains("paused = true"), "{config}");
+    let out = home.hbsync(&["resume"])?;
+    assert!(out.status.success(), "{}", text(&out));
 
     let out = home.hbsync(&["stop"])?;
     assert!(out.status.success(), "{}", text(&out));

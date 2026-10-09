@@ -902,6 +902,29 @@ impl<'a> Store<'a> {
         Ok((local_gone, remote_gone))
     }
 
+    /// Whether `node` counts in [`pending_file_deletes`](Self::pending_file_deletes): (gone
+    /// locally, gone remotely).
+    pub fn pending_file_delete(&self, node: NodeId) -> Result<(bool, bool)> {
+        let found = |sql: String| -> Result<bool> {
+            Ok(self
+                .conn
+                .prepare_cached(&sql)?
+                .query_row([node.0.as_bytes()], |_| Ok(()))
+                .optional()?
+                .is_some())
+        };
+        let here = found(format!(
+            "SELECT 1 FROM dirty d JOIN base b ON b.id = d.id WHERE d.id = {ID_OF} \
+             AND b.kind = 0 AND b.content_state != 2 \
+             AND NOT EXISTS (SELECT 1 FROM local l WHERE l.id = d.id)"
+        ))?;
+        let there = found(format!(
+            "SELECT 1 FROM dirty d JOIN base b ON b.id = d.id WHERE d.id = {ID_OF} \
+             AND b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)"
+        ))?;
+        Ok((here, there))
+    }
+
     pub fn dirty_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM dirty")
     }

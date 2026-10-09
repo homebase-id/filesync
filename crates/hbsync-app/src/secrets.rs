@@ -40,6 +40,8 @@ pub enum Location {
 pub struct CredentialStore {
     /// The OS keychain, or why there is none.
     keychain: Result<Arc<Keychain>, String>,
+    /// Files only, on purpose (tests, development): no keychain to miss.
+    files_only: bool,
     /// The folder of the credential files.
     dir: PathBuf,
 }
@@ -48,13 +50,15 @@ impl CredentialStore {
     /// The OS keychain, with files in the config folder as the fallback.
     /// `HBSYNC_CREDENTIALS=file` uses the files only (tests, development).
     pub fn open(paths: &Paths) -> CredentialStore {
-        let keychain = if std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file") {
+        let files_only = std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file");
+        let keychain = if files_only {
             Err("HBSYNC_CREDENTIALS=file".to_owned())
         } else {
             os_keychain().map_err(|e| e.to_string())
         };
         CredentialStore {
             keychain,
+            files_only,
             dir: paths.config.join("credentials"),
         }
     }
@@ -63,6 +67,7 @@ impl CredentialStore {
     pub fn files_in(dir: &Path) -> CredentialStore {
         CredentialStore {
             keychain: Err("files only".to_owned()),
+            files_only: true,
             dir: dir.to_path_buf(),
         }
     }
@@ -98,23 +103,33 @@ impl CredentialStore {
         Ok(Location::File { path: file, why })
     }
 
-    /// The saved credentials for `identity`, and where they are.
+    /// The saved credentials for `identity`, and where they are. `None` only when they are
+    /// known to be missing: a keychain that is there but can't be read now (locked at logon)
+    /// is an error, not "not set up".
     pub fn load(&self, identity: &str) -> Result<Option<(Credentials, Location)>, CredentialError> {
-        let why = match self.keychain_entry(identity) {
-            Ok(entry) => match entry.get_password() {
+        // Why the file is read: no keychain on this system, or one that failed.
+        let (why, failed) = match &self.keychain {
+            Err(why) => (Some(why.clone()), false),
+            Ok(_) => match self.keychain_entry(identity).and_then(|entry| {
+                entry.get_password().map_err(|e| match e {
+                    KeychainError::NoEntry => String::new(),
+                    e => e.to_string(),
+                })
+            }) {
                 Ok(json) => {
                     let creds = serde_json::from_str(&json).map_err(CredentialError::Corrupt)?;
                     return Ok(Some((creds, Location::Keychain)));
                 }
-                Err(KeychainError::NoEntry) => None,
-                // Locked or unreachable right now: the file may still hold them.
-                Err(e) => Some(e.to_string()),
+                Err(e) if e.is_empty() => (None, false),
+                Err(e) => (Some(e), true),
             },
-            Err(why) => Some(why),
         };
         let path = self.file(identity);
         let Some(creds) = Credentials::load(&path)? else {
-            return Ok(None);
+            return match why {
+                Some(why) if failed => Err(CredentialError::Keychain(why)),
+                _ => Ok(None),
+            };
         };
         let location = match why {
             Some(why) => Location::File { path, why },
@@ -124,15 +139,23 @@ impl CredentialStore {
         Ok(Some((creds, location)))
     }
 
-    /// Forgets the credentials for `identity`, wherever they are.
-    pub fn delete(&self, identity: &str) -> Result<(), CredentialError> {
-        if let Ok(entry) = self.keychain_entry(identity) {
-            match entry.delete_credential() {
-                Ok(()) | Err(KeychainError::NoEntry) => {}
-                Err(e) => return Err(CredentialError::Keychain(e.to_string())),
+    /// Forgets the credentials for `identity`, wherever they are. Returns why the keychain
+    /// couldn't be looked at, if it couldn't (it may still hold them: say so).
+    pub fn delete(&self, identity: &str) -> Result<Option<String>, CredentialError> {
+        remove(&self.file(identity))?;
+        match &self.keychain {
+            Err(_) if self.files_only => Ok(None),
+            Err(why) => Ok(Some(why.clone())),
+            Ok(_) => {
+                let entry = self
+                    .keychain_entry(identity)
+                    .map_err(CredentialError::Keychain)?;
+                match entry.delete_credential() {
+                    Ok(()) | Err(KeychainError::NoEntry) => Ok(None),
+                    Err(e) => Err(CredentialError::Keychain(e.to_string())),
+                }
             }
         }
-        remove(&self.file(identity))
     }
 
     fn keychain_entry(&self, identity: &str) -> Result<keyring_core::Entry, String> {
@@ -153,18 +176,23 @@ fn os_keychain() -> keyring_core::Result<Arc<Keychain>> {
     Ok(store)
 }
 
-/// Writes `creds` to `path`, in a folder only this user can open (on Windows, the user's
-/// profile folders already are).
+/// Writes `creds` to `path` in one step (a crash leaves the old file or the new one), in a
+/// folder only this user can open (on Windows, the user's profile folders already are). The
+/// file is created 0600.
 fn save_private(creds: &Credentials, path: &Path) -> Result<(), HomebaseError> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        }
+    use std::io::Write;
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    creds.save(path)
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(&serde_json::to_vec_pretty(creds)?)?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 fn remove(path: &Path) -> Result<(), CredentialError> {
@@ -233,8 +261,8 @@ mod tests {
             );
         }
 
-        store.delete("a.example")?;
-        store.delete("a.example")?;
+        assert_eq!(store.delete("a.example")?, None);
+        assert_eq!(store.delete("a.example")?, None);
         assert!(store.load("a.example")?.is_none());
         Ok(())
     }

@@ -56,17 +56,25 @@ JSON (identity, client auth token, shared secret, circle id):
 When no keychain answers (a Linux without a Secret Service, say), the credentials go to
 `<config>/credentials/<identity>.json`, mode 0600 in a 0700 folder (on Windows the profile
 folder is the user's only), and `hbsync status` says so. Credentials found in the file while the
-keychain works are moved into it. `HBSYNC_CREDENTIALS=file` uses the file only.
+keychain works are moved into it. `HBSYNC_CREDENTIALS=file` uses the file only. The file is
+replaced in one step (a crash leaves the old one or the new one).
+
+A keychain that is there but can't be read (locked at logon, before the session unlocks it) is
+not "not set up": the daemon waits for it (status `failing`, with the reason). `hbsync logout`
+says so when it couldn't reach the keychain to remove the credentials there.
 
 ## The daemon
 
 1. Takes the lock (`<state>/hbsyncd.lock`, an exclusive lock the OS drops when the process
    ends, with the pid in `hbsyncd.pid`): a second daemon says which process runs and exits.
-2. Reads the config and the credentials. Not set up: it says so and exits.
+2. Reads the config. Not set up: it says so and exits.
 3. Answers on the control socket from now on.
-4. Connects to the identity, retrying with backoff (5 s doubling to 5 min) while it can't be
-   reached; meanwhile the status says `offline` and why.
-5. Runs the sync loop (`Runner`) until a stop request, SIGTERM or SIGINT.
+4. Reads the credentials, waiting (backoff 5 s doubling to 5 min) while the keychain can't be
+   read. None: it says so and exits.
+5. Connects to the identity, retrying with the same backoff while it can't be reached
+   (`offline`); a refusal (the device revoked) shows as `denied` and is asked again every 5 min.
+   Meanwhile `pause` and `resume` work (kept in the config); other requests are refused.
+6. Runs the sync loop (`Runner`) until a stop request, SIGTERM or SIGINT.
 
 Exit status: 0 when stopped or when there is nothing to do (not set up, already running), 1 on
 a failure (service managers restart it then).
@@ -87,8 +95,12 @@ a failure (service managers restart it then).
 - **The folder gone** (moved, deleted, a disk not mounted: its `.hbsync` missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a new
   `.hbsync`: only `hbsync setup` does.
-- **Held deletes:** the status shows how many (deleted here; deleted elsewhere) and some paths;
-  a confirmation covers at most as many as were shown (sync semantics, the mass-delete guard).
+- **Held deletes:** the status shows how many (deleted here; deleted elsewhere), some paths,
+  and a token naming exactly these deletes. A confirmation carries the token back and lets
+  exactly them through; when the held deletes changed since, it is refused (sync semantics,
+  the mass-delete guard).
+- **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
+  file that can't be read) isn't noted again until it has gone away.
 
 ### States
 
@@ -104,7 +116,7 @@ version (now 1); a daemon refuses another one with the reason (after an update: 
 ```json
 {"protocol":1,"ask":"status"}
 {"protocol":1,"ask":{"control":"sync_now"}}            // pause, resume, stop
-{"protocol":1,"ask":{"control":{"confirm_deletes":{"here":60,"remotely":0}}}}
+{"protocol":1,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
 ```
 
 Replies: `{"status":{...}}`, `"done"`, `{"refused":"why"}`.
@@ -127,8 +139,11 @@ Only the user can connect:
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Homebase Filesync` | no |
 
 Windows uses the `Run` key rather than a logon task: creating an `ONLOGON` task needs an
-administrator **[inferred, not tried]**. `hbsyncd.exe` has no console window. `HBSYNC_HOME` and
-`HBSYNC_CREDENTIALS` are passed on in the plist and the unit (not on Windows).
+administrator **[inferred, not tried]**. `hbsyncd.exe` has no console window.
+`HBSYNC_HOME`, `HBSYNC_CREDENTIALS`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are passed on in
+the plist and the unit (not on Windows), so the daemon uses the same files as the command line
+that set it up. The unit goes where the user's systemd looks by default, whatever the shell's
+`XDG_CONFIG_HOME`. An install the service manager refuses leaves no file behind.
 
 `hbsync setup` turns autostart on, `logout` and `unlink` turn it off, `hbsync autostart on|off`
 by hand. With autostart on, `hbsync start` goes through launchd or systemd so that they supervise
@@ -138,7 +153,7 @@ the daemon. With `HBSYNC_HOME` set, only `hbsync autostart` touches the user's l
 
 | | |
 |---|---|
-| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), saves the config, turns autostart on, (re)starts the daemon |
+| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), saves the config, turns autostart on, (re)starts the daemon |
 | `hbsync status [--json]` | what the daemon does; exit status 3 when it isn't running |
 | `hbsync sync`, `pause`, `resume` | |
 | `hbsync confirm-deletes [--yes]` | shows the held deletes and lets them through |

@@ -246,22 +246,16 @@ fn a_stopped_sync_keeps_what_it_did_and_the_next_one_finishes() -> R {
     );
     a.engine.set_stop(Arc::clone(&stop));
     a.engine.scan_local()?;
-    let err = a
-        .engine
-        .sync_once("2026-10-09")
-        .err()
-        .ok_or("the sync didn't stop")?;
-    assert!(err.is_stop_request(), "{err}");
+    let report = a.engine.sync_once("2026-10-09")?;
+    assert!(report.stopped, "{report:?}");
     let live = server.lock().map_err(|_| "poisoned")?.live().count();
     assert!((3..15).contains(&live), "stopped part way: {live} of 15 up");
+    assert_eq!(report.ops_done, live, "what was done is reported");
+    assert!(report.pending > 0);
 
     // While the flag is set, a sync stops before doing anything.
-    let err = a
-        .engine
-        .sync_once("2026-10-09")
-        .err()
-        .ok_or("went through")?;
-    assert!(err.is_stop_request(), "{err}");
+    let report = a.engine.sync_once("2026-10-09")?;
+    assert!(report.stopped && report.ops_done == 0, "{report:?}");
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), live);
 
     // Resumed: the rest goes up, and another device gets everything.
@@ -1136,5 +1130,37 @@ fn a_parked_file_whose_name_became_ignored_and_taken_moves_to_a_numbered_one() -
         server.lock().map_err(|_| "poisoned")?.live_names(),
         ["readme.txt"]
     );
+    Ok(())
+}
+
+/// Another device moves a folder into a name this one ignores: trashing it here is held (more
+/// than the guard allows), and the confirmation has to last until the trash ran, although the
+/// drive keeps the folder.
+#[test]
+fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        ignoring("build/\n")(cfg);
+        cfg.mass_delete_min = 2;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("src/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("src"), a.root.join("build"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    assert!(b.root.join("src/f0.txt").exists(), "held");
+
+    b.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(), ["keep.txt = k"]);
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 6);
     Ok(())
 }

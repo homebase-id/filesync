@@ -149,7 +149,7 @@ fn sync_now_reads_the_drive_without_waiting_for_the_poll() -> R {
 }
 
 #[test]
-fn held_deletes_go_through_once_confirmed() -> R {
+fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     let server = server();
     let a = Device::start(&server, "a", Duration::from_millis(300))?;
     for i in 0..60 {
@@ -176,10 +176,14 @@ fn held_deletes_go_through_once_confirmed() -> R {
     );
     assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
 
+    // A confirmation of something else (the held deletes changed since) is ignored.
     a.handle.send(Control::ConfirmDeletes {
-        here: held.here,
-        remotely: held.remotely,
+        token: "0000000000000000-60".into(),
     });
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
+
+    a.handle.send(Control::ConfirmDeletes { token: held.token });
     wait_until("the drive is empty", || live_names(&server).is_empty())?;
     wait_until("nothing is held", || a.status().held_deletes.is_none())?;
     Ok(())

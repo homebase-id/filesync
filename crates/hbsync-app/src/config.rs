@@ -58,7 +58,7 @@ pub struct Root {
 /// When deletes are held for confirmation (sync semantics, the mass-delete guard): at least
 /// `min_files` files, and at least `fraction` of the synced files.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct MassDelete {
     pub min_files: usize,
     pub fraction: f64,
@@ -157,6 +157,14 @@ mod tests {
         assert_eq!(config.mass_delete, MassDelete::default());
         assert_eq!(config.root().expect("ok"), None);
         assert!(!config.device_name().is_empty());
+    }
+
+    #[test]
+    fn a_partial_table_takes_the_rest_from_the_defaults() -> Result<(), toml::de::Error> {
+        let config: Config = toml::from_str("[mass_delete]\nmin_files = 200\n")?;
+        assert_eq!(config.mass_delete.min_files, 200);
+        assert_eq!(config.mass_delete.fraction, MassDelete::default().fraction);
+        Ok(())
     }
 
     #[test]
