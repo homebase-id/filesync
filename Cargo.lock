@@ -592,6 +592,8 @@ dependencies = [
  "base64",
  "cbc",
  "getrandom 0.3.4",
+ "hbsync-fileio",
+ "hbsync-remote",
  "hbsync-types",
  "hkdf",
  "p384",

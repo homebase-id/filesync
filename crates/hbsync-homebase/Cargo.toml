@@ -11,6 +11,7 @@ aes = "0.9.3"
 base64 = "0.23.1"
 cbc = { version = "0.2.1", features = ["alloc"] }
 getrandom = "0.3"
+hbsync-remote.workspace = true
 hbsync-types.workspace = true
 hkdf = "0.13.0"
 p384 = { version = "0.14.0", features = ["ecdh"] }
@@ -24,3 +25,6 @@ uuid.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+hbsync-fileio.workspace = true
