@@ -110,11 +110,13 @@ pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
         FILE_TYPE_FILE => NodeKind::File,
         other => return Err(format!("file {id}: file type {other} isn't a sync node")),
     };
-    let parent = NodeId(
-        meta.app_data
-            .group_id
-            .ok_or_else(|| format!("file {id}: no parent (groupId)"))?,
-    );
+    // A tombstone always comes through: dropping it would keep a deleted node alive. Its parent
+    // isn't used, only its file id.
+    let parent = match (meta.app_data.group_id, header.file_state.as_str()) {
+        (Some(parent), _) => NodeId(parent),
+        (None, "deleted") => NodeId::ROOT,
+        (None, _) => return Err(format!("file {id}: no parent (groupId)")),
+    };
     let body = match header.file_state.as_str() {
         "deleted" => RemoteBody::Deleted,
         "active" => {
@@ -303,6 +305,13 @@ mod tests {
         let mut orphan = fixture("file-node.json");
         orphan.file_metadata.app_data.unique_id = None;
         assert!(to_remote(orphan).is_err());
+        let mut no_parent = fixture("file-node.json");
+        no_parent.file_metadata.app_data.group_id = None;
+        assert!(to_remote(no_parent).is_err());
+        // A tombstone is never dropped, even without a parent.
+        let mut tomb = fixture("tombstone.json");
+        tomb.file_metadata.app_data.group_id = None;
+        assert!(to_remote(tomb).is_ok_and(|h| h.is_deleted()));
         // A file without its payload is kept, without a state (the engine waits for it).
         let mut bare = fixture("file-node.json");
         bare.file_metadata.payloads = None;

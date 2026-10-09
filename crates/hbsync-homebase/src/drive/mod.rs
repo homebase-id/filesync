@@ -251,6 +251,7 @@ impl Remote for HomebaseRemote {
             Err(RemoteError::Transient(why)) => match self.header(file_id) {
                 Ok(h) if h.is_deleted() => Err(RemoteError::NotFound),
                 Ok(h) if h.version != expected => Err(RemoteError::VersionMismatch),
+                Err(e @ (RemoteError::Denied(_) | RemoteError::NotFound)) => Err(e),
                 _ => Err(RemoteError::Transient(why)),
             },
             other => other,

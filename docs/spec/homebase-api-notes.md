@@ -79,8 +79,10 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 
 The client only soft-deletes: the tombstone is how the other clients learn of a delete
 through the feed. A hard delete (`.../hard-delete`) leaves no trace in the feed and is never
-used. Only the Filesync app writes to its drive (other apps need a grant), so no hard deletes
-come from elsewhere either.
+used **[verified]** (`DriveStorageServiceBase.cs`, tried on frodo). Only the Filesync app
+writes to its drive (other apps need a grant), so no hard deletes come from elsewhere either:
+a design decision (2026-10-09), not checked against every owner-side path. A hard delete from
+elsewhere would leave the file's mirror row stale.
 
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,
@@ -172,7 +174,8 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   be a no-op). Until then the client reads the header and compares right before deleting.
 - Payload reads are buffered whole in server memory (#1892) and ranges are `int` (#1893): the
   client reads in chunks and refuses payloads of 2 GiB or more until #1893 lands.
-- App clients can't read the drive's `requirePayloadHashes`; the client always sends hashes.
+- App clients can't read the drive's `requirePayloadHashes` **[verified]** (`ClientDriveData`
+  has no such field); the client always sends hashes.
 - **The feed can hide a write until the next one** **[verified, tried]**: `QueryBatchCached`
   caches query-batch results for two hours (`AbstractTableCaching.DefaultTtl`) and drops
   them only when the drive is written. An `anyChangeDate` result also depends on the clock

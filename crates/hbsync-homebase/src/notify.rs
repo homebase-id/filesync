@@ -16,7 +16,6 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -47,11 +46,11 @@ const SILENCE: Duration = Duration::from_secs(75);
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// The notification connection, on its own thread. Stops when dropped.
+/// The notification connection, on its own thread. Stops when dropped: the thread ends at
+/// its next check (it isn't waited for, as it may be in the middle of connecting).
 #[derive(Debug)]
 pub struct Notifier {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
 }
 
 impl Notifier {
@@ -59,23 +58,18 @@ impl Notifier {
     /// events go to `events` until it is closed or the notifier dropped.
     pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let thread = {
-            let stop = stop.clone();
-            std::thread::Builder::new()
-                .name("hbsync-notify".into())
-                .spawn(move || run(&client, drive, &events, &stop))
-                .ok()
-        };
-        Notifier { stop, thread }
+        let flag = stop.clone();
+        // Without a thread there are no hints; the sync loop's poll still catches up.
+        let _ = std::thread::Builder::new()
+            .name("hbsync-notify".into())
+            .spawn(move || run(&client, drive, &events, &flag));
+        Notifier { stop }
     }
 }
 
 impl Drop for Notifier {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
     }
 }
 
@@ -177,13 +171,22 @@ fn session(
 
 fn connect(client: &Client) -> Result<Socket, String> {
     let host = client.identity();
-    let addr = (host, 443)
+    // Every address in turn, as the HTTP client does (an IPv6 address may be unreachable).
+    let mut failure = format!("{host} has no address");
+    let mut connected = None;
+    for addr in (host, 443)
         .to_socket_addrs()
         .map_err(|e| format!("resolving {host}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("{host} has no address"))?;
-    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(30))
-        .map_err(|e| format!("connecting to {host}: {e}"))?;
+    {
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(10)) {
+            Ok(tcp) => {
+                connected = Some(tcp);
+                break;
+            }
+            Err(e) => failure = format!("connecting to {host} ({addr}): {e}"),
+        }
+    }
+    let tcp = connected.ok_or(failure)?;
     tcp.set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| e.to_string())?;
     let name = rustls::pki_types::ServerName::try_from(host.to_owned())
@@ -275,15 +278,11 @@ fn notification(client: &Client, text: &str) -> Option<Notification> {
 fn classify(body: &Value) -> Notification {
     let kind = match &body["notificationType"] {
         Value::String(s) => s.to_ascii_lowercase(),
-        Value::Number(n) => n.to_string(),
         _ => return Notification::Other,
     };
     match kind.as_str() {
         "devicehandshakesuccess" => Notification::Handshake,
-        // Also by number (`ClientNotificationType.cs`).
-        "fileadded" | "filemodified" | "filedeleted" | "101" | "202" | "303" => {
-            Notification::Changed
-        }
+        "fileadded" | "filemodified" | "filedeleted" => Notification::Changed,
         "authenticationerror" => {
             Notification::Refused(format!("refused: {}", body["data"].as_str().unwrap_or("")))
         }
@@ -306,7 +305,6 @@ mod tests {
             n(json!({"notificationType": "fileModified", "data": "{}"})),
             Notification::Changed
         );
-        assert_eq!(n(json!({"notificationType": 202})), Notification::Changed);
         assert_eq!(n(json!({"notificationType": "pong"})), Notification::Other);
         assert!(matches!(
             n(json!({"notificationType": "authenticationError", "data": "no"})),

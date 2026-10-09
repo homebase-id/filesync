@@ -108,6 +108,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         let now = Instant::now();
         if now >= next_poll {
+            // Once a minute, whether the syncs succeed or back off.
+            next_poll = now + POLL;
             wanted = true;
             if !observer.has_watcher() {
                 engine.scan_local()?;
@@ -126,7 +128,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 // Work that is left (deferred, held) waits for the next change or poll.
                 wanted = false;
                 backoff = Duration::from_secs(5);
-                next_poll = Instant::now() + POLL;
             }
             Err(e) if e.is_denied() => return Err(stopped(e)),
             Err(e) => {

@@ -8,7 +8,7 @@ use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
 
 use crate::adopt::adopt;
-use crate::exec::{ExecConfig, Executor, recover_forks, sweep_tmp, unpark};
+use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
 use crate::view;
@@ -63,6 +63,9 @@ pub enum EngineError {
     /// The remote refused access: syncing stops until the user authorizes again.
     #[error("access denied: {0}")]
     Denied(String),
+    /// Transient remote errors kept coming: try again later.
+    #[error("remote unreachable: {0}")]
+    Unreachable(String),
 }
 
 impl EngineError {
@@ -273,8 +276,10 @@ impl Engine {
         let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
             .with_urgent(self.urgent.clone())
             .run(plan.ops)?;
-        if let Some(why) = exec.stopped {
-            return Err(EngineError::Denied(why));
+        match exec.stopped {
+            Some(Stopped::Denied(why)) => return Err(EngineError::Denied(why)),
+            Some(Stopped::Unreachable(why)) => return Err(EngineError::Unreachable(why)),
+            None => {}
         }
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);

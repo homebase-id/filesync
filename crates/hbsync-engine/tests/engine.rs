@@ -173,6 +173,44 @@ fn a_denied_remote_stops_the_sync_and_loses_nothing() -> R {
     Ok(())
 }
 
+/// When the remote stops answering mid-plan, the run gives up after a few transient errors in
+/// a row (pausing between them) instead of trying every queued operation four times.
+#[test]
+fn a_dead_remote_ends_the_run_early_and_loses_nothing() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    for i in 0..60 {
+        a.write(&format!("f{i:02}.txt"), format!("content {i}"))?;
+    }
+    a.engine.scan_local()?;
+    // The feed answers, then nothing does.
+    a.remote.faults().script = std::iter::once(false)
+        .chain(std::iter::repeat_n(true, 10_000))
+        .collect();
+    let before = a.remote.faults().requests;
+    let err = a
+        .engine
+        .sync_once("2026-10-09")
+        .err()
+        .ok_or("sync went through")?;
+    assert!(
+        matches!(err, hbsync_engine::EngineError::Unreachable(_)),
+        "{err}"
+    );
+    let requests = a.remote.faults().requests - before;
+    assert!(requests < 20, "gave up after {requests} requests");
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 0);
+
+    // Back up: everything goes through.
+    a.remote.faults().script.clear();
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(), a.tree_text());
+    assert_eq!(b.tree_text().len(), 60);
+    Ok(())
+}
+
 #[test]
 fn restart_after_an_interrupted_sync_converges() -> R {
     let server = server();

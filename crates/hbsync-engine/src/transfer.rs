@@ -203,8 +203,22 @@ impl JobError {
 pub fn run_jobs(
     remote: &dyn Remote,
     cfg: TransferConfig,
-    mut jobs: Vec<(bool, Job)>,
+    jobs: Vec<(bool, Job)>,
     mut commit: impl FnMut(Job, JobResult),
+) {
+    run_jobs_while(remote, cfg, jobs, |job, result| {
+        commit(job, result);
+        true
+    });
+}
+
+/// [`run_jobs`], until `commit` returns `false`: jobs not started by then are dropped (jobs
+/// already running finish and are committed).
+pub fn run_jobs_while(
+    remote: &dyn Remote,
+    cfg: TransferConfig,
+    mut jobs: Vec<(bool, Job)>,
+    mut commit: impl FnMut(Job, JobResult) -> bool,
 ) {
     jobs.sort_by_key(|(urgent, job)| (!*urgent, job.size()));
     let queue: Mutex<VecDeque<Job>> = Mutex::new(jobs.into_iter().map(|(_, j)| j).collect());
@@ -226,7 +240,11 @@ pub fn run_jobs(
         }
         drop(tx);
         for (job, result) in rx {
-            commit(job, result);
+            if !commit(job, result)
+                && let Ok(mut q) = queue.lock()
+            {
+                q.clear();
+            }
         }
     });
 }
@@ -321,9 +339,10 @@ fn download(
 ) -> Result<JobResult, JobError> {
     let mut partial = PartialFile::open(tmp_dir, key, expected.algorithm)?;
     let offset = partial.offset();
-    // Resume where an earlier attempt stopped.
+    // Resume where an earlier attempt stopped. The size is known, so always name the range:
+    // a remote needn't look it up first.
     if offset < size {
-        let range = (offset > 0).then_some(offset..size);
+        let range = Some(offset..size);
         let mut sink = ThrottledWrite {
             inner: &mut partial,
             throttle,

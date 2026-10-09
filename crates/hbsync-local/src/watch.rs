@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use hbsync_platform::journal::ChangeJournal;
@@ -107,12 +107,29 @@ impl LiveWatcher {
         loop {
             let quiet_at = quiet_from + debounce.quiet;
             let now = Instant::now();
-            if now >= quiet_at {
-                batch.drained = true;
-                break;
-            }
             if now >= close_by {
                 break;
+            }
+            if now >= quiet_at {
+                // Quiet, but only drained once the queue is empty: a change may still wait
+                // behind events that don't count, and the stored journal position must not
+                // pass it.
+                match self.rx.try_recv() {
+                    Ok(event) => {
+                        if self.add(&mut batch, event) {
+                            quiet_from = Instant::now();
+                        }
+                        continue;
+                    }
+                    Err(TryRecvError::Empty) => {
+                        batch.drained = true;
+                        break;
+                    }
+                    Err(TryRecvError::Disconnected) => {
+                        batch.rescan_all = true;
+                        break;
+                    }
+                }
             }
             match self.rx.recv_timeout(quiet_at.min(close_by) - now) {
                 Ok(event) => {
@@ -416,6 +433,39 @@ mod tests {
 
         reading.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = reader.join();
+        Ok(())
+    }
+
+    /// A batch is only drained when the queue is empty: a change queued behind a backlog of
+    /// events that don't count must land in this batch, or the stored journal position could
+    /// pass it.
+    #[test]
+    fn a_change_behind_a_backlog_of_reads_is_not_left_out() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let mut watcher = LiveWatcher::start(&root, &[])?;
+        let (tx, rx) = channel();
+        watcher.rx = rx;
+        let event = |kind, path: &str| Ok(Event::new(kind).add_path(root.join(path)));
+        tx.send(event(EventKind::Create(CreateKind::File), "a/first"))?;
+        for _ in 0..200_000 {
+            tx.send(event(
+                EventKind::Access(AccessKind::Open(AccessMode::Read)),
+                "r/read",
+            ))?;
+        }
+        tx.send(event(EventKind::Create(CreateKind::File), "b/behind"))?;
+        // A quiet period far shorter than working through the backlog.
+        let debounce = Debounce {
+            quiet: Duration::from_micros(100),
+            max_delay: Duration::from_secs(30),
+        };
+        let batch = watcher
+            .next_batch(Duration::from_secs(1), debounce)
+            .ok_or("no batch")?;
+        assert_eq!(batch.dirs, [rp("a"), rp("b")].into());
+        assert!(batch.drained);
         Ok(())
     }
 

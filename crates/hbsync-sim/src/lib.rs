@@ -599,7 +599,12 @@ impl Sim {
                     self.clients[c].planned_remote.remove(node);
                     Done
                 }
-                _ => Skip,
+                Some(_) => Skip, // changed meanwhile (4160)
+                // Already deleted: a delete of a tombstone succeeds, as on the fake and Homebase.
+                None => {
+                    self.clients[c].planned_remote.remove(node);
+                    Done
+                }
             },
             Op::Settle { .. } => Done,
         }

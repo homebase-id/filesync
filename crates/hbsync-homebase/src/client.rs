@@ -28,6 +28,9 @@ pub(crate) fn agent() -> ureq::Agent {
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_send_request(Some(Duration::from_secs(60)))
         .timeout_recv_response(Some(Duration::from_secs(300)))
+        // A body that stalls (a connection that died without a reset) ends the call instead of
+        // blocking a worker forever. Answers are bounded: JSON pages, 8 MiB payload ranges.
+        .timeout_recv_body(Some(Duration::from_secs(300)))
         .user_agent(concat!("hbsync/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()
@@ -160,7 +163,20 @@ impl Client {
             .header("Range", &format!("bytes={start}-{last}"))
             .call();
         let mut response = checked(response, path)?;
-        let mut reader = response.body_mut().with_config().limit(u64::MAX).reader();
+        // Anything but the range asked for (a proxy that ignored `Range`) must not reach the
+        // sink: it would be written at the wrong offset.
+        if response.status().as_u16() != 206 {
+            return Err(HomebaseError::Protocol(format!(
+                "{path}: asked for bytes {start}-{last}, got HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        let mut reader = response
+            .body_mut()
+            .with_config()
+            .limit(u64::MAX)
+            .reader()
+            .take(last - start + 1);
         let mut buf = vec![0u8; 64 * 1024];
         let mut written = 0u64;
         loop {

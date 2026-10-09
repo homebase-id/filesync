@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
@@ -30,7 +30,7 @@ use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind};
 
 use crate::reconcile::{Agreement, Op, Requirement};
-use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs};
+use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::{feed, view};
 
 /// Where the executor works.
@@ -42,7 +42,8 @@ pub struct ExecConfig {
     pub algorithm: HashAlgorithm,
     /// Attempts per operation within one run (ordering blocks and transient errors).
     pub attempts: u8,
-    /// The pause before retrying after a transient remote error; doubled on each attempt.
+    /// The pause after a transient remote error, doubled for each one in a row. The whole run
+    /// waits: the next request would most likely fail the same way.
     pub retry_pause: Duration,
     pub transfer: TransferConfig,
     /// Names that differ only in case (or Unicode normalization) are the same file here
@@ -90,9 +91,22 @@ pub struct ExecReport {
     pub failed: Vec<(Op, String)>,
     /// Local folders whose contents differ from the DB: rescan them before planning again.
     pub rescan: Vec<RelPath>,
-    /// Why the run stopped early: the remote refused access, so nothing else can succeed.
-    pub stopped: Option<String>,
+    /// Why the run stopped early, leaving the rest dirty for a later sync.
+    pub stopped: Option<Stopped>,
 }
+
+/// Why a run stopped before its plan was done.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// The remote refused access: nothing else can succeed until the user authorizes again.
+    Denied(String),
+    /// Transient remote errors kept coming: the network or the server is down.
+    Unreachable(String),
+}
+
+/// Transient remote errors in a row after which a run gives up (with the pauses between them
+/// doubling from `retry_pause`, 0.5 s by default: about 15 s in all).
+const UNREACHABLE_AFTER: u32 = 6;
 
 #[derive(Debug)]
 enum Outcome {
@@ -127,6 +141,9 @@ pub struct Executor<'a> {
     urgent: HashSet<NodeId>,
     /// Set when a test's crash point was reached: the run stops.
     crashed: bool,
+    /// Transient remote errors in a row, and until when the run waits because of them.
+    streak: u32,
+    resume_at: Option<Instant>,
 }
 
 /// A transfer whose guards passed, waiting for a worker.
@@ -185,6 +202,8 @@ impl<'a> Executor<'a> {
             report: ExecReport::default(),
             urgent: HashSet::new(),
             crashed: false,
+            streak: 0,
+            resume_at: None,
         }
     }
 
@@ -199,16 +218,17 @@ impl<'a> Executor<'a> {
         self.queue = ops.into_iter().map(|op| (op, 0)).collect();
         let mut batch: Vec<Prepared> = Vec::new();
         loop {
+            if self.report.stopped.is_some() {
+                break;
+            }
+            self.wait_out_backoff();
             let Some((op, attempts)) = self.queue.pop_front() else {
-                if batch.is_empty() || self.report.stopped.is_some() {
+                if batch.is_empty() {
                     break;
                 }
                 self.flush(&mut batch)?;
                 continue;
             };
-            if self.report.stopped.is_some() {
-                break;
-            }
             if let Err(wait) = self.ready(&op) {
                 self.handle(op, attempts, wait)?;
                 continue;
@@ -228,6 +248,10 @@ impl<'a> Executor<'a> {
             }
             if !batch.is_empty() {
                 self.flush(&mut batch)?;
+                if self.report.stopped.is_some() {
+                    break;
+                }
+                self.wait_out_backoff();
             }
             if let Op::Settle { node } = op {
                 self.settle_run(node)?;
@@ -306,22 +330,30 @@ impl<'a> Executor<'a> {
     fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), StateError> {
         match outcome {
             Outcome::Done => {
+                self.streak = 0;
                 self.report.done += 1;
                 let os = self.cfg.os;
                 let same_bytes = is_transfer(&op);
                 self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
             }
-            Outcome::Settled => self.report.done += 1,
-            Outcome::Retry(_) | Outcome::Backoff(_) if attempts + 1 < self.cfg.attempts => {
-                if matches!(outcome, Outcome::Backoff(_)) {
-                    // The network or the server is struggling: everything waits, as the next
-                    // request would most likely fail the same way.
-                    std::thread::sleep(self.cfg.retry_pause * (1u32 << attempts.min(8)));
-                }
-                self.queue.push_back((op, attempts + 1));
+            Outcome::Settled => {
+                self.streak = 0;
+                self.report.done += 1;
             }
-            Outcome::Retry(why) | Outcome::Backoff(why) => self.report.failed.push((op, why)),
+            Outcome::Backoff(why) => {
+                self.streak += 1;
+                if self.streak >= UNREACHABLE_AFTER {
+                    self.report.stopped.get_or_insert(Stopped::Unreachable(why));
+                    return Ok(());
+                }
+                // One pause for the whole run, longer for each failure in a row.
+                let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1).min(8));
+                self.resume_at = Some(Instant::now() + pause);
+                self.retry_or_fail(op, attempts, why);
+            }
+            Outcome::Retry(why) => self.retry_or_fail(op, attempts, why),
             Outcome::Skip(why) => {
+                self.streak = 0; // the remote answered
                 let node = op.node();
                 self.db.write(|s| s.mark_dirty(node))?;
                 self.report.skipped.push((op, why));
@@ -329,10 +361,25 @@ impl<'a> Executor<'a> {
             Outcome::Stop(why) => {
                 let node = op.node();
                 self.db.write(|s| s.mark_dirty(node))?;
-                self.report.stopped.get_or_insert(why);
+                self.report.stopped.get_or_insert(Stopped::Denied(why));
             }
         }
         Ok(())
+    }
+
+    fn retry_or_fail(&mut self, op: Op, attempts: u8, why: String) {
+        if attempts + 1 < self.cfg.attempts {
+            self.queue.push_back((op, attempts + 1));
+        } else {
+            self.report.failed.push((op, why));
+        }
+    }
+
+    /// Waits out the pause after a transient remote error, if there is one.
+    fn wait_out_backoff(&mut self) {
+        if let Some(at) = self.resume_at.take() {
+            std::thread::sleep(at.saturating_duration_since(Instant::now()));
+        }
     }
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
@@ -348,17 +395,19 @@ impl<'a> Executor<'a> {
         let remote = self.remote;
         let transfer = self.cfg.transfer;
         let mut first_error = None;
-        run_jobs(remote, transfer, jobs, |job, result| {
+        // A DB error or a stopped run (denied, unreachable) starts no further transfers; the
+        // nodes stay dirty for the next sync.
+        run_jobs_while(remote, transfer, jobs, |job, result| {
             if first_error.is_some() {
-                return; // the DB failed; leave the rest dirty for the next sync
+                return false;
             }
-            let Some(p) = pending.remove(&job.node()) else {
-                return;
-            };
-            let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
-            if let Err(e) = self.handle(p.op, p.attempts, outcome) {
-                first_error = Some(e);
+            if let Some(p) = pending.remove(&job.node()) {
+                let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
+                if let Err(e) = self.handle(p.op, p.attempts, outcome) {
+                    first_error = Some(e);
+                }
             }
+            first_error.is_none() && self.report.stopped.is_none()
         });
         if let Some(e) = first_error {
             return Err(e);
@@ -1149,7 +1198,9 @@ fn io_outcome(e: io::Error) -> Outcome {
 
 fn remote_outcome(e: RemoteError) -> Outcome {
     match e {
-        RemoteError::Transient(_) | RemoteError::Io(_) => Outcome::Backoff(e.to_string()),
+        RemoteError::Transient(_) => Outcome::Backoff(e.to_string()),
+        // The local source or sink failed: worth another try, but no reason to pause.
+        RemoteError::Io(_) => Outcome::Retry(e.to_string()),
         RemoteError::Denied(_) => Outcome::Stop(e.to_string()),
         // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
         _ => Outcome::Skip(e.to_string()),
