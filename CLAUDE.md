@@ -5,12 +5,15 @@ syncs a local folder tree with a Homebase drive (server: `../odin-core`; mobile 
 reference: `../chat-kmp`).
 
 Status: roadmap Layers 0–4 are built and tested against the in-memory fake remote (two-client
-sync on real folders, green on all three OSes in CI). Layer 5 has started: `hbsync-homebase`
-registers the Filesync app on an identity (YouAuth, its drive and circle) and talks to the V2
-API through the shared-secret envelope; next is the drive adapter behind `Remote` (see
-`docs/spec/homebase-api-notes.md`). Dev registration: `cargo run -p hbsync-homebase --bin
-hbsync-register -- <identity> [--browser firefox]` (credentials in
-`~/.config/hbsync/dev/<identity>.json`).
+sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebase:
+`hbsync-homebase` registers the Filesync app (YouAuth, its drive and circle), implements
+`Remote` on the drive's V2 API (`drive::HomebaseRemote`) and listens on the notification
+WebSocket; two folders converge through a live identity. Facts and server bugs:
+`docs/spec/homebase-api-notes.md`. Dev tools (`hbsync-dev`), credentials in
+`~/.config/hbsync/dev/<identity>.json`:
+- `cargo run -p hbsync-dev --bin hbsync-register -- <identity> [--browser firefox]`
+- `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]
+  [--allow-mass-delete]`
 
 Read these first:
 - `docs/foundations.md`: the pinned decisions (client-computed stored + content hashes on
@@ -38,7 +41,12 @@ cargo test --workspace
 # Deeper runs (release mode):
 PROPTEST_CASES=150000 cargo test --release -p hbsync-sim --test props
 MILESTONE_SEEDS=3000 cargo test --release -p hbsync-engine --test milestone randomized
+# Against a live identity registered with hbsync-register (the local dev host is frodo):
+HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-homebase --test live -- --ignored
+HBSYNC_LIVE=frodo.dotyou.cloud cargo test --release -p hbsync-dev --test live_e2e -- --ignored
 ```
+
+Every `Remote` must pass `hbsync_remote::contract` (the fake in CI, Homebase live).
 
 The toolchain is pinned in `rust-toolchain.toml`. CI (`.github/workflows/ci.yml`) runs fmt,
 clippy and tests on Ubuntu, Windows and macOS. Crates without SQLite can also be checked for
@@ -58,4 +66,5 @@ the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-wind
 | `hbsync-remote` | blocking `Remote` trait and the fake server/remote with Homebase semantics |
 | `hbsync-engine` | tree, pure reconciler, view builder, executor, transfer pool, adoption, sync loop |
 | `hbsync-sim` | deterministic multi-client simulator with convergence/no-loss properties |
-| `hbsync-homebase` | YouAuth app registration (P-384 ECDH, HKDF), the AES-CBC shared-secret envelope, a V2 API client, the Filesync app definition |
+| `hbsync-homebase` | YouAuth app registration (P-384 ECDH, HKDF), the AES-CBC shared-secret envelope, a V2 API client, the Filesync app definition, the drive as a `Remote`, the notification WebSocket |
+| `hbsync-dev` | development tools: `hbsync-register`, `hbsync-sync` (a folder synced with a live identity), the live end-to-end test |

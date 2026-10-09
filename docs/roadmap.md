@@ -1,6 +1,9 @@
 # Roadmap: layered build plan
 
-Progress (2026-10-08): Layers 0–4 are built against the fake remote; Layer 5 is next.
+Progress (2026-10-09): Layers 0–4 are built against the fake remote; Layer 5's adapter syncs
+two folders through a live identity (frodo), including the WebSocket wake-up. Open in Layer 5:
+batch deletes, files of 2 GiB and over (#1893), app sign-in by slug (#1902), hash-less nodes
+from other writers, encrypted drives, and the interop work.
 Open items in those layers:
 - catch-up at background I/O and CPU priority (Layer 2) is not implemented yet;
 - the performance budget isn't measured in CI yet (no 10^6-file benchmark job);
@@ -105,11 +108,12 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   - apps sign in by slug (#1902)
   - resumable upload (not filed yet)
   - "Files" drive type + reserved SyncFile / SyncFolder types (not filed yet)
-- **Homebase remote adapter**:
+- **Homebase remote adapter** (done 2026-10-09, `hbsync-homebase`):
   - app registration and auth
   - query-batch cursor feed, with the WebSocket as a wake-up hint only
   - node-schema mapping
   - VersionTag-guarded writes
+  - a contract suite every `Remote` passes, run live against frodo
 - **Interop**: payload hashes and the node schema in odin-js and chat-kmp, checked against the golden vectors, so web and mobile can browse and edit the same drive
 
 ## Layer 6: Product shell

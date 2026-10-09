@@ -63,7 +63,8 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   `instructions.transferIv` **[verified]** `FileSystemStreamWriterBase.cs:364-367`.
 
 ## Endpoints
-Checked on odin-core branch `payload-hashes` @ 467d0b531 (the local dev host) **[verified]**.
+Checked on odin-core branch `payload-hashes` @ 467d0b531 (the local dev host) **[verified]**,
+and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract suite).
 
 | Operation | Route | Notes |
 |---|---|---|

@@ -22,3 +22,22 @@ Rules that keep these reachable (from [../foundations.md](../foundations.md) §3
 - The reconciler works on the dirty set plus the ancestors and siblings it needs, not the
   whole tree.
 - Catch-up runs at background I/O and CPU priority.
+
+## Measured: sync with a live identity (2026-10-09)
+`hbsync-sync` (release) against frodo.dotyou.cloud: the local dev host on the same machine
+(odin-core on SQLite, NVMe). The tree is 10,003 files of 1–8 KB in 100 folders plus three
+100 MB files, 361 MB in all, on tmpfs. Loopback, so this is client and server cost with no
+network latency.
+
+| Scenario | Result |
+|---|---|
+| First upload: walk, hash, create 10,104 nodes | 26.6 s wall, 6.7 s CPU, peak RSS 89 MB |
+| First download into an empty folder (10,130 nodes, 361 MB) | 8.3 s wall, 9.0 s CPU, peak RSS 157 MB |
+| Feed read, 10,755 rows from the start | 1.1 s (500 per page; 1,000 or 2,000 aren't faster) |
+| Restart, nothing changed | 55 ms to idle |
+| Idle loop (watcher, WebSocket, 60 s poll) | 12 MB RSS, 3 threads, CPU ≈ 0 |
+| Edit in one folder until it is in the other (both running) | ≈ 0.55 s, mostly the 300 ms local debounce |
+| Deleting the 10,130 nodes | 33.6 s: a header check and a delete per node, one at a time |
+
+Follow-ups: batch deletes (`delete-batch/by-file-id`, with the header checks batched too);
+find what drives peak memory during a large first download.
