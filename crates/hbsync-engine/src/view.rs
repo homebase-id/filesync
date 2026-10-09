@@ -184,17 +184,34 @@ impl Builder<'_, '_> {
         Ok(())
     }
 
+    /// Loads the children of `folder` (which is loaded) on every side. The rows the listings
+    /// return are used directly; `load` then only reads the sides they didn't cover.
     fn load_children(&mut self, folder: NodeId) -> Result<(), StateError> {
         let mut kids: Vec<NodeId> = Vec::new();
-        kids.extend(self.s.base_children(folder)?.into_iter().map(|r| r.node));
-        kids.extend(self.s.mirror_children(folder)?.into_iter().map(|r| r.node));
+        for row in self.s.base_children(folder)? {
+            kids.push(row.node);
+            if self.base_done.insert(row.node) {
+                self.add_base(row);
+            }
+        }
+        for row in self.s.mirror_children(folder)? {
+            kids.push(row.node);
+            if self.mirror_done.insert(row.node) {
+                self.add_mirror(row);
+            }
+        }
         let local_path = if folder.is_root() {
             Some(RelPath::root())
         } else {
             self.s.local_by_node(folder)?.map(|r| r.path)
         };
         if let Some(path) = local_path {
-            kids.extend(self.s.local_children(&path)?.into_iter().map(|r| r.node));
+            for row in self.s.local_children(&path)? {
+                kids.push(row.node);
+                if self.local_done.insert(row.node) {
+                    self.add_local(row)?;
+                }
+            }
         }
         for kid in kids {
             self.load(kid)?;

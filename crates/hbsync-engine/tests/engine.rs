@@ -1,106 +1,16 @@
 //! The executor and engine end to end: real folders, a real state DB, the fake remote.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
-use hbsync_engine::{Engine, EngineConfig, SyncReport};
-use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+use hbsync_engine::{Engine, EngineConfig};
+use hbsync_remote::fake::FakeRemote;
 use hbsync_state::StateDb;
 
+mod common;
+
+use common::{Client, server};
+
 type R = Result<(), Box<dyn std::error::Error>>;
-
-struct Client {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    engine: Engine,
-    remote: FakeRemote,
-}
-
-impl Client {
-    fn new(
-        server: &Arc<Mutex<FakeServer>>,
-        name: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let root = dir.path().canonicalize()?;
-        fs::create_dir_all(root.join(".hbsync"))?;
-        let db = StateDb::open(&root.join(".hbsync").join("state.db"))?;
-        let remote = FakeRemote::new(server.clone());
-        let engine = Engine::new(db, Box::new(remote.clone()), EngineConfig::new(&root, name));
-        Ok(Client {
-            _dir: dir,
-            root,
-            engine,
-            remote,
-        })
-    }
-
-    /// Scan, then sync until idle. The report accumulates every pass.
-    fn sync(&mut self) -> Result<SyncReport, Box<dyn std::error::Error>> {
-        let mut total = SyncReport::default();
-        for _ in 0..6 {
-            self.engine.scan_local()?;
-            let pass = self.engine.sync_once("2026-10-08")?;
-            total.ops_done += pass.ops_done;
-            total.conflicts.extend(pass.conflicts);
-            total.failed.extend(pass.failed);
-            total.skipped.extend(pass.skipped);
-            total.held = pass.held;
-            total.pending = pass.pending;
-            if pass.ops_done == 0 {
-                break;
-            }
-        }
-        Ok(total)
-    }
-
-    fn write(&self, rel: &str, data: &str) -> std::io::Result<()> {
-        let p = self.root.join(rel);
-        if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(p, data)
-    }
-
-    fn read(&self, rel: &str) -> std::io::Result<String> {
-        fs::read_to_string(self.root.join(rel))
-    }
-
-    /// Every synced path with its content (folders end in `/`), excluding `.hbsync`.
-    fn tree(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        walk(&self.root, &self.root, &mut out);
-        out.sort();
-        out
-    }
-}
-
-fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        if rel == ".hbsync" {
-            continue;
-        }
-        if path.is_dir() {
-            out.push(format!("{rel}/"));
-            walk(root, &path, out);
-        } else {
-            out.push(format!(
-                "{rel} = {}",
-                fs::read_to_string(&path).unwrap_or_default()
-            ));
-        }
-    }
-}
-
-fn server() -> Arc<Mutex<FakeServer>> {
-    FakeServer::new(ServerConfig::default())
-}
 
 #[test]
 fn upload_then_download() -> R {
@@ -117,7 +27,7 @@ fn upload_then_download() -> R {
     assert!(a.engine.sync_once("2026-10-08")?.is_idle());
 
     b.sync()?;
-    assert_eq!(b.tree(), a.tree());
+    assert_eq!(b.tree_text(), a.tree_text());
     assert_eq!(b.read("Docs/deep/nested.bin")?, "bytes");
     Ok(())
 }
@@ -139,7 +49,7 @@ fn edits_moves_and_deletes_propagate() -> R {
     a.sync()?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     // two-moved.txt went into y, which b deleted: the live file kept y alive (edit/move wins).
     assert_eq!(b.read("y/two-moved.txt")?, "2");
     assert_eq!(b.read("x/one.txt")?, "1 edited");
@@ -167,8 +77,8 @@ fn concurrent_edits_keep_both_versions() -> R {
     let report = b.sync()?;
     assert!(!report.conflicts.is_empty());
     a.sync()?;
-    assert_eq!(a.tree(), b.tree());
-    let tree = b.tree();
+    assert_eq!(a.tree_text(), b.tree_text());
+    let tree = b.tree_text();
     assert!(
         tree.contains(&"notes.txt = from laptop".to_owned()),
         "{tree:?}"
@@ -197,7 +107,7 @@ fn name_swap_uses_a_parked_name() -> R {
     b.sync()?;
     assert_eq!(b.read("left")?, "R");
     assert_eq!(b.read("right")?, "L");
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     Ok(())
 }
 
@@ -220,7 +130,7 @@ fn restart_after_an_interrupted_sync_converges() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     for i in 0..12 {
-        a.write(&format!("batch/f{i:02}.txt"), &format!("content {i}"))?;
+        a.write(&format!("batch/f{i:02}.txt"), format!("content {i}"))?;
     }
     // A long outage partway through: every request after the first few fails.
     a.remote.faults().script = std::iter::repeat_n(false, 5)
@@ -231,7 +141,7 @@ fn restart_after_an_interrupted_sync_converges() -> R {
     a.remote.faults().script.clear();
 
     // Restart: a new engine on the same state DB.
-    let db = StateDb::open(&a.root.join(".hbsync").join("state.db"))?;
+    let db = StateDb::open(&a.db_path())?;
     a.engine = Engine::new(
         db,
         Box::new(a.remote.clone()),
@@ -240,8 +150,8 @@ fn restart_after_an_interrupted_sync_converges() -> R {
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
-    assert_eq!(a.tree(), b.tree());
-    assert_eq!(b.tree().len(), 13);
+    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(b.tree_text().len(), 13);
     Ok(())
 }
 
@@ -275,7 +185,7 @@ fn parked_item_from_a_crash_is_put_back() -> R {
     })?;
     a.sync()?;
     assert_eq!(a.read("doc.txt")?, "keep me");
-    assert_eq!(a.tree().len(), 1);
+    assert_eq!(a.tree_text().len(), 1);
     let names: Vec<String> = server
         .lock()
         .map_err(|_| "poisoned")?
@@ -348,7 +258,7 @@ fn first_run_adopts_an_existing_copy_without_downloading() -> R {
     let report = b.sync()?;
     assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
     assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
-    assert_eq!(b.tree(), a.tree());
+    assert_eq!(b.tree_text(), a.tree_text());
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.live().count(),
         5,
@@ -367,9 +277,9 @@ fn a_differing_copy_keeps_both_versions() -> R {
     b.write("doc.txt", "local version")?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     let contents: Vec<String> = b
-        .tree()
+        .tree_text()
         .into_iter()
         .map(|e| e.split(" = ").nth(1).unwrap_or_default().to_owned())
         .collect();
@@ -377,7 +287,7 @@ fn a_differing_copy_keeps_both_versions() -> R {
         contents.contains(&"remote version".to_owned())
             && contents.contains(&"local version".to_owned()),
         "{:?}",
-        b.tree()
+        b.tree_text()
     );
     Ok(())
 }
@@ -392,13 +302,13 @@ fn start_up_catches_up_both_sides_in_parallel() -> R {
     b.write("from-b/two.txt", "2")?;
     let opts = b.engine.scan_options().clone();
     let mut observer = hbsync_local::LocalObserver::start(&b.root, opts);
-    let db_path = b.root.join(".hbsync").join("state.db");
+    let db_path = b.db_path();
     let report = b.engine.start_up(&mut observer, &db_path, "2026-10-08")?;
     assert!(report.feed.live >= 2, "{:?}", report.feed);
     assert_eq!(report.local.report.added, 2);
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     assert_eq!(a.read("from-b/two.txt")?, "2");
     Ok(())
 }
@@ -432,7 +342,7 @@ fn crossing_moves_park_the_occupant_in_one_pass() -> R {
     );
     assert_eq!(b.read("b")?, "A");
     assert_eq!(b.read("sub/b")?, "B");
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     Ok(())
 }
 
@@ -450,8 +360,11 @@ fn case_only_rename_converges() -> R {
     a.sync()?;
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
-    assert_eq!(b.tree(), ["Photos/", "Photos/p.jpg = p", "Report.pdf = r"]);
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(
+        b.tree_text(),
+        ["Photos/", "Photos/p.jpg = p", "Report.pdf = r"]
+    );
+    assert_eq!(a.tree_text(), b.tree_text());
     Ok(())
 }
 
@@ -471,7 +384,7 @@ fn new_folder_differing_only_in_case_from_a_leaving_one() -> R {
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(
-        b.tree(),
+        b.tree_text(),
         [
             "Photos/",
             "Photos/new.jpg = new",
@@ -479,7 +392,7 @@ fn new_folder_differing_only_in_case_from_a_leaving_one() -> R {
             "archive/old.jpg = old"
         ]
     );
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     Ok(())
 }
 
@@ -514,7 +427,7 @@ fn crash_right_after_a_fork_rename_is_completed_not_published() -> R {
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     a.sync()?;
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     assert_eq!(b.read("notes.txt")?, "a's edit");
     assert_eq!(b.read(to.as_str())?, "b's edit");
     let srv = server.lock().map_err(|_| "poisoned")?;
@@ -545,13 +458,13 @@ fn a_second_conflict_with_the_same_bytes_gets_its_own_copy() -> R {
         );
         a.sync()?;
     }
-    assert_eq!(a.tree(), b.tree());
+    assert_eq!(a.tree_text(), b.tree_text());
     let copies = b
-        .tree()
+        .tree_text()
         .iter()
         .filter(|e| e.ends_with("= same local bytes"))
         .count();
-    assert_eq!(copies, 2, "{:?}", b.tree());
+    assert_eq!(copies, 2, "{:?}", b.tree_text());
     assert_eq!(b.read("f.txt")?, "a2");
     Ok(())
 }
@@ -573,7 +486,7 @@ fn adopting_a_copy_of_a_sha256_file_downloads_nothing() -> R {
     let report = b.sync()?;
     assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
     assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
-    assert_eq!(b.tree(), ["photo.jpg = photo bytes"]);
+    assert_eq!(b.tree_text(), ["photo.jpg = photo bytes"]);
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.live().count(),
         1,
@@ -678,7 +591,7 @@ fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     let mut b = Client::new(&server, "b")?;
     let report = b.sync()?;
     assert!(report.conflicts.is_empty(), "{report:?}");
-    assert_eq!(b.tree(), a.tree());
+    assert_eq!(b.tree_text(), a.tree_text());
     Ok(())
 }
 

@@ -72,7 +72,7 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use crate::meta::{filetime_to_unix_ns, open_attributes};
+    use crate::meta::filetime_to_unix_ns;
     use crate::{EntryKind, FileId};
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::fs::OpenOptionsExt;
@@ -105,7 +105,7 @@ mod imp {
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(crate::winpath::extended(dir))?;
         let handle = handle_owner.as_raw_handle();
-        let volume = volume_serial(dir)?;
+        let volume = volume_serial(handle)?;
 
         // u64 storage keeps the buffer 8-byte aligned, as the structs require.
         let mut buf = vec![0u64; 64 * 1024 / 8];
@@ -185,13 +185,13 @@ mod imp {
         }
     }
 
-    fn volume_serial(dir: &Path) -> io::Result<u64> {
-        let file = open_attributes(dir)?;
+    /// The volume of the open directory `handle` (no second open per listed folder).
+    fn volume_serial(handle: std::os::windows::io::RawHandle) -> io::Result<u64> {
         let mut id: FILE_ID_INFO = unsafe { std::mem::zeroed() };
-        // SAFETY: POD out struct with its size.
+        // SAFETY: POD out struct with its size; the caller keeps the handle open.
         let ok = unsafe {
             GetFileInformationByHandleEx(
-                file.as_raw_handle(),
+                handle,
                 FileIdInfo,
                 (&raw mut id).cast(),
                 size_of::<FILE_ID_INFO>() as u32,

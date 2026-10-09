@@ -120,11 +120,12 @@ pub fn rescan_dirs(
         if covered.iter().any(|c| dir.starts_with(c)) {
             continue;
         }
-        let known = db.read(|s| s.local_subtree(&dir))?;
+        // Only the direct children are loaded up front; deeper rows only for the folders
+        // that are walked in full or gone (a rescan of the root must not read the whole DB).
+        let children = db.read(|s| s.local_children(&dir))?;
         let is_child = |p: &RelPath| p.parent().as_ref() == Some(&dir);
-        let known_children: HashMap<RelPath, (NodeKind, FileId)> = known
+        let known_children: HashMap<RelPath, (NodeKind, FileId)> = children
             .iter()
-            .filter(|r| is_child(&r.path))
             .map(|r| (r.path.clone(), (r.kind, r.fingerprint.file_id)))
             .collect();
 
@@ -152,21 +153,13 @@ pub fn rescan_dirs(
                 })
                 .collect()
         };
-        let gone: Vec<&RelPath> = known_children
-            .keys()
-            .filter(|p| !present.contains(p))
-            .collect();
-        let rows: Vec<LocalRow> = known
-            .into_iter()
-            .filter(|r| {
-                r.path != dir
-                    && (is_child(&r.path)
-                        || descended
-                            .iter()
-                            .chain(gone.iter().copied())
-                            .any(|d| r.path.starts_with(d)))
-            })
-            .collect();
+        let gone = known_children.keys().filter(|p| !present.contains(*p));
+        let mut rows = children;
+        for deep in descended.iter().chain(gone) {
+            let below = db.read(|s| s.local_subtree(deep))?;
+            rows.extend(below.into_iter().filter(|r| r.path != *deep));
+        }
+        rows.sort_by(|a, b| a.path.cmp(&b.path)); // walk order
         let part = merge(db, events.into_iter(), DbRows::fixed(rows), &mut report)?;
         diff.added.extend(part.added);
         diff.removed.extend(part.removed);

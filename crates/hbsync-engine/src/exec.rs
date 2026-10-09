@@ -359,17 +359,41 @@ impl<'a> Executor<'a> {
 
     /// Whether the item on disk still matches its row.
     fn on_disk_unchanged(&self, row: &LocalRow) -> bool {
-        match hbsync_platform::stat(&self.abs(&row.path)) {
-            Ok(meta) => match row.kind {
-                NodeKind::Folder => {
-                    meta.kind == EntryKind::Dir && meta.file_id == row.fingerprint.file_id
-                }
-                NodeKind::File => {
-                    meta.kind == EntryKind::File && meta.fingerprint() == row.fingerprint
-                }
-            },
-            Err(_) => false,
+        hbsync_platform::stat(&self.abs(&row.path)).is_ok_and(|meta| matches_row(row, &meta))
+    }
+
+    /// Whether the disk at and below `top` holds exactly `rows` (its subtree in the DB, `top`
+    /// included), unchanged. One walk, compared with the metadata the listing returns.
+    fn subtree_unchanged(&self, top: &LocalRow, rows: &[LocalRow]) -> bool {
+        if !self.on_disk_unchanged(top) {
+            return false;
         }
+        let mut expected: HashMap<&RelPath, &LocalRow> = rows
+            .iter()
+            .filter(|r| r.path != top.path)
+            .map(|r| (&r.path, r))
+            .collect();
+        if top.kind == NodeKind::Folder {
+            let walk = hbsync_local::Walker::at(
+                &self.cfg.root,
+                top.path.clone(),
+                &[hbsync_local::STATE_DIR],
+                None,
+            );
+            for event in walk {
+                // Anything we never sync (a link, a bad name) would be trashed silently.
+                let hbsync_local::WalkEvent::Entry { path, meta } = event else {
+                    return false;
+                };
+                if !expected
+                    .remove(&path)
+                    .is_some_and(|r| matches_row(r, &meta))
+                {
+                    return false;
+                }
+            }
+        }
+        expected.is_empty()
     }
 
     /// The tracked item that holds `target` on disk: the row at that exact path, or, on a
@@ -808,9 +832,7 @@ impl<'a> Executor<'a> {
             ));
         }
         // Everything on disk must be known and unchanged; otherwise rescan first.
-        let folder_has_unknown =
-            row.kind == NodeKind::Folder && self.disk_has_unknown(&row.path, rows.len());
-        if !rows.iter().all(|r| self.on_disk_unchanged(r)) || folder_has_unknown {
+        if !self.subtree_unchanged(&row, &rows) {
             return Ok(rescan(&mut self.report, &row.path));
         }
         if let Err(e) = self.move_to_trash(&row.path, node) {
@@ -826,24 +848,6 @@ impl<'a> Executor<'a> {
             Ok(())
         })?;
         Ok(Outcome::Done)
-    }
-
-    /// Whether the folder at `path` has entries on disk the DB doesn't know.
-    fn disk_has_unknown(&self, path: &RelPath, known: usize) -> bool {
-        let mut count = 1usize; // the folder itself
-        for event in hbsync_local::Walker::at(
-            &self.cfg.root,
-            path.clone(),
-            &[hbsync_local::STATE_DIR],
-            None,
-        ) {
-            match event {
-                hbsync_local::WalkEvent::Entry { .. } => count += 1,
-                // Something we never sync (a link, a bad name) would be trashed silently.
-                _ => return true,
-            }
-        }
-        count != known
     }
 
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
@@ -1043,6 +1047,15 @@ fn mirror_from(
 /// The temporary name a node is parked under (see [`Executor`]).
 pub fn parked_name(node: NodeId) -> String {
     format!(".hbsync-move-{}", node.0.simple())
+}
+
+/// Whether `meta` (from disk) is what `row` recorded: folders by kind and file id, files by
+/// their full fingerprint.
+fn matches_row(row: &LocalRow, meta: &hbsync_platform::LocalMeta) -> bool {
+    match row.kind {
+        NodeKind::Folder => meta.kind == EntryKind::Dir && meta.file_id == row.fingerprint.file_id,
+        NodeKind::File => meta.kind == EntryKind::File && meta.fingerprint() == row.fingerprint,
+    }
 }
 
 fn rescan(report: &mut ExecReport, path: &RelPath) -> Outcome {

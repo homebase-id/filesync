@@ -7,102 +7,15 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
-use hbsync_engine::{Engine, EngineConfig, SyncReport};
+use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_platform::name::name_key;
-use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-use hbsync_state::StateDb;
+
+mod common;
+
+use common::{Client, Res, server};
 
 type R = Result<(), Box<dyn std::error::Error>>;
-type Res<T> = Result<T, Box<dyn std::error::Error>>;
-
-struct Client {
-    _dir: tempfile::TempDir,
-    root: PathBuf,
-    engine: Engine,
-    remote: FakeRemote,
-}
-
-impl Client {
-    fn new(
-        server: &Arc<Mutex<FakeServer>>,
-        name: &str,
-        tweak: impl FnOnce(&mut EngineConfig),
-    ) -> Res<Self> {
-        let dir = tempfile::tempdir()?;
-        let root = dir.path().canonicalize()?;
-        fs::create_dir_all(root.join(".hbsync"))?;
-        let db = StateDb::open(&root.join(".hbsync").join("state.db"))?;
-        let remote = FakeRemote::new(server.clone());
-        let mut cfg = EngineConfig::new(&root, name);
-        tweak(&mut cfg);
-        let engine = Engine::new(db, Box::new(remote.clone()), cfg);
-        Ok(Client {
-            _dir: dir,
-            root,
-            engine,
-            remote,
-        })
-    }
-
-    fn sync(&mut self) -> Res<SyncReport> {
-        let mut total = SyncReport::default();
-        for _ in 0..6 {
-            self.engine.scan_local()?;
-            let pass = self.engine.sync_once("2026-10-08")?;
-            total.ops_done += pass.ops_done;
-            total.conflicts.extend(pass.conflicts);
-            total.failed.extend(pass.failed);
-            total.skipped.extend(pass.skipped);
-            total.held = pass.held;
-            total.pending = pass.pending;
-            if pass.ops_done == 0 {
-                break;
-            }
-        }
-        Ok(total)
-    }
-
-    fn write(&self, rel: &str, data: &[u8]) -> std::io::Result<()> {
-        let p = self.root.join(rel);
-        if let Some(parent) = p.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(p, data)
-    }
-
-    /// `(path, content)` for files, `(path/, "")` for folders, sorted; `.hbsync` excluded.
-    fn tree(&self) -> Vec<(String, Vec<u8>)> {
-        let mut out = Vec::new();
-        walk(&self.root, &self.root, &mut out);
-        out.sort();
-        out
-    }
-}
-
-fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
-    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        if rel == ".hbsync" {
-            continue;
-        }
-        if path.is_dir() {
-            out.push((format!("{rel}/"), Vec::new()));
-            walk(root, &path, out);
-        } else {
-            out.push((rel, fs::read(&path).unwrap_or_default()));
-        }
-    }
-}
-
-fn server() -> Arc<Mutex<FakeServer>> {
-    FakeServer::new(ServerConfig::default())
-}
 
 /// Syncs both clients until a full round changes nothing.
 fn settle_all(a: &mut Client, b: &mut Client) -> Res<()> {
@@ -246,8 +159,8 @@ fn randomized_two_client_convergence() -> R {
     for seed in 0..seeds {
         let server = server();
         let allow = |c: &mut EngineConfig| c.allow_mass_delete = true;
-        let mut a = Client::new(&server, "a", allow)?;
-        let mut b = Client::new(&server, "b", allow)?;
+        let mut a = Client::with_config(&server, "a", allow)?;
+        let mut b = Client::with_config(&server, "b", allow)?;
         let mut rng = Rng(seed);
         let mut ledger = Ledger::default();
         for _ in 0..30 {
@@ -285,8 +198,8 @@ fn randomized_two_client_convergence() -> R {
 #[test]
 fn unicode_and_case_clashes() -> R {
     let server = server();
-    let mut a = Client::new(&server, "a", |_| {})?;
-    let mut b = Client::new(&server, "b", |_| {})?;
+    let mut a = Client::with_config(&server, "a", |_| {})?;
+    let mut b = Client::with_config(&server, "b", |_| {})?;
     // Decomposed on one side, composed on the other: the same name.
     a.write("Re\u{301}sume\u{301}.txt", b"from a")?;
     a.sync()?;
@@ -346,7 +259,8 @@ fn windows_illegal_names_are_mapped_locally_only() -> R {
     )?;
 
     // A client applying the Windows rules (works on any disk: the escaped names are legal).
-    let mut win = Client::new(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
+    let mut win =
+        Client::with_config(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
     assert_clean(&win.sync()?);
     let names: BTreeSet<String> = win.tree().into_iter().map(|(p, _)| p).collect();
     assert_eq!(
@@ -373,7 +287,8 @@ fn windows_illegal_names_are_mapped_locally_only() -> R {
     // A client with Unix rules round-trips the original names (NTFS can't hold them).
     #[cfg(not(windows))]
     {
-        let mut unix = Client::new(&server, "unix", |c| c.exec.os = hbsync_platform::Os::Linux)?;
+        let mut unix =
+            Client::with_config(&server, "unix", |c| c.exec.os = hbsync_platform::Os::Linux)?;
         assert_clean(&unix.sync()?);
         assert_eq!(fs::read(unix.root.join("what?.txt"))?, b"edited on windows");
         unix.write("new:name.txt", b"from unix")?;
@@ -408,7 +323,8 @@ fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
         srv.seed_file(NodeId::ROOT, &device, b"d", Blake3)?;
         srv.seed_file(NodeId::ROOT, "fine.txt", b"f", Blake3)?;
     }
-    let mut win = Client::new(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
+    let mut win =
+        Client::with_config(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
     let report = win.sync()?;
     assert_clean(&report);
     assert!(
@@ -431,8 +347,8 @@ fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
 #[test]
 fn large_file_streams_and_resumes() -> R {
     let server = server();
-    let mut a = Client::new(&server, "a", |_| {})?;
-    let mut b = Client::new(&server, "b", |_| {})?;
+    let mut a = Client::with_config(&server, "a", |_| {})?;
+    let mut b = Client::with_config(&server, "b", |_| {})?;
     let data: Vec<u8> = (0..6_000_000u32)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
         .collect();
@@ -452,7 +368,7 @@ fn large_file_streams_and_resumes() -> R {
 #[test]
 fn deleting_everything_is_held() -> R {
     let server = server();
-    let mut a = Client::new(&server, "a", |_| {})?;
+    let mut a = Client::with_config(&server, "a", |_| {})?;
     for i in 0..60 {
         a.write(&format!("f{i:02}"), format!("{i}").as_bytes())?;
     }
@@ -474,7 +390,7 @@ fn deleting_everything_is_held() -> R {
 fn held_deletes_do_not_hold_up_other_changes() -> R {
     let server = server();
     // 5 nodes per round, 2 rounds per sync: one sync sees 10 of the 61 dirty nodes.
-    let mut a = Client::new(&server, "a", |c| {
+    let mut a = Client::with_config(&server, "a", |c| {
         c.batch = 5;
         c.max_rounds = 2;
     })?;
@@ -510,7 +426,7 @@ fn a_mass_delete_split_over_batches_is_still_held() -> R {
         c.batch = 10;
         c.mass_delete_min = 20;
     };
-    let mut a = Client::new(&server, "a", small_batches)?;
+    let mut a = Client::with_config(&server, "a", small_batches)?;
     for i in 0..30 {
         a.write(&format!("dir/f{i:02}"), format!("{i}").as_bytes())?;
     }
@@ -551,7 +467,7 @@ fn an_edit_keeps_the_executable_bit() -> R {
             reader: &mut &script[..],
         }),
     )?;
-    let mut a = Client::new(&server, "a", |_| {})?;
+    let mut a = Client::with_config(&server, "a", |_| {})?;
     assert_clean(&a.sync()?);
     a.write("run.sh", b"#!/bin/sh\necho edited\n")?;
     assert_clean(&a.sync()?);
@@ -572,8 +488,8 @@ fn an_edit_keeps_the_executable_bit() -> R {
 fn executable_bit_syncs() -> R {
     use std::os::unix::fs::PermissionsExt;
     let server = server();
-    let mut a = Client::new(&server, "a", |_| {})?;
-    let mut b = Client::new(&server, "b", |_| {})?;
+    let mut a = Client::with_config(&server, "a", |_| {})?;
+    let mut b = Client::with_config(&server, "b", |_| {})?;
     a.write("run.sh", b"#!/bin/sh\necho hi\n")?;
     fs::set_permissions(a.root.join("run.sh"), fs::Permissions::from_mode(0o755))?;
     a.sync()?;
