@@ -58,6 +58,8 @@ pub struct ScanReport {
     /// Folders whose contents are unknown this time; their DB rows were left alone.
     pub unreadable: Vec<RelPath>,
     pub skipped: Vec<(std::path::PathBuf, SkipReason)>,
+    /// Folders seen for the first time.
+    pub new_folders: Vec<RelPath>,
 }
 
 /// Runs a full tier-C scan of `root` and records the result in `db`.
@@ -511,6 +513,9 @@ fn resolve(
         }
         let node = NodeId::new();
         report.added += 1;
+        if kind_of(&meta) == NodeKind::Folder {
+            report.new_folders.push(path.clone());
+        }
         plan.dirty.push(node);
         new_nodes.push((path.clone(), node));
         plan.put_rows.push(LocalRow {

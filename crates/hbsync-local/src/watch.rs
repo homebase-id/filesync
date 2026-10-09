@@ -171,10 +171,16 @@ fn keep(
 }
 
 /// Whether `rel` is filtered or lies in a filtered folder. Whether it is a folder itself is
-/// unknown (it may be gone), so a rule only for folders counts on the folders above it only.
+/// unknown (it may be gone), so it must be filtered either way: a folder that only rules for
+/// folders let through (`/*` then `!/docs/`) would otherwise lose its creation event, and with
+/// it what was written into it before it was watched. An event kept too many only costs a
+/// rescan, which judges with the kind known.
 fn excluded(rel: &Path, filter: &Filter) -> bool {
     let names: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
-    names.is_some_and(|names| !filter.names(names, false).is_sync())
+    names.is_some_and(|names| {
+        !filter.names(names.iter().copied(), false).is_sync()
+            && !filter.names(names.iter().copied(), true).is_sync()
+    })
 }
 
 /// Folds one notification into a batch, if it counts (see [`keep`]): every changed path
@@ -222,7 +228,16 @@ pub struct LocalObserver {
     pub watcher_error: Option<String>,
     /// A batch was recorded without storing the journal position (see [`LocalObserver::poll`]).
     unsaved: bool,
+    /// New folders to look into once more, and when (see [`RECHECK`]).
+    recheck: Vec<RelPath>,
+    recheck_at: Option<Instant>,
 }
+
+/// How long after a new folder is found it is rescanned once more. A watcher that watches
+/// folder by folder (inotify) starts watching a new one only after its creation event: what is
+/// written into it before that sends no event, and the rescan that found the folder may have
+/// come too early to see it. By then the watch is long in place.
+const RECHECK: Duration = Duration::from_secs(1);
 
 impl LocalObserver {
     /// Starts watching. Call [`LocalObserver::catch_up`] next.
@@ -239,6 +254,8 @@ impl LocalObserver {
             watcher,
             watcher_error,
             unsaved: false,
+            recheck: Vec::new(),
+            recheck_at: None,
         }
     }
 
@@ -254,8 +271,20 @@ impl LocalObserver {
         timeout: Duration,
         debounce: Debounce,
     ) -> Result<Option<ScanReport>, StateError> {
-        let Some(watcher) = &self.watcher else {
+        if self.watcher.is_none() {
             std::thread::sleep(timeout);
+            return Ok(None);
+        }
+        if self.recheck_at.is_some_and(|at| Instant::now() >= at) {
+            self.recheck_at = None;
+            let dirs = std::mem::take(&mut self.recheck);
+            let report = rescan_dirs(db, &self.root, &dirs, &self.opts)?;
+            self.note_new_folders(&report);
+            if report.added + report.removed + report.modified + report.moved > 0 {
+                return Ok(Some(report));
+            }
+        }
+        let Some(watcher) = &self.watcher else {
             return Ok(None);
         };
         // The journal position is taken before waiting. Once the queue has been drained (a
@@ -287,7 +316,18 @@ impl LocalObserver {
             }
             _ => self.unsaved = true,
         }
+        self.note_new_folders(&report);
         Ok(Some(report))
+    }
+
+    /// Looks into the new folders of `report` once more after [`RECHECK`].
+    fn note_new_folders(&mut self, report: &ScanReport) {
+        if report.new_folders.is_empty() {
+            return;
+        }
+        self.recheck.extend(report.new_folders.iter().cloned());
+        self.recheck_at
+            .get_or_insert_with(|| Instant::now() + RECHECK);
     }
 
     pub fn has_watcher(&self) -> bool {
@@ -504,6 +544,58 @@ mod tests {
             .ok_or("no batch")?;
         assert_eq!(batch.dirs, [rp("a"), rp("b")].into());
         assert!(batch.drained);
+        Ok(())
+    }
+
+    /// Rules for folders only decide on a path whose kind an event doesn't tell: the event
+    /// is kept if the path syncs as a folder or as a file.
+    #[test]
+    fn an_event_for_a_folder_only_rules_let_through_is_kept() -> Result<(), crate::FilterError> {
+        let root = Path::new("/sync");
+        let filter = Filter::from_rules("/*\n!/docs/\n", false)?;
+        let event =
+            |p: &str| Ok(Event::new(EventKind::Create(CreateKind::Folder)).add_path(root.join(p)));
+        assert!(keep(root, &filter, event("docs")).is_some());
+        assert!(keep(root, &filter, event("docs/a.txt")).is_some());
+        assert!(keep(root, &filter, event("other")).is_none());
+        assert!(keep(root, &filter, event("other/a.txt")).is_none());
+        Ok(())
+    }
+
+    /// A file written into a folder just created, before the watcher watches the folder,
+    /// sends no event; the folder is looked into once more a moment later.
+    #[test]
+    fn a_file_written_into_a_new_folder_before_its_watch_is_found()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        let mut db = StateDb::open_in_memory()?;
+        let mut observer = LocalObserver::start(&root, opts);
+        observer.catch_up(&mut db)?;
+        // Only the events this test sends arrive.
+        let (tx, rx) = channel();
+        observer.watcher.as_mut().ok_or("no watcher")?.rx = rx;
+
+        fs::create_dir(root.join("new"))?;
+        let created = Event::new(EventKind::Create(CreateKind::Folder)).add_path(root.join("new"));
+        tx.send(Ok(created))?;
+        let quick = Debounce {
+            quiet: Duration::from_millis(10),
+            max_delay: Duration::from_secs(1),
+        };
+        let report = observer
+            .poll(&mut db, Duration::from_secs(1), quick)?
+            .ok_or("no batch")?;
+        assert_eq!(report.new_folders, [rp("new")]);
+        // Written before the watch: no event.
+        fs::write(root.join("new/early.txt"), "early")?;
+
+        let until = Instant::now() + Duration::from_secs(10);
+        while db.read(|s| s.get_local(&rp("new/early.txt")))?.is_none() {
+            assert!(Instant::now() < until, "new/early.txt was never found");
+            observer.poll(&mut db, Duration::from_millis(100), quick)?;
+        }
         Ok(())
     }
 
