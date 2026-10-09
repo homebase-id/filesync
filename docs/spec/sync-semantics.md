@@ -177,3 +177,45 @@ expected fingerprint is treated as done.
 2. **No data loss:** every file version that some client held and that no client replaced or
    deleted *after seeing it* exists in the converged tree (possibly as a conflict copy).
 3. **Invariants** of section 6 hold in every base tree at every step.
+4. **Filters** (section 10): convergence and no loss hold for what each client syncs; a
+   filtered local item is never changed or removed by sync, except junk going to the trash
+   with its folder.
+
+## 10. Filters
+
+Some items are never synced. Filtering is per device and works in both directions: a filtered
+item is invisible to this device's sync, locally and remotely. Ignoring never deletes anything
+on its own.
+
+**Classes** (`hbsync-local/src/filter.rs`):
+- **Excluded**: the client's own `.hbsync` folder at the top of the sync root.
+- **Junk**: a built-in list of names the OS or an application creates by itself, matched in any
+  case at any depth: macOS `.DS_Store`, `._*`, `Icon\r`, `.Spotlight-V100`, `.Trashes`,
+  `.fseventsd`, `.TemporaryItems`, `.DocumentRevisions-V100`, `.apdisk`; Windows `Thumbs.db`,
+  `ehthumbs.db`, `desktop.ini`, `$RECYCLE.BIN`, `System Volume Information`; Office `~$*` and
+  `~*.tmp`; LibreOffice `.~lock.*#`; vim `.*.swp`, `.*.swx`; downloads in progress
+  `*.crdownload`, `*.part`. Junk is disposable.
+- **Ignored**: the user's rules in `.hbsync/ignore` (gitignore syntax, per device, never
+  synced), matched case-insensitively on case-insensitive volumes. Ignored items are the user's
+  data, kept on this device only. A rule that doesn't parse stops the client: skipping it would
+  sync what the user meant to keep here.
+
+An item inside a filtered folder is filtered too.
+
+**Rules:**
+1. **Local.** The walk neither reports nor enters filtered entries (nothing is hashed), and the
+   watcher drops their events. A synced item that becomes filtered (a rule was added, or it was
+   moved into an ignored folder) looks deleted: it leaves the drive and the other devices
+   (their trash), and stays here. The mass-delete guard applies.
+2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
+   never downloaded, never deleted by this device. A synced node that becomes masked (another
+   device moved it into a path this device ignores) is trashed here; the remote is untouched.
+3. **Folders.** A remote folder with masked live children counts as having a live child: a
+   local delete of it deletes what this device saw, and the folder comes back here, empty.
+   Locally, junk in a folder being trashed goes to the trash with it; ignored content keeps its
+   folder: the synced contents are trashed and the folder is released (the next scan sees it
+   as a new folder).
+4. **Rule changes.** The filter's fingerprint (rules, junk list version, case sensitivity) is
+   kept in the state DB. When it changed, start-up walks the whole tree (a journal doesn't
+   report items that just became visible) and re-plans every remote node. Rules are read at
+   start-up.
