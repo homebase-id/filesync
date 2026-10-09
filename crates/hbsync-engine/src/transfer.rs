@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
 use hbsync_remote::{NodeMeta, Remote, RemoteError, Upload};
-use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, VersionTag};
+use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -129,18 +129,11 @@ pub enum Job {
         /// The hash the `local` rows keep (computed too if the remote uses another algorithm).
         local_algorithm: HashAlgorithm,
     },
-    Create {
-        node: NodeId,
-        new: NodeMeta,
-        path: PathBuf,
-        hash: ContentHash,
-        size: u64,
-    },
-    Update {
-        node: NodeId,
-        file_id: RemoteFileId,
-        expected: VersionTag,
+    /// Uploads the file at `path` as `meta`: a create, or with `target` an update of that
+    /// file at that version.
+    Upload {
         meta: NodeMeta,
+        target: Option<RemoteRef>,
         path: PathBuf,
         hash: ContentHash,
         size: u64,
@@ -150,17 +143,14 @@ pub enum Job {
 impl Job {
     pub fn node(&self) -> NodeId {
         match self {
-            Job::Download { node, .. } | Job::Create { node, .. } | Job::Update { node, .. } => {
-                *node
-            }
+            Job::Download { node, .. } => *node,
+            Job::Upload { meta, .. } => meta.node,
         }
     }
 
     pub fn size(&self) -> u64 {
         match self {
-            Job::Download { size, .. } | Job::Create { size, .. } | Job::Update { size, .. } => {
-                *size
-            }
+            Job::Download { size, .. } | Job::Upload { size, .. } => *size,
         }
     }
 }
@@ -273,52 +263,26 @@ fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobRe
             *local_algorithm,
             throttle,
         ),
-        Job::Create {
-            new,
-            path,
-            hash,
-            size,
-            ..
-        } => (|| {
-            let file = std::fs::File::open(path)?;
-            let mut reader = ThrottledRead {
-                inner: file,
-                throttle,
-            };
-            Ok(JobResult::Uploaded(remote.create(
-                new,
-                Some(Upload {
-                    hash: *hash,
-                    size: *size,
-                    reader: &mut reader,
-                }),
-            )?))
-        })(),
-        Job::Update {
-            file_id,
-            expected,
+        Job::Upload {
             meta,
+            target,
             path,
             hash,
             size,
-            ..
         } => (|| {
-            let file = std::fs::File::open(path)?;
             let mut reader = ThrottledRead {
-                inner: file,
+                inner: std::fs::File::open(path)?,
                 throttle,
             };
-            let upload = Upload {
+            let upload = Some(Upload {
                 hash: *hash,
                 size: *size,
                 reader: &mut reader,
-            };
-            Ok(JobResult::Uploaded(remote.update(
-                *file_id,
-                *expected,
-                meta,
-                Some(upload),
-            )?))
+            });
+            Ok(JobResult::Uploaded(match target {
+                None => remote.create(meta, upload)?,
+                Some(at) => remote.update(at.file_id, at.version, meta, upload)?,
+            }))
         })(),
     };
     result.unwrap_or_else(JobResult::Failed)

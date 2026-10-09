@@ -14,15 +14,14 @@ fn upload_job(dir: &std::path::Path, name: &str, size: usize) -> std::io::Result
     let data = vec![b'x'; size];
     let path = dir.join(name);
     fs::write(&path, &data)?;
-    let node = NodeId::new();
-    Ok(Job::Create {
-        node,
-        new: NodeMeta {
-            node,
+    Ok(Job::Upload {
+        meta: NodeMeta {
+            node: NodeId::new(),
             parent: NodeId::ROOT,
             kind: NodeKind::File,
             content: NodeContent::file(name, 0, size as u64, false),
         },
+        target: None,
         path,
         hash: hash_bytes(&data, HashAlgorithm::Blake3),
         size: size as u64,
@@ -75,7 +74,7 @@ fn urgent_first_then_smallest_first() -> R {
     let names: std::collections::HashMap<NodeId, String> = jobs
         .iter()
         .map(|(_, j)| match j {
-            Job::Create { node, new, .. } => (*node, new.content.name.clone()),
+            Job::Upload { meta, .. } => (meta.node, meta.content.name.clone()),
             _ => unreachable!(),
         })
         .collect();

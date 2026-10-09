@@ -168,6 +168,14 @@ impl Op {
         matches!(self, Op::LocalTrash { .. } | Op::RemoteDelete { .. })
     }
 
+    /// Whether this op calls the remote (transfers aside, which run on the worker pool).
+    pub fn touches_remote(&self) -> bool {
+        matches!(
+            self,
+            Op::RemoteCreate { .. } | Op::RemoteUpdate { .. } | Op::RemoteDelete { .. }
+        )
+    }
+
     /// The node whose local name this op gives up (it moves away, is trashed, forked, or
     /// replaced by a download that may land elsewhere). A target held by that node can be
     /// freed early by parking the node under a temporary name.

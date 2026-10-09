@@ -15,3 +15,8 @@ pub use watch::{Debounce, LiveWatcher, LocalObserver, WatchBatch};
 
 /// The client's own folder at the top of the sync root (state, temp files, trash). Never synced.
 pub const STATE_DIR: &str = ".hbsync";
+
+/// The state DB of the sync root `root`, in [`STATE_DIR`].
+pub fn state_db_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(STATE_DIR).join("state.db")
+}

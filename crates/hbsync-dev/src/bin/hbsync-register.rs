@@ -12,7 +12,9 @@
 use std::process::Command;
 use std::time::Duration;
 
+use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, app};
+use hbsync_remote::Remote;
 use serde_json::{Value, json};
 
 fn main() {
@@ -32,7 +34,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .position(|a| a == "--browser")
         .and_then(|i| args.get(i + 1))
         .cloned();
-    let path = Credentials::dev_path(&identity)?;
+    let path = hbsync_dev::credentials_path(&identity)?;
 
     let mut creds = match Credentials::load(&path)? {
         Some(c) => {
@@ -51,27 +53,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             creds
         }
     };
-    let client = Client::new(&creds)?;
-
     // The drive, by its slugs (how the client addresses it from now on).
-    let drive: Value = client.get(
-        &format!(
-            "/api/v2/apps/{}/drives/{}",
-            app::APP_SLUG,
-            app::SYNC_DRIVE.slug
-        ),
-        &[],
-    )?;
-    println!("Sync drive: {}", serde_json::to_string_pretty(&drive)?);
-    let target = drive
-        .get("targetDrive")
-        .cloned()
-        .unwrap_or_else(|| app::target_drive(&app::SYNC_DRIVE));
-    let alias = target["alias"].as_str().unwrap_or_default().to_owned();
+    let remote = HomebaseRemote::connect(Client::new(&creds)?)?;
+    let drive = remote.drive();
+    println!(
+        "Sync drive: alias {}, type {}",
+        drive.alias.simple(),
+        drive.drive_type.simple()
+    );
 
     // The app's circle, once.
     if creds.circle_id.is_none() {
-        let id: Value = client.post(
+        let id: Value = remote.client().post(
             "/api/v2/connections/circles/create",
             &json!({
                 "name": app::CIRCLE_NAME,
@@ -79,7 +72,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "emoji": app::CIRCLE_EMOJI,
                 "driveGrants": [{
                     "permissionedDrive": {
-                        "drive": target,
+                        "drive": {
+                            "alias": drive.alias.simple().to_string(),
+                            "type": drive.drive_type.simple().to_string(),
+                        },
                         "permission": app::CIRCLE_DRIVE_PERMISSION,
                     }
                 }],
@@ -95,20 +91,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Read access: one page of the change feed.
-    let page: Value = client.post(
-        &format!("/api/v2/drives/{alias}/files/query-batch"),
-        &json!({
-            "queryParams": {},
-            "resultOptionsRequest": {
-                "maxRecords": 10,
-                "sorting": "anyChangeDate",
-                "ordering": "oldestFirst",
-                "includeMetadataHeader": true,
-            },
-        }),
-    )?;
-    let files = page["searchResults"].as_array().map_or(0, Vec::len);
-    println!("Query on the sync drive works: {files} file(s) on the first page.");
+    let page = remote.changes(None, 10)?;
+    println!(
+        "The sync drive's feed works: {} change(s) on the first page.",
+        page.entries.len()
+    );
     Ok(())
 }
 

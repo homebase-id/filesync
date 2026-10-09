@@ -18,7 +18,7 @@ use hbsync_engine::{Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
-use hbsync_local::{LocalObserver, STATE_DIR, ScanOptions};
+use hbsync_local::{LocalObserver, STATE_DIR, ScanOptions, state_db_path};
 use hbsync_state::StateDb;
 
 const POLL: Duration = Duration::from_secs(60);
@@ -46,7 +46,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(folder)?;
     let root = std::fs::canonicalize(folder)?;
     std::fs::create_dir_all(root.join(STATE_DIR))?;
-    let db_path = root.join(STATE_DIR).join("state.db");
+    let db_path = state_db_path(&root);
     let mut cfg = EngineConfig::new(&root, &hbsync_dev::device_name());
     cfg.allow_mass_delete = args.iter().any(|a| a == "--allow-mass-delete");
     let mut observer =
@@ -102,6 +102,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 Ok(Event::Changed) => wanted = true,
                 Ok(Event::Lost(why)) => println!("Notifications lost ({why}); reconnecting."),
+                Ok(Event::Refused(why)) => {
+                    println!("Notifications refused ({why}); syncing on the minute poll only.");
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Err("the notifier stopped".into()),
             }

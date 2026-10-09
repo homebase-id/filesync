@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use hbsync_engine::{Engine, EngineConfig, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_local::STATE_DIR;
+use hbsync_local::{STATE_DIR, state_db_path};
 use hbsync_state::StateDb;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -44,7 +44,7 @@ impl Client {
     fn engine(root: &Path, name: &str, remote: &Arc<HomebaseRemote>) -> Res<Engine> {
         let mut cfg = EngineConfig::new(root, name);
         cfg.allow_mass_delete = true; // the test deletes its whole folder at the end
-        let db = StateDb::open(&root.join(STATE_DIR).join("state.db"))?;
+        let db = StateDb::open(&state_db_path(root))?;
         Ok(Engine::new(db, Box::new(remote.clone()), cfg))
     }
 
@@ -62,15 +62,9 @@ impl Client {
             std::thread::sleep(Duration::from_millis(20));
             self.engine.scan_local()?;
             let pass = self.engine.sync_once(&hbsync_dev::today())?;
-            total.ops_done += pass.ops_done;
-            total.feed.pages += pass.feed.pages;
-            total.feed.live += pass.feed.live;
-            total.feed.deleted += pass.feed.deleted;
-            total.conflicts.extend(pass.conflicts);
-            total.failed.extend(pass.failed);
-            total.skipped.extend(pass.skipped);
-            total.pending = pass.pending;
-            if pass.ops_done == 0 {
+            let idle = pass.ops_done == 0;
+            total.absorb(pass);
+            if idle {
                 break;
             }
         }
@@ -135,14 +129,8 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn two_clients_converge_through_homebase() -> Res<()> {
-    let identity = std::env::var("HBSYNC_LIVE")
-        .map_err(|_| "set HBSYNC_LIVE to an identity registered with hbsync-register")?;
-    let run = format!(
-        "hbsync-e2e {}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_millis()
-    );
+    let identity = hbsync_dev::live_identity()?;
+    let run = hbsync_dev::run_name("e2e");
     let mut a = Client::new(&identity, "a")?;
     let mut b = Client::new(&identity, "b")?;
     let result = scenarios(&run, &mut a, &mut b);

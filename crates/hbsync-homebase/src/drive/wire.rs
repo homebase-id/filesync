@@ -35,20 +35,16 @@ pub struct FileMetadata {
     pub version_tag: Uuid,
     #[serde(default)]
     pub is_encrypted: bool,
-    #[serde(default)]
     pub payloads: Option<Vec<Payload>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppData {
-    #[serde(default)]
     pub unique_id: Option<Uuid>,
-    #[serde(default)]
     pub group_id: Option<Uuid>,
     #[serde(default)]
     pub file_type: i32,
-    #[serde(default)]
     pub content: Option<String>,
 }
 
@@ -58,7 +54,6 @@ pub struct Payload {
     pub key: String,
     #[serde(default)]
     pub bytes_written: u64,
-    #[serde(default)]
     pub hash: Option<PayloadHash>,
 }
 
@@ -74,13 +69,13 @@ pub struct PayloadHash {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryBatchResponse {
-    #[serde(default)]
     pub cursor_state: Option<String>,
     #[serde(default)]
     pub has_more_rows: bool,
-    /// Raw, so one row the client can't read doesn't fail the page.
+    /// Raw, so one row the client can't read doesn't fail the page (and fields the client
+    /// ignores are skipped, not built into a tree).
     #[serde(default)]
-    pub search_results: Vec<Value>,
+    pub search_results: Vec<Box<serde_json::value::RawValue>>,
 }
 
 /// The `query-batch` body for one page of the change feed: every change to a sync node,
@@ -110,16 +105,13 @@ pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
         FILE_TYPE_FILE => NodeKind::File,
         other => return Err(format!("file {id}: file type {other} isn't a sync node")),
     };
-    // A tombstone always comes through: dropping it would keep a deleted node alive. Its parent
-    // isn't used, only its file id.
-    let parent = match (meta.app_data.group_id, header.file_state.as_str()) {
-        (Some(parent), _) => NodeId(parent),
-        (None, "deleted") => NodeId::ROOT,
-        (None, _) => return Err(format!("file {id}: no parent (groupId)")),
-    };
-    let body = match header.file_state.as_str() {
-        "deleted" => RemoteBody::Deleted,
+    let group = meta.app_data.group_id.map(NodeId);
+    let (parent, body) = match header.file_state.as_str() {
+        // A tombstone always comes through: dropping it would keep a deleted node alive. Its
+        // parent isn't used, only its file id.
+        "deleted" => (group.unwrap_or(NodeId::ROOT), RemoteBody::Deleted),
         "active" => {
+            let parent = group.ok_or_else(|| format!("file {id}: no parent (groupId)"))?;
             if meta.is_encrypted {
                 return Err(format!("file {id}: encrypted nodes aren't supported yet"));
             }
@@ -141,11 +133,12 @@ pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
                     .transpose()
                     .map_err(|e| format!("file {id}: {e}"))?,
             };
-            RemoteBody::Live {
+            let body = RemoteBody::Live {
                 node: NodeId(node),
                 content,
                 payload,
-            }
+            };
+            (parent, body)
         }
         other => return Err(format!("file {id}: file state {other:?}")),
     };
@@ -159,20 +152,19 @@ pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
 }
 
 fn payload_info(p: &Payload) -> Result<PayloadInfo, String> {
-    let hash = match &p.hash {
-        None => None,
-        Some(h) => {
+    // Unencrypted: the content hash is the stored hash.
+    let hash = p
+        .hash
+        .as_ref()
+        .map(|h| {
             let algorithm: HashAlgorithm = h
                 .algorithm
                 .parse()
                 .map_err(|_| format!("hash algorithm {:?}", h.algorithm))?;
-            // Unencrypted: the content hash is the stored hash.
-            Some(
-                ContentHash::from_base64(algorithm, &h.content_hash)
-                    .map_err(|e| format!("content hash: {e}"))?,
-            )
-        }
-    };
+            ContentHash::from_base64(algorithm, &h.content_hash)
+                .map_err(|e| format!("content hash: {e}"))
+        })
+        .transpose()?;
     Ok(PayloadInfo {
         hash,
         bytes: p.bytes_written,
@@ -215,7 +207,7 @@ pub fn instructions(transfer_iv: &[u8; 16], payload: Option<&ContentHash>, updat
 
 /// The plaintext of the `metadata` part. Homebase replaces the whole header on update, so
 /// every field is always sent: node id, parent, kind, content, and the owner-only ACL.
-pub fn metadata_json(meta: &NodeMeta, version: Option<VersionTag>, key_header: Value) -> Value {
+fn metadata_json(meta: &NodeMeta, version: Option<VersionTag>, key_header: Value) -> Value {
     let file_type = match meta.kind {
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,

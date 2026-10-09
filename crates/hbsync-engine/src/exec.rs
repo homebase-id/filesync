@@ -27,7 +27,7 @@ use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{BaseRow, LocalRow, MirrorFile, MirrorRow, StateDb, StateError, Store};
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{ContentState, NodeId, NodeKind};
+use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef};
 
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs_while};
@@ -96,11 +96,13 @@ pub struct ExecReport {
 }
 
 /// Why a run stopped before its plan was done.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Stopped {
     /// The remote refused access: nothing else can succeed until the user authorizes again.
+    #[error("access denied: {0}")]
     Denied(String),
     /// Transient remote errors kept coming: the network or the server is down.
+    #[error("remote unreachable: {0}")]
     Unreachable(String),
 }
 
@@ -221,7 +223,6 @@ impl<'a> Executor<'a> {
             if self.report.stopped.is_some() {
                 break;
             }
-            self.wait_out_backoff();
             let Some((op, attempts)) = self.queue.pop_front() else {
                 if batch.is_empty() {
                     break;
@@ -251,11 +252,13 @@ impl<'a> Executor<'a> {
                 if self.report.stopped.is_some() {
                     break;
                 }
-                self.wait_out_backoff();
             }
             if let Op::Settle { node } = op {
                 self.settle_run(node)?;
                 continue;
+            }
+            if op.touches_remote() {
+                self.wait_out_backoff();
             }
             let outcome = self.execute(&op);
             self.handle(op, attempts, outcome)?;
@@ -328,18 +331,17 @@ impl<'a> Executor<'a> {
     }
 
     fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), StateError> {
+        if matches!(outcome, Outcome::Done | Outcome::Settled | Outcome::Skip(_)) {
+            self.streak = 0; // the remote answered (or wasn't needed)
+        }
         match outcome {
             Outcome::Done => {
-                self.streak = 0;
                 self.report.done += 1;
                 let os = self.cfg.os;
                 let same_bytes = is_transfer(&op);
                 self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
             }
-            Outcome::Settled => {
-                self.streak = 0;
-                self.report.done += 1;
-            }
+            Outcome::Settled => self.report.done += 1,
             Outcome::Backoff(why) => {
                 self.streak += 1;
                 if self.streak >= UNREACHABLE_AFTER {
@@ -347,13 +349,12 @@ impl<'a> Executor<'a> {
                     return Ok(());
                 }
                 // One pause for the whole run, longer for each failure in a row.
-                let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1).min(8));
+                let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1));
                 self.resume_at = Some(Instant::now() + pause);
                 self.retry_or_fail(op, attempts, why);
             }
             Outcome::Retry(why) => self.retry_or_fail(op, attempts, why),
             Outcome::Skip(why) => {
-                self.streak = 0; // the remote answered
                 let node = op.node();
                 self.db.write(|s| s.mark_dirty(node))?;
                 self.report.skipped.push((op, why));
@@ -375,7 +376,8 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Waits out the pause after a transient remote error, if there is one.
+    /// Waits out the pause after a transient remote error, if there is one. Only remote work
+    /// waits; local operations go on meanwhile.
     fn wait_out_backoff(&mut self) {
         if let Some(at) = self.resume_at.take() {
             std::thread::sleep(at.saturating_duration_since(Instant::now()));
@@ -384,6 +386,7 @@ impl<'a> Executor<'a> {
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
     fn flush(&mut self, batch: &mut Vec<Prepared>) -> Result<(), StateError> {
+        self.wait_out_backoff();
         let mut pending: HashMap<NodeId, Prepared> = HashMap::new();
         let mut jobs = Vec::new();
         for p in batch.drain(..) {
@@ -804,39 +807,27 @@ impl<'a> Executor<'a> {
         let (hash, size) = (file.hash, file.size);
         let path = self.abs(&row.path);
         let extra = mirror.as_ref().and_then(|m| m.content_extra.clone());
-        let job = match existing {
-            None => Job::Create {
-                node,
-                new: NodeMeta {
-                    node,
-                    parent,
-                    kind,
-                    content: content.clone(),
-                },
-                path,
-                hash,
-                size,
-            },
-            Some((file_id, expected)) => {
+        let target = match existing {
+            None => None,
+            Some((file_id, version)) => {
                 let Some(mirror) = &mirror else {
                     return Err(Outcome::Skip("gone remotely".into()));
                 };
                 content.unknown = feed::unknown_keys(mirror);
-                Job::Update {
-                    node,
-                    file_id,
-                    expected,
-                    meta: NodeMeta {
-                        node,
-                        parent,
-                        kind,
-                        content: content.clone(),
-                    },
-                    path,
-                    hash,
-                    size,
-                }
+                Some(RemoteRef { file_id, version })
             }
+        };
+        let job = Job::Upload {
+            meta: NodeMeta {
+                node,
+                parent,
+                kind,
+                content: content.clone(),
+            },
+            target,
+            path,
+            hash,
+            size,
         };
         Ok((
             job,

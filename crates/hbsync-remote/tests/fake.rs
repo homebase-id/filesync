@@ -2,7 +2,7 @@ use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use std::time::Duration;
 
-use hbsync_remote::contract::{Bench, file, folder, with};
+use hbsync_remote::contract::{Bench, file, folder, upload};
 use hbsync_remote::{NodeMeta, Remote, RemoteError, Upload};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind};
@@ -13,21 +13,13 @@ fn remote() -> FakeRemote {
     FakeRemote::new(FakeServer::new(ServerConfig::default()))
 }
 
-fn upload<'a>(data: &[u8], reader: &'a mut &[u8]) -> Upload<'a> {
-    Upload {
-        hash: hash_bytes(data, HashAlgorithm::Blake3),
-        size: data.len() as u64,
-        reader,
-    }
-}
-
 fn create_file(
     r: &FakeRemote,
     node: &NodeMeta,
     data: &[u8],
 ) -> Result<hbsync_types::RemoteRef, RemoteError> {
     let mut reader = data;
-    r.create(node, Some(upload(data, &mut reader)))
+    r.create(node, Some(upload(&mut reader)))
 }
 
 #[test]
@@ -51,13 +43,11 @@ fn an_update_keeps_node_id_and_kind() -> R {
         node: NodeId::new(),
         ..f.clone()
     };
-    let other_kind = with(
-        &NodeMeta {
-            kind: NodeKind::Folder,
-            ..f.clone()
-        },
-        NodeContent::folder("f"),
-    );
+    let other_kind = NodeMeta {
+        kind: NodeKind::Folder,
+        content: NodeContent::folder("f"),
+        ..f.clone()
+    };
     for wrong in [other_node, other_kind] {
         assert!(matches!(
             r.update(w.file_id, w.version, &wrong, None),

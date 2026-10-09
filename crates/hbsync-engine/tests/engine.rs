@@ -194,11 +194,16 @@ fn a_dead_remote_ends_the_run_early_and_loses_nothing() -> R {
         .err()
         .ok_or("sync went through")?;
     assert!(
-        matches!(err, hbsync_engine::EngineError::Unreachable(_)),
+        matches!(
+            err,
+            hbsync_engine::EngineError::Stopped(hbsync_engine::exec::Stopped::Unreachable(_))
+        ),
         "{err}"
     );
+    // Trying every op four times would be 240 requests. Workers that fail instantly can run
+    // ahead of the commits until the run stops, so up to one try per upload may happen.
     let requests = a.remote.faults().requests - before;
-    assert!(requests < 20, "gave up after {requests} requests");
+    assert!(requests <= 70, "gave up after {requests} requests");
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 0);
 
     // Back up: everything goes through.
@@ -227,8 +232,7 @@ fn restart_after_an_interrupted_sync_converges() -> R {
     a.remote.faults().script.clear();
 
     // Restart: a new engine on the same state DB.
-    let db = StateDb::open(&a.db_path())?;
-    a.engine = Engine::new(db, Box::new(a.remote.clone()), common::config(&a.root, "a"));
+    restart(&mut a, "a")?;
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;

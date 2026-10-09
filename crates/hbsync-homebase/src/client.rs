@@ -40,8 +40,8 @@ pub(crate) fn agent() -> ureq::Agent {
 #[derive(Clone)]
 pub struct Client {
     identity: String,
-    base: String,
-    bearer: String,
+    /// The client auth token (CAT), base64.
+    token: String,
     key: Key,
     agent: ureq::Agent,
 }
@@ -65,8 +65,7 @@ impl Client {
     pub fn new(credentials: &Credentials) -> Result<Self, HomebaseError> {
         Ok(Client {
             identity: credentials.identity.clone(),
-            base: format!("https://{}", credentials.identity),
-            bearer: format!("Bearer {}", credentials.client_auth_token),
+            token: credentials.client_auth_token.clone(),
             key: credentials.shared_secret_key()?,
             agent: agent(),
         })
@@ -83,7 +82,15 @@ impl Client {
 
     /// The client auth token, base64.
     pub(crate) fn token(&self) -> &str {
-        self.bearer.trim_start_matches("Bearer ")
+        &self.token
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("https://{}{path}", self.identity)
+    }
+
+    fn bearer(&self) -> String {
+        format!("Bearer {}", self.token)
     }
 
     /// `GET {path}` with `query` encrypted into `ss`.
@@ -98,14 +105,14 @@ impl Client {
             .collect();
         let ss = serde_json::to_string(&Envelope::seal(&self.key, qs.join("&").as_bytes())?)?;
         let url = format!(
-            "{}{path}?ss={}",
-            self.base,
+            "{}?ss={}",
+            self.url(path),
             utf8_percent_encode(&ss, NON_ALPHANUMERIC)
         );
         let response = self
             .agent
             .get(&url)
-            .header("Authorization", &self.bearer)
+            .header("Authorization", &self.bearer())
             .call();
         self.decode(response, path)
     }
@@ -119,8 +126,8 @@ impl Client {
         let sealed = Envelope::seal(&self.key, &serde_json::to_vec(body)?)?;
         let response = self
             .agent
-            .post(format!("{}{path}", self.base))
-            .header("Authorization", &self.bearer)
+            .post(self.url(path))
+            .header("Authorization", &self.bearer())
             .send_json(&sealed);
         self.decode(response, path)
     }
@@ -132,15 +139,15 @@ impl Client {
         path: &str,
         form: Multipart<'_>,
     ) -> Result<T, HomebaseError> {
-        let url = format!("{}{path}", self.base);
+        let url = self.url(path);
         let request = match method {
             UploadMethod::Post => self.agent.post(&url),
             UploadMethod::Patch => self.agent.patch(&url),
         };
-        let (content_type, len) = (form.content_type(), form.len());
+        let (content_type, len) = (form.content_type(), form.content_length());
         let mut body = form.into_reader();
         let response = request
-            .header("Authorization", &self.bearer)
+            .header("Authorization", &self.bearer())
             .header("Content-Type", &content_type)
             .header("Content-Length", &len.to_string())
             .send(ureq::SendBody::from_reader(&mut body));
@@ -158,8 +165,8 @@ impl Client {
     ) -> Result<u64, HomebaseError> {
         let response = self
             .agent
-            .get(format!("{}{path}", self.base))
-            .header("Authorization", &self.bearer)
+            .get(self.url(path))
+            .header("Authorization", &self.bearer())
             .header("Range", &format!("bytes={start}-{last}"))
             .call();
         let mut response = checked(response, path)?;

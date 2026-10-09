@@ -1,31 +1,18 @@
-//! Against a live identity: `HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-homebase
-//! --test live -- --ignored`. Needs the credentials `hbsync-register` saves for it. Each run
-//! works in its own top-level folder and deletes it at the end.
+//! Against a live identity: `HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-dev --test live
+//! -- --ignored`. Needs the credentials `hbsync-register` saves for it. Each run works in its
+//! own top-level folder and deletes it at the end.
 
 use std::time::Duration;
 
+use hbsync_dev::{live_identity, run_name, saved_client};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
-use hbsync_homebase::{Client, Credentials};
-use hbsync_remote::contract::{self, Bench};
+use hbsync_remote::contract::Bench;
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
 fn live_remote() -> Result<HomebaseRemote, Box<dyn std::error::Error>> {
-    let identity = std::env::var("HBSYNC_LIVE")
-        .map_err(|_| "set HBSYNC_LIVE to an identity registered with hbsync-register")?;
-    let path = Credentials::dev_path(&identity)?;
-    let creds =
-        Credentials::load(&path)?.ok_or_else(|| format!("no credentials at {}", path.display()))?;
-    Ok(HomebaseRemote::connect(Client::new(&creds)?)?)
-}
-
-fn run_name(what: &str) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default();
-    format!("hbsync-test {what} {now}")
+    Ok(HomebaseRemote::connect(saved_client(&live_identity()?)?)?)
 }
 
 #[test]
@@ -53,7 +40,7 @@ fn a_change_on_the_drive_is_announced() -> R {
         loop {
             match rx.recv_timeout(Duration::from_secs(15)) {
                 Ok(e) if e == what => return Ok(()),
-                Ok(Event::Lost(why)) => return Err(why),
+                Ok(Event::Lost(why) | Event::Refused(why)) => return Err(why),
                 Ok(_) => {}
                 Err(e) => return Err(format!("waiting for {what:?}: {e}")),
             }
@@ -62,7 +49,7 @@ fn a_change_on_the_drive_is_announced() -> R {
     let result = (|| -> R {
         wait(Event::Connected)?;
         let start = std::time::Instant::now();
-        bench.create(&contract::folder("inside", bench.scratch()), None)?;
+        bench.folder("inside")?;
         wait(Event::Changed)?;
         let took = start.elapsed();
         assert!(took < Duration::from_secs(2), "announced after {took:?}");

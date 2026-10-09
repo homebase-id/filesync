@@ -60,7 +60,7 @@ impl Client {
     }
 
     fn db_path_in(root: &Path) -> PathBuf {
-        root.join(STATE_DIR).join("state.db")
+        hbsync_local::state_db_path(root)
     }
 
     /// The state DB file (for a second connection or a restart).
@@ -74,13 +74,9 @@ impl Client {
         for _ in 0..6 {
             self.engine.scan_local()?;
             let pass = self.engine.sync_once("2026-10-08")?;
-            total.ops_done += pass.ops_done;
-            total.conflicts.extend(pass.conflicts);
-            total.failed.extend(pass.failed);
-            total.skipped.extend(pass.skipped);
-            total.held = pass.held;
-            total.pending = pass.pending;
-            if pass.ops_done == 0 {
+            let idle = pass.ops_done == 0;
+            total.absorb(pass);
+            if idle {
                 break;
             }
         }

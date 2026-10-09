@@ -29,9 +29,7 @@ const KNOWN_CODES: &[(u32, &str)] = &[
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProblemDetails {
-    #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
     error_code: Option<serde_json::Value>,
 }
 

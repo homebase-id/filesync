@@ -594,14 +594,11 @@ impl Sim {
                 Done
             }
             Op::RemoteDelete { node, expected, .. } => match self.server.live.get(&node) {
-                Some(server) if server.remote.version == expected => {
+                Some(server) if server.remote.version != expected => Skip, // changed meanwhile
+                // Deleted now, or already: a delete of a tombstone succeeds, as on the fake and
+                // Homebase.
+                _ => {
                     self.server.live.remove(&node);
-                    self.clients[c].planned_remote.remove(node);
-                    Done
-                }
-                Some(_) => Skip, // changed meanwhile (4160)
-                // Already deleted: a delete of a tombstone succeeds, as on the fake and Homebase.
-                None => {
                     self.clients[c].planned_remote.remove(node);
                     Done
                 }

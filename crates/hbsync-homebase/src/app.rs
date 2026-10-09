@@ -81,11 +81,6 @@ pub fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::
     })
 }
 
-/// The `TargetDrive` JSON of `drive`.
-pub fn target_drive(drive: &DriveSpec) -> serde_json::Value {
-    json!({ "alias": drive.alias.to_string(), "type": drive.drive_type.to_string() })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

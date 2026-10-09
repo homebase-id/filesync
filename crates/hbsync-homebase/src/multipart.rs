@@ -7,8 +7,8 @@ use std::io::{self, Cursor, Read};
 /// One form part.
 pub struct Part<'a> {
     name: &'static str,
-    filename: Option<String>,
-    content_type: String,
+    filename: Option<&'static str>,
+    content_type: &'static str,
     body: PartBody<'a>,
 }
 
@@ -28,11 +28,11 @@ impl std::fmt::Debug for Part<'_> {
 }
 
 impl<'a> Part<'a> {
-    pub fn bytes(name: &'static str, content_type: &str, bytes: Vec<u8>) -> Self {
+    pub fn bytes(name: &'static str, content_type: &'static str, bytes: Vec<u8>) -> Self {
         Part {
             name,
             filename: None,
-            content_type: content_type.to_owned(),
+            content_type,
             body: PartBody::Bytes(bytes),
         }
     }
@@ -40,15 +40,15 @@ impl<'a> Part<'a> {
     /// A part streamed from `reader`, which must yield `size` bytes.
     pub fn reader(
         name: &'static str,
-        filename: &str,
-        content_type: &str,
+        filename: &'static str,
+        content_type: &'static str,
         reader: &'a mut dyn Read,
         size: u64,
     ) -> Self {
         Part {
             name,
-            filename: Some(filename.to_owned()),
-            content_type: content_type.to_owned(),
+            filename: Some(filename),
+            content_type,
             body: PartBody::Reader { reader, size },
         }
     }
@@ -91,17 +91,13 @@ impl<'a> Multipart<'a> {
     }
 
     /// The exact length of the body.
-    pub fn len(&self) -> u64 {
+    pub fn content_length(&self) -> u64 {
         let parts: u64 = self
             .parts
             .iter()
             .map(|p| p.head(&self.boundary).len() as u64 + p.body_len() + 2)
             .sum();
         parts + self.tail().len() as u64
-    }
-
-    pub fn is_empty(&self) -> bool {
-        false // there is always the closing boundary
     }
 
     fn tail(&self) -> Vec<u8> {
@@ -112,23 +108,20 @@ impl<'a> Multipart<'a> {
     /// since it was hashed); one that has more is cut at its size (the server's hash check
     /// then refuses it).
     pub fn into_reader(self) -> impl Read + 'a {
-        let tail = self.tail();
-        let mut pieces: Vec<Box<dyn Read + 'a>> = Vec::new();
+        let tail = Cursor::new(self.tail());
+        let mut body: Box<dyn Read + 'a> = Box::new(io::empty());
         for part in self.parts {
-            pieces.push(Box::new(Cursor::new(part.head(&self.boundary))));
-            match part.body {
-                PartBody::Bytes(b) => pieces.push(Box::new(Cursor::new(b))),
-                PartBody::Reader { reader, size } => pieces.push(Box::new(Exact {
+            let head = Cursor::new(part.head(&self.boundary));
+            let content: Box<dyn Read + 'a> = match part.body {
+                PartBody::Bytes(b) => Box::new(Cursor::new(b)),
+                PartBody::Reader { reader, size } => Box::new(Exact {
                     inner: reader,
                     remaining: size,
-                })),
-            }
-            pieces.push(Box::new(Cursor::new(b"\r\n".to_vec())));
+                }),
+            };
+            body = Box::new(body.chain(head).chain(content).chain(&b"\r\n"[..]));
         }
-        pieces.push(Box::new(Cursor::new(tail)));
-        Chain {
-            pieces: pieces.into_iter().collect(),
-        }
+        body.chain(tail)
     }
 }
 
@@ -158,24 +151,6 @@ impl Read for Exact<'_> {
     }
 }
 
-/// Readers one after another.
-struct Chain<'a> {
-    pieces: std::collections::VecDeque<Box<dyn Read + 'a>>,
-}
-
-impl Read for Chain<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        while let Some(front) = self.pieces.front_mut() {
-            let n = front.read(buf)?;
-            if n > 0 || buf.is_empty() {
-                return Ok(n);
-            }
-            self.pieces.pop_front();
-        }
-        Ok(0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,7 +172,7 @@ mod tests {
                 ),
             ],
         );
-        let len = form.len();
+        let len = form.content_length();
         let mut body = Vec::new();
         form.into_reader().read_to_end(&mut body)?;
         assert_eq!(body.len() as u64, len);
@@ -233,7 +208,7 @@ mod tests {
             "b".into(),
             vec![Part::reader("payload", "k", "x", &mut long, 2)],
         );
-        let len = form.len();
+        let len = form.content_length();
         let mut body = Vec::new();
         assert!(form.into_reader().read_to_end(&mut body).is_ok());
         assert_eq!(body.len() as u64, len);

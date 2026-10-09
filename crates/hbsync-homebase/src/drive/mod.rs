@@ -26,7 +26,10 @@ pub mod wire;
 const READ_CHUNK: u64 = 8 * 1024 * 1024;
 
 /// Ranges are 32-bit on the server (#1893): payloads this large can't be read back.
-pub const MAX_PAYLOAD: u64 = (1 << 31) - 1;
+const MAX_PAYLOAD: u64 = (1 << 31) - 1;
+
+/// Skipped feed rows kept for [`HomebaseRemote::take_skipped`] at most.
+const MAX_SKIPPED: usize = 1000;
 
 /// The sync drive on an identity, as its alias and type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -94,7 +97,7 @@ impl HomebaseRemote {
         &self.client
     }
 
-    /// The feed rows skipped since the last call, with the reason.
+    /// The feed rows skipped since the last call, with the reason (at most a thousand).
     pub fn take_skipped(&self) -> Vec<String> {
         std::mem::take(&mut *self.skipped.lock().unwrap_or_else(|e| e.into_inner()))
     }
@@ -107,28 +110,28 @@ impl HomebaseRemote {
         format!("{}/{}", self.files(), file_id.0)
     }
 
-    /// Creates (no `version`) or updates a file with one multipart request.
+    /// Creates a file, or with `target` updates that file at that version, in one multipart
+    /// request.
     fn write(
         &self,
-        method: UploadMethod,
-        path: &str,
+        target: Option<RemoteRef>,
         meta: &NodeMeta,
-        version: Option<VersionTag>,
         payload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef> {
+    ) -> Result<RemoteRef, HomebaseError> {
         if let Some(p) = &payload
             && p.size > MAX_PAYLOAD
         {
-            return Err(RemoteError::Fatal(format!(
+            return Err(HomebaseError::Protocol(format!(
                 "{} bytes is too large for this server (odin-core #1893)",
                 p.size
             )));
         }
         let transfer_iv = transfer_iv()?;
+        let version = target.map(|t| t.version);
         let instructions = wire::instructions(
             &transfer_iv,
             payload.as_ref().map(|p| &p.hash),
-            version.is_some(),
+            target.is_some(),
         );
         let metadata = wire::metadata(meta, version, self.client.key(), &transfer_iv);
         let mut parts = vec![
@@ -148,13 +151,14 @@ impl HomebaseRemote {
                 p.size,
             ));
         }
-        let boundary = Uuid::from_bytes(random::<16>().map_err(remote_error)?)
-            .simple()
-            .to_string();
-        let result: WriteResult = self
-            .client
-            .upload(method, path, Multipart::new(boundary, parts))
-            .map_err(remote_error)?;
+        let (method, path) = match target {
+            None => (UploadMethod::Post, self.files()),
+            Some(at) => (UploadMethod::Patch, self.file(at.file_id)),
+        };
+        let boundary = Uuid::new_v4().simple().to_string();
+        let result: WriteResult =
+            self.client
+                .upload(method, &path, Multipart::new(boundary, parts))?;
         Ok(RemoteRef {
             file_id: RemoteFileId(result.file_id),
             version: VersionTag(result.new_version_tag),
@@ -163,9 +167,9 @@ impl HomebaseRemote {
 }
 
 /// A fresh transfer IV; the server refuses an all-zero one.
-fn transfer_iv() -> Result<[u8; 16]> {
+fn transfer_iv() -> Result<[u8; 16], HomebaseError> {
     loop {
-        let iv = random::<16>().map_err(remote_error)?;
+        let iv = random::<16>()?;
         if iv != [0; 16] {
             return Ok(iv);
         }
@@ -192,8 +196,8 @@ impl Remote for HomebaseRemote {
             .map_err(remote_error)?;
         let mut entries = Vec::with_capacity(page.search_results.len());
         let mut skipped = Vec::new();
-        for row in page.search_results {
-            match serde_json::from_value::<wire::FileHeader>(row)
+        for row in &page.search_results {
+            match serde_json::from_str::<wire::FileHeader>(row.get())
                 .map_err(|e| format!("unreadable header: {e}"))
                 .and_then(wire::to_remote)
             {
@@ -202,10 +206,9 @@ impl Remote for HomebaseRemote {
             }
         }
         if !skipped.is_empty() {
-            self.skipped
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .extend(skipped);
+            let mut kept = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
+            let room = MAX_SKIPPED.saturating_sub(kept.len());
+            kept.extend(skipped.into_iter().take(room));
         }
         Ok(ChangesPage {
             entries,
@@ -227,7 +230,7 @@ impl Remote for HomebaseRemote {
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
-        self.write(UploadMethod::Post, &self.files(), node, None, payload)
+        self.write(None, node, payload).map_err(remote_error)
     }
 
     fn update(
@@ -237,25 +240,25 @@ impl Remote for HomebaseRemote {
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
-        let written = self.write(
-            UploadMethod::Patch,
-            &self.file(file_id),
-            meta,
-            Some(expected),
-            payload,
-        );
-        match written {
-            // odin-core answers a content update of a deleted file with 500 (a null payload
-            // list in `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002: look before
-            // retrying.
-            Err(RemoteError::Transient(why)) => match self.header(file_id) {
-                Ok(h) if h.is_deleted() => Err(RemoteError::NotFound),
-                Ok(h) if h.version != expected => Err(RemoteError::VersionMismatch),
-                Err(e @ (RemoteError::Denied(_) | RemoteError::NotFound)) => Err(e),
-                _ => Err(RemoteError::Transient(why)),
-            },
-            other => other,
+        let at = RemoteRef {
+            file_id,
+            version: expected,
+        };
+        let error = match self.write(Some(at), meta, payload) {
+            Ok(written) => return Ok(written),
+            Err(e) => e,
+        };
+        // odin-core answers a content update of a deleted file with 500 (a null payload list in
+        // `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002: look before retrying.
+        if matches!(&error, HomebaseError::Api { error, .. } if error.status == 500) {
+            match self.header(file_id) {
+                Ok(h) if h.is_deleted() => return Err(RemoteError::NotFound),
+                Ok(h) if h.version != expected => return Err(RemoteError::VersionMismatch),
+                Err(e @ (RemoteError::Denied(_) | RemoteError::NotFound)) => return Err(e),
+                _ => {}
+            }
         }
+        Err(remote_error(error))
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
@@ -326,7 +329,7 @@ impl Remote for HomebaseRemote {
 }
 
 /// How a Homebase answer maps onto the trait's errors (`homebase-api-notes.md`, Errors).
-pub fn remote_error(e: HomebaseError) -> RemoteError {
+fn remote_error(e: HomebaseError) -> RemoteError {
     match e {
         HomebaseError::Network(why) => RemoteError::Transient(why),
         HomebaseError::Denied(why) => RemoteError::Denied(why),

@@ -60,12 +60,9 @@ pub enum EngineError {
     Feed(#[from] FeedError),
     #[error("{0} panicked")]
     Panic(&'static str),
-    /// The remote refused access: syncing stops until the user authorizes again.
-    #[error("access denied: {0}")]
-    Denied(String),
-    /// Transient remote errors kept coming: try again later.
-    #[error("remote unreachable: {0}")]
-    Unreachable(String),
+    /// The executor stopped early: access denied, or the remote unreachable.
+    #[error(transparent)]
+    Stopped(#[from] Stopped),
 }
 
 impl EngineError {
@@ -73,7 +70,8 @@ impl EngineError {
     pub fn is_denied(&self) -> bool {
         matches!(
             self,
-            EngineError::Denied(_) | EngineError::Feed(FeedError::Remote(RemoteError::Denied(_)))
+            EngineError::Stopped(Stopped::Denied(_))
+                | EngineError::Feed(FeedError::Remote(RemoteError::Denied(_)))
         )
     }
 }
@@ -108,6 +106,20 @@ pub struct SyncReport {
 impl SyncReport {
     pub fn is_idle(&self) -> bool {
         self.ops_done == 0 && self.pending == 0
+    }
+
+    /// Adds a later sync's report to this one: counts and lists add up, `held` and `pending`
+    /// are the later sync's.
+    pub fn absorb(&mut self, later: SyncReport) {
+        self.feed += later.feed;
+        self.rounds += later.rounds;
+        self.ops_done += later.ops_done;
+        self.skipped.extend(later.skipped);
+        self.failed.extend(later.failed);
+        self.held = later.held;
+        self.conflicts.extend(later.conflicts);
+        self.pending = later.pending;
+        self.adopted += later.adopted;
     }
 }
 
@@ -276,10 +288,8 @@ impl Engine {
         let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
             .with_urgent(self.urgent.clone())
             .run(plan.ops)?;
-        match exec.stopped {
-            Some(Stopped::Denied(why)) => return Err(EngineError::Denied(why)),
-            Some(Stopped::Unreachable(why)) => return Err(EngineError::Unreachable(why)),
-            None => {}
+        if let Some(stopped) = exec.stopped {
+            return Err(stopped.into());
         }
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
@@ -293,9 +303,7 @@ impl Engine {
             )?;
         }
         let more = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        report.feed.pages += more.pages;
-        report.feed.live += more.live;
-        report.feed.deleted += more.deleted;
+        report.feed += more;
         Ok(plan.held)
     }
 }

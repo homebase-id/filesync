@@ -47,7 +47,7 @@ cargo test --workspace
 PROPTEST_CASES=150000 cargo test --release -p hbsync-sim --test props
 MILESTONE_SEEDS=3000 cargo test --release -p hbsync-engine --test milestone randomized
 # Against a live identity registered with hbsync-register (the local dev host is frodo):
-HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-homebase --test live -- --ignored
+HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-dev --test live -- --ignored
 HBSYNC_LIVE=frodo.dotyou.cloud cargo test --release -p hbsync-dev --test live_e2e -- --ignored
 ```
 

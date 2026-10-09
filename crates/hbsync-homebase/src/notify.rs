@@ -18,6 +18,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tungstenite::client::IntoClientRequest;
@@ -36,6 +38,9 @@ pub enum Event {
     Changed,
     /// The connection broke; it is retried with backoff.
     Lost(String),
+    /// The identity refused the subscription (credentials revoked, no access to the drive):
+    /// the notifier stops, as the API calls will be refused too.
+    Refused(String),
 }
 
 /// How often the socket is checked for a stop request and the keep-alive.
@@ -129,20 +134,20 @@ fn session(
         match socket.read() {
             Ok(Message::Text(text)) => {
                 last_frame = Instant::now();
-                match notification(client, text.as_str()) {
-                    Some(Notification::Handshake) if !*connected => {
+                let event = match notification(client, text.as_str()) {
+                    Notification::Handshake if !*connected => {
                         *connected = true;
-                        if events.send(Event::Connected).is_err() {
-                            return Ok(());
-                        }
+                        Event::Connected
                     }
-                    Some(Notification::Changed) => {
-                        if events.send(Event::Changed).is_err() {
-                            return Ok(());
-                        }
+                    Notification::Changed => Event::Changed,
+                    Notification::Refused(why) => {
+                        let _ = events.send(Event::Refused(why));
+                        return Ok(()); // stop
                     }
-                    Some(Notification::Refused(why)) => return Err(why),
-                    _ => {}
+                    _ => continue,
+                };
+                if events.send(event).is_err() {
+                    return Ok(());
                 }
             }
             Ok(Message::Close(frame)) => {
@@ -198,12 +203,11 @@ fn connect(client: &Client) -> Result<Socket, String> {
         .into_client_request()
         .map_err(|e| e.to_string())?;
     // base64url without padding: a subprotocol must be an HTTP token ('/' and '=' aren't).
-    let token = client
-        .token()
-        .replace('+', "-")
-        .replace('/', "_")
-        .trim_end_matches('=')
-        .to_owned();
+    let token = URL_SAFE_NO_PAD.encode(
+        STANDARD
+            .decode(client.token())
+            .map_err(|_| "the token isn't base64".to_owned())?,
+    );
     let protocols = format!("odin.notify.v1, odin.bearer.{token}")
         .parse()
         .map_err(|_| "the token can't go in a header".to_owned())?;
@@ -263,16 +267,18 @@ struct Frame {
     payload: String,
 }
 
-/// What a server frame says; `None` if it can't be read.
-fn notification(client: &Client, text: &str) -> Option<Notification> {
-    let frame: Frame = serde_json::from_str(text).ok()?;
-    let body: Value = if frame.is_encrypted {
-        let envelope: Envelope = serde_json::from_str(&frame.payload).ok()?;
-        serde_json::from_slice(&envelope.open(client.key()).ok()?).ok()?
-    } else {
-        serde_json::from_str(&frame.payload).ok()?
+/// What a server frame says; [`Notification::Other`] if it can't be read.
+fn notification(client: &Client, text: &str) -> Notification {
+    let body = || -> Option<Value> {
+        let frame: Frame = serde_json::from_str(text).ok()?;
+        if frame.is_encrypted {
+            let envelope: Envelope = serde_json::from_str(&frame.payload).ok()?;
+            serde_json::from_slice(&envelope.open(client.key()).ok()?).ok()
+        } else {
+            serde_json::from_str(&frame.payload).ok()
+        }
     };
-    Some(classify(&body))
+    body().map_or(Notification::Other, |b| classify(&b))
 }
 
 fn classify(body: &Value) -> Notification {

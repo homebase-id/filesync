@@ -61,23 +61,14 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
 impl<'a> Bench<'a> {
     /// Creates a scratch folder named `name` at the top of the drive.
     pub fn new(remote: &'a dyn Remote, name: &str, settle: Duration) -> Result<Self, RemoteError> {
-        let bench = Bench {
-            remote,
-            scratch: NodeId::ROOT,
-            settle,
-            created: Mutex::new(Vec::new()),
-        };
         let scratch = folder(name, NodeId::ROOT);
-        bench.create(&scratch, None)?;
+        let written = remote.create(&scratch, None)?;
         Ok(Bench {
+            remote,
             scratch: scratch.node,
-            ..bench
+            settle,
+            created: Mutex::new(vec![written.file_id]),
         })
-    }
-
-    /// The folder the scenarios work in.
-    pub fn scratch(&self) -> NodeId {
-        self.scratch
     }
 
     /// Runs every scenario; returns the names and errors of the ones that failed.
@@ -109,13 +100,7 @@ impl<'a> Bench<'a> {
 
     /// A create, remembered for cleanup.
     pub fn create(&self, meta: &NodeMeta, data: Option<&[u8]>) -> Result<RemoteRef, RemoteError> {
-        let mut reader = data.unwrap_or_default();
-        let upload = data.map(|d| Upload {
-            hash: hash_bytes(d, HashAlgorithm::Blake3),
-            size: d.len() as u64,
-            reader: &mut reader,
-        });
-        let written = self.remote.create(meta, upload)?;
+        let written = with_upload(data, |upload| self.remote.create(meta, upload))?;
         self.created
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -123,7 +108,8 @@ impl<'a> Bench<'a> {
         Ok(written)
     }
 
-    fn folder(&self, name: &str) -> Result<(NodeMeta, RemoteRef), RemoteError> {
+    /// A folder in the scratch folder, remembered for cleanup.
+    pub fn folder(&self, name: &str) -> Result<(NodeMeta, RemoteRef), RemoteError> {
         let meta = folder(name, self.scratch);
         let written = self.create(&meta, None)?;
         Ok((meta, written))
@@ -141,13 +127,9 @@ impl<'a> Bench<'a> {
         meta: &NodeMeta,
         data: Option<&[u8]>,
     ) -> Result<RemoteRef, RemoteError> {
-        let mut reader = data.unwrap_or_default();
-        let upload = data.map(|d| Upload {
-            hash: hash_bytes(d, HashAlgorithm::Blake3),
-            size: d.len() as u64,
-            reader: &mut reader,
-        });
-        self.remote.update(at.file_id, at.version, meta, upload)
+        with_upload(data, |upload| {
+            self.remote.update(at.file_id, at.version, meta, upload)
+        })
     }
 
     fn read(
@@ -168,7 +150,6 @@ impl<'a> Bench<'a> {
 
     /// The feed's end: a cursor after every change so far.
     fn cursor_now(&self) -> Result<String, RemoteError> {
-        std::thread::sleep(self.settle);
         Ok(self.changes_after(None)?.1)
     }
 
@@ -183,12 +164,11 @@ impl<'a> Bench<'a> {
         loop {
             let page = self.remote.changes(cursor.as_deref(), 100)?;
             entries.extend(page.entries);
-            cursor = Some(page.cursor);
             if !page.has_more {
-                break;
+                return Ok((entries, page.cursor));
             }
+            cursor = Some(page.cursor);
         }
-        Ok((entries, cursor.unwrap_or_default()))
     }
 
     /// The changes after `cursor` to the files in `ids` (other writers may share the drive).
@@ -204,6 +184,24 @@ impl<'a> Bench<'a> {
             .into_iter()
             .filter(|h| ids.contains(&h.file_id))
             .collect())
+    }
+}
+
+/// `data` as an upload with its BLAKE3 hash; `reader` must start as `data`.
+pub fn upload<'a>(reader: &'a mut &[u8]) -> Upload<'a> {
+    let data: &[u8] = reader;
+    Upload {
+        hash: hash_bytes(data, HashAlgorithm::Blake3),
+        size: data.len() as u64,
+        reader,
+    }
+}
+
+/// Calls `f` with `data` as an upload, or with none.
+fn with_upload<T>(data: Option<&[u8]>, f: impl FnOnce(Option<Upload<'_>>) -> T) -> T {
+    match data {
+        Some(mut data) => f(Some(upload(&mut data))),
+        None => f(None),
     }
 }
 

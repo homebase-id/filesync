@@ -24,6 +24,14 @@ pub struct FeedReport {
     pub deleted: usize,
 }
 
+impl std::ops::AddAssign for FeedReport {
+    fn add_assign(&mut self, other: FeedReport) {
+        self.pages += other.pages;
+        self.live += other.live;
+        self.deleted += other.deleted;
+    }
+}
+
 /// Reads the feed from the stored cursor until it has no more rows.
 pub fn pull(
     db: &mut StateDb,

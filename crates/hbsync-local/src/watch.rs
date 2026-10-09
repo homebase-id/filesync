@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
 use hbsync_platform::journal::ChangeJournal;
@@ -63,9 +63,14 @@ impl LiveWatcher {
     pub fn start(root: &Path, exclude_at_root: &[String]) -> notify::Result<Self> {
         let root = root.canonicalize().map_err(notify::Error::io)?;
         let (tx, rx) = channel();
+        let (filter_root, exclude) = (root.clone(), exclude_at_root.to_vec());
         let mut watcher = notify::recommended_watcher(move |res| {
-            // The receiver is gone only when the watcher is being dropped.
-            let _ = tx.send(res);
+            // Only changes are queued: reads (a viewer, a backup tool, the rescan itself) and
+            // the client's own state folder would otherwise flood the channel.
+            if counts(&filter_root, &exclude, &res) {
+                // The receiver is gone only when the watcher is being dropped.
+                let _ = tx.send(res);
+            }
         })?;
         watcher.watch(&root, RecursiveMode::Recursive)?;
         Ok(LiveWatcher {
@@ -77,11 +82,8 @@ impl LiveWatcher {
     }
 
     /// Waits up to `timeout` for a first change, then collects until no change came for
-    /// `debounce.quiet` or `debounce.max_delay` has passed. `None` if nothing changed.
-    ///
-    /// Events that change nothing (reads, the client's own state folder) neither start nor
-    /// extend a batch: a folder that is read all the time would otherwise hold every batch
-    /// open until `max_delay`.
+    /// `debounce.quiet` (the queue is then drained) or `debounce.max_delay` has passed.
+    /// `None` if nothing changed. Events that change nothing neither start nor extend a batch.
     pub fn next_batch(&self, timeout: Duration, debounce: Debounce) -> Option<WatchBatch> {
         let mut batch = WatchBatch::default();
         let deadline = Instant::now() + timeout;
@@ -103,41 +105,28 @@ impl LiveWatcher {
             }
         }
         let close_by = Instant::now() + debounce.max_delay;
-        let mut quiet_from = Instant::now();
+        let mut quiet_at = Instant::now() + debounce.quiet;
         loop {
-            let quiet_at = quiet_from + debounce.quiet;
             let now = Instant::now();
             if now >= close_by {
                 break;
             }
-            if now >= quiet_at {
-                // Quiet, but only drained once the queue is empty: a change may still wait
-                // behind events that don't count, and the stored journal position must not
-                // pass it.
-                match self.rx.try_recv() {
-                    Ok(event) => {
-                        if self.add(&mut batch, event) {
-                            quiet_from = Instant::now();
-                        }
-                        continue;
+            match self
+                .rx
+                .recv_timeout(quiet_at.min(close_by).saturating_duration_since(now))
+            {
+                Ok(event) => {
+                    if self.add(&mut batch, event) {
+                        quiet_at = Instant::now() + debounce.quiet;
                     }
-                    Err(TryRecvError::Empty) => {
+                }
+                // A timeout means the queue is empty: drained, once quiet long enough.
+                Err(RecvTimeoutError::Timeout) => {
+                    if Instant::now() >= quiet_at {
                         batch.drained = true;
                         break;
                     }
-                    Err(TryRecvError::Disconnected) => {
-                        batch.rescan_all = true;
-                        break;
-                    }
                 }
-            }
-            match self.rx.recv_timeout(quiet_at.min(close_by) - now) {
-                Ok(event) => {
-                    if self.add(&mut batch, event) {
-                        quiet_from = Instant::now();
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     batch.rescan_all = true;
                     break;
@@ -147,42 +136,60 @@ impl LiveWatcher {
         Some(batch)
     }
 
-    /// Folds `event` into `batch`; `true` if it changed something there.
+    /// Folds `event` into `batch`; `true` if it counts.
     fn add(&self, batch: &mut WatchBatch, event: notify::Result<Event>) -> bool {
         add_event(&self.root, &self.exclude_at_root, batch, event)
     }
 }
 
-/// Folds one notification into a batch: every path touches its parent folder. Returns
-/// whether the notification counts (a change in the tree, or a call for a full rescan).
+/// Whether a notification counts: a change in the tree, or a call for a full rescan. Opening
+/// or reading changes nothing, and the rescan itself opens what it lists: counting those
+/// would make every batch trigger the next. Closing after a write does count.
+fn counts(root: &Path, exclude_at_root: &[String], event: &notify::Result<Event>) -> bool {
+    let Ok(event) = event else {
+        return true;
+    };
+    if event.need_rescan() {
+        return true;
+    }
+    if let EventKind::Access(kind) = event.kind
+        && kind != AccessKind::Close(AccessMode::Write)
+    {
+        return false;
+    }
+    event.paths.iter().any(|path| {
+        path.strip_prefix(root)
+            .is_ok_and(|rel| !excluded(rel, exclude_at_root))
+    })
+}
+
+/// Whether `rel` lies in a top-level folder the watcher ignores (the client's state).
+fn excluded(rel: &Path, exclude_at_root: &[String]) -> bool {
+    let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
+    first.is_some_and(|first| exclude_at_root.iter().any(|e| e.as_str() == first))
+}
+
+/// Folds one notification into a batch: every changed path touches its parent folder.
+/// Returns whether the notification counts (see [`counts`]).
 fn add_event(
     root: &Path,
     exclude_at_root: &[String],
     batch: &mut WatchBatch,
     event: notify::Result<Event>,
 ) -> bool {
-    let event = match event {
-        Ok(event) => event,
-        Err(_) => {
-            batch.rescan_all = true;
-            return true;
-        }
-    };
-    let mut counts = event.need_rescan();
-    batch.rescan_all |= counts;
-    // Opening or reading changes nothing, and the rescan itself opens what it lists: counting
-    // those would make every batch trigger the next. Closing after a write does count.
-    if let EventKind::Access(kind) = event.kind
-        && kind != AccessKind::Close(AccessMode::Write)
-    {
-        return counts;
+    if !counts(root, exclude_at_root, &event) {
+        return false;
     }
+    let Ok(event) = event else {
+        batch.rescan_all = true;
+        return true;
+    };
+    batch.rescan_all |= event.need_rescan();
     for path in &event.paths {
         let Ok(rel) = path.strip_prefix(root) else {
             continue;
         };
-        let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
-        if first.is_some_and(|first| exclude_at_root.iter().any(|e| e.as_str() == first)) {
+        if excluded(rel, exclude_at_root) {
             continue;
         }
         // The parent of the changed entry; a name that isn't valid ends the path early, which
@@ -190,9 +197,8 @@ fn add_event(
         batch
             .dirs
             .insert(relpath_prefix(rel.parent().unwrap_or(Path::new(""))));
-        counts = true;
     }
-    counts
+    true
 }
 
 /// All local observation for one sync root: catch-up at start, then live batches.
