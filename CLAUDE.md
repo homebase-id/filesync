@@ -9,7 +9,9 @@ sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebas
 `hbsync-homebase` registers the Filesync app (YouAuth, its drive and circle), implements
 `Remote` on the drive's V2 API (`drive::HomebaseRemote`) and listens on the notification
 WebSocket; two folders converge through a live identity. Facts and server bugs:
-`docs/spec/homebase-api-notes.md`. Dev tools (`hbsync-dev`), credentials in
+`docs/spec/homebase-api-notes.md`. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
+syntax, read at start-up); an ignored item is kept on its device only. Dev tools (`hbsync-dev`), credentials in
 `~/.config/hbsync/dev/<identity>.json`:
 - `cargo run -p hbsync-dev --bin hbsync-register -- <identity> [--browser firefox]`
 - `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use hbsync_engine::{Engine, EngineConfig, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_local::{STATE_DIR, state_db_path};
+use hbsync_local::{Filter, IGNORE_FILE, STATE_DIR, state_db_path};
 use hbsync_state::StateDb;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -44,6 +44,7 @@ impl Client {
     fn engine(root: &Path, name: &str, remote: &Arc<HomebaseRemote>) -> Res<Engine> {
         let mut cfg = EngineConfig::new(root, name);
         cfg.allow_mass_delete = true; // the test deletes its whole folder at the end
+        cfg.exec.filter = Arc::new(Filter::load(root, cfg.exec.case_insensitive)?);
         let db = StateDb::open(&state_db_path(root))?;
         Ok(Engine::new(db, Box::new(remote.clone()), cfg))
     }
@@ -51,6 +52,14 @@ impl Client {
     /// A new engine on the same state DB, as after a restart.
     fn restart(&mut self) -> Res<()> {
         self.engine = Self::engine(&self.root, &self.name, &self.remote)?;
+        Ok(())
+    }
+
+    /// [`Client::restart`] with the ignore rules `rules`.
+    fn restart_ignoring(&mut self, rules: &str) -> Res<()> {
+        fs::write(self.root.join(STATE_DIR).join(IGNORE_FILE), rules)?;
+        self.restart()?;
+        assert!(self.engine.apply_filter_change()?);
         Ok(())
     }
 
@@ -223,5 +232,56 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.sync()?;
     b.sync()?;
     assert_eq!(a.tree(run), b.tree(run));
+
+    filters(run, a, b)
+}
+
+/// Sync semantics §10: junk never syncs, and what b starts ignoring stays on b only.
+fn filters(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
+    let at = |rel: &str| format!("{run}/proj/{rel}");
+    let proj = format!("{run}/proj");
+    a.write(&at(".DS_Store"), "finder")?;
+    a.write(&at("main.c"), "int main")?;
+    a.write(&at("build/out.o"), "obj")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(
+        b.tree(&proj),
+        ["build/", "build/out.o = obj", "main.c = int main"]
+    );
+
+    // b starts ignoring build/: it leaves the drive (a's copy goes to a's trash), stays on b.
+    b.restart_ignoring("build/\n")?;
+    b.write(&at("build/local.o"), "b only")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree(&proj), [".DS_Store = finder", "main.c = int main"]);
+    assert_eq!(
+        b.tree(&proj),
+        [
+            "build/",
+            "build/local.o = b only",
+            "build/out.o = obj",
+            "main.c = int main"
+        ]
+    );
+
+    // a deletes the folder: b keeps what it ignores and the folder holding it, which goes
+    // back up, empty.
+    fs::remove_dir_all(a.root.join(&proj))?;
+    a.sync()?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(
+        b.tree(&proj),
+        ["build/", "build/local.o = b only", "build/out.o = obj"]
+    );
+    assert!(a.root.join(&proj).is_dir() && a.tree(&proj).is_empty());
+
+    // Clean up b's own files; the empty folder goes everywhere.
+    fs::remove_dir_all(b.root.join(&proj))?;
+    b.sync()?;
+    a.sync()?;
+    assert!(!a.root.join(&proj).exists());
     Ok(())
 }

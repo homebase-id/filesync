@@ -3,7 +3,7 @@
 Progress (2026-10-09): Layers 0–4 are built against the fake remote; Layer 5's adapter syncs
 two folders through a live identity (frodo), including the WebSocket wake-up. Open in Layer 5:
 batch deletes, files of 2 GiB and over (#1893), app sign-in by slug (#1902), hash-less nodes
-from other writers, encrypted drives, and the interop work.
+from other writers, encrypted drives, and the interop work. Layer 6 has its filters.
 Open items in those layers:
 - catch-up at background I/O and CPU priority (Layer 2) is not implemented yet;
 - the performance budget isn't measured in CI yet (no 10^6-file benchmark job);
@@ -120,7 +120,8 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Daemon host**: Windows service or agent, launchd, systemd user unit; single instance; sleep/resume and network changes
 - **IPC control API + CLI**
 - **Config + OS keychain**
-- **Filters**: ignore rules and junk files
+- **Filters** (done 2026-10-09, sync semantics §10): built-in junk, per-device ignore rules in
+  `.hbsync/ignore`, remote nodes masked per device, local-only semantics for ignored items
 - **Observability**: structured logs, per-item status, diagnostics bundle
 - **Packaging**: signing and notarization, auto-update
 
