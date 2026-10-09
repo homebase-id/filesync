@@ -15,6 +15,11 @@ WebSocket; two folders converge through a live identity. Facts and server bugs:
 - `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]
   [--allow-mass-delete]`
 
+Server dependencies: every odin-core issue the client waits on has a tracking issue here,
+labelled `odin-core` (`gh issue list -R homebase-id/filesync --label odin-core`). Each one names
+its upstream issue, the workaround in the code meanwhile, and what to do once it's fixed; the
+upstream issue links back. Check upstream state now and then and act on what's fixed.
+
 Read these first:
 - `docs/foundations.md`: the pinned decisions (client-computed stored + content hashes on
   `PayloadDescriptor`, id tree with `GroupId` = parent, start-up catch-up tiers, placeholder

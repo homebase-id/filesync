@@ -179,6 +179,7 @@ impl Remote for HomebaseRemote {
         // cached without that row (rows of the current millisecond are held back), and the
         // same query would then miss it until the next write. The page size is part of the
         // cache key: never ask the same page size twice in a row, so the next query is fresh.
+        // odin-core #1905, tracked in filesync #1.
         let n = self.queries.fetch_add(1, Ordering::Relaxed);
         let limit = limit.max(1);
         let size = limit - (n as usize % limit.min(16));

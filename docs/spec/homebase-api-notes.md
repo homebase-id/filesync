@@ -179,10 +179,12 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   that row, and every identical query (same cursor, same page size) misses it until the next
   write to the drive. On frodo, about one write in twelve stayed invisible to a polling
   client. Workaround in the client: never send the same page size twice in a row (it is
-  part of the cache key). Contract scenario `every_write_shows_up_promptly`. Not filed yet.
+  part of the cache key). Contract scenario `every_write_shows_up_promptly`. Filed as
+  odin-core #1905 (fix: don't cache an answer that left out rows with `modified >= now`);
+  tracked in filesync #1.
 - **A content update of a deleted file is a 500** **[verified, tried]**: a PATCH with an
   `appendOrOverwrite` payload on a tombstone throws a NullReferenceException in
   `DriveStorageServiceBase.UpdateBatchCopyFilesAsync` / `ProcessAppendOrOverwrite` (the
   tombstone's payload list is null) before the 4002 check. Workaround in the client: after a
   failed update, read the header; a tombstone means `NotFound`. Filed as odin-core #1904
-  (a header-only update of a tombstone correctly answers 4002).
+  (a header-only update of a tombstone correctly answers 4002); tracked in filesync #6.
