@@ -29,6 +29,7 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 [target.'cfg(windows)'.dependencies]
 widestring = "1.0.2"
 windows-native-keyring-store = "1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

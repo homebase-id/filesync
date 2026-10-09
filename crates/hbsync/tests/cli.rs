@@ -125,9 +125,10 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     let out = home.hbsync(&["start"])?;
     assert!(out.status.success(), "{}", text(&out));
 
-    // A second daemon refuses to run.
+    // A second daemon has nothing to do: it says so and exits, successfully (a service
+    // manager would restart a failed one).
     let out = home.command(env!("CARGO_BIN_EXE_hbsyncd"), &[]).output()?;
-    assert!(!out.status.success());
+    assert!(out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("already running"), "{}", text(&out));
 
     // It answers while it can't reach the identity, and says why.

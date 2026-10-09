@@ -1,7 +1,8 @@
 //! The product shell around the sync engine: where the client keeps its files, the config,
 //! the credentials, setting the app up on an identity, the sync runner, the control socket and
-//! the one-daemon lock, and (in a later step) autostart.
+//! the one-daemon lock, and starting the daemon at logon.
 
+pub mod autostart;
 pub mod config;
 pub mod daemon;
 pub mod ipc;

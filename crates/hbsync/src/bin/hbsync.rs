@@ -8,7 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use hbsync_app::ipc::{self, Ask, IpcError, Reply, Request};
 use hbsync_app::runner::{Hints, IDENTITY_KEY};
-use hbsync_app::{Config, Control, CredentialStore, Location, Paths, Root, State, Status, setup};
+use hbsync_app::{
+    Config, Control, CredentialStore, Location, Paths, Root, State, Status, autostart, setup,
+};
 use hbsync_local::{STATE_DIR, state_db_path};
 use hbsync_state::StateDb;
 
@@ -44,6 +46,9 @@ enum Command {
         /// Don't start the daemon.
         #[arg(long)]
         no_start: bool,
+        /// Don't start the daemon at logon.
+        #[arg(long)]
+        no_autostart: bool,
     },
     /// Shows what the daemon is doing.
     Status {
@@ -70,8 +75,18 @@ enum Command {
     Logout,
     /// Stops syncing the folder. Its files stay; setting it up again picks up where it was.
     Unlink,
+    /// Starts the daemon at logon (on), or not (off); shows which without an argument.
+    Autostart {
+        state: Option<OnOff>,
+    },
     /// Prints the folder of the daemon's logs.
     Log,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 fn main() -> ExitCode {
@@ -97,13 +112,15 @@ fn run(command: Command) -> Res<ExitCode> {
             existing,
             browser,
             no_start,
+            no_autostart,
         } => set_up(
             &paths,
             &identity,
             folder,
             existing,
             browser.as_deref(),
-            no_start,
+            !no_start,
+            !no_autostart,
         )?,
         Command::Status { json } => match ask(&paths, Ask::Status) {
             Ok(Reply::Status(s)) if json => println!("{}", serde_json::to_string_pretty(&s)?),
@@ -149,6 +166,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             stop(&paths)?;
+            autostart_off_unless_dev()?;
             CredentialStore::open(&paths).delete(&root.identity)?;
             println!(
                 "Logged out of {}. {} and its files stay; `hbsync setup {}` signs in again.",
@@ -164,6 +182,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             stop(&paths)?;
+            autostart_off_unless_dev()?;
             for root in config.roots.drain(..) {
                 println!(
                     "{} is no longer synced with {}. Its files stay.",
@@ -173,6 +192,18 @@ fn run(command: Command) -> Res<ExitCode> {
             }
             config.save(&path)?;
         }
+        Command::Autostart { state } => match state {
+            None if autostart::installed()? => println!("The daemon starts at logon."),
+            None => println!("The daemon doesn't start at logon."),
+            Some(OnOff::On) => {
+                autostart::install(&autostart::daemon_exe()?)?;
+                println!("The daemon starts at logon.");
+            }
+            Some(OnOff::Off) => {
+                autostart::uninstall()?;
+                println!("The daemon no longer starts at logon.");
+            }
+        },
         Command::Log => println!("{}", paths.logs.display()),
     }
     Ok(ExitCode::SUCCESS)
@@ -188,7 +219,8 @@ fn set_up(
     folder: Option<PathBuf>,
     existing: bool,
     browser: Option<&str>,
-    no_start: bool,
+    start_now: bool,
+    at_logon: bool,
 ) -> Res<()> {
     let identity = identity.trim().trim_end_matches('/').to_lowercase();
     let folder = match folder {
@@ -261,7 +293,15 @@ fn set_up(
     config.save(&config_path)?;
     println!("{} syncs with {identity}.", folder.display());
 
-    if no_start {
+    if at_logon {
+        if dev_home() {
+            println!("HBSYNC_HOME is set: not starting at logon (`hbsync autostart on` does).");
+        } else {
+            autostart::install(&autostart::daemon_exe()?)?;
+            println!("The daemon starts at logon (`hbsync autostart off` stops that).");
+        }
+    }
+    if !start_now {
         return Ok(());
     }
     if running(paths)? {
@@ -269,6 +309,20 @@ fn set_up(
     }
     start(paths)?;
     println!("The daemon is running: `hbsync status` shows what it does.");
+    Ok(())
+}
+
+/// A private instance (`HBSYNC_HOME`): tests, development. It leaves the user's logon entry
+/// alone unless asked by `hbsync autostart`.
+fn dev_home() -> bool {
+    std::env::var_os("HBSYNC_HOME").is_some()
+}
+
+fn autostart_off_unless_dev() -> Res<()> {
+    if !dev_home() && autostart::installed()? {
+        autostart::uninstall()?;
+        println!("The daemon no longer starts at logon.");
+    }
     Ok(())
 }
 
@@ -304,10 +358,14 @@ fn running(paths: &Paths) -> Result<bool, IpcError> {
     }
 }
 
-/// Starts `hbsyncd` (beside this program) on its own and waits until it answers.
+/// Starts the daemon and waits until it answers: through the service manager when it starts
+/// the daemon at logon (so that it supervises it), else `hbsyncd` beside this program, on its
+/// own.
 fn start(paths: &Paths) -> Res<()> {
-    let exe =
-        std::env::current_exe()?.with_file_name(format!("hbsyncd{}", std::env::consts::EXE_SUFFIX));
+    if !dev_home() && autostart::installed()? && autostart::start()? {
+        return wait_until_running(paths, None);
+    }
+    let exe = autostart::daemon_exe()?;
     let mut process = Process::new(&exe);
     process
         .stdin(Stdio::null())
@@ -320,15 +378,20 @@ fn start(paths: &Paths) -> Res<()> {
         // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: not tied to this console.
         std::os::windows::process::CommandExt::creation_flags(&mut process, 0x8 | 0x200);
     }
-    let mut child = process
+    let child = process
         .spawn()
         .map_err(|e| format!("can't start {}: {e}", exe.display()))?;
+    wait_until_running(paths, Some(child))
+}
+
+/// Waits until the daemon answers, or `child` (when we started it) exits.
+fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> Res<()> {
     let until = Instant::now() + Duration::from_secs(15);
     while Instant::now() < until {
         if running(paths)? {
             return Ok(());
         }
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
             return Err(format!(
                 "the daemon exited ({status}); its log is in {}",
                 paths.logs.display()

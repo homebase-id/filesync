@@ -1088,6 +1088,7 @@ dependencies = [
  "uuid",
  "widestring",
  "windows-native-keyring-store",
+ "windows-sys 0.61.2",
  "zbus-secret-service-keyring-store",
 ]
 

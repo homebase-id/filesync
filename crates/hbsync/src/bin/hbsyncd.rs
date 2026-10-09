@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use hbsync_app::Paths;
+use hbsync_app::daemon::DaemonError;
+use hbsync_app::lock::LockError;
 use tracing_subscriber::prelude::*;
 
 fn main() -> ExitCode {
@@ -35,14 +37,21 @@ fn main() -> ExitCode {
             tracing::warn!("can't handle signal {signal}: {e}");
         }
     }
-    match hbsync_app::daemon::run(&paths, stop) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
+    let Err(e) = hbsync_app::daemon::run(&paths, stop) else {
+        return ExitCode::SUCCESS;
+    };
+    // Also for whoever started it without a terminal (`hbsync start`, a test).
+    if !std::io::stderr().is_terminal() {
+        eprintln!("hbsyncd: {e}");
+    }
+    match e {
+        // Nothing to do is no failure: launchd and systemd restart a daemon that failed.
+        DaemonError::NotSetUp(_) | DaemonError::Lock(LockError::Held { .. }) => {
+            tracing::warn!("{e}");
+            ExitCode::SUCCESS
+        }
+        e => {
             tracing::error!("{e}");
-            // Also for whoever started it without a terminal (`hbsync start`, a test).
-            if !std::io::stderr().is_terminal() {
-                eprintln!("hbsyncd: {e}");
-            }
             ExitCode::FAILURE
         }
     }
