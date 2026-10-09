@@ -5,8 +5,12 @@ syncs a local folder tree with a Homebase drive (server: `../odin-core`; mobile 
 reference: `../chat-kmp`).
 
 Status: roadmap Layers 0–4 are built and tested against the in-memory fake remote (two-client
-sync on real folders, green on all three OSes in CI). Next: Layer 5, the Homebase adapter
-(shared-secret envelopes, YouAuth, V2 endpoints; see `docs/spec/homebase-api-notes.md`).
+sync on real folders, green on all three OSes in CI). Layer 5 has started: `hbsync-homebase`
+registers the Filesync app on an identity (YouAuth, its drive and circle) and talks to the V2
+API through the shared-secret envelope; next is the drive adapter behind `Remote` (see
+`docs/spec/homebase-api-notes.md`). Dev registration: `cargo run -p hbsync-homebase --bin
+hbsync-register -- <identity> [--browser firefox]` (credentials in
+`~/.config/hbsync/dev/<identity>.json`).
 
 Read these first:
 - `docs/foundations.md`: the pinned decisions (client-computed stored + content hashes on
@@ -54,3 +58,4 @@ the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-wind
 | `hbsync-remote` | blocking `Remote` trait and the fake server/remote with Homebase semantics |
 | `hbsync-engine` | tree, pure reconciler, view builder, executor, transfer pool, adoption, sync loop |
 | `hbsync-sim` | deterministic multi-client simulator with convergence/no-loss properties |
+| `hbsync-homebase` | YouAuth app registration (P-384 ECDH, HKDF), the AES-CBC shared-secret envelope, a V2 API client, the Filesync app definition |

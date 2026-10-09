@@ -27,6 +27,31 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   `odin-js/packages/apps/owner-app/src/hooks/apps/useApp.ts:55-88`. Drive request entry keys:
   `a`, `t`, `n`, `d`, `p` (Read=1, Write=2), `ds`, `ts`, `r`, `s`.
 
+## The Filesync app on an identity (`crates/hbsync-homebase`, tried on frodo.dotyou.cloud 2026-10-09)
+- **Ids and slugs** **[verified]**: YouAuth still requires an app id (`client_id`, and
+  `appId` in `permission_request`; `YouAuthAppParameters.cs:10-13`), and a drive request names
+  the drive by alias and type. Registration also requires the app slug `as`
+  (`AppRegistrationService.AssignSlugAsync`), and the owner app requires `ts` (and reads `ds`)
+  on every requested drive and refuses a request without `cd` (`RegisterApp.tsx:74`). Slugs:
+  `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, at most 14 characters (`OdinSlug.cs`). Filesync uses app
+  slug `filesync` and one drive `filesync`/`filesync`; its ids are fixed in `app.rs`.
+- **Addressing by slug** **[verified, tried]**: once registered, the client finds its drive
+  with `GET /api/v2/apps/filesync/drives/filesync` (`V2AppDriveController.cs`); the answer
+  carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`.
+  File routes still take the alias.
+- **Registration flow** **[verified, tried]**: an unregistered app is sent to
+  `/owner/appreg`, which creates the requested drives and registers the app, then returns to
+  the authorize URL (`YouAuthUnifiedController.cs:155-162` sets `return`), so the flow resumes
+  by itself. An app cannot create drives itself.
+- **Circles** **[verified, tried]**: circles have no slug. An app creates its own after
+  registration: `POST /api/v2/connections/circles/create` with `{name, description, emoji,
+  driveGrants: [{permissionedDrive: {drive, permission}}], permissions: {keys}}`; only drives
+  the app owns and keys it holds (`CircleMembershipService.CreateAppCircleAsync`). Returns the
+  circle id. Filesync's circle grants Read on its drive and starts empty.
+- **Desktop callback** **[tried]**: `http://localhost:{port}/authorization-code-callback`.
+  Firefox may first open a connection the callback server can't read (an https attempt);
+  ignore such connections rather than failing.
+
 ## Shared-secret encryption (mandatory, even for unencrypted files)
 **[verified]** `apps/Odin.Hosting/Middleware/SharedSecretEncryptionMiddleware.cs`:
 - JSON request bodies (POST/PUT/PATCH/DELETE) are `{"iv": b64, "data": b64}`, AES-CBC under the
@@ -69,6 +94,14 @@ header must be present even when unencrypted (chat-kmp encrypts an all-zero `Key
 - Payload hashes: `../odin-core/docs/payload-hashes.md` (errors 4175–4177).
 
 ## Known gaps
+- **No file-sync drive kind** **[verified]**: the drive flag `RequirePayloadHashes` (#1899)
+  can't be requested at registration (no field in `d`), the owner app drops a requested
+  drive's attributes when it creates it, and no owner UI sets the flag or a kind. App clients
+  can't read the flag either (`ClientDriveData` lacks it). To do in odin-core / odin-js.
+- **Circle permission keys lost** **[verified]**: odin-js sends `cp`, but the server's
+  `YouAuthAppParameters` has no `cp`, so they vanish on the redirect to `/owner/appreg`.
+- `docs/mandatory-slugs-and-app-ids-plan.md` calls `DriveSlug`/`DriveTypeSlug` required; the
+  server derives a missing one instead (only the owner app insists on `ts`).
 - Delete has no VersionTag guard → a delete can wipe a concurrent edit. Proposed: optional
   `versionTag` on delete, 4160 on mismatch; draft in
   [../issues/odin-core-delete-version-tag.md](../issues/odin-core-delete-version-tag.md).
