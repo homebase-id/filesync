@@ -1,0 +1,515 @@
+//! The behavior every [`Remote`] must have, as runnable scenarios: the fake runs them in CI,
+//! the Homebase adapter against a live identity.
+//!
+//! The scenarios only use the trait, and only inside a scratch folder of their own, so they
+//! can run on a drive that holds other files. Everything they create is deleted by
+//! [`Bench::cleanup`].
+
+use std::collections::HashSet;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use hbsync_fileio::{HashAlgorithm, hash_bytes};
+use hbsync_types::schema::NodeContent;
+use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef};
+
+use crate::{NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
+
+pub type Outcome = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// A remote under test and the scratch folder the scenarios work in.
+pub struct Bench<'a> {
+    pub remote: &'a dyn Remote,
+    scratch: NodeId,
+    /// How long a write takes to show up in the feed (Homebase: rows of the current
+    /// millisecond are held back).
+    settle: Duration,
+    created: Mutex<Vec<RemoteFileId>>,
+}
+
+impl std::fmt::Debug for Bench<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bench")
+            .field("scratch", &self.scratch)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The scenarios, by name.
+pub type Scenario = fn(&Bench) -> Outcome;
+
+pub const SCENARIOS: &[(&str, Scenario)] = &[
+    ("create_read_and_feed", create_read_and_feed),
+    ("empty_file", empty_file),
+    (
+        "retried_create_and_recreate_after_delete",
+        retried_create_and_recreate_after_delete,
+    ),
+    ("guarded_updates", guarded_updates),
+    ("content_round_trips", content_round_trips),
+    ("deletes", deletes),
+    ("tombstone_in_the_feed", tombstone_in_the_feed),
+    ("hash_mismatch_stores_nothing", hash_mismatch_stores_nothing),
+    ("feed_pages_and_resumes", feed_pages_and_resumes),
+    ("ranged_reads", ranged_reads),
+];
+
+impl<'a> Bench<'a> {
+    /// Creates a scratch folder named `name` at the top of the drive.
+    pub fn new(remote: &'a dyn Remote, name: &str, settle: Duration) -> Result<Self, RemoteError> {
+        let bench = Bench {
+            remote,
+            scratch: NodeId::ROOT,
+            settle,
+            created: Mutex::new(Vec::new()),
+        };
+        let scratch = folder(name, NodeId::ROOT);
+        bench.create(&scratch, None)?;
+        Ok(Bench {
+            scratch: scratch.node,
+            ..bench
+        })
+    }
+
+    /// Runs every scenario; returns the names and errors of the ones that failed.
+    pub fn run_all(&self) -> Vec<(&'static str, String)> {
+        SCENARIOS
+            .iter()
+            .filter_map(|(name, run)| run(self).err().map(|e| (*name, e.to_string())))
+            .collect()
+    }
+
+    /// Deletes everything the scenarios (and the scratch folder) left, children first.
+    pub fn cleanup(&self) -> Result<(), RemoteError> {
+        let created = std::mem::take(&mut *self.created.lock().unwrap_or_else(|e| e.into_inner()));
+        for file_id in created.into_iter().rev() {
+            let header = match self.remote.header(file_id) {
+                Ok(h) => h,
+                Err(RemoteError::NotFound) => continue,
+                Err(e) => return Err(e),
+            };
+            if !header.is_deleted() {
+                match self.remote.delete(file_id, header.version) {
+                    Ok(()) | Err(RemoteError::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A create, remembered for cleanup.
+    pub fn create(&self, meta: &NodeMeta, data: Option<&[u8]>) -> Result<RemoteRef, RemoteError> {
+        let mut reader = data.unwrap_or_default();
+        let upload = data.map(|d| Upload {
+            hash: hash_bytes(d, HashAlgorithm::Blake3),
+            size: d.len() as u64,
+            reader: &mut reader,
+        });
+        let written = self.remote.create(meta, upload)?;
+        self.created
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(written.file_id);
+        Ok(written)
+    }
+
+    fn folder(&self, name: &str) -> Result<(NodeMeta, RemoteRef), RemoteError> {
+        let meta = folder(name, self.scratch);
+        let written = self.create(&meta, None)?;
+        Ok((meta, written))
+    }
+
+    fn file(&self, name: &str, data: &[u8]) -> Result<(NodeMeta, RemoteRef), RemoteError> {
+        let meta = file(name, self.scratch, data);
+        let written = self.create(&meta, Some(data))?;
+        Ok((meta, written))
+    }
+
+    fn update(
+        &self,
+        at: RemoteRef,
+        meta: &NodeMeta,
+        data: Option<&[u8]>,
+    ) -> Result<RemoteRef, RemoteError> {
+        let mut reader = data.unwrap_or_default();
+        let upload = data.map(|d| Upload {
+            hash: hash_bytes(d, HashAlgorithm::Blake3),
+            size: d.len() as u64,
+            reader: &mut reader,
+        });
+        self.remote.update(at.file_id, at.version, meta, upload)
+    }
+
+    fn read(
+        &self,
+        file_id: RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+    ) -> Result<Vec<u8>, RemoteError> {
+        let mut out = Vec::new();
+        let n = self.remote.read(file_id, range, &mut out)?;
+        if n != out.len() as u64 {
+            return Err(RemoteError::Fatal(format!(
+                "read returned {n} but wrote {} bytes",
+                out.len()
+            )));
+        }
+        Ok(out)
+    }
+
+    /// The feed's end: a cursor after every change so far.
+    fn cursor_now(&self) -> Result<String, RemoteError> {
+        std::thread::sleep(self.settle);
+        Ok(self.changes_after(None)?.1)
+    }
+
+    /// Every change after `cursor` (all pages) and the cursor after them.
+    fn changes_after(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<RemoteHeader>, String), RemoteError> {
+        std::thread::sleep(self.settle);
+        let mut cursor = cursor.map(str::to_owned);
+        let mut entries = Vec::new();
+        loop {
+            let page = self.remote.changes(cursor.as_deref(), 100)?;
+            entries.extend(page.entries);
+            cursor = Some(page.cursor);
+            if !page.has_more {
+                break;
+            }
+        }
+        Ok((entries, cursor.unwrap_or_default()))
+    }
+
+    /// The changes after `cursor` to the files in `ids` (other writers may share the drive).
+    fn changes_to(
+        &self,
+        cursor: &str,
+        ids: &[RemoteFileId],
+    ) -> Result<Vec<RemoteHeader>, RemoteError> {
+        let ids: HashSet<_> = ids.iter().collect();
+        Ok(self
+            .changes_after(Some(cursor))?
+            .0
+            .into_iter()
+            .filter(|h| ids.contains(&h.file_id))
+            .collect())
+    }
+}
+
+pub fn folder(name: &str, parent: NodeId) -> NodeMeta {
+    NodeMeta {
+        node: NodeId::new(),
+        parent,
+        kind: NodeKind::Folder,
+        content: NodeContent::folder(name),
+    }
+}
+
+pub fn file(name: &str, parent: NodeId, data: &[u8]) -> NodeMeta {
+    NodeMeta {
+        node: NodeId::new(),
+        parent,
+        kind: NodeKind::File,
+        content: NodeContent::file(name, 1_700_000_000_123, data.len() as u64, false),
+    }
+}
+
+/// `meta` with new content (a rename, an edit).
+pub fn with(meta: &NodeMeta, content: NodeContent) -> NodeMeta {
+    NodeMeta {
+        content,
+        ..meta.clone()
+    }
+}
+
+macro_rules! ensure {
+    ($cond:expr, $($msg:tt)+) => {
+        if !$cond {
+            return Err(format!($($msg)+).into());
+        }
+    };
+}
+
+macro_rules! ensure_err {
+    ($result:expr, $pattern:pat) => {
+        match $result {
+            Err($pattern) => {}
+            other => {
+                return Err(format!(
+                    "{}: expected {}, got {other:?}",
+                    stringify!($result),
+                    stringify!($pattern)
+                )
+                .into())
+            }
+        }
+    };
+}
+
+fn create_read_and_feed(b: &Bench) -> Outcome {
+    let start = b.cursor_now()?;
+    let (dir, dir_ref) = b.folder("Docs")?;
+    let f = file("a.txt", dir.node, b"hello");
+    let written = b.create(&f, Some(b"hello"))?;
+
+    let header = b.remote.header(written.file_id)?;
+    ensure!(
+        header.node() == Some(f.node),
+        "node id: {:?}",
+        header.node()
+    );
+    ensure!(header.parent == dir.node, "parent: {}", header.parent);
+    ensure!(
+        header.version == written.version,
+        "version differs from the create's"
+    );
+    let state = header.state().ok_or("no state")?;
+    ensure!(state.name == "a.txt", "name: {}", state.name);
+    let content = state.content.ok_or("no file content")?;
+    ensure!(
+        content.hash == hash_bytes(b"hello", HashAlgorithm::Blake3),
+        "hash: {:?}",
+        content.hash
+    );
+    ensure!(content.size == 5, "size: {}", content.size);
+    ensure!(
+        content.mtime_ms == 1_700_000_000_123,
+        "mtime: {}",
+        content.mtime_ms
+    );
+    ensure!(b.read(written.file_id, None)? == b"hello", "payload");
+
+    let feed = b.changes_to(&start, &[dir_ref.file_id, written.file_id])?;
+    let ids: Vec<_> = feed.iter().map(|h| h.file_id).collect();
+    ensure!(
+        ids == [dir_ref.file_id, written.file_id],
+        "feed order: {ids:?}"
+    );
+    ensure!(feed[1] == header, "the feed's header differs from header()");
+    Ok(())
+}
+
+fn empty_file(b: &Bench) -> Outcome {
+    let (_, written) = b.file("empty", b"")?;
+    let state = b
+        .remote
+        .header(written.file_id)?
+        .state()
+        .ok_or("no state")?;
+    ensure!(state.content.map(|c| c.size) == Some(0), "size");
+    ensure!(b.read(written.file_id, None)?.is_empty(), "payload");
+    Ok(())
+}
+
+fn retried_create_and_recreate_after_delete(b: &Bench) -> Outcome {
+    let (f, first) = b.file("x", b"1")?;
+    ensure_err!(b.create(&f, Some(b"1")), RemoteError::AlreadyExists);
+    b.remote.delete(first.file_id, first.version)?;
+    // A tombstone frees the node id; the new file gets a new file id.
+    let again = b.create(&f, Some(b"1"))?;
+    ensure!(
+        again.file_id != first.file_id,
+        "same file id after re-create"
+    );
+    ensure!(
+        b.remote.header(again.file_id)?.node() == Some(f.node),
+        "node id"
+    );
+    Ok(())
+}
+
+fn guarded_updates(b: &Bench) -> Outcome {
+    let (dir, _) = b.folder("target")?;
+    let (f, w1) = b.file("v.txt", b"v1")?;
+    // Rename and move, metadata only: the payload stays.
+    let moved = NodeMeta {
+        parent: dir.node,
+        ..with(
+            &f,
+            NodeContent::file("renamed.txt", 1_700_000_000_123, 2, false),
+        )
+    };
+    let w2 = b.update(w1, &moved, None)?;
+    ensure!(
+        w2.file_id == w1.file_id && w2.version != w1.version,
+        "new version"
+    );
+    let header = b.remote.header(w2.file_id)?;
+    ensure!(header.node() == Some(f.node), "node id kept");
+    ensure!(header.kind == NodeKind::File, "kind kept");
+    ensure!(header.parent == dir.node, "moved");
+    let state = header
+        .state()
+        .ok_or("payload info lost on a metadata update")?;
+    ensure!(state.name == "renamed.txt", "renamed");
+    ensure!(b.read(w2.file_id, None)? == b"v1", "payload kept");
+    // Stale version.
+    ensure_err!(b.update(w1, &moved, None), RemoteError::VersionMismatch);
+    ensure_err!(
+        b.update(w1, &moved, Some(b"lost")),
+        RemoteError::VersionMismatch
+    );
+    // Content update.
+    let edited = with(
+        &moved,
+        NodeContent::file("renamed.txt", 1_700_000_000_999, 3, true),
+    );
+    let w3 = b.update(w2, &edited, Some(b"v2!"))?;
+    ensure!(b.read(w3.file_id, None)? == b"v2!", "new payload");
+    let content = b
+        .remote
+        .header(w3.file_id)?
+        .state()
+        .ok_or("state")?
+        .content
+        .ok_or("file")?;
+    ensure!(
+        content.hash == hash_bytes(b"v2!", HashAlgorithm::Blake3) && content.size == 3,
+        "new hash and size"
+    );
+    ensure!(
+        content.executable && content.mtime_ms == 1_700_000_000_999,
+        "new metadata"
+    );
+    Ok(())
+}
+
+fn content_round_trips(b: &Bench) -> Outcome {
+    let mut content = NodeContent::file("Résumé – 履歴書 🗂.txt", -1_000, 4, false);
+    content
+        .unknown
+        .insert("future".into(), serde_json::json!({"k": [1, 2]}));
+    let meta = NodeMeta {
+        content: content.clone(),
+        ..file("", b.scratch, b"data")
+    };
+    let written = b.create(&meta, Some(b"data"))?;
+    let RemoteBody::Live { content: back, .. } = b.remote.header(written.file_id)?.body else {
+        return Err("not live".into());
+    };
+    ensure!(back == content, "content came back as {back:?}");
+    Ok(())
+}
+
+fn deletes(b: &Bench) -> Outcome {
+    let (f, w) = b.file("f", b"1")?;
+    let w2 = b.update(w, &with(&f, NodeContent::file("f", 2, 1, false)), None)?;
+    // A delete at a version that is no longer current is refused (another client changed it).
+    ensure_err!(
+        b.remote.delete(w.file_id, w.version),
+        RemoteError::VersionMismatch
+    );
+    ensure!(!b.remote.header(w.file_id)?.is_deleted(), "deleted anyway");
+    b.remote.delete(w2.file_id, w2.version)?;
+    ensure!(b.remote.header(w.file_id)?.is_deleted(), "not deleted");
+    // A retried delete succeeds.
+    b.remote.delete(w2.file_id, w2.version)?;
+    // An update of a deleted file fails.
+    ensure_err!(
+        b.update(w2, &f, None),
+        RemoteError::NotFound | RemoteError::VersionMismatch
+    );
+    ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
+    Ok(())
+}
+
+fn tombstone_in_the_feed(b: &Bench) -> Outcome {
+    let (dir, _) = b.folder("d")?;
+    let f = file("f", dir.node, b"data");
+    let w = b.create(&f, Some(b"data"))?;
+    let cursor = b.cursor_now()?;
+    b.remote.delete(w.file_id, w.version)?;
+
+    let feed = b.changes_to(&cursor, &[w.file_id])?;
+    ensure!(feed.len() == 1, "{} feed entries", feed.len());
+    let tomb = &feed[0];
+    ensure!(
+        (tomb.file_id, tomb.parent, tomb.kind) == (w.file_id, dir.node, NodeKind::File),
+        "tombstone keeps file id, parent and kind: {tomb:?}"
+    );
+    ensure!(
+        tomb.body == RemoteBody::Deleted && tomb.node().is_none(),
+        "{tomb:?}"
+    );
+    Ok(())
+}
+
+fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
+    let f = file("f", b.scratch, b"real");
+    let mut reader: &[u8] = b"fake";
+    let lying = Upload {
+        hash: hash_bytes(b"real", HashAlgorithm::Blake3),
+        size: 4,
+        reader: &mut reader,
+    };
+    ensure_err!(b.remote.create(&f, Some(lying)), RemoteError::HashMismatch);
+    // Nothing was stored: the node id is still free.
+    b.create(&f, Some(b"real"))?;
+    Ok(())
+}
+
+fn feed_pages_and_resumes(b: &Bench) -> Outcome {
+    let start = b.cursor_now()?;
+    let nodes: Vec<NodeMeta> = (0..5)
+        .map(|i| folder(&format!("f{i}"), b.scratch))
+        .collect();
+    let written: Vec<RemoteRef> = nodes
+        .iter()
+        .map(|n| b.create(n, None))
+        .collect::<Result<_, _>>()?;
+    let ids: Vec<RemoteFileId> = written.iter().map(|w| w.file_id).collect();
+    std::thread::sleep(b.settle);
+
+    // Small pages, resumed by cursor, see each file once and in order.
+    let mut cursor = start.clone();
+    let mut seen = Vec::new();
+    for _ in 0..100 {
+        let page = b.remote.changes(Some(&cursor), 2)?;
+        ensure!(page.entries.len() <= 2, "page of {}", page.entries.len());
+        seen.extend(
+            page.entries
+                .iter()
+                .map(|h| h.file_id)
+                .filter(|id| ids.contains(id)),
+        );
+        cursor = page.cursor;
+        if !page.has_more {
+            break;
+        }
+    }
+    ensure!(seen == ids, "paged feed: {seen:?}");
+    // At the end, the cursor stays usable: nothing new, then only what is new.
+    ensure!(b.changes_to(&cursor, &ids)?.is_empty(), "changes repeated");
+    let renamed = with(&nodes[0], NodeContent::folder("f0-renamed"));
+    b.update(written[0], &renamed, None)?;
+    let again = b.changes_to(&cursor, &ids)?;
+    ensure!(
+        again.len() == 1 && again[0].file_id == written[0].file_id,
+        "after an update: {again:?}"
+    );
+    // From the start, each file appears once, at its latest position.
+    let all: Vec<_> = b
+        .changes_to(&start, &ids)?
+        .iter()
+        .map(|h| h.file_id)
+        .collect();
+    ensure!(all.len() == 5 && all[4] == written[0].file_id, "{all:?}");
+    Ok(())
+}
+
+fn ranged_reads(b: &Bench) -> Outcome {
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let (_, w) = b.file("ranged.bin", &data)?;
+    for range in [0..1, 1..3, 65_535..65_537, 299_999..300_000, 0..300_000] {
+        let got = b.read(w.file_id, Some(range.clone()))?;
+        ensure!(
+            got == data[range.start as usize..range.end as usize],
+            "range {range:?}: {} bytes",
+            got.len()
+        );
+    }
+    ensure!(b.read(w.file_id, None)? == data, "whole payload");
+    Ok(())
+}

@@ -14,6 +14,7 @@ use hbsync_types::{
     ContentHash, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
 
+pub mod contract;
 pub mod fake;
 
 /// One file header as the change feed or a header read returns it.

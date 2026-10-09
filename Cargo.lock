@@ -645,6 +645,7 @@ version = "0.1.0"
 dependencies = [
  "hbsync-fileio",
  "hbsync-types",
+ "serde_json",
  "thiserror",
 ]
 

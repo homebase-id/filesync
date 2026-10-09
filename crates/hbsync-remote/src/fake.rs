@@ -522,9 +522,10 @@ impl Remote for FakeRemote {
         // Check, then act: the server's delete has no version guard.
         self.gate()?;
         let current = self.server().header(file_id)?;
-        if let RemoteBody::Live { content, .. } = &current.body {
-            self.gate_name(&content.name)?;
-        }
+        let RemoteBody::Live { content, .. } = &current.body else {
+            return Ok(()); // already deleted: a retry
+        };
+        self.gate_name(&content.name)?;
         if current.version != expected {
             return Err(RemoteError::VersionMismatch);
         }
