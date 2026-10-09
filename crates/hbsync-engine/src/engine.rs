@@ -4,7 +4,7 @@ use std::path::Path;
 
 use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
-use hbsync_state::{StateDb, StateError};
+use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
 
 use crate::adopt::adopt;
@@ -101,7 +101,7 @@ pub struct Engine {
     /// Nodes whose transfers go first (a file the user just opened).
     urgent: std::collections::HashSet<hbsync_types::NodeId>,
     /// Where the sweep over the dirty set stopped when the last sync hit its round limit.
-    sweep_after: Option<NodeId>,
+    sweep_after: Option<DirtyCursor>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -207,14 +207,14 @@ impl Engine {
         let mut held: Vec<Op> = Vec::new();
         let mut swept = false;
         for _ in 0..self.cfg.max_rounds {
-            let dirty = self.db.read(|s| s.dirty_page(after, self.cfg.batch))?;
+            let (dirty, next) = self.db.read(|s| s.dirty_page(after, self.cfg.batch))?;
             if !dirty.is_empty() {
                 report.rounds += 1;
                 let done_before = report.ops_done;
                 held.extend(self.plan_and_execute(&dirty, &opts, &mut report)?);
                 progress |= report.ops_done > done_before;
             }
-            after = dirty.last().copied();
+            after = next;
             if dirty.len() < self.cfg.batch {
                 // End of a sweep.
                 report.held = std::mem::take(&mut held);
@@ -233,6 +233,10 @@ impl Engine {
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
         self.sweep_after = after;
         report.pending = self.db.read(|s| s.dirty_count())?;
+        if report.ops_done > 0 || report.feed.deleted > 0 {
+            // Ids of nodes gone everywhere.
+            self.db.write(|s| s.collect_nodes())?;
+        }
         Ok(report)
     }
 

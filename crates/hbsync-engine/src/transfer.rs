@@ -127,7 +127,7 @@ pub enum Job {
         tmp_dir: PathBuf,
         /// Identifies the exact content, so a partial file is only resumed for the same bytes.
         key: String,
-        /// The hash `local_items` keeps (computed too if the remote uses another algorithm).
+        /// The hash the `local` rows keep (computed too if the remote uses another algorithm).
         local_algorithm: HashAlgorithm,
     },
     Create {

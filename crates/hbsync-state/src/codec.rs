@@ -87,8 +87,12 @@ pub fn hash_from(bytes: &[u8]) -> Result<ContentHash> {
     Ok(ContentHash { algorithm, bytes })
 }
 
-pub fn file_id_bytes(id: &FileId) -> [u8; 16] {
-    id.file.to_be_bytes()
+/// A file id as two signed 64-bit columns: the low half, and the high half when it isn't zero
+/// (only 128-bit ids, as ReFS has, need it).
+pub fn file_id_parts(id: &FileId) -> (i64, Option<i64>) {
+    let lo = id.file as u64 as i64;
+    let hi = (id.file >> 64) as u64;
+    (lo, (hi != 0).then_some(hi as i64))
 }
 
 pub fn fingerprint_from(
@@ -96,19 +100,18 @@ pub fn fingerprint_from(
     mtime_ns: i64,
     ctime_ns: i64,
     volume: i64,
-    file_id: &[u8],
-) -> Result<Fingerprint> {
-    let file: [u8; 16] = file_id
-        .try_into()
-        .map_err(|_| StateError::Corrupt("bad file id".into()))?;
-    Ok(Fingerprint {
+    file_lo: i64,
+    file_hi: Option<i64>,
+) -> Fingerprint {
+    let file = u128::from(file_lo as u64) | (u128::from(file_hi.unwrap_or(0) as u64) << 64);
+    Fingerprint {
         size: size as u64,
         mtime_ns,
         ctime_ns,
-        // u64 ids are stored bit-for-bit in SQLite's signed INTEGER.
+        // u64 values are stored bit for bit in SQLite's signed INTEGER.
         file_id: FileId {
             volume: volume as u64,
-            file: u128::from_be_bytes(file),
+            file,
         },
-    })
+    }
 }

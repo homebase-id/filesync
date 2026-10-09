@@ -84,16 +84,13 @@ pub fn local_content(row: &LocalRow, base: Option<&BaseRow>) -> Option<FileConte
 /// name (the user renamed it, and the record is void). Parking never leaves the folder, so the
 /// place follows the folder (or the item) wherever it is moved meanwhile.
 pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
-    let Some(original) = s.get_parked(row.node)? else {
+    let Some(name) = s.get_parked(row.node)? else {
         return Ok(None);
     };
     if row.path.name() != Some(parked_name(row.node).as_str()) {
         return Ok(None);
     }
-    let Some(name) = original.name() else {
-        return Ok(None);
-    };
-    Ok(row.path.parent().unwrap_or_default().join(name).ok())
+    Ok(row.path.parent().unwrap_or_default().join(&name).ok())
 }
 
 /// Loads everything the reconciler needs for `dirty`.

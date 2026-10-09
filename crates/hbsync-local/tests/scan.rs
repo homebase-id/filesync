@@ -369,7 +369,7 @@ mod targeted {
         fn snapshot(&mut self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             Ok(self
                 .db
-                .read(|s| s.local_page(None, usize::MAX >> 1))?
+                .read(|s| s.local_subtree(&RelPath::root()))?
                 .into_iter()
                 .map(|r| format!("{} {:?} {:?}", r.path, r.kind, r.hash))
                 .collect())

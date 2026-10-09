@@ -1,7 +1,7 @@
 //! Executing a plan against the disk, the state DB and the remote.
 //!
 //! Every operation is guarded and idempotent, as the simulator requires:
-//! - a local item is only touched if it still matches its `local_items` row (the fingerprint
+//! - a local item is only touched if it still matches its `local` row (the fingerprint
 //!   guard); folders are compared by kind and file id;
 //! - nothing local is ever overwritten by surprise: new names use no-replace renames, content
 //!   swaps check the fingerprint first, and deletes move items to `.hbsync/trash`;
@@ -10,7 +10,7 @@
 //!   under a temporary name, recorded in the DB until it is moved on or back;
 //! - an operation blocked only by the order of the plan is retried later in the same run.
 //!
-//! After each operation the affected rows (`local_items`, mirror) are updated and the node is
+//! After each operation the affected rows (`local`, mirror) are updated and the node is
 //! **settled**: the base takes each attribute both sides now agree on.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -36,7 +36,7 @@ use crate::{feed, view};
 pub struct ExecConfig {
     pub root: PathBuf,
     pub os: Os,
-    /// The hash this client writes and keeps in `local_items`.
+    /// The hash this client writes and keeps in its `local` rows.
     pub algorithm: HashAlgorithm,
     /// Attempts per operation within one run (ordering blocks and transient errors).
     pub attempts: u8,
@@ -540,8 +540,7 @@ impl<'a> Executor<'a> {
                 ..row.clone()
             })
         };
-        self.db
-            .write(|s| complete_fork(s, node, &row.path, &moved))?;
+        self.db.write(|s| complete_fork(s, node, &moved))?;
         Ok(Outcome::Done)
     }
 
@@ -858,7 +857,7 @@ impl<'a> Executor<'a> {
         let target = target.clone();
         self.db.write(|s| {
             if let Some(row) = &current {
-                s.delete_local(&row.path)?;
+                s.delete_local(row.node)?;
             }
             s.delete_parked(node)?;
             s.put_local(&LocalRow {
@@ -1138,13 +1137,8 @@ fn renamed_row(root: &Path, old: &LocalRow, path: &RelPath) -> Option<LocalRow> 
 }
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
-fn complete_fork(
-    s: &Store<'_>,
-    node: NodeId,
-    from: &RelPath,
-    moved: &LocalRow,
-) -> Result<(), StateError> {
-    s.delete_local(from)?;
+fn complete_fork(s: &Store<'_>, node: NodeId, moved: &LocalRow) -> Result<(), StateError> {
+    s.delete_local(node)?;
     s.put_local(moved)?;
     s.delete_parked(node)?;
     s.delete_fork(node)?;
@@ -1172,7 +1166,7 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
                         .filter(|_| row.fingerprint.same_after_rename(&meta)),
                     ..row
                 };
-                db.write(|s| complete_fork(s, node, &from, &moved))?;
+                db.write(|s| complete_fork(s, node, &moved))?;
                 completed += 1;
             }
             _ => db.write(|s| s.delete_fork(node))?,

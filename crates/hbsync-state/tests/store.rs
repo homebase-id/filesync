@@ -103,16 +103,17 @@ fn local_rows_and_walk_order() -> R {
 
     db.read(|s| {
         let all: Vec<String> = s
-            .local_page(None, 100)?
+            .local_subtree(&RelPath::root())?
             .into_iter()
             .map(|r| r.path.as_str().to_owned())
             .collect();
         assert_eq!(all, ["a", "a/b", "a/b/c", "a/z", "a\u{1}x", "a-b", "b"]);
-
-        // Paging resumes after the last path seen.
-        let first = s.local_page(None, 3)?;
-        let next = s.local_page(Some(&first[2].path), 3)?;
-        assert_eq!(next[0].path, path("a/z"));
+        let top: Vec<String> = s
+            .local_children(&RelPath::root())?
+            .into_iter()
+            .map(|r| r.path.as_str().to_owned())
+            .collect();
+        assert_eq!(top, ["a", "a\u{1}x", "a-b", "b"]);
 
         let subtree: Vec<String> = s
             .local_subtree(&path("a"))?
@@ -142,9 +143,9 @@ fn local_node_can_only_be_in_one_place() -> R {
         .write(|s| s.put_local(&moved))
         .expect_err("node already at x");
     assert!(matches!(err, StateError::Conflict(_)));
-    // Moving is delete + put in one transaction.
+    // Moving is delete + put in one transaction (or move_local_subtree).
     db.write(|s| {
-        s.delete_local(&row.path)?;
+        s.delete_local(row.node)?;
         s.put_local(&moved)
     })?;
     assert_eq!(
@@ -195,24 +196,27 @@ fn dirty_and_kv() -> R {
 #[test]
 fn dirty_pages_visit_every_node_once() -> R {
     let mut db = StateDb::open_in_memory()?;
-    let mut nodes: Vec<NodeId> = (0..23).map(|_| NodeId::new()).collect();
+    let nodes: Vec<NodeId> = (0..23).map(|_| NodeId::new()).collect();
     db.write(|s| nodes.iter().try_for_each(|n| s.mark_dirty(*n)))?;
     let mut seen: Vec<NodeId> = Vec::new();
     let mut after = None;
     loop {
-        let page = db.read(|s| s.dirty_page(after, 5))?;
+        let (page, next) = db.read(|s| s.dirty_page(after, 5))?;
         seen.extend(&page);
-        after = page.last().copied();
+        after = next;
         if page.len() < 5 {
             break;
         }
     }
-    nodes.sort();
+    // Id order: the order the nodes were first seen.
     assert_eq!(seen, nodes);
-    // A cursor that has gone clean still works.
-    let gone = nodes[10];
-    db.write(|s| s.clear_dirty(gone))?;
-    assert_eq!(db.read(|s| s.dirty_page(Some(gone), 2))?, nodes[11..13]);
+    // A cursor whose node went clean, and was forgotten entirely, still works.
+    let (_, at_10) = db.read(|s| s.dirty_page(None, 11))?;
+    db.write(|s| {
+        s.clear_dirty(nodes[10])?;
+        s.collect_nodes()
+    })?;
+    assert_eq!(db.read(|s| s.dirty_page(at_10, 2))?.0, nodes[11..13]);
     Ok(())
 }
 
@@ -227,7 +231,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 6);
+    assert_eq!(db.schema_version()?, 1);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -357,10 +361,7 @@ fn children_subtree_moves_and_parking() -> R {
     );
 
     // Move folder "a" to "moved".
-    assert_eq!(
-        db.write(|s| s.move_local_subtree(&path("a"), &path("moved")))?,
-        4
-    );
+    db.write(|s| s.move_local_subtree(&path("a"), &path("moved")))?;
     assert_eq!(
         names(db.read(|s| s.local_children(&RelPath::root()))?),
         ["a-b", "moved", "top"]
@@ -386,7 +387,61 @@ fn children_subtree_moves_and_parking() -> R {
 
     db.write(|s| s.put_parked(rows[5].node, &path("top")))?;
     assert_eq!(db.read(|s| s.all_parked())?, vec![rows[5].node]);
+    assert_eq!(
+        db.read(|s| s.get_parked(rows[5].node))?.as_deref(),
+        Some("top")
+    );
     db.write(|s| s.delete_parked(rows[5].node))?;
     assert!(db.read(|s| s.all_parked())?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn local_tree_keeps_rows_connected() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    let (dir, file) = (
+        local("d", NodeKind::Folder, 1),
+        local("d/f", NodeKind::File, 2),
+    );
+    // A row needs its folder's row.
+    let orphan = db.write(|s| s.put_local(&file)).expect_err("no folder yet");
+    assert!(matches!(orphan, StateError::Conflict(_)));
+    db.write(|s| {
+        s.put_local(&dir)?;
+        s.put_local(&file)
+    })?;
+    // Another node can't take a recorded path.
+    let taken = LocalRow {
+        node: NodeId::new(),
+        ..file.clone()
+    };
+    assert!(db.write(|s| s.put_local(&taken)).is_err());
+    // A folder goes after its contents.
+    assert!(db.write(|s| s.delete_local(dir.node)).is_err());
+
+    // Adoption: the folder becomes another node, its contents stay inside it.
+    let adopted = NodeId::new();
+    db.write(|s| s.rekey_local(dir.node, adopted))?;
+    db.read(|s| {
+        assert_eq!(s.local_by_node(dir.node)?, None);
+        assert_eq!(s.local_node_at(&path("d"))?, Some(adopted));
+        assert_eq!(
+            s.local_by_node(file.node)?.map(|r| r.path),
+            Some(path("d/f"))
+        );
+        Ok(())
+    })?;
+
+    // Ids still referenced stay; ids of nodes gone everywhere are forgotten.
+    db.write(|s| s.delete_local(file.node))?;
+    db.write(|s| s.collect_nodes())?;
+    assert_eq!(
+        db.read(|s| s.local_node_at(&path("d")))?,
+        Some(adopted),
+        "the folder and the root are still referenced"
+    );
+    db.write(|s| s.delete_local(adopted))?;
+    db.write(|s| s.collect_nodes())?;
+    assert_eq!(db.read(|s| s.node_count())?, 0);
     Ok(())
 }

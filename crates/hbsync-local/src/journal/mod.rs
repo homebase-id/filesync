@@ -37,7 +37,7 @@ pub struct CatchUp {
     pub report: ScanReport,
 }
 
-/// Brings `local_items` and the dirty set up to date with the disk, using the journal when it
+/// Brings the `local` rows and the dirty set up to date with the disk, using the journal when it
 /// can and the full walk otherwise.
 pub fn catch_up<J: ChangeJournal + ?Sized>(
     db: &mut StateDb,

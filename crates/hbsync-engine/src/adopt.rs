@@ -70,11 +70,7 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
         }
         db.write(|s| {
             for (row, remote_node, proven_equal) in &matches {
-                s.delete_local(&row.path)?;
-                s.put_local(&LocalRow {
-                    node: *remote_node,
-                    ..(*row).clone()
-                })?;
+                s.rekey_local(row.node, *remote_node)?;
                 s.clear_dirty(row.node)?;
                 s.mark_dirty(*remote_node)?;
                 // A match proven by hashing with the remote's algorithm is recorded right away:

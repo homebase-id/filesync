@@ -1,10 +1,12 @@
 //! The state DB: everything the client knows between runs, in one SQLite file.
 //!
+//! - **nodes**: one small integer id per node; every other table is keyed by it.
 //! - **base**: the last state both sides agreed on, per node (the three-way merge's ancestor).
-//! - **local_items**: what the last observation saw on disk, keyed by local path and sorted
-//!   with the `hbpath` collation, so a sorted walk can be merged against it in one pass.
+//! - **local**: what the last observation saw on disk, as a tree of (parent, name) rows.
+//! - **remote**: the client's copy of the live remote nodes.
 //! - **dirty**: nodes whose local or remote side changed and still need reconciling. Written
 //!   in the same transaction as the change, so a crash never loses one.
+//! - **parked**, **forks**: write-ahead records of the executor's temporary renames.
 //! - **kv**: cursors and small settings.
 //!
 //! Every access runs inside a transaction ([`StateDb::read`], [`StateDb::write`]); a write
@@ -18,7 +20,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-pub use store::{BaseRow, LocalRow, MirrorFile, MirrorRow, Store};
+pub use store::{BaseRow, DirtyCursor, LocalRow, MirrorFile, MirrorRow, Store};
 
 /// The state DB key of the remote change-feed cursor.
 pub const REMOTE_CURSOR_KEY: &str = "remote.cursor";
@@ -66,7 +68,6 @@ impl StateDb {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        conn.create_collation("hbpath", hbsync_platform::path_cmp)?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(64);
         migrations::apply(&mut conn)?;

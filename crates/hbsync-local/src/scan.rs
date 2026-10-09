@@ -1,12 +1,13 @@
 //! Merging a walk into the state DB: the local half of catch-up.
 //!
-//! 1. **Streaming merge** of the walk against `local_items`, both in [`RelPath`] order.
-//!    Unchanged entries cost one comparison; only differences are kept in memory.
+//! 1. **Streaming merge** of the walk against the `local` rows, both in [`RelPath`] order (the
+//!    DB side is read folder by folder, depth first). Unchanged entries cost one comparison;
+//!    only differences are kept in memory.
 //! 2. **Identity** (sync-semantics §3): a vanished path whose file id or (for files) content
 //!    hash shows up at a new path is a move and keeps its node id; everything else new gets a
 //!    fresh node id.
 //! 3. **Hashing** only for files whose fingerprint changed (never at start for unchanged files).
-//! 4. **One transaction** updates `local_items` and marks every node whose local state changed
+//! 4. **One transaction** updates the `local` rows and marks every node whose local state changed
 //!    as dirty.
 
 use std::collections::HashMap;
@@ -18,9 +19,6 @@ use hbsync_state::{LocalRow, StateDb, StateError};
 use hbsync_types::{ContentHash, NodeId, NodeKind};
 
 use crate::walk::{SkipReason, WalkEvent, Walker};
-
-/// Rows read from the DB per page during the merge.
-const PAGE: usize = 2000;
 
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -67,7 +65,7 @@ pub fn scan(db: &mut StateDb, root: &Path, opts: &ScanOptions) -> Result<ScanRep
     let diff = merge(
         db,
         Walker::new(root, &excludes),
-        DbRows::paged(),
+        DbRows::tree(),
         &mut report,
     )?;
     let plan = resolve(db, root, diff, opts, &mut report)?;
@@ -223,14 +221,14 @@ fn merge(
             if row.path >= path {
                 break;
             }
-            let row = rows.take();
+            let row = rows.take(db)?;
             if !under_unknown(&unknown, &row.path) {
                 diff.removed.push(row);
             }
         }
         match rows.peek(db)? {
             Some(row) if row.path == path => {
-                let row = rows.take();
+                let row = rows.take(db)?;
                 if differs(&row, &meta) {
                     diff.changed.push((row, meta));
                 }
@@ -262,61 +260,83 @@ fn kind_of(meta: &LocalMeta) -> NodeKind {
     }
 }
 
-/// Pages through `local_items` in walk order, or serves a fixed, already sorted set of rows.
+/// The DB's rows in walk order: the whole tree depth first, a folder's children loaded when
+/// the folder is reached (memory grows with depth times width, not with the tree), or a fixed,
+/// already sorted set of rows.
+///
+/// Depth first with children sorted by name is walk order: `/` sorts below every other byte,
+/// so everything under `a` comes before a sibling such as `a-b`.
 struct DbRows {
-    page: std::collections::VecDeque<LocalRow>,
-    last: Option<RelPath>,
-    done: bool,
+    /// One level per open folder; the front of the last level is next.
+    levels: Vec<std::collections::VecDeque<LocalRow>>,
+    /// Load each folder's children when it is taken (the full walk); off for fixed rows.
+    descend: bool,
+    started: bool,
 }
 
 impl DbRows {
-    fn paged() -> Self {
+    fn tree() -> Self {
         DbRows {
-            page: Default::default(),
-            last: None,
-            done: false,
+            levels: Vec::new(),
+            descend: true,
+            started: false,
         }
     }
 
     fn fixed(rows: Vec<LocalRow>) -> Self {
         DbRows {
-            page: rows.into(),
-            last: None,
-            done: true,
+            levels: vec![rows.into()],
+            descend: false,
+            started: true,
         }
     }
 
     fn fill(&mut self, db: &mut StateDb) -> Result<(), StateError> {
-        if self.page.is_empty() && !self.done {
-            let rows = db.read(|s| s.local_page(self.last.as_ref(), PAGE))?;
-            self.done = rows.len() < PAGE;
-            self.last = rows.last().map(|r| r.path.clone());
-            self.page.extend(rows);
+        if !self.started {
+            self.started = true;
+            let top = db.read(|s| s.local_children(&RelPath::root()))?;
+            self.levels.push(top.into());
+        }
+        while self.levels.last().is_some_and(|l| l.is_empty()) {
+            self.levels.pop();
         }
         Ok(())
     }
 
     fn peek(&mut self, db: &mut StateDb) -> Result<Option<&LocalRow>, StateError> {
         self.fill(db)?;
-        Ok(self.page.front())
+        Ok(self.levels.last().and_then(|l| l.front()))
     }
 
     fn next(&mut self, db: &mut StateDb) -> Result<Option<LocalRow>, StateError> {
-        self.fill(db)?;
-        Ok(self.page.pop_front())
+        if self.peek(db)?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(self.take(db)?))
     }
 
-    fn take(&mut self) -> LocalRow {
-        self.page
-            .pop_front()
-            .unwrap_or_else(|| unreachable!("take after a successful peek"))
+    /// Takes the next row (after a successful peek); a folder's children come next.
+    fn take(&mut self, db: &mut StateDb) -> Result<LocalRow, StateError> {
+        let row = self
+            .levels
+            .last_mut()
+            .and_then(|l| l.pop_front())
+            .unwrap_or_else(|| unreachable!("take after a successful peek"));
+        if self.descend && row.kind == NodeKind::Folder {
+            let children = db.read(|s| s.local_children(&row.path))?;
+            if !children.is_empty() {
+                self.levels.push(children.into());
+            }
+        }
+        Ok(row)
     }
 }
 
 /// The writes a scan will make.
 #[derive(Debug, Default)]
 struct Plan {
-    delete_paths: Vec<RelPath>,
+    /// Rows to delete, by their old path (moved nodes get theirs back in `put_rows`).
+    delete: Vec<(RelPath, NodeId)>,
     put_rows: Vec<LocalRow>,
     dirty: Vec<NodeId>,
 }
@@ -475,7 +495,7 @@ fn resolve(
 
     // Unmatched vanished rows are local deletes.
     for (i, row) in removed.iter().enumerate() {
-        plan.delete_paths.push(row.path.clone());
+        plan.delete.push((row.path.clone(), row.node));
         if !matched[i] {
             report.removed += 1;
             plan.dirty.push(row.node);
@@ -534,15 +554,18 @@ fn row_from(path: &RelPath, node: NodeId, meta: &LocalMeta, hash: Option<Content
     }
 }
 
-fn apply(db: &mut StateDb, plan: Plan, report: &mut ScanReport) -> Result<(), StateError> {
+fn apply(db: &mut StateDb, mut plan: Plan, report: &mut ScanReport) -> Result<(), StateError> {
     let mut dirty = plan.dirty;
     dirty.sort();
     dirty.dedup();
     report.dirty = dirty.len();
+    // Deletes first, so a node that moved can take its new place, and contents before their
+    // folder; then new rows parents first (walk order).
+    plan.delete.sort_by(|a, b| b.0.cmp(&a.0));
+    plan.put_rows.sort_by(|a, b| a.path.cmp(&b.path));
     db.write(|s| {
-        // Deletes first, so a node that moved can take its new path.
-        for path in &plan.delete_paths {
-            s.delete_local(path)?;
+        for (_, node) in &plan.delete {
+            s.delete_local(*node)?;
         }
         for row in &plan.put_rows {
             s.put_local(row)?;

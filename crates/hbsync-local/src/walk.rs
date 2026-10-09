@@ -1,8 +1,8 @@
 //! Tier-C catch-up: a depth-first walk of the sync root in [`RelPath`] order.
 //!
 //! Siblings are visited in byte order of their names and a folder comes right before its
-//! contents, which is exactly the order of `local_items` in the state DB. That lets
-//! [`crate::scan`] merge the two in one streaming pass. Memory is the listings of the folders on
+//! contents, which is the order the scan reads the state DB's `local` tree in (depth first,
+//! children by name). That lets [`crate::scan`] merge the two in one streaming pass. Memory is the listings of the folders on
 //! the current path, not the whole tree.
 
 use std::io;
