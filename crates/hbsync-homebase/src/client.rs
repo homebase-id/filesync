@@ -1,37 +1,76 @@
-//! Calls to an identity's V2 API as an authorized app client. Every request goes inside the
+//! Calls to an identity's V2 API as an authorized app client. JSON calls go inside the
 //! shared-secret envelope (verified in odin-core `SharedSecretEncryptionMiddleware`): a GET's
 //! query string becomes one `ss` parameter, even when empty; a JSON body becomes `{iv, data}`;
-//! a response marked `X-SSE: 1` comes back the same way.
+//! a response marked `X-SSE: 1` comes back the same way. Uploads (multipart) and payload
+//! reads are plaintext.
+
+use std::io::{Read, Write};
+use std::time::Duration;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::de::DeserializeOwned;
+use ureq::http::Response;
 
 use crate::HomebaseError;
 use crate::crypto::{Envelope, Key};
+use crate::multipart::Multipart;
+use crate::problem::ApiError;
 use crate::youauth::Credentials;
 
+/// The largest JSON answer read (a page of the change feed is far below it).
+const MAX_JSON: u64 = 256 * 1024 * 1024;
+
+/// One connection pool for all calls. No overall timeout: an upload of a large file takes as
+/// long as it takes.
+pub(crate) fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_send_request(Some(Duration::from_secs(60)))
+        .timeout_recv_response(Some(Duration::from_secs(300)))
+        .user_agent(concat!("hbsync/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into()
+}
+
+/// An authorized client of one identity. Cheap to clone; clones share the connection pool.
 #[derive(Clone)]
 pub struct Client {
+    identity: String,
     base: String,
     bearer: String,
     key: Key,
+    agent: ureq::Agent,
 }
 
 impl std::fmt::Debug for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Client")
-            .field("base", &self.base)
+            .field("identity", &self.identity)
             .finish_non_exhaustive()
     }
+}
+
+/// How a multipart upload is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadMethod {
+    Post,
+    Patch,
 }
 
 impl Client {
     pub fn new(credentials: &Credentials) -> Result<Self, HomebaseError> {
         Ok(Client {
+            identity: credentials.identity.clone(),
             base: format!("https://{}", credentials.identity),
             bearer: format!("Bearer {}", credentials.client_auth_token),
             key: credentials.shared_secret_key()?,
+            agent: agent(),
         })
+    }
+
+    pub fn identity(&self) -> &str {
+        &self.identity
     }
 
     /// `GET {path}` with `query` encrypted into `ss`.
@@ -50,7 +89,11 @@ impl Client {
             self.base,
             utf8_percent_encode(&ss, NON_ALPHANUMERIC)
         );
-        let response = ureq::get(&url).header("Authorization", &self.bearer).call();
+        let response = self
+            .agent
+            .get(&url)
+            .header("Authorization", &self.bearer)
+            .call();
         self.decode(response, path)
     }
 
@@ -61,26 +104,83 @@ impl Client {
         body: &serde_json::Value,
     ) -> Result<T, HomebaseError> {
         let sealed = Envelope::seal(&self.key, &serde_json::to_vec(body)?)?;
-        let response = ureq::post(format!("{}{path}", self.base))
+        let response = self
+            .agent
+            .post(format!("{}{path}", self.base))
             .header("Authorization", &self.bearer)
             .send_json(&sealed);
         self.decode(response, path)
     }
 
+    /// Sends a multipart form (plaintext; the parts carry their own encryption).
+    pub fn upload<T: DeserializeOwned>(
+        &self,
+        method: UploadMethod,
+        path: &str,
+        form: Multipart<'_>,
+    ) -> Result<T, HomebaseError> {
+        let url = format!("{}{path}", self.base);
+        let request = match method {
+            UploadMethod::Post => self.agent.post(&url),
+            UploadMethod::Patch => self.agent.patch(&url),
+        };
+        let (content_type, len) = (form.content_type(), form.len());
+        let mut body = form.into_reader();
+        let response = request
+            .header("Authorization", &self.bearer)
+            .header("Content-Type", &content_type)
+            .header("Content-Length", &len.to_string())
+            .send(ureq::SendBody::from_reader(&mut body));
+        self.decode(response, path)
+    }
+
+    /// Streams the bytes of `GET {path}` (plaintext) with a `Range` of `start..=last` into
+    /// `sink`. Returns the bytes written.
+    pub fn download(
+        &self,
+        path: &str,
+        start: u64,
+        last: u64,
+        sink: &mut dyn Write,
+    ) -> Result<u64, HomebaseError> {
+        let response = self
+            .agent
+            .get(format!("{}{path}", self.base))
+            .header("Authorization", &self.bearer)
+            .header("Range", &format!("bytes={start}-{last}"))
+            .call();
+        let mut response = checked(response, path)?;
+        let mut reader = response.body_mut().with_config().limit(u64::MAX).reader();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut written = 0u64;
+        loop {
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| HomebaseError::Network(format!("{path}: {e}")))?;
+            if n == 0 {
+                return Ok(written);
+            }
+            sink.write_all(&buf[..n])?;
+            written += n as u64;
+        }
+    }
+
     fn decode<T: DeserializeOwned>(
         &self,
-        response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+        response: Result<Response<ureq::Body>, ureq::Error>,
         what: &str,
     ) -> Result<T, HomebaseError> {
-        let mut response = check(response, what)?;
+        let mut response = checked(response, what)?;
         let encrypted = response
             .headers()
             .get("X-SSE")
             .is_some_and(|v| v.as_bytes() == b"1");
         let body = response
             .body_mut()
+            .with_config()
+            .limit(MAX_JSON)
             .read_to_vec()
-            .map_err(|e| HomebaseError::Http(format!("{what}: {e}")))?;
+            .map_err(|e| HomebaseError::Network(format!("{what}: {e}")))?;
         let plain = if encrypted {
             serde_json::from_slice::<Envelope>(&body)?.open(&self.key)?
         } else {
@@ -92,24 +192,38 @@ impl Client {
 
 /// A plain JSON exchange (no envelope), for the YouAuth token call.
 pub(crate) fn http_json<T: DeserializeOwned>(
-    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    response: Result<Response<ureq::Body>, ureq::Error>,
     what: &str,
 ) -> Result<T, HomebaseError> {
-    let mut response = check(response, what)?;
+    let mut response = checked(response, what)?;
     response
         .body_mut()
         .read_json()
-        .map_err(|e| HomebaseError::Http(format!("{what}: {e}")))
+        .map_err(|e| HomebaseError::Network(format!("{what}: {e}")))
 }
 
-fn check(
-    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+/// The response if it is a success; otherwise the error it carries.
+fn checked(
+    response: Result<Response<ureq::Body>, ureq::Error>,
     what: &str,
-) -> Result<ureq::http::Response<ureq::Body>, HomebaseError> {
-    response.map_err(|e| match e {
-        ureq::Error::StatusCode(401 | 403) => {
-            HomebaseError::Denied(format!("{what}: not authorized"))
-        }
-        e => HomebaseError::Http(format!("{what}: {e}")),
+) -> Result<Response<ureq::Body>, HomebaseError> {
+    let mut response = response.map_err(|e| HomebaseError::Network(format!("{what}: {e}")))?;
+    let status = response.status().as_u16();
+    if status < 400 {
+        return Ok(response);
+    }
+    let body = response
+        .body_mut()
+        .with_config()
+        .limit(64 * 1024)
+        .read_to_vec()
+        .unwrap_or_default();
+    let error = ApiError::parse(status, &body);
+    Err(match status {
+        401 | 403 => HomebaseError::Denied(format!("{what}: {error}")),
+        _ => HomebaseError::Api {
+            what: what.to_owned(),
+            error,
+        },
     })
 }

@@ -8,15 +8,24 @@
 pub mod app;
 pub mod client;
 pub mod crypto;
+pub mod multipart;
+pub mod problem;
 pub mod youauth;
 
 pub use client::Client;
+pub use problem::ApiError;
 pub use youauth::{Credentials, Pending, begin};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HomebaseError {
-    #[error("HTTP: {0}")]
-    Http(String),
+    /// The request didn't get an answer: no connection, a timeout, a dropped stream. Worth
+    /// retrying.
+    #[error("network: {0}")]
+    Network(String),
+    /// The identity answered with an error.
+    #[error("{what}: {error}")]
+    Api { what: String, error: ApiError },
+    /// The owner refused, or the credentials no longer work (401/403).
     #[error("denied: {0}")]
     Denied(String),
     #[error("protocol: {0}")]

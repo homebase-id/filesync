@@ -196,7 +196,7 @@ impl Pending {
         let url = format!("https://{}/api/owner/v1/youauth/token", self.identity);
         let body = serde_json::json!({ "secret_digest": digest });
         let answer: TokenResponse = crate::client::http_json(
-            ureq::post(&url).send_json(&body),
+            crate::client::agent().post(&url).send_json(&body),
             "exchanging the YouAuth token",
         )?;
         if answer.cipher.as_deref().is_some_and(|c| c != "aes-cbc") {
