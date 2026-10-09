@@ -1,6 +1,6 @@
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-use hbsync_remote::{NewNode, Remote, RemoteBody, RemoteError, Upload};
+use hbsync_remote::{NodeMeta, Remote, RemoteBody, RemoteError, Upload};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind};
 
@@ -10,8 +10,8 @@ fn remote() -> FakeRemote {
     FakeRemote::new(FakeServer::new(ServerConfig::default()))
 }
 
-fn folder(name: &str, parent: NodeId) -> NewNode {
-    NewNode {
+fn folder(name: &str, parent: NodeId) -> NodeMeta {
+    NodeMeta {
         node: NodeId::new(),
         parent,
         kind: NodeKind::Folder,
@@ -19,12 +19,20 @@ fn folder(name: &str, parent: NodeId) -> NewNode {
     }
 }
 
-fn file(name: &str, parent: NodeId, data: &[u8]) -> NewNode {
-    NewNode {
+fn file(name: &str, parent: NodeId, data: &[u8]) -> NodeMeta {
+    NodeMeta {
         node: NodeId::new(),
         parent,
         kind: NodeKind::File,
         content: NodeContent::file(name, 1_700_000_000_000, data.len() as u64, false),
+    }
+}
+
+/// `node` with new content (a rename, an edit).
+fn with(node: &NodeMeta, content: NodeContent) -> NodeMeta {
+    NodeMeta {
+        content,
+        ..node.clone()
     }
 }
 
@@ -38,7 +46,7 @@ fn upload<'a>(data: &[u8], reader: &'a mut &[u8]) -> Upload<'a> {
 
 fn create_file(
     r: &FakeRemote,
-    node: &NewNode,
+    node: &NodeMeta,
     data: &[u8],
 ) -> Result<hbsync_types::RemoteRef, RemoteError> {
     let mut reader = data;
@@ -100,13 +108,13 @@ fn version_guarded_update_and_metadata_only_update() -> R {
     let r = remote();
     let f = file("v.txt", NodeId::ROOT, b"v1");
     let w1 = create_file(&r, &f, b"v1")?;
-    let moved = NodeContent::file("renamed.txt", 1, 2, false);
+    let moved = with(&f, NodeContent::file("renamed.txt", 1, 2, false));
 
-    let w2 = r.update(w1.file_id, w1.version, NodeId::ROOT, &moved, None)?;
+    let w2 = r.update(w1.file_id, w1.version, &moved, None)?;
     assert_ne!(w2.version, w1.version);
     // Stale version.
     assert!(matches!(
-        r.update(w1.file_id, w1.version, NodeId::ROOT, &moved, None),
+        r.update(w1.file_id, w1.version, &moved, None),
         Err(RemoteError::VersionMismatch)
     ));
     // Metadata-only update kept the payload.
@@ -118,7 +126,6 @@ fn version_guarded_update_and_metadata_only_update() -> R {
     let w3 = r.update(
         w2.file_id,
         w2.version,
-        NodeId::ROOT,
         &moved,
         Some(upload(b"v2!", &mut reader)),
     )?;
@@ -159,13 +166,39 @@ fn stale_delete_is_refused_by_the_client_check() -> R {
     let r = remote();
     let f = file("f", NodeId::ROOT, b"1");
     let w = create_file(&r, &f, b"1")?;
-    let content = NodeContent::file("f", 2, 1, false);
-    r.update(w.file_id, w.version, NodeId::ROOT, &content, None)?;
+    let content = with(&f, NodeContent::file("f", 2, 1, false));
+    r.update(w.file_id, w.version, &content, None)?;
     assert!(matches!(
         r.delete(w.file_id, w.version),
         Err(RemoteError::VersionMismatch)
     ));
     assert!(!r.header(w.file_id)?.is_deleted());
+    Ok(())
+}
+
+#[test]
+fn an_update_keeps_node_id_and_kind() -> R {
+    let r = remote();
+    let f = file("f", NodeId::ROOT, b"1");
+    let w = create_file(&r, &f, b"1")?;
+    let other_node = NodeMeta {
+        node: NodeId::new(),
+        ..f.clone()
+    };
+    let other_kind = with(
+        &NodeMeta {
+            kind: NodeKind::Folder,
+            ..f.clone()
+        },
+        NodeContent::folder("f"),
+    );
+    for wrong in [other_node, other_kind] {
+        assert!(matches!(
+            r.update(w.file_id, w.version, &wrong, None),
+            Err(RemoteError::Fatal(_))
+        ));
+    }
+    assert_eq!(r.header(w.file_id)?.node(), Some(f.node));
     Ok(())
 }
 
@@ -191,7 +224,7 @@ fn hash_rules() -> R {
 #[test]
 fn feed_pages_resume_and_updated_rows_move_forward() -> R {
     let r = remote();
-    let nodes: Vec<NewNode> = (0..5)
+    let nodes: Vec<NodeMeta> = (0..5)
         .map(|i| folder(&format!("f{i}"), NodeId::ROOT))
         .collect();
     let written: Vec<_> = nodes
@@ -210,14 +243,8 @@ fn feed_pages_resume_and_updated_rows_move_forward() -> R {
     );
 
     // Updating the first row moves it to the end of the feed: it shows up again, once.
-    let renamed = NodeContent::folder("f0-renamed");
-    r.update(
-        written[0].file_id,
-        written[0].version,
-        NodeId::ROOT,
-        &renamed,
-        None,
-    )?;
+    let renamed = with(&nodes[0], NodeContent::folder("f0-renamed"));
+    r.update(written[0].file_id, written[0].version, &renamed, None)?;
     let p4 = r.changes(Some(&p3.cursor), 10)?;
     assert_eq!(p4.entries.len(), 1);
     assert_eq!(p4.entries[0].file_id, written[0].file_id);

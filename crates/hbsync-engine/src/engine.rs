@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
-use hbsync_remote::Remote;
+use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
 
@@ -36,6 +36,7 @@ impl EngineConfig {
                 os: hbsync_platform::Os::current(),
                 algorithm: hbsync_fileio::HashAlgorithm::Blake3,
                 attempts: 4,
+                retry_pause: std::time::Duration::from_millis(500),
                 transfer: crate::transfer::TransferConfig::default(),
                 case_insensitive: crate::exec::probe_case_insensitive(root),
                 crash_at: None,
@@ -59,6 +60,19 @@ pub enum EngineError {
     Feed(#[from] FeedError),
     #[error("{0} panicked")]
     Panic(&'static str),
+    /// The remote refused access: syncing stops until the user authorizes again.
+    #[error("access denied: {0}")]
+    Denied(String),
+}
+
+impl EngineError {
+    /// The remote refused access (a sync, a feed read): retrying won't help.
+    pub fn is_denied(&self) -> bool {
+        matches!(
+            self,
+            EngineError::Denied(_) | EngineError::Feed(FeedError::Remote(RemoteError::Denied(_)))
+        )
+    }
 }
 
 /// What start-up did.
@@ -259,6 +273,9 @@ impl Engine {
         let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
             .with_urgent(self.urgent.clone())
             .run(plan.ops)?;
+        if let Some(why) = exec.stopped {
+            return Err(EngineError::Denied(why));
+        }
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);

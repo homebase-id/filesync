@@ -2,8 +2,8 @@
 
 use std::fs;
 
+use hbsync_engine::Engine;
 use hbsync_engine::exec::CrashPoint;
-use hbsync_engine::{Engine, EngineConfig};
 use hbsync_remote::fake::FakeRemote;
 use hbsync_state::StateDb;
 
@@ -127,6 +127,53 @@ fn transient_failures_are_retried() -> R {
 }
 
 #[test]
+fn a_denied_remote_stops_the_sync_and_loses_nothing() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("kept.txt", "v1")?;
+    a.sync()?;
+    a.write("kept.txt", "v2")?;
+    a.write("new/one.txt", "one")?;
+    // The owner revoked the app: every request is refused.
+    a.remote.faults().denied = true;
+    let before = a.remote.faults().requests;
+    a.engine.scan_local()?;
+    let err = a
+        .engine
+        .sync_once("2026-10-09")
+        .err()
+        .ok_or("sync went through")?;
+    assert!(err.is_denied(), "{err}");
+    let requests = a.remote.faults().requests - before;
+    assert!(
+        requests <= 2,
+        "stopped at the first refusal, made {requests} requests"
+    );
+    assert_eq!(a.read("kept.txt")?, "v2");
+    assert_eq!(a.read("new/one.txt")?, "one");
+
+    // Reads work again but writes are refused: the executor stops at the first write.
+    a.remote.faults().denied = false;
+    a.remote.faults().deny_writes = true;
+    let err = a
+        .engine
+        .sync_once("2026-10-09")
+        .err()
+        .ok_or("sync went through")?;
+    assert!(err.is_denied(), "{err}");
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
+
+    // Authorized again: the pending work goes through.
+    a.remote.faults().deny_writes = false;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(), a.tree_text());
+    assert_eq!(b.read("kept.txt")?, "v2");
+    Ok(())
+}
+
+#[test]
 fn restart_after_an_interrupted_sync_converges() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
@@ -143,11 +190,7 @@ fn restart_after_an_interrupted_sync_converges() -> R {
 
     // Restart: a new engine on the same state DB.
     let db = StateDb::open(&a.db_path())?;
-    a.engine = Engine::new(
-        db,
-        Box::new(a.remote.clone()),
-        EngineConfig::new(&a.root, "a"),
-    );
+    a.engine = Engine::new(db, Box::new(a.remote.clone()), common::config(&a.root, "a"));
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
@@ -206,7 +249,7 @@ fn restart(c: &mut Client, name: &str) -> R {
     c.engine = Engine::new(
         StateDb::open(&c.db_path())?,
         Box::new(c.remote.clone()),
-        EngineConfig::new(&c.root, name),
+        common::config(&c.root, name),
     );
     Ok(())
 }

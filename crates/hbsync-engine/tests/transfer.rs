@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use hbsync_engine::transfer::{Job, JobResult, TransferConfig, run_jobs};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-use hbsync_remote::{NewNode, Remote, Upload};
+use hbsync_remote::{NodeMeta, Remote, Upload};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind};
 
@@ -17,7 +17,7 @@ fn upload_job(dir: &std::path::Path, name: &str, size: usize) -> std::io::Result
     let node = NodeId::new();
     Ok(Job::Create {
         node,
-        new: NewNode {
+        new: NodeMeta {
             node,
             parent: NodeId::ROOT,
             kind: NodeKind::File,
@@ -100,7 +100,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
     let data: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
     let hash = hash_bytes(&data, HashAlgorithm::Blake3);
     let node = NodeId::new();
-    let new = NewNode {
+    let new = NodeMeta {
         node,
         parent: NodeId::ROOT,
         kind: NodeKind::File,

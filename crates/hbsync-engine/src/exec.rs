@@ -18,12 +18,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
-use hbsync_remote::{NewNode, Remote, RemoteError};
+use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{BaseRow, LocalRow, MirrorFile, MirrorRow, StateDb, StateError, Store};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind};
@@ -41,6 +42,8 @@ pub struct ExecConfig {
     pub algorithm: HashAlgorithm,
     /// Attempts per operation within one run (ordering blocks and transient errors).
     pub attempts: u8,
+    /// The pause before retrying after a transient remote error; doubled on each attempt.
+    pub retry_pause: Duration,
     pub transfer: TransferConfig,
     /// Names that differ only in case (or Unicode normalization) are the same file here
     /// (Windows, default macOS). Probe with [`probe_case_insensitive`].
@@ -87,6 +90,8 @@ pub struct ExecReport {
     pub failed: Vec<(Op, String)>,
     /// Local folders whose contents differ from the DB: rescan them before planning again.
     pub rescan: Vec<RelPath>,
+    /// Why the run stopped early: the remote refused access, so nothing else can succeed.
+    pub stopped: Option<String>,
 }
 
 #[derive(Debug)]
@@ -96,7 +101,11 @@ enum Outcome {
     /// Done, and settled in the operation's own transaction.
     Settled,
     Retry(String),
+    /// A transient remote error: retry after a pause.
+    Backoff(String),
     Skip(String),
+    /// The remote refused access: stop the run.
+    Stop(String),
 }
 
 /// A DB error inside an operation is retried like any transient failure.
@@ -191,12 +200,15 @@ impl<'a> Executor<'a> {
         let mut batch: Vec<Prepared> = Vec::new();
         loop {
             let Some((op, attempts)) = self.queue.pop_front() else {
-                if batch.is_empty() {
+                if batch.is_empty() || self.report.stopped.is_some() {
                     break;
                 }
                 self.flush(&mut batch)?;
                 continue;
             };
+            if self.report.stopped.is_some() {
+                break;
+            }
             if let Err(wait) = self.ready(&op) {
                 self.handle(op, attempts, wait)?;
                 continue;
@@ -300,14 +312,24 @@ impl<'a> Executor<'a> {
                 self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
             }
             Outcome::Settled => self.report.done += 1,
-            Outcome::Retry(_) if attempts + 1 < self.cfg.attempts => {
+            Outcome::Retry(_) | Outcome::Backoff(_) if attempts + 1 < self.cfg.attempts => {
+                if matches!(outcome, Outcome::Backoff(_)) {
+                    // The network or the server is struggling: everything waits, as the next
+                    // request would most likely fail the same way.
+                    std::thread::sleep(self.cfg.retry_pause * (1u32 << attempts.min(8)));
+                }
                 self.queue.push_back((op, attempts + 1));
             }
-            Outcome::Retry(why) => self.report.failed.push((op, why)),
+            Outcome::Retry(why) | Outcome::Backoff(why) => self.report.failed.push((op, why)),
             Outcome::Skip(why) => {
                 let node = op.node();
                 self.db.write(|s| s.mark_dirty(node))?;
                 self.report.skipped.push((op, why));
+            }
+            Outcome::Stop(why) => {
+                let node = op.node();
+                self.db.write(|s| s.mark_dirty(node))?;
+                self.report.stopped.get_or_insert(why);
             }
         }
         Ok(())
@@ -736,7 +758,7 @@ impl<'a> Executor<'a> {
         let job = match existing {
             None => Job::Create {
                 node,
-                new: NewNode {
+                new: NodeMeta {
                     node,
                     parent,
                     kind,
@@ -755,8 +777,12 @@ impl<'a> Executor<'a> {
                     node,
                     file_id,
                     expected,
-                    parent,
-                    content: content.clone(),
+                    meta: NodeMeta {
+                        node,
+                        parent,
+                        kind,
+                        content: content.clone(),
+                    },
                     path,
                     hash,
                     size,
@@ -934,7 +960,7 @@ impl<'a> Executor<'a> {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let content = NodeContent::folder(name);
-        let new = NewNode {
+        let new = NodeMeta {
             node,
             parent,
             kind,
@@ -969,10 +995,13 @@ impl<'a> Executor<'a> {
             _ => NodeContent::folder(name),
         };
         content.unknown = feed::unknown_keys(&mirror);
-        let written = match self
-            .remote
-            .update(file_id, expected, parent, &content, None)
-        {
+        let meta = NodeMeta {
+            node,
+            parent,
+            kind: mirror.kind,
+            content,
+        };
+        let written = match self.remote.update(file_id, expected, &meta, None) {
             Ok(w) => w,
             Err(e) => return Ok(remote_outcome(e)),
         };
@@ -981,7 +1010,7 @@ impl<'a> Executor<'a> {
             node,
             parent,
             mirror.kind,
-            &content,
+            &meta.content,
             hash,
             written,
             mirror.content_extra.clone(),
@@ -1120,7 +1149,8 @@ fn io_outcome(e: io::Error) -> Outcome {
 
 fn remote_outcome(e: RemoteError) -> Outcome {
     match e {
-        RemoteError::Transient(_) | RemoteError::Io(_) => Outcome::Retry(e.to_string()),
+        RemoteError::Transient(_) | RemoteError::Io(_) => Outcome::Backoff(e.to_string()),
+        RemoteError::Denied(_) => Outcome::Stop(e.to_string()),
         // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
         _ => Outcome::Skip(e.to_string()),
     }

@@ -447,7 +447,7 @@ fn a_mass_delete_split_over_batches_is_still_held() -> R {
 /// the bit is read from disk, so this holds trivially there).
 #[test]
 fn an_edit_keeps_the_executable_bit() -> R {
-    use hbsync_remote::{NewNode, RemoteBody, Upload};
+    use hbsync_remote::{NodeMeta, RemoteBody, Upload};
     use hbsync_types::schema::NodeContent;
     use hbsync_types::{NodeId, NodeKind};
 
@@ -455,7 +455,7 @@ fn an_edit_keeps_the_executable_bit() -> R {
     // A Unix client uploaded an executable script.
     let script = b"#!/bin/sh\necho hi\n";
     server.lock().map_err(|_| "poisoned")?.create(
-        &NewNode {
+        &NodeMeta {
             node: NodeId::new(),
             parent: NodeId::ROOT,
             kind: NodeKind::File,

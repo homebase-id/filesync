@@ -27,7 +27,7 @@ use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Uuid, VersionTag};
 
 use crate::{
-    ChangesPage, NewNode, PayloadInfo, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
+    ChangesPage, NodeMeta, PayloadInfo, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
     Upload,
 };
 
@@ -147,7 +147,7 @@ impl FakeServer {
 
     // ---- server operations (the HTTP API) ----
 
-    pub fn create(&mut self, node: &NewNode, upload: Option<Upload<'_>>) -> Result<RemoteRef> {
+    pub fn create(&mut self, node: &NodeMeta, upload: Option<Upload<'_>>) -> Result<RemoteRef> {
         if self.by_node.contains_key(&node.node) {
             return Err(RemoteError::AlreadyExists);
         }
@@ -186,8 +186,7 @@ impl FakeServer {
         &mut self,
         file_id: RemoteFileId,
         expected: VersionTag,
-        parent: NodeId,
-        content: &NodeContent,
+        meta: &NodeMeta,
         upload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
         let current = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
@@ -203,6 +202,15 @@ impl FakeServer {
             return Err(RemoteError::NotFound);
         };
         let (node, old_payload, kind) = (*node, *old_payload, current.header.kind);
+        // Homebase replaces the whole header: a client that sent another node id or kind
+        // would change (or clear) them. Ours never may.
+        if meta.node != node || meta.kind != kind {
+            return Err(RemoteError::Fatal(format!(
+                "update would change the node {node} ({kind:?}) to {} ({:?})",
+                meta.node, meta.kind
+            )));
+        }
+        let (parent, content) = (meta.parent, &meta.content);
         // Without an upload the payload stays.
         let new_payload = match upload {
             Some(upload) => self.receive(kind, Some(upload))?,
@@ -300,7 +308,7 @@ impl FakeServer {
         algorithm: hbsync_fileio::HashAlgorithm,
     ) -> Result<(NodeId, RemoteRef)> {
         let node = NodeId::new();
-        let new = NewNode {
+        let new = NodeMeta {
             node,
             parent,
             kind: NodeKind::File,
@@ -366,6 +374,11 @@ pub struct Faults {
     /// Creates, updates and deletes of nodes with this name fail transiently (a write that
     /// keeps failing).
     pub fail_writes_named: Option<String>,
+    /// Every request is refused with [`RemoteError::Denied`] (credentials revoked).
+    pub denied: bool,
+    /// Creates, updates and deletes are refused with [`RemoteError::Denied`] (the app lost
+    /// write access to the drive); reads still work.
+    pub deny_writes: bool,
     /// Added to every request.
     pub latency: Duration,
     /// Requests seen, for assertions.
@@ -402,6 +415,9 @@ impl FakeRemote {
         let latency = {
             let mut f = self.faults();
             f.requests += 1;
+            if f.denied {
+                return Err(RemoteError::Denied("injected: not authorized".into()));
+            }
             let scripted = f.script.pop_front().unwrap_or(false);
             if scripted || f.fail_next > 0 {
                 f.fail_next = f.fail_next.saturating_sub(1);
@@ -419,6 +435,9 @@ impl FakeRemote {
 impl FakeRemote {
     /// Fails a write to a node named `name` if that is injected.
     fn gate_name(&self, name: &str) -> Result<()> {
+        if self.faults().deny_writes {
+            return Err(RemoteError::Denied("injected: no write access".into()));
+        }
         if self.faults().fail_writes_named.as_deref() == Some(name) {
             return Err(RemoteError::Transient("injected write failure".into()));
         }
@@ -475,7 +494,7 @@ impl Remote for FakeRemote {
         self.server().header(file_id)
     }
 
-    fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
         self.gate()?;
         self.gate_name(&node.content.name)?;
         // Receive the bytes before taking the server lock, as a real server handles several
@@ -488,16 +507,14 @@ impl Remote for FakeRemote {
         &self,
         file_id: RemoteFileId,
         expected: VersionTag,
-        parent: NodeId,
-        content: &NodeContent,
+        meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
         self.gate()?;
-        self.gate_name(&content.name)?;
+        self.gate_name(&meta.content.name)?;
         let received = self.receive(payload)?;
         replay(received, |upload| {
-            self.server()
-                .update(file_id, expected, parent, content, upload)
+            self.server().update(file_id, expected, meta, upload)
         })
     }
 

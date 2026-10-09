@@ -99,9 +99,10 @@ pub struct ChangesPage {
     pub has_more: bool,
 }
 
-/// A new node to create.
+/// A node's header as a client writes it, on create and on every update. Homebase replaces
+/// the whole header on update, so an update sends all of it again, node id and kind included.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NewNode {
+pub struct NodeMeta {
     pub node: NodeId,
     pub parent: NodeId,
     pub kind: NodeKind,
@@ -129,6 +130,10 @@ pub enum RemoteError {
     /// A live file with this node id exists (Homebase 4105): a retried create already landed.
     #[error("a node with this id already exists")]
     AlreadyExists,
+    /// The identity refused the credentials or the drive (401/403): stop syncing until the
+    /// user re-authorizes; retrying changes nothing.
+    #[error("access denied: {0}")]
+    Denied(String),
     /// The file changed since the given version (Homebase 4160).
     #[error("version mismatch")]
     VersionMismatch,
@@ -173,16 +178,15 @@ pub trait Remote: Send + Sync {
 
     /// Creates a node. Fails with [`RemoteError::AlreadyExists`] if a live file already has
     /// this node id (a retry of a create that landed).
-    fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<RemoteRef>;
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef>;
 
-    /// Rewrites the header (parent and content) and, with a payload, replaces the bytes, if
-    /// the file is still at `expected`.
+    /// Rewrites the header (parent and content; node id and kind stay what they are) and, with
+    /// a payload, replaces the bytes, if the file is still at `expected`.
     fn update(
         &self,
         file_id: RemoteFileId,
         expected: VersionTag,
-        parent: NodeId,
-        content: &NodeContent,
+        meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<RemoteRef>;
 

@@ -19,6 +19,13 @@ pub fn server() -> Arc<Mutex<FakeServer>> {
     FakeServer::new(ServerConfig::default())
 }
 
+/// The engine config tests use: no real pause between transient retries.
+pub fn config(root: &Path, name: &str) -> EngineConfig {
+    let mut cfg = EngineConfig::new(root, name);
+    cfg.exec.retry_pause = std::time::Duration::from_millis(1);
+    cfg
+}
+
 pub struct Client {
     _dir: tempfile::TempDir,
     pub root: PathBuf,
@@ -41,7 +48,7 @@ impl Client {
         fs::create_dir_all(root.join(STATE_DIR))?;
         let db = StateDb::open(&Self::db_path_in(&root))?;
         let remote = FakeRemote::new(server.clone());
-        let mut cfg = EngineConfig::new(&root, name);
+        let mut cfg = config(&root, name);
         tweak(&mut cfg);
         let engine = Engine::new(db, Box::new(remote.clone()), cfg);
         Ok(Client {

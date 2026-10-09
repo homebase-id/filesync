@@ -15,8 +15,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
-use hbsync_remote::{NewNode, Remote, RemoteError, Upload};
-use hbsync_types::schema::NodeContent;
+use hbsync_remote::{NodeMeta, Remote, RemoteError, Upload};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, VersionTag};
 
 #[derive(Debug, Clone, Copy)]
@@ -132,7 +131,7 @@ pub enum Job {
     },
     Create {
         node: NodeId,
-        new: NewNode,
+        new: NodeMeta,
         path: PathBuf,
         hash: ContentHash,
         size: u64,
@@ -141,8 +140,7 @@ pub enum Job {
         node: NodeId,
         file_id: RemoteFileId,
         expected: VersionTag,
-        parent: NodeId,
-        content: NodeContent,
+        meta: NodeMeta,
         path: PathBuf,
         hash: ContentHash,
         size: u64,
@@ -281,8 +279,7 @@ fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobRe
         Job::Update {
             file_id,
             expected,
-            parent,
-            content,
+            meta,
             path,
             hash,
             size,
@@ -301,8 +298,7 @@ fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobRe
             Ok(JobResult::Uploaded(remote.update(
                 *file_id,
                 *expected,
-                *parent,
-                content,
+                meta,
                 Some(upload),
             )?))
         })(),
