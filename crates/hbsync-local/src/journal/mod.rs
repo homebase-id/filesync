@@ -122,7 +122,7 @@ fn resolve_touched(
 
 /// The longest valid [`RelPath`] prefix of a relative native path (a component that isn't
 /// valid UTF-8 or a valid name ends it, so the containing folder is rescanned instead).
-pub(crate) fn relpath_prefix(rel: &Path) -> RelPath {
+pub fn relpath_prefix(rel: &Path) -> RelPath {
     let mut path = RelPath::root();
     for component in rel.components() {
         let std::path::Component::Normal(name) = component else {

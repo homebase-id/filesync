@@ -58,19 +58,18 @@ pub struct LiveWatcher {
     _watcher: RecommendedWatcher,
     rx: Receiver<notify::Result<Event>>,
     root: PathBuf,
-    filter: Arc<Filter>,
 }
 
 impl LiveWatcher {
     pub fn start(root: &Path, filter: Arc<Filter>) -> notify::Result<Self> {
         let root = root.canonicalize().map_err(notify::Error::io)?;
         let (tx, rx) = channel();
-        let (filter_root, filter_in_cb) = (root.clone(), Arc::clone(&filter));
+        let filter_root = root.clone();
         let mut watcher = notify::recommended_watcher(move |res| {
-            // Only changes are queued: reads (a viewer, a backup tool, the rescan itself) and
-            // filtered items (the client's own state, junk, ignored folders) would otherwise
-            // flood the channel.
-            if counts(&filter_root, &filter_in_cb, &res) {
+            // Only changes are queued, and only their paths that sync: reads (a viewer, a
+            // backup tool, the rescan itself) and filtered items (the client's own state,
+            // junk, ignored folders) would otherwise flood the channel.
+            if let Some(res) = keep(&filter_root, &filter, res) {
                 // The receiver is gone only when the watcher is being dropped.
                 let _ = tx.send(res);
             }
@@ -80,7 +79,6 @@ impl LiveWatcher {
             _watcher: watcher,
             rx,
             root,
-            filter,
         })
     }
 
@@ -139,31 +137,37 @@ impl LiveWatcher {
         Some(batch)
     }
 
-    /// Folds `event` into `batch`; `true` if it counts.
+    /// Folds `event` (one [`keep`] let through) into `batch`; `true` as it counts.
     fn add(&self, batch: &mut WatchBatch, event: notify::Result<Event>) -> bool {
-        add_event(&self.root, &self.filter, batch, event)
+        fold(&self.root, batch, event);
+        true
     }
 }
 
-/// Whether a notification counts: a change in the tree, or a call for a full rescan. Opening
-/// or reading changes nothing, and the rescan itself opens what it lists: counting those
-/// would make every batch trigger the next. Closing after a write does count.
-fn counts(root: &Path, filter: &Filter, event: &notify::Result<Event>) -> bool {
-    let Ok(event) = event else {
-        return true;
+/// The notification as far as it counts, or `None`: a change in the tree, or a call for a full
+/// rescan, with only the paths in the root that sync. Opening or reading changes nothing, and
+/// the rescan itself opens what it lists: counting those would make every batch trigger the
+/// next. Closing after a write does count.
+fn keep(
+    root: &Path,
+    filter: &Filter,
+    event: notify::Result<Event>,
+) -> Option<notify::Result<Event>> {
+    let Ok(mut event) = event else {
+        return Some(event);
     };
-    if event.need_rescan() {
-        return true;
-    }
+    let rescan = event.need_rescan();
     if let EventKind::Access(kind) = event.kind
         && kind != AccessKind::Close(AccessMode::Write)
+        && !rescan
     {
-        return false;
+        return None;
     }
-    event.paths.iter().any(|path| {
+    event.paths.retain(|path| {
         path.strip_prefix(root)
             .is_ok_and(|rel| !excluded(rel, filter))
-    })
+    });
+    (rescan || !event.paths.is_empty()).then_some(Ok(event))
 }
 
 /// Whether `rel` is filtered or lies in a filtered folder. Whether it is a folder itself is
@@ -173,36 +177,38 @@ fn excluded(rel: &Path, filter: &Filter) -> bool {
     names.is_some_and(|names| !filter.names(names, false).is_sync())
 }
 
-/// Folds one notification into a batch: every changed path touches its parent folder.
-/// Returns whether the notification counts (see [`counts`]).
+/// Folds one notification into a batch, if it counts (see [`keep`]): every changed path
+/// touches its parent folder. Returns whether it counts.
+#[cfg(test)]
 fn add_event(
     root: &Path,
     filter: &Filter,
     batch: &mut WatchBatch,
     event: notify::Result<Event>,
 ) -> bool {
-    if !counts(root, filter, &event) {
-        return false;
-    }
+    keep(root, filter, event).is_some_and(|event| {
+        fold(root, batch, event);
+        true
+    })
+}
+
+/// Folds a notification [`keep`] let through into `batch`.
+fn fold(root: &Path, batch: &mut WatchBatch, event: notify::Result<Event>) {
     let Ok(event) = event else {
         batch.rescan_all = true;
-        return true;
+        return;
     };
     batch.rescan_all |= event.need_rescan();
     for path in &event.paths {
         let Ok(rel) = path.strip_prefix(root) else {
             continue;
         };
-        if excluded(rel, filter) {
-            continue;
-        }
         // The parent of the changed entry; a name that isn't valid ends the path early, which
         // rescans a folder higher up.
         batch
             .dirs
             .insert(relpath_prefix(rel.parent().unwrap_or(Path::new(""))));
     }
-    true
 }
 
 /// All local observation for one sync root: catch-up at start, then live batches.
@@ -406,13 +412,19 @@ mod tests {
         let reading = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let reader = {
             let (tx, reading, path) = (tx.clone(), reading.clone(), root.join("viewed.txt"));
+            let root_in_thread = root.clone();
             std::thread::spawn(move || {
                 while reading.load(std::sync::atomic::Ordering::Relaxed) {
                     let read = Event::new(EventKind::Access(AccessKind::Open(AccessMode::Read)))
                         .add_path(path.clone());
                     let own = Event::new(EventKind::Modify(ModifyKind::Any))
                         .add_path(path.parent().unwrap_or(&path).join(".hbsync/state.db"));
-                    if tx.send(Ok(read)).is_err() || tx.send(Ok(own)).is_err() {
+                    // As the OS callback queues them.
+                    let filter = Filter::default();
+                    let mut queue = [Ok(read), Ok(own)]
+                        .into_iter()
+                        .filter_map(|e| keep(&root_in_thread, &filter, e));
+                    if queue.any(|e| tx.send(e).is_err()) {
                         return;
                     }
                     std::thread::sleep(Duration::from_millis(10));
@@ -465,15 +477,23 @@ mod tests {
         let mut watcher = LiveWatcher::start(&root, Arc::default())?;
         let (tx, rx) = channel();
         watcher.rx = rx;
-        let event = |kind, path: &str| Ok(Event::new(kind).add_path(root.join(path)));
-        tx.send(event(EventKind::Create(CreateKind::File), "a/first"))?;
+        // As the OS callback queues them.
+        let filter = Filter::default();
+        let send = |kind, path: &str| -> Result<(), Box<dyn std::error::Error>> {
+            let event = Ok(Event::new(kind).add_path(root.join(path)));
+            if let Some(event) = keep(&root, &filter, event) {
+                tx.send(event)?;
+            }
+            Ok(())
+        };
+        send(EventKind::Create(CreateKind::File), "a/first")?;
         for _ in 0..200_000 {
-            tx.send(event(
+            send(
                 EventKind::Access(AccessKind::Open(AccessMode::Read)),
                 "r/read",
-            ))?;
+            )?;
         }
-        tx.send(event(EventKind::Create(CreateKind::File), "b/behind"))?;
+        send(EventKind::Create(CreateKind::File), "b/behind")?;
         // A quiet period far shorter than working through the backlog.
         let debounce = Debounce {
             quiet: Duration::from_micros(100),

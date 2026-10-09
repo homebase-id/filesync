@@ -232,7 +232,7 @@ impl Engine {
         let mut report = SyncReport::default();
         // After the scan, before planning: see recover_forks.
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
-        unpark(&mut self.db, &self.cfg.exec.root, &self.cfg.exec.filter)?;
+        unpark(&mut self.db, &self.cfg.exec)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;

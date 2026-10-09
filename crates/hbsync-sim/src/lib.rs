@@ -25,7 +25,7 @@ use std::sync::Arc;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile};
-use hbsync_engine::tree::{Tree, numbered_conflict_name};
+use hbsync_engine::tree::{Tree, numbered_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::name::check_remote_name;
@@ -510,10 +510,7 @@ impl Sim {
                 // numbered name.
                 let mut name = name;
                 if !park_occupant(client, state.parent, &name, None) {
-                    let free = (1..=100)
-                        .map(|n| numbered_conflict_name(&name, n))
-                        .find(|n| client.local.child_named(state.parent, n, None).is_none());
-                    match free {
+                    match numbered_name(client, None, state.parent, &name, false) {
                         Some(n) => name = n,
                         None => return Retry,
                     }
@@ -843,16 +840,10 @@ impl Sim {
             let free = |client: &Client, name: &str| {
                 client.local.child_named(parent, name, Some(node)).is_none()
             };
-            let filtered = |client: &Client, name: &str| {
-                client.local.path(parent).is_some_and(|mut path| {
-                    path.push(name);
-                    !client.filter.names(path, is_dir).is_sync()
-                })
-            };
             // A filtered original name may be held by an item the scanner never tracks: the
             // first free numbered name instead (as the executor does).
             let mut name = name;
-            if filtered(client, &name)
+            if !syncs_at(client, parent, &name, is_dir)
                 && let Some(n) = release_name(client, node, parent, &name, is_dir)
             {
                 name = n;
@@ -1048,27 +1039,43 @@ fn release_name(
     name: &str,
     is_dir: bool,
 ) -> Option<String> {
-    let free = |n: &str| client.local.child_named(parent, n, Some(node)).is_none();
-    if free(name) {
+    if client.local.child_named(parent, name, Some(node)).is_none() {
         return Some(name.to_owned());
     }
-    let synced = |n: &str| {
-        client.local.path(parent).is_some_and(|mut path| {
-            path.push(n);
-            client.filter.names(path, is_dir).is_sync()
-        })
-    };
+    numbered_name(client, Some(node), parent, name, is_dir)
+}
+
+/// The first numbered variant of `name` in `parent` that nothing but `except` holds, one the
+/// client syncs if any is, as the executor picks it.
+fn numbered_name(
+    client: &Client,
+    except: Option<NodeId>,
+    parent: NodeId,
+    name: &str,
+    is_dir: bool,
+) -> Option<String> {
     let mut filtered = None;
-    for n in 1..=100 {
-        let candidate = numbered_conflict_name(name, n);
-        if free(&candidate) {
-            if synced(&candidate) {
+    for candidate in numbered_names(name) {
+        if client
+            .local
+            .child_named(parent, &candidate, except)
+            .is_none()
+        {
+            if syncs_at(client, parent, &candidate, is_dir) {
                 return Some(candidate);
             }
             filtered.get_or_insert(candidate);
         }
     }
     filtered
+}
+
+/// Whether the client syncs an item `name` in its folder `parent`.
+fn syncs_at(client: &Client, parent: NodeId, name: &str, is_dir: bool) -> bool {
+    client.local.path(parent).is_some_and(|mut path| {
+        path.push(name);
+        client.filter.names(path, is_dir).is_sync()
+    })
 }
 
 fn ignoring_d() -> Filter {

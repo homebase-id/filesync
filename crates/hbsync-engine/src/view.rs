@@ -131,28 +131,35 @@ pub fn build_input(
     }
     // A folder that is gone remotely (or masked) but present locally may be trashed or
     // detached: load all of it.
+    // Each folder once: a dirty folder inside one already loaded is in it.
     let masked = crate::mask::masked(&b.input.remote, filter);
+    let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
-        if b.input.base.contains(node)
+        if !loaded.contains(&node)
+            && b.input.base.contains(node)
             && (!b.input.remote.contains(node) || masked.contains(&node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)
         {
             for child in s.local_subtree(&row.path)? {
+                loaded.insert(child.node);
                 b.load(child.node)?;
             }
         }
     }
     // Whether a masked folder synced here leaves the drive depends on everything in it
     // remotely (§10): load all of it.
+    let mut expanded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !(masked.contains(&node) && b.input.base.contains(node)) {
             continue;
         }
         let mut folders = vec![node];
         while let Some(folder) = folders.pop() {
-            if b.input.remote.get(folder).map(|s| s.kind) != Some(NodeKind::Folder) {
+            if b.input.remote.get(folder).map(|s| s.kind) != Some(NodeKind::Folder)
+                || !expanded.insert(folder)
+            {
                 continue;
             }
             b.load_children(folder)?;

@@ -118,15 +118,16 @@ impl<'a> Walker<'a> {
                 reason: SkipReason::NotUnicode,
             };
         };
-        let filtered = match self
-            .filter
-            .entry(dir, name, item.meta.kind == EntryKind::Dir)
-        {
-            Verdict::Sync => None,
-            Verdict::Excluded => Some(SkipReason::Excluded),
-            Verdict::Junk => Some(SkipReason::Junk),
-            Verdict::Ignored => Some(SkipReason::Ignored),
-        };
+        let filtered =
+            match self
+                .filter
+                .in_folder(dir.as_str(), name, item.meta.kind == EntryKind::Dir)
+            {
+                Verdict::Sync => None,
+                Verdict::Excluded => Some(SkipReason::Excluded),
+                Verdict::Junk => Some(SkipReason::Junk),
+                Verdict::Ignored => Some(SkipReason::Ignored),
+            };
         if let Some(reason) = filtered {
             return WalkEvent::Skipped {
                 path: rel_native(),

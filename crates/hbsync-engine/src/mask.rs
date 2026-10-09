@@ -18,14 +18,15 @@
 //! The parent of a masked node keeps a live child (§6.3): a local delete of it can't take
 //! children this device never saw.
 //!
-//! A masked node this device synced *at a place it now filters* (its rules changed) is
-//! **leaving**: ignored means kept here only, so it leaves the drive, unless the remote changed
-//! it since (a folder: unless it holds anything that isn't leaving). If the user brings the
+//! A node this device synced *at a place it now filters* (its rules changed) is **leaving**:
+//! ignored means kept here only, so it leaves the drive, unless the remote changed it since (a
+//! folder: unless it holds anything that isn't leaving). It isn't masked: the scanner no longer
+//! reports it, which the merge sees as an ordinary local delete. If the user brings the
 //! local item back into view instead, it isn't masked at all, and its local place wins over a
 //! remote move (which would take it out of view again). The names masked nodes hold stay taken
 //! for this device's own items.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use hbsync_local::Filter;
 use hbsync_platform::name::name_key;
@@ -39,10 +40,8 @@ use crate::tree::Tree;
 pub struct Masks {
     /// Remote nodes this device doesn't sync.
     pub masked: HashSet<NodeId>,
-    /// Folders a masked live child (one that isn't leaving) keeps alive.
+    /// Folders a masked live child keeps alive.
     pub keep_alive: HashSet<NodeId>,
-    /// Masked nodes to delete remotely: synced here, now filtered where they were.
-    pub leaving: HashSet<NodeId>,
     /// Nodes at a filtered place remotely whose local item the user brought back into view:
     /// not masked, and the local place wins a move conflict.
     pub brought_back: HashSet<NodeId>,
@@ -90,17 +89,23 @@ impl Masks {
                 _ => false,
             })
             .collect();
+        // Leaving is an ordinary local delete: the scanner no longer reports the item.
         let leaving = only_whole_folders(&input.remote, leaving);
+        masked.retain(|m| !leaving.contains(m));
+        if masked.is_empty() {
+            return Masks {
+                brought_back,
+                ..Masks::default()
+            };
+        }
         let keep_alive = masked
             .iter()
-            .filter(|m| !leaving.contains(m))
             .filter_map(|m| input.remote.get(*m).map(|s| s.parent))
             .filter(|p| !p.is_root() && !masked.contains(p))
             .collect();
 
         // What must stay here, and the masked folders it needs.
-        let mut detach: Vec<NodeId> = Vec::new();
-        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut detach: BTreeSet<NodeId> = BTreeSet::new();
         for (node, local) in input.local.iter() {
             let needs_place = if masked.contains(&node) {
                 let changed = match (input.base.get(node), local.kind) {
@@ -119,17 +124,18 @@ impl Masks {
                         _ => true,
                     },
                 };
-                if changed && seen.insert(node) {
-                    detach.push(node);
+                if changed {
+                    detach.insert(node);
                 }
                 changed
             } else {
                 masked.contains(&local.parent)
             };
             if needs_place {
+                // Up to the first masked folder already in: what is above it is in too.
                 for a in input.local.ancestors(node) {
-                    if masked.contains(&a) && input.local.contains(a) && seen.insert(a) {
-                        detach.push(a);
+                    if masked.contains(&a) && input.local.contains(a) && !detach.insert(a) {
+                        break;
                     }
                 }
             }
@@ -187,7 +193,6 @@ impl Masks {
         Masks {
             masked,
             keep_alive,
-            leaving,
             brought_back,
             names,
             detached,

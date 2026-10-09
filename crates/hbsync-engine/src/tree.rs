@@ -225,6 +225,11 @@ impl Tree {
     }
 }
 
+/// The numbered variants of `name` tried for a free one, in order: a hundred at most.
+pub fn numbered_names(name: &str) -> impl Iterator<Item = String> + '_ {
+    (1..=100).map(move |n| numbered_conflict_name(name, n))
+}
+
 /// `"report (conflict 2).pdf"`: the name a node gets when another node keeps its name.
 pub fn numbered_conflict_name(name: &str, n: usize) -> String {
     with_tag(name, &format!(" (conflict {n})"))

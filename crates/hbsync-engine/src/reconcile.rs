@@ -912,20 +912,6 @@ impl<'a> Reconciler<'a> {
                         remote_ops = true;
                     }
                 }
-                // Ignored here now, where it was synced: it leaves the drive (§10).
-                (None, None) if self.masks.leaving.contains(&node) => {
-                    if let Some(r) = i.remote_refs.get(&node) {
-                        deletes.push((
-                            depth(&i.base),
-                            Op::RemoteDelete {
-                                node,
-                                file_id: r.file_id,
-                                expected: r.version,
-                            },
-                        ));
-                        remote_ops = true;
-                    }
-                }
                 (None, None) => {}
             }
 
@@ -1000,8 +986,11 @@ impl<'a> Reconciler<'a> {
                 if needs_settle && target.is_none() && self.masks.masked.contains(&node) {
                     // A detached node's base goes with the detach.
                     if !self.masks.detached.contains_key(&node) {
-                        let subtree = Vec::new();
-                        deletes.push((depth(&i.base), Op::Forget { node, subtree }));
+                        let op = Op::Forget {
+                            node,
+                            subtree: Vec::new(),
+                        };
+                        deletes.push((depth(&i.base), op));
                     }
                 } else if needs_settle {
                     settles.push(Op::Settle { node });
@@ -1091,18 +1080,18 @@ impl<'a> Reconciler<'a> {
         let (mut local_files, mut remote_files) = (0usize, 0usize);
         for op in &self.plan.ops {
             match op {
-                Op::LocalTrash { node, .. } | Op::Forget { node, .. } => {
-                    local_files += files_under(&i.local, *node)
-                }
                 Op::RemoteDelete { node, .. }
                     if i.remote
                         .get(*node)
-                        .or(i.base.get(*node))
                         .is_some_and(|s| s.kind == NodeKind::File) =>
                 {
                     remote_files += 1
                 }
-                _ => {}
+                _ => {
+                    if let Some(node) = op.trashes() {
+                        local_files += files_under(&i.local, node);
+                    }
+                }
             }
         }
         let synced = self.opts.synced_files;
@@ -1121,10 +1110,8 @@ impl<'a> Reconciler<'a> {
         let ops = std::mem::take(&mut self.plan.ops);
         for op in ops {
             let held = match op {
-                Op::LocalTrash { .. } => hold_local,
-                Op::Forget { ref subtree, .. } if !subtree.is_empty() => hold_local,
                 Op::RemoteDelete { .. } => hold_remote,
-                _ => false,
+                _ => op.trashes().is_some() && hold_local,
             };
             if held {
                 self.plan.held.push(op);

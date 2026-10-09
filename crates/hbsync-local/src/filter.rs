@@ -172,20 +172,22 @@ impl Filter {
         )
     }
 
-    /// The verdict on the entry `name` in `dir`, assuming `dir` itself is synced (a walk never
-    /// enters a filtered folder).
-    pub fn entry(&self, dir: &RelPath, name: &str, is_dir: bool) -> Verdict {
-        self.in_folder(dir.as_str(), name, is_dir)
-    }
-
-    /// [`Filter::entry`] with the folder given as its `/`-separated path (`""` for the root).
+    /// The verdict on the entry `name` in `folder` (its `/`-separated path, `""` for the root),
+    /// assuming the folder itself is synced (a walk never enters a filtered folder).
     pub fn in_folder(&self, folder: &str, name: &str, is_dir: bool) -> Verdict {
-        let path = if folder.is_empty() {
+        let at_root = folder.is_empty();
+        if let Some(verdict) = self.by_name(name, at_root) {
+            return verdict;
+        }
+        if self.rules.is_empty() {
+            return Verdict::Sync; // no path to build
+        }
+        let path = if at_root {
             name.to_owned()
         } else {
             format!("{folder}/{name}")
         };
-        self.check(&path, name, folder.is_empty(), is_dir)
+        self.by_rules(&path, is_dir)
     }
 
     /// The verdict on the item at `rel`: the first of its folders (outermost first) or itself
@@ -215,11 +217,23 @@ impl Filter {
     }
 
     fn check(&self, path: &str, name: &str, at_root: bool, is_dir: bool) -> Verdict {
+        self.by_name(name, at_root)
+            .unwrap_or_else(|| self.by_rules(path, is_dir))
+    }
+
+    /// The verdict the name alone gives (the state folder, junk), if any.
+    fn by_name(&self, name: &str, at_root: bool) -> Option<Verdict> {
         if at_root && name == crate::STATE_DIR {
-            Verdict::Excluded
+            Some(Verdict::Excluded)
         } else if is_junk(name) {
-            Verdict::Junk
-        } else if self.rules.matched(path, is_dir).is_ignore() {
+            Some(Verdict::Junk)
+        } else {
+            None
+        }
+    }
+
+    fn by_rules(&self, path: &str, is_dir: bool) -> Verdict {
+        if self.rules.matched(path, is_dir).is_ignore() {
             Verdict::Ignored
         } else {
             Verdict::Sync
@@ -276,11 +290,8 @@ mod tests {
     #[test]
     fn the_state_folder_is_excluded_only_at_the_top() {
         let f = Filter::default();
-        assert_eq!(
-            f.entry(&RelPath::root(), ".hbsync", true),
-            Verdict::Excluded
-        );
-        assert_eq!(f.entry(&rel("a"), ".hbsync", true), Verdict::Sync);
+        assert_eq!(f.in_folder("", ".hbsync", true), Verdict::Excluded);
+        assert_eq!(f.in_folder("a", ".hbsync", true), Verdict::Sync);
         assert_eq!(f.path(&rel(".hbsync/state.db"), false), Verdict::Excluded);
     }
 
@@ -323,10 +334,10 @@ mod tests {
         assert_eq!(f.names(["app", "src", "x.js"], false), Verdict::Sync);
         // The entry check trusts its folder.
         assert_eq!(
-            f.entry(&rel("app/node_modules"), "x.js", false),
+            f.in_folder("app/node_modules", "x.js", false),
             Verdict::Sync
         );
-        assert_eq!(f.entry(&rel("app"), "node_modules", true), Verdict::Ignored);
+        assert_eq!(f.in_folder("app", "node_modules", true), Verdict::Ignored);
     }
 
     #[test]
