@@ -1,11 +1,15 @@
 //! The executor and engine end to end: real folders, a real state DB, the fake remote.
 
 use std::fs;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hbsync_engine::Engine;
 use hbsync_engine::exec::CrashPoint;
 use hbsync_remote::fake::FakeRemote;
+use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
+use hbsync_types::{RemoteFileId, RemoteRef, VersionTag};
 
 mod common;
 
@@ -170,6 +174,103 @@ fn a_denied_remote_stops_the_sync_and_loses_nothing() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(), a.tree_text());
     assert_eq!(b.read("kept.txt")?, "v2");
+    Ok(())
+}
+
+/// A remote that asks the engine to stop after a number of creates (a pause or a shutdown
+/// arriving in the middle of a sync).
+struct StopAfterCreates {
+    inner: FakeRemote,
+    creates: AtomicUsize,
+    after: usize,
+    stop: Arc<AtomicBool>,
+}
+
+impl Remote for StopAfterCreates {
+    fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
+        self.inner.changes(cursor, limit)
+    }
+    fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
+        self.inner.header(file_id)
+    }
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
+        let made = self.inner.create(node, payload);
+        if self.creates.fetch_add(1, Ordering::SeqCst) + 1 == self.after {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+        made
+    }
+    fn update(
+        &self,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> RemoteResult<RemoteRef> {
+        self.inner.update(file_id, expected, meta, payload)
+    }
+    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
+        self.inner.delete(file_id, expected)
+    }
+    fn read(
+        &self,
+        file_id: RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn std::io::Write,
+    ) -> RemoteResult<u64> {
+        self.inner.read(file_id, range, sink)
+    }
+}
+
+#[test]
+fn a_stopped_sync_keeps_what_it_did_and_the_next_one_finishes() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    for i in 0..10 {
+        fs::create_dir_all(a.root.join(format!("d{i}")))?;
+    }
+    for i in 0..5 {
+        a.write(&format!("f{i}.txt"), format!("{i}"))?;
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let remote = StopAfterCreates {
+        inner: a.remote.clone(),
+        creates: AtomicUsize::new(0),
+        after: 3,
+        stop: Arc::clone(&stop),
+    };
+    a.engine = Engine::new(
+        StateDb::open(&a.db_path())?,
+        Box::new(remote),
+        common::config(&a.root, "a"),
+    );
+    a.engine.set_stop(Arc::clone(&stop));
+    a.engine.scan_local()?;
+    let err = a
+        .engine
+        .sync_once("2026-10-09")
+        .err()
+        .ok_or("the sync didn't stop")?;
+    assert!(err.is_stop_request(), "{err}");
+    let live = server.lock().map_err(|_| "poisoned")?.live().count();
+    assert!((3..15).contains(&live), "stopped part way: {live} of 15 up");
+
+    // While the flag is set, a sync stops before doing anything.
+    let err = a
+        .engine
+        .sync_once("2026-10-09")
+        .err()
+        .ok_or("went through")?;
+    assert!(err.is_stop_request(), "{err}");
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), live);
+
+    // Resumed: the rest goes up, and another device gets everything.
+    stop.store(false, Ordering::SeqCst);
+    a.sync()?;
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 15);
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(), a.tree_text());
     Ok(())
 }
 

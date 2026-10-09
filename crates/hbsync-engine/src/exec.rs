@@ -18,6 +18,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm};
@@ -106,6 +108,9 @@ pub enum Stopped {
     /// Transient remote errors kept coming: the network or the server is down.
     #[error("remote unreachable: {0}")]
     Unreachable(String),
+    /// The caller asked the run to stop (pause, shutdown).
+    #[error("stopped on request")]
+    Requested,
 }
 
 /// Transient remote errors in a row after which a run gives up (with the pauses between them
@@ -150,6 +155,8 @@ pub struct Executor<'a> {
     /// Transient remote errors in a row, and until when the run waits because of them.
     streak: u32,
     resume_at: Option<Instant>,
+    /// Set by the caller to stop the run between operations.
+    stop: Option<Arc<AtomicBool>>,
 }
 
 /// A transfer whose guards passed, waiting for a worker.
@@ -211,7 +218,28 @@ impl<'a> Executor<'a> {
             crashed: false,
             streak: 0,
             resume_at: None,
+            stop: None,
         }
+    }
+
+    /// Stops the run between operations once `stop` is set: each operation is done or not
+    /// started, as at a crash, and the rest stays dirty. Transfers in flight finish first.
+    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    /// Whether the run should stop now: on request, or after a denied or unreachable remote.
+    fn should_stop(&mut self) -> bool {
+        if self.report.stopped.is_none()
+            && self
+                .stop
+                .as_ref()
+                .is_some_and(|s| s.load(Ordering::Relaxed))
+        {
+            self.report.stopped = Some(Stopped::Requested);
+        }
+        self.report.stopped.is_some()
     }
 
     /// Marks nodes whose transfers go first (files the user is waiting for).
@@ -230,7 +258,7 @@ impl<'a> Executor<'a> {
         self.queue = ops.into_iter().map(|op| (op, 0)).collect();
         let mut batch: Vec<Prepared> = Vec::new();
         loop {
-            if self.report.stopped.is_some() {
+            if self.should_stop() {
                 break;
             }
             let Some((op, attempts)) = self.queue.pop_front() else {
@@ -259,7 +287,7 @@ impl<'a> Executor<'a> {
             }
             if !batch.is_empty() {
                 self.flush(&mut batch)?;
-                if self.report.stopped.is_some() {
+                if self.should_stop() {
                     break;
                 }
             }
@@ -414,8 +442,8 @@ impl<'a> Executor<'a> {
         let remote = self.remote;
         let transfer = self.cfg.transfer;
         let mut first_error = None;
-        // A DB error or a stopped run (denied, unreachable) starts no further transfers; the
-        // nodes stay dirty for the next sync.
+        // A DB error or a stopped run (requested, denied, unreachable) starts no further
+        // transfers; the nodes stay dirty for the next sync.
         run_jobs_while(remote, transfer, jobs, |job, result| {
             if first_error.is_some() {
                 return false;
@@ -426,7 +454,7 @@ impl<'a> Executor<'a> {
                     first_error = Some(e);
                 }
             }
-            first_error.is_none() && self.report.stopped.is_none()
+            first_error.is_none() && !self.should_stop()
         });
         if let Some(e) = first_error {
             return Err(e);

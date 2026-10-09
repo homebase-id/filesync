@@ -387,6 +387,51 @@ fn deleting_everything_is_held() -> R {
 }
 
 #[test]
+fn confirmed_deletes_go_through_once_and_no_more_than_were_seen() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |_| {})?;
+    for i in 0..120 {
+        a.write(&format!("f{i:03}"), format!("{i}").as_bytes())?;
+    }
+    a.sync()?;
+    let live = |server: &std::sync::Arc<std::sync::Mutex<hbsync_remote::fake::FakeServer>>| {
+        server
+            .lock()
+            .map(|s| s.live().count())
+            .map_err(|_| "poisoned")
+    };
+    for i in 0..60 {
+        fs::remove_file(a.root.join(format!("f{i:03}")))?;
+    }
+    assert_eq!(a.sync()?.held.len(), 60);
+    let seen = a.engine.pending_deletes()?;
+    assert_eq!(seen, (60, 0));
+
+    // Ten more deletes after the user looked: more than they confirmed, so all are held.
+    for i in 60..70 {
+        fs::remove_file(a.root.join(format!("f{i:03}")))?;
+    }
+    a.engine.confirm_deletes(seen);
+    assert_eq!(a.sync()?.held.len(), 70);
+    assert_eq!(live(&server)?, 120);
+
+    // Confirmed as they are now: they go through.
+    let now = a.engine.pending_deletes()?;
+    a.engine.confirm_deletes(now);
+    let report = a.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(live(&server)?, 50);
+
+    // The confirmation was used up: deleting the rest is held again.
+    for i in 70..120 {
+        fs::remove_file(a.root.join(format!("f{i:03}")))?;
+    }
+    assert_eq!(a.sync()?.held.len(), 50);
+    assert_eq!(live(&server)?, 50);
+    Ok(())
+}
+
+#[test]
 fn held_deletes_do_not_hold_up_other_changes() -> R {
     let server = server();
     // 5 nodes per round, 2 rounds per sync: one sync sees 10 of the 61 dirty nodes.

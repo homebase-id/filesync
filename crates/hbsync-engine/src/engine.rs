@@ -1,6 +1,8 @@
 //! The sync loop for one sync root.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::{Remote, RemoteError};
@@ -70,6 +72,11 @@ pub enum EngineError {
 }
 
 impl EngineError {
+    /// The sync stopped because the caller asked it to ([`Engine::set_stop`]).
+    pub fn is_stop_request(&self) -> bool {
+        matches!(self, EngineError::Stopped(Stopped::Requested))
+    }
+
     /// The remote refused access (a sync, a feed read): retrying won't help.
     pub fn is_denied(&self) -> bool {
         matches!(
@@ -136,6 +143,10 @@ pub struct Engine {
     urgent: std::collections::HashSet<hbsync_types::NodeId>,
     /// Where the sweep over the dirty set stopped when the last sync hit its round limit.
     sweep_after: Option<DirtyCursor>,
+    /// Set by the caller to stop a sync between operations.
+    stop: Arc<AtomicBool>,
+    /// File deletes the user confirmed: (gone here, gone remotely), as they saw them.
+    confirmed: Option<(u64, u64)>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -149,7 +160,7 @@ impl std::fmt::Debug for Engine {
 impl Engine {
     pub fn new(db: StateDb, remote: Box<dyn Remote>, cfg: EngineConfig) -> Self {
         let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
-        scan_opts.filter = std::sync::Arc::clone(&cfg.exec.filter);
+        scan_opts.filter = Arc::clone(&cfg.exec.filter);
         Engine {
             db,
             remote,
@@ -157,7 +168,28 @@ impl Engine {
             scan_opts,
             urgent: Default::default(),
             sweep_after: None,
+            stop: Arc::default(),
+            confirmed: None,
         }
+    }
+
+    /// A sync stops between operations, with [`Stopped::Requested`], while `stop` is set.
+    /// What was done is kept; the rest stays dirty for a later sync.
+    pub fn set_stop(&mut self, stop: Arc<AtomicBool>) {
+        self.stop = stop;
+    }
+
+    /// Files waiting to be deleted: (gone here, so deleted remotely; gone remotely, so moved
+    /// to the trash here). What the mass-delete guard judges, and what a user confirms.
+    pub fn pending_deletes(&mut self) -> Result<(u64, u64), StateError> {
+        self.db.read(|s| s.pending_file_deletes())
+    }
+
+    /// Lets the deletes the mass-delete guard holds through, until a sync completes, as long
+    /// as there are no more of them than `seen` ([`pending_deletes`](Self::pending_deletes)
+    /// when the user confirmed). More deletes since then are held again, for the user to see.
+    pub fn confirm_deletes(&mut self, seen: (u64, u64)) {
+        self.confirmed = Some(seen);
     }
 
     /// Transfers of these nodes go before all others in the next syncs.
@@ -241,15 +273,18 @@ impl Engine {
         let (pending_deletes, synced_files) = self
             .db
             .read(|s| Ok((s.pending_file_deletes()?, s.base_file_count()?)))?;
+        let confirmed = self
+            .confirmed
+            .is_some_and(|(here, there)| pending_deletes.0 <= here && pending_deletes.1 <= there);
         let opts = Options {
             device: self.cfg.device.clone(),
             date: date.to_owned(),
             mass_delete_min: self.cfg.mass_delete_min,
             mass_delete_fraction: self.cfg.mass_delete_fraction,
             synced_files: synced_files as usize,
-            allow_mass_delete: self.cfg.allow_mass_delete,
+            allow_mass_delete: self.cfg.allow_mass_delete || confirmed,
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
-            filter: std::sync::Arc::clone(&self.cfg.exec.filter),
+            filter: Arc::clone(&self.cfg.exec.filter),
         };
         // The dirty set is planned page by page in node id order and swept round after
         // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
@@ -259,6 +294,9 @@ impl Engine {
         let mut held: Vec<Op> = Vec::new();
         let mut swept = false;
         for _ in 0..self.cfg.max_rounds {
+            if self.stop.load(Ordering::Relaxed) {
+                return Err(Stopped::Requested.into());
+            }
             let (dirty, next) = self.db.read(|s| s.dirty_page(after, self.cfg.batch))?;
             if !dirty.is_empty() {
                 report.rounds += 1;
@@ -289,6 +327,8 @@ impl Engine {
             // Ids of nodes gone everywhere.
             self.db.write(|s| s.collect_nodes())?;
         }
+        // The confirmed deletes went through (or were undone): a later one is asked again.
+        self.confirmed = None;
         Ok(report)
     }
 
@@ -313,6 +353,7 @@ impl Engine {
         }
         let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
             .with_urgent(self.urgent.clone())
+            .with_stop(Arc::clone(&self.stop))
             .run(plan.ops)?;
         if let Some(stopped) = exec.stopped {
             return Err(stopped.into());
