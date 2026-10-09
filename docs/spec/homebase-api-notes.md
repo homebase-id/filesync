@@ -165,7 +165,8 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - **Circle permission keys lost** **[verified]**: odin-js sends `cp`, but the server's
   `YouAuthAppParameters` has no `cp`, so they vanish on the redirect to `/owner/appreg`.
 - `docs/mandatory-slugs-and-app-ids-plan.md` calls `DriveSlug`/`DriveTypeSlug` required; the
-  server derives a missing one instead (only the owner app insists on `ts`).
+  server derives a missing one instead (only the owner app insists on `ts`). odin-core #1901
+  makes them mandatory with no derivation; tracked in filesync #7.
 - Delete has no VersionTag guard → a delete can wipe a concurrent edit. Filed as odin-core
   #1903 (optional `versionTag` on delete, 4160 on mismatch; also: deleting a tombstone should
   be a no-op). Until then the client reads the header and compares right before deleting.
