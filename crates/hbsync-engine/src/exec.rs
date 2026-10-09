@@ -23,14 +23,11 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
 use hbsync_remote::{NewNode, Remote, RemoteError};
-use hbsync_state::{
-    BaseRow, LocalRow, MirrorFile, MirrorRow, RemoteRef as BaseRemoteRef, StateDb, StateError,
-    Store,
-};
+use hbsync_state::{BaseRow, LocalRow, MirrorFile, MirrorRow, StateDb, StateError, Store};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind};
 
-use crate::reconcile::{Op, Plan};
+use crate::reconcile::Op;
 use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs};
 use crate::view;
 
@@ -83,12 +80,6 @@ enum Outcome {
     Done,
     Retry(String),
     Skip(String),
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ExecError {
-    #[error(transparent)]
-    State(#[from] StateError),
 }
 
 impl From<StateError> for Outcome {
@@ -170,8 +161,9 @@ impl<'a> Executor<'a> {
         self
     }
 
-    pub fn run(mut self, plan: &Plan) -> Result<ExecReport, ExecError> {
-        self.queue = plan.ops.iter().cloned().map(|op| (op, 0)).collect();
+    /// Runs a plan's operations, in order.
+    pub fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
+        self.queue = ops.into_iter().map(|op| (op, 0)).collect();
         let mut batch: Vec<Prepared> = Vec::new();
         loop {
             let Some((op, attempts)) = self.queue.pop_front() else {
@@ -204,7 +196,7 @@ impl<'a> Executor<'a> {
         Ok(self.report)
     }
 
-    fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), ExecError> {
+    fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), StateError> {
         match outcome {
             Outcome::Done => {
                 self.report.done += 1;
@@ -227,7 +219,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
-    fn flush(&mut self, batch: &mut Vec<Prepared>) -> Result<(), ExecError> {
+    fn flush(&mut self, batch: &mut Vec<Prepared>) -> Result<(), StateError> {
         let mut pending: HashMap<NodeId, Prepared> = HashMap::new();
         let mut jobs = Vec::new();
         for p in batch.drain(..) {
@@ -404,7 +396,7 @@ impl<'a> Executor<'a> {
         let original = occupant.path.clone();
         self.db.write(|s| {
             s.move_local_subtree(&original, &parked)?;
-            s.put_parked(occupant.node, &parked, &original)
+            s.put_parked(occupant.node, &original)
         })?;
         // The rename changed ctime: record it, or the occupant's own next step fails its check.
         self.refresh_fingerprint(&parked, &occupant)?;
@@ -1052,10 +1044,7 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
             // No local bytes by design: the base follows the remote.
             if let (Some(mut b), Some(r)) = (base, m.state()) {
                 b.state = r;
-                b.remote = BaseRemoteRef {
-                    file_id: m.file_id,
-                    version: m.version,
-                };
+                b.remote = m.remote_ref();
                 s.put_base(&b)?;
             }
             return Ok(());
@@ -1079,10 +1068,7 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
             .clone()
             .filter(|ln| to_remote(ln, os).as_deref() != Ok(name))
     };
-    let remote_ref = BaseRemoteRef {
-        file_id: mirror.file_id,
-        version: mirror.version,
-    };
+    let remote_ref = mirror.remote_ref();
     match base {
         None if place && content => {
             s.put_base(&BaseRow {
@@ -1118,7 +1104,7 @@ fn mirror_from(
     kind: NodeKind,
     content: &NodeContent,
     hash: Option<hbsync_types::ContentHash>,
-    written: hbsync_remote::Written,
+    written: hbsync_types::RemoteRef,
     extra: Option<String>,
 ) -> MirrorRow {
     MirrorRow {
@@ -1261,7 +1247,7 @@ fn wanted_download(db: &mut StateDb, file_name: &str) -> Result<bool, StateError
 /// no longer apply (the item was renamed, by us or by the user). Run before each plan.
 pub fn unpark(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
     let mut restored = 0;
-    for (node, _, _) in db.read(|s| s.all_parked())? {
+    for node in db.read(|s| s.all_parked())? {
         let place = db.read(|s| {
             let Some(row) = s.local_by_node(node)? else {
                 return Ok(None);

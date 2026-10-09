@@ -9,7 +9,7 @@ use hbsync_state::{StateDb, StateError};
 use hbsync_types::NodeId;
 
 use crate::adopt::adopt;
-use crate::exec::{ExecConfig, ExecError, Executor, recover_forks, sweep_tmp, unpark};
+use crate::exec::{ExecConfig, Executor, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
 use crate::view;
@@ -57,10 +57,6 @@ pub enum EngineError {
     State(#[from] StateError),
     #[error(transparent)]
     Feed(#[from] FeedError),
-    #[error(transparent)]
-    Exec(#[from] ExecError),
-    #[error(transparent)]
-    Scan(#[from] hbsync_local::ScanError),
     #[error("{0} panicked")]
     Panic(&'static str),
 }
@@ -197,8 +193,18 @@ impl Engine {
         report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
 
         // The guard must judge the whole delete, even when it is planned in several batches.
-        let pending_deletes = self.db.read(|s| s.pending_file_deletes())?;
-        let pending_deletes = (pending_deletes.0 as usize, pending_deletes.1 as usize);
+        let (pending_deletes, synced_files) = self
+            .db
+            .read(|s| Ok((s.pending_file_deletes()?, s.base_file_count()?)))?;
+        let opts = Options {
+            device: self.cfg.device.clone(),
+            date: date.to_owned(),
+            mass_delete_min: self.cfg.mass_delete_min,
+            mass_delete_fraction: self.cfg.mass_delete_fraction,
+            synced_files: synced_files as usize,
+            allow_mass_delete: self.cfg.allow_mass_delete,
+            pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
+        };
         // The dirty set is planned page by page in node id order and swept round after
         // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
         // the rest. A sync stops after a full sweep in which nothing was done.
@@ -210,9 +216,9 @@ impl Engine {
             let dirty = self.db.read(|s| s.dirty_page(after, self.cfg.batch))?;
             if !dirty.is_empty() {
                 report.rounds += 1;
-                let done = self.plan_and_execute(&dirty, date, pending_deletes, &mut report)?;
-                held.extend(done.held);
-                progress |= done.ops_done > 0;
+                let done_before = report.ops_done;
+                held.extend(self.plan_and_execute(&dirty, &opts, &mut report)?);
+                progress |= report.ops_done > done_before;
             }
             after = dirty.last().copied();
             if dirty.len() < self.cfg.batch {
@@ -237,39 +243,25 @@ impl Engine {
     }
 
     /// Plans one page of dirty nodes and executes the plan; then pulls the feed again.
+    /// Returns the deletes the mass-delete guard held.
     fn plan_and_execute(
         &mut self,
         dirty: &[NodeId],
-        date: &str,
-        pending_deletes: (usize, usize),
+        opts: &Options,
         report: &mut SyncReport,
-    ) -> Result<PageResult, EngineError> {
+    ) -> Result<Vec<Op>, EngineError> {
         let os = self.cfg.exec.os;
-        let input = self.db.read(|s| view::build_input(s, dirty, os, true))?;
-        let opts = Options {
-            device: self.cfg.device.clone(),
-            date: date.to_owned(),
-            mass_delete_min: self.cfg.mass_delete_min,
-            mass_delete_fraction: self.cfg.mass_delete_fraction,
-            synced_files: self.db.read(|s| s.base_file_count())? as usize,
-            allow_mass_delete: self.cfg.allow_mass_delete,
-            pending_deletes,
-        };
-        let plan = reconcile(&input, &opts);
+        let input = self.db.read(|s| view::build_input(s, dirty, os))?;
+        let plan = reconcile(&input, opts);
         self.db
             .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;
-        report.conflicts.extend(plan.conflicts.iter().cloned());
-        let mut result = PageResult {
-            held: plan.held.clone(),
-            ops_done: 0,
-        };
+        report.conflicts.extend(plan.conflicts);
         if plan.ops.is_empty() {
-            return Ok(result);
+            return Ok(plan.held);
         }
         let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
             .with_urgent(self.urgent.clone())
-            .run(&plan)?;
-        result.ops_done = exec.done;
+            .run(plan.ops)?;
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
@@ -285,12 +277,6 @@ impl Engine {
         report.feed.pages += more.pages;
         report.feed.live += more.live;
         report.feed.deleted += more.deleted;
-        Ok(result)
+        Ok(plan.held)
     }
-}
-
-/// What planning and executing one page did.
-struct PageResult {
-    held: Vec<Op>,
-    ops_done: usize,
 }

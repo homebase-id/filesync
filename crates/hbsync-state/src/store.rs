@@ -2,19 +2,12 @@
 
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::{
-    ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, VersionTag,
+    ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::codec::{self, file_id_bytes};
 use crate::{Result, StateError};
-
-/// Where a node lives on the server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct RemoteRef {
-    pub file_id: RemoteFileId,
-    pub version: VersionTag,
-}
 
 /// The agreed state of one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +60,13 @@ pub struct MirrorFile {
 }
 
 impl MirrorRow {
+    pub fn remote_ref(&self) -> RemoteRef {
+        RemoteRef {
+            file_id: self.file_id,
+            version: self.version,
+        }
+    }
+
     /// The node state, if complete (files need a hash).
     pub fn state(&self) -> Option<NodeState> {
         let content = match (self.kind, &self.file) {
@@ -109,33 +109,27 @@ impl<'a> Store<'a> {
     // ---- base ----
 
     pub fn get_base(&self, node: NodeId) -> Result<Option<BaseRow>> {
-        self.conn
-            .query_row(
-                &format!("SELECT {BASE_COLS} FROM base WHERE node_id = ?1"),
-                [node.0.as_bytes()],
-                |r| Ok(base_row(r)),
-            )
-            .optional()?
-            .transpose()
+        self.one(
+            &format!("SELECT {BASE_COLS} FROM base WHERE node_id = ?1"),
+            node.0.as_bytes(),
+            base_row,
+        )
     }
 
     pub fn base_by_remote_file(&self, file_id: RemoteFileId) -> Result<Option<BaseRow>> {
-        self.conn
-            .query_row(
-                &format!("SELECT {BASE_COLS} FROM base WHERE remote_file_id = ?1"),
-                [file_id.0.as_bytes()],
-                |r| Ok(base_row(r)),
-            )
-            .optional()?
-            .transpose()
+        self.one(
+            &format!("SELECT {BASE_COLS} FROM base WHERE remote_file_id = ?1"),
+            file_id.0.as_bytes(),
+            base_row,
+        )
     }
 
     pub fn base_children(&self, parent: NodeId) -> Result<Vec<BaseRow>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {BASE_COLS} FROM base WHERE parent_id = ?1"
-        ))?;
-        let rows = stmt.query_map([parent.0.as_bytes()], |r| Ok(base_row(r)))?;
-        rows.map(|r| r?).collect()
+        self.many(
+            &format!("SELECT {BASE_COLS} FROM base WHERE parent_id = ?1"),
+            [parent.0.as_bytes()],
+            base_row,
+        )
     }
 
     /// Inserts or replaces the base row of `row.node`.
@@ -165,68 +159,52 @@ impl<'a> Store<'a> {
     }
 
     pub fn delete_base(&self, node: NodeId) -> Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM base WHERE node_id = ?1", [node.0.as_bytes()])?
-            > 0)
+        self.change("DELETE FROM base WHERE node_id = ?1", node.0.as_bytes())
     }
 
     pub fn base_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM base", [], |r| r.get::<_, i64>(0))? as u64)
+        self.count("SELECT COUNT(*) FROM base")
     }
 
     /// Number of file (not folder) nodes in the base; the mass-delete guard's denominator.
+    /// A full table scan: callers take it once per sync.
     pub fn base_file_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM base WHERE kind = 0", [], |r| {
-                r.get::<_, i64>(0)
-            })? as u64)
-    }
-
-    /// Every base row. For tests and small trees; production code walks by parent.
-    pub fn all_base(&self) -> Result<Vec<BaseRow>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("SELECT {BASE_COLS} FROM base"))?;
-        let rows = stmt.query_map([], |r| Ok(base_row(r)))?;
-        rows.map(|r| r?).collect()
+        self.count("SELECT COUNT(*) FROM base WHERE kind = 0")
     }
 
     // ---- local observations ----
 
     pub fn get_local(&self, path: &RelPath) -> Result<Option<LocalRow>> {
-        self.conn
-            .query_row(
-                &format!("SELECT {LOCAL_COLS} FROM local_items WHERE path = ?1"),
-                [path.as_str()],
-                |r| Ok(local_row(r)),
-            )
-            .optional()?
-            .transpose()
+        self.one(
+            &format!("SELECT {LOCAL_COLS} FROM local_items WHERE path = ?1"),
+            path.as_str(),
+            local_row,
+        )
     }
 
     pub fn local_by_node(&self, node: NodeId) -> Result<Option<LocalRow>> {
-        self.conn
-            .query_row(
-                &format!("SELECT {LOCAL_COLS} FROM local_items WHERE node_id = ?1"),
-                [node.0.as_bytes()],
-                |r| Ok(local_row(r)),
-            )
-            .optional()?
-            .transpose()
+        self.one(
+            &format!("SELECT {LOCAL_COLS} FROM local_items WHERE node_id = ?1"),
+            node.0.as_bytes(),
+            local_row,
+        )
+    }
+
+    /// The node of the folder at `path`: the root for the empty path, `None` if no row is
+    /// recorded there.
+    pub fn local_node_at(&self, path: &RelPath) -> Result<Option<NodeId>> {
+        if path.is_root() {
+            return Ok(Some(NodeId::ROOT));
+        }
+        Ok(self.get_local(path)?.map(|r| r.node))
     }
 
     pub fn local_by_file_id(&self, id: &FileId) -> Result<Vec<LocalRow>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {LOCAL_COLS} FROM local_items WHERE volume = ?1 AND file_id = ?2"
-        ))?;
-        let rows = stmt.query_map(params![id.volume as i64, file_id_bytes(id)], |r| {
-            Ok(local_row(r))
-        })?;
-        rows.map(|r| r?).collect()
+        self.many(
+            &format!("SELECT {LOCAL_COLS} FROM local_items WHERE volume = ?1 AND file_id = ?2"),
+            params![id.volume as i64, file_id_bytes(id)],
+            local_row,
+        )
     }
 
     /// Inserts or updates the row at `row.path`. Fails with [`StateError::Conflict`] if the node
@@ -263,22 +241,27 @@ impl<'a> Store<'a> {
     }
 
     pub fn delete_local(&self, path: &RelPath) -> Result<bool> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM local_items WHERE path = ?1", [path.as_str()])?
-            > 0)
+        self.change("DELETE FROM local_items WHERE path = ?1", path.as_str())
     }
 
     /// Up to `limit` rows strictly after `after` (or from the start), in walk order.
     pub fn local_page(&self, after: Option<&RelPath>, limit: usize) -> Result<Vec<LocalRow>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {LOCAL_COLS} FROM local_items WHERE ?1 IS NULL OR path > ?1 \
-             ORDER BY path LIMIT ?2"
-        ))?;
-        let rows = stmt.query_map(params![after.map(RelPath::as_str), limit as i64], |r| {
-            Ok(local_row(r))
-        })?;
-        rows.map(|r| r?).collect()
+        // Two statements: an `?1 IS NULL OR path > ?1` filter would defeat the key seek and
+        // make every page re-read the rows before it.
+        match after {
+            None => self.many(
+                &format!("SELECT {LOCAL_COLS} FROM local_items ORDER BY path LIMIT ?1"),
+                [limit as i64],
+                local_row,
+            ),
+            Some(after) => self.many(
+                &format!(
+                    "SELECT {LOCAL_COLS} FROM local_items WHERE path > ?1 ORDER BY path LIMIT ?2"
+                ),
+                params![after.as_str(), limit as i64],
+                local_row,
+            ),
+        }
     }
 
     /// `path` and everything below it, in walk order.
@@ -291,21 +274,23 @@ impl<'a> Store<'a> {
             format!("{}/", path.as_str()),
             format!("{}\u{1}", path.as_str()),
         );
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {LOCAL_COLS} FROM local_items \
+        self.many(
+            &format!(
+                "SELECT {LOCAL_COLS} FROM local_items \
              WHERE path = ?1 OR (path >= ?2 AND path < ?3) ORDER BY path"
-        ))?;
-        let rows = stmt.query_map(params![path.as_str(), lo, hi], |r| Ok(local_row(r)))?;
-        rows.map(|r| r?).collect()
+            ),
+            params![path.as_str(), lo, hi],
+            local_row,
+        )
     }
 
     /// The direct children of the folder at `parent` (the root for an empty path).
     pub fn local_children(&self, parent: &RelPath) -> Result<Vec<LocalRow>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {LOCAL_COLS} FROM local_items WHERE parent_path = ?1 ORDER BY path"
-        ))?;
-        let rows = stmt.query_map([parent.as_str()], |r| Ok(local_row(r)))?;
-        rows.map(|r| r?).collect()
+        self.many(
+            &format!("SELECT {LOCAL_COLS} FROM local_items WHERE parent_path = ?1 ORDER BY path"),
+            [parent.as_str()],
+            local_row,
+        )
     }
 
     /// Re-roots the rows of `from` and everything below it at `to` (a folder was moved).
@@ -330,61 +315,46 @@ impl<'a> Store<'a> {
     /// Deletes the rows of `path` and everything below it and returns them.
     pub fn delete_local_subtree(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
         let rows = self.local_subtree(path)?;
-        for row in &rows {
-            self.delete_local(&row.path)?;
+        if path.is_root() {
+            self.conn.execute("DELETE FROM local_items", [])?;
+        } else {
+            self.conn
+                .prepare_cached(
+                    "DELETE FROM local_items WHERE path = ?1 OR (path >= ?1 || '/' AND path < ?1 || char(1))",
+                )?
+                .execute([path.as_str()])?;
         }
         Ok(rows)
     }
 
     // ---- parked items ----
 
-    /// Records that `node` was moved from `original` to the temporary `parked` path.
-    pub fn put_parked(&self, node: NodeId, parked: &RelPath, original: &RelPath) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO parked (node_id, parked_path, original_path) VALUES (?1, ?2, ?3)",
-            params![node.0.as_bytes(), parked.as_str(), original.as_str()],
-        )?;
+    /// Records that `node` was parked under a temporary name, away from `original`. Where it
+    /// is parked follows from its row (see the engine's `parked_place`).
+    pub fn put_parked(&self, node: NodeId, original: &RelPath) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO parked (node_id, original_path) VALUES (?1, ?2)",
+            )?
+            .execute(params![node.0.as_bytes(), original.as_str()])?;
         Ok(())
     }
 
-    /// `(parked path, original path)` of a parked node.
-    pub fn get_parked(&self, node: NodeId) -> Result<Option<(RelPath, RelPath)>> {
-        let row = self
+    /// The original path of a parked node.
+    pub fn get_parked(&self, node: NodeId) -> Result<Option<RelPath>> {
+        let original = self
             .conn
-            .prepare_cached("SELECT parked_path, original_path FROM parked WHERE node_id = ?1")?
-            .query_row([node.0.as_bytes()], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
+            .prepare_cached("SELECT original_path FROM parked WHERE node_id = ?1")?
+            .query_row([node.0.as_bytes()], |r| r.get::<_, String>(0))
             .optional()?;
-        row.map(|(parked, original)| {
-            let path = |p: &str| {
-                RelPath::new(p).map_err(|e| StateError::Corrupt(format!("parked path {p:?}: {e}")))
-            };
-            Ok((path(&parked)?, path(&original)?))
-        })
-        .transpose()
+        original.as_deref().map(codec::rel_path).transpose()
     }
 
-    /// `(node, parked path, original path)` of every parked item.
-    pub fn all_parked(&self) -> Result<Vec<(NodeId, RelPath, RelPath)>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT node_id, parked_path, original_path FROM parked")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, Vec<u8>>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        rows.map(|r| {
-            let (node, parked, original) = r?;
-            let path = |p: &str| {
-                RelPath::new(p).map_err(|e| StateError::Corrupt(format!("parked path {p:?}: {e}")))
-            };
-            Ok((codec::node(&node)?, path(&parked)?, path(&original)?))
-        })
-        .collect()
+    /// Every parked node.
+    pub fn all_parked(&self) -> Result<Vec<NodeId>> {
+        let mut stmt = self.conn.prepare_cached("SELECT node_id FROM parked")?;
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.map(|r| codec::node(&r?)).collect()
     }
 
     // ---- forks in progress ----
@@ -419,77 +389,54 @@ impl<'a> Store<'a> {
         })?;
         rows.map(|r| {
             let (node, new_node, from, to) = r?;
-            let path = |p: &str| {
-                RelPath::new(p).map_err(|e| StateError::Corrupt(format!("fork path {p:?}: {e}")))
-            };
             Ok((
                 codec::node(&node)?,
                 codec::node(&new_node)?,
-                path(&from)?,
-                path(&to)?,
+                codec::rel_path(&from)?,
+                codec::rel_path(&to)?,
             ))
         })
         .collect()
     }
 
     pub fn delete_fork(&self, node: NodeId) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM forks WHERE node_id = ?1", [node.0.as_bytes()])?;
+        self.change("DELETE FROM forks WHERE node_id = ?1", node.0.as_bytes())?;
         Ok(())
     }
 
     pub fn delete_parked(&self, node: NodeId) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM parked WHERE node_id = ?1", [node.0.as_bytes()])?;
+        self.change("DELETE FROM parked WHERE node_id = ?1", node.0.as_bytes())?;
         Ok(())
     }
 
     pub fn local_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM local_items", [], |r| {
-                r.get::<_, i64>(0)
-            })? as u64)
+        self.count("SELECT COUNT(*) FROM local_items")
     }
 
     // ---- remote mirror ----
 
     pub fn get_mirror(&self, node: NodeId) -> Result<Option<MirrorRow>> {
-        self.conn
-            .query_row(
-                &format!("SELECT {MIRROR_COLS} FROM remote WHERE node_id = ?1"),
-                [node.0.as_bytes()],
-                |r| Ok(mirror_row(r)),
-            )
-            .optional()?
-            .transpose()
+        self.one(
+            &format!("SELECT {MIRROR_COLS} FROM remote WHERE node_id = ?1"),
+            node.0.as_bytes(),
+            mirror_row,
+        )
     }
 
     pub fn mirror_by_file(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
-        self.conn
-            .query_row(
-                &format!("SELECT {MIRROR_COLS} FROM remote WHERE file_id = ?1"),
-                [file_id.0.as_bytes()],
-                |r| Ok(mirror_row(r)),
-            )
-            .optional()?
-            .transpose()
+        self.one(
+            &format!("SELECT {MIRROR_COLS} FROM remote WHERE file_id = ?1"),
+            file_id.0.as_bytes(),
+            mirror_row,
+        )
     }
 
     pub fn mirror_children(&self, parent: NodeId) -> Result<Vec<MirrorRow>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {MIRROR_COLS} FROM remote WHERE parent_id = ?1"
-        ))?;
-        let rows = stmt.query_map([parent.0.as_bytes()], |r| Ok(mirror_row(r)))?;
-        rows.map(|r| r?).collect()
-    }
-
-    pub fn all_mirror(&self) -> Result<Vec<MirrorRow>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("SELECT {MIRROR_COLS} FROM remote"))?;
-        let rows = stmt.query_map([], |r| Ok(mirror_row(r)))?;
-        rows.map(|r| r?).collect()
+        self.many(
+            &format!("SELECT {MIRROR_COLS} FROM remote WHERE parent_id = ?1"),
+            [parent.0.as_bytes()],
+            mirror_row,
+        )
     }
 
     /// Records a live remote node. A row for the same node under an older file id (the node
@@ -524,19 +471,16 @@ impl<'a> Store<'a> {
     pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let row = self.mirror_by_file(file_id)?;
         if row.is_some() {
-            self.conn.execute(
+            self.change(
                 "DELETE FROM remote WHERE file_id = ?1",
-                [file_id.0.as_bytes()],
+                file_id.0.as_bytes(),
             )?;
         }
         Ok(row)
     }
 
     pub fn mirror_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM remote", [], |r| r.get::<_, i64>(0))?
-            as u64)
+        self.count("SELECT COUNT(*) FROM remote")
     }
 
     // ---- dirty set ----
@@ -575,6 +519,21 @@ impl<'a> Store<'a> {
         rows.map(|r| codec::node(&r?)).collect()
     }
 
+    /// Local rows of dirty nodes that have neither a base nor a mirror row: what adoption may
+    /// match against remote nodes.
+    pub fn unpaired_local(&self) -> Result<Vec<LocalRow>> {
+        self.many(
+            &format!(
+                "SELECT {LOCAL_COLS} FROM local_items l \
+             WHERE node_id IN (SELECT node_id FROM dirty) \
+             AND NOT EXISTS (SELECT 1 FROM base b WHERE b.node_id = l.node_id) \
+             AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.node_id = l.node_id)"
+            ),
+            [],
+            local_row,
+        )
+    }
+
     pub fn dirty_nodes(&self, limit: usize) -> Result<Vec<NodeId>> {
         let mut stmt = self
             .conn
@@ -606,9 +565,7 @@ impl<'a> Store<'a> {
     }
 
     pub fn dirty_count(&self) -> Result<u64> {
-        Ok(self
-            .conn
-            .query_row("SELECT COUNT(*) FROM dirty", [], |r| r.get::<_, i64>(0))? as u64)
+        self.count("SELECT COUNT(*) FROM dirty")
     }
 
     // ---- key/value ----
@@ -616,21 +573,58 @@ impl<'a> Store<'a> {
     pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
-            .query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
+            .prepare_cached("SELECT value FROM kv WHERE key = ?1")?
+            .query_row([key], |r| r.get(0))
             .optional()?)
     }
 
     pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
-            [key, value],
-        )?;
+        self.conn
+            .prepare_cached("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)")?
+            .execute([key, value])?;
         Ok(())
     }
 
     pub fn delete_kv(&self, key: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM kv WHERE key = ?1", [key])?;
+        self.change("DELETE FROM kv WHERE key = ?1", key)?;
         Ok(())
+    }
+
+    // ---- statement helpers (all through the statement cache) ----
+
+    /// The row a one-parameter query finds, if any.
+    fn one<T>(
+        &self,
+        sql: &str,
+        param: impl rusqlite::ToSql,
+        decode: fn(&Row<'_>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.conn
+            .prepare_cached(sql)?
+            .query_row([param], |r| Ok(decode(r)))
+            .optional()?
+            .transpose()
+    }
+
+    fn many<T>(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+        decode: fn(&Row<'_>) -> Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut stmt = self.conn.prepare_cached(sql)?;
+        let rows = stmt.query_map(params, |r| Ok(decode(r)))?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// Runs a one-parameter statement; whether it changed a row.
+    fn change(&self, sql: &str, param: impl rusqlite::ToSql) -> Result<bool> {
+        Ok(self.conn.prepare_cached(sql)?.execute([param])? > 0)
+    }
+
+    fn count(&self, sql: &str) -> Result<u64> {
+        let n: i64 = self.conn.prepare_cached(sql)?.query_row([], |r| r.get(0))?;
+        Ok(n as u64)
     }
 }
 
@@ -673,10 +667,8 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
 }
 
 fn local_row(r: &Row<'_>) -> Result<LocalRow> {
-    let path: String = r.get(0)?;
     Ok(LocalRow {
-        path: RelPath::new(&path)
-            .map_err(|e| StateError::Corrupt(format!("path {path:?}: {e}")))?,
+        path: codec::rel_path(&r.get::<_, String>(0)?)?,
         node: codec::node(&r.get::<_, Vec<u8>>(1)?)?,
         kind: codec::kind_from(r.get(2)?)?,
         fingerprint: codec::fingerprint_from(

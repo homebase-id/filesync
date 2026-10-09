@@ -271,7 +271,7 @@ fn parked_item_from_a_crash_is_put_back() -> R {
     );
     a.engine.db().write(|s| {
         s.move_local_subtree(&from, &to)?;
-        s.put_parked(node, &to, &from)
+        s.put_parked(node, &from)
     })?;
     a.sync()?;
     assert_eq!(a.read("doc.txt")?, "keep me");
@@ -308,7 +308,7 @@ fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
     fs::rename(from.to_native(&a.root), to.to_native(&a.root))?;
     a.engine.db().write(|s| {
         s.move_local_subtree(&from, &to)?;
-        s.put_parked(node, &to, &from)
+        s.put_parked(node, &from)
     })?;
     fs::rename(a.root.join("A"), a.root.join("B"))?;
     a.sync()?;

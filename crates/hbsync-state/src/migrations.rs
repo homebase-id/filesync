@@ -96,6 +96,8 @@ const MIGRATIONS: &[Migration] = &[
         to_path   TEXT NOT NULL
     ) WITHOUT ROWID;
     "#),
+    // 6: a parked item's temporary path follows from its row; only the original is kept.
+    Sql("ALTER TABLE parked DROP COLUMN parked_path;"),
 ];
 
 fn backfill_parent_paths(tx: &Transaction<'_>) -> Result<()> {
@@ -106,8 +108,8 @@ fn backfill_parent_paths(tx: &Transaction<'_>) -> Result<()> {
     };
     let mut update = tx.prepare("UPDATE local_items SET parent_path = ?2 WHERE path = ?1")?;
     for path in paths {
-        let parent = path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
-        update.execute([&path, &parent])?;
+        let parent = crate::codec::rel_path(&path)?.parent().unwrap_or_default();
+        update.execute([path.as_str(), parent.as_str()])?;
     }
     Ok(())
 }

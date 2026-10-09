@@ -24,11 +24,11 @@ use std::time::Duration;
 
 use hbsync_fileio::Hasher;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
+use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Uuid, VersionTag};
 
 use crate::{
     ChangesPage, NewNode, PayloadInfo, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
-    Upload, Written,
+    Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -161,7 +161,7 @@ impl FakeServer {
 
     // ---- server operations (the HTTP API) ----
 
-    pub fn create(&mut self, node: &NewNode, upload: Option<Upload<'_>>) -> Result<Written> {
+    pub fn create(&mut self, node: &NewNode, upload: Option<Upload<'_>>) -> Result<RemoteRef> {
         self.create_cut(node, upload, None)
     }
 
@@ -170,7 +170,7 @@ impl FakeServer {
         node: &NewNode,
         upload: Option<Upload<'_>>,
         cut: Option<u64>,
-    ) -> Result<Written> {
+    ) -> Result<RemoteRef> {
         if self.by_node.contains_key(&node.node) {
             return Err(RemoteError::AlreadyExists);
         }
@@ -202,7 +202,7 @@ impl FakeServer {
         self.feed.insert((0, row), file_id);
         self.by_node.insert(node.node, file_id);
         self.touch(file_id);
-        Ok(Written { file_id, version })
+        Ok(RemoteRef { file_id, version })
     }
 
     pub fn update(
@@ -212,7 +212,7 @@ impl FakeServer {
         parent: NodeId,
         content: &NodeContent,
         upload: Option<Upload<'_>>,
-    ) -> Result<Written> {
+    ) -> Result<RemoteRef> {
         self.update_cut(file_id, expected, parent, content, upload, None)
     }
 
@@ -224,7 +224,7 @@ impl FakeServer {
         content: &NodeContent,
         upload: Option<Upload<'_>>,
         cut: Option<u64>,
-    ) -> Result<Written> {
+    ) -> Result<RemoteRef> {
         let current = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
         if current.header.version != expected {
             return Err(RemoteError::VersionMismatch);
@@ -259,7 +259,7 @@ impl FakeServer {
             payload,
         };
         self.touch(file_id);
-        Ok(Written { file_id, version })
+        Ok(RemoteRef { file_id, version })
     }
 
     /// Homebase's delete: no version check.
@@ -332,7 +332,7 @@ impl FakeServer {
         name: &str,
         data: &[u8],
         algorithm: hbsync_fileio::HashAlgorithm,
-    ) -> Result<(NodeId, Written)> {
+    ) -> Result<(NodeId, RemoteRef)> {
         let node = NodeId::new();
         let new = NewNode {
             node,
@@ -494,7 +494,7 @@ impl Remote for FakeRemote {
         self.server().header(file_id)
     }
 
-    fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<Written> {
+    fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
         self.gate()?;
         self.gate_name(&node.content.name)?;
         // Receive the bytes before taking the server lock, as a real server handles several
@@ -516,7 +516,7 @@ impl Remote for FakeRemote {
         parent: NodeId,
         content: &NodeContent,
         payload: Option<Upload<'_>>,
-    ) -> Result<Written> {
+    ) -> Result<RemoteRef> {
         self.gate()?;
         self.gate_name(&content.name)?;
         let received = self.receive(payload)?;

@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    ContentHash, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, VersionTag,
+    ContentHash, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
 
 pub mod fake;
@@ -99,13 +99,6 @@ pub struct ChangesPage {
     pub has_more: bool,
 }
 
-/// The result of a write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Written {
-    pub file_id: RemoteFileId,
-    pub version: VersionTag,
-}
-
 /// A new node to create.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewNode {
@@ -180,7 +173,7 @@ pub trait Remote: Send + Sync {
 
     /// Creates a node. Fails with [`RemoteError::AlreadyExists`] if a live file already has
     /// this node id (a retry of a create that landed).
-    fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<Written>;
+    fn create(&self, node: &NewNode, payload: Option<Upload<'_>>) -> Result<RemoteRef>;
 
     /// Rewrites the header (parent and content) and, with a payload, replaces the bytes, if
     /// the file is still at `expected`.
@@ -191,7 +184,7 @@ pub trait Remote: Send + Sync {
         parent: NodeId,
         content: &NodeContent,
         payload: Option<Upload<'_>>,
-    ) -> Result<Written>;
+    ) -> Result<RemoteRef>;
 
     /// Deletes (tombstones) a file if it is still at `expected`.
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()>;

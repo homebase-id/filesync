@@ -9,7 +9,7 @@ pub mod walk;
 pub mod watch;
 
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
-pub use scan::{ScanError, ScanOptions, ScanReport, rescan_dirs, scan};
+pub use scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
 pub use watch::{Debounce, LiveWatcher, LocalObserver, WatchBatch};
 

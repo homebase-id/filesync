@@ -1,8 +1,9 @@
 //! One test per rule of `docs/spec/sync-semantics.md`.
 
 use hbsync_engine::reconcile::file_state;
-use hbsync_engine::{BaseExtra, Conflict, Input, Op, Options, RemoteRef, reconcile};
+use hbsync_engine::{BaseExtra, Conflict, Input, Op, Options, reconcile};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
+use hbsync_types::RemoteRef;
 use hbsync_types::{
     ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, Uuid, VersionTag,
 };

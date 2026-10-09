@@ -40,7 +40,7 @@ fn create_file(
     r: &FakeRemote,
     node: &NewNode,
     data: &[u8],
-) -> Result<hbsync_remote::Written, RemoteError> {
+) -> Result<hbsync_types::RemoteRef, RemoteError> {
     let mut reader = data;
     r.create(node, Some(upload(data, &mut reader)))
 }

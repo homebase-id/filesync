@@ -18,7 +18,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use hbsync_platform::name::name_key;
 use hbsync_types::{
-    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, VersionTag,
+    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
+    VersionTag,
 };
 
 use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
@@ -34,13 +35,6 @@ pub struct BaseExtra {
     /// conflict copy id derived from it is stable across replans of one conflict and new for
     /// the next one.
     pub version: Option<VersionTag>,
-}
-
-/// The server's handle on a node, for guarded writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RemoteRef {
-    pub file_id: RemoteFileId,
-    pub version: VersionTag,
 }
 
 /// Settings that affect decisions.

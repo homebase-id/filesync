@@ -14,12 +14,12 @@ use std::time::{Duration, Instant};
 
 use hbsync_platform::journal::ChangeJournal;
 use hbsync_platform::{RelPath, journal::open_journal};
-use hbsync_state::StateDb;
+use hbsync_state::{StateDb, StateError};
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::journal::{CURSOR_KEY, CatchUp, catch_up};
-use crate::scan::{ScanError, ScanOptions, ScanReport, rescan_dirs, scan};
+use crate::scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 
 /// A coalesced set of changes from the watcher.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -204,7 +204,7 @@ impl LocalObserver {
         }
     }
 
-    pub fn catch_up(&mut self, db: &mut StateDb) -> Result<CatchUp, ScanError> {
+    pub fn catch_up(&mut self, db: &mut StateDb) -> Result<CatchUp, StateError> {
         catch_up(db, &self.root, self.journal.as_deref_mut(), &self.opts)
     }
 
@@ -215,7 +215,7 @@ impl LocalObserver {
         db: &mut StateDb,
         timeout: Duration,
         debounce: Debounce,
-    ) -> Result<Option<ScanReport>, ScanError> {
+    ) -> Result<Option<ScanReport>, StateError> {
         let Some(watcher) = &self.watcher else {
             std::thread::sleep(timeout);
             return Ok(None);

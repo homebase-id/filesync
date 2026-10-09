@@ -17,27 +17,15 @@ use std::path::Path;
 
 use hbsync_fileio::hash_file;
 use hbsync_namemap::to_remote;
+use hbsync_platform::Os;
 use hbsync_platform::name::name_key;
-use hbsync_platform::{Os, RelPath};
 use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError};
 use hbsync_types::{NodeId, NodeKind};
 
 /// Adopts what it can among the dirty nodes. Returns the number of adoptions.
 pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError> {
     // Local-only candidates: dirty, no base, no mirror row.
-    let dirty = db.read(|s| s.dirty_nodes(usize::MAX >> 1))?;
-    let mut candidates: Vec<LocalRow> = Vec::new();
-    db.read(|s| {
-        for node in &dirty {
-            if s.get_base(*node)?.is_none()
-                && s.get_mirror(*node)?.is_none()
-                && let Some(row) = s.local_by_node(*node)?
-            {
-                candidates.push(row);
-            }
-        }
-        Ok(())
-    })?;
+    let mut candidates = db.read(|s| s.unpaired_local())?;
     // Grouped by folder, parents before children.
     candidates.sort_by_cached_key(|r| {
         let parent = r.path.parent().unwrap_or_default();
@@ -56,13 +44,8 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
         let group = &candidates[start..end];
         start = end;
 
-        let parent = if parent_path.is_root() {
-            NodeId::ROOT
-        } else {
-            match db.read(|s| s.get_local(&parent_path))? {
-                Some(p) => p.node,
-                None => continue,
-            }
+        let Some(parent) = db.read(|s| s.local_node_at(&parent_path))? else {
+            continue;
         };
         let mut siblings: HashMap<String, Vec<MirrorRow>> = HashMap::new();
         for remote in db.read(|s| s.mirror_children(parent))? {
@@ -159,7 +142,7 @@ fn find_match(
             local_hash == remote_hash
         } else {
             // Another client's algorithm: hash this one file the same way.
-            hash_file(&path_of(root, &row.path), remote_hash.algorithm)
+            hash_file(&row.path.to_native(root), remote_hash.algorithm)
                 .is_ok_and(|h| h.hash == remote_hash && h.meta.fingerprint() == row.fingerprint)
         };
         if same {
@@ -167,8 +150,4 @@ fn find_match(
         }
     }
     Ok(None)
-}
-
-fn path_of(root: &Path, path: &RelPath) -> std::path::PathBuf {
-    path.to_native(root)
 }

@@ -9,7 +9,7 @@
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
 //! node parked under a temporary name is reported at its original place ([`parked_place`]).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
@@ -17,7 +17,7 @@ use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState};
 
 use crate::exec::parked_name;
-use crate::reconcile::{BaseExtra, Input, RemoteRef};
+use crate::reconcile::{BaseExtra, Input};
 
 /// The local state of one node, as the reconciler sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,14 +43,8 @@ fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState
     let Some(local_name) = path.name() else {
         return Ok(None);
     };
-    let parent_path = path.parent().unwrap_or_default();
-    let parent = if parent_path.is_root() {
-        NodeId::ROOT
-    } else {
-        match s.get_local(&parent_path)? {
-            Some(p) => p.node,
-            None => return Ok(None),
-        }
+    let Some(parent) = s.local_node_at(&path.parent().unwrap_or_default())? else {
+        return Ok(None);
     };
     let name = match &base {
         Some(b) if b.local_name.as_deref() == Some(local_name) => b.state.name.clone(),
@@ -95,7 +89,7 @@ fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState
 /// name (the user renamed it, and the record is void). Parking never leaves the folder, so the
 /// place follows the folder (or the item) wherever it is moved meanwhile.
 pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
-    let Some((_, original)) = s.get_parked(row.node)? else {
+    let Some(original) = s.get_parked(row.node)? else {
         return Ok(None);
     };
     if row.path.name() != Some(parked_name(row.node).as_str()) {
@@ -108,12 +102,7 @@ pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, St
 }
 
 /// Loads everything the reconciler needs for `dirty`.
-pub fn build_input(
-    s: &Store<'_>,
-    dirty: &[NodeId],
-    os: Os,
-    remote_complete: bool,
-) -> Result<Input, StateError> {
+pub fn build_input(s: &Store<'_>, dirty: &[NodeId], os: Os) -> Result<Input, StateError> {
     let mut b = Builder {
         s,
         os,
@@ -123,7 +112,8 @@ pub fn build_input(
         local_done: HashSet::new(),
     };
     b.input.dirty = dirty.iter().copied().collect();
-    b.input.remote_complete = remote_complete;
+    // The feed is drained before every plan, and every loaded node brings its ancestors.
+    b.input.remote_complete = true;
 
     let mut folders: HashSet<NodeId> = HashSet::from([NodeId::ROOT]);
     for &node in dirty {
@@ -230,13 +220,7 @@ impl Builder<'_, '_> {
     }
 
     fn add_mirror(&mut self, row: MirrorRow) {
-        self.input.remote_refs.insert(
-            row.node,
-            RemoteRef {
-                file_id: row.file_id,
-                version: row.version,
-            },
-        );
+        self.input.remote_refs.insert(row.node, row.remote_ref());
         match row.state() {
             Some(state) => {
                 self.input.remote.insert(row.node, state);
@@ -273,18 +257,4 @@ impl Builder<'_, '_> {
         }
         Ok(())
     }
-}
-
-/// Node → local path for every loaded local row (used by the executor's checks).
-pub fn local_paths(
-    s: &Store<'_>,
-    nodes: &[NodeId],
-) -> Result<HashMap<NodeId, RelPath>, StateError> {
-    let mut out = HashMap::new();
-    for &n in nodes {
-        if let Some(row) = s.local_by_node(n)? {
-            out.insert(n, row.path);
-        }
-    }
-    Ok(out)
 }

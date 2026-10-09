@@ -70,6 +70,13 @@ impl fmt::Debug for VersionTag {
     }
 }
 
+/// Where a node lives on the server: its file, and the version a guarded write must name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RemoteRef {
+    pub file_id: RemoteFileId,
+    pub version: VersionTag,
+}
+
 /// The last 8 hex digits: UUIDv7 ids share their leading timestamp digits.
 fn short(id: Uuid) -> String {
     id.simple().to_string()[24..].to_owned()

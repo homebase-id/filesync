@@ -18,7 +18,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-pub use store::{BaseRow, LocalRow, MirrorFile, MirrorRow, RemoteRef, Store};
+pub use store::{BaseRow, LocalRow, MirrorFile, MirrorRow, Store};
 
 /// The state DB key of the remote change-feed cursor.
 pub const REMOTE_CURSOR_KEY: &str = "remote.cursor";
@@ -49,7 +49,7 @@ impl StateDb {
         Self::setup(Connection::open(path)?)
     }
 
-    /// An in-memory DB, for tests and the simulator.
+    /// An in-memory DB, for tests.
     pub fn open_in_memory() -> Result<Self> {
         Self::setup(Connection::open_in_memory()?)
     }
@@ -64,6 +64,8 @@ impl StateDb {
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.create_collation("hbpath", hbsync_platform::path_cmp)?;
+        // Enough for every statement the store prepares, so hot lookups are never re-parsed.
+        conn.set_prepared_statement_cache_capacity(64);
         migrations::apply(&mut conn)?;
         Ok(StateDb { conn })
     }

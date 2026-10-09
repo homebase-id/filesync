@@ -14,10 +14,10 @@ use hbsync_platform::RelPath;
 pub use hbsync_platform::journal::{
     ChangeJournal, JournalDelta, JournalError, Touched, open_journal,
 };
-use hbsync_state::StateDb;
+use hbsync_state::{StateDb, StateError};
 use hbsync_types::NodeKind;
 
-use crate::scan::{ScanError, ScanOptions, ScanReport, rescan_dirs, scan};
+use crate::scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 
 /// The state DB key of the stored journal position.
 pub const CURSOR_KEY: &str = "local.journal_cursor";
@@ -44,7 +44,7 @@ pub fn catch_up<J: ChangeJournal + ?Sized>(
     root: &Path,
     journal: Option<&mut J>,
     opts: &ScanOptions,
-) -> Result<CatchUp, ScanError> {
+) -> Result<CatchUp, StateError> {
     let stored = db.read(|s| s.get_kv(CURSOR_KEY))?;
     let Some(journal) = journal else {
         let report = scan(db, root, opts)?;
@@ -90,7 +90,7 @@ fn resolve_touched(
     db: &mut StateDb,
     root: &Path,
     touched: &[Touched],
-) -> Result<Vec<RelPath>, ScanError> {
+) -> Result<Vec<RelPath>, StateError> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let root_id = hbsync_platform::stat(root).ok().map(|m| m.file_id);
     let mut dirs = Vec::new();

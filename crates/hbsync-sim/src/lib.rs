@@ -16,13 +16,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
-use hbsync_engine::reconcile::{BaseExtra, Input, Op, Options, RemoteRef, reconcile};
+use hbsync_engine::reconcile::{BaseExtra, Input, Op, Options, reconcile};
 use hbsync_engine::tree::Tree;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_platform::name::{check_remote_name, name_key};
 use hbsync_types::{
-    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, Uuid,
-    VersionTag,
+    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
+    Uuid, VersionTag,
 };
 
 /// A user action on one client's local tree. Indices pick among existing items modulo their
@@ -83,8 +83,7 @@ const NAMES: &[&str] = &[
 #[derive(Debug, Clone)]
 struct ServerNode {
     state: NodeState,
-    file_id: RemoteFileId,
-    version: VersionTag,
+    remote: RemoteRef,
 }
 
 #[derive(Debug, Default)]
@@ -328,15 +327,12 @@ impl Sim {
             remote_complete: true,
             ..Default::default()
         };
-        for (id, n) in &self.server.live {
-            input.remote_refs.insert(
-                *id,
-                RemoteRef {
-                    file_id: n.file_id,
-                    version: n.version,
-                },
-            );
-        }
+        input.remote_refs = self
+            .server
+            .live
+            .iter()
+            .map(|(id, n)| (*id, n.remote))
+            .collect();
         input.dirty = client
             .base
             .ids()
@@ -558,20 +554,13 @@ impl Sim {
                     kind,
                     content,
                 };
-                let (file_id, version) = (
-                    RemoteFileId(self.server.uuid()),
-                    VersionTag(self.server.uuid()),
-                );
+                let remote = RemoteRef {
+                    file_id: RemoteFileId(self.server.uuid()),
+                    version: VersionTag(self.server.uuid()),
+                };
                 self.server.ever.insert(node);
                 self.clients[c].planned_remote.insert(node, state.clone());
-                self.server.live.insert(
-                    node,
-                    ServerNode {
-                        state,
-                        file_id,
-                        version,
-                    },
-                );
+                self.server.live.insert(node, ServerNode { state, remote });
                 Done
             }
             Op::RemoteUpdate {
@@ -590,7 +579,7 @@ impl Sim {
                 let Some(server) = self.server.live.get_mut(&node) else {
                     return Skip;
                 };
-                if server.version != expected {
+                if server.remote.version != expected {
                     return Skip; // 4160
                 }
                 if upload {
@@ -601,7 +590,7 @@ impl Sim {
                 }
                 server.state.parent = parent;
                 server.state.name = name;
-                server.version = version;
+                server.remote.version = version;
                 let state = server.state.clone();
                 self.clients[c].planned_remote.insert(node, state);
                 Done
@@ -618,7 +607,7 @@ impl Sim {
                     return Retry;
                 }
                 match self.server.live.get(&node) {
-                    Some(server) if server.version == expected => {
+                    Some(server) if server.remote.version == expected => {
                         self.server.live.remove(&node);
                         self.clients[c].planned_remote.remove(node);
                         Done
@@ -666,7 +655,7 @@ impl Sim {
     /// The executor's settle rule: the base takes each attribute both sides agree on.
     fn settle(&mut self, c: usize, node: NodeId) {
         let remote = self.server.live.get(&node).map(|n| n.state.clone());
-        let version = self.server.live.get(&node).map(|n| n.version);
+        let version = self.server.live.get(&node).map(|n| n.remote.version);
         let client = &mut self.clients[c];
         let local = client.local.get(node).cloned();
         match (local, remote) {

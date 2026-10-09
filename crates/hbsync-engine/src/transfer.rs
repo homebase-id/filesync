@@ -15,9 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
-use hbsync_remote::{NewNode, Remote, RemoteError, Upload, Written};
+use hbsync_remote::{NewNode, Remote, RemoteError, Upload};
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{ContentHash, NodeId, RemoteFileId, VersionTag};
+use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, VersionTag};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -174,7 +174,7 @@ pub enum JobResult {
         file: CompletedFile,
         local_hash: ContentHash,
     },
-    Uploaded(Written),
+    Uploaded(RemoteRef),
     Failed(JobError),
 }
 

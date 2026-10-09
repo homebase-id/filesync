@@ -1,5 +1,6 @@
 use hbsync_platform::{FileId, Fingerprint, RelPath};
-use hbsync_state::{BaseRow, LocalRow, RemoteRef, StateDb, StateError};
+use hbsync_state::{BaseRow, LocalRow, StateDb, StateError};
+use hbsync_types::RemoteRef;
 use hbsync_types::{
     ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Uuid,
     VersionTag,
@@ -226,7 +227,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 5);
+    assert_eq!(db.schema_version()?, 6);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -381,12 +382,10 @@ fn children_subtree_moves_and_parking() -> R {
 
     let gone = db.write(|s| s.delete_local_subtree(&path("moved")))?;
     assert_eq!(gone.len(), 4);
+    assert_eq!(db.read(|s| s.local_count())?, 2);
 
-    db.write(|s| s.put_parked(rows[5].node, &path(".hbsync-move-x"), &path("top")))?;
-    assert_eq!(
-        db.read(|s| s.all_parked())?,
-        vec![(rows[5].node, path(".hbsync-move-x"), path("top"))]
-    );
+    db.write(|s| s.put_parked(rows[5].node, &path("top")))?;
+    assert_eq!(db.read(|s| s.all_parked())?, vec![rows[5].node]);
     db.write(|s| s.delete_parked(rows[5].node))?;
     assert!(db.read(|s| s.all_parked())?.is_empty());
     Ok(())

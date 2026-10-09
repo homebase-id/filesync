@@ -48,14 +48,8 @@ pub struct ScanReport {
     pub skipped: Vec<(std::path::PathBuf, SkipReason)>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ScanError {
-    #[error(transparent)]
-    State(#[from] StateError),
-}
-
 /// Runs a full tier-C scan of `root` and records the result in `db`.
-pub fn scan(db: &mut StateDb, root: &Path, opts: &ScanOptions) -> Result<ScanReport, ScanError> {
+pub fn scan(db: &mut StateDb, root: &Path, opts: &ScanOptions) -> Result<ScanReport, StateError> {
     let excludes: Vec<&str> = opts.exclude_at_root.iter().map(String::as_str).collect();
     let mut report = ScanReport::default();
     let diff = merge(
@@ -80,7 +74,7 @@ pub fn rescan_dirs(
     root: &Path,
     dirs: &[RelPath],
     opts: &ScanOptions,
-) -> Result<ScanReport, ScanError> {
+) -> Result<ScanReport, StateError> {
     let excludes: Vec<&str> = opts.exclude_at_root.iter().map(String::as_str).collect();
     let mut targets = std::collections::BTreeSet::new();
     for dir in dirs {
@@ -200,7 +194,7 @@ fn merge(
     events: impl Iterator<Item = WalkEvent>,
     mut rows: DbRows,
     report: &mut ScanReport,
-) -> Result<Diff, ScanError> {
+) -> Result<Diff, StateError> {
     let mut diff = Diff::default();
     let mut unknown: Vec<RelPath> = Vec::new();
     let under_unknown =
@@ -328,7 +322,7 @@ fn resolve(
     diff: Diff,
     opts: &ScanOptions,
     report: &mut ScanReport,
-) -> Result<Plan, ScanError> {
+) -> Result<Plan, StateError> {
     let mut plan = Plan::default();
     let hash_now =
         |path: &RelPath, meta: &LocalMeta, report: &mut ScanReport| -> Option<ContentHash> {
@@ -514,13 +508,10 @@ fn parent_node(
     let Some(parent) = path.parent() else {
         return Ok(None);
     };
-    if parent.is_root() {
-        return Ok(Some(NodeId::ROOT));
-    }
     if let Some(node) = overrides.get(&parent) {
         return Ok(Some(*node));
     }
-    Ok(db.read(|s| s.get_local(&parent))?.map(|r| r.node))
+    db.read(|s| s.local_node_at(&parent))
 }
 
 fn row_from(path: &RelPath, node: NodeId, meta: &LocalMeta, hash: Option<ContentHash>) -> LocalRow {

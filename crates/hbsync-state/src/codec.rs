@@ -1,6 +1,6 @@
 //! Column encodings.
 
-use hbsync_platform::{FileId, Fingerprint};
+use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::{
     ContentHash, ContentState, HashAlgorithm, NodeId, NodeKind, RemoteFileId, Uuid, VersionTag,
 };
@@ -22,6 +22,10 @@ pub fn remote_file(bytes: &[u8]) -> Result<RemoteFileId> {
 
 pub fn version(bytes: &[u8]) -> Result<VersionTag> {
     uuid_from(bytes).map(VersionTag)
+}
+
+pub fn rel_path(s: &str) -> Result<RelPath> {
+    RelPath::new(s).map_err(|e| StateError::Corrupt(format!("path {s:?}: {e}")))
 }
 
 pub fn kind_to(kind: NodeKind) -> i64 {
