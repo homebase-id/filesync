@@ -40,7 +40,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             c
         }
         None => {
-            let device = hostname();
+            let device = hbsync_dev::device_name();
             let pending = hbsync_homebase::begin(&identity, &format!("Filesync on {device}"))?;
             println!("Opening the browser to authorize Homebase Filesync on {identity}...");
             println!("If it doesn't open, visit:\n{}\n", pending.authorize_url);
@@ -110,15 +110,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let files = page["searchResults"].as_array().map_or(0, Vec::len);
     println!("Query on the sync drive works: {files} file(s) on the first page.");
     Ok(())
-}
-
-fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-        .unwrap_or_else(|| "this computer".into())
 }
 
 fn open_browser(command: Option<&str>, url: &str) {

@@ -10,6 +10,7 @@ pub mod client;
 pub mod crypto;
 pub mod drive;
 pub mod multipart;
+pub mod notify;
 pub mod problem;
 pub mod youauth;
 

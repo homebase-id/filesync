@@ -32,12 +32,6 @@ pub struct WatchBatch {
     pub drained: bool,
 }
 
-impl WatchBatch {
-    fn is_empty(&self) -> bool {
-        self.dirs.is_empty() && !self.rescan_all
-    }
-}
-
 /// Timing of the debounce.
 #[derive(Debug, Clone, Copy)]
 pub struct Debounce {
@@ -82,68 +76,89 @@ impl LiveWatcher {
         })
     }
 
-    /// Waits up to `timeout` for a first event, then collects until the batch is quiet or
-    /// `debounce.max_delay` has passed. `None` if nothing happened.
+    /// Waits up to `timeout` for a first change, then collects until no change came for
+    /// `debounce.quiet` or `debounce.max_delay` has passed. `None` if nothing changed.
+    ///
+    /// Events that change nothing (reads, the client's own state folder) neither start nor
+    /// extend a batch: a folder that is read all the time would otherwise hold every batch
+    /// open until `max_delay`.
     pub fn next_batch(&self, timeout: Duration, debounce: Debounce) -> Option<WatchBatch> {
         let mut batch = WatchBatch::default();
-        let first = match self.rx.recv_timeout(timeout) {
-            Ok(event) => event,
-            Err(RecvTimeoutError::Timeout) => return None,
-            Err(RecvTimeoutError::Disconnected) => {
-                batch.rescan_all = true;
-                return Some(batch);
-            }
-        };
-        self.add(&mut batch, first);
-        let started = Instant::now();
+        let deadline = Instant::now() + timeout;
         loop {
-            let left = debounce.max_delay.saturating_sub(started.elapsed());
-            if left.is_zero() {
+            match self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                Ok(event) => {
+                    if self.add(&mut batch, event) {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => return None,
+                Err(RecvTimeoutError::Disconnected) => {
+                    batch.rescan_all = true;
+                    return Some(batch);
+                }
+            }
+        }
+        let close_by = Instant::now() + debounce.max_delay;
+        let mut quiet_from = Instant::now();
+        loop {
+            let quiet_at = quiet_from + debounce.quiet;
+            let now = Instant::now();
+            if now >= quiet_at {
+                batch.drained = true;
                 break;
             }
-            match self.rx.recv_timeout(debounce.quiet.min(left)) {
-                Ok(event) => self.add(&mut batch, event),
-                Err(RecvTimeoutError::Timeout) => {
-                    batch.drained = debounce.quiet <= left;
-                    break;
+            if now >= close_by {
+                break;
+            }
+            match self.rx.recv_timeout(quiet_at.min(close_by) - now) {
+                Ok(event) => {
+                    if self.add(&mut batch, event) {
+                        quiet_from = Instant::now();
+                    }
                 }
+                Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     batch.rescan_all = true;
                     break;
                 }
             }
         }
-        (!batch.is_empty()).then_some(batch)
+        Some(batch)
     }
 
-    fn add(&self, batch: &mut WatchBatch, event: notify::Result<Event>) {
-        add_event(&self.root, &self.exclude_at_root, batch, event);
+    /// Folds `event` into `batch`; `true` if it changed something there.
+    fn add(&self, batch: &mut WatchBatch, event: notify::Result<Event>) -> bool {
+        add_event(&self.root, &self.exclude_at_root, batch, event)
     }
 }
 
-/// Folds one notification into a batch: every path touches its parent folder.
+/// Folds one notification into a batch: every path touches its parent folder. Returns
+/// whether the notification counts (a change in the tree, or a call for a full rescan).
 fn add_event(
     root: &Path,
     exclude_at_root: &[String],
     batch: &mut WatchBatch,
     event: notify::Result<Event>,
-) {
+) -> bool {
     let event = match event {
         Ok(event) => event,
         Err(_) => {
             batch.rescan_all = true;
-            return;
+            return true;
         }
     };
-    if event.need_rescan() {
-        batch.rescan_all = true;
-    }
+    let mut counts = event.need_rescan();
+    batch.rescan_all |= counts;
     // Opening or reading changes nothing, and the rescan itself opens what it lists: counting
     // those would make every batch trigger the next. Closing after a write does count.
     if let EventKind::Access(kind) = event.kind
         && kind != AccessKind::Close(AccessMode::Write)
     {
-        return;
+        return counts;
     }
     for path in &event.paths {
         let Ok(rel) = path.strip_prefix(root) else {
@@ -158,7 +173,9 @@ fn add_event(
         batch
             .dirs
             .insert(relpath_prefix(rel.parent().unwrap_or(Path::new(""))));
+        counts = true;
     }
+    counts
 }
 
 /// All local observation for one sync root: catch-up at start, then live batches.
@@ -289,37 +306,22 @@ mod tests {
             &mut batch,
             ev(EventKind::Create(CreateKind::File), &["/sync/top.txt"]),
         );
-        add_event(
-            root,
-            &excl,
-            &mut batch,
+        // The client's own state, paths elsewhere, and reads (such as the rescan's own) touch
+        // nothing and don't count; a finished write does.
+        for ignored in [
             ev(EventKind::Any, &["/sync/.hbsync/state.db"]),
-        );
-        add_event(
-            root,
-            &excl,
-            &mut batch,
             ev(EventKind::Any, &["/elsewhere/z"]),
-        );
-        // Reads (such as the rescan's own) touch nothing; a finished write does.
-        add_event(
-            root,
-            &excl,
-            &mut batch,
             ev(
                 EventKind::Access(AccessKind::Open(AccessMode::Read)),
                 &["/sync/r/f"],
             ),
-        );
-        add_event(
-            root,
-            &excl,
-            &mut batch,
             ev(
                 EventKind::Access(AccessKind::Close(AccessMode::Read)),
                 &["/sync/r/f"],
             ),
-        );
+        ] {
+            assert!(!add_event(root, &excl, &mut batch, ignored));
+        }
         add_event(
             root,
             &excl,
@@ -354,6 +356,67 @@ mod tests {
             Err(notify::Error::generic("lost")),
         );
         assert!(batch.rescan_all);
+    }
+
+    /// Reads all the time (a user's viewer, a backup tool) must not hold a batch open: the
+    /// sync loop waits on `next_batch` and can't react to anything else meanwhile.
+    #[test]
+    fn events_that_change_nothing_neither_start_nor_extend_a_batch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let mut watcher = LiveWatcher::start(&root, &[".hbsync".to_owned()])?;
+        let (tx, rx) = channel();
+        watcher.rx = rx;
+        let reading = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reader = {
+            let (tx, reading, path) = (tx.clone(), reading.clone(), root.join("viewed.txt"));
+            std::thread::spawn(move || {
+                while reading.load(std::sync::atomic::Ordering::Relaxed) {
+                    let read = Event::new(EventKind::Access(AccessKind::Open(AccessMode::Read)))
+                        .add_path(path.clone());
+                    let own = Event::new(EventKind::Modify(ModifyKind::Any))
+                        .add_path(path.parent().unwrap_or(&path).join(".hbsync/state.db"));
+                    if tx.send(Ok(read)).is_err() || tx.send(Ok(own)).is_err() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            })
+        };
+        let debounce = Debounce {
+            quiet: Duration::from_millis(100),
+            max_delay: Duration::from_secs(5),
+        };
+        let started = Instant::now();
+        assert_eq!(
+            watcher.next_batch(Duration::from_millis(200), debounce),
+            None
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+
+        // A real change closes after the quiet period, reads or not.
+        let created = Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("new"));
+        tx.send(Ok(created))?;
+        let started = Instant::now();
+        let batch = watcher
+            .next_batch(Duration::from_millis(200), debounce)
+            .ok_or("no batch")?;
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(batch.drained);
+        assert_eq!(batch.dirs, [RelPath::root()].into());
+
+        reading.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = reader.join();
+        Ok(())
     }
 
     #[test]

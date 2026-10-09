@@ -69,12 +69,17 @@ Checked on odin-core branch `payload-hashes` @ 467d0b531 (the local dev host) **
 |---|---|---|
 | Create | `POST /api/v2/drives/{d}/files` | multipart, plaintext request and response (`V2DriveCreateFileController.cs`). Parts: `instructions` first, `metadata` second, then `payload`* (filename = payload key, case-sensitive) and `thumbnail`* (`V1DriveUploadControllerBase.cs:205-270`). Duplicate live UniqueId → 400 4105. Response `{fileId, driveId, globalTransitId, recipientStatus, newVersionTag, payloads[{key, uid, lastModified}]}` |
 | Update | `PATCH /api/v2/drives/{d}/files/{fileId}` (or `/by-uid/{uid}`) | multipart, plaintext; `metadata` required. `fileMetadata.versionTag` required (4159), stale → 4160. Instructions need `locale: "local"` (missing → 500) and a `manifest`; `payloadDescriptors: []` is a header-only update that keeps the payloads. Ops `appendOrOverwrite` / `deletePayload`; unlisted payloads kept. Unknown fileId → 4106, deleted file → 4002 |
-| Delete | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: []}` (send it; an empty body likely fails binding **[inferred]**). **No versionTag** (odin-core #1903). Unknown file → 200 `localFileNotFound: true`. Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted` |
+| Delete (soft) | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: []}` (send it; an empty body likely fails binding **[inferred]**). **No versionTag** (odin-core #1903). Unknown file → 200 `localFileNotFound: true`. Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted` |
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
 | Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
 | Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206; end past the payload → 416. Offsets are `int` (#1893) and every read is buffered whole in server memory (#1892) |
 | Notify | `wss://{id}/api/v2/notify/ws-token` | see below |
+
+The client only soft-deletes: the tombstone is how the other clients learn of a delete
+through the feed. A hard delete (`.../hard-delete`) leaves no trace in the feed and is never
+used. Only the Filesync app writes to its drive (other apps need a grant), so no hard deletes
+come from elsewhere either.
 
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,

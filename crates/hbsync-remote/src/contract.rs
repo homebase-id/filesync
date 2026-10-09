@@ -71,6 +71,11 @@ impl<'a> Bench<'a> {
         })
     }
 
+    /// The folder the scenarios work in.
+    pub fn scratch(&self) -> NodeId {
+        self.scratch
+    }
+
     /// Runs every scenario; returns the names and errors of the ones that failed.
     pub fn run_all(&self) -> Vec<(&'static str, String)> {
         SCENARIOS

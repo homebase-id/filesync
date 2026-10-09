@@ -78,6 +78,11 @@ impl Client {
         &self.key
     }
 
+    /// The client auth token, base64.
+    pub(crate) fn token(&self) -> &str {
+        self.bearer.trim_start_matches("Bearer ")
+    }
+
     /// `GET {path}` with `query` encrypted into `ss`.
     pub fn get<T: DeserializeOwned>(
         &self,

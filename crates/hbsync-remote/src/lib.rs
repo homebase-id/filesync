@@ -202,3 +202,42 @@ pub trait Remote: Send + Sync {
         sink: &mut dyn Write,
     ) -> Result<u64>;
 }
+
+/// A shared remote: the engine owns one handle, the caller keeps another (to read what the
+/// implementation reports beyond the trait).
+impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
+    fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
+        (**self).changes(cursor, limit)
+    }
+
+    fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
+        (**self).header(file_id)
+    }
+
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
+        (**self).create(node, payload)
+    }
+
+    fn update(
+        &self,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> Result<RemoteRef> {
+        (**self).update(file_id, expected, meta, payload)
+    }
+
+    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
+        (**self).delete(file_id, expected)
+    }
+
+    fn read(
+        &self,
+        file_id: RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<u64> {
+        (**self).read(file_id, range, sink)
+    }
+}

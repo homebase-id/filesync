@@ -16,12 +16,15 @@ hbsync-types.workspace = true
 hkdf = "0.13.0"
 p384 = { version = "0.14.0", features = ["ecdh"] }
 percent-encoding = "2.3.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"
 thiserror.workspace = true
+tungstenite = { version = "0.28.0", default-features = false, features = ["handshake"] }
 ureq = { version = "3.4.2", features = ["json"] }
 uuid.workspace = true
+webpki-roots = "1"
 
 [lints]
 workspace = true

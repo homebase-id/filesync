@@ -1,0 +1,19 @@
+[package]
+name = "hbsync-dev"
+description = "Development tools: register the app on an identity, sync a folder with it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+hbsync-engine.workspace = true
+hbsync-homebase.workspace = true
+hbsync-local.workspace = true
+hbsync-remote.workspace = true
+hbsync-state.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
