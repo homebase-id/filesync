@@ -51,6 +51,10 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
     ("tombstone_in_the_feed", tombstone_in_the_feed),
     ("hash_mismatch_stores_nothing", hash_mismatch_stores_nothing),
     ("feed_pages_and_resumes", feed_pages_and_resumes),
+    (
+        "every_write_shows_up_promptly",
+        every_write_shows_up_promptly,
+    ),
     ("ranged_reads", ranged_reads),
 ];
 
@@ -411,9 +415,14 @@ fn deletes(b: &Bench) -> Outcome {
     ensure!(b.remote.header(w.file_id)?.is_deleted(), "not deleted");
     // A retried delete succeeds.
     b.remote.delete(w2.file_id, w2.version)?;
-    // An update of a deleted file fails.
+    // An update of a deleted file fails, header only or with new bytes (another client
+    // deleted it meanwhile).
     ensure_err!(
         b.update(w2, &f, None),
+        RemoteError::NotFound | RemoteError::VersionMismatch
+    );
+    ensure_err!(
+        b.update(w2, &f, Some(b"edited")),
         RemoteError::NotFound | RemoteError::VersionMismatch
     );
     ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
@@ -501,6 +510,31 @@ fn feed_pages_and_resumes(b: &Bench) -> Outcome {
         .map(|h| h.file_id)
         .collect();
     ensure!(all.len() == 5 && all[4] == written[0].file_id, "{all:?}");
+    Ok(())
+}
+
+/// A client that reads the feed right after a write (its own, or one it was told about)
+/// must see it within moments, every time: a feed answer cached from before the write must
+/// not hide it (odin-core's query cache did, until the next write to the drive).
+fn every_write_shows_up_promptly(b: &Bench) -> Outcome {
+    let mut cursor = b.cursor_now()?;
+    for i in 0..30 {
+        let (_, w) = b.folder(&format!("w{i}"))?;
+        let started = std::time::Instant::now();
+        loop {
+            let page = b.remote.changes(Some(&cursor), 100)?;
+            cursor = page.cursor;
+            if page.entries.iter().any(|h| h.file_id == w.file_id) {
+                break;
+            }
+            ensure!(
+                started.elapsed() < Duration::from_secs(2),
+                "write {i} not in the feed after {:?}",
+                started.elapsed()
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
     Ok(())
 }
 

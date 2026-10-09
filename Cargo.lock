@@ -619,6 +619,7 @@ dependencies = [
  "hbsync-remote",
  "hbsync-state",
  "serde_json",
+ "tempfile",
  "uuid",
 ]
 

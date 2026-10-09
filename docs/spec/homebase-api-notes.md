@@ -171,3 +171,16 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - Payload reads are buffered whole in server memory (#1892) and ranges are `int` (#1893): the
   client reads in chunks and refuses payloads of 2 GiB or more until #1893 lands.
 - App clients can't read the drive's `requirePayloadHashes`; the client always sends hashes.
+- **The feed can hide a write until the next one** **[verified, tried]**: `QueryBatchCached`
+  caches query-batch results for two hours (`AbstractTableCaching.DefaultTtl`) and drops
+  them only when the drive is written. An `anyChangeDate` result also depends on the clock
+  (`modified < now`). A query in the same millisecond as a write is therefore cached without
+  that row, and every identical query (same cursor, same page size) misses it until the next
+  write to the drive. On frodo, about one write in twelve stayed invisible to a polling
+  client. Workaround in the client: never send the same page size twice in a row (it is
+  part of the cache key). Contract scenario `every_write_shows_up_promptly`. Not filed yet.
+- **A content update of a deleted file is a 500** **[verified, tried]**: a PATCH with an
+  `appendOrOverwrite` payload on a tombstone throws a NullReferenceException in
+  `DriveStorageServiceBase.UpdateBatchCopyFilesAsync` / `ProcessAppendOrOverwrite` (the
+  tombstone's payload list is null) before the 4002 check. Workaround in the client: after a
+  failed update, read the header; a tombstone means `NotFound`. Not filed yet.

@@ -1,13 +1,14 @@
 //! Development tool: syncs a folder with an identity's Filesync drive until stopped.
 //!
 //! ```text
-//! hbsync-sync <identity> <folder> [--once]
+//! hbsync-sync <identity> <folder> [--once] [--allow-mass-delete]
 //! ```
 //!
 //! Uses the credentials `hbsync-register` saved. The state DB lives in `<folder>/.hbsync`.
 //! A sync runs when the folder changes (live watcher), when the identity announces a change
 //! on the drive (WebSocket), and every minute regardless. After a failed sync it waits,
-//! doubling up to five minutes. `--once` catches up, syncs and exits.
+//! doubling up to five minutes. `--once` catches up, syncs and exits. Deletes of a large
+//! share of the synced files are held unless `--allow-mass-delete` is given.
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, TryRecvError};
@@ -36,7 +37,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(identity), Some(folder)) = (args.first(), args.get(1)) else {
-        return Err("usage: hbsync-sync <identity> <folder> [--once]".into());
+        return Err("usage: hbsync-sync <identity> <folder> [--once] [--allow-mass-delete]".into());
     };
     let once = args.iter().any(|a| a == "--once");
 
@@ -46,7 +47,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::fs::canonicalize(folder)?;
     std::fs::create_dir_all(root.join(STATE_DIR))?;
     let db_path = root.join(STATE_DIR).join("state.db");
-    let cfg = EngineConfig::new(&root, &hbsync_dev::device_name());
+    let mut cfg = EngineConfig::new(&root, &hbsync_dev::device_name());
+    cfg.allow_mass_delete = args.iter().any(|a| a == "--allow-mass-delete");
     let mut observer =
         LocalObserver::start(&root, ScanOptions::for_root(&root, cfg.exec.algorithm));
     let mut engine = Engine::new(StateDb::open(&db_path)?, Box::new(remote.clone()), cfg);
