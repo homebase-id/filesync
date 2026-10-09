@@ -11,6 +11,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use hbsync_local::Filter;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
@@ -94,8 +95,13 @@ pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, St
     Ok(row.path.parent().unwrap_or_default().join(&name).ok())
 }
 
-/// Loads everything the reconciler needs for `dirty`.
-pub fn build_input(s: &Store<'_>, dirty: &[NodeId], os: Os) -> Result<Input, StateError> {
+/// Loads everything the reconciler needs for `dirty`; `filter` is this device's (§10).
+pub fn build_input(
+    s: &Store<'_>,
+    dirty: &[NodeId],
+    os: Os,
+    filter: &Filter,
+) -> Result<Input, StateError> {
     let mut b = Builder {
         s,
         os,
@@ -123,10 +129,12 @@ pub fn build_input(s: &Store<'_>, dirty: &[NodeId], os: Os) -> Result<Input, Sta
     for folder in folders {
         b.load_children(folder)?;
     }
-    // A folder that is gone remotely but present locally may be trashed: load all of it.
+    // A folder that is gone remotely (or masked) but present locally may be trashed or
+    // detached: load all of it.
+    let masked = crate::mask::masked(&b.input.remote, filter);
     for &node in dirty {
         if b.input.base.contains(node)
-            && !b.input.remote.contains(node)
+            && (!b.input.remote.contains(node) || masked.contains(&node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)

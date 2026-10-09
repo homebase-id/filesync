@@ -130,6 +130,8 @@ fn kinds(ops: &[Op]) -> Vec<&'static str> {
             Op::RemoteUpdate { upload: false, .. } => "rename",
             Op::RemoteDelete { .. } => "delete",
             Op::Settle { .. } => "settle",
+            Op::LocalDetach { .. } => "detach",
+            Op::Forget { .. } => "forget",
         })
         .collect()
 }
@@ -631,4 +633,145 @@ fn children_of_a_withdrawn_orphan_are_withdrawn_too() {
     let mut deferred = plan.deferred.clone();
     deferred.sort();
     assert_eq!(deferred, [parent, child]);
+}
+
+// ---- §10 filters ----
+
+fn ignoring(rules: &str) -> Options {
+    Options {
+        filter: std::sync::Arc::new(
+            hbsync_local::Filter::from_rules(rules, false).expect("valid rules"),
+        ),
+        ..Options::default()
+    }
+}
+
+#[test]
+fn filtered_remote_nodes_are_never_downloaded() {
+    let [junk, b, inside, log] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        opts: ignoring("build/\n*.log\n"),
+        ..World::default()
+    };
+    w.remote(junk, Some(file(ROOT, ".DS_Store", "x")))
+        .remote(b, Some(folder(ROOT, "build")))
+        .remote(inside, Some(file(b, "out.o", "o")))
+        .remote(log, Some(file(ROOT, "run.log", "l")));
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{plan:?}");
+    assert_eq!(plan.clean.len(), 4);
+}
+
+#[test]
+fn a_remote_move_into_an_ignored_folder_takes_the_file_away_here() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let mut w = World {
+        opts: ignoring("build/\n"),
+        ..World::default()
+    };
+    w.synced(f, file(ROOT, "a.txt", "v1"));
+    w.remote(b, Some(folder(ROOT, "build")))
+        .remote(f, Some(file(b, "a.txt", "v1")));
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["trash"], "{plan:?}");
+    // Once it is gone here, the base goes too; the remote is never touched.
+    w.local(f, None);
+    assert_eq!(w.plan().ops, [Op::Forget { node: f }]);
+}
+
+#[test]
+fn a_local_edit_of_a_file_moved_into_an_ignored_folder_stays_as_a_new_file() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let mut w = World {
+        opts: ignoring("build/\n"),
+        ..World::default()
+    };
+    w.synced(f, file(ROOT, "a.txt", "v1"));
+    w.local(f, Some(file(ROOT, "a.txt", "local v2")));
+    w.remote(b, Some(folder(ROOT, "build")))
+        .remote(f, Some(file(b, "a.txt", "v1")));
+    let plan = w.plan();
+    let Some(&Op::LocalDetach { node, new_node }) = plan.ops.first() else {
+        panic!("{plan:?}")
+    };
+    assert_eq!(node, f);
+    assert_eq!(kinds(&plan.ops), ["detach", "create", "forget"], "{plan:?}");
+    assert!(plan.ops.contains(&Op::RemoteCreate {
+        node: new_node,
+        parent: ROOT,
+        name: "a.txt".into(),
+        kind: NodeKind::File,
+    }));
+}
+
+#[test]
+fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
+    let [b, d, f, n] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        opts: ignoring("build/\n"),
+        ..World::default()
+    };
+    w.synced(d, folder(ROOT, "proj"))
+        .synced(f, file(d, "f.txt", "v1"));
+    w.remote(b, Some(folder(ROOT, "build")))
+        .remote(d, Some(folder(b, "proj")));
+    let plan = w.plan();
+    assert_eq!(
+        plan.ops,
+        [Op::LocalTrash {
+            node: d,
+            subtree: {
+                let mut v = vec![d, f];
+                v.sort();
+                v
+            },
+        }],
+        "{plan:?}"
+    );
+
+    // A file created here meanwhile keeps the folder, as a new one; the rest goes.
+    w.local(n, Some(file(d, "new.txt", "n")));
+    let plan = w.plan();
+    assert_eq!(
+        kinds(&plan.ops),
+        ["detach", "create", "create", "trash"],
+        "{plan:?}"
+    );
+    let Some(&Op::LocalDetach { node, new_node }) = plan.ops.first() else {
+        panic!("{plan:?}")
+    };
+    assert_eq!(node, d);
+    assert!(plan.ops.contains(&Op::RemoteCreate {
+        node: n,
+        parent: new_node,
+        name: "new.txt".into(),
+        kind: NodeKind::File,
+    }));
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { node, .. } if *node == f))
+    );
+}
+
+#[test]
+fn a_folder_with_children_this_device_ignores_survives_a_local_delete() {
+    let [d, f, log] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        opts: ignoring("*.log\n"),
+        ..World::default()
+    };
+    w.synced(d, folder(ROOT, "proj"))
+        .synced(f, file(d, "f.txt", "v1"));
+    w.remote(log, Some(file(d, "run.log", "l")));
+    w.local(d, None).local(f, None);
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["mkdir", "delete"], "{plan:?}");
+    assert!(matches!(plan.ops[1], Op::RemoteDelete { node, .. } if node == f));
 }

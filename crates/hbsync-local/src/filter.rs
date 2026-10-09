@@ -175,12 +175,17 @@ impl Filter {
     /// The verdict on the entry `name` in `dir`, assuming `dir` itself is synced (a walk never
     /// enters a filtered folder).
     pub fn entry(&self, dir: &RelPath, name: &str, is_dir: bool) -> Verdict {
-        let path = if dir.is_root() {
+        self.in_folder(dir.as_str(), name, is_dir)
+    }
+
+    /// [`Filter::entry`] with the folder given as its `/`-separated path (`""` for the root).
+    pub fn in_folder(&self, folder: &str, name: &str, is_dir: bool) -> Verdict {
+        let path = if folder.is_empty() {
             name.to_owned()
         } else {
-            format!("{}/{name}", dir.as_str())
+            format!("{folder}/{name}")
         };
-        self.check(&path, name, dir.is_root(), is_dir)
+        self.check(&path, name, folder.is_empty(), is_dir)
     }
 
     /// The verdict on the item at `rel`: the first of its folders (outermost first) or itself

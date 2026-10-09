@@ -15,12 +15,16 @@
 //! it keeps both versions).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+
+use hbsync_local::Filter;
 
 use hbsync_platform::name::name_key;
 use hbsync_types::{
     ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
 
+use crate::mask::Masks;
 use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
 
 /// Per-node facts about the base that aren't part of [`NodeState`].
@@ -54,6 +58,8 @@ pub struct Options {
     /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
     /// totals too, so a large delete split over several batches is still held.
     pub pending_deletes: (usize, usize),
+    /// What this device never syncs: remote nodes it matches are masked (§10).
+    pub filter: Arc<Filter>,
 }
 
 impl Default for Options {
@@ -66,6 +72,7 @@ impl Default for Options {
             synced_files: 0,
             allow_mass_delete: false,
             pending_deletes: (0, 0),
+            filter: Arc::default(),
         }
     }
 }
@@ -147,6 +154,12 @@ pub enum Op {
     },
     /// Both sides agree; record that as the base.
     Settle { node: NodeId },
+    /// The local item of `node` becomes the new node `new_node`, where it is (with what is
+    /// below it): `node` moved remotely to where this device doesn't sync, and the item holds
+    /// what must stay here (§10). A later op creates it remotely.
+    LocalDetach { node: NodeId, new_node: NodeId },
+    /// This device no longer syncs `node` (§10) and holds nothing of it: drop its base.
+    Forget { node: NodeId },
 }
 
 impl Op {
@@ -160,7 +173,9 @@ impl Op {
             | Op::RemoteCreate { node, .. }
             | Op::RemoteUpdate { node, .. }
             | Op::RemoteDelete { node, .. }
-            | Op::Settle { node } => *node,
+            | Op::Settle { node }
+            | Op::LocalDetach { node, .. }
+            | Op::Forget { node } => *node,
         }
     }
 
@@ -318,12 +333,16 @@ enum Origin {
 }
 
 pub fn reconcile(input: &Input, opts: &Options) -> Plan {
-    Reconciler::new(input, opts).run()
+    let masks = Masks::of(input, &opts.filter, &opts.device);
+    let input = masks.input.as_ref().unwrap_or(input);
+    Reconciler::new(input, opts, &masks).run()
 }
 
 struct Reconciler<'a> {
+    /// The input with the masks applied.
     input: &'a Input,
     opts: &'a Options,
+    masks: &'a Masks,
     /// The merged tree: context plus targets.
     merged: Tree,
     /// Nodes ops are generated for.
@@ -338,10 +357,11 @@ struct Reconciler<'a> {
 }
 
 impl<'a> Reconciler<'a> {
-    fn new(input: &'a Input, opts: &'a Options) -> Self {
+    fn new(input: &'a Input, opts: &'a Options, masks: &'a Masks) -> Self {
         Reconciler {
             input,
             opts,
+            masks,
             merged: Tree::new(),
             scope: BTreeSet::new(),
             origin: HashMap::new(),
@@ -488,6 +508,8 @@ impl<'a> Reconciler<'a> {
         let (lc, rc) = (self.local_change(node), self.remote_change(node));
         let (b, l, r) = (i.base.get(node), self.local_state(node), i.remote.get(node));
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
+            // Gone from what this device syncs; what must stay here was detached (§10).
+            _ if self.masks.masked.contains(&node) => (None, Origin::Base),
             (Change::Absent | Change::Unchanged, Change::Absent | Change::Unchanged) => {
                 (r.or(l.as_ref()).or(b).cloned(), Origin::Base)
             }
@@ -525,6 +547,13 @@ impl<'a> Reconciler<'a> {
                 };
                 self.merge_both(node, l, r, lc, rc)
             }
+        };
+        // A masked live child keeps its folder (§10): never delete what this device can't see.
+        let (target, origin) = match (target, r) {
+            (None, Some(r)) if self.masks.keep_alive.contains(&node) => {
+                (Some(r.clone()), Origin::Base)
+            }
+            (target, _) => (target, origin),
         };
         self.scope.insert(node);
         self.origin.insert(node, origin);
@@ -606,8 +635,12 @@ impl<'a> Reconciler<'a> {
         self.origin.entry(node).or_insert(Origin::Base);
     }
 
-    /// The best known state of a node that the merge removed or never saw.
+    /// The best known state of a node that the merge removed or never saw. A masked node has
+    /// none: it can't come back here under its id.
     fn known_state(&self, node: NodeId) -> Option<NodeState> {
+        if self.masks.masked.contains(&node) {
+            return None;
+        }
         let i = self.input;
         i.remote
             .get(node)
@@ -771,6 +804,7 @@ impl<'a> Reconciler<'a> {
         let mut content = Vec::new();
         let mut deletes = Vec::new(); // (depth, op)
         let mut settles = Vec::new();
+        let mut forgets = Vec::new(); // (depth, node)
 
         let scope: Vec<NodeId> = self.scope.iter().copied().collect();
         let fork_copies: HashSet<NodeId> = self.forks.values().copied().collect();
@@ -923,7 +957,9 @@ impl<'a> Reconciler<'a> {
                     (Some(_), None) | (None, Some(_)) => true,
                     (None, None) => false,
                 };
-                if needs_settle {
+                if needs_settle && target.is_none() && self.masks.masked.contains(&node) {
+                    forgets.push((depth(&i.base), node));
+                } else if needs_settle {
                     settles.push(Op::Settle { node });
                 } else if i.dirty.contains(&node) {
                     self.plan.clean.push(node);
@@ -931,6 +967,14 @@ impl<'a> Reconciler<'a> {
             }
         }
 
+        // A base is forgotten only with all of its base children, so the base stays a tree;
+        // children first. The rest waits for a later plan.
+        let forgettable: HashSet<NodeId> = forgets.iter().map(|(_, n)| *n).collect();
+        for (d, node) in forgets {
+            if i.base.subtree(node).iter().all(|n| forgettable.contains(n)) {
+                deletes.push((d, Op::Forget { node }));
+            }
+        }
         // Parents before children for creates; children before parents for deletes; only the
         // topmost local trash of a subtree is needed.
         creates.sort_by_key(|(d, op)| (*d, op.node()));
@@ -951,6 +995,12 @@ impl<'a> Reconciler<'a> {
             })
             .collect();
 
+        self.plan.ops.extend(
+            self.masks
+                .detached
+                .iter()
+                .map(|(&node, &new_node)| Op::LocalDetach { node, new_node }),
+        );
         self.plan.ops.extend(forks);
         self.plan.ops.extend(creates.into_iter().map(|(_, op)| op));
         self.plan.ops.extend(moves);

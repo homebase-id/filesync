@@ -455,6 +455,8 @@ impl<'a> Executor<'a> {
                 expected,
             } => self.delete(*node, *file_id, *expected),
             Op::Settle { .. } => Ok(Outcome::Done),
+            Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
+            Op::Forget { node } => self.forget(*node),
         };
         result.unwrap_or_else(|o| o)
     }
@@ -968,6 +970,44 @@ impl<'a> Executor<'a> {
             }
             Ok(())
         })
+    }
+
+    /// Makes the local item of `node` the new node `new_node`, in place (§10). Everything
+    /// below it is planned again: it sits in a new folder now.
+    fn detach(&mut self, node: NodeId, new_node: NodeId) -> Step {
+        let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
+            return Ok(if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
+                Outcome::Settled // an earlier try did it
+            } else {
+                Outcome::Skip("gone locally".into())
+            });
+        };
+        if self.db.read(|s| s.get_parked(node))?.is_some() {
+            return Ok(Outcome::Skip(
+                "parked; the next plan sees it back in place".into(),
+            ));
+        }
+        self.finish(&[], |s| {
+            let below = s.local_subtree(&row.path)?;
+            s.rekey_local(node, new_node)?;
+            s.mark_dirty(node)?;
+            s.mark_dirty(new_node)?;
+            below
+                .iter()
+                .filter(|r| r.node != node)
+                .try_for_each(|r| s.mark_dirty(r.node))
+        })
+    }
+
+    /// Drops the base of a node this device no longer syncs, once nothing of it is here.
+    fn forget(&mut self, node: NodeId) -> Step {
+        if self.db.read(|s| s.local_by_node(node))?.is_some() {
+            return Ok(Outcome::Skip("still here".into()));
+        }
+        if !self.db.read(|s| s.base_children(node))?.is_empty() {
+            return Ok(Outcome::Retry("its children first".into()));
+        }
+        self.finish(&[], |s| s.delete_base(node).map(drop))
     }
 
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.

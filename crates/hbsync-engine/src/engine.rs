@@ -226,6 +226,7 @@ impl Engine {
             synced_files: synced_files as usize,
             allow_mass_delete: self.cfg.allow_mass_delete,
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
+            filter: std::sync::Arc::clone(&self.scan_opts.filter),
         };
         // The dirty set is planned page by page in node id order and swept round after
         // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
@@ -277,7 +278,9 @@ impl Engine {
         report: &mut SyncReport,
     ) -> Result<Vec<Op>, EngineError> {
         let os = self.cfg.exec.os;
-        let input = self.db.read(|s| view::build_input(s, dirty, os))?;
+        let input = self
+            .db
+            .read(|s| view::build_input(s, dirty, os, &self.scan_opts.filter))?;
         let plan = reconcile(&input, opts);
         self.db
             .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;

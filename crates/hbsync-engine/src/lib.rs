@@ -5,6 +5,7 @@ pub mod adopt;
 pub mod engine;
 pub mod exec;
 pub mod feed;
+pub mod mask;
 pub mod reconcile;
 pub mod transfer;
 pub mod tree;

@@ -604,6 +604,34 @@ impl Sim {
                 }
             },
             Op::Settle { .. } => Done,
+            Op::LocalDetach { node, new_node } => {
+                let client = &mut self.clients[c];
+                if !client.local.contains(node) {
+                    return if client.local.contains(new_node) {
+                        Done
+                    } else {
+                        Skip
+                    };
+                }
+                if client.parked.contains_key(&node) {
+                    return Skip;
+                }
+                rekey(&mut client.local, node, new_node);
+                rekey(&mut client.planned_local, node, new_node);
+                Done
+            }
+            Op::Forget { node } => {
+                let client = &mut self.clients[c];
+                if client.local.contains(node) {
+                    return Skip;
+                }
+                if client.base.children(node).next().is_some() {
+                    return Retry;
+                }
+                client.base.remove(node);
+                client.extra.remove(&node);
+                Done
+            }
         }
     }
 
@@ -766,6 +794,20 @@ fn park_occupant(client: &mut Client, parent: NodeId, name: &str, except: Option
     client.local.insert(occupant, parked.clone());
     client.planned_local.insert(occupant, parked);
     true
+}
+
+/// Gives the item `node` in `tree` the id `new`, children included.
+fn rekey(tree: &mut Tree, node: NodeId, new: NodeId) {
+    let kids: Vec<NodeId> = tree.children(node).collect();
+    if let Some(state) = tree.remove(node) {
+        tree.insert(new, state);
+    }
+    for kid in kids {
+        if let Some(mut state) = tree.get(kid).cloned() {
+            state.parent = new;
+            tree.insert(kid, state);
+        }
+    }
 }
 
 /// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
