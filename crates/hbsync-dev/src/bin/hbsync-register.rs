@@ -9,13 +9,8 @@
 //! and its drive), keeps the credentials in `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json`
 //! (mode 0600), and is safe to run again: a saved registration is reused.
 
-use std::process::Command;
-use std::time::Duration;
-
-use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::{Client, Credentials, app};
-use hbsync_remote::Remote;
-use serde_json::{Value, json};
+use hbsync_app::setup;
+use hbsync_homebase::Credentials;
 
 fn main() {
     if let Err(e) = run() {
@@ -43,71 +38,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let device = hbsync_platform::host::device_name();
-            let pending = hbsync_homebase::begin(&identity, &format!("Filesync on {device}"))?;
             println!("Opening the browser to authorize Homebase Filesync on {identity}...");
-            println!("If it doesn't open, visit:\n{}\n", pending.authorize_url);
-            open_browser(browser.as_deref(), &pending.authorize_url);
-            let creds = pending.finish(Duration::from_secs(1800))?;
+            let creds = setup::authorize(&identity, &device, browser.as_deref(), |url| {
+                println!("If it doesn't open, visit:\n{url}\n");
+            })?;
             creds.save(&path)?;
             println!("Authorized. Credentials saved to {}", path.display());
             creds
         }
     };
-    // The drive, by its slugs (how the client addresses it from now on).
-    let remote = HomebaseRemote::connect(Client::new(&creds)?)?;
-    let drive = remote.drive();
+    let prepared = setup::prepare(&mut creds)?;
+    let drive = prepared.remote.drive();
     println!(
         "Sync drive: alias {}, type {}",
         drive.alias.simple(),
         drive.drive_type.simple()
     );
-
-    // The app's circle, once.
-    if creds.circle_id.is_none() {
-        let id: Value = remote.client().post(
-            "/api/v2/connections/circles/create",
-            &json!({
-                "name": app::CIRCLE_NAME,
-                "description": app::CIRCLE_DESCRIPTION,
-                "emoji": app::CIRCLE_EMOJI,
-                "driveGrants": [{
-                    "permissionedDrive": {
-                        "drive": {
-                            "alias": drive.alias.simple().to_string(),
-                            "type": drive.drive_type.simple().to_string(),
-                        },
-                        "permission": app::CIRCLE_DRIVE_PERMISSION,
-                    }
-                }],
-                "permissions": { "keys": [] },
-            }),
-        )?;
-        let id: uuid::Uuid = serde_json::from_value(id)?;
-        creds.circle_id = Some(id);
-        creds.save(&path)?;
-        println!("Created the circle '{}' ({id})", app::CIRCLE_NAME);
-    } else {
-        println!("Circle already created: {:?}", creds.circle_id);
+    match prepared.circle_created {
+        Some(id) => {
+            creds.save(&path)?;
+            println!(
+                "Created the circle '{}' ({id})",
+                hbsync_homebase::app::CIRCLE_NAME
+            );
+        }
+        None => println!("Circle already created: {:?}", creds.circle_id),
     }
-
-    // Read access: one page of the change feed.
-    let page = remote.changes(None, 10)?;
     println!(
         "The sync drive's feed works: {} change(s) on the first page.",
-        page.entries.len()
+        prepared.feed_entries
     );
     Ok(())
-}
-
-fn open_browser(command: Option<&str>, url: &str) {
-    let opener = command.unwrap_or(if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(windows) {
-        "explorer"
-    } else {
-        "xdg-open"
-    });
-    if let Err(e) = Command::new(opener).arg(url).spawn() {
-        eprintln!("couldn't start {opener}: {e}");
-    }
 }

@@ -12,8 +12,11 @@
 //! kind afterwards (verified in odin-js `useApp.ts` / `DriveProvider.ts`). Until then the
 //! client sends hashes on every upload anyway, and the drive is only recognised by its type.
 
-use serde_json::json;
+use serde_json::{Value, json};
 use uuid::{Uuid, uuid};
+
+use crate::drive::HomebaseRemote;
+use crate::{Credentials, HomebaseError};
 
 /// The app's id on every identity. Never change it: it is how an identity recognises the app.
 pub const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
@@ -79,6 +82,40 @@ pub fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::
         "cd": "[]",
         "return": return_url,
     })
+}
+
+/// Creates the app's circle on the identity unless `creds` already names one, with Read on the
+/// sync drive. Returns the new circle's id (the caller saves `creds`), or `None` when there
+/// was one already.
+pub fn ensure_circle(
+    remote: &HomebaseRemote,
+    creds: &mut Credentials,
+) -> Result<Option<Uuid>, HomebaseError> {
+    if creds.circle_id.is_some() {
+        return Ok(None);
+    }
+    let drive = remote.drive();
+    let id: Value = remote.client().post(
+        "/api/v2/connections/circles/create",
+        &json!({
+            "name": CIRCLE_NAME,
+            "description": CIRCLE_DESCRIPTION,
+            "emoji": CIRCLE_EMOJI,
+            "driveGrants": [{
+                "permissionedDrive": {
+                    "drive": {
+                        "alias": drive.alias.simple().to_string(),
+                        "type": drive.drive_type.simple().to_string(),
+                    },
+                    "permission": CIRCLE_DRIVE_PERMISSION,
+                }
+            }],
+            "permissions": { "keys": [] },
+        }),
+    )?;
+    let id: Uuid = serde_json::from_value(id)?;
+    creds.circle_id = Some(id);
+    Ok(Some(id))
 }
 
 #[cfg(test)]
