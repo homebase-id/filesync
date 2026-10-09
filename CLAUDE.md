@@ -11,7 +11,10 @@ sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebas
 WebSocket; two folders converge through a live identity. Facts and server bugs:
 `docs/spec/homebase-api-notes.md`. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
-syntax, picked up within a minute of an edit); an ignored item is kept on its device only. Dev tools (`hbsync-dev`), credentials in
+syntax, picked up within a minute of an edit); an ignored item is kept on its device only. The
+product runs as a per-user daemon (`hbsyncd`) set up and controlled with `hbsync`
+(`docs/spec/daemon.md`): `cargo run -p hbsync --bin hbsync -- setup <identity>`; `HBSYNC_HOME`
+gives a private instance. Dev tools (`hbsync-dev`), credentials in
 `~/.config/hbsync/dev/<identity>.json`:
 - `cargo run -p hbsync-dev --bin hbsync-register -- <identity> [--browser firefox]`
 - `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]
@@ -29,6 +32,7 @@ Read these first:
 - `docs/roadmap.md`: the layered, step-by-step build plan.
 - `docs/spec/sync-semantics.md`: what the reconciler and executor must do (the contract).
 - `docs/spec/node-schema-v1.md`: how a node maps onto a Homebase file.
+- `docs/spec/daemon.md`: the daemon, its files, config, credentials, control socket, autostart.
 
 Ground rules:
 - Never lose data. The reconciler is a pure function; all OS and network work sits behind traits.
@@ -51,6 +55,7 @@ MILESTONE_SEEDS=3000 cargo test --release -p hbsync-engine --test milestone rand
 # Against a live identity registered with hbsync-register (the local dev host is frodo):
 HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-dev --test live -- --ignored
 HBSYNC_LIVE=frodo.dotyou.cloud cargo test --release -p hbsync-dev --test live_e2e -- --ignored
+HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync --test live_daemon -- --ignored
 ```
 
 Every `Remote` must pass `hbsync_remote::contract` (the fake in CI, Homebase live).

@@ -3,7 +3,9 @@
 Progress (2026-10-09): Layers 0–4 are built against the fake remote; Layer 5's adapter syncs
 two folders through a live identity (frodo), including the WebSocket wake-up. Open in Layer 5:
 batch deletes, files of 2 GiB and over (#1893), app sign-in by slug (#1902), hash-less nodes
-from other writers, encrypted drives, and the interop work. Layer 6 has its filters.
+from other writers, encrypted drives, and the interop work. Layer 6 has its filters, and the
+daemon with its config, keychain, control socket, CLI and autostart
+([spec/daemon.md](spec/daemon.md)).
 Open items in those layers:
 - catch-up at background I/O and CPU priority (Layer 2) is not implemented yet;
 - the performance budget isn't measured in CI yet (no 10^6-file benchmark job);
@@ -117,9 +119,15 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Interop**: payload hashes and the node schema in odin-js and chat-kmp, checked against the golden vectors, so web and mobile can browse and edit the same drive
 
 ## Layer 6: Product shell
-- **Daemon host**: Windows service or agent, launchd, systemd user unit; single instance; sleep/resume and network changes
-- **IPC control API + CLI**
-- **Config + OS keychain**
+- **Daemon host** (done 2026-10-09, [spec/daemon.md](spec/daemon.md)): a per-user daemon,
+  started at logon by a launchd agent, a systemd user unit or the Windows `Run` key; single
+  instance; sleep/resume (a wall-clock gap); network changes only through reconnect backoff
+  and the poll so far
+- **IPC control API + CLI** (done 2026-10-09): a local socket / named pipe only the user can
+  open; `hbsync setup`, `status`, `sync`, `pause`, `resume`, `confirm-deletes`, `start`,
+  `stop`, `autostart`, `logout`, `unlink`, `log`
+- **Config + OS keychain** (done 2026-10-09): `config.toml`; credentials in Keychain,
+  Credential Manager or the Secret Service, a user-only file when there is none
 - **Filters** (done 2026-10-09, sync semantics §10): built-in junk, per-device ignore rules in
   `.hbsync/ignore`, remote nodes masked per device, local-only semantics for ignored items
 - **Observability**: structured logs, per-item status, diagnostics bundle
