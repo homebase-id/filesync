@@ -58,10 +58,13 @@ impl StateDb {
         // Start-up runs the local catch-up and the feed on two connections; a long scan
         // transaction must not make the other writer give up.
         conn.busy_timeout(std::time::Duration::from_secs(120))?;
-        // WAL keeps readers off the writer's back; FULL fsyncs each commit so a committed base
-        // update survives power loss.
+        // WAL keeps readers off the writer's back. NORMAL syncs the WAL at checkpoints, not at
+        // every commit: a commit survives an app crash at once, and a power loss can only undo
+        // the last few, never corrupt the file. That is safe here because every step after a
+        // disk or remote change is redone by the next scan and plan; the records that must be
+        // on disk before the change they describe use `write_durable`.
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.create_collation("hbpath", hbsync_platform::path_cmp)?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
@@ -88,6 +91,16 @@ impl StateDb {
         let out = f(&Store::new(&tx))?;
         tx.commit()?;
         Ok(out)
+    }
+
+    /// [`StateDb::write`], with the commit on disk before this returns, even across a power
+    /// loss. For write-ahead records: ones that must exist before the disk change they
+    /// describe (forks, parked items).
+    pub fn write_durable<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
+        self.conn.pragma_update(None, "synchronous", "FULL")?;
+        let out = self.write(f);
+        self.conn.pragma_update(None, "synchronous", "NORMAL")?;
+        out
     }
 
     /// The schema version in use.

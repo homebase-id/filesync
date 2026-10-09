@@ -99,7 +99,31 @@ pub struct Executor<'a> {
     queue: VecDeque<(Op, u8)>,
     report: ExecReport,
     urgent: HashSet<NodeId>,
+    /// Bookkeeping after finished operations, written in batches (see [`Executor::defer`]).
+    after: Vec<After>,
+    after_nodes: HashSet<NodeId>,
 }
+
+/// DB work that follows an operation without being part of it.
+#[derive(Debug, Clone, Copy)]
+enum After {
+    /// Record in the base what both sides now agree on; `same_bytes`: a transfer just made
+    /// the content equal.
+    Settle { node: NodeId, same_bytes: bool },
+    /// The node needs another plan.
+    Dirty(NodeId),
+}
+
+impl After {
+    fn node(self) -> NodeId {
+        match self {
+            After::Settle { node, .. } | After::Dirty(node) => node,
+        }
+    }
+}
+
+/// Deferred bookkeeping written per transaction.
+const AFTER_BATCH: usize = 1000;
 
 /// A transfer whose guards passed, waiting for a worker.
 struct Prepared {
@@ -156,6 +180,8 @@ impl<'a> Executor<'a> {
             queue: VecDeque::new(),
             report: ExecReport::default(),
             urgent: HashSet::new(),
+            after: Vec::new(),
+            after_nodes: HashSet::new(),
         }
     }
 
@@ -177,6 +203,18 @@ impl<'a> Executor<'a> {
                 self.flush(&mut batch)?;
                 continue;
             };
+            // An operation reads its node's rows as they are after everything before it.
+            let fork_copy = match &op {
+                Op::LocalFork { new_node, .. } => Some(*new_node),
+                _ => None,
+            };
+            if [Some(op.node()), fork_copy]
+                .iter()
+                .flatten()
+                .any(|n| self.after_nodes.contains(n))
+            {
+                self.write_after()?;
+            }
             if let Err(wait) = self.ready(&op) {
                 self.handle(op, attempts, wait)?;
                 continue;
@@ -197,33 +235,38 @@ impl<'a> Executor<'a> {
             if !batch.is_empty() {
                 self.flush(&mut batch)?;
             }
-            if let Op::Settle { node } = op {
-                self.settle_run(node)?;
-                continue;
-            }
             let outcome = self.execute(&op);
             self.handle(op, attempts, outcome)?;
         }
+        self.write_after()?;
         Ok(self.report)
     }
 
-    /// Settles `first` and the run of `Settle` ops after it (the plan puts them last) in
-    /// one transaction: they need no disk or network work, and a commit per node would cost an
-    /// fsync each.
-    fn settle_run(&mut self, first: NodeId) -> Result<(), StateError> {
-        const CHUNK: usize = 1000;
-        let mut nodes = vec![first];
-        while nodes.len() < CHUNK
-            && let Some((Op::Settle { node }, _)) = self.queue.front()
-        {
-            nodes.push(*node);
-            self.queue.pop_front();
+    /// Queues bookkeeping that follows an operation. It is written in batches (a commit each
+    /// would cost a disk sync), before any later operation on the same node, and at the end of
+    /// the run. A crash loses only bookkeeping the next plan redoes.
+    fn defer(&mut self, after: After) -> Result<(), StateError> {
+        self.after_nodes.insert(after.node());
+        self.after.push(after);
+        if self.after.len() >= AFTER_BATCH {
+            self.write_after()?;
+        }
+        Ok(())
+    }
+
+    fn write_after(&mut self) -> Result<(), StateError> {
+        if self.after.is_empty() {
+            return Ok(());
         }
         let os = self.cfg.os;
-        self.db
-            .write(|s| nodes.iter().try_for_each(|n| settle(s, *n, os, false)))?;
-        self.report.done += nodes.len();
-        Ok(())
+        let after = std::mem::take(&mut self.after);
+        self.after_nodes.clear();
+        self.db.write(|s| {
+            after.iter().try_for_each(|a| match *a {
+                After::Settle { node, same_bytes } => settle(s, node, os, same_bytes),
+                After::Dirty(node) => s.mark_dirty(node),
+            })
+        })
     }
 
     /// The server-side order guards ([`Op::requires`]), checked against the mirror.
@@ -249,17 +292,22 @@ impl<'a> Executor<'a> {
             Outcome::Done => {
                 self.report.done += 1;
                 if let Op::LocalFork { new_node, .. } = op {
-                    self.settle(new_node, false)?;
+                    self.defer(After::Settle {
+                        node: new_node,
+                        same_bytes: false,
+                    })?;
                 }
-                self.settle(op.node(), is_transfer(&op))?;
+                self.defer(After::Settle {
+                    node: op.node(),
+                    same_bytes: is_transfer(&op),
+                })?;
             }
             Outcome::Retry(_) if attempts + 1 < self.cfg.attempts => {
                 self.queue.push_back((op, attempts + 1));
             }
             Outcome::Retry(why) => self.report.failed.push((op, why)),
             Outcome::Skip(why) => {
-                let node = op.node();
-                self.db.write(|s| s.mark_dirty(node))?;
+                self.defer(After::Dirty(op.node()))?;
                 self.report.skipped.push((op, why));
             }
         }
@@ -437,13 +485,19 @@ impl<'a> Executor<'a> {
         let Ok(parked) = parent.join(&parked_name(occupant.node)) else {
             return Ok(false);
         };
+        // Write-ahead: after a crash between the rename and the row update, the scan finds the
+        // item under its temporary name, and this record maps it back to its real place (a
+        // record counts only while the item carries that name), so the temporary name can't
+        // reach the remote as a rename.
+        self.db
+            .write_durable(|s| s.put_parked(occupant.node, &occupant.path))?;
         if ops::rename_noreplace(&self.abs(&occupant.path), &self.abs(&parked)).is_err() {
+            self.db.write(|s| s.delete_parked(occupant.node))?;
             return Ok(false);
         }
         let refreshed = self.renamed(&occupant, &parked);
         self.db.write(|s| {
             s.move_local_subtree(&occupant.path, &parked)?;
-            s.put_parked(occupant.node, &occupant.path)?;
             refreshed.as_ref().map_or(Ok(()), |r| s.put_local(r))
         })?;
         Ok(true)
@@ -474,7 +528,7 @@ impl<'a> Executor<'a> {
         // Write-ahead: if we crash after the rename, recovery completes the fork instead of a
         // scan mistaking it for the user renaming the original.
         self.db
-            .write(|s| s.put_fork(node, new_node, &row.path, &target))?;
+            .write_durable(|s| s.put_fork(node, new_node, &row.path, &target))?;
         if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&target)) {
             self.db.write(|s| s.delete_fork(node))?;
             return Ok(io_outcome(e));
@@ -949,19 +1003,11 @@ impl<'a> Executor<'a> {
         })?;
         Ok(Outcome::Done)
     }
-
-    // ---- settling ----
-
-    /// Records in the base whatever both sides now agree on (sync-semantics: the base only
-    /// takes a value when both sides hold it). `content_hint`: the operation just made the
-    /// local and remote bytes equal (a transfer), even if their hashes use other algorithms.
-    fn settle(&mut self, node: NodeId, content_hint: bool) -> Result<(), StateError> {
-        let os = self.cfg.os;
-        self.db.write(|s| settle(s, node, os, content_hint))
-    }
 }
 
-/// See [`Executor::settle`].
+/// Records in the base whatever both sides now agree on (sync-semantics: the base only takes
+/// a value when both sides hold it). `content_hint`: the operation just made the local and
+/// remote bytes equal (a transfer), even if their hashes use other algorithms.
 pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result<(), StateError> {
     let local = view::local_node(s, node, os)?;
     let mirror = s.get_mirror(node)?;

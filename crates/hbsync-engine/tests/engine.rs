@@ -201,6 +201,36 @@ fn parked_item_from_a_crash_is_put_back() -> R {
 }
 
 #[test]
+fn crash_between_parking_rename_and_row_update_leaks_no_temporary_name() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "keep me")?;
+    a.sync()?;
+    let from = hbsync_platform::RelPath::new("doc.txt")?;
+    let node = a
+        .engine
+        .db()
+        .read(|s| s.get_local(&from))?
+        .ok_or("row")?
+        .node;
+    // The executor writes the record first, then renames; the crash comes before the row
+    // follows the rename. The scan then finds the file under its temporary name.
+    a.engine.db().write(|s| s.put_parked(node, &from))?;
+    fs::rename(
+        a.root.join("doc.txt"),
+        a.root.join(format!(".hbsync-move-{}", node.0.simple())),
+    )?;
+    a.sync()?;
+    assert_eq!(a.read("doc.txt")?, "keep me");
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["doc.txt"],
+        "the temporary name never reached the remote"
+    );
+    Ok(())
+}
+
+#[test]
 fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
