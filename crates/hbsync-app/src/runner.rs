@@ -54,7 +54,16 @@ pub enum RunnerError {
     Io(#[from] std::io::Error),
     #[error("the sync thread panicked")]
     Panicked,
+    #[error("{folder} is synced with {theirs}, not {ours}")]
+    OtherIdentity {
+        folder: PathBuf,
+        theirs: String,
+        ours: String,
+    },
 }
+
+/// The state DB key of the identity a folder syncs with.
+pub const IDENTITY_KEY: &str = "account.identity";
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
@@ -164,6 +173,27 @@ pub struct Status {
     pub credentials_warning: Option<String>,
 }
 
+impl Status {
+    /// Starting to sync `folder` with `identity`.
+    pub fn new(identity: &str, folder: &Path) -> Status {
+        Status {
+            state: State::Starting,
+            identity: identity.to_owned(),
+            folder: folder.to_path_buf(),
+            error: None,
+            retry_at: None,
+            last_sync: None,
+            pending: 0,
+            held_deletes: None,
+            recent: Vec::new(),
+            watcher_error: None,
+            hints: Hints::Off,
+            rules: 0,
+            credentials_warning: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LastSync {
     /// When it ended (Unix seconds).
@@ -222,7 +252,12 @@ impl Handle {
         if matches!(control, Control::Pause | Control::Stop) {
             self.stop.store(true, Ordering::Relaxed);
         }
-        self.control.send(control).is_ok()
+        let sent = self.control.send(control.clone()).is_ok();
+        // Seen at once by whoever asks next, not only once the runner gets to it.
+        if sent && control == Control::Pause {
+            lock(&self.status).state = State::Paused;
+        }
+        sent
     }
 
     pub fn status(&self) -> Status {
@@ -268,25 +303,12 @@ impl Runner {
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused));
-        let status = Arc::new(Mutex::new(Status {
-            state: State::Starting,
-            identity: cfg.identity.clone(),
-            folder: cfg.folder.clone(),
-            error: None,
-            retry_at: None,
-            last_sync: None,
-            pending: 0,
-            held_deletes: None,
-            recent: Vec::new(),
-            watcher_error: None,
-            hints: if hints.notifier.is_some() {
-                Hints::Connecting
-            } else {
-                Hints::Off
-            },
-            rules: 0,
-            credentials_warning: cfg.credentials_warning.clone(),
-        }));
+        let mut status = Status::new(&cfg.identity, &cfg.folder);
+        if hints.notifier.is_some() {
+            status.hints = Hints::Connecting;
+        }
+        status.credentials_warning = cfg.credentials_warning.clone();
+        let status = Arc::new(Mutex::new(status));
         let handle = Handle {
             control: tx,
             stop: Arc::clone(&stop),
@@ -332,11 +354,20 @@ impl Runner {
             tweak(&mut cfg);
         }
         let rules = cfg.exec.filter.rule_count();
-        let mut engine = Engine::new(
-            StateDb::open(&state_db_path(root))?,
-            Box::new(Arc::clone(&self.remote)),
-            cfg,
-        );
+        let mut db = StateDb::open(&state_db_path(root))?;
+        // A folder belongs to one identity: never mix two drives through one folder.
+        let ours = &self.cfg.identity;
+        db.write(|s| match s.get_kv(IDENTITY_KEY)? {
+            Some(theirs) if theirs != *ours => Ok(Err(theirs)),
+            Some(_) => Ok(Ok(())),
+            None => s.set_kv(IDENTITY_KEY, ours).map(Ok),
+        })?
+        .map_err(|theirs| RunnerError::OtherIdentity {
+            folder: root.clone(),
+            theirs,
+            ours: ours.clone(),
+        })?;
+        let mut engine = Engine::new(db, Box::new(Arc::clone(&self.remote)), cfg);
         engine.set_stop(Arc::clone(&self.stop));
         let observer = LocalObserver::start(root, engine.scan_options().clone());
         if let Some(why) = &observer.watcher_error {

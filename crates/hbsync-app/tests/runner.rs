@@ -116,7 +116,7 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     assert!(b.status().last_sync.is_some());
 
     b.handle.send(Control::Pause);
-    wait_until("b is paused", || b.status().state == State::Paused)?;
+    assert_eq!(b.status().state, State::Paused, "shown at once");
     a.write("two.txt", "2")?;
     wait_until("two.txt is up", || on_server(&server, "two.txt"))?;
     std::thread::sleep(Duration::from_secs(1));
@@ -274,4 +274,30 @@ fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
             other => return other,
         }
     }
+}
+
+#[test]
+fn a_folder_synced_with_another_identity_is_refused() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    std::fs::create_dir_all(root.join(".hbsync"))?;
+    hbsync_state::StateDb::open(&hbsync_local::state_db_path(&root))?
+        .write(|s| s.set_kv(hbsync_app::runner::IDENTITY_KEY, "other.example"))?;
+    std::fs::write(root.join("theirs.txt"), "not for test.example")?;
+    let (handle, thread) = spawn_at(&server, &root)?;
+    let err = thread
+        .join()
+        .map_err(|_| "panicked")?
+        .expect_err("the runner refused the folder");
+    assert!(matches!(err, RunnerError::OtherIdentity { .. }), "{err}");
+    assert_eq!(handle.status().state, State::Stopped);
+    assert!(
+        handle
+            .status()
+            .error
+            .is_some_and(|e| e.contains("other.example"))
+    );
+    assert!(live_names(&server).is_empty(), "nothing was uploaded");
+    Ok(())
 }

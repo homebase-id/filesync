@@ -75,7 +75,7 @@ pub enum IpcError {
 pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
     let name = endpoint(paths, false).map_err(not_running)?;
     let stream = Stream::connect(name).map_err(not_running)?;
-    stream.set_recv_timeout(Some(PATIENCE))?;
+    patience(&stream)?;
     let mut stream = BufReader::new(stream);
     let mut line = serde_json::to_string(request).map_err(|e| IpcError::Protocol(e.to_string()))?;
     line.push('\n');
@@ -131,7 +131,7 @@ pub fn serve(listener: Listener, answer: impl Fn(Request) -> Reply + Send + Sync
 }
 
 fn handle(conn: Stream, answer: &(dyn Fn(Request) -> Reply + Sync)) -> Result<(), IpcError> {
-    conn.set_recv_timeout(Some(PATIENCE))?;
+    patience(&conn)?;
     let mut conn = BufReader::new(conn);
     let Some(line) = read_line(&mut conn)? else {
         return Ok(());
@@ -150,6 +150,15 @@ fn handle(conn: Stream, answer: &(dyn Fn(Request) -> Reply + Sync)) -> Result<()
     Ok(())
 }
 
+/// Waits at most [`PATIENCE`] for the other side, where the OS can time out reads (named pipes
+/// can't).
+fn patience(stream: &Stream) -> io::Result<()> {
+    match stream.set_recv_timeout(Some(PATIENCE)) {
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => Ok(()),
+        other => other,
+    }
+}
+
 /// One line, without its end; `None` at the end of the stream.
 fn read_line(stream: &mut BufReader<Stream>) -> Result<Option<String>, IpcError> {
     let mut line = String::new();
@@ -164,32 +173,80 @@ fn read_line(stream: &mut BufReader<Stream>) -> Result<Option<String>, IpcError>
     Ok(Some(line))
 }
 
-/// The socket file (Unix).
+/// Socket addresses hold 104 bytes on macOS and 108 on Linux, terminator included.
+#[cfg(unix)]
+const MAX_SOCKET_PATH: usize = 100;
+
+/// The socket file (Unix): in the runtime folder or, when that path is too long for a socket
+/// address (a deep `HBSYNC_HOME`), in a private folder of the temp folder named after it.
 #[cfg(unix)]
 pub fn socket_path(paths: &Paths) -> PathBuf {
-    paths.runtime.join("hbsyncd.sock")
+    const SOCKET: &str = "hbsyncd.sock";
+    let path = paths.runtime.join(SOCKET);
+    if path.as_os_str().len() <= MAX_SOCKET_PATH {
+        return path;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    // FNV-1a: stable across builds, so an older daemon and a newer CLI agree.
+    let hash = paths
+        .runtime
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+        });
+    std::env::temp_dir()
+        .join(format!("hbsync-{hash:016x}"))
+        .join(SOCKET)
 }
 
 /// Where the daemon listens; `serving` prepares it for listening.
 #[cfg(unix)]
 fn endpoint(paths: &Paths, serving: bool) -> io::Result<Name<'static>> {
     use interprocess::local_socket::GenericFilePath;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let path = socket_path(paths);
-    // `sun_path` holds 104 bytes on macOS and 108 on Linux, terminator included.
-    if path.as_os_str().len() > 100 {
+    if path.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(io::Error::other(format!(
-            "the control socket's path is too long for the OS: {} (set HBSYNC_HOME to a \
-             shorter folder)",
+            "the control socket's path is too long for the OS: {}",
             path.display()
         )));
     }
+    let dir = path.parent().unwrap_or(&paths.runtime);
     if serving {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        // Only the runtime folder is created with its parents: the temp folder exists.
         std::fs::DirBuilder::new()
-            .recursive(true)
+            .recursive(dir == paths.runtime)
             .mode(0o700)
-            .create(&paths.runtime)?;
-        std::fs::set_permissions(&paths.runtime, std::fs::Permissions::from_mode(0o700))?;
+            .create(dir)
+            .or_else(|e| match e.kind() {
+                io::ErrorKind::AlreadyExists => Ok(()),
+                _ => Err(e),
+            })?;
+        if dir == paths.runtime {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    // A shared temp folder: the socket's folder must be this user's own and private, or
+    // someone else could listen in our place.
+    if dir != paths.runtime {
+        let meta = match std::fs::symlink_metadata(dir) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound && !serving => {
+                return Err(e);
+            }
+            other => other?,
+        };
+        // SAFETY: getuid has no preconditions and can't fail.
+        let me = unsafe { libc::getuid() };
+        if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o777 != 0o700 {
+            return Err(io::Error::other(format!(
+                "{} isn't a private folder of this user: not using it for the control socket",
+                dir.display()
+            )));
+        }
+    }
+    if serving {
         match std::fs::remove_file(&path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
@@ -228,21 +285,10 @@ mod tests {
     use crate::runner::State;
 
     fn status() -> Status {
-        Status {
-            state: State::Idle,
-            identity: "a.example".into(),
-            folder: "/home/a/Homebase".into(),
-            error: None,
-            retry_at: None,
-            last_sync: None,
-            pending: 3,
-            held_deletes: None,
-            recent: Vec::new(),
-            watcher_error: None,
-            hints: crate::runner::Hints::Off,
-            rules: 0,
-            credentials_warning: None,
-        }
+        let mut s = Status::new("a.example", std::path::Path::new("/home/a/Homebase"));
+        s.state = State::Idle;
+        s.pending = 3;
+        s
     }
 
     #[test]
@@ -287,6 +333,43 @@ mod tests {
             ask: Ask::Status,
         };
         assert!(matches!(call(&paths, &old)?, Reply::Refused(why) if why.contains("restart")));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deep_home_gets_a_short_private_socket_folder() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let deep = dir.path().join("a".repeat(60)).join("b".repeat(60));
+        let paths = Paths::under(&deep);
+        let path = socket_path(&paths);
+        assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+        assert!(path.as_os_str().len() <= MAX_SOCKET_PATH);
+        assert_eq!(path, socket_path(&paths), "the same every time");
+        assert!(matches!(
+            call(&paths, &Request::new(Ask::Status)),
+            Err(IpcError::NotRunning)
+        ));
+
+        let listener = listen(&paths)?;
+        std::thread::spawn(move || serve(listener, |_| Reply::Done));
+        let folder = path.parent().ok_or("folder")?;
+        let mode = std::fs::metadata(folder)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        assert_eq!(
+            call(&paths, &Request::new(Ask::Control(Control::SyncNow)))?,
+            Reply::Done
+        );
+
+        // Opened up by someone: neither side uses it any more.
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o777))?;
+        assert!(matches!(
+            call(&paths, &Request::new(Ask::Status)),
+            Err(IpcError::Io(_))
+        ));
+        assert!(listen(&paths).is_err());
+        std::fs::remove_dir_all(folder)?;
         Ok(())
     }
 
