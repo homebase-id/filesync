@@ -498,12 +498,8 @@ impl<'a> Executor<'a> {
             .map(|r| (&r.path, r))
             .collect();
         if top.kind == NodeKind::Folder {
-            let walk = hbsync_local::Walker::at(
-                &self.cfg.root,
-                top.path.clone(),
-                &[hbsync_local::STATE_DIR],
-                None,
-            );
+            let filter = hbsync_local::Filter::default();
+            let walk = hbsync_local::Walker::at(&self.cfg.root, top.path.clone(), &filter, None);
             for event in walk {
                 // Anything we never sync (a link, a bad name) would be trashed silently.
                 let hbsync_local::WalkEvent::Entry { path, meta } = event else {

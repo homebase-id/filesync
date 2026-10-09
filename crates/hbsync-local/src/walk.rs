@@ -12,6 +12,8 @@ use hbsync_platform::{EntryKind, LocalMeta, RelPath};
 
 use hbsync_platform::listdir::{DirItem, list_dir};
 
+use crate::filter::{Filter, Verdict};
+
 /// Something the walk found.
 #[derive(Debug)]
 pub enum WalkEvent {
@@ -33,8 +35,12 @@ pub enum SkipReason {
     NotUnicode,
     /// Not a valid name for the remote (for example more than 255 UTF-8 bytes).
     InvalidName,
-    /// Excluded by the walker options (the client's own `.hbsync` folder).
+    /// The client's own `.hbsync` folder.
     Excluded,
+    /// On the built-in junk list: disposable.
+    Junk,
+    /// Matched by the user's ignore rules: kept on this device only.
+    Ignored,
 }
 
 /// Decides whether the walk enters a folder.
@@ -43,7 +49,7 @@ pub type DescendFn<'a> = Box<dyn FnMut(&RelPath, &LocalMeta) -> bool + 'a>;
 /// A lazy depth-first walk.
 pub struct Walker<'a> {
     root: PathBuf,
-    exclude_at_root: Vec<String>,
+    filter: &'a Filter,
     stack: Vec<Frame>,
     queued: Vec<WalkEvent>,
     descend: Option<DescendFn<'a>>,
@@ -66,9 +72,9 @@ struct Frame {
 }
 
 impl<'a> Walker<'a> {
-    /// Walks everything below `root`, skipping the root-level names in `exclude_at_root`.
-    pub fn new(root: &Path, exclude_at_root: &[&str]) -> Self {
-        Self::at(root, RelPath::root(), exclude_at_root, None)
+    /// Walks everything below `root` that `filter` lets through.
+    pub fn new(root: &Path, filter: &'a Filter) -> Self {
+        Self::at(root, RelPath::root(), filter, None)
     }
 
     /// Walks below `start` (which itself is not returned). `descend` decides for each folder
@@ -76,12 +82,12 @@ impl<'a> Walker<'a> {
     pub fn at(
         root: &Path,
         start: RelPath,
-        exclude_at_root: &[&str],
+        filter: &'a Filter,
         descend: Option<DescendFn<'a>>,
     ) -> Self {
         let mut walker = Walker {
             root: root.to_path_buf(),
-            exclude_at_root: exclude_at_root.iter().map(|s| (*s).to_owned()).collect(),
+            filter,
             stack: Vec::new(),
             queued: Vec::new(),
             descend,
@@ -112,10 +118,19 @@ impl<'a> Walker<'a> {
                 reason: SkipReason::NotUnicode,
             };
         };
-        if dir.is_root() && self.exclude_at_root.iter().any(|e| e == name) {
+        let filtered = match self
+            .filter
+            .entry(dir, name, item.meta.kind == EntryKind::Dir)
+        {
+            Verdict::Sync => None,
+            Verdict::Excluded => Some(SkipReason::Excluded),
+            Verdict::Junk => Some(SkipReason::Junk),
+            Verdict::Ignored => Some(SkipReason::Ignored),
+        };
+        if let Some(reason) = filtered {
             return WalkEvent::Skipped {
                 path: rel_native(),
-                reason: SkipReason::Excluded,
+                reason,
             };
         }
         let reason = match item.meta.kind {
@@ -180,7 +195,7 @@ mod tests {
     use std::fs;
 
     fn entries(root: &Path) -> Vec<String> {
-        Walker::new(root, &[".hbsync"])
+        Walker::new(root, &Filter::default())
             .filter_map(|e| match e {
                 WalkEvent::Entry { path, .. } => Some(path.as_str().to_owned()),
                 _ => None,
@@ -226,6 +241,50 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn filtered_entries_are_skipped_and_not_entered() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let r = dir.path();
+        for d in ["app", "app/node_modules", "app/node_modules/x", "._res"] {
+            fs::create_dir(r.join(d))?;
+        }
+        for f in [
+            "app/main.js",
+            "app/.DS_Store",
+            "app/node_modules/x/y.js",
+            "._res/data",
+            "THUMBS.DB",
+            "~$report.docx",
+            "report.docx",
+        ] {
+            fs::write(r.join(f), b"x")?;
+        }
+        let filter = Filter::from_rules("node_modules/\n", false).map_err(io::Error::other)?;
+        let mut entries = Vec::new();
+        let mut skipped = Vec::new();
+        for event in Walker::new(r, &filter) {
+            match event {
+                WalkEvent::Entry { path, .. } => entries.push(path.as_str().to_owned()),
+                WalkEvent::Skipped { path, reason } => skipped.push((path, reason)),
+                WalkEvent::Unreadable { .. } => return Err(io::Error::other("unreadable")),
+            }
+        }
+        assert_eq!(entries, ["app", "app/main.js", "report.docx"]);
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        let p = |s: &str| s.split('/').collect::<PathBuf>();
+        assert_eq!(
+            skipped,
+            [
+                (p("._res"), SkipReason::Junk),
+                (p("THUMBS.DB"), SkipReason::Junk),
+                (p("app/.DS_Store"), SkipReason::Junk),
+                (p("app/node_modules"), SkipReason::Ignored),
+                (p("~$report.docx"), SkipReason::Junk),
+            ]
+        );
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinks_are_skipped_not_followed() -> io::Result<()> {
@@ -234,7 +293,7 @@ mod tests {
         fs::write(dir.path().join("real/f"), b"x")?;
         std::os::unix::fs::symlink("real", dir.path().join("link"))?;
         assert_eq!(entries(dir.path()), ["real", "real/f"]);
-        let skipped: Vec<_> = Walker::new(dir.path(), &[])
+        let skipped: Vec<_> = Walker::new(dir.path(), &Filter::default())
             .filter_map(|e| match e {
                 WalkEvent::Skipped { reason, .. } => Some(reason),
                 _ => None,
@@ -258,7 +317,7 @@ mod tests {
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))?;
             return Ok(());
         }
-        let events: Vec<_> = Walker::new(dir.path(), &[]).collect();
+        let events: Vec<_> = Walker::new(dir.path(), &Filter::default()).collect();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755))?;
         assert!(matches!(&events[0], WalkEvent::Entry { path, .. } if path.as_str() == "locked"));
         assert!(
@@ -275,7 +334,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let name = std::ffi::OsStr::from_bytes(b"bad\xff");
         fs::write(dir.path().join(name), b"x")?;
-        let events: Vec<_> = Walker::new(dir.path(), &[]).collect();
+        let events: Vec<_> = Walker::new(dir.path(), &Filter::default()).collect();
         assert!(matches!(
             events[..],
             [WalkEvent::Skipped {

@@ -12,12 +12,14 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use hbsync_fileio::{FileIoError, HashAlgorithm, hash_file};
 use hbsync_platform::{EntryKind, FileId, FsFamily, LocalMeta, RelPath};
 use hbsync_state::{LocalRow, StateDb, StateError};
 use hbsync_types::{ContentHash, NodeId, NodeKind};
 
+use crate::filter::Filter;
 use crate::walk::{SkipReason, WalkEvent, Walker};
 
 #[derive(Debug, Clone)]
@@ -25,18 +27,18 @@ pub struct ScanOptions {
     pub algorithm: HashAlgorithm,
     /// Decides whether file ids can be trusted for move detection.
     pub fs_family: FsFamily,
-    /// Root-level names the walk skips (the client's own state folder).
-    pub exclude_at_root: Vec<String>,
+    /// What is never synced (the client's own state folder, junk, ignored items).
+    pub filter: Arc<Filter>,
 }
 
 impl ScanOptions {
     /// The options for a sync root: its file system family (`Other` if it can't be told) and
-    /// the client's state folder left out.
+    /// only the built-in filter (the client's state folder and junk).
     pub fn for_root(root: &Path, algorithm: HashAlgorithm) -> Self {
         ScanOptions {
             algorithm,
             fs_family: hbsync_platform::fskind::detect(root).unwrap_or(FsFamily::Other),
-            exclude_at_root: vec![crate::STATE_DIR.to_owned()],
+            filter: Arc::default(),
         }
     }
 }
@@ -60,11 +62,10 @@ pub struct ScanReport {
 
 /// Runs a full tier-C scan of `root` and records the result in `db`.
 pub fn scan(db: &mut StateDb, root: &Path, opts: &ScanOptions) -> Result<ScanReport, StateError> {
-    let excludes: Vec<&str> = opts.exclude_at_root.iter().map(String::as_str).collect();
     let mut report = ScanReport::default();
     let diff = merge(
         db,
-        Walker::new(root, &excludes),
+        Walker::new(root, &opts.filter),
         DbRows::tree(),
         &mut report,
     )?;
@@ -85,16 +86,11 @@ pub fn rescan_dirs(
     dirs: &[RelPath],
     opts: &ScanOptions,
 ) -> Result<ScanReport, StateError> {
-    let excludes: Vec<&str> = opts.exclude_at_root.iter().map(String::as_str).collect();
     let mut targets = std::collections::BTreeSet::new();
     for dir in dirs {
-        // Never look inside excluded root folders (the client's own state, temp files, trash),
-        // whoever reported them.
-        if dir
-            .components()
-            .next()
-            .is_some_and(|first| excludes.contains(&first))
-        {
+        // Never look inside filtered folders (the client's own state, junk, ignored folders),
+        // whoever reported them. Their parent's rescan notices one that just became filtered.
+        if !opts.filter.path(dir, true).is_sync() {
             continue;
         }
         // A folder the DB doesn't know yet is new: its parent's rescan finds it and walks it in
@@ -140,7 +136,7 @@ pub fn rescan_dirs(
                 }
                 !unchanged
             };
-            let walker = Walker::at(root, dir.clone(), &excludes, Some(Box::new(descend)));
+            let walker = Walker::at(root, dir.clone(), &opts.filter, Some(Box::new(descend)));
             walker
                 .inspect(|e| {
                     if let WalkEvent::Entry { path, .. } = e

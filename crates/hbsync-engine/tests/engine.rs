@@ -686,7 +686,7 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
     let opts = hbsync_local::ScanOptions {
         algorithm: hbsync_fileio::HashAlgorithm::Blake3,
         fs_family: hbsync_platform::FsFamily::Other,
-        exclude_at_root: Vec::new(),
+        filter: Default::default(),
     };
     hbsync_local::scan(&mut db, dir.path(), &opts)?;
     hbsync_engine::feed::pull(&mut db, &FakeRemote::new(server.clone()), 500)?;

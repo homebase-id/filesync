@@ -9,6 +9,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,7 @@ use hbsync_state::{StateDb, StateError};
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::filter::Filter;
 use crate::journal::{CURSOR_KEY, CatchUp, catch_up, relpath_prefix};
 use crate::scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 
@@ -56,18 +58,19 @@ pub struct LiveWatcher {
     _watcher: RecommendedWatcher,
     rx: Receiver<notify::Result<Event>>,
     root: PathBuf,
-    exclude_at_root: Vec<String>,
+    filter: Arc<Filter>,
 }
 
 impl LiveWatcher {
-    pub fn start(root: &Path, exclude_at_root: &[String]) -> notify::Result<Self> {
+    pub fn start(root: &Path, filter: Arc<Filter>) -> notify::Result<Self> {
         let root = root.canonicalize().map_err(notify::Error::io)?;
         let (tx, rx) = channel();
-        let (filter_root, exclude) = (root.clone(), exclude_at_root.to_vec());
+        let (filter_root, filter_in_cb) = (root.clone(), Arc::clone(&filter));
         let mut watcher = notify::recommended_watcher(move |res| {
             // Only changes are queued: reads (a viewer, a backup tool, the rescan itself) and
-            // the client's own state folder would otherwise flood the channel.
-            if counts(&filter_root, &exclude, &res) {
+            // filtered items (the client's own state, junk, ignored folders) would otherwise
+            // flood the channel.
+            if counts(&filter_root, &filter_in_cb, &res) {
                 // The receiver is gone only when the watcher is being dropped.
                 let _ = tx.send(res);
             }
@@ -77,7 +80,7 @@ impl LiveWatcher {
             _watcher: watcher,
             rx,
             root,
-            exclude_at_root: exclude_at_root.to_vec(),
+            filter,
         })
     }
 
@@ -138,14 +141,14 @@ impl LiveWatcher {
 
     /// Folds `event` into `batch`; `true` if it counts.
     fn add(&self, batch: &mut WatchBatch, event: notify::Result<Event>) -> bool {
-        add_event(&self.root, &self.exclude_at_root, batch, event)
+        add_event(&self.root, &self.filter, batch, event)
     }
 }
 
 /// Whether a notification counts: a change in the tree, or a call for a full rescan. Opening
 /// or reading changes nothing, and the rescan itself opens what it lists: counting those
 /// would make every batch trigger the next. Closing after a write does count.
-fn counts(root: &Path, exclude_at_root: &[String], event: &notify::Result<Event>) -> bool {
+fn counts(root: &Path, filter: &Filter, event: &notify::Result<Event>) -> bool {
     let Ok(event) = event else {
         return true;
     };
@@ -159,25 +162,26 @@ fn counts(root: &Path, exclude_at_root: &[String], event: &notify::Result<Event>
     }
     event.paths.iter().any(|path| {
         path.strip_prefix(root)
-            .is_ok_and(|rel| !excluded(rel, exclude_at_root))
+            .is_ok_and(|rel| !excluded(rel, filter))
     })
 }
 
-/// Whether `rel` lies in a top-level folder the watcher ignores (the client's state).
-fn excluded(rel: &Path, exclude_at_root: &[String]) -> bool {
-    let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
-    first.is_some_and(|first| exclude_at_root.iter().any(|e| e.as_str() == first))
+/// Whether `rel` is filtered or lies in a filtered folder. Whether it is a folder itself is
+/// unknown (it may be gone), so a rule only for folders counts on the folders above it only.
+fn excluded(rel: &Path, filter: &Filter) -> bool {
+    let names: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
+    names.is_some_and(|names| !filter.names(names, false).is_sync())
 }
 
 /// Folds one notification into a batch: every changed path touches its parent folder.
 /// Returns whether the notification counts (see [`counts`]).
 fn add_event(
     root: &Path,
-    exclude_at_root: &[String],
+    filter: &Filter,
     batch: &mut WatchBatch,
     event: notify::Result<Event>,
 ) -> bool {
-    if !counts(root, exclude_at_root, &event) {
+    if !counts(root, filter, &event) {
         return false;
     }
     let Ok(event) = event else {
@@ -189,7 +193,7 @@ fn add_event(
         let Ok(rel) = path.strip_prefix(root) else {
             continue;
         };
-        if excluded(rel, exclude_at_root) {
+        if excluded(rel, filter) {
             continue;
         }
         // The parent of the changed entry; a name that isn't valid ends the path early, which
@@ -217,7 +221,7 @@ pub struct LocalObserver {
 impl LocalObserver {
     /// Starts watching. Call [`LocalObserver::catch_up`] next.
     pub fn start(root: &Path, opts: ScanOptions) -> Self {
-        let (watcher, watcher_error) = match LiveWatcher::start(root, &opts.exclude_at_root) {
+        let (watcher, watcher_error) = match LiveWatcher::start(root, Arc::clone(&opts.filter)) {
             Ok(w) => (Some(w), None),
             // Typically inotify's watch limit on very large trees.
             Err(e) => (None, Some(e.to_string())),
@@ -300,7 +304,7 @@ mod tests {
     fn events_touch_parent_folders() {
         let root = Path::new("/sync");
         let mut batch = WatchBatch::default();
-        let excl = vec![".hbsync".to_owned()];
+        let excl = Filter::from_rules("node_modules/\n", false).expect("valid rules");
         let ev = |kind, paths: &[&str]| {
             Ok(Event {
                 kind,
@@ -329,10 +333,13 @@ mod tests {
             &mut batch,
             ev(EventKind::Create(CreateKind::File), &["/sync/top.txt"]),
         );
-        // The client's own state, paths elsewhere, and reads (such as the rescan's own) touch
-        // nothing and don't count; a finished write does.
+        // The client's own state, junk, ignored folders, paths elsewhere, and reads (such as
+        // the rescan's own) touch nothing and don't count; a finished write does.
         for ignored in [
             ev(EventKind::Any, &["/sync/.hbsync/state.db"]),
+            ev(EventKind::Any, &["/sync/a/.DS_Store"]),
+            ev(EventKind::Any, &["/sync/a/.notes.txt.swp"]),
+            ev(EventKind::Any, &["/sync/app/node_modules/x/y.js"]),
             ev(EventKind::Any, &["/elsewhere/z"]),
             ev(
                 EventKind::Access(AccessKind::Open(AccessMode::Read)),
@@ -369,12 +376,17 @@ mod tests {
     fn overflow_and_errors_ask_for_full_rescan() {
         let mut batch = WatchBatch::default();
         let overflow = Event::new(EventKind::Other).set_flag(Flag::Rescan);
-        add_event(Path::new("/r"), &[], &mut batch, Ok(overflow));
+        add_event(
+            Path::new("/r"),
+            &Filter::default(),
+            &mut batch,
+            Ok(overflow),
+        );
         assert!(batch.rescan_all);
         let mut batch = WatchBatch::default();
         add_event(
             Path::new("/r"),
-            &[],
+            &Filter::default(),
             &mut batch,
             Err(notify::Error::generic("lost")),
         );
@@ -388,7 +400,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
-        let mut watcher = LiveWatcher::start(&root, &[".hbsync".to_owned()])?;
+        let mut watcher = LiveWatcher::start(&root, Arc::default())?;
         let (tx, rx) = channel();
         watcher.rx = rx;
         let reading = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -450,7 +462,7 @@ mod tests {
     {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
-        let mut watcher = LiveWatcher::start(&root, &[])?;
+        let mut watcher = LiveWatcher::start(&root, Arc::default())?;
         let (tx, rx) = channel();
         watcher.rx = rx;
         let event = |kind, path: &str| Ok(Event::new(kind).add_path(root.join(path)));

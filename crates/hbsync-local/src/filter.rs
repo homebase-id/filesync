@@ -98,12 +98,9 @@ impl Verdict {
 pub enum FilterError {
     #[error("can't read {}: {source}", path.display())]
     Read { path: PathBuf, source: io::Error },
-    #[error("{}, line {line}: {message}", path.display())]
-    Rule {
-        path: PathBuf,
-        line: usize,
-        message: String,
-    },
+    /// A rule in `.hbsync/ignore` that doesn't parse (line 1-based; 0 for the whole set).
+    #[error(".hbsync/ignore, line {line}: {message}")]
+    Rule { line: usize, message: String },
 }
 
 /// The filter of one sync root.
@@ -136,26 +133,24 @@ impl Filter {
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(source) => return Err(FilterError::Read { path, source }),
         };
-        Self::from_rules(&text, case_insensitive).map_err(|(line, message)| FilterError::Rule {
-            path,
-            line,
-            message,
-        })
+        Self::from_rules(&text, case_insensitive)
     }
 
     /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). An error
-    /// names the first bad line (1-based).
-    pub fn from_rules(text: &str, case_insensitive: bool) -> Result<Self, (usize, String)> {
+    /// names the first bad line.
+    pub fn from_rules(text: &str, case_insensitive: bool) -> Result<Self, FilterError> {
+        let bad = |line| {
+            move |e: ignore::Error| FilterError::Rule {
+                line,
+                message: e.to_string(),
+            }
+        };
         let mut builder = GitignoreBuilder::new("");
-        builder
-            .case_insensitive(case_insensitive)
-            .map_err(|e| (0, e.to_string()))?;
+        builder.case_insensitive(case_insensitive).map_err(bad(0))?;
         for (i, line) in text.lines().enumerate() {
-            builder
-                .add_line(None, line)
-                .map_err(|e| (i + 1, e.to_string()))?;
+            builder.add_line(None, line).map_err(bad(i + 1))?;
         }
-        let rules = builder.build().map_err(|e| (0, e.to_string()))?;
+        let rules = builder.build().map_err(bad(0))?;
         Ok(Filter {
             rules,
             text: text.to_owned(),
@@ -331,12 +326,10 @@ mod tests {
 
     #[test]
     fn bad_rules_and_fingerprints() {
-        assert_eq!(
-            Filter::from_rules("ok\n[z-a\n", false)
-                .map(|_| ())
-                .map_err(|e| e.0),
-            Err(2)
-        );
+        assert!(matches!(
+            Filter::from_rules("ok\n[z-a\n", false),
+            Err(FilterError::Rule { line: 2, .. })
+        ));
         let a = rules("*.log\n");
         assert_ne!(a.fingerprint(), rules("*.tmp\n").fingerprint());
         assert_ne!(

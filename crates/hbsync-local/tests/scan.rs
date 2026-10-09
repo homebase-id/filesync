@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use hbsync_fileio::HashAlgorithm;
-use hbsync_local::{ScanOptions, ScanReport, scan};
+use hbsync_local::{Filter, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_platform::RelPath;
 use hbsync_state::StateDb;
 use hbsync_types::NodeId;
@@ -550,4 +551,38 @@ mod targeted {
         assert_eq!(targeted, fresh.snapshot()?);
         Ok(())
     }
+}
+
+#[test]
+fn filtered_items_never_reach_the_db_and_a_newly_ignored_one_looks_deleted() -> R {
+    let mut f = Fixture::new()?;
+    f.write("a/.DS_Store", b"junk")?;
+    f.write("a/notes.txt", b"n")?;
+    f.write("a/build/out.o", b"o")?;
+    f.write("a/run.log", b"l")?;
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 5, "{report:?}"); // a, notes, build, out.o, run.log
+    assert_eq!(report.skipped.len(), 1);
+
+    // A rule appears: what it matches leaves the DB (a delete to sync), never the disk.
+    f.opts.filter = Arc::new(Filter::from_rules("build/\n*.log\n", false)?);
+    let (report, dirty) = f.scan()?;
+    assert_eq!(report.removed, 3, "{report:?}");
+    assert_eq!(dirty.len(), 3);
+    for rel in ["a/build", "a/build/out.o", "a/run.log"] {
+        let path = RelPath::new(rel)?;
+        assert!(f.db.read(|s| s.get_local(&path))?.is_none(), "{rel}");
+        assert!(f.root().join(rel).exists(), "{rel}");
+    }
+    // Changes inside an ignored folder are never looked at, whoever reports them.
+    f.write("a/build/more.o", b"m")?;
+    let root = f.root().to_path_buf();
+    let report = rescan_dirs(&mut f.db, &root, &[RelPath::new("a/build")?], &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+
+    // The rule goes: they are new again.
+    f.opts.filter = Arc::default();
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 4, "{report:?}");
+    Ok(())
 }
