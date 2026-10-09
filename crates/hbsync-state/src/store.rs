@@ -809,6 +809,16 @@ impl<'a> Store<'a> {
         Ok(())
     }
 
+    /// Marks every node with a base or a remote row dirty: all of them are planned again.
+    pub fn mark_synced_dirty(&self) -> Result<()> {
+        self.conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO dirty (id) SELECT id FROM base UNION SELECT id FROM remote",
+            )?
+            .execute([])?;
+        Ok(())
+    }
+
     pub fn clear_dirty(&self, node: NodeId) -> Result<()> {
         self.change(
             &format!("DELETE FROM dirty WHERE id = {ID_OF}"),

@@ -49,6 +49,8 @@ pub struct ExecConfig {
     /// Names that differ only in case (or Unicode normalization) are the same file here
     /// (Windows, default macOS). Probe with [`probe_case_insensitive`].
     pub case_insensitive: bool,
+    /// What this device never syncs (sync semantics §10).
+    pub filter: std::sync::Arc<hbsync_local::Filter>,
     /// Tests only: stop the run at this point, as if the process died there.
     #[doc(hidden)]
     pub crash_at: Option<CrashPoint>,
@@ -431,7 +433,7 @@ impl<'a> Executor<'a> {
             Op::LocalMkdir { node, parent, name } => self.mkdir(*node, *parent, name),
             Op::LocalMove { node, parent, name } => self.local_move(*node, *parent, name),
             Op::LocalDownload { .. } => unreachable!("transfers run through flush"),
-            Op::LocalTrash { node, subtree } => self.trash(*node, subtree),
+            Op::LocalTrash { node, subtree } => self.trash(*node, subtree, false),
             Op::RemoteCreate {
                 node,
                 parent,
@@ -456,7 +458,7 @@ impl<'a> Executor<'a> {
             } => self.delete(*node, *file_id, *expected),
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
-            Op::Forget { node } => self.forget(*node),
+            Op::Forget { node, subtree } => self.forget(*node, subtree),
         };
         result.unwrap_or_else(|o| o)
     }
@@ -488,34 +490,55 @@ impl<'a> Executor<'a> {
         hbsync_platform::stat(&self.abs(&row.path)).is_ok_and(|meta| matches_row(row, &meta))
     }
 
-    /// Whether the disk at and below `top` holds exactly `rows` (its subtree in the DB, `top`
-    /// included), unchanged. One walk, compared with the metadata the listing returns.
-    fn subtree_unchanged(&self, top: &LocalRow, rows: &[LocalRow]) -> bool {
+    /// Whether everything on disk at `top` is what `rows` recorded (its subtree in the DB, `top`
+    /// included), unchanged, apart from filtered items (§10): junk may go along, ignored items
+    /// must stay, and the folders they are in are returned. `None` if anything else is there or
+    /// changed. One walk, compared with the metadata the listing returns.
+    fn subtree_check(&self, top: &LocalRow, rows: &[LocalRow]) -> Option<Vec<RelPath>> {
         if !self.on_disk_unchanged(top) {
-            return false;
+            return None;
         }
         let mut expected: HashMap<&RelPath, &LocalRow> = rows
             .iter()
             .filter(|r| r.path != top.path)
             .map(|r| (&r.path, r))
             .collect();
+        let mut ignored = Vec::new();
         if top.kind == NodeKind::Folder {
-            let filter = hbsync_local::Filter::default();
-            let walk = hbsync_local::Walker::at(&self.cfg.root, top.path.clone(), &filter, None);
+            let walk =
+                hbsync_local::Walker::at(&self.cfg.root, top.path.clone(), &self.cfg.filter, None);
             for event in walk {
-                // Anything we never sync (a link, a bad name) would be trashed silently.
-                let hbsync_local::WalkEvent::Entry { path, meta } = event else {
-                    return false;
-                };
-                if !expected
-                    .remove(&path)
-                    .is_some_and(|r| matches_row(r, &meta))
-                {
-                    return false;
+                match event {
+                    hbsync_local::WalkEvent::Entry { path, meta } => {
+                        if !expected
+                            .remove(&path)
+                            .is_some_and(|r| matches_row(r, &meta))
+                        {
+                            return None;
+                        }
+                    }
+                    hbsync_local::WalkEvent::Skipped {
+                        reason: hbsync_local::SkipReason::Junk,
+                        ..
+                    } => {}
+                    hbsync_local::WalkEvent::Skipped {
+                        path,
+                        reason: hbsync_local::SkipReason::Ignored,
+                    } => {
+                        // Its own name may be one we can't sync; its folder's we walked.
+                        let names: Vec<&str> = path
+                            .parent()?
+                            .iter()
+                            .map(|c| c.to_str())
+                            .collect::<Option<_>>()?;
+                        ignored.push(RelPath::new(&names.join("/")).ok()?);
+                    }
+                    // Anything else we never sync (a link, a bad name) would be trashed silently.
+                    _ => return None,
                 }
             }
         }
-        expected.is_empty()
+        expected.is_empty().then_some(ignored)
     }
 
     /// The tracked item that holds `target` on disk: the row at that exact path, or, on a
@@ -535,6 +558,25 @@ impl<'a> Executor<'a> {
         Ok(siblings
             .into_iter()
             .find(|r| r.path.name().is_some_and(|n| name_key(n) == key)))
+    }
+
+    /// The first numbered variant of `target` that nothing holds, on disk or in the DB (in any
+    /// case, on a case-insensitive volume).
+    fn numbered_free(&mut self, target: &RelPath) -> Result<Option<RelPath>, StateError> {
+        let (Some(name), parent) = (target.name(), target.parent().unwrap_or_default()) else {
+            return Ok(None);
+        };
+        for n in 1..=100 {
+            let Ok(candidate) = parent.join(&crate::tree::numbered_conflict_name(name, n)) else {
+                break;
+            };
+            if fs::symlink_metadata(self.abs(&candidate)).is_err()
+                && self.occupant(&candidate)?.is_none()
+            {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
     }
 
     /// Frees `target` if a node that the plan is about to move away holds it: that node is
@@ -599,9 +641,17 @@ impl<'a> Executor<'a> {
         if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
             return Ok(Outcome::Skip("conflict copy id already in use".into()));
         }
-        if !self.free_target(&target, None)? {
-            return Ok(Outcome::Retry("conflict name taken".into()));
-        }
+        // The name may be held by something that stays: the copy can exist remotely already,
+        // made by another device with the same bytes, named to fit its folder there. Then a
+        // numbered name here; a later plan moves it where it belongs.
+        let target = if self.free_target(&target, None)? {
+            target
+        } else {
+            match self.numbered_free(&target)? {
+                Some(t) => t,
+                None => return Ok(Outcome::Retry("conflict name taken".into())),
+            }
+        };
         // Write-ahead: if we crash after the rename, recovery completes the fork instead of a
         // scan mistaking it for the user renaming the original.
         self.db.write(|s| s.put_fork(node, new_node, &target))?;
@@ -942,8 +992,13 @@ impl<'a> Executor<'a> {
         })
     }
 
-    fn trash(&mut self, node: NodeId, expected: &[NodeId]) -> Step {
+    /// Moves the local item of `node` to the trash; with `forget`, the bases of `node` and
+    /// `expected` go too (§10).
+    fn trash(&mut self, node: NodeId, expected: &[NodeId], forget: bool) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
+            if forget {
+                return self.forget(node, &[]);
+            }
             return Ok(Outcome::Done); // already gone
         };
         let rows = self.db.read(|s| s.local_subtree(&row.path))?;
@@ -955,17 +1010,61 @@ impl<'a> Executor<'a> {
             ));
         }
         // Everything on disk must be known and unchanged; otherwise rescan first.
-        if !self.subtree_unchanged(&row, &rows) {
+        let Some(holding) = self.subtree_check(&row, &rows) else {
             return Ok(rescan(&mut self.report, &row.path));
-        }
-        if let Err(e) = self.move_to_trash(&row.path, node) {
-            return Ok(io_outcome(e));
+        };
+        if holding.is_empty() {
+            if let Err(e) = self.move_to_trash(&row.path, node) {
+                return Ok(io_outcome(e));
+            }
+        } else {
+            // Ignored items are kept here, and so are the folders they are in (§10): the rest
+            // goes, and those folders are released, for the scan to find as new ones.
+            let holders: HashSet<RelPath> = holding
+                .into_iter()
+                .flat_map(|folder| {
+                    std::iter::successors(Some(folder), |p| p.parent())
+                        .take_while(|p| p.starts_with(&row.path))
+                })
+                .collect();
+            for r in &rows {
+                let in_holder = r.path.parent().is_some_and(|p| holders.contains(&p));
+                if in_holder
+                    && !holders.contains(&r.path)
+                    && let Err(e) = self.move_to_trash(&r.path, r.node)
+                {
+                    self.report.rescan.push(row.path.clone());
+                    return Ok(io_outcome(e));
+                }
+            }
+            // A released folder can't keep a temporary name (it carries the old id): it gets
+            // a real one. Deepest first, so the paths above stay valid.
+            let mut parked: Vec<(&LocalRow, RelPath)> = Vec::new();
+            for r in rows.iter().filter(|r| holders.contains(&r.path)) {
+                if let Some(original) = self.db.read(|s| view::parked_place(s, r))? {
+                    parked.push((r, original));
+                }
+            }
+            parked.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.components().count()));
+            for (r, original) in parked {
+                let to = release_place(self.db, &self.cfg.root, &self.cfg.filter, &original, true)?;
+                if let Some(to) = to {
+                    // Best effort: if it fails, the item keeps its name and the scan finds it there.
+                    let _ = ops::rename_noreplace(&self.abs(&r.path), &self.abs(&to));
+                }
+            }
+            self.report
+                .rescan
+                .push(row.path.parent().unwrap_or_default());
         }
         self.finish(&[(node, false)], |s| {
             for r in s.delete_local_subtree(&row.path)? {
                 s.delete_parked(r.node)?;
                 if r.node != node {
                     s.mark_dirty(r.node)?;
+                }
+                if forget {
+                    s.delete_base(r.node)?;
                 }
             }
             Ok(())
@@ -982,14 +1081,40 @@ impl<'a> Executor<'a> {
                 Outcome::Skip("gone locally".into())
             });
         };
-        if self.db.read(|s| s.get_parked(node))?.is_some() {
-            return Ok(Outcome::Skip(
-                "parked; the next plan sees it back in place".into(),
-            ));
-        }
+        // A parked item's temporary name carries its old id: it gets a real one first, its
+        // original if that is free. After a crash in between, the scan finds it there.
+        let row = match self.db.read(|s| view::parked_place(s, &row))? {
+            None => row,
+            Some(original) => {
+                if !self.on_disk_unchanged(&row) {
+                    return Ok(rescan(&mut self.report, &row.path));
+                }
+                let is_dir = row.kind == NodeKind::Folder;
+                let to =
+                    release_place(self.db, &self.cfg.root, &self.cfg.filter, &original, is_dir)?;
+                let Some(to) = to else {
+                    return Ok(Outcome::Skip("no free name to leave the parked one".into()));
+                };
+                if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&to)) {
+                    return Ok(io_outcome(e));
+                }
+                let refreshed = self.renamed(&row, &to);
+                self.db.write(|s| {
+                    s.move_local_subtree(&row.path, &to)?;
+                    if let Some(r) = &refreshed {
+                        s.put_local(r)?;
+                    }
+                    s.delete_parked(node)
+                })?;
+                refreshed.unwrap_or(LocalRow { path: to, ..row })
+            }
+        };
         self.finish(&[], |s| {
             let below = s.local_subtree(&row.path)?;
             s.rekey_local(node, new_node)?;
+            // The old node isn't synced here any more; a base left behind would read as a
+            // local delete once it is back in view.
+            s.delete_base(node)?;
             s.mark_dirty(node)?;
             s.mark_dirty(new_node)?;
             below
@@ -999,13 +1124,27 @@ impl<'a> Executor<'a> {
         })
     }
 
-    /// Drops the base of a node this device no longer syncs, once nothing of it is here.
-    fn forget(&mut self, node: NodeId) -> Step {
+    /// Leaves a node this device no longer syncs: its local item (`subtree`) goes to the trash
+    /// and the bases go with it; with nothing here, only the base goes.
+    fn forget(&mut self, node: NodeId, subtree: &[NodeId]) -> Step {
+        if !subtree.is_empty() {
+            return self.trash(node, subtree, true);
+        }
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
             return Ok(Outcome::Skip("still here".into()));
         }
-        if !self.db.read(|s| s.base_children(node))?.is_empty() {
-            return Ok(Outcome::Retry("its children first".into()));
+        // The base stays a tree: a child's base may still be needed (its delete held or failed),
+        // unless the child is forgotten in this run too (children go first; in a cycle of
+        // bases, as a remote cycle leaves them, one must go before the others).
+        let forgetting: HashSet<NodeId> = self
+            .queue
+            .iter()
+            .filter(|(op, _)| matches!(op, Op::Forget { .. }))
+            .map(|(op, _)| op.node())
+            .collect();
+        let children = self.db.read(|s| s.base_children(node))?;
+        if children.iter().any(|c| !forgetting.contains(&c.node)) {
+            return Ok(Outcome::Skip("its children first".into()));
         }
         self.finish(&[], |s| s.delete_base(node).map(drop))
     }
@@ -1196,6 +1335,43 @@ fn mirror_from(
     }
 }
 
+/// Whether nothing is at `path`, on disk or in the DB.
+fn is_free(db: &mut StateDb, root: &Path, path: &RelPath) -> Result<bool, StateError> {
+    Ok(fs::symlink_metadata(path.to_native(root)).is_err()
+        && db.read(|s| s.get_local(path))?.is_none())
+}
+
+/// A real name for a parked item that leaves its temporary one: its `original` place if that is
+/// free, else the first free numbered name there, one this device syncs if any is (§10). `None`
+/// if the first hundred are taken.
+fn release_place(
+    db: &mut StateDb,
+    root: &Path,
+    filter: &hbsync_local::Filter,
+    original: &RelPath,
+    is_dir: bool,
+) -> Result<Option<RelPath>, StateError> {
+    if is_free(db, root, original)? {
+        return Ok(Some(original.clone()));
+    }
+    let (Some(name), folder) = (original.name(), original.parent().unwrap_or_default()) else {
+        return Ok(None);
+    };
+    let mut filtered = None;
+    for n in 1..=100 {
+        let Ok(candidate) = folder.join(&crate::tree::numbered_conflict_name(name, n)) else {
+            break;
+        };
+        if is_free(db, root, &candidate)? {
+            if filter.path(&candidate, is_dir).is_sync() {
+                return Ok(Some(candidate));
+            }
+            filtered.get_or_insert(candidate);
+        }
+    }
+    Ok(filtered)
+}
+
 /// The temporary name a node is parked under (see [`Executor`]).
 pub fn parked_name(node: NodeId) -> String {
     format!(".hbsync-move-{}", node.0.simple())
@@ -1339,7 +1515,13 @@ fn wanted_download(db: &mut StateDb, file_name: &str) -> Result<bool, StateError
 
 /// Puts parked items back where they came from when that is possible, and drops records that
 /// no longer apply (the item was renamed, by us or by the user). Run before each plan.
-pub fn unpark(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+/// An original name this device now filters (§10) may be held by an item it doesn't track, which
+/// would keep the parked item away for good: it takes the first free numbered name instead.
+pub fn unpark(
+    db: &mut StateDb,
+    root: &Path,
+    filter: &hbsync_local::Filter,
+) -> Result<usize, StateError> {
     let mut restored = 0;
     for node in db.read(|s| s.all_parked())? {
         let place = db.read(|s| {
@@ -1353,9 +1535,17 @@ pub fn unpark(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
             continue;
         };
         let parked = current.path.clone();
-        let free = fs::symlink_metadata(original.to_native(root)).is_err()
-            && db.read(|s| s.get_local(&original))?.is_none();
-        if free && ops::rename_noreplace(&parked.to_native(root), &original.to_native(root)).is_ok()
+        let is_dir = current.kind == NodeKind::Folder;
+        let original = if filter.path(&original, is_dir).is_sync() {
+            original // taken by something synced: that changes, wait for it
+        } else {
+            match release_place(db, root, filter, &original, is_dir)? {
+                Some(place) => place,
+                None => continue,
+            }
+        };
+        if is_free(db, root, &original)?
+            && ops::rename_noreplace(&parked.to_native(root), &original.to_native(root)).is_ok()
         {
             let refreshed = renamed_row(root, &current, &original);
             db.write(|s| {

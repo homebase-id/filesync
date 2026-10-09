@@ -116,8 +116,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 ## 8. Operations
 
 Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `trash`,
-`rename-for-conflict`. Remote: `create-folder`, `upload` (create by node id), `update-content`,
-`move`, `delete`.
+`rename-for-conflict`, and for filters (section 10) `detach` (a new node id in place) and
+`forget` (trash plus dropping the base). Remote: `create-folder`, `upload` (create by node id),
+`update-content`, `move`, `delete`.
 
 Ordering within one plan: folder creates top-down, then moves, then content, then deletes
 bottom-up. A move whose target name is occupied by a node that is itself moving away goes
@@ -139,7 +140,13 @@ expected fingerprint is treated as done.
   is recorded in the state DB. The local view reports a parked node under its original name
   in whatever folder it is in now, but only while it still carries the parked name: a rename
   voids the record. Before each plan, parked items whose original name is free again are
-  moved back.
+  moved back; if a filter (section 10) now matches that name and something there holds it, the
+  item takes the first free numbered name instead (the holder is never tracked, so it would
+  never leave): one this device syncs if any of the first hundred is, else a filtered one (the
+  item is then ignored, rule 1). A parked item that must leave its temporary name for another
+  reason (it is detached, or released as a folder that keeps ignored items, section 10) takes
+  its original name if free, else a numbered one the same way: the temporary name carries the
+  old id and never reaches the remote.
 - **Trash guard.** `LocalTrash` carries the nodes the plan expects in the subtree; if the
   folder holds anything else (in the DB or on disk), it is not trashed and the folder is
   rescanned.
@@ -158,7 +165,10 @@ expected fingerprint is treated as done.
 - **Conflict copies are write-ahead.** The fork is recorded before the rename and the record
   is removed with the DB update after it; recovery runs before any scan and completes or
   forgets an interrupted fork. A copy id derives from the node, the local bytes and the base's
-  remote version: stable when one conflict is replanned, new for the next conflict.
+  remote version: stable when one conflict is replanned, new for the next conflict. Two devices
+  with the same bytes make the same copy, so it may exist remotely already, named to fit its
+  folder there; if that name is held in the local folder by something that stays, the fork
+  takes the first free numbered name, and a later plan moves the copy where it belongs.
 - **Case-insensitive volumes** (probed once): a name's occupant is any sibling with the same
   name key; a node may take its own name in another case.
 - **Orphans.** With a fully drained feed, a remote node whose parent is unknown everywhere (a
@@ -208,14 +218,32 @@ An item inside a filtered folder is filtered too.
    moved into an ignored folder) looks deleted: it leaves the drive and the other devices
    (their trash), and stays here. The mass-delete guard applies.
 2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
-   never downloaded, never deleted by this device. A synced node that becomes masked (another
-   device moved it into a path this device ignores) is trashed here; the remote is untouched.
-3. **Folders.** A remote folder with masked live children counts as having a live child: a
-   local delete of it deletes what this device saw, and the folder comes back here, empty.
+   never downloaded, and never deleted by this device, with one exception: a node this device
+   synced at a place it now filters (a rule was added) is leaving per rule 1, and is deleted
+   remotely unless the remote changed it since (a folder: unless it holds anything that isn't
+   leaving, such as another device's new file; then only its base is dropped, once the bases
+   below it are gone or go in the same run). If the user brings the local item back into view first (moves it out of
+   the ignored place), it syncs as usual, and its local place wins over a remote move (the
+   remote place is filtered too, and following it would take the item out of view again). Names held by masked nodes stay taken: a local item with such a name gets a numbered
+   one (a name clash).
+   A synced node that becomes masked because another device moved it into a path this device
+   ignores leaves this device, the remote untouched:
+   - an unchanged local copy goes to the trash, and its base goes in the same step
+     (`Forget`): a base left behind would read as a local delete once the node is back in view
+     (another rule, another move);
+   - a local copy with changes the remote doesn't have (edited, or never synced) is
+     **detached** (`LocalDetach`): it becomes a new node where it is and is created remotely
+     like any new item. The old id is still live remotely, so it can't be created again. The
+     masked folders it sits in are detached with it, as are masked folders holding anything
+     else this device syncs; their unchanged contents go to the trash.
+3. **Folders.** A remote folder with masked live children (that aren't leaving) counts as
+   having a live child: a local delete of it deletes what this device saw, and the folder comes
+   back here, empty.
    Locally, junk in a folder being trashed goes to the trash with it; ignored content keeps its
    folder: the synced contents are trashed and the folder is released (the next scan sees it
-   as a new folder).
+   as a new folder); junk directly in it stays with it.
 4. **Rule changes.** The filter's fingerprint (rules, junk list version, case sensitivity) is
    kept in the state DB. When it changed, start-up walks the whole tree (a journal doesn't
-   report items that just became visible) and re-plans every remote node. Rules are read at
-   start-up.
+   report items that just became visible) and re-plans every synced node; the new fingerprint
+   is stored in the same transaction. Items that come into view are new items. Rules are read
+   at start-up.

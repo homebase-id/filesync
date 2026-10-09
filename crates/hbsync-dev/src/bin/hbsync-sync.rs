@@ -18,7 +18,7 @@ use hbsync_engine::{Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
-use hbsync_local::{LocalObserver, STATE_DIR, ScanOptions, state_db_path};
+use hbsync_local::{Filter, LocalObserver, STATE_DIR, state_db_path};
 use hbsync_state::StateDb;
 
 const POLL: Duration = Duration::from_secs(60);
@@ -49,13 +49,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = state_db_path(&root);
     let mut cfg = EngineConfig::new(&root, &hbsync_dev::device_name());
     cfg.allow_mass_delete = args.iter().any(|a| a == "--allow-mass-delete");
-    let mut observer =
-        LocalObserver::start(&root, ScanOptions::for_root(&root, cfg.exec.algorithm));
+    cfg.exec.filter = Arc::new(Filter::load(&root, cfg.exec.case_insensitive)?);
+    let rules = cfg.exec.filter.rule_count();
     let mut engine = Engine::new(StateDb::open(&db_path)?, Box::new(remote.clone()), cfg);
+    let mut observer = LocalObserver::start(&root, engine.scan_options().clone());
     println!(
-        "Syncing {} with {identity} (drive {})",
+        "Syncing {} with {identity} (drive {}); built-in junk filter, {rules} rules in {}/{}",
         root.display(),
-        remote.drive().alias.simple()
+        remote.drive().alias.simple(),
+        STATE_DIR,
+        hbsync_local::IGNORE_FILE,
     );
     if let Some(why) = &observer.watcher_error {
         println!("No live watcher ({why}); the folder is rescanned at every poll.");

@@ -13,13 +13,21 @@
 //!
 //! [`Sim::check`] then verifies convergence, invariants, and that no file version was lost
 //! unless some client overwrote or deleted it after seeing it.
+//!
+//! Clients filter (sync semantics §10): every client has the built-in junk list, and odd
+//! clients start out also ignoring the name `d` (any client can toggle that). A client's filtered items are invisible to its sync, as
+//! the scanner leaves them out; convergence is judged on what each client syncs, and an
+//! ignored item, kept on its client only, counts as present for the no-loss check.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 
 use hbsync_engine::exec::parked_name;
+use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile};
-use hbsync_engine::tree::Tree;
+use hbsync_engine::tree::{Tree, numbered_conflict_name};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
+use hbsync_local::{Filter, Verdict};
 use hbsync_platform::name::check_remote_name;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -49,7 +57,16 @@ pub enum Action {
     Delete {
         node: usize,
     },
+    /// A file on the built-in junk list (an OS thumbnail cache).
+    CreateJunk {
+        parent: usize,
+    },
+    /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
+    ToggleIgnore,
 }
+
+/// The junk name [`Action::CreateJunk`] uses.
+const JUNK: &str = "Thumbs.db";
 
 /// One step of a simulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +144,7 @@ struct Client {
     /// The server snapshot the pending plan was made from (contents to download), updated
     /// by the client's own remote writes: what the executor's mirror holds.
     planned_remote: Tree,
+    filter: Arc<Filter>,
 }
 
 /// The simulation.
@@ -143,6 +161,8 @@ pub struct Sim {
     written: BTreeSet<u64>,
     pub ops_executed: usize,
     pub conflicts: usize,
+    /// Items that stopped being tracked so far (each gets a new id).
+    released: u64,
     /// Record every plan and skipped operation in `trace` (debugging).
     pub verbose: bool,
     pub trace: Vec<String>,
@@ -162,6 +182,11 @@ impl Sim {
                     parked: HashMap::new(),
                     planned_local: Tree::new(),
                     planned_remote: Tree::new(),
+                    filter: Arc::new(if i % 2 == 1 {
+                        ignoring_d()
+                    } else {
+                        Filter::default()
+                    }),
                 })
                 .collect(),
             next_blob: 0,
@@ -170,6 +195,7 @@ impl Sim {
             written: BTreeSet::new(),
             ops_executed: 0,
             conflicts: 0,
+            released: 0,
             verbose: false,
             trace: Vec::new(),
         }
@@ -235,6 +261,21 @@ impl Sim {
             t.child_named(parent, name, except).is_none()
         };
         match action {
+            Action::ToggleIgnore => {
+                let client = &mut self.clients[c];
+                client.filter = Arc::new(if client.filter.rule_count() == 0 {
+                    ignoring_d()
+                } else {
+                    Filter::default()
+                });
+            }
+            Action::CreateJunk { parent } => {
+                let parent = folders[parent % folders.len()];
+                if name_free(local, parent, JUNK, None) {
+                    let state = NodeState::file(parent, JUNK, self.new_blob());
+                    self.clients[c].local.insert(NodeId::new(), state);
+                }
+            }
             Action::CreateFile { parent, name } | Action::CreateFolder { parent, name } => {
                 let parent = folders[parent % folders.len()];
                 let name = NAMES[name % NAMES.len()];
@@ -299,6 +340,7 @@ impl Sim {
 
     fn plan(&mut self, c: usize) {
         self.unpark(c);
+        self.release_filtered(c);
         let remote = self.server.tree();
         let client = &self.clients[c];
         // A parked node is reported at its original place: the temporary name is the
@@ -319,6 +361,10 @@ impl Sim {
                     },
                 );
             }
+        }
+        // The scanner never reports filtered items (judged by their names on disk).
+        for n in masked(&client.local, &client.filter) {
+            local_view.remove(n);
         }
         let mut input = Input {
             base: client.base.clone(),
@@ -345,6 +391,7 @@ impl Sim {
             date: "2026-10-08".into(),
             allow_mass_delete: true,
             synced_files: 0,
+            filter: Arc::clone(&client.filter),
             ..Options::default()
         };
         let plan = reconcile(&input, &opts);
@@ -363,6 +410,37 @@ impl Sim {
         client.plan = plan.ops.into_iter().map(|op| (op, 0)).collect();
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
+    }
+
+    /// The id the scanner gives an item it stopped tracking: any new one (counted, to keep
+    /// runs repeatable).
+    fn release_id(&mut self) -> NodeId {
+        self.released += 1;
+        let hash = hash_bytes(&self.released.to_le_bytes(), HashAlgorithm::Sha256);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash.bytes[..16]);
+        NodeId(Uuid::from_bytes(bytes))
+    }
+
+    /// The scanner keeps no rows for filtered items: one that was tracked loses its node id,
+    /// and gets a new one if it ever becomes visible again.
+    fn release_filtered(&mut self, c: usize) {
+        let hidden = masked(&self.clients[c].local, &self.clients[c].filter);
+        let mut tracked: Vec<NodeId> = hidden
+            .into_iter()
+            .filter(|n| {
+                self.clients[c].base.contains(*n)
+                    || self.server.ever.contains(n)
+                    || self.clients[c].planned_remote.contains(*n)
+            })
+            .collect();
+        tracked.sort();
+        for n in tracked {
+            let new = self.release_id();
+            let client = &mut self.clients[c];
+            client.parked.remove(&n);
+            rekey_client(client, n, new);
+        }
     }
 
     /// Executes the next planned operation. Returns `false` if the plan is empty.
@@ -428,12 +506,17 @@ impl Sim {
                 if !unchanged(client, node) || client.local.contains(new_node) {
                     return Skip;
                 }
-                if client
-                    .local
-                    .child_named(state.parent, &name, None)
-                    .is_some()
-                {
-                    return Retry;
+                // As the executor: a leaving holder is parked; one that stays leaves the copy a
+                // numbered name.
+                let mut name = name;
+                if !park_occupant(client, state.parent, &name, None) {
+                    let free = (1..=100)
+                        .map(|n| numbered_conflict_name(&name, n))
+                        .find(|n| client.local.child_named(state.parent, n, None).is_none());
+                    match free {
+                        Some(n) => name = n,
+                        None => return Retry,
+                    }
                 }
                 client.local.remove(node);
                 client.local.insert(new_node, NodeState { name, ..state });
@@ -509,25 +592,7 @@ impl Sim {
                 );
                 Done
             }
-            Op::LocalTrash {
-                node,
-                subtree: expected,
-            } => {
-                let client = &mut self.clients[c];
-                let mut subtree = client.local.subtree(node);
-                subtree.sort();
-                if subtree.is_empty()
-                    || subtree.iter().any(|n| !unchanged(client, *n))
-                    || subtree != expected
-                {
-                    return Skip;
-                }
-                for n in subtree {
-                    client.local.remove(n);
-                    client.parked.remove(&n);
-                }
-                Done
-            }
+            Op::LocalTrash { node, subtree } => self.trash(c, node, &subtree),
             Op::RemoteCreate {
                 node,
                 parent,
@@ -613,26 +678,153 @@ impl Sim {
                         Skip
                     };
                 }
-                if client.parked.contains_key(&node) {
-                    return Skip;
+                // A parked item's temporary name carries its old id: it gets a real one first, as
+                // in the executor.
+                if let Some((parent, original)) = client.parked.remove(&node)
+                    && let Some(state) = client.local.get(node).cloned()
+                    && state.name == parked_name(node)
+                {
+                    if client.planned_local.get(node) != Some(&state) {
+                        client.parked.insert(node, (parent, original));
+                        return Skip;
+                    }
+                    let is_dir = state.kind == NodeKind::Folder;
+                    let Some(name) = release_name(client, node, state.parent, &original, is_dir)
+                    else {
+                        client.parked.insert(node, (parent, original));
+                        return Skip;
+                    };
+                    let state = NodeState { name, ..state };
+                    client.local.insert(node, state.clone());
+                    client.planned_local.insert(node, state);
                 }
-                rekey(&mut client.local, node, new_node);
-                rekey(&mut client.planned_local, node, new_node);
+                rekey_client(client, node, new_node);
+                // Not synced here any more; see the executor.
+                client.base.remove(node);
+                client.extra.remove(&node);
                 Done
             }
-            Op::Forget { node } => {
-                let client = &mut self.clients[c];
-                if client.local.contains(node) {
-                    return Skip;
+            Op::Forget { node, subtree } => {
+                if !subtree.is_empty() {
+                    let outcome = self.trash(c, node, &subtree);
+                    if outcome == Done {
+                        let client = &mut self.clients[c];
+                        for n in subtree {
+                            client.base.remove(n);
+                            client.extra.remove(&n);
+                        }
+                    }
+                    return outcome;
                 }
-                if client.base.children(node).next().is_some() {
-                    return Retry;
+                let client = &mut self.clients[c];
+                // Still here, or its children's bases first, unless they are forgotten in this
+                // run too (as in the executor).
+                let forgetting = |n: NodeId| {
+                    client
+                        .plan
+                        .iter()
+                        .any(|(op, _)| matches!(op, Op::Forget { .. }) && op.node() == n)
+                };
+                if client.local.contains(node) || client.base.children(node).any(|n| !forgetting(n))
+                {
+                    return Skip;
                 }
                 client.base.remove(node);
                 client.extra.remove(&node);
                 Done
             }
         }
+    }
+
+    /// Moves `node` and everything below it to the trash, as the executor does: only if the
+    /// visible part is `expected` and unchanged since planning. Junk goes along; ignored items
+    /// stay, and so do the folders they sit in, released (§10).
+    fn trash(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
+        use Outcome::{Done, Skip};
+        let unchanged = |client: &Client, node: NodeId| {
+            client.local.get(node) == client.planned_local.get(node)
+        };
+        let client = &self.clients[c];
+        let all: BTreeSet<NodeId> = client.local.subtree(node).into_iter().collect();
+        let hidden = masked(&client.local, &client.filter);
+        let mut shown: Vec<NodeId> = all
+            .iter()
+            .copied()
+            .filter(|n| !hidden.contains(n))
+            .collect();
+        shown.sort();
+        if all.is_empty() || shown.iter().any(|n| !unchanged(client, *n)) || shown != expected {
+            return Skip;
+        }
+        // Junk goes along. Ignored items stay, and so do the folders they sit in, but
+        // released: the scanner finds them as new folders.
+        let kept: HashSet<NodeId> = all
+            .iter()
+            .copied()
+            .filter(|n| hidden.contains(n) && verdict(client, *n) == Verdict::Ignored)
+            .collect();
+        let mut released: BTreeSet<NodeId> = BTreeSet::new();
+        for k in &kept {
+            released.extend(
+                client
+                    .local
+                    .ancestors(*k)
+                    .into_iter()
+                    .filter(|a| all.contains(a) && !kept.contains(a)),
+            );
+        }
+        // Junk sitting directly in a released folder, or anywhere in a kept one, isn't touched.
+        let gone: Vec<NodeId> = all
+            .iter()
+            .copied()
+            .filter(|n| !kept.contains(n) && !released.contains(n))
+            .filter(|n| {
+                let parent = client.local.get(*n).map(|s| s.parent);
+                !(hidden.contains(n) && parent.is_some_and(|p| released.contains(&p)))
+                    && !client.local.ancestors(*n).iter().any(|a| kept.contains(a))
+            })
+            .collect();
+        // A released folder can't keep a temporary name (it carries the old id): it gets a real
+        // one, deepest first, before the rest goes (the executor's DB still holds it then).
+        let mut parked: Vec<NodeId> = released
+            .iter()
+            .copied()
+            .filter(|r| {
+                client.parked.contains_key(r)
+                    && client
+                        .local
+                        .get(*r)
+                        .is_some_and(|s| s.name == parked_name(*r))
+            })
+            .collect();
+        parked.sort_by_key(|r| std::cmp::Reverse(client.local.ancestors(*r).len()));
+        for r in parked {
+            let client = &mut self.clients[c];
+            let (Some(state), Some((_, original))) =
+                (client.local.get(r).cloned(), client.parked.get(&r).cloned())
+            else {
+                continue;
+            };
+            if let Some(name) = release_name(client, r, state.parent, &original, true) {
+                client.local.insert(r, NodeState { name, ..state });
+            }
+        }
+        for n in gone {
+            if hidden.contains(&n) {
+                let content = self.clients[c].local.get(n).and_then(|s| s.content);
+                self.supersede(content); // junk, disposed of by design
+            }
+            let client = &mut self.clients[c];
+            client.local.remove(n);
+            client.parked.remove(&n);
+        }
+        for r in released {
+            let new = self.release_id();
+            let client = &mut self.clients[c];
+            client.parked.remove(&r);
+            rekey_client(client, r, new);
+        }
+        Done
     }
 
     /// Moves parked nodes back where they came from, when that name is free again.
@@ -647,11 +839,26 @@ impl Sim {
             if state.name != parked_name(node) {
                 continue; // the user moved it: the record is void
             }
+            let is_dir = state.kind == NodeKind::Folder;
+            let free = |client: &Client, name: &str| {
+                client.local.child_named(parent, name, Some(node)).is_none()
+            };
+            let filtered = |client: &Client, name: &str| {
+                client.local.path(parent).is_some_and(|mut path| {
+                    path.push(name);
+                    !client.filter.names(path, is_dir).is_sync()
+                })
+            };
+            // A filtered original name may be held by an item the scanner never tracks: the
+            // first free numbered name instead (as the executor does).
+            let mut name = name;
+            if filtered(client, &name)
+                && let Some(n) = release_name(client, node, parent, &name, is_dir)
+            {
+                name = n;
+            }
             if client.local.exists(parent)
-                && client
-                    .local
-                    .child_named(parent, &name, Some(node))
-                    .is_none()
+                && free(client, &name)
                 && !client.local.would_cycle(node, parent)
             {
                 client.local.insert(
@@ -673,7 +880,11 @@ impl Sim {
         let remote = self.server.live.get(&node).map(|n| n.state.clone());
         let version = self.server.live.get(&node).map(|n| n.remote.version);
         let client = &mut self.clients[c];
-        let local = client.local.get(node).cloned();
+        let local = client
+            .local
+            .get(node)
+            .filter(|_| verdict(client, node).is_sync())
+            .cloned();
         match (local, remote) {
             (None, None) => {
                 client.base.remove(node);
@@ -724,9 +935,25 @@ impl Sim {
             return Err(format!("created under a folder the server never had: {op}"));
         }
         let server = self.server.tree();
-        let server_view = view(&server);
+        let mut kept_here: BTreeSet<u64> = BTreeSet::new();
         for client in &self.clients {
-            let local_view = view(&client.local);
+            let hidden = masked(&client.local, &client.filter);
+            let mut visible = client.local.clone();
+            for n in &hidden {
+                if let Some(blob) = visible
+                    .remove(*n)
+                    .and_then(|s| s.content)
+                    .and_then(|c| self.blobs.get(&c.hash))
+                {
+                    kept_here.insert(*blob);
+                }
+            }
+            let mut synced = server.clone();
+            for n in masked(&server, &client.filter) {
+                synced.remove(n);
+            }
+            let server_view = view(&synced);
+            let local_view = view(&visible);
             if local_view != server_view {
                 return Err(format!(
                     "{} diverged:\n  local:  {local_view:?}\n  server: {server_view:?}",
@@ -739,20 +966,36 @@ impl Sim {
             if view(&client.base) != server_view {
                 return Err(format!("{}: base not settled", client.name));
             }
+            if !synced.violations().is_empty() {
+                return Err(format!(
+                    "server as {} syncs it: {:?}",
+                    client.name,
+                    synced.violations()
+                ));
+            }
         }
-        if !server.violations().is_empty() {
-            return Err(format!("server: {:?}", server.violations()));
+        // Names are judged per client (above): a clash among nodes every client filters stays,
+        // as no client syncs them, and any client that does would rename one.
+        let broken: Vec<_> = server
+            .violations()
+            .into_iter()
+            .filter(|v| !matches!(v, hbsync_engine::tree::Violation::DuplicateName { .. }))
+            .collect();
+        if !broken.is_empty() {
+            return Err(format!("server: {broken:?}"));
         }
         if let Some((_, bad)) = server
             .iter()
-            .find(|(_, s)| check_remote_name(&s.name).is_err())
+            .find(|(_, s)| check_remote_name(&s.name).is_err() || s.name.starts_with(".hbsync-"))
         {
             return Err(format!("server: invalid name {:?}", bad.name));
         }
-        let present: BTreeSet<u64> = server
+        let mut present: BTreeSet<u64> = server
             .iter()
             .filter_map(|(_, s)| s.content.and_then(|c| self.blobs.get(&c.hash).copied()))
             .collect();
+        // Filtered items are kept on their client only.
+        present.extend(kept_here);
         let lost: Vec<u64> = self
             .written
             .difference(&self.superseded)
@@ -794,6 +1037,66 @@ fn park_occupant(client: &mut Client, parent: NodeId, name: &str, except: Option
     client.local.insert(occupant, parked.clone());
     client.planned_local.insert(occupant, parked);
     true
+}
+
+/// A real name in `parent` for `node`, leaving its temporary one, as the executor picks it:
+/// `name` if free, else the first free numbered one, one the client syncs if any is.
+fn release_name(
+    client: &Client,
+    node: NodeId,
+    parent: NodeId,
+    name: &str,
+    is_dir: bool,
+) -> Option<String> {
+    let free = |n: &str| client.local.child_named(parent, n, Some(node)).is_none();
+    if free(name) {
+        return Some(name.to_owned());
+    }
+    let synced = |n: &str| {
+        client.local.path(parent).is_some_and(|mut path| {
+            path.push(n);
+            client.filter.names(path, is_dir).is_sync()
+        })
+    };
+    let mut filtered = None;
+    for n in 1..=100 {
+        let candidate = numbered_conflict_name(name, n);
+        if free(&candidate) {
+            if synced(&candidate) {
+                return Some(candidate);
+            }
+            filtered.get_or_insert(candidate);
+        }
+    }
+    filtered
+}
+
+fn ignoring_d() -> Filter {
+    Filter::from_rules("d\n", false).unwrap_or_default()
+}
+
+/// What the client's filter says about its local item `node`.
+fn verdict(client: &Client, node: NodeId) -> Verdict {
+    let Some(path) = client.local.path(node) else {
+        return Verdict::Sync;
+    };
+    let is_dir = client
+        .local
+        .get(node)
+        .is_some_and(|s| s.kind == NodeKind::Folder);
+    client.filter.names(path, is_dir)
+}
+
+/// Gives the client's local item `node` the id `new`: in its tree, in the tree its plan was
+/// made from, and in the parking records of its children.
+fn rekey_client(client: &mut Client, node: NodeId, new: NodeId) {
+    rekey(&mut client.local, node, new);
+    rekey(&mut client.planned_local, node, new);
+    for (parent, _) in client.parked.values_mut() {
+        if *parent == node {
+            *parent = new;
+        }
+    }
 }
 
 /// Gives the item `node` in `tree` the id `new`, children included.

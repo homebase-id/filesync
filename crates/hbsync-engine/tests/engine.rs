@@ -792,3 +792,248 @@ fn a_folder_is_not_deleted_remotely_while_a_child_delete_failed() -> R {
     );
     Ok(())
 }
+
+// ---- §10 filters ----
+
+fn ignoring(rules: &'static str) -> impl FnOnce(&mut hbsync_engine::EngineConfig) {
+    move |cfg| {
+        cfg.exec.filter = std::sync::Arc::new(
+            hbsync_local::Filter::from_rules(rules, false).expect("valid rules"),
+        );
+    }
+}
+
+#[test]
+fn junk_never_syncs_and_goes_to_the_trash_with_its_folder() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("proj/doc.txt", "v1")?;
+    a.write("proj/.DS_Store", "finder")?;
+    a.write("~$doc.docx", "lock")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(), ["proj/", "proj/doc.txt = v1"]);
+
+    // b's own junk in the folder doesn't hold up a's delete of it.
+    b.write("proj/Thumbs.db", "thumbs")?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("proj"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert!(b.tree_text().is_empty(), "{:?}", b.tree_text());
+    assert_eq!(a.tree_text(), ["~$doc.docx = lock"]);
+    Ok(())
+}
+
+#[test]
+fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("node_modules/\n*.log\n"))?;
+    a.write("proj/main.js", "m")?;
+    a.write("proj/run.log", "from a")?;
+    a.write("readme.txt", "r")?; // so deleting proj isn't deleting everything
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(),
+        ["proj/", "proj/main.js = m", "readme.txt = r"]
+    );
+
+    b.write("proj/node_modules/x/y.js", "dep")?;
+    b.write("proj/debug.log", "b's log")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(),
+        [
+            "proj/",
+            "proj/main.js = m",
+            "proj/run.log = from a",
+            "readme.txt = r"
+        ]
+    );
+
+    // a deletes the project: b keeps what it ignores, and the folder holding it, which goes
+    // back up as a new, empty folder.
+    fs::remove_dir_all(a.root.join("proj"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(),
+        [
+            "proj/",
+            "proj/debug.log = b's log",
+            "proj/node_modules/",
+            "proj/node_modules/x/",
+            "proj/node_modules/x/y.js = dep",
+            "readme.txt = r"
+        ]
+    );
+    a.sync()?;
+    assert_eq!(a.tree_text(), ["proj/", "readme.txt = r"]);
+    Ok(())
+}
+
+#[test]
+fn a_file_moved_into_a_folder_one_device_ignores_leaves_that_device_only() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("build/\n"))?;
+    a.write("notes.txt", "n")?;
+    a.write("draft.txt", "d1")?;
+    a.sync()?;
+    b.sync()?;
+    // a moves both into build/; b edited the draft meanwhile.
+    fs::create_dir(a.root.join("build"))?;
+    fs::rename(a.root.join("notes.txt"), a.root.join("build/notes.txt"))?;
+    fs::rename(a.root.join("draft.txt"), a.root.join("build/draft.txt"))?;
+    b.write("draft.txt", "d2 from b")?;
+    a.sync()?;
+    b.sync()?;
+    // The unchanged file went with the move; b's edit stays, as a new file everyone gets.
+    assert_eq!(b.tree_text(), ["draft.txt = d2 from b"]);
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(),
+        [
+            "build/",
+            "build/draft.txt = d1",
+            "build/notes.txt = n",
+            "draft.txt = d2 from b"
+        ]
+    );
+    Ok(())
+}
+
+/// `c` restarted with the ignore rules `rules`.
+fn restart_ignoring(c: &mut Client, name: &str, rules: &'static str) -> R {
+    let mut cfg = common::config(&c.root, name);
+    ignoring(rules)(&mut cfg);
+    c.engine = Engine::new(
+        StateDb::open(&c.db_path())?,
+        Box::new(c.remote.clone()),
+        cfg,
+    );
+    assert!(c.engine.apply_filter_change()?, "the filter changed");
+    assert!(!c.engine.apply_filter_change()?, "and is recorded");
+    Ok(())
+}
+
+#[test]
+fn a_new_ignore_rule_takes_files_off_the_drive_but_not_off_the_disk() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("src/main.rs", "fn main")?;
+    a.write("build/out.o", "obj")?;
+    a.write("readme", "r")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read("build/out.o")?, "obj");
+
+    // a starts ignoring build/: it leaves the drive and b (for b's trash), and stays on a.
+    restart_ignoring(&mut a, "a", "build/\n")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(a.read("build/out.o")?, "obj");
+    assert_eq!(
+        b.tree_text(),
+        ["readme = r", "src/", "src/main.rs = fn main"]
+    );
+
+    // The rule goes: build/ is new on a again, and goes back up.
+    restart_ignoring(&mut a, "a", "")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read("build/out.o")?, "obj");
+    Ok(())
+}
+
+#[test]
+fn a_parked_folder_kept_for_what_it_ignores_gets_a_real_name() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("node_modules/\n"))?;
+    a.write("proj/main.js", "m")?;
+    a.write("readme.txt", "r")?;
+    a.sync()?;
+    b.sync()?;
+    b.write("proj/node_modules/x.js", "dep")?;
+    b.sync()?;
+
+    // a starts the project over: b's old folder makes way for the new one, and keeps what b
+    // ignores under a real name, never the temporary one.
+    fs::remove_dir_all(a.root.join("proj"))?;
+    a.sync()?;
+    a.write("proj/new.js", "n")?;
+    a.sync()?;
+    b.sync()?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(
+        b.tree_text(),
+        [
+            "proj (conflict 1)/",
+            "proj (conflict 1)/node_modules/",
+            "proj (conflict 1)/node_modules/x.js = dep",
+            "proj/",
+            "proj/new.js = n",
+            "readme.txt = r"
+        ]
+    );
+    assert_eq!(
+        a.tree_text(),
+        [
+            "proj (conflict 1)/",
+            "proj/",
+            "proj/new.js = n",
+            "readme.txt = r"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_parked_file_whose_name_became_ignored_and_taken_moves_to_a_numbered_one() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("app.log", "keep me")?;
+    a.write("readme.txt", "r")?;
+    a.sync()?;
+    // A crash right after parking app.log; then a new app.log appears, and a rule ignores
+    // every numbered name too.
+    let from = hbsync_platform::RelPath::new("app.log")?;
+    let node = a
+        .engine
+        .db()
+        .read(|s| s.get_local(&from))?
+        .ok_or("row")?
+        .node;
+    let to = hbsync_platform::RelPath::new(&format!(".hbsync-move-{}", node.0.simple()))?;
+    fs::rename(from.to_native(&a.root), to.to_native(&a.root))?;
+    a.engine.db().write(|s| {
+        s.move_local_subtree(&from, &to)?;
+        s.put_parked(node, &from)
+    })?;
+    a.write("app.log", "new log")?;
+    restart_ignoring(&mut a, "a", "*.log\n")?;
+    a.sync()?;
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(),
+        [
+            "app (conflict 1).log = keep me",
+            "app.log = new log",
+            "readme.txt = r"
+        ]
+    );
+    // Ignored now: it left the drive.
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["readme.txt"]
+    );
+    Ok(())
+}

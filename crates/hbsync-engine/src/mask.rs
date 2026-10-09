@@ -4,21 +4,31 @@
 //! this device it isn't there. What the device still holds of such a node is settled before
 //! the merge:
 //! - an unchanged local copy is trashed (the node moved away, to where this device doesn't
-//!   follow), and the base is forgotten once nothing is left here;
+//!   follow), and its base is forgotten in the same step: a base left behind would read as a
+//!   local delete once the node is back in view;
 //! - a local copy with changes the remote doesn't have (edited bytes, or never synced) is
 //!   **detached**: it becomes a new node at its local place, created remotely like any new
-//!   local item. So are the masked folders such an item sits in, so it keeps its place, and
-//!   the masked folders holding anything else this device syncs.
+//!   local item, and the old base goes with the detach. So are the masked folders such an item
+//!   sits in, so it keeps its place, and the masked folders holding anything else this device
+//!   syncs.
 //!
 //! Detaching is a new identity rather than a resurrection: the node id is still live remotely
 //! (at the masked place), so it can't be created again.
 //!
 //! The parent of a masked node keeps a live child (§6.3): a local delete of it can't take
 //! children this device never saw.
+//!
+//! A masked node this device synced *at a place it now filters* (its rules changed) is
+//! **leaving**: ignored means kept here only, so it leaves the drive, unless the remote changed
+//! it since (a folder: unless it holds anything that isn't leaving). If the user brings the
+//! local item back into view instead, it isn't masked at all, and its local place wins over a
+//! remote move (which would take it out of view again). The names masked nodes hold stay taken
+//! for this device's own items.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use hbsync_local::Filter;
+use hbsync_platform::name::name_key;
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::reconcile::Input;
@@ -29,8 +39,15 @@ use crate::tree::Tree;
 pub struct Masks {
     /// Remote nodes this device doesn't sync.
     pub masked: HashSet<NodeId>,
-    /// Folders a masked live child keeps alive.
+    /// Folders a masked live child (one that isn't leaving) keeps alive.
     pub keep_alive: HashSet<NodeId>,
+    /// Masked nodes to delete remotely: synced here, now filtered where they were.
+    pub leaving: HashSet<NodeId>,
+    /// Nodes at a filtered place remotely whose local item the user brought back into view:
+    /// not masked, and the local place wins a move conflict.
+    pub brought_back: HashSet<NodeId>,
+    /// The name keys masked nodes hold, per folder: still taken remotely.
+    pub names: HashMap<NodeId, HashSet<String>>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
     /// The input as the merge sees it, if anything is masked: masked nodes left out of the
@@ -41,12 +58,42 @@ pub struct Masks {
 
 impl Masks {
     pub fn of(input: &Input, filter: &Filter, device: &str) -> Masks {
-        let masked = masked(&input.remote, filter);
+        let mut masked = masked(&input.remote, filter);
         if masked.is_empty() {
             return Masks::default();
         }
+        // A node synced at a place this device filters now, whose local item the user brought
+        // back into view (moved out of the ignored place), syncs as usual.
+        let filtered_base = self::masked(&input.base, filter);
+        let brought_back: HashSet<NodeId> = masked
+            .iter()
+            .copied()
+            .filter(|m| filtered_base.contains(m) && input.local.contains(*m))
+            .collect();
+        masked.retain(|m| !brought_back.contains(m));
+        if masked.is_empty() {
+            return Masks {
+                brought_back,
+                ..Masks::default()
+            };
+        }
+        let leaving: HashSet<NodeId> = masked
+            .iter()
+            .copied()
+            .filter(|m| filtered_base.contains(m))
+            .filter(|m| match (input.base.get(*m), input.remote.get(*m)) {
+                (Some(b), Some(r)) => {
+                    b.same_place(r)
+                        && b.content.map(|c| (c.hash, c.executable))
+                            == r.content.map(|c| (c.hash, c.executable))
+                }
+                _ => false,
+            })
+            .collect();
+        let leaving = only_whole_folders(&input.remote, leaving);
         let keep_alive = masked
             .iter()
+            .filter(|m| !leaving.contains(m))
             .filter_map(|m| input.remote.get(*m).map(|s| s.parent))
             .filter(|p| !p.is_root() && !masked.contains(p))
             .collect();
@@ -81,7 +128,7 @@ impl Masks {
             };
             if needs_place {
                 for a in input.local.ancestors(node) {
-                    if masked.contains(&a) && seen.insert(a) {
+                    if masked.contains(&a) && input.local.contains(a) && seen.insert(a) {
                         detach.push(a);
                     }
                 }
@@ -128,13 +175,43 @@ impl Masks {
             dirty,
             remote_complete: input.remote_complete,
         };
+        let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        for m in &masked {
+            if let Some(state) = input.remote.get(*m) {
+                names
+                    .entry(state.parent)
+                    .or_default()
+                    .insert(name_key(&state.name));
+            }
+        }
         Masks {
             masked,
             keep_alive,
+            leaving,
+            brought_back,
+            names,
             detached,
             input: Some(view),
         }
     }
+}
+
+/// `leaving` without the folders that hold anything else remotely (another device added it):
+/// those stay, and only what this device synced in them leaves.
+fn only_whole_folders(remote: &Tree, mut leaving: HashSet<NodeId>) -> HashSet<NodeId> {
+    let mut folders: Vec<(usize, NodeId)> = leaving
+        .iter()
+        .filter(|n| remote.get(**n).is_some_and(|s| s.kind == NodeKind::Folder))
+        .map(|n| (remote.ancestors(*n).len(), *n))
+        .collect();
+    // Deepest first: a folder's children are decided before it.
+    folders.sort_by(|a, b| b.cmp(a));
+    for (_, folder) in folders {
+        if remote.children(folder).any(|c| !leaving.contains(&c)) {
+            leaving.remove(&folder);
+        }
+    }
+    leaving
 }
 
 /// The remote nodes `filter` doesn't sync: those whose path it matches, and everything below
@@ -210,7 +287,11 @@ fn detach_id(node: NodeId, device: &str) -> NodeId {
     for b in device.bytes().chain(*b"detach") {
         h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
     }
-    for (b, x) in bytes.iter_mut().zip(h.to_le_bytes()) {
+    let mix = h
+        .to_le_bytes()
+        .into_iter()
+        .chain(h.rotate_left(29).to_le_bytes());
+    for (b, x) in bytes.iter_mut().zip(mix) {
         *b ^= x;
     }
     bytes[6] = (bytes[6] & 0x0F) | 0x40; // a well-formed v4 UUID

@@ -158,8 +158,11 @@ pub enum Op {
     /// below it): `node` moved remotely to where this device doesn't sync, and the item holds
     /// what must stay here (§10). A later op creates it remotely.
     LocalDetach { node: NodeId, new_node: NodeId },
-    /// This device no longer syncs `node` (§10) and holds nothing of it: drop its base.
-    Forget { node: NodeId },
+    /// This device no longer syncs `node` (§10): its local item goes to the trash, like
+    /// [`Op::LocalTrash`] with `subtree` (empty if nothing of it is here), and the bases of
+    /// `node` and `subtree` go with it, in one step. A base left behind would read as a local
+    /// delete once the node is back in view.
+    Forget { node: NodeId, subtree: Vec<NodeId> },
 }
 
 impl Op {
@@ -175,12 +178,21 @@ impl Op {
             | Op::RemoteDelete { node, .. }
             | Op::Settle { node }
             | Op::LocalDetach { node, .. }
-            | Op::Forget { node } => *node,
+            | Op::Forget { node, .. } => *node,
         }
     }
 
     pub fn is_delete(&self) -> bool {
-        matches!(self, Op::LocalTrash { .. } | Op::RemoteDelete { .. })
+        self.trashes().is_some() || matches!(self, Op::RemoteDelete { .. })
+    }
+
+    /// The node whose local item (with everything below it) this op moves to the trash.
+    pub fn trashes(&self) -> Option<NodeId> {
+        match self {
+            Op::LocalTrash { node, .. } => Some(*node),
+            Op::Forget { node, subtree } if !subtree.is_empty() => Some(*node),
+            _ => None,
+        }
     }
 
     /// Whether this op calls the remote (transfers aside, which run on the worker pool).
@@ -195,9 +207,11 @@ impl Op {
     /// replaced by a download that may land elsewhere). A target held by that node can be
     /// freed early by parking the node under a temporary name.
     pub fn vacates_local_name(&self) -> Option<NodeId> {
+        if let Some(node) = self.trashes() {
+            return Some(node);
+        }
         match self {
             Op::LocalMove { node, .. }
-            | Op::LocalTrash { node, .. }
             | Op::LocalFork { node, .. }
             | Op::LocalDownload {
                 node,
@@ -585,7 +599,9 @@ impl<'a> Reconciler<'a> {
             _ => (true, true),
         };
         let mut target = r.clone();
-        if l_moved && !r_moved {
+        // A node brought back into view from where this device filters (§10) keeps its local
+        // place: the remote one is filtered too, and would take it out of view again.
+        if l_moved && (!r_moved || self.masks.brought_back.contains(&node)) {
             target.parent = l.parent;
             target.name = l.name.clone();
         } else if l_moved && r_moved && !l.same_place(r) {
@@ -757,14 +773,19 @@ impl<'a> Reconciler<'a> {
                     by_key.entry(name_key(&s.name)).or_default().push(child);
                 }
             }
-            for (_, mut group) in by_key {
-                if group.len() < 2 {
+            // Names held remotely by nodes this device doesn't sync (§10) are taken: their
+            // holders keep them, and every node here loses.
+            let masked = self.masks.names.get(&parent);
+            let taken = |key: &str| masked.is_some_and(|m| m.contains(key));
+            for (key, mut group) in by_key {
+                let keep = usize::from(!taken(&key));
+                if group.len() <= keep {
                     continue;
                 }
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses.
                 group.sort_by_key(|n| (!self.deferred.contains(n), *n));
-                for loser in group.into_iter().skip(1) {
+                for loser in group.into_iter().skip(keep) {
                     if self.deferred.contains(&loser) {
                         continue;
                     }
@@ -779,6 +800,7 @@ impl<'a> Reconciler<'a> {
                             .merged
                             .child_named(parent, &candidate, Some(loser))
                             .is_none()
+                            && !taken(&name_key(&candidate))
                         {
                             break candidate;
                         }
@@ -804,7 +826,6 @@ impl<'a> Reconciler<'a> {
         let mut content = Vec::new();
         let mut deletes = Vec::new(); // (depth, op)
         let mut settles = Vec::new();
-        let mut forgets = Vec::new(); // (depth, node)
 
         let scope: Vec<NodeId> = self.scope.iter().copied().collect();
         let fork_copies: HashSet<NodeId> = self.forks.values().copied().collect();
@@ -891,6 +912,20 @@ impl<'a> Reconciler<'a> {
                         remote_ops = true;
                     }
                 }
+                // Ignored here now, where it was synced: it leaves the drive (§10).
+                (None, None) if self.masks.leaving.contains(&node) => {
+                    if let Some(r) = i.remote_refs.get(&node) {
+                        deletes.push((
+                            depth(&i.base),
+                            Op::RemoteDelete {
+                                node,
+                                file_id: r.file_id,
+                                expected: r.version,
+                            },
+                        ));
+                        remote_ops = true;
+                    }
+                }
                 (None, None) => {}
             }
 
@@ -901,7 +936,12 @@ impl<'a> Reconciler<'a> {
                     (None, Some(_)) => {
                         let mut subtree = i.local.subtree(node);
                         subtree.sort();
-                        deletes.push((depth(&i.local), Op::LocalTrash { node, subtree }));
+                        let op = if self.masks.masked.contains(&node) {
+                            Op::Forget { node, subtree }
+                        } else {
+                            Op::LocalTrash { node, subtree }
+                        };
+                        deletes.push((depth(&i.local), op));
                         local_ops = true;
                     }
                     (Some(t), None) => {
@@ -958,7 +998,11 @@ impl<'a> Reconciler<'a> {
                     (None, None) => false,
                 };
                 if needs_settle && target.is_none() && self.masks.masked.contains(&node) {
-                    forgets.push((depth(&i.base), node));
+                    // A detached node's base goes with the detach.
+                    if !self.masks.detached.contains_key(&node) {
+                        let subtree = Vec::new();
+                        deletes.push((depth(&i.base), Op::Forget { node, subtree }));
+                    }
                 } else if needs_settle {
                     settles.push(Op::Settle { node });
                 } else if i.dirty.contains(&node) {
@@ -967,31 +1011,17 @@ impl<'a> Reconciler<'a> {
             }
         }
 
-        // A base is forgotten only with all of its base children, so the base stays a tree;
-        // children first. The rest waits for a later plan.
-        let forgettable: HashSet<NodeId> = forgets.iter().map(|(_, n)| *n).collect();
-        for (d, node) in forgets {
-            if i.base.subtree(node).iter().all(|n| forgettable.contains(n)) {
-                deletes.push((d, Op::Forget { node }));
-            }
-        }
         // Parents before children for creates; children before parents for deletes; only the
         // topmost local trash of a subtree is needed.
         creates.sort_by_key(|(d, op)| (*d, op.node()));
         deletes.sort_by_key(|(d, op)| (std::cmp::Reverse(*d), op.node()));
-        let trashed: HashSet<NodeId> = deletes
-            .iter()
-            .filter(|(_, op)| matches!(op, Op::LocalTrash { .. }))
-            .map(|(_, op)| op.node())
-            .collect();
+        let trashed: HashSet<NodeId> = deletes.iter().filter_map(|(_, op)| op.trashes()).collect();
         let deletes: Vec<Op> = deletes
             .into_iter()
             .map(|(_, op)| op)
-            .filter(|op| match op {
-                Op::LocalTrash { node, .. } => {
-                    !i.local.ancestors(*node).iter().any(|a| trashed.contains(a))
-                }
-                _ => true,
+            .filter(|op| match op.trashes() {
+                Some(node) => !i.local.ancestors(node).iter().any(|a| trashed.contains(a)),
+                None => true,
             })
             .collect();
 
@@ -1061,10 +1091,13 @@ impl<'a> Reconciler<'a> {
         let (mut local_files, mut remote_files) = (0usize, 0usize);
         for op in &self.plan.ops {
             match op {
-                Op::LocalTrash { node, .. } => local_files += files_under(&i.local, *node),
+                Op::LocalTrash { node, .. } | Op::Forget { node, .. } => {
+                    local_files += files_under(&i.local, *node)
+                }
                 Op::RemoteDelete { node, .. }
                     if i.remote
                         .get(*node)
+                        .or(i.base.get(*node))
                         .is_some_and(|s| s.kind == NodeKind::File) =>
                 {
                     remote_files += 1
@@ -1089,6 +1122,7 @@ impl<'a> Reconciler<'a> {
         for op in ops {
             let held = match op {
                 Op::LocalTrash { .. } => hold_local,
+                Op::Forget { ref subtree, .. } if !subtree.is_empty() => hold_local,
                 Op::RemoteDelete { .. } => hold_remote,
                 _ => false,
             };

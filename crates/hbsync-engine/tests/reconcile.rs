@@ -131,7 +131,8 @@ fn kinds(ops: &[Op]) -> Vec<&'static str> {
             Op::RemoteDelete { .. } => "delete",
             Op::Settle { .. } => "settle",
             Op::LocalDetach { .. } => "detach",
-            Op::Forget { .. } => "forget",
+            Op::Forget { subtree, .. } if subtree.is_empty() => "forget",
+            Op::Forget { .. } => "forget+trash",
         })
         .collect()
 }
@@ -674,11 +675,26 @@ fn a_remote_move_into_an_ignored_folder_takes_the_file_away_here() {
     w.synced(f, file(ROOT, "a.txt", "v1"));
     w.remote(b, Some(folder(ROOT, "build")))
         .remote(f, Some(file(b, "a.txt", "v1")));
+    // The copy here goes to the trash and the base with it, in one step: the remote is never
+    // touched.
     let plan = w.plan();
-    assert_eq!(kinds(&plan.ops), ["trash"], "{plan:?}");
-    // Once it is gone here, the base goes too; the remote is never touched.
+    assert_eq!(
+        plan.ops,
+        [Op::Forget {
+            node: f,
+            subtree: vec![f]
+        }],
+        "{plan:?}"
+    );
+    // Gone here already: only the base goes.
     w.local(f, None);
-    assert_eq!(w.plan().ops, [Op::Forget { node: f }]);
+    assert_eq!(
+        w.plan().ops,
+        [Op::Forget {
+            node: f,
+            subtree: vec![]
+        }]
+    );
 }
 
 #[test]
@@ -697,7 +713,8 @@ fn a_local_edit_of_a_file_moved_into_an_ignored_folder_stays_as_a_new_file() {
         panic!("{plan:?}")
     };
     assert_eq!(node, f);
-    assert_eq!(kinds(&plan.ops), ["detach", "create", "forget"], "{plan:?}");
+    // The detach drops the old base itself.
+    assert_eq!(kinds(&plan.ops), ["detach", "create"], "{plan:?}");
     assert!(plan.ops.contains(&Op::RemoteCreate {
         node: new_node,
         parent: ROOT,
@@ -722,7 +739,7 @@ fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
     let plan = w.plan();
     assert_eq!(
         plan.ops,
-        [Op::LocalTrash {
+        [Op::Forget {
             node: d,
             subtree: {
                 let mut v = vec![d, f];
@@ -738,7 +755,7 @@ fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
     let plan = w.plan();
     assert_eq!(
         kinds(&plan.ops),
-        ["detach", "create", "create", "trash"],
+        ["detach", "create", "create", "forget+trash"],
         "{plan:?}"
     );
     let Some(&Op::LocalDetach { node, new_node }) = plan.ops.first() else {
@@ -754,7 +771,7 @@ fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
     assert!(
         plan.ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { node, .. } if *node == f))
+            .any(|op| matches!(op, Op::Forget { node, .. } if *node == f))
     );
 }
 
@@ -774,4 +791,70 @@ fn a_folder_with_children_this_device_ignores_survives_a_local_delete() {
     let plan = w.plan();
     assert_eq!(kinds(&plan.ops), ["mkdir", "delete"], "{plan:?}");
     assert!(matches!(plan.ops[1], Op::RemoteDelete { node, .. } if node == f));
+}
+
+#[test]
+fn what_a_new_rule_hides_leaves_the_drive_unless_another_device_added_to_it() {
+    let [d, f, g] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        opts: ignoring("build/\n"),
+        ..World::default()
+    };
+    w.synced(d, folder(ROOT, "build"))
+        .synced(f, file(d, "out.o", "o"));
+    // The scanner no longer reports them: kept here only, so they leave the drive.
+    w.local(d, None).local(f, None);
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["delete", "delete"], "{plan:?}");
+    assert_eq!(plan.ops[0].node(), f);
+
+    // Another device added to the folder meanwhile: that stays, and so does the folder; only
+    // what this device synced leaves, and the folder's base goes.
+    w.remote(g, Some(file(d, "new.o", "n")));
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["delete", "forget"], "{plan:?}");
+    assert_eq!(plan.ops[0].node(), f);
+    assert_eq!(plan.ops[1].node(), d);
+}
+
+#[test]
+fn a_folder_deleted_here_stays_deleted_when_what_it_held_leaves_the_drive() {
+    let [p, b, f] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        opts: ignoring("build/\n"),
+        ..World::default()
+    };
+    w.synced(p, folder(ROOT, "proj"))
+        .synced(b, folder(p, "build"))
+        .synced(f, file(b, "out.o", "o"));
+    // The user adds the rule and deletes the project: what the rule hides leaves the drive, so
+    // it doesn't keep the project alive.
+    w.local(p, None).local(b, None).local(f, None);
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["delete", "delete", "delete"], "{plan:?}");
+    assert_eq!(plan.ops[2].node(), p);
+}
+
+#[test]
+fn a_file_brought_back_into_view_keeps_its_place_over_a_remote_move() {
+    let [logs, f] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        opts: ignoring("*.o\n"),
+        ..World::default()
+    };
+    w.synced(logs, folder(ROOT, "logs"))
+        .synced(f, file(ROOT, "out.o", "o"));
+    // A new rule hides it, so the user renames it to keep it synced, while another device
+    // moves it to another place the rule hides: following that would take it off the drive.
+    w.local(f, Some(file(ROOT, "out.bin", "o")))
+        .remote(f, Some(file(logs, "out.o", "o")));
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["rename"], "{plan:?}");
+    assert!(plan.conflicts.is_empty(), "{plan:?}");
 }

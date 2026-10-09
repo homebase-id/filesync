@@ -144,6 +144,21 @@ pub fn build_input(
             }
         }
     }
+    // Whether a masked folder synced here leaves the drive depends on everything in it
+    // remotely (§10): load all of it.
+    for &node in dirty {
+        if !(masked.contains(&node) && b.input.base.contains(node)) {
+            continue;
+        }
+        let mut folders = vec![node];
+        while let Some(folder) = folders.pop() {
+            if b.input.remote.get(folder).map(|s| s.kind) != Some(NodeKind::Folder) {
+                continue;
+            }
+            b.load_children(folder)?;
+            folders.extend(b.input.remote.children(folder));
+        }
+    }
     Ok(b.input)
 }
 

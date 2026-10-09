@@ -9,6 +9,8 @@ fn action() -> impl Strategy<Value = Action> {
         3 => i().prop_map(|file| Action::Edit { file }),
         2 => (i(), i(), i()).prop_map(|(node, parent, name)| Action::Move { node, parent, name }),
         1 => i().prop_map(|node| Action::Delete { node }),
+        1 => i().prop_map(|parent| Action::CreateJunk { parent }),
+        1 => Just(Action::ToggleIgnore),
     ]
 }
 
@@ -307,6 +309,458 @@ fn regression_create_under_concurrently_deleted_folder() {
         Event::Step { client: 1 },
     ];
     run(2, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// A folder moved remotely into a place one client ignores, while that client holds a new
+/// item in it (detached), then more moves around it.
+#[test]
+fn regression_detached_folder() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 0 },
+        act(0, CreateFile { parent: 5, name: 0 }),
+        act(0, CreateJunk { parent: 0 }),
+        act(
+            0,
+            CreateFolder {
+                parent: 1,
+                name: 13,
+            },
+        ),
+        act(0, CreateFile { parent: 1, name: 0 }),
+        act(0, CreateFolder { parent: 3, name: 8 }),
+        Event::Step { client: 0 },
+        act(0, CreateJunk { parent: 0 }),
+        Event::Plan { client: 1 },
+        act(
+            1,
+            CreateFile {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        Event::Step { client: 1 },
+        act(0, CreateFile { parent: 0, name: 5 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        act(1, CreateFolder { parent: 6, name: 0 }),
+        Event::Step { client: 0 },
+        act(0, CreateFolder { parent: 0, name: 3 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 11,
+                name: 1,
+            },
+        ),
+    ];
+    run(2, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Three clients, junk and a client that ignores `d` among concurrent creates, moves and
+/// edits.
+#[test]
+fn regression_three_clients_with_filters() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 0 },
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        act(0, CreateFile { parent: 6, name: 0 }),
+        act(2, CreateFile { parent: 0, name: 6 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(
+            2,
+            CreateFile {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        act(0, Delete { node: 0 }),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        Event::Step { client: 1 },
+        act(0, Edit { file: 0 }),
+        act(1, CreateJunk { parent: 0 }),
+        act(1, CreateFile { parent: 2, name: 0 }),
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 1,
+                name: 13,
+            },
+        ),
+        act(0, CreateFile { parent: 0, name: 1 }),
+        Event::Plan { client: 1 },
+        act(0, CreateFile { parent: 0, name: 1 }),
+        Event::Step { client: 1 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 1,
+                name: 2,
+            },
+        ),
+    ];
+    run(3, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// An item parked under a temporary name whose original name a rule change then filters,
+/// while another item this client ignores holds that name.
+#[test]
+fn regression_parked_under_a_name_that_became_ignored() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let file = |client| act(client, CreateFile { parent: 0, name: 0 });
+    let events = [
+        file(2),
+        file(1),
+        Event::Plan { client: 1 },
+        act(2, ToggleIgnore),
+        act(2, ToggleIgnore),
+        act(1, CreateFolder { parent: 0, name: 5 }),
+        act(
+            2,
+            CreateFolder {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        Event::Step { client: 1 },
+        Event::Plan { client: 0 },
+        Event::Plan { client: 0 },
+        file(0),
+        file(0),
+        file(0),
+        act(1, ToggleIgnore),
+        act(
+            2,
+            Move {
+                node: 2,
+                parent: 2,
+                name: 0,
+            },
+        ),
+        file(0),
+        file(0),
+        file(0),
+        Event::Plan { client: 2 },
+        file(0),
+        file(0),
+        Event::Plan { client: 1 },
+        Event::Step { client: 2 },
+        Event::Step { client: 1 },
+        act(1, Delete { node: 1 }),
+        Event::Plan { client: 2 },
+        act(2, ToggleIgnore),
+        act(0, ToggleIgnore),
+        Event::Step { client: 2 },
+    ];
+    run(3, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn regression_fork_onto_a_name_that_stays_taken() {
+    use Action::*;
+    use Event::*;
+    let events = [
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 9, name: 6 },
+        },
+        Act {
+            client: 2,
+            action: CreateFile {
+                parent: 14,
+                name: 10,
+            },
+        },
+        Step { client: 0 },
+        Step { client: 1 },
+        Plan { client: 0 },
+        Plan { client: 1 },
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 9, name: 7 },
+        },
+        Plan { client: 2 },
+        Act {
+            client: 1,
+            action: Edit { file: 13 },
+        },
+        Step { client: 0 },
+        Step { client: 0 },
+        Step { client: 1 },
+        Step { client: 2 },
+        Plan { client: 2 },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: Move {
+                node: 3,
+                parent: 12,
+                name: 3,
+            },
+        },
+        Plan { client: 0 },
+        Step { client: 1 },
+        Plan { client: 1 },
+        Plan { client: 2 },
+        Act {
+            client: 0,
+            action: CreateFile {
+                parent: 13,
+                name: 13,
+            },
+        },
+        Plan { client: 0 },
+        Step { client: 2 },
+        Act {
+            client: 2,
+            action: Delete { node: 4 },
+        },
+        Act {
+            client: 1,
+            action: Move {
+                node: 7,
+                parent: 10,
+                name: 3,
+            },
+        },
+        Step { client: 0 },
+        Step { client: 2 },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 0, name: 7 },
+        },
+        Step { client: 0 },
+        Act {
+            client: 1,
+            action: ToggleIgnore,
+        },
+        Step { client: 0 },
+        Act {
+            client: 2,
+            action: Edit { file: 4 },
+        },
+        Act {
+            client: 1,
+            action: Edit { file: 4 },
+        },
+        Plan { client: 2 },
+        Step { client: 0 },
+        Act {
+            client: 1,
+            action: Edit { file: 15 },
+        },
+        Step { client: 2 },
+        Act {
+            client: 0,
+            action: Edit { file: 15 },
+        },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: CreateJunk { parent: 4 },
+        },
+        Act {
+            client: 0,
+            action: Edit { file: 11 },
+        },
+        Act {
+            client: 0,
+            action: Edit { file: 13 },
+        },
+        Step { client: 2 },
+        Step { client: 2 },
+        Step { client: 0 },
+        Act {
+            client: 0,
+            action: Move {
+                node: 5,
+                parent: 12,
+                name: 9,
+            },
+        },
+        Act {
+            client: 2,
+            action: CreateFile {
+                parent: 13,
+                name: 2,
+            },
+        },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 6, name: 5 },
+        },
+        Act {
+            client: 1,
+            action: Move {
+                node: 6,
+                parent: 6,
+                name: 7,
+            },
+        },
+        Step { client: 0 },
+        Step { client: 0 },
+        Step { client: 0 },
+        Plan { client: 2 },
+        Plan { client: 0 },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: CreateFile {
+                parent: 15,
+                name: 9,
+            },
+        },
+        Plan { client: 2 },
+        Act {
+            client: 1,
+            action: ToggleIgnore,
+        },
+        Act {
+            client: 1,
+            action: CreateFolder {
+                parent: 12,
+                name: 12,
+            },
+        },
+        Step { client: 0 },
+        Step { client: 2 },
+        Act {
+            client: 0,
+            action: Move {
+                node: 12,
+                parent: 1,
+                name: 5,
+            },
+        },
+        Act {
+            client: 2,
+            action: CreateFile {
+                parent: 10,
+                name: 11,
+            },
+        },
+        Plan { client: 1 },
+        Plan { client: 2 },
+        Act {
+            client: 1,
+            action: Move {
+                node: 12,
+                parent: 14,
+                name: 1,
+            },
+        },
+        Act {
+            client: 1,
+            action: ToggleIgnore,
+        },
+        Act {
+            client: 0,
+            action: Move {
+                node: 11,
+                parent: 4,
+                name: 8,
+            },
+        },
+        Act {
+            client: 2,
+            action: Edit { file: 14 },
+        },
+        Step { client: 2 },
+    ];
+    run(3, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+#[test]
+fn regression_forget_of_a_cycle_of_bases() {
+    use Action::*;
+    use Event::*;
+    let events = [
+        Act {
+            client: 2,
+            action: CreateFolder { parent: 0, name: 0 },
+        },
+        Act {
+            client: 2,
+            action: CreateFolder { parent: 0, name: 0 },
+        },
+        Act {
+            client: 2,
+            action: CreateJunk { parent: 0 },
+        },
+        Act {
+            client: 2,
+            action: CreateFolder {
+                parent: 10,
+                name: 0,
+            },
+        },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 2 },
+        Step { client: 2 },
+        Act {
+            client: 2,
+            action: CreateJunk { parent: 1 },
+        },
+        Act {
+            client: 2,
+            action: Move {
+                node: 3,
+                parent: 3,
+                name: 1,
+            },
+        },
+        Act {
+            client: 2,
+            action: Move {
+                node: 0,
+                parent: 6,
+                name: 5,
+            },
+        },
+        Act {
+            client: 2,
+            action: Move {
+                node: 13,
+                parent: 3,
+                name: 13,
+            },
+        },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Act {
+            client: 2,
+            action: ToggleIgnore,
+        },
+    ];
+    run(3, &events)
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }

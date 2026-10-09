@@ -786,6 +786,7 @@ version = "0.1.0"
 dependencies = [
  "hbsync-engine",
  "hbsync-fileio",
+ "hbsync-local",
  "hbsync-platform",
  "hbsync-types",
  "proptest",

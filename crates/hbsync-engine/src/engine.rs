@@ -13,6 +13,9 @@ use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
 use crate::view;
 
+/// The state DB key of the fingerprint of the filter the DB was last synced with.
+const FILTER_KEY: &str = "filter.fingerprint";
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub exec: ExecConfig,
@@ -39,6 +42,7 @@ impl EngineConfig {
                 retry_pause: std::time::Duration::from_millis(500),
                 transfer: crate::transfer::TransferConfig::default(),
                 case_insensitive: crate::exec::probe_case_insensitive(root),
+                filter: Default::default(),
                 crash_at: None,
             },
             device: device.to_owned(),
@@ -144,7 +148,8 @@ impl std::fmt::Debug for Engine {
 
 impl Engine {
     pub fn new(db: StateDb, remote: Box<dyn Remote>, cfg: EngineConfig) -> Self {
-        let scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
+        let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
+        scan_opts.filter = std::sync::Arc::clone(&cfg.exec.filter);
         Engine {
             db,
             remote,
@@ -181,6 +186,7 @@ impl Engine {
         db_path: &Path,
         date: &str,
     ) -> Result<StartupReport, EngineError> {
+        self.apply_filter_change()?;
         let remote = self.remote.as_ref();
         let page = self.cfg.feed_page_size;
         let db = &mut self.db;
@@ -198,6 +204,23 @@ impl Engine {
         Ok(StartupReport { local, feed, sync })
     }
 
+    /// Prepares for a filter that changed since the last run (§10): items may have come into
+    /// view or left it, which no journal reports, so the next catch-up walks the whole tree and
+    /// every node is planned again. Returns whether the filter changed. In one transaction with
+    /// the new fingerprint, so a crash can't skip it.
+    pub fn apply_filter_change(&mut self) -> Result<bool, StateError> {
+        let fingerprint = self.cfg.exec.filter.fingerprint();
+        self.db.write(|s| {
+            if s.get_kv(FILTER_KEY)?.as_deref() == Some(fingerprint.as_str()) {
+                return Ok(false);
+            }
+            s.delete_kv(hbsync_local::journal::CURSOR_KEY)?;
+            s.mark_synced_dirty()?;
+            s.set_kv(FILTER_KEY, &fingerprint)?;
+            Ok(true)
+        })
+    }
+
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
         Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)
@@ -209,7 +232,7 @@ impl Engine {
         let mut report = SyncReport::default();
         // After the scan, before planning: see recover_forks.
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
-        unpark(&mut self.db, &self.cfg.exec.root)?;
+        unpark(&mut self.db, &self.cfg.exec.root, &self.cfg.exec.filter)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
@@ -226,7 +249,7 @@ impl Engine {
             synced_files: synced_files as usize,
             allow_mass_delete: self.cfg.allow_mass_delete,
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
-            filter: std::sync::Arc::clone(&self.scan_opts.filter),
+            filter: std::sync::Arc::clone(&self.cfg.exec.filter),
         };
         // The dirty set is planned page by page in node id order and swept round after
         // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
@@ -280,7 +303,7 @@ impl Engine {
         let os = self.cfg.exec.os;
         let input = self
             .db
-            .read(|s| view::build_input(s, dirty, os, &self.scan_opts.filter))?;
+            .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter))?;
         let plan = reconcile(&input, opts);
         self.db
             .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;
