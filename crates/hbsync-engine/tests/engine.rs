@@ -2,6 +2,7 @@
 
 use std::fs;
 
+use hbsync_engine::exec::CrashPoint;
 use hbsync_engine::{Engine, EngineConfig};
 use hbsync_remote::fake::FakeRemote;
 use hbsync_state::StateDb;
@@ -200,32 +201,85 @@ fn parked_item_from_a_crash_is_put_back() -> R {
     Ok(())
 }
 
+/// A fresh engine for `c` on its state DB, as after a restart.
+fn restart(c: &mut Client, name: &str) -> R {
+    c.engine = Engine::new(
+        StateDb::open(&c.db_path())?,
+        Box::new(c.remote.clone()),
+        EngineConfig::new(&c.root, name),
+    );
+    Ok(())
+}
+
 #[test]
-fn crash_between_parking_rename_and_row_update_leaks_no_temporary_name() -> R {
+fn crash_right_after_parking_leaks_no_temporary_name() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
-    a.write("doc.txt", "keep me")?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.exec.crash_at = Some(CrashPoint::AfterParkRename)
+    })?;
+    a.write("x", "old file")?;
     a.sync()?;
-    let from = hbsync_platform::RelPath::new("doc.txt")?;
-    let node = a
-        .engine
-        .db()
-        .read(|s| s.get_local(&from))?
-        .ok_or("row")?
-        .node;
-    // The executor writes the record first, then renames; the crash comes before the row
-    // follows the rename. The scan then finds the file under its temporary name.
-    a.engine.db().write(|s| s.put_parked(node, &from))?;
-    fs::rename(
-        a.root.join("doc.txt"),
-        a.root.join(format!(".hbsync-move-{}", node.0.simple())),
-    )?;
+    b.sync()?;
+    // On a, the file x gives way to a folder x. On b the folder is created before the file is
+    // trashed, so the file is parked first; b's executor "crashes" right after that rename on
+    // disk, before the row follows. The file's own place on the server didn't change (it was
+    // deleted there), so only the parked record stops its temporary name from being uploaded.
+    fs::remove_file(a.root.join("x"))?;
+    a.write("x/inside", "new")?;
     a.sync()?;
-    assert_eq!(a.read("doc.txt")?, "keep me");
+    assert!(b.sync().is_err(), "b stops at the crash point");
+    assert!(
+        fs::read_dir(&b.root)?
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(".hbsync-move-")),
+        "the crash left a parked file behind"
+    );
+    restart(&mut b, "b")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(b.read("x/inside")?, "new");
+    assert_eq!(a.tree_text(), b.tree_text());
+    let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
+    names.sort();
     assert_eq!(
-        server.lock().map_err(|_| "poisoned")?.live_names(),
-        ["doc.txt"],
+        names,
+        ["inside", "x"],
         "the temporary name never reached the remote"
+    );
+    Ok(())
+}
+
+#[test]
+fn crash_right_after_a_fork_rename_survives_a_folder_rename() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.exec.crash_at = Some(CrashPoint::AfterForkRename)
+    })?;
+    a.write("docs/notes.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("docs/notes.txt", "a's edit")?;
+    a.sync()?;
+    b.write("docs/notes.txt", "b's edit")?;
+    assert!(b.sync().is_err(), "b stops right after the conflict rename");
+    // The user renames the folder before b runs again.
+    fs::rename(b.root.join("docs"), b.root.join("papers"))?;
+    restart(&mut b, "b")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(b.read("papers/notes.txt")?, "a's edit");
+    assert_eq!(
+        b.read("papers/notes (conflict b 2026-10-08).txt")?,
+        "b's edit"
+    );
+    let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
+    names.sort();
+    assert_eq!(
+        names,
+        ["notes (conflict b 2026-10-08).txt", "notes.txt", "papers"]
     );
     Ok(())
 }
@@ -449,9 +503,7 @@ fn crash_right_after_a_fork_rename_is_completed_not_published() -> R {
         .ok_or("row")?
         .node;
     let copy = hbsync_types::NodeId::new();
-    b.engine
-        .db()
-        .write(|s| s.put_fork(node, copy, &from, &to))?;
+    b.engine.db().write(|s| s.put_fork(node, copy, &to))?;
     fs::rename(b.root.join("notes.txt"), b.root.join(to.as_str()))?;
 
     let report = b.sync()?;

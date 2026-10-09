@@ -10,8 +10,9 @@
 //!   under a temporary name, recorded in the DB until it is moved on or back;
 //! - an operation blocked only by the order of the plan is retried later in the same run.
 //!
-//! After each operation the affected rows (`local`, mirror) are updated and the node is
-//! **settled**: the base takes each attribute both sides now agree on.
+//! Each operation's row updates (`local`, mirror) and the **settling** of its node (the base
+//! takes each attribute both sides now agree on) are one transaction: the base never falls
+//! behind what was done on disk or remotely.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -44,6 +45,19 @@ pub struct ExecConfig {
     /// Names that differ only in case (or Unicode normalization) are the same file here
     /// (Windows, default macOS). Probe with [`probe_case_insensitive`].
     pub case_insensitive: bool,
+    /// Tests only: stop the run at this point, as if the process died there.
+    #[doc(hidden)]
+    pub crash_at: Option<CrashPoint>,
+}
+
+/// Places where a test can make the executor stop as if it crashed.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashPoint {
+    /// After parking an occupant on disk, before its row follows.
+    AfterParkRename,
+    /// After a conflict-copy rename on disk, before the rows follow.
+    AfterForkRename,
 }
 
 /// Probes the volume of the sync root, inside the client's own state folder so nothing shows
@@ -77,7 +91,10 @@ pub struct ExecReport {
 
 #[derive(Debug)]
 enum Outcome {
+    /// Done; the node still needs settling.
     Done,
+    /// Done, and settled in the operation's own transaction.
+    Settled,
     Retry(String),
     Skip(String),
 }
@@ -99,31 +116,9 @@ pub struct Executor<'a> {
     queue: VecDeque<(Op, u8)>,
     report: ExecReport,
     urgent: HashSet<NodeId>,
-    /// Bookkeeping after finished operations, written in batches (see [`Executor::defer`]).
-    after: Vec<After>,
-    after_nodes: HashSet<NodeId>,
+    /// Set when a test's crash point was reached: the run stops.
+    crashed: bool,
 }
-
-/// DB work that follows an operation without being part of it.
-#[derive(Debug, Clone, Copy)]
-enum After {
-    /// Record in the base what both sides now agree on; `same_bytes`: a transfer just made
-    /// the content equal.
-    Settle { node: NodeId, same_bytes: bool },
-    /// The node needs another plan.
-    Dirty(NodeId),
-}
-
-impl After {
-    fn node(self) -> NodeId {
-        match self {
-            After::Settle { node, .. } | After::Dirty(node) => node,
-        }
-    }
-}
-
-/// Deferred bookkeeping written per transaction.
-const AFTER_BATCH: usize = 1000;
 
 /// A transfer whose guards passed, waiting for a worker.
 struct Prepared {
@@ -180,8 +175,7 @@ impl<'a> Executor<'a> {
             queue: VecDeque::new(),
             report: ExecReport::default(),
             urgent: HashSet::new(),
-            after: Vec::new(),
-            after_nodes: HashSet::new(),
+            crashed: false,
         }
     }
 
@@ -203,18 +197,6 @@ impl<'a> Executor<'a> {
                 self.flush(&mut batch)?;
                 continue;
             };
-            // An operation reads its node's rows as they are after everything before it.
-            let fork_copy = match &op {
-                Op::LocalFork { new_node, .. } => Some(*new_node),
-                _ => None,
-            };
-            if [Some(op.node()), fork_copy]
-                .iter()
-                .flatten()
-                .any(|n| self.after_nodes.contains(n))
-            {
-                self.write_after()?;
-            }
             if let Err(wait) = self.ready(&op) {
                 self.handle(op, attempts, wait)?;
                 continue;
@@ -235,38 +217,60 @@ impl<'a> Executor<'a> {
             if !batch.is_empty() {
                 self.flush(&mut batch)?;
             }
+            if let Op::Settle { node } = op {
+                self.settle_run(node)?;
+                continue;
+            }
             let outcome = self.execute(&op);
             self.handle(op, attempts, outcome)?;
+            if self.crashed {
+                return Err(StateError::Conflict("crash point reached".into()));
+            }
         }
-        self.write_after()?;
         Ok(self.report)
     }
 
-    /// Queues bookkeeping that follows an operation. It is written in batches (a commit each
-    /// would cost a disk sync), before any later operation on the same node, and at the end of
-    /// the run. A crash loses only bookkeeping the next plan redoes.
-    fn defer(&mut self, after: After) -> Result<(), StateError> {
-        self.after_nodes.insert(after.node());
-        self.after.push(after);
-        if self.after.len() >= AFTER_BATCH {
-            self.write_after()?;
+    /// Settles `first` and the run of `Settle` ops after it (the plan puts them last) in one
+    /// transaction: they change nothing on disk or remotely, so a crash only loses settling
+    /// the next plan asks for again.
+    fn settle_run(&mut self, first: NodeId) -> Result<(), StateError> {
+        const CHUNK: usize = 1000;
+        let mut nodes = vec![first];
+        while nodes.len() < CHUNK
+            && let Some((Op::Settle { node }, _)) = self.queue.front()
+        {
+            nodes.push(*node);
+            self.queue.pop_front();
         }
+        let os = self.cfg.os;
+        self.db
+            .write(|s| nodes.iter().try_for_each(|n| settle(s, *n, os, false)))?;
+        self.report.done += nodes.len();
         Ok(())
     }
 
-    fn write_after(&mut self) -> Result<(), StateError> {
-        if self.after.is_empty() {
-            return Ok(());
-        }
+    /// Writes an operation's DB changes and settles `nodes` (with whether the operation made
+    /// their bytes equal) in the same transaction: the base can't fall behind what was done,
+    /// and it costs one commit.
+    fn finish(
+        &mut self,
+        nodes: &[(NodeId, bool)],
+        f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
+    ) -> Step {
         let os = self.cfg.os;
-        let after = std::mem::take(&mut self.after);
-        self.after_nodes.clear();
         self.db.write(|s| {
-            after.iter().try_for_each(|a| match *a {
-                After::Settle { node, same_bytes } => settle(s, node, os, same_bytes),
-                After::Dirty(node) => s.mark_dirty(node),
-            })
-        })
+            f(s)?;
+            nodes
+                .iter()
+                .try_for_each(|(node, same_bytes)| settle(s, *node, os, *same_bytes))
+        })?;
+        Ok(Outcome::Settled)
+    }
+
+    /// Whether the test crash point `at` is reached; the run then stops.
+    fn crash_here(&mut self, at: CrashPoint) -> bool {
+        self.crashed |= self.cfg.crash_at == Some(at);
+        self.crashed
     }
 
     /// The server-side order guards ([`Op::requires`]), checked against the mirror.
@@ -291,23 +295,18 @@ impl<'a> Executor<'a> {
         match outcome {
             Outcome::Done => {
                 self.report.done += 1;
-                if let Op::LocalFork { new_node, .. } = op {
-                    self.defer(After::Settle {
-                        node: new_node,
-                        same_bytes: false,
-                    })?;
-                }
-                self.defer(After::Settle {
-                    node: op.node(),
-                    same_bytes: is_transfer(&op),
-                })?;
+                let os = self.cfg.os;
+                let same_bytes = is_transfer(&op);
+                self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
             }
+            Outcome::Settled => self.report.done += 1,
             Outcome::Retry(_) if attempts + 1 < self.cfg.attempts => {
                 self.queue.push_back((op, attempts + 1));
             }
             Outcome::Retry(why) => self.report.failed.push((op, why)),
             Outcome::Skip(why) => {
-                self.defer(After::Dirty(op.node()))?;
+                let node = op.node();
+                self.db.write(|s| s.mark_dirty(node))?;
                 self.report.skipped.push((op, why));
             }
         }
@@ -341,6 +340,9 @@ impl<'a> Executor<'a> {
         });
         if let Some(e) = first_error {
             return Err(e);
+        }
+        if self.crashed {
+            return Err(StateError::Conflict("crash point reached".into()));
         }
         Ok(())
     }
@@ -490,9 +492,12 @@ impl<'a> Executor<'a> {
         // record counts only while the item carries that name), so the temporary name can't
         // reach the remote as a rename.
         self.db
-            .write_durable(|s| s.put_parked(occupant.node, &occupant.path))?;
+            .write(|s| s.put_parked(occupant.node, &occupant.path))?;
         if ops::rename_noreplace(&self.abs(&occupant.path), &self.abs(&parked)).is_err() {
             self.db.write(|s| s.delete_parked(occupant.node))?;
+            return Ok(false);
+        }
+        if self.crash_here(CrashPoint::AfterParkRename) {
             return Ok(false);
         }
         let refreshed = self.renamed(&occupant, &parked);
@@ -527,8 +532,7 @@ impl<'a> Executor<'a> {
         }
         // Write-ahead: if we crash after the rename, recovery completes the fork instead of a
         // scan mistaking it for the user renaming the original.
-        self.db
-            .write_durable(|s| s.put_fork(node, new_node, &row.path, &target))?;
+        self.db.write(|s| s.put_fork(node, new_node, &target))?;
         if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&target)) {
             self.db.write(|s| s.delete_fork(node))?;
             return Ok(io_outcome(e));
@@ -540,8 +544,12 @@ impl<'a> Executor<'a> {
                 ..row.clone()
             })
         };
-        self.db.write(|s| complete_fork(s, node, &moved))?;
-        Ok(Outcome::Done)
+        if self.crash_here(CrashPoint::AfterForkRename) {
+            return Ok(Outcome::Retry("crash point reached".into()));
+        }
+        self.finish(&[(new_node, false), (node, false)], |s| {
+            complete_fork(s, node, &moved)
+        })
     }
 
     fn mkdir(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
@@ -566,7 +574,7 @@ impl<'a> Executor<'a> {
             Ok(m) => m,
             Err(e) => return Ok(io_outcome(e)),
         };
-        self.db.write(|s| {
+        self.finish(&[(node, false)], |s| {
             s.put_local(&LocalRow {
                 path: target.clone(),
                 node,
@@ -575,8 +583,7 @@ impl<'a> Executor<'a> {
                 executable: None,
                 hash: None,
             })
-        })?;
-        Ok(Outcome::Done)
+        })
     }
 
     fn local_move(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
@@ -603,12 +610,11 @@ impl<'a> Executor<'a> {
             return Ok(io_outcome(e));
         }
         let refreshed = self.renamed(&row, &target);
-        self.db.write(|s| {
+        self.finish(&[(node, false)], |s| {
             s.move_local_subtree(&row.path, &target)?;
             s.delete_parked(node)?;
             refreshed.as_ref().map_or(Ok(()), |r| s.put_local(r))
-        })?;
-        Ok(Outcome::Done)
+        })
     }
 
     /// See [`renamed_row`].
@@ -798,8 +804,8 @@ impl<'a> Executor<'a> {
                 JobResult::Uploaded(written),
             ) => {
                 let row = mirror_from(node, parent, kind, &content, Some(hash), written, extra);
-                self.db.write(|s| s.put_mirror(&row))?;
-                Ok(Outcome::Done)
+                // The bytes were just sent: equal even if the hashes use other algorithms.
+                self.finish(&[(node, true)], |s| s.put_mirror(&row))
             }
             _ => Ok(Outcome::Skip("mismatched transfer result".into())),
         }
@@ -855,7 +861,8 @@ impl<'a> Executor<'a> {
             Err(e) => return Ok(Outcome::Retry(e.to_string())),
         };
         let target = target.clone();
-        self.db.write(|s| {
+        // The bytes were just fetched: equal even if the hashes use other algorithms.
+        self.finish(&[(node, true)], |s| {
             if let Some(row) = &current {
                 s.delete_local(row.node)?;
             }
@@ -868,8 +875,7 @@ impl<'a> Executor<'a> {
                 executable: meta.executable,
                 hash: Some(local_hash),
             })
-        })?;
-        Ok(Outcome::Done)
+        })
     }
 
     fn trash(&mut self, node: NodeId, expected: &[NodeId]) -> Step {
@@ -891,7 +897,7 @@ impl<'a> Executor<'a> {
         if let Err(e) = self.move_to_trash(&row.path, node) {
             return Ok(io_outcome(e));
         }
-        self.db.write(|s| {
+        self.finish(&[(node, false)], |s| {
             for r in s.delete_local_subtree(&row.path)? {
                 s.delete_parked(r.node)?;
                 if r.node != node {
@@ -899,8 +905,7 @@ impl<'a> Executor<'a> {
                 }
             }
             Ok(())
-        })?;
-        Ok(Outcome::Done)
+        })
     }
 
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
@@ -940,12 +945,11 @@ impl<'a> Executor<'a> {
             Err(RemoteError::AlreadyExists) => return Ok(Outcome::Done),
             Err(e) => return Ok(remote_outcome(e)),
         };
-        self.db.write(|s| {
+        self.finish(&[(node, false)], |s| {
             s.put_mirror(&mirror_from(
                 node, parent, kind, &content, None, written, None,
             ))
-        })?;
-        Ok(Outcome::Done)
+        })
     }
 
     /// A metadata-only update: move or rename, keeping the payload.
@@ -982,8 +986,7 @@ impl<'a> Executor<'a> {
             written,
             mirror.content_extra.clone(),
         );
-        self.db.write(|s| s.put_mirror(&row))?;
-        Ok(Outcome::Done)
+        self.finish(&[(node, false)], |s| s.put_mirror(&row))
     }
 
     fn delete(
@@ -996,11 +999,10 @@ impl<'a> Executor<'a> {
             Ok(()) | Err(RemoteError::NotFound) => {}
             Err(e) => return Ok(remote_outcome(e)),
         }
-        self.db.write(|s| {
+        self.finish(&[(node, false)], |s| {
             s.delete_mirror(file_id)?;
             s.mark_dirty(node)
-        })?;
-        Ok(Outcome::Done)
+        })
     }
 }
 
@@ -1146,31 +1148,33 @@ fn complete_fork(s: &Store<'_>, node: NodeId, moved: &LocalRow) -> Result<(), St
     s.mark_dirty(node)
 }
 
-/// Finishes or forgets forks interrupted by a crash. Run before scanning: a scan would read a
-/// finished rename without its DB update as the user renaming the original.
+/// Finishes or forgets forks interrupted by a crash. Run after the scan and before planning:
+/// the scan has followed the renamed file (same node, now under the conflict-copy name, in
+/// whatever folder it is now), and completing hands that row to the copy's node, so the plan
+/// never reads the fork as the user renaming the original.
 pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
     let mut completed = 0;
-    for (node, new_node, from, to) in db.read(|s| s.all_forks())? {
-        let row = db.read(|s| s.get_local(&from))?.filter(|r| r.node == node);
-        let at_to = hbsync_platform::stat(&to.to_native(root)).ok();
-        let from_gone = fs::symlink_metadata(from.to_native(root)).is_err();
-        match (row, at_to) {
-            (Some(row), Some(meta)) if from_gone && meta.file_id == row.fingerprint.file_id => {
-                // The bytes are the forked ones only if size and mtime agree; else rehash later.
-                let moved = LocalRow {
-                    path: to.clone(),
-                    node: new_node,
-                    fingerprint: meta.fingerprint(),
-                    hash: row
-                        .hash
-                        .filter(|_| row.fingerprint.same_after_rename(&meta)),
-                    ..row
-                };
-                db.write(|s| complete_fork(s, node, &moved))?;
-                completed += 1;
-            }
-            _ => db.write(|s| s.delete_fork(node))?,
+    for (node, new_node, copy_name) in db.read(|s| s.all_forks())? {
+        let Some(row) = db.read(|s| s.local_by_node(node))? else {
+            db.write(|s| s.delete_fork(node))?;
+            continue;
+        };
+        if row.path.name() == Some(copy_name.as_str()) {
+            db.write(|s| {
+                s.rekey_local(node, new_node)?;
+                s.delete_parked(node)?;
+                s.delete_fork(node)?;
+                s.mark_dirty(new_node)?;
+                s.mark_dirty(node)
+            })?;
+            completed += 1;
+        } else if hbsync_platform::stat(&row.path.to_native(root))
+            .is_ok_and(|meta| meta.file_id == row.fingerprint.file_id)
+        {
+            // Still under its own name: the rename never happened.
+            db.write(|s| s.delete_fork(node))?;
         }
+        // Otherwise the scan hasn't caught up with the disk yet: decide next time.
     }
     Ok(completed)
 }

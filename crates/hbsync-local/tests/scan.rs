@@ -327,6 +327,33 @@ fn unreadable_folder_is_not_a_delete() -> R {
 
 #[cfg(unix)]
 #[test]
+fn contents_follow_a_folder_moved_somewhere_unreadable() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new()?;
+    f.write("a/x.txt", b"x")?;
+    f.scan()?;
+    let x = f.node("a/x.txt")?;
+    fs::rename(f.root().join("a"), f.root().join("b"))?;
+    let b = f.root().join("b");
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o000))?;
+    if fs::read_dir(&b).is_ok() {
+        fs::set_permissions(&b, fs::Permissions::from_mode(0o755))?;
+        return Ok(()); // root ignores permissions
+    }
+    let result = f.scan();
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o755))?;
+    let (report, dirty) = result?;
+    assert_eq!(report.removed, 0, "{report:?}");
+    assert!(
+        !dirty.contains(&x),
+        "x moved with its folder; it wasn't deleted"
+    );
+    assert_eq!(f.node("b/x.txt")?, x);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn executable_bit_change_is_a_change() -> R {
     use std::os::unix::fs::PermissionsExt;
     let mut f = Fixture::new()?;

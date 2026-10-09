@@ -38,6 +38,7 @@ impl EngineConfig {
                 attempts: 4,
                 transfer: crate::transfer::TransferConfig::default(),
                 case_insensitive: crate::exec::probe_case_insensitive(root),
+                crash_at: None,
             },
             device: device.to_owned(),
             feed_page_size: 500,
@@ -151,8 +152,6 @@ impl Engine {
         db_path: &Path,
         date: &str,
     ) -> Result<StartupReport, EngineError> {
-        // Before the local catch-up reads the disk: see recover_forks.
-        recover_forks(&mut self.db, &self.cfg.exec.root)?;
         let remote = self.remote.as_ref();
         let page = self.cfg.feed_page_size;
         let db = &mut self.db;
@@ -172,7 +171,6 @@ impl Engine {
 
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
-        recover_forks(&mut self.db, &self.cfg.exec.root)?;
         Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)
     }
 
@@ -180,6 +178,7 @@ impl Engine {
     /// round limit is hit). `date` (`YYYY-MM-DD`) is used for conflict-copy names.
     pub fn sync_once(&mut self, date: &str) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
+        // After the scan, before planning: see recover_forks.
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec.root)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;

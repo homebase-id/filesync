@@ -8,6 +8,8 @@ use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::{
     ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
+use std::collections::HashMap;
+
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::codec;
@@ -110,7 +112,12 @@ const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
 /// The columns [`RawLocal`] reads, from `local l JOIN nodes n`.
 const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, l.volume, \
-     l.file_id, l.file_id_hi, l.executable, l.hash";
+     l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name";
+/// Columns in [`LOCAL_COLS`].
+const LOCAL_COL_COUNT: usize = 13;
+/// Deeper than any real tree (Windows' 32k-character paths hold about 16k levels); reaching it
+/// means a broken parent chain.
+const MAX_DEPTH: usize = 16_384;
 const LOCAL_FROM: &str = "FROM local l JOIN nodes n ON n.id = l.id";
 /// A node's integer id, by UUID.
 const ID_OF: &str = "(SELECT id FROM nodes WHERE uuid = ?1)";
@@ -150,13 +157,15 @@ impl<'a> Store<'a> {
     }
 
     /// Forgets the ids of nodes nothing refers to any more (gone everywhere, nothing pending).
-    /// Ids are never handed out again, so an id held anywhere can't come to mean another node.
+    /// Only ids that lost a reference since the last call are checked (triggers note them in
+    /// `gone`). Ids are never handed out again, so an id held anywhere can't come to mean
+    /// another node.
     pub fn collect_nodes(&self) -> Result<usize> {
-        Ok(self
+        let n = self
             .conn
             .prepare_cached(
-                "DELETE FROM nodes WHERE \
-                 NOT EXISTS (SELECT 1 FROM local WHERE id = nodes.id) \
+                "DELETE FROM nodes WHERE id IN (SELECT id FROM gone) \
+             AND NOT EXISTS (SELECT 1 FROM local WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM local WHERE parent = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM base WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM base WHERE parent = nodes.id) \
@@ -166,7 +175,9 @@ impl<'a> Store<'a> {
              AND NOT EXISTS (SELECT 1 FROM parked WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM forks WHERE id = nodes.id OR new_node = nodes.id)",
             )?
-            .execute([])?)
+            .execute([])?;
+        self.conn.prepare_cached("DELETE FROM gone")?.execute([])?;
+        Ok(n)
     }
 
     pub fn node_count(&self) -> Result<u64> {
@@ -208,9 +219,12 @@ impl<'a> Store<'a> {
         );
         self.conn
             .prepare_cached(
-                "INSERT OR REPLACE INTO base (id, parent, name, kind, hash, size, mtime_ms, \
+                "INSERT INTO base (id, parent, name, kind, hash, size, mtime_ms, \
                  executable, remote_file_id, version_tag, content_state, local_name, local_hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                 ON CONFLICT (id) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, hash = ?5, \
+                 size = ?6, mtime_ms = ?7, executable = ?8, remote_file_id = ?9, \
+                 version_tag = ?10, content_state = ?11, local_name = ?12, local_hash = ?13",
             )?
             .execute(params![
                 id,
@@ -275,30 +289,42 @@ impl<'a> Store<'a> {
         self.local_id_at(path)
     }
 
-    /// The path of the local row `id`, from its chain of parents up to the root.
-    fn path_of(&self, id: i64) -> Result<RelPath> {
-        let root = self.key(NodeId::ROOT)?;
-        let mut stmt = self.conn.prepare_cached(
-            "WITH RECURSIVE up(id, parent, name, depth) AS ( \
-                 SELECT id, parent, name, 0 FROM local WHERE id = ?1 \
-                 UNION ALL \
-                 SELECT l.id, l.parent, l.name, up.depth + 1 FROM local l JOIN up ON l.id = up.parent \
-                 WHERE up.depth < 4096) \
-             SELECT parent, name FROM up ORDER BY depth DESC",
-        )?;
-        let chain: Vec<(i64, String)> = stmt
-            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<Result<_, _>>()?;
-        if chain.first().map(|(parent, _)| *parent) != root {
-            return Err(StateError::Corrupt(format!(
-                "local row {id} is not connected to the root"
-            )));
+    /// The path of the folder `id` (the root's id gives the root), walking up its parents
+    /// until a folder already in `cache`; every folder on the way is cached.
+    fn folder_path(&self, id: i64, cache: &mut HashMap<i64, RelPath>) -> Result<RelPath> {
+        if cache.is_empty()
+            && let Some(root) = self.key(NodeId::ROOT)?
+        {
+            cache.insert(root, RelPath::root());
         }
-        let mut path = RelPath::root();
-        for (_, name) in &chain {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT parent, name FROM local WHERE id = ?1")?;
+        let mut chain: Vec<(i64, String)> = Vec::new();
+        let mut at = id;
+        let mut path = loop {
+            if let Some(p) = cache.get(&at) {
+                break p.clone();
+            }
+            if chain.len() >= MAX_DEPTH {
+                return Err(StateError::Corrupt(format!(
+                    "local row {id}: parent chain too deep, or a cycle"
+                )));
+            }
+            let (parent, name): (i64, String) = stmt
+                .query_row([at], |r| Ok((r.get(0)?, r.get(1)?)))
+                .optional()?
+                .ok_or_else(|| {
+                    StateError::Corrupt(format!("local row {id} is not connected to the root"))
+                })?;
+            chain.push((at, name));
+            at = parent;
+        };
+        for (folder, name) in chain.into_iter().rev() {
             path = path
-                .join(name)
+                .join(&name)
                 .map_err(|e| StateError::Corrupt(format!("local name {name:?}: {e}")))?;
+            cache.insert(folder, path.clone());
         }
         Ok(path)
     }
@@ -309,14 +335,32 @@ impl<'a> Store<'a> {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Rows found without their path: the path comes from the parent chain.
+    /// Rows found without their path: each path is its folder's (derived once per folder)
+    /// plus its name.
     fn with_paths(&self, raw: Vec<RawLocal>) -> Result<Vec<LocalRow>> {
+        let mut cache = HashMap::new();
         raw.into_iter()
             .map(|r| {
-                let path = self.path_of(r.id)?;
+                let path = self
+                    .folder_path(r.parent, &mut cache)?
+                    .join(&r.name)
+                    .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
                 r.into_row(path)
             })
             .collect()
+    }
+
+    /// The folder `node` is in locally: the root for a top-level item, `None` without a row.
+    pub fn local_parent(&self, node: NodeId) -> Result<Option<NodeId>> {
+        let parent: Option<Vec<u8>> = self
+            .conn
+            .prepare_cached(
+                "SELECT p.uuid FROM local l JOIN nodes n ON n.id = l.id \
+                 JOIN nodes p ON p.id = l.parent WHERE n.uuid = ?1",
+            )?
+            .query_row([node.0.as_bytes()], |r| r.get(0))
+            .optional()?;
+        parent.as_deref().map(codec::node).transpose()
     }
 
     pub fn get_local(&self, path: &RelPath) -> Result<Option<LocalRow>> {
@@ -386,10 +430,10 @@ impl<'a> Store<'a> {
         if let Some((p, n)) = place
             && (p != parent || n != name)
         {
+            let at = self.local_by_node(row.node)?.map(|r| r.path);
             return Err(StateError::Conflict(format!(
-                "{:?} is already at {}",
-                row.node,
-                self.path_of(id)?
+                "{:?} is already at {at:?}",
+                row.node
             )));
         }
         let holder: Option<i64> = self
@@ -404,9 +448,12 @@ impl<'a> Store<'a> {
         let (lo, hi) = codec::file_id_parts(&fp.file_id);
         self.conn
             .prepare_cached(
-                "INSERT OR REPLACE INTO local (id, parent, name, kind, size, mtime_ns, ctime_ns, \
+                "INSERT INTO local (id, parent, name, kind, size, mtime_ns, ctime_ns, \
                  volume, file_id, file_id_hi, executable, hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 ON CONFLICT (id) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, size = ?5, \
+                 mtime_ns = ?6, ctime_ns = ?7, volume = ?8, file_id = ?9, file_id_hi = ?10, \
+                 executable = ?11, hash = ?12",
             )?
             .execute(params![
                 id,
@@ -471,19 +518,29 @@ impl<'a> Store<'a> {
             return Ok(Vec::new());
         };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "WITH RECURSIVE sub(id, path) AS ( \
-                 VALUES (?1, ?2) \
+            "WITH RECURSIVE sub(id, path, depth) AS ( \
+                 VALUES (?1, ?2, 0) \
                  UNION ALL \
-                 SELECT l.id, CASE WHEN sub.path = '' THEN l.name ELSE sub.path || '/' || l.name END \
-                 FROM local l JOIN sub ON l.parent = sub.id) \
-             SELECT {LOCAL_COLS}, sub.path FROM sub JOIN local l ON l.id = sub.id \
+                 SELECT l.id, CASE WHEN sub.path = '' THEN l.name ELSE sub.path || '/' || l.name END, \
+                 sub.depth + 1 \
+                 FROM local l JOIN sub ON l.parent = sub.id WHERE sub.depth < ?3) \
+             SELECT {LOCAL_COLS}, sub.path, sub.depth FROM sub JOIN local l ON l.id = sub.id \
              JOIN nodes n ON n.id = l.id"
         ))?;
-        let rows = stmt.query_map(params![start, path.as_str()], |r| {
-            Ok((r.get::<_, String>(11)?, RawLocal::read(r, 0)?))
+        let rows = stmt.query_map(params![start, path.as_str(), MAX_DEPTH as i64], |r| {
+            Ok((
+                r.get::<_, String>(LOCAL_COL_COUNT)?,
+                r.get::<_, i64>(LOCAL_COL_COUNT + 1)?,
+                RawLocal::read(r, 0)?,
+            ))
         })?;
         rows.map(|r| {
-            let (p, raw) = r?;
+            let (p, depth, raw) = r?;
+            if depth as usize >= MAX_DEPTH {
+                return Err(StateError::Corrupt(format!(
+                    "below {path}: too deep, or a cycle"
+                )));
+            }
             Ok((codec::rel_path(&p)?, raw))
         })
         .collect()
@@ -503,24 +560,32 @@ impl<'a> Store<'a> {
     /// The direct children of the folder at `parent` (the root for an empty path), in walk
     /// order.
     pub fn local_children(&self, parent: &RelPath) -> Result<Vec<LocalRow>> {
-        let Some(id) = self.local_id_at(parent)? else {
-            return Ok(Vec::new());
-        };
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {LOCAL_COLS}, l.name {LOCAL_FROM} WHERE l.parent = ?1"
-        ))?;
-        let raw = stmt
-            .query_map([id], |r| {
-                Ok((r.get::<_, String>(11)?, RawLocal::read(r, 0)?))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
+        match self.local_id_at(parent)? {
+            Some(id) => self.children_of(id, parent),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The direct children of `folder` (a row read in this transaction), in walk order.
+    pub fn local_children_of(&self, folder: &LocalRow) -> Result<Vec<LocalRow>> {
+        match self.key(folder.node)? {
+            Some(id) => self.children_of(id, &folder.path),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn children_of(&self, id: i64, path: &RelPath) -> Result<Vec<LocalRow>> {
+        let raw = self.raw_local(
+            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1"),
+            [id],
+        )?;
         let mut rows = raw
             .into_iter()
-            .map(|(name, r)| {
-                let path = parent
-                    .join(&name)
-                    .map_err(|e| StateError::Corrupt(format!("local name {name:?}: {e}")))?;
-                r.into_row(path)
+            .map(|r| {
+                let child = path
+                    .join(&r.name)
+                    .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
+                r.into_row(child)
             })
             .collect::<Result<Vec<_>>>()?;
         rows.sort_by(|a, b| a.path.cmp(&b.path));
@@ -615,28 +680,26 @@ impl<'a> Store<'a> {
 
     // ---- forks in progress ----
 
-    /// Records, before renaming, that `node`'s file at `from` becomes `new_node` at `to`.
-    pub fn put_fork(
-        &self,
-        node: NodeId,
-        new_node: NodeId,
-        from: &RelPath,
-        to: &RelPath,
-    ) -> Result<()> {
+    /// Records, before the rename, that `node`'s file becomes the conflict copy `new_node`
+    /// under the name of `to`, in the same folder. Only the name is kept, so the record holds
+    /// wherever the folder moves meanwhile.
+    pub fn put_fork(&self, node: NodeId, new_node: NodeId, to: &RelPath) -> Result<()> {
+        let name = to
+            .name()
+            .ok_or_else(|| StateError::Conflict("the root can't be forked".into()))?;
         let (id, new_id) = (self.key_or_insert(node)?, self.key_or_insert(new_node)?);
         self.conn
             .prepare_cached(
-                "INSERT OR REPLACE INTO forks (id, new_node, from_path, to_path) \
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO forks (id, new_node, to_name) VALUES (?1, ?2, ?3)",
             )?
-            .execute(params![id, new_id, from.as_str(), to.as_str()])?;
+            .execute(params![id, new_id, name])?;
         Ok(())
     }
 
-    /// `(node, new node, from, to)` of every fork in progress.
-    pub fn all_forks(&self) -> Result<Vec<(NodeId, NodeId, RelPath, RelPath)>> {
+    /// `(node, new node, conflict-copy name)` of every fork in progress.
+    pub fn all_forks(&self) -> Result<Vec<(NodeId, NodeId, String)>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT n.uuid, m.uuid, f.from_path, f.to_path FROM forks f \
+            "SELECT n.uuid, m.uuid, f.to_name FROM forks f \
              JOIN nodes n ON n.id = f.id JOIN nodes m ON m.id = f.new_node",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -644,17 +707,11 @@ impl<'a> Store<'a> {
                 r.get::<_, Vec<u8>>(0)?,
                 r.get::<_, Vec<u8>>(1)?,
                 r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
             ))
         })?;
         rows.map(|r| {
-            let (node, new_node, from, to) = r?;
-            Ok((
-                codec::node(&node)?,
-                codec::node(&new_node)?,
-                codec::rel_path(&from)?,
-                codec::rel_path(&to)?,
-            ))
+            let (node, new_node, name) = r?;
+            Ok((codec::node(&node)?, codec::node(&new_node)?, name))
         })
         .collect()
     }
@@ -703,9 +760,12 @@ impl<'a> Store<'a> {
         let f = row.file.as_ref();
         self.conn
             .prepare_cached(
-                "INSERT OR REPLACE INTO remote (id, file_id, version_tag, parent, kind, name, \
+                "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
                  hash, size, mtime_ms, executable, content_extra) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
+                 ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
+                 kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
+                 content_extra = ?11",
             )?
             .execute(params![
                 id,
@@ -909,6 +969,8 @@ struct RawLocal {
     file_id_hi: Option<i64>,
     executable: Option<bool>,
     hash: Option<Vec<u8>>,
+    parent: i64,
+    name: String,
 }
 
 impl RawLocal {
@@ -926,6 +988,8 @@ impl RawLocal {
             file_id_hi: r.get(at + 8)?,
             executable: r.get(at + 9)?,
             hash: r.get(at + 10)?,
+            parent: r.get(at + 11)?,
+            name: r.get(at + 12)?,
         })
     }
 

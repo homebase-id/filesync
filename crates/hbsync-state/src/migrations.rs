@@ -2,7 +2,7 @@
 //! are append-only once released: never edit one that has shipped. (Before the first release
 //! the schema was rebuilt as one migration.)
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::{Result, StateError};
 
@@ -77,14 +77,39 @@ const MIGRATIONS: &[&str] = &[
     -- Items parked under a temporary name in their folder, with the name they had.
     CREATE TABLE parked (id INTEGER PRIMARY KEY, original_name TEXT NOT NULL);
 
-    -- Conflict-copy forks in progress (written before the rename), so a crash in between can
-    -- be completed instead of misread.
+    -- Conflict-copy forks in progress (written before the rename, in the same folder), so a
+    -- crash in between can be completed instead of misread.
     CREATE TABLE forks (
-        id        INTEGER PRIMARY KEY,
-        new_node  INTEGER NOT NULL,
-        from_path TEXT NOT NULL,
-        to_path   TEXT NOT NULL
+        id       INTEGER PRIMARY KEY,
+        new_node INTEGER NOT NULL,
+        to_name  TEXT NOT NULL
     );
+
+    -- Node ids that lost a reference since the last collection (see Store::collect_nodes).
+    -- Not unique: a trigger's conflict handling yields to the statement that fired it, and a
+    -- repeated id costs nothing (the table is emptied at each collection).
+    CREATE TABLE gone (id INTEGER NOT NULL);
+    CREATE TRIGGER local_gone AFTER DELETE ON local
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;
+    CREATE TRIGGER local_regone AFTER UPDATE OF id, parent ON local
+        WHEN old.id IS NOT new.id OR old.parent IS NOT new.parent
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;
+    CREATE TRIGGER base_gone AFTER DELETE ON base
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;
+    CREATE TRIGGER base_regone AFTER UPDATE OF parent ON base
+        WHEN old.parent IS NOT new.parent
+        BEGIN INSERT INTO gone VALUES (old.parent); END;
+    CREATE TRIGGER remote_gone AFTER DELETE ON remote
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;
+    CREATE TRIGGER remote_regone AFTER UPDATE OF parent ON remote
+        WHEN old.parent IS NOT new.parent
+        BEGIN INSERT INTO gone VALUES (old.parent); END;
+    CREATE TRIGGER dirty_gone AFTER DELETE ON dirty
+        BEGIN INSERT INTO gone VALUES (old.id); END;
+    CREATE TRIGGER parked_gone AFTER DELETE ON parked
+        BEGIN INSERT INTO gone VALUES (old.id); END;
+    CREATE TRIGGER forks_gone AFTER DELETE ON forks
+        BEGIN INSERT INTO gone VALUES (old.id), (old.new_node); END;
 
     -- Cursors and small settings.
     CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
@@ -93,6 +118,18 @@ const MIGRATIONS: &[&str] = &[
 
 pub fn apply(conn: &mut Connection) -> Result<()> {
     let current: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    // Builds before the schema was rebuilt (no `nodes` table) left DBs at versions 1 to 6.
+    let has_nodes = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'nodes'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if current > 0 && !has_nodes {
+        return Err(StateError::PreRelease { found: current });
+    }
     let supported = MIGRATIONS.len() as u32;
     if current > supported {
         return Err(StateError::TooNew {
@@ -124,6 +161,18 @@ mod tests {
         let value: String =
             conn.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))?;
         assert_eq!(value, "v");
+        Ok(())
+    }
+
+    #[test]
+    fn a_pre_release_db_is_named_as_such() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch("CREATE TABLE local_items (path TEXT PRIMARY KEY)")?;
+        conn.pragma_update(None, "user_version", 6)?;
+        assert!(matches!(
+            apply(&mut conn),
+            Err(StateError::PreRelease { found: 6 })
+        ));
         Ok(())
     }
 }

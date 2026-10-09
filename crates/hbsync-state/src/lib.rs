@@ -33,6 +33,8 @@ pub enum StateError {
     Corrupt(String),
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
+    #[error("state DB was made by a pre-release build (schema {found}): delete it to start over")]
+    PreRelease { found: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
 }
@@ -60,13 +62,13 @@ impl StateDb {
         // Start-up runs the local catch-up and the feed on two connections; a long scan
         // transaction must not make the other writer give up.
         conn.busy_timeout(std::time::Duration::from_secs(120))?;
-        // WAL keeps readers off the writer's back. NORMAL syncs the WAL at checkpoints, not at
-        // every commit: a commit survives an app crash at once, and a power loss can only undo
-        // the last few, never corrupt the file. That is safe here because every step after a
-        // disk or remote change is redone by the next scan and plan; the records that must be
-        // on disk before the change they describe use `write_durable`.
+        // WAL keeps readers off the writer's back; FULL syncs each commit, so after a power loss
+        // the DB is never more than the one step in flight behind the disk. The executor's
+        // crash handling (write-ahead records, the scan's identity rules) relies on that, so
+        // speed comes from fewer commits (an operation and its settling are one), not from
+        // weaker ones.
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(64);
@@ -92,16 +94,6 @@ impl StateDb {
         let out = f(&Store::new(&tx))?;
         tx.commit()?;
         Ok(out)
-    }
-
-    /// [`StateDb::write`], with the commit on disk before this returns, even across a power
-    /// loss. For write-ahead records: ones that must exist before the disk change they
-    /// describe (forks, parked items).
-    pub fn write_durable<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        self.conn.pragma_update(None, "synchronous", "FULL")?;
-        let out = self.write(f);
-        self.conn.pragma_update(None, "synchronous", "NORMAL")?;
-        out
     }
 
     /// The schema version in use.

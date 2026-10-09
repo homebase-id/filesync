@@ -43,7 +43,8 @@ fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState
     let Some(local_name) = path.name() else {
         return Ok(None);
     };
-    let Some(parent) = s.local_node_at(&path.parent().unwrap_or_default())? else {
+    // Parking never leaves the folder, so the row's folder is the place's folder too.
+    let Some(parent) = s.local_parent(row.node)? else {
         return Ok(None);
     };
     let name = match &base {
@@ -170,10 +171,8 @@ impl Builder<'_, '_> {
             if self.local_done.insert(n)
                 && let Some(row) = self.s.local_by_node(n)?
             {
-                if let Some(parent) = row.path.parent().filter(|p| !p.is_root())
-                    && let Some(p) = self.s.get_local(&parent)?
-                {
-                    queue.push_back(p.node);
+                if let Some(parent) = self.s.local_parent(n)? {
+                    queue.push_back(parent);
                 }
                 self.add_local(row)?;
             }

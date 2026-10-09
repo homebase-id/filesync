@@ -162,6 +162,7 @@ pub fn rescan_dirs(
         diff.added.extend(part.added);
         diff.removed.extend(part.removed);
         diff.changed.extend(part.changed);
+        diff.unknown.extend(part.unknown);
         covered.extend(descended);
     }
     let plan = resolve(db, root, diff, opts, &mut report)?;
@@ -190,6 +191,8 @@ struct Diff {
     added: Vec<(RelPath, LocalMeta)>,
     removed: Vec<LocalRow>,
     changed: Vec<(LocalRow, LocalMeta)>,
+    /// Folders whose contents couldn't be read this time.
+    unknown: Vec<RelPath>,
 }
 
 fn merge(
@@ -241,6 +244,7 @@ fn merge(
             diff.removed.push(row);
         }
     }
+    diff.unknown = unknown;
     Ok(diff)
 }
 
@@ -323,7 +327,7 @@ impl DbRows {
             .and_then(|l| l.pop_front())
             .unwrap_or_else(|| unreachable!("take after a successful peek"));
         if self.descend && row.kind == NodeKind::Folder {
-            let children = db.read(|s| s.local_children(&row.path))?;
+            let children = db.read(|s| s.local_children_of(&row))?;
             if !children.is_empty() {
                 self.levels.push(children.into());
             }
@@ -451,6 +455,32 @@ fn resolve(
         }
         moved.push((old.clone(), path));
         plan.put_rows.push(new);
+    }
+
+    // A folder that moved to where it can't be read now took its contents along: they aren't
+    // gone, they follow it unchanged (the next readable scan checks them).
+    let unreadable = |p: &RelPath| diff.unknown.iter().any(|u| p.starts_with(u));
+    for (i, row) in removed.iter().enumerate() {
+        if matched[i] {
+            continue;
+        }
+        let Some((old_dir, new_dir)) = moved_folders
+            .iter()
+            .filter(|(old, new)| row.path.starts_with(old) && row.path != **old && unreadable(new))
+            .max_by_key(|(old, _)| old.as_str().len())
+        else {
+            continue;
+        };
+        let rest = &row.path.as_str()[old_dir.as_str().len() + 1..];
+        let Ok(new_path) = RelPath::new(&format!("{new_dir}/{rest}")) else {
+            continue;
+        };
+        matched[i] = true;
+        moved.push((row.clone(), new_path.clone()));
+        plan.put_rows.push(LocalRow {
+            path: new_path,
+            ..row.clone()
+        });
     }
 
     // Moves by content hash (rule 3): a new file whose hash matches exactly one vanished file.

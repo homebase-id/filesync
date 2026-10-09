@@ -5,8 +5,8 @@
 //!
 //! Ordering is component-wise (`"a/b" < "a-b"` because component `"a"` < `"a-b"`), so a
 //! depth-first walk that visits siblings in byte order yields paths in [`RelPath`] order. The
-//! walker's streaming merge against the state DB depends on that; the DB sorts with
-//! [`path_cmp`] registered as a collation.
+//! walker's streaming merge against the state DB depends on that: the scan reads the DB's
+//! tree depth first with children sorted the same way.
 
 use std::cmp::Ordering;
 use std::fmt;
