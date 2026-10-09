@@ -154,16 +154,19 @@ impl Hasher {
 }
 
 /// Hashes everything `reader` yields, with constant memory. Returns the hash and byte count.
-pub fn hash_reader(
-    mut reader: impl Read,
-    algorithm: HashAlgorithm,
-) -> io::Result<(ContentHash, u64)> {
+pub fn hash_reader(reader: impl Read, algorithm: HashAlgorithm) -> io::Result<(ContentHash, u64)> {
     let mut hasher = Hasher::new(algorithm);
+    let total = feed(reader, &mut hasher)?;
+    Ok((hasher.finalize(), total))
+}
+
+/// Feeds everything `reader` yields into `hasher`, in large reads. Returns the byte count.
+pub(crate) fn feed(mut reader: impl Read, hasher: &mut Hasher) -> io::Result<u64> {
     let mut buf = vec![0u8; BUF_SIZE];
     let mut total = 0u64;
     loop {
         let n = match reader.read(&mut buf) {
-            Ok(0) => break,
+            Ok(0) => return Ok(total),
             Ok(n) => n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
@@ -171,7 +174,6 @@ pub fn hash_reader(
         hasher.update(&buf[..n]);
         total += n as u64;
     }
-    Ok((hasher.finalize(), total))
 }
 
 /// Hashes a byte slice in one call.

@@ -3,7 +3,6 @@
 use std::path::Path;
 
 use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
-use hbsync_platform::FsFamily;
 use hbsync_remote::Remote;
 use hbsync_state::{StateDb, StateError};
 use hbsync_types::NodeId;
@@ -115,12 +114,7 @@ impl std::fmt::Debug for Engine {
 
 impl Engine {
     pub fn new(db: StateDb, remote: Box<dyn Remote>, cfg: EngineConfig) -> Self {
-        let fs_family = hbsync_platform::fskind::detect(&cfg.exec.root).unwrap_or(FsFamily::Other);
-        let scan_opts = ScanOptions {
-            algorithm: cfg.exec.algorithm,
-            fs_family,
-            exclude_at_root: vec![hbsync_local::STATE_DIR.to_owned()],
-        };
+        let scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
         Engine {
             db,
             remote,

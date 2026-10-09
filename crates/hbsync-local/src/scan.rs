@@ -31,6 +31,18 @@ pub struct ScanOptions {
     pub exclude_at_root: Vec<String>,
 }
 
+impl ScanOptions {
+    /// The options for a sync root: its file system family (`Other` if it can't be told) and
+    /// the client's state folder left out.
+    pub fn for_root(root: &Path, algorithm: HashAlgorithm) -> Self {
+        ScanOptions {
+            algorithm,
+            fs_family: hbsync_platform::fskind::detect(root).unwrap_or(FsFamily::Other),
+            exclude_at_root: vec![crate::STATE_DIR.to_owned()],
+        }
+    }
+}
+
 /// What a scan found and did.
 #[derive(Debug, Default)]
 pub struct ScanReport {
@@ -381,7 +393,7 @@ fn resolve(
     let mut matched = vec![false; removed.len()];
     // New entries without an identity yet, with their hash if one was already computed.
     let mut fresh: Vec<(RelPath, LocalMeta, Option<Option<ContentHash>>)> = Vec::new();
-    // node id → (old path, new path) for every moved node, to decide which moves are real.
+    // (old row, new path) for every node matched by file id, to decide which moves are real.
     let mut moved: Vec<(LocalRow, RelPath)> = Vec::new();
     // Folders matched by id, old path → new path. Walk order puts a folder before its contents.
     let mut moved_folders: HashMap<RelPath, RelPath> = HashMap::new();

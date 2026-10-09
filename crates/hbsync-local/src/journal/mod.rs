@@ -100,10 +100,8 @@ fn resolve_touched(
                 let rel = abs
                     .strip_prefix(&canonical_root)
                     .or_else(|_| abs.strip_prefix(root));
-                if let Ok(rel) = rel
-                    && let Some(path) = relpath_prefix(rel)
-                {
-                    dirs.push(path);
+                if let Ok(rel) = rel {
+                    dirs.push(relpath_prefix(rel));
                 }
             }
             Touched::DirId(id) if Some(*id) == root_id => dirs.push(RelPath::root()),
@@ -124,7 +122,7 @@ fn resolve_touched(
 
 /// The longest valid [`RelPath`] prefix of a relative native path (a component that isn't
 /// valid UTF-8 or a valid name ends it, so the containing folder is rescanned instead).
-fn relpath_prefix(rel: &Path) -> Option<RelPath> {
+pub(crate) fn relpath_prefix(rel: &Path) -> RelPath {
     let mut path = RelPath::root();
     for component in rel.components() {
         let std::path::Component::Normal(name) = component else {
@@ -135,14 +133,13 @@ fn relpath_prefix(rel: &Path) -> Option<RelPath> {
             _ => break,
         }
     }
-    Some(path)
+    path
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use hbsync_fileio::HashAlgorithm;
-    use hbsync_platform::FsFamily;
     use std::fs;
 
     /// A scripted journal for testing the catch-up logic on every OS.
@@ -169,11 +166,7 @@ mod tests {
     }
 
     fn opts(root: &Path) -> ScanOptions {
-        ScanOptions {
-            algorithm: HashAlgorithm::Blake3,
-            fs_family: hbsync_platform::fskind::detect(root).unwrap_or(FsFamily::Other),
-            exclude_at_root: vec![crate::STATE_DIR.into()],
-        }
+        ScanOptions::for_root(root, HashAlgorithm::Blake3)
     }
 
     #[test]
@@ -279,7 +272,17 @@ mod tests {
 
     #[test]
     fn relpath_prefix_stops_at_bad_components() {
-        assert_eq!(relpath_prefix(Path::new("a/b")), RelPath::new("a/b").ok());
-        assert_eq!(relpath_prefix(Path::new("")), Some(RelPath::root()));
+        assert_eq!(
+            Some(relpath_prefix(Path::new("a/b"))),
+            RelPath::new("a/b").ok()
+        );
+        assert_eq!(relpath_prefix(Path::new("")), RelPath::root());
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            // Not UTF-8 in the middle: the path ends there, it doesn't skip to "a/c".
+            let bad = Path::new(std::ffi::OsStr::from_bytes(b"a/\xff/c"));
+            assert_eq!(Some(relpath_prefix(bad)), RelPath::new("a").ok());
+        }
     }
 }

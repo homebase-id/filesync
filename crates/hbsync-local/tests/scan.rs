@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use hbsync_fileio::HashAlgorithm;
-use hbsync_local::{STATE_DIR, ScanOptions, ScanReport, scan};
+use hbsync_local::{ScanOptions, ScanReport, scan};
 use hbsync_platform::RelPath;
 use hbsync_state::StateDb;
 use hbsync_types::NodeId;
@@ -18,11 +18,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
-        let opts = ScanOptions {
-            algorithm: HashAlgorithm::Blake3,
-            fs_family: hbsync_platform::fskind::detect(dir.path())?,
-            exclude_at_root: vec![STATE_DIR.into()],
-        };
+        let opts = ScanOptions::for_root(dir.path(), HashAlgorithm::Blake3);
         Ok(Fixture {
             dir,
             db: StateDb::open_in_memory()?,

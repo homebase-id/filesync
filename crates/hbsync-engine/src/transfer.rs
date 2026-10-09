@@ -10,8 +10,8 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
@@ -193,10 +193,8 @@ impl JobError {
     pub fn is_transient(&self) -> bool {
         match self {
             JobError::Remote(e) => e.is_transient() || matches!(e, RemoteError::Io(_)),
-            // A resumable download that didn't verify was deleted; a fresh try may succeed.
-            JobError::File(FileIoError::HashMismatch { .. } | FileIoError::SizeMismatch { .. }) => {
-                true
-            }
+            // Local trouble (locked, changing) passes; a download that didn't verify was
+            // deleted, so a fresh try may succeed.
             JobError::File(_) | JobError::Io(_) => true,
         }
     }
@@ -212,16 +210,16 @@ pub fn run_jobs(
 ) {
     jobs.sort_by_key(|(urgent, job)| (!*urgent, job.size()));
     let queue: Mutex<VecDeque<Job>> = Mutex::new(jobs.into_iter().map(|(_, j)| j).collect());
-    let throttle = cfg.max_bytes_per_sec.map(|r| Arc::new(Throttle::new(r)));
+    let throttle = cfg.max_bytes_per_sec.map(Throttle::new);
     let (tx, rx) = mpsc::channel::<(Job, JobResult)>();
     std::thread::scope(|scope| {
         for _ in 0..cfg.workers.max(1) {
             let tx = tx.clone();
             let queue = &queue;
-            let throttle = throttle.clone();
+            let throttle = throttle.as_ref();
             scope.spawn(move || {
                 while let Some(job) = queue.lock().ok().and_then(|mut q| q.pop_front()) {
-                    let result = run_job(remote, &job, throttle.as_deref());
+                    let result = run_job(remote, &job, throttle);
                     if tx.send((job, result)).is_err() {
                         break;
                     }
@@ -331,7 +329,7 @@ fn download(
     if offset < size {
         let range = (offset > 0).then_some(offset..size);
         let mut sink = ThrottledWrite {
-            inner: PartialSink(&mut partial),
+            inner: &mut partial,
             throttle,
         };
         remote.read(file_id, range, &mut sink)?;
@@ -344,19 +342,6 @@ fn download(
         hash_file(file.path(), local_algorithm)?.hash
     };
     Ok(JobResult::Downloaded { file, local_hash })
-}
-
-/// Adapts a [`PartialFile`] to `io::Write`.
-struct PartialSink<'a>(&'a mut PartialFile);
-
-impl Write for PartialSink<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write_all(buf)?;
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

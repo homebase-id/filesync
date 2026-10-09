@@ -114,11 +114,6 @@ impl Tree {
         out
     }
 
-    /// `true` if `ancestor` is `node` or above it.
-    pub fn is_within(&self, node: NodeId, ancestor: NodeId) -> bool {
-        node == ancestor || ancestor.is_root() || self.ancestors(node).contains(&ancestor)
-    }
-
     /// The names from the root down to `node`, or `None` if `node` isn't connected to the root
     /// (missing node on the way, or a cycle).
     pub fn path(&self, node: NodeId) -> Option<Vec<&str>> {
@@ -292,7 +287,6 @@ mod tests {
         assert_eq!(t.ancestors(c), vec![b, a]);
         assert_eq!(t.children(a).collect::<Vec<_>>(), [b]);
         assert_eq!(t.subtree(a), [a, b, c]);
-        assert!(t.is_within(c, a));
         assert!(t.would_cycle(a, c));
         assert!(!t.would_cycle(c, a));
         assert_eq!(t.child_named(NodeId::ROOT, "A", None), Some(a));

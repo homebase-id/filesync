@@ -18,7 +18,7 @@ use hbsync_state::{StateDb, StateError};
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::journal::{CURSOR_KEY, CatchUp, catch_up};
+use crate::journal::{CURSOR_KEY, CatchUp, catch_up, relpath_prefix};
 use crate::scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 
 /// A coalesced set of changes from the watcher.
@@ -149,27 +149,15 @@ fn add_event(
         let Ok(rel) = path.strip_prefix(root) else {
             continue;
         };
-        let mut components = rel.components().filter_map(|c| match c {
-            std::path::Component::Normal(n) => n.to_str(),
-            _ => None,
-        });
-        let names: Vec<&str> = components.by_ref().collect();
-        if names
-            .first()
-            .is_some_and(|first| exclude_at_root.iter().any(|e| e == first))
-        {
+        let first = rel.components().next().and_then(|c| c.as_os_str().to_str());
+        if first.is_some_and(|first| exclude_at_root.iter().any(|e| e.as_str() == first)) {
             continue;
         }
         // The parent of the changed entry; a name that isn't valid ends the path early, which
         // rescans a folder higher up.
-        let mut dir = RelPath::root();
-        for name in names.iter().take(names.len().saturating_sub(1)) {
-            match dir.join(name) {
-                Ok(next) => dir = next,
-                Err(_) => break,
-            }
-        }
-        batch.dirs.insert(dir);
+        batch
+            .dirs
+            .insert(relpath_prefix(rel.parent().unwrap_or(Path::new(""))));
     }
 }
 
@@ -373,11 +361,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
         fs::create_dir_all(root.join("a/b"))?;
-        let opts = ScanOptions {
-            algorithm: hbsync_fileio::HashAlgorithm::Blake3,
-            fs_family: hbsync_platform::fskind::detect(&root)?,
-            exclude_at_root: vec![crate::STATE_DIR.into()],
-        };
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
         let mut db = StateDb::open_in_memory()?;
         let mut observer = LocalObserver::start(&root, opts);
         assert!(observer.has_watcher(), "{:?}", observer.watcher_error);
@@ -427,11 +411,7 @@ mod tests {
     {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
-        let opts = ScanOptions {
-            algorithm: hbsync_fileio::HashAlgorithm::Blake3,
-            fs_family: hbsync_platform::fskind::detect(&root)?,
-            exclude_at_root: vec![crate::STATE_DIR.into()],
-        };
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
         let mut db = StateDb::open_in_memory()?;
         let mut observer = LocalObserver::start(&root, opts);
         let clock = Instant::now();

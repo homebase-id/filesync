@@ -25,19 +25,6 @@ pub enum FsFamily {
 }
 
 impl FsFamily {
-    /// Coarsest mtime step the file system stores. Two mtimes closer than this are equal.
-    pub fn mtime_granularity_ns(self) -> i64 {
-        match self {
-            FsFamily::Fat => 2_000_000_000,
-            FsFamily::ExFat => 10_000_000,
-            FsFamily::HfsPlus => 1_000_000_000,
-            FsFamily::Ntfs | FsFamily::ReFs => 100,
-            // Network and FUSE file systems depend on the backend; assume the worst common case.
-            FsFamily::Network | FsFamily::Fuse | FsFamily::Other => 1_000_000_000,
-            _ => 1,
-        }
-    }
-
     /// `true` if file ids are stable across renames and reboots, so they can be used for local
     /// move detection.
     pub fn has_stable_file_ids(self) -> bool {
@@ -61,11 +48,6 @@ impl FsFamily {
             FsFamily::Ntfs | FsFamily::ReFs | FsFamily::Apfs | FsFamily::HfsPlus
         )
     }
-}
-
-/// Two mtimes are equal if they differ by less than the file system's granularity.
-pub fn mtimes_match(a_ns: i64, b_ns: i64, family: FsFamily) -> bool {
-    a_ns.abs_diff(b_ns) < family.mtime_granularity_ns().unsigned_abs()
 }
 
 /// Detects the file system family of the volume holding `path`.
@@ -225,11 +207,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn granularity_rules() {
-        assert!(mtimes_match(0, 1_999_999_999, FsFamily::Fat));
-        assert!(!mtimes_match(0, 2_000_000_000, FsFamily::Fat));
-        assert!(mtimes_match(5, 5, FsFamily::Ext4));
-        assert!(!mtimes_match(5, 6, FsFamily::Ext4));
+    fn family_rules() {
         assert!(!FsFamily::ExFat.has_stable_file_ids());
         assert!(FsFamily::Ntfs.supports_journal());
         assert!(!FsFamily::Ext4.supports_journal());

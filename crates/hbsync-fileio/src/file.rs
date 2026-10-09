@@ -7,12 +7,12 @@
 //!   [`CompletedFile::persist_new`] (never overwrites) or [`CompletedFile::persist_over`].
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use hbsync_platform::{Fingerprint, LocalMeta, ops};
 
-use crate::hash::{BUF_SIZE, ContentHash, HashAlgorithm, Hasher};
+use crate::hash::{ContentHash, HashAlgorithm, Hasher, feed};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileIoError {
@@ -83,18 +83,7 @@ impl PartialFile {
             .truncate(false)
             .open(&path)?;
         let mut hasher = Hasher::new(algorithm);
-        let mut buf = vec![0u8; BUF_SIZE];
-        let mut written = 0u64;
-        loop {
-            let n = match file.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            };
-            hasher.update(&buf[..n]);
-            written += n as u64;
-        }
+        let written = feed(&mut file, &mut hasher)?;
         file.seek(SeekFrom::Start(written))?;
         Ok(PartialFile {
             path,
@@ -111,29 +100,6 @@ impl PartialFile {
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    pub fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.file.write_all(data)?;
-        self.hasher.update(data);
-        self.written += data.len() as u64;
-        Ok(())
-    }
-
-    /// Copies everything from `reader` and returns the number of bytes copied.
-    pub fn copy_from(&mut self, mut reader: impl Read) -> io::Result<u64> {
-        let mut buf = vec![0u8; BUF_SIZE];
-        let mut total = 0u64;
-        loop {
-            let n = match reader.read(&mut buf) {
-                Ok(0) => return Ok(total),
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            };
-            self.write_all(&buf[..n])?;
-            total += n as u64;
-        }
     }
 
     /// Flushes to disk and verifies size and hash. On a mismatch the partial file is deleted,
@@ -168,17 +134,25 @@ impl PartialFile {
             size: self.written,
         })
     }
+}
 
-    /// Throws the partial file away.
-    pub fn discard(self) -> io::Result<()> {
-        drop(self.file);
-        fs::remove_file(&self.path)
+/// Appends to the partial file, hashing as it goes.
+impl Write for PartialFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.file.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
     }
 }
 
 /// A verified temp file, ready to be moved into place.
 #[derive(Debug)]
-#[must_use = "a completed file stays in the temp dir until persisted or discarded"]
+#[must_use = "a completed file stays in the temp dir until persisted"]
 pub struct CompletedFile {
     path: PathBuf,
     pub hash: ContentHash,
@@ -232,10 +206,6 @@ impl CompletedFile {
         Ok(hbsync_platform::stat(target)?)
     }
 
-    pub fn discard(self) -> io::Result<()> {
-        fs::remove_file(&self.path)
-    }
-
     /// Leaves the verified file in the temp folder: reopening its [`PartialFile`] finds it
     /// complete, so a retry needs no transfer. The caller cleans up files nobody resumes.
     pub fn keep_for_retry(self) {}
@@ -281,7 +251,7 @@ mod tests {
         // Resume from the offset the partial file reports.
         let mut partial = PartialFile::open(&tmp, "node-1", ALG)?;
         assert_eq!(partial.offset(), 300_000);
-        partial.copy_from(&data[300_000..])?;
+        io::copy(&mut &data[300_000..], &mut partial)?;
         let done = partial.finish(Some(expected), Some(data.len() as u64))?;
         assert_eq!(done.hash, expected);
 

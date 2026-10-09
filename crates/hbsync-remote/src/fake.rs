@@ -22,7 +22,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use hbsync_fileio::Hasher;
+use hbsync_fileio::hash_bytes;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Uuid, VersionTag};
 
@@ -112,13 +112,11 @@ impl FakeServer {
         }
     }
 
-    /// Reads an upload, checking its hash. `cut` simulates a connection that drops after that
-    /// many bytes.
+    /// Reads an upload, checking its hash.
     fn receive(
         &self,
         kind: NodeKind,
         upload: Option<Upload<'_>>,
-        cut: Option<u64>,
     ) -> Result<Option<(Arc<Vec<u8>>, PayloadInfo)>> {
         match (kind, upload) {
             (NodeKind::Folder, None) => Ok(None),
@@ -133,21 +131,9 @@ impl FakeServer {
                 }
             }
             (NodeKind::File, Some(upload)) => {
-                let mut hasher = Hasher::new(upload.hash.algorithm);
                 let mut bytes = Vec::with_capacity(upload.size as usize);
-                let mut buf = [0u8; 64 * 1024];
-                loop {
-                    if cut.is_some_and(|limit| bytes.len() as u64 >= limit) {
-                        return Err(RemoteError::Transient("injected upload cut".into()));
-                    }
-                    let n = upload.reader.read(&mut buf)?;
-                    if n == 0 {
-                        break;
-                    }
-                    hasher.update(&buf[..n]);
-                    bytes.extend_from_slice(&buf[..n]);
-                }
-                if hasher.finalize() != upload.hash {
+                upload.reader.read_to_end(&mut bytes)?;
+                if hash_bytes(&bytes, upload.hash.algorithm) != upload.hash {
                     return Err(RemoteError::HashMismatch);
                 }
                 let info = PayloadInfo {
@@ -162,19 +148,10 @@ impl FakeServer {
     // ---- server operations (the HTTP API) ----
 
     pub fn create(&mut self, node: &NewNode, upload: Option<Upload<'_>>) -> Result<RemoteRef> {
-        self.create_cut(node, upload, None)
-    }
-
-    fn create_cut(
-        &mut self,
-        node: &NewNode,
-        upload: Option<Upload<'_>>,
-        cut: Option<u64>,
-    ) -> Result<RemoteRef> {
         if self.by_node.contains_key(&node.node) {
             return Err(RemoteError::AlreadyExists);
         }
-        let payload = self.receive(node.kind, upload, cut)?;
+        let payload = self.receive(node.kind, upload)?;
         let file_id = RemoteFileId(self.fresh_uuid());
         let version = VersionTag(self.fresh_uuid());
         let row = self.next_row;
@@ -213,18 +190,6 @@ impl FakeServer {
         content: &NodeContent,
         upload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
-        self.update_cut(file_id, expected, parent, content, upload, None)
-    }
-
-    fn update_cut(
-        &mut self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
-        parent: NodeId,
-        content: &NodeContent,
-        upload: Option<Upload<'_>>,
-        cut: Option<u64>,
-    ) -> Result<RemoteRef> {
         let current = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
         if current.header.version != expected {
             return Err(RemoteError::VersionMismatch);
@@ -238,8 +203,9 @@ impl FakeServer {
             return Err(RemoteError::NotFound);
         };
         let (node, old_payload, kind) = (*node, *old_payload, current.header.kind);
+        // Without an upload the payload stays.
         let new_payload = match upload {
-            Some(upload) => Some(self.receive(kind, Some(upload), cut)?),
+            Some(upload) => self.receive(kind, Some(upload))?,
             None => None,
         };
         let version = VersionTag(self.fresh_uuid());
@@ -247,11 +213,11 @@ impl FakeServer {
         f.header.version = version;
         f.header.parent = parent;
         let payload = match new_payload {
-            Some(Some((bytes, info))) => {
+            Some((bytes, info)) => {
                 f.bytes = Some(bytes);
                 Some(info)
             }
-            _ => old_payload,
+            None => old_payload,
         };
         f.header.body = RemoteBody::Live {
             node,
@@ -483,6 +449,21 @@ impl FakeRemote {
     }
 }
 
+/// Hands bytes taken in by [`FakeRemote::receive`] on to the server as an upload.
+fn replay<T>(
+    received: Option<(hbsync_types::ContentHash, Vec<u8>)>,
+    send: impl FnOnce(Option<Upload<'_>>) -> T,
+) -> T {
+    let Some((hash, bytes)) = received else {
+        return send(None);
+    };
+    send(Some(Upload {
+        hash,
+        size: bytes.len() as u64,
+        reader: &mut bytes.as_slice(),
+    }))
+}
+
 impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
@@ -500,13 +481,7 @@ impl Remote for FakeRemote {
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
-        let mut bytes: &[u8] = received.as_ref().map_or(&[], |(_, b)| b.as_slice());
-        let upload = received.as_ref().map(|(hash, b)| Upload {
-            hash: *hash,
-            size: b.len() as u64,
-            reader: &mut bytes,
-        });
-        self.server().create(node, upload)
+        replay(received, |upload| self.server().create(node, upload))
     }
 
     fn update(
@@ -520,14 +495,10 @@ impl Remote for FakeRemote {
         self.gate()?;
         self.gate_name(&content.name)?;
         let received = self.receive(payload)?;
-        let mut bytes: &[u8] = received.as_ref().map_or(&[], |(_, b)| b.as_slice());
-        let upload = received.as_ref().map(|(hash, b)| Upload {
-            hash: *hash,
-            size: b.len() as u64,
-            reader: &mut bytes,
-        });
-        self.server()
-            .update(file_id, expected, parent, content, upload)
+        replay(received, |upload| {
+            self.server()
+                .update(file_id, expected, parent, content, upload)
+        })
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
