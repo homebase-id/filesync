@@ -63,22 +63,39 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   `instructions.transferIv` **[verified]** `FileSystemStreamWriterBase.cs:364-367`.
 
 ## Endpoints
+Checked on odin-core branch `payload-hashes` @ 467d0b531 (the local dev host) **[verified]**.
+
 | Operation | Route | Notes |
 |---|---|---|
-| Create | `POST /api/v2/drives/{d}/files` | multipart, parts in order `instructions`, `metadata`, `payload`*, `thumbnail`* (`V1DriveUploadControllerBase.cs:205-270`). Duplicate UniqueId → 400, `errorCode` 4105 |
-| Update | `PATCH /api/v2/drives/{d}/files/{fileId}` (or `/by-uid/{uid}`) | multipart; `fileMetadata.versionTag` required; mismatch → 4160. Manifest ops `appendOrOverwrite` / `deletePayload`; unlisted payloads kept |
-| Delete | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients?}`; **no versionTag** |
+| Create | `POST /api/v2/drives/{d}/files` | multipart, plaintext request and response (`V2DriveCreateFileController.cs`). Parts: `instructions` first, `metadata` second, then `payload`* (filename = payload key, case-sensitive) and `thumbnail`* (`V1DriveUploadControllerBase.cs:205-270`). Duplicate live UniqueId → 400 4105. Response `{fileId, driveId, globalTransitId, recipientStatus, newVersionTag, payloads[{key, uid, lastModified}]}` |
+| Update | `PATCH /api/v2/drives/{d}/files/{fileId}` (or `/by-uid/{uid}`) | multipart, plaintext; `metadata` required. `fileMetadata.versionTag` required (4159), stale → 4160. Instructions need `locale: "local"` (missing → 500) and a `manifest`; `payloadDescriptors: []` is a header-only update that keeps the payloads. Ops `appendOrOverwrite` / `deletePayload`; unlisted payloads kept. Unknown fileId → 4106, deleted file → 4002 |
+| Delete | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: []}` (send it; an empty body likely fails binding **[inferred]**). **No versionTag** (odin-core #1903). Unknown file → 200 `localFileNotFound: true`. Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted` |
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
-| Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response |
+| Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
-| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range` header here wins and gives 206 |
-| Notify | `wss://{id}/api/v2/notify/ws-token` | CAT in `Sec-WebSocket-Protocol: odin.bearer.<b64url CAT>`; frames are envelopes; subscribe with `establishConnectionRequest` |
+| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206; end past the payload → 416. Offsets are `int` (#1893) and every read is buffered whole in server memory (#1892) |
+| Notify | `wss://{id}/api/v2/notify/ws-token` | see below |
 
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,
-contentType, iv, hash?}]}}`. Omit `storageOptions` rather than sending null. Unencrypted files need
-empty payload IVs. The decrypted metadata part is `{encryptedKeyHeader, fileMetadata}`; the key
-header must be present even when unencrypted (chat-kmp encrypts an all-zero `KeyHeader`).
+contentType, iv, hash?}]}}`. `transferIv` is required and must not be all zero. Omit
+`storageOptions` rather than sending null (null → 500). Unencrypted files need null or zero
+payload IVs. Payload keys match `^[a-z0-9_]{8,10}$`.
+
+The `metadata` part is the raw AES-CBC ciphertext (not an envelope) of
+`{encryptedKeyHeader, fileMetadata}` under the shared secret with `transferIv`
+(`FileSystemStreamWriterBase.cs:104,366`). The key header must be present even when the file
+is unencrypted (4109 otherwise); chat-kmp encrypts an all-zero `KeyHeader` with the shared
+secret. `fileMetadata`: `{isEncrypted, allowDistribution, accessControlList, appData:
+{uniqueId, groupId, fileType, dataType, content, ...}, versionTag}`.
+
+**Update replaces the metadata, it doesn't merge** **[verified]**
+`StandardFileUpdateWriter.cs:48-85`: an update that leaves out `uniqueId` clears it, and a
+missing `accessControlList` resets to owner. Every update resends the whole `appData`.
+
+Limits **[verified]**: `content` at most 10,240 UTF-16 code units (4167); file types in
+`2100000000..` are reserved (4120); one upload payload at most 4 GiB (`uint` byte count); out
+of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in headers.
 
 ## Change feed
 **[verified]** `QueryBatch.cs`, `KMP/sync/DriveSync.kt:173-295`:
@@ -87,6 +104,42 @@ header must be present even when unencrypted (chat-kmp encrypts an all-zero `Key
 - `queryParams.fileState` null → tombstones included.
 - Only rows with modified < now are returned; with `oldestFirst` the cursor resumes after the
   last change. Page until `hasMoreRows == false`.
+- `sorting` must be sent: the default is creation order. `maxRecords: 0` → 500.
+- `cursorState` is a JSON string (`{paging:{time,row}}`), not base64. An empty page returns the
+  input cursor. **An unparsable cursor silently restarts from the beginning**
+  (`QueryBatchCursor.cs:135-150`).
+- Every header write sets `modified = max(modified + 1, now)`, so a change never lands behind
+  the cursor.
+- Tombstones: `fileState: "deleted"`, `uniqueId: null`, `content: ""`, `payloads: null`;
+  `fileId`, `groupId`, `fileType` kept.
+
+## Errors
+**[verified]** `ExceptionHandlingMiddleware.cs`: plaintext `application/problem+json` (never
+enveloped) `{title, status, correlationId, errorCode}`. `errorCode` is the camelCase enum name
+(`versionTagMismatch`); accept numbers too. `OdinClientException` → 400,
+`OdinSecurityException` → 403, a bad or missing token → 401 with an empty body. A `NotFound()`
+on an enveloped route comes back as 404 with an encrypted empty body: check the status first.
+
+| Code | Name |
+|---|---|
+| 4002 | `cannotUpdateNonActiveFile` |
+| 4105 | `existingFileWithUniqueId` |
+| 4106 | `fileNotFound` |
+| 4159 / 4160 | `missingVersionTag` / `versionTagMismatch` |
+| 4175 / 4176 / 4177 | `payloadHashMismatch` / `invalidPayloadHash` / `payloadHashRequired` |
+
+## Notifications (WebSocket)
+**[verified]** `V2NotificationSocketController.cs`, `AppNotificationHandler.cs`,
+`KMP/client/websockets/OdinWebSocketClient.kt`:
+- `wss://{identity}/api/v2/notify/ws-token`, app tokens only. Auth in one header:
+  `Sec-WebSocket-Protocol: odin.notify.v1, odin.bearer.<base64url CAT, no padding>`; the server
+  answers with `odin.notify.v1`.
+- Client frames: envelopes of `{command, data}` where `data` is a JSON string. Subscribe with
+  `establishConnectionRequest` and `{"drives":[{"alias","type"}]}` (Read on the drive
+  needed); the server answers `deviceHandshakeSuccess`. `ping` → `pong`.
+- Server frames: `{isEncrypted, payload}`, `payload` an envelope string of
+  `{notificationType, data}`. `fileAdded`, `fileModified`, `fileDeleted` carry the header.
+  Reaction updates also send `fileModified`: treat all of them as a hint to read the feed.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.
@@ -107,7 +160,9 @@ header must be present even when unencrypted (chat-kmp encrypts an all-zero `Key
   `YouAuthAppParameters` has no `cp`, so they vanish on the redirect to `/owner/appreg`.
 - `docs/mandatory-slugs-and-app-ids-plan.md` calls `DriveSlug`/`DriveTypeSlug` required; the
   server derives a missing one instead (only the owner app insists on `ts`).
-- Delete has no VersionTag guard → a delete can wipe a concurrent edit. Proposed: optional
-  `versionTag` on delete, 4160 on mismatch; draft in
-  [../issues/odin-core-delete-version-tag.md](../issues/odin-core-delete-version-tag.md).
-- `FileChunk` ranges are `int` (odin-core #1893, being fixed separately).
+- Delete has no VersionTag guard → a delete can wipe a concurrent edit. Filed as odin-core
+  #1903 (optional `versionTag` on delete, 4160 on mismatch; also: deleting a tombstone should
+  be a no-op). Until then the client reads the header and compares right before deleting.
+- Payload reads are buffered whole in server memory (#1892) and ranges are `int` (#1893): the
+  client reads in chunks and refuses payloads of 2 GiB or more until #1893 lands.
+- App clients can't read the drive's `requirePayloadHashes`; the client always sends hashes.

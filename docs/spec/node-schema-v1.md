@@ -9,8 +9,10 @@ reserved in odin-core.
 
 ## Drive
 - One Homebase drive per sync root, of the "Files" drive type.
-- Drive type GUID: `9ed2413e-50d6-4153-b5eb-d9c7fd2af080` **[provisional]**, until odin-core
-  reserves one (foundations §5 item 5).
+- The Filesync app's drive: slug `filesync`, type slug `filesync`, drive type GUID
+  `5da48122-e946-487a-8b9d-589642f3c91d` (`crates/hbsync-homebase/src/app.rs`). Clients find it
+  by slug (`GET /api/v2/apps/filesync/drives/filesync`), not by GUID. The GUIDs are
+  **[provisional]** until odin-core reserves a drive kind (foundations §5 item 5).
 - The drive should have `requirePayloadHashes = true` (owner setting; apps can't set it
   **[verified]** `OwnerDriveManagementController.cs`).
 

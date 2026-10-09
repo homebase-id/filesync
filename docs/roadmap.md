@@ -100,7 +100,9 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **odin-core prerequisites**:
   - streamed payload reads (#1892)
   - 64-bit sizes and ranges (#1893)
-  - payload hashes + per-drive "hashes required" setting (#1895)
+  - payload hashes + per-drive "hashes required" setting (#1895, merged as PR #1899)
+  - guarded delete: optional `versionTag` (#1903)
+  - apps sign in by slug (#1902)
   - resumable upload (not filed yet)
   - "Files" drive type + reserved SyncFile / SyncFolder types (not filed yet)
 - **Homebase remote adapter**:
