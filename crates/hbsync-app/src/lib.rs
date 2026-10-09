@@ -1,8 +1,10 @@
 //! The product shell around the sync engine: where the client keeps its files, the config,
-//! the credentials, setting the app up on an identity, the sync runner, and (in later steps)
-//! the control socket and autostart.
+//! the credentials, setting the app up on an identity, the sync runner, the control socket and
+//! the one-daemon lock, and (in a later step) autostart.
 
 pub mod config;
+pub mod ipc;
+pub mod lock;
 pub mod paths;
 pub mod runner;
 pub mod secrets;
