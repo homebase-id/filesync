@@ -30,7 +30,7 @@ reserved in odin-core.
 | `appData.groupId` | parent node id | parent node id |
 | `appData.content` | JSON, see below | JSON, see below |
 | `appData.tags` | none | none |
-| `isEncrypted` | `false` in v1 | `false` in v1 |
+| `isEncrypted` | `true` (`encryption.md`) | `true` (`encryption.md`) |
 | payloads | none | exactly one, key `sync_data` |
 
 The file types must stay outside the server's reserved range `2100000000..int.MaxValue`, which
@@ -61,13 +61,15 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 |---|---|
 | `key` | `sync_data` (matches `^[a-z0-9_]{8,10}$` **[verified]**) |
 | `contentType` | `application/octet-stream` |
-| `iv` | empty (unencrypted) |
+| `iv` | the payload IV (`encryption.md`); empty when unencrypted |
 | `hash` | `{ "algorithm": "blake3", "storedHash": b64, "contentHash": b64 }` |
 
 - This client writes BLAKE3. It accepts `sha256` nodes written by other clients and computes
   SHA-256 for the local file when it needs to compare.
-- Unencrypted: `contentHash == storedHash` **[verified]** rule 5 of
-  `../odin-core/docs/payload-hashes.md`.
+- Encrypted: `storedHash` is over the ciphertext; `contentHash` is the plaintext hash,
+  encrypted (`encryption.md`).
+- Unencrypted (nodes written before encryption): `contentHash == storedHash` **[verified]**
+  rule 5 of `../odin-core/docs/payload-hashes.md`.
 - A node with no `hash` (drive without the requirement) is downloaded, hashed locally and
   marked unverified.
 

@@ -7,7 +7,8 @@ reference: `../chat-kmp`).
 Status: roadmap Layers 0–4 are built and tested against the in-memory fake remote (two-client
 sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebase:
 `hbsync-homebase` registers the Filesync app (YouAuth, its drive and circle), implements
-`Remote` on the drive's V2 API (`drive::HomebaseRemote`) and listens on the notification
+`Remote` on the drive's V2 API (`drive::HomebaseRemote`, every node encrypted:
+`docs/spec/encryption.md`) and listens on the notification
 WebSocket; two folders converge through a live identity. Facts and server bugs:
 `docs/spec/homebase-api-notes.md`. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
@@ -33,11 +34,12 @@ Read these first:
 - `docs/spec/sync-semantics.md`: what the reconciler and executor must do (the contract).
 - `docs/spec/node-schema-v1.md`: how a node maps onto a Homebase file.
 - `docs/spec/daemon.md`: the daemon, its files, config, credentials, control socket, autostart.
+- `docs/spec/encryption.md`: how files are encrypted (Homebase's AES-CBC format, checked
+  against odin-js), and what it does and doesn't protect.
 
 Ground rules:
 - Never lose data. The reconciler is a pure function; all OS and network work sits behind traits.
 - Build against a fake remote that models the real node schema before touching Homebase.
-- Homebase encryption is out of scope here for now; the focus is the three-OS side.
 - When stating facts about the Homebase API, say whether they were verified in the sibling repos'
   code or inferred.
 - A change to sync behavior gets a simulator property or regression test (`hbsync-sim`), not

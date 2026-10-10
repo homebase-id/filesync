@@ -41,7 +41,7 @@ Explored 2026-10-08: `../odin-core` server model and `../chat-kmp` `HomebaseFile
 - **Stored hash**: over the bytes as uploaded and stored. That is the ciphertext for encrypted payloads, and the plaintext otherwise.
 - **Content hash**: over the original plaintext.
 
-An encrypting client gets both in a single pass: hash the plaintext going in and the ciphertext coming out.
+An encrypting client hashes the plaintext going in and the ciphertext coming out. The stored hash travels in the upload's instructions, before the payload, so this client makes that pass before sending and encrypts again while sending (`spec/encryption.md`).
 
 **Rules:**
 - **Algorithm:** the client picks **SHA-256 or BLAKE3**. The set is closed at those two. The choice is recorded once per payload, and both hashes use it.
@@ -72,7 +72,7 @@ They are stored in the existing header JSON (`hdrFileMetaData`; there is no payl
 
 **What the hashes buy:**
 - **Upload integrity**: the server rejects corrupted transfers.
-- **Download verification**: the client checks the stored hash before decrypting.
+- **Download verification**: the client checks the content hash of what it decrypted (a resumed or ranged download has no whole ciphertext to check the stored hash against).
 - **Change detection** that doesn't depend on mtime.
 - **Adopting an existing local copy** without downloading it.
 - **Move detection**.
