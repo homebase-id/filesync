@@ -90,9 +90,11 @@ mod imp {
     pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         let c_from = CString::new(from.as_os_str().as_bytes())?;
         let c_to = CString::new(to.as_os_str().as_bytes())?;
+        // The system call itself: musl (the static release build) has no renameat2 wrapper.
         // SAFETY: valid NUL-terminated strings; AT_FDCWD resolves relative paths like rename(2).
         let rc = unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 c_from.as_ptr(),
                 libc::AT_FDCWD,

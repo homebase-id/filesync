@@ -110,7 +110,7 @@ jobs:
           fi
           case "$RUNNER_OS" in
             Linux) file "dist/$DIR/hbsync" "dist/$DIR/hbsyncd" | grep -E "static(-pie)? linked" ;;
-            macOS) for bin in hbsync hbsyncd; do lipo -verify_arch "dist/$DIR/$bin" arm64 x86_64; done ;;
+            macOS) for bin in hbsync hbsyncd; do lipo "dist/$DIR/$bin" -verify_arch arm64 x86_64; done ;;
           esac
       - name: Archive
         shell: bash
