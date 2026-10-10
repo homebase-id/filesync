@@ -102,11 +102,16 @@ impl<'a> Bench<'a> {
     /// A create, remembered for cleanup.
     pub fn create(&self, meta: &NodeMeta, data: Option<&[u8]>) -> Result<RemoteRef, RemoteError> {
         let written = with_upload(data, |upload| self.remote.create(meta, upload))?;
+        self.track(written.file_id);
+        Ok(written)
+    }
+
+    /// Remembers a file created some other way, for cleanup.
+    pub fn track(&self, file_id: RemoteFileId) {
         self.created
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(written.file_id);
-        Ok(written)
+            .push(file_id);
     }
 
     /// A folder in the scratch folder, remembered for cleanup.
@@ -195,6 +200,7 @@ pub fn upload<'a>(reader: &'a mut Cursor<&[u8]>) -> Upload<'a> {
         hash: hash_bytes(data, HashAlgorithm::Blake3),
         size: data.len() as u64,
         reader,
+        pace: None,
     }
 }
 
@@ -456,6 +462,7 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
         hash: hash_bytes(b"real", HashAlgorithm::Blake3),
         size: 4,
         reader: &mut reader,
+        pace: None,
     };
     ensure_err!(b.remote.create(&f, Some(lying)), RemoteError::HashMismatch);
     // Nothing was stored: the node id is still free.

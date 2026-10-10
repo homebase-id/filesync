@@ -111,6 +111,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
             hash,
             size: data.len() as u64,
             reader: &mut std::io::Cursor::new(data.as_slice()),
+            pace: None,
         }),
     )?;
     let job = Job::Download {

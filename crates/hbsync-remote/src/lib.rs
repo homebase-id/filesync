@@ -115,6 +115,39 @@ pub struct Upload<'a> {
     pub hash: ContentHash,
     pub size: u64,
     pub reader: &'a mut dyn Source,
+    /// Paces the bytes sent (a bandwidth cap); not those a remote reads for itself.
+    pub pace: Option<&'a dyn Pace>,
+}
+
+/// A bandwidth cap: blocks until `bytes` more may go.
+pub trait Pace: Sync {
+    fn take(&self, bytes: usize);
+}
+
+/// `inner`, paced by `pace` as it is read: what a remote sends.
+pub struct Paced<'a, R> {
+    pub inner: R,
+    pub pace: Option<&'a dyn Pace>,
+}
+
+impl<R> std::fmt::Debug for Paced<'_, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Paced")
+            .field("paced", &self.pace.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R: Read> Read for Paced<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Small slices keep the pacing smooth.
+        let max = buf.len().min(64 * 1024);
+        let n = self.inner.read(&mut buf[..max])?;
+        if let Some(pace) = self.pace {
+            pace.take(n);
+        }
+        Ok(n)
+    }
 }
 
 /// Where an upload's bytes come from. A remote may read it more than once: an encrypting one

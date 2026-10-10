@@ -319,6 +319,7 @@ impl FakeServer {
             hash,
             size: data.len() as u64,
             reader: &mut std::io::Cursor::new(data),
+            pace: None,
         };
         Ok((node, self.create(&new, Some(upload))?))
     }
@@ -463,6 +464,9 @@ impl FakeRemote {
             if n == 0 {
                 return Ok(Some((upload.hash, bytes)));
             }
+            if let Some(pace) = upload.pace {
+                pace.take(n);
+            }
             bytes.extend_from_slice(&buf[..n]);
         }
     }
@@ -480,6 +484,7 @@ fn replay<T>(
         hash,
         size: bytes.len() as u64,
         reader: &mut std::io::Cursor::new(bytes.as_slice()),
+        pace: None,
     }))
 }
 

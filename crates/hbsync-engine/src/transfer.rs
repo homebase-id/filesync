@@ -8,14 +8,14 @@
 //! many small files aren't stuck behind one large one.
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Seek, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
-use hbsync_remote::{NodeMeta, Remote, RemoteError, Upload};
+use hbsync_remote::{NodeMeta, Pace, Remote, RemoteError, Upload};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef};
 
 #[derive(Debug, Clone, Copy)]
@@ -73,29 +73,10 @@ impl Throttle {
     }
 }
 
-/// A reader that respects a [`Throttle`].
-#[derive(Debug)]
-pub struct ThrottledRead<'a, R> {
-    pub inner: R,
-    pub throttle: Option<&'a Throttle>,
-}
-
-impl<R: Read> Read for ThrottledRead<'_, R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Small slices keep the pacing smooth.
-        let max = buf.len().min(64 * 1024);
-        let n = self.inner.read(&mut buf[..max])?;
-        if let Some(t) = self.throttle {
-            t.take(n);
-        }
-        Ok(n)
-    }
-}
-
-/// Seeking takes no bandwidth.
-impl<R: Seek> Seek for ThrottledRead<'_, R> {
-    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
-        self.inner.seek(pos)
+/// Uploads: the remote paces what it sends.
+impl Pace for Throttle {
+    fn take(&self, bytes: usize) {
+        Throttle::take(self, bytes);
     }
 }
 
@@ -277,14 +258,12 @@ fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobRe
             hash,
             size,
         } => (|| {
-            let mut reader = ThrottledRead {
-                inner: std::fs::File::open(path)?,
-                throttle,
-            };
+            let mut file = std::fs::File::open(path)?;
             let upload = Some(Upload {
                 hash: *hash,
                 size: *size,
-                reader: &mut reader,
+                reader: &mut file,
+                pace: throttle.map(|t| t as &dyn Pace),
             });
             Ok(JobResult::Uploaded(match target {
                 None => remote.create(meta, upload)?,

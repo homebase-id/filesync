@@ -2,7 +2,7 @@
 //! shared-secret envelope (verified in odin-core `SharedSecretEncryptionMiddleware`): a GET's
 //! query string becomes one `ss` parameter, even when empty; a JSON body becomes `{iv, data}`;
 //! a response marked `X-SSE: 1` comes back the same way. Uploads (multipart) and payload
-//! reads are plaintext.
+//! reads aren't (encrypted files carry their own encryption).
 
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -154,22 +154,16 @@ impl Client {
         self.decode(response, path)
     }
 
-    /// Streams the bytes of `GET {path}` (plaintext) with a `Range` of `start..=last` into
-    /// `sink`. Returns the bytes written.
-    pub fn download(
-        &self,
-        path: &str,
-        start: u64,
-        last: u64,
-        sink: &mut dyn Write,
-    ) -> Result<u64, HomebaseError> {
+    /// `GET {path}` with a `Range` of `start..=last`: what the response says about the payload,
+    /// and its bytes to read (encrypted payloads come as ciphertext).
+    pub fn fetch(&self, path: &str, start: u64, last: u64) -> Result<Fetched, HomebaseError> {
         let response = self
             .agent
             .get(self.url(path))
             .header("Authorization", &self.bearer())
             .header("Range", &format!("bytes={start}-{last}"))
             .call();
-        let mut response = checked(response, path)?;
+        let response = checked(response, path)?;
         // Anything but the range asked for (a proxy that ignored `Range`) must not reach the
         // sink: it would be written at the wrong offset.
         if response.status().as_u16() != 206 {
@@ -178,35 +172,6 @@ impl Client {
                 response.status().as_u16()
             )));
         }
-        let mut reader = response
-            .body_mut()
-            .with_config()
-            .limit(u64::MAX)
-            .reader()
-            .take(last - start + 1);
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut written = 0u64;
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|e| HomebaseError::Network(format!("{path}: {e}")))?;
-            if n == 0 {
-                return Ok(written);
-            }
-            sink.write_all(&buf[..n])?;
-            written += n as u64;
-        }
-    }
-
-    /// `GET {path}` of a whole payload (the route that ignores `Range`): what the response says
-    /// about it, and its bytes to read.
-    pub fn fetch(&self, path: &str) -> Result<Fetched, HomebaseError> {
-        let response = self
-            .agent
-            .get(self.url(path))
-            .header("Authorization", &self.bearer())
-            .call();
-        let response = checked(response, path)?;
         let header = |name: &str| {
             response
                 .headers()
@@ -251,7 +216,7 @@ impl Client {
     }
 }
 
-/// A payload being read whole ([`Client::fetch`]).
+/// A payload range being read ([`Client::fetch`]).
 pub struct Fetched {
     /// The payload is encrypted (`PayloadEncrypted`).
     pub encrypted: bool,

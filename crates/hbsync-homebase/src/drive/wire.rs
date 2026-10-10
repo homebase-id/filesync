@@ -5,6 +5,8 @@
 //! `UploadInstructionSet`, `FileUpdateInstructionSet`, `UploadFileDescriptor` (branch
 //! `payload-hashes` @ 467d0b531), and chat-kmp's `UploadDescriptorBuilder`.
 
+use std::borrow::Cow;
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hbsync_remote::{NodeMeta, PayloadInfo, RemoteBody, RemoteHeader};
@@ -108,7 +110,7 @@ pub fn feed_query(cursor: Option<&str>, limit: usize) -> Value {
 /// why it isn't a usable sync node.
 pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
     let id = header.file_id;
-    let meta = header.file_metadata;
+    let meta = &header.file_metadata;
     let kind = match meta.app_data.file_type {
         FILE_TYPE_FOLDER => NodeKind::Folder,
         FILE_TYPE_FILE => NodeKind::File,
@@ -125,32 +127,23 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 .app_data
                 .unique_id
                 .ok_or_else(|| format!("file {id}: no node id (uniqueId)"))?;
-            let key = match meta.is_encrypted {
-                true => Some(
-                    file_key(
-                        header.shared_secret_encrypted_key_header.as_ref(),
-                        shared_secret,
-                    )
-                    .map_err(|e| format!("file {id}: {e}"))?,
-                ),
-                false => None,
-            };
+            let key = header
+                .key(shared_secret)
+                .map_err(|e| format!("file {id}: {e}"))?;
             let content = meta.app_data.content.as_deref().unwrap_or_default();
             let content = match &key {
-                Some(key) => key
-                    .open_text(content)
-                    .map_err(|e| format!("file {id}: content: {e}"))?,
-                None => content.to_owned(),
+                Some(key) => Cow::Owned(
+                    key.open_text(content)
+                        .map_err(|e| format!("file {id}: content: {e}"))?,
+                ),
+                None => Cow::Borrowed(content),
             };
             let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
             let payload = match kind {
                 NodeKind::Folder => None,
                 NodeKind::File => meta
-                    .payloads
-                    .iter()
-                    .flatten()
-                    .find(|p| p.key == PAYLOAD_KEY)
+                    .sync_payload()
                     .map(|p| payload_info(p, key.as_ref()))
                     .transpose()
                     .map_err(|e| format!("file {id}: {e}"))?,
@@ -173,17 +166,32 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
     })
 }
 
-/// The file key of an encrypted header.
-pub fn file_key(
-    sealed: Option<&SealedKeyHeader>,
-    shared_secret: &Key,
-) -> Result<KeyHeader, HomebaseError> {
-    let sealed = sealed.ok_or_else(|| HomebaseError::Crypto("no key header".into()))?;
-    KeyHeader::open(sealed, shared_secret)
+impl FileHeader {
+    /// The file key and header IV, opened with `shared_secret`; `None` when unencrypted.
+    pub fn key(&self, shared_secret: &Key) -> Result<Option<KeyHeader>, HomebaseError> {
+        if !self.file_metadata.is_encrypted {
+            return Ok(None);
+        }
+        let sealed = self
+            .shared_secret_encrypted_key_header
+            .as_ref()
+            .ok_or_else(|| HomebaseError::Crypto("no key header".into()))?;
+        KeyHeader::open(sealed, shared_secret).map(Some)
+    }
+}
+
+impl FileMetadata {
+    /// The `sync_data` payload.
+    pub fn sync_payload(&self) -> Option<&Payload> {
+        self.payloads
+            .iter()
+            .flatten()
+            .find(|p| p.key == PAYLOAD_KEY)
+    }
 }
 
 /// The IV of a payload of an encrypted file.
-pub fn payload_iv(p: &Payload) -> Result<[u8; 16], String> {
+fn payload_iv(p: &Payload) -> Result<[u8; 16], String> {
     let iv = p.iv.as_deref().ok_or("no payload IV")?;
     STANDARD
         .decode(iv)
@@ -220,7 +228,7 @@ fn payload_info(p: &Payload, key: Option<&KeyHeader>) -> Result<PayloadInfo, Str
 
 /// What an upload says about the `sync_data` payload it sends.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PayloadDescriptor {
+pub(crate) struct PayloadDescriptor {
     pub algorithm: HashAlgorithm,
     /// Base64, over the bytes sent.
     pub stored_hash: String,
@@ -259,7 +267,7 @@ impl PayloadDescriptor {
 
 /// The `instructions` part of a create (`update: false`) or update. With `payload`, the
 /// `sync_data` payload is (over)written.
-pub fn instructions(
+pub(crate) fn instructions(
     transfer_iv: &[u8; 16],
     payload: Option<&PayloadDescriptor>,
     update: bool,
@@ -297,22 +305,29 @@ pub fn instructions(
     instructions
 }
 
-/// The plaintext of the `metadata` part. Homebase replaces the whole header on update, so
-/// every field is always sent: node id, parent, kind, content, and the owner-only ACL. With
-/// `key`, the file is encrypted and its content sealed with it.
-fn metadata_json(
+/// The `metadata` part: the header JSON, AES-CBC under the shared secret with `transfer_iv`.
+/// Homebase replaces the whole header on update, so every field is always sent: node id,
+/// parent, kind, content, and the owner-only ACL. With `key`, the file is encrypted: the key
+/// sealed with the shared secret, the content with the key. An unencrypted file still needs a
+/// key header; like chat-kmp, an all-zero key.
+pub(crate) fn metadata(
     meta: &NodeMeta,
     version: Option<VersionTag>,
-    key_header: Value,
+    shared_secret: &Key,
+    transfer_iv: &[u8; 16],
     key: Option<&KeyHeader>,
-) -> Value {
+) -> Vec<u8> {
     let file_type = match meta.kind {
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,
     };
+    let none = KeyHeader {
+        iv: [0; 16],
+        key: [0; 16],
+    };
     let content = meta.content.to_json();
-    json!({
-        "encryptedKeyHeader": key_header,
+    let plain = json!({
+        "encryptedKeyHeader": key.unwrap_or(&none).seal(shared_secret, transfer_iv),
         "fileMetadata": {
             "isEncrypted": key.is_some(),
             "allowDistribution": false,
@@ -322,29 +337,15 @@ fn metadata_json(
                 "groupId": meta.parent.0,
                 "fileType": file_type,
                 "dataType": 0,
-                "content": key.map_or(content.clone(), |k| k.seal_text(&content)),
+                "content": match key {
+                    Some(k) => k.seal_text(&content),
+                    None => content,
+                },
             },
             "versionTag": version.map(|v| v.0),
         },
-    })
-}
-
-/// The `metadata` part: the header JSON, AES-CBC under the shared secret with `transfer_iv`,
-/// with the file `key` sealed the same way. An unencrypted file still needs a key header;
-/// like chat-kmp, an all-zero key.
-pub fn metadata(
-    meta: &NodeMeta,
-    version: Option<VersionTag>,
-    shared_secret: &Key,
-    transfer_iv: &[u8; 16],
-    key: Option<&KeyHeader>,
-) -> Vec<u8> {
-    let key_header = match key {
-        Some(key) => key.seal(shared_secret, transfer_iv),
-        None => KeyHeader::seal_none(shared_secret, transfer_iv),
-    };
-    let plain = metadata_json(meta, version, key_header, key).to_string();
-    aes_cbc_encrypt(shared_secret, transfer_iv, plain.as_bytes())
+    });
+    aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
 }
 
 #[cfg(test)]
@@ -426,14 +427,13 @@ mod tests {
         meta.is_encrypted = true;
         meta.app_data.content = Some(kh.seal_text(&plain));
         let payload = meta.payloads.iter_mut().flatten().next().ok_or("payload")?;
-        let payload_iv = crate::drive::sealed::strong()?;
+        let payload_iv = sealed::strong()?;
         payload.iv = Some(STANDARD.encode(payload_iv));
         let hash = payload.hash.as_mut().ok_or("hash")?;
         let content_hash = ContentHash::from_base64(HashAlgorithm::Blake3, &hash.content_hash)?;
         hash.content_hash = kh.seal_hash(&payload_iv, &content_hash);
-        header.shared_secret_encrypted_key_header = Some(serde_json::from_value(
-            kh.seal(&SS, &crate::drive::sealed::strong()?),
-        )?);
+        header.shared_secret_encrypted_key_header =
+            Some(serde_json::from_value(kh.seal(&SS, &sealed::strong()?))?);
         Ok((header, content_hash))
     }
 

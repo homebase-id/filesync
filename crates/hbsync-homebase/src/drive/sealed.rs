@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use zeroize::Zeroize;
 
 use crate::HomebaseError;
-use crate::crypto::{Key, aes_cbc_decrypt, aes_cbc_encrypt, random};
+use crate::crypto::{Envelope, Key, aes_cbc_decrypt, aes_cbc_encrypt, random};
 
 const BLOCK: usize = 16;
 
@@ -62,7 +62,7 @@ pub struct SealedKeyHeader {
 impl SealedKeyHeader {
     /// The binary form of the `SharedSecretEncryptedHeader64` response header: IV (16),
     /// encrypted key (48), version (4), base64 (odin-core `EncryptedKeyHeader.ToBase64`).
-    pub fn from_base64(b64: &str) -> Result<Self, HomebaseError> {
+    pub(crate) fn from_base64(b64: &str) -> Result<Self, HomebaseError> {
         let bytes = STANDARD
             .decode(b64.trim())
             .map_err(|_| crypto("the key header isn't base64"))?;
@@ -109,28 +109,13 @@ impl KeyHeader {
         })
     }
 
-    /// The key header an unencrypted file sends, since the server wants one anyway: all
-    /// zeros, sealed the same way (as chat-kmp does).
-    pub fn seal_none(shared_secret: &Key, wrap_iv: &[u8; 16]) -> Value {
-        KeyHeader {
-            iv: [0; 16],
-            key: [0; 16],
-        }
-        .seal(shared_secret, wrap_iv)
-    }
-
     /// Opens a key header sealed with `shared_secret`.
     pub fn open(sealed: &SealedKeyHeader, shared_secret: &Key) -> Result<Self, HomebaseError> {
-        let decode = |b64: &str| {
-            STANDARD
-                .decode(b64)
-                .map_err(|_| crypto("the key header isn't base64"))
-        };
-        let mut plain = aes_cbc_decrypt(
-            shared_secret,
-            &decode(&sealed.iv)?,
-            &decode(&sealed.encrypted_aes_key)?,
-        )?;
+        let mut plain = Envelope {
+            iv: sealed.iv.clone(),
+            data: sealed.encrypted_aes_key.clone(),
+        }
+        .open(shared_secret)?;
         if plain.len() != 32 {
             plain.zeroize();
             return Err(crypto(format!("a key header of {} bytes", plain.len())));
@@ -191,7 +176,7 @@ fn hash_iv(payload_iv: &[u8; 16]) -> [u8; 16] {
 
 /// 16 random bytes the server takes as a key or IV: not every group of four bytes the same
 /// (odin-core `ByteArrayUtil.IsStrongKey`).
-pub fn strong() -> Result<[u8; 16], HomebaseError> {
+pub(crate) fn strong() -> Result<[u8; 16], HomebaseError> {
     loop {
         let bytes = random::<16>()?;
         if bytes.chunks(4).any(|g| g.iter().any(|b| *b != g[0])) {
@@ -210,14 +195,15 @@ pub fn sealed_len(plain: u64) -> u64 {
 }
 
 /// Encrypts what `inner` yields with AES-CBC, PKCS#7 at the end.
-pub struct Encrypting<R> {
+pub(crate) struct Encrypting<R> {
     inner: R,
     cipher: cbc::Encryptor<Aes128>,
-    /// Ciphertext ready to hand out, from `at`.
-    out: Vec<u8>,
+    /// `buf[at..ready]` is ciphertext to hand out; `buf[ready..ready + carry]` plaintext short
+    /// of a whole block, waiting for more.
+    buf: Box<[u8]>,
     at: usize,
-    /// Plaintext short of a whole block, waiting for more.
-    carry: Vec<u8>,
+    ready: usize,
+    carry: usize,
     done: bool,
 }
 
@@ -232,9 +218,11 @@ impl<R: Read> Encrypting<R> {
         Encrypting {
             inner,
             cipher: cbc::Encryptor::new(key.into(), iv.into()),
-            out: Vec::with_capacity(CHUNK + BLOCK),
+            // A carried partial block, a chunk read, and room for a padding block.
+            buf: vec![0; CHUNK + 2 * BLOCK].into_boxed_slice(),
             at: 0,
-            carry: Vec::with_capacity(BLOCK),
+            ready: 0,
+            carry: 0,
             done: false,
         }
     }
@@ -243,45 +231,42 @@ impl<R: Read> Encrypting<R> {
         self.inner
     }
 
-    /// Encrypts the next chunk into `out`.
+    /// Reads the next chunk after the carried bytes and encrypts its whole blocks in place.
     fn refill(&mut self) -> io::Result<()> {
-        let mut plain = std::mem::take(&mut self.carry);
-        plain.resize(plain.len() + CHUNK, 0);
-        let start = plain.len() - CHUNK;
+        self.buf.copy_within(self.ready..self.ready + self.carry, 0);
+        let mut len = self.carry;
         let n = loop {
-            match self.inner.read(&mut plain[start..]) {
+            match self.inner.read(&mut self.buf[len..len + CHUNK]) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 other => break other?,
             }
         };
-        plain.truncate(start + n);
+        len += n;
         if n == 0 {
             // The end: pad to a whole block (a whole block of padding if already whole).
-            let pad = BLOCK - plain.len() % BLOCK;
-            plain.resize(plain.len() + pad, pad as u8);
+            let pad = BLOCK - len % BLOCK;
+            self.buf[len..len + pad].fill(pad as u8);
+            len += pad;
             self.done = true;
         }
-        let whole = plain.len() / BLOCK * BLOCK;
-        self.carry.extend_from_slice(&plain[whole..]);
-        plain.truncate(whole);
-        let (blocks, _) = Array::slice_as_chunks_mut(&mut plain);
+        let whole = len / BLOCK * BLOCK;
+        let (blocks, _) = Array::slice_as_chunks_mut(&mut self.buf[..whole]);
         self.cipher.encrypt_blocks(blocks);
-        self.out = plain;
-        self.at = 0;
+        (self.at, self.ready, self.carry) = (0, whole, len - whole);
         Ok(())
     }
 }
 
 impl<R: Read> Read for Encrypting<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        while self.at == self.out.len() {
+        while self.at == self.ready {
             if self.done {
                 return Ok(0);
             }
             self.refill()?;
         }
-        let n = buf.len().min(self.out.len() - self.at);
-        buf[..n].copy_from_slice(&self.out[self.at..self.at + n]);
+        let n = buf.len().min(self.ready - self.at);
+        buf[..n].copy_from_slice(&self.buf[self.at..self.at + n]);
         self.at += n;
         Ok(n)
     }
@@ -291,7 +276,7 @@ impl<R: Read> Read for Encrypting<R> {
 /// given the one before it, so the read starts a block early unless it starts at the
 /// beginning (then the payload IV is the one before).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CipherRange {
+pub(crate) struct CipherRange {
     /// The ciphertext bytes to fetch.
     pub fetch: Range<u64>,
     /// Whether the first fetched block is the IV, not data.
@@ -326,10 +311,11 @@ impl CipherRange {
 /// Decrypts the ciphertext written to it into `sink`, block by block: `len` plaintext bytes
 /// after the first `skip`. With no IV given, the first block written is the IV. The padding is
 /// never checked: the content hash is (CBC can't tell changed bytes from good ones).
-pub struct Decrypting<'a> {
+pub(crate) struct Decrypting<'a> {
     key: Key,
     cipher: Option<cbc::Decryptor<Aes128>>,
     sink: &'a mut dyn Write,
+    /// Ciphertext short of a whole block (or of the IV), waiting for more.
     carry: Vec<u8>,
     skip: u64,
     left: u64,
@@ -376,30 +362,27 @@ impl<'a> Decrypting<'a> {
 impl Write for Decrypting<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.carry.extend_from_slice(buf);
-        if self.cipher.is_none() {
-            if self.carry.len() < BLOCK {
-                return Ok(buf.len());
+        let cipher = match &mut self.cipher {
+            Some(cipher) => cipher,
+            None if self.carry.len() < BLOCK => return Ok(buf.len()),
+            None => {
+                let mut iv = [0u8; BLOCK];
+                iv.copy_from_slice(&self.carry[..BLOCK]);
+                self.carry.drain(..BLOCK);
+                self.cipher
+                    .insert(cbc::Decryptor::new((&self.key).into(), (&iv).into()))
             }
-            let iv: [u8; 16] = self.carry[..BLOCK].try_into().unwrap_or_default();
-            self.cipher = Some(cbc::Decryptor::new((&self.key).into(), (&iv).into()));
-            self.carry.drain(..BLOCK);
-        }
+        };
         let whole = self.carry.len() / BLOCK * BLOCK;
-        if whole == 0 {
-            return Ok(buf.len());
-        }
-        let mut plain: Vec<u8> = self.carry.drain(..whole).collect();
-        if let Some(cipher) = &mut self.cipher {
-            let (blocks, _) = Array::slice_as_chunks_mut(&mut plain);
-            cipher.decrypt_blocks(blocks);
-        }
-        let mut out = &plain[..];
-        let skip = self.skip.min(out.len() as u64) as usize;
-        out = &out[skip..];
+        let (blocks, _) = Array::slice_as_chunks_mut(&mut self.carry[..whole]);
+        cipher.decrypt_blocks(blocks);
+        let skip = self.skip.min(whole as u64) as usize;
         self.skip -= skip as u64;
-        let keep = self.left.min(out.len() as u64) as usize;
-        self.sink.write_all(&out[..keep])?;
+        let keep = self.left.min((whole - skip) as u64) as usize;
+        self.sink.write_all(&self.carry[skip..skip + keep])?;
         self.left -= keep as u64;
+        self.carry.copy_within(whole.., 0);
+        self.carry.truncate(self.carry.len() - whole);
         Ok(buf.len())
     }
 
@@ -623,16 +606,8 @@ mod tests {
         rate("encrypt (stream)", started);
 
         let started = std::time::Instant::now();
-        let mut hasher = hbsync_fileio::Hasher::new(HashAlgorithm::Blake3);
-        let mut reader = Encrypting::new(source(), &kh.key, &iv);
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            let n = reader.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-        }
+        let sealing = Encrypting::new(source(), &kh.key, &iv);
+        hbsync_fileio::hash_reader(sealing, HashAlgorithm::Blake3)?;
         rate("encrypt + BLAKE3 (upload pass 1)", started);
 
         let started = std::time::Instant::now();

@@ -66,6 +66,7 @@ fn hash_rules() -> R {
         hash: hash_bytes(b"real", HashAlgorithm::Blake3),
         size: 4,
         reader: &mut reader,
+        pace: None,
     };
     assert!(matches!(
         r.create(&f, Some(lying)),

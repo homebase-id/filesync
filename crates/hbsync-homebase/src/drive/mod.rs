@@ -5,18 +5,21 @@
 //! Facts: `docs/spec/homebase-api-notes.md`.
 
 use std::io::{Read, SeekFrom, Write};
+use std::ops::Range;
 use std::sync::Mutex;
 
 use hbsync_fileio::HashingReader;
-use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteError, RemoteHeader, Result, Upload};
+use hbsync_remote::{
+    ChangesPage, NodeMeta, Paced, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
+};
 use hbsync_types::schema::PAYLOAD_KEY;
 use hbsync_types::{ContentHash, RemoteFileId, RemoteRef, VersionTag};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::client::{Client, UploadMethod};
-use crate::crypto::{Key, random};
+use crate::client::{Client, Fetched, UploadMethod};
+use crate::crypto::Key;
 use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
@@ -28,10 +31,6 @@ pub mod wire;
 
 /// Payload bytes per ranged read: odin-core reads each request whole into memory (#1892).
 const READ_CHUNK: u64 = 8 * 1024 * 1024;
-
-/// A read from the start up to this many bytes is one request for the whole payload (which
-/// the server holds in memory whole, #1892); longer ones go by ranges after the header.
-const WHOLE_READ: u64 = 1024 * 1024;
 
 /// Ranges are 32-bit on the server (#1893): payloads this large can't be read back.
 const MAX_PAYLOAD: u64 = (1 << 31) - 1;
@@ -107,55 +106,85 @@ impl HomebaseRemote {
         std::mem::take(&mut *self.skipped.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    fn files(&self) -> String {
+    /// The route of the drive's files.
+    pub fn files(&self) -> String {
         format!("/api/v2/drives/{}/files", self.drive.alias.simple())
     }
 
-    fn file(&self, file_id: RemoteFileId) -> String {
+    /// The route of one file.
+    pub fn file(&self, file_id: RemoteFileId) -> String {
         format!("{}/{}", self.files(), file_id.0)
     }
 
-    /// Creates a file, or with `target` updates that file at that version, in one multipart
-    /// request. A new file is encrypted; an update keeps the file's mode (the server can't
+    /// A file's header as the server sends it.
+    pub fn raw_header(&self, file_id: RemoteFileId) -> Result<wire::FileHeader> {
+        self.client
+            .get(&format!("{}/header", self.file(file_id)), &[])
+            .map_err(remote_error)
+    }
+
+    /// Creates a node unencrypted, as clients before encryption did: for tests of what they
+    /// left on drives.
+    #[doc(hidden)]
+    pub fn create_unencrypted(
+        &self,
+        node: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> Result<RemoteRef> {
+        self.write(None, node, payload, false)
+    }
+
+    /// Creates a file (encrypted when `encrypt`), or with `target` updates that file at that
+    /// version, in one multipart request. An update keeps the file's mode (the server can't
     /// change it) and its key, with a new header IV.
     fn write(
         &self,
         target: Option<RemoteRef>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
+        encrypt: bool,
     ) -> Result<RemoteRef> {
         let key = match target {
-            None => Some(KeyHeader::random().map_err(remote_error)?),
+            None if encrypt => Some(KeyHeader::random().map_err(remote_error)?),
+            None => None,
             Some(at) => self.update_key(at)?,
         };
-        if let Some(p) = &payload {
-            let stored = match key {
-                Some(_) => sealed_len(p.size),
-                None => p.size,
-            };
-            if stored > MAX_PAYLOAD {
-                return Err(RemoteError::Fatal(format!(
-                    "{} bytes is too large for this server (odin-core #1893)",
-                    p.size
-                )));
+        let transfer_iv = sealed::strong().map_err(remote_error)?;
+        // The payload as sent: encrypted under a new payload IV, or as it is, and paced.
+        let (descriptor, body) = match payload {
+            None => (None, None),
+            Some(mut p) => {
+                let size = key.as_ref().map_or(p.size, |_| sealed_len(p.size));
+                if size > MAX_PAYLOAD {
+                    return Err(RemoteError::Fatal(format!(
+                        "{} bytes is too large for this server (odin-core #1893)",
+                        p.size
+                    )));
+                }
+                let pace = p.pace;
+                let (descriptor, reader): (_, Box<dyn Read + '_>) = match &key {
+                    Some(key) => {
+                        let iv = sealed::strong().map_err(remote_error)?;
+                        let stored = sealed_hash(&mut p, &key.key, &iv)?;
+                        let descriptor = wire::PayloadDescriptor::sealed(key, iv, &p.hash, &stored);
+                        (
+                            descriptor,
+                            Box::new(Encrypting::new(p.reader, &key.key, &iv)),
+                        )
+                    }
+                    None => (wire::PayloadDescriptor::plain(&p.hash), Box::new(p.reader)),
+                };
+                (
+                    Some(descriptor),
+                    Some((
+                        Paced {
+                            inner: reader,
+                            pace,
+                        },
+                        size,
+                    )),
+                )
             }
-        }
-        let transfer_iv = transfer_iv().map_err(remote_error)?;
-        // The payload as sent: encrypted under a new payload IV, or as it is.
-        let mut sealed;
-        let (descriptor, body): (_, Option<(&mut dyn Read, u64)>) = match (payload, &key) {
-            (Some(mut p), Some(key)) => {
-                let iv = sealed::strong().map_err(remote_error)?;
-                let stored = sealed_hash(&mut p, &key.key, &iv)?;
-                let descriptor = wire::PayloadDescriptor::sealed(key, iv, &p.hash, &stored);
-                sealed = Encrypting::new(p.reader, &key.key, &iv);
-                (Some(descriptor), Some((&mut sealed, sealed_len(p.size))))
-            }
-            (Some(p), None) => (
-                Some(wire::PayloadDescriptor::plain(&p.hash)),
-                Some((p.reader as &mut dyn Read, p.size)),
-            ),
-            (None, _) => (None, None),
         };
         let version = target.map(|t| t.version);
         let instructions = wire::instructions(&transfer_iv, descriptor.as_ref(), target.is_some());
@@ -168,13 +197,14 @@ impl HomebaseRemote {
             ),
             Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
         ];
-        if let Some((reader, size)) = body {
+        let mut body = body;
+        if let Some((reader, size)) = &mut body {
             parts.push(Part::reader(
                 "payload",
                 PAYLOAD_KEY,
                 wire::CONTENT_TYPE,
                 reader,
-                size,
+                *size,
             ));
         }
         let (method, path) = match target {
@@ -182,67 +212,126 @@ impl HomebaseRemote {
             Some(at) => (UploadMethod::Patch, self.file(at.file_id)),
         };
         let boundary = Uuid::new_v4().simple().to_string();
-        let result: WriteResult = self
+        match self
             .client
             .upload(method, &path, Multipart::new(boundary, parts))
-            .map_err(remote_error)?;
-        Ok(RemoteRef {
-            file_id: RemoteFileId(result.file_id),
-            version: VersionTag(result.new_version_tag),
-        })
+        {
+            Ok(WriteResult {
+                file_id,
+                new_version_tag,
+            }) => Ok(RemoteRef {
+                file_id: RemoteFileId(file_id),
+                version: VersionTag(new_version_tag),
+            }),
+            // odin-core answers a content update of a file deleted since `update_key` looked
+            // with 500 (a null payload list in `ProcessAppendOrOverwrite`, odin-core #1904)
+            // instead of 4002: look again before retrying.
+            Err(HomebaseError::Api { ref error, .. }) if error.status == 500 => {
+                if let Some(at) = target {
+                    self.current(at)?;
+                }
+                Err(RemoteError::Transient(format!("{path}: {error}")))
+            }
+            Err(e) => Err(remote_error(e)),
+        }
     }
 
-    /// The key an update of `at` sends: the file's own, with a new header IV. `None` when the
-    /// file isn't encrypted. A file deleted or changed since is found here, before the upload.
-    fn update_key(&self, at: RemoteRef) -> Result<Option<KeyHeader>> {
-        let header: wire::FileHeader = self
-            .client
-            .get(&format!("{}/header", self.file(at.file_id)), &[])
-            .map_err(remote_error)?;
+    /// The header of `at`, which must still be that version and not deleted.
+    fn current(&self, at: RemoteRef) -> Result<wire::FileHeader> {
+        let header = self.raw_header(at.file_id)?;
         if header.file_state == "deleted" {
             return Err(RemoteError::NotFound);
         }
         if header.file_metadata.version_tag != at.version.0 {
             return Err(RemoteError::VersionMismatch);
         }
+        Ok(header)
+    }
+
+    /// The key an update of `at` sends: the file's own, with a new header IV. `None` when the
+    /// file isn't encrypted. A file deleted or changed since is found here, before the upload.
+    fn update_key(&self, at: RemoteRef) -> Result<Option<KeyHeader>> {
+        self.current(at)?
+            .key(self.client.key())
+            .and_then(|key| key.map(|k| k.with_new_iv()).transpose())
+            .map_err(remote_error)
+    }
+
+    /// The plaintext size of a payload, for a read without a range.
+    fn payload_size(&self, file_id: RemoteFileId) -> Result<u64> {
+        let header = self.raw_header(file_id)?;
+        let stored = header
+            .file_metadata
+            .sync_payload()
+            .ok_or(RemoteError::NotFound)?
+            .bytes_written;
         if !header.file_metadata.is_encrypted {
-            return Ok(None);
+            return Ok(stored);
         }
-        let key = wire::file_key(
-            header.shared_secret_encrypted_key_header.as_ref(),
-            self.client.key(),
-        )
-        .and_then(|k| k.with_new_iv())
-        .map_err(remote_error)?;
-        Ok(Some(key))
+        match wire::to_remote(header, self.client.key())
+            .map_err(RemoteError::Fatal)?
+            .body
+        {
+            RemoteBody::Live { content, .. } => content
+                .size
+                .ok_or_else(|| RemoteError::Fatal("an encrypted file without its size".into())),
+            RemoteBody::Deleted => Err(RemoteError::NotFound),
+        }
+    }
+
+    /// Stored bytes `range` of a payload into `sink`: `first`, a response for its start that
+    /// ends at `first_end`, then a request per chunk.
+    fn read_ranges(
+        &self,
+        path: &str,
+        range: Range<u64>,
+        (mut first, first_end): (Fetched, u64),
+        sink: &mut dyn Write,
+    ) -> Result<()> {
+        let mut start = range.start;
+        let mut end = first_end;
+        loop {
+            let got = first.copy_to(sink, end - start).map_err(remote_error)?;
+            if got != end - start {
+                return Err(RemoteError::Transient(format!(
+                    "short read: {got} of {} bytes at {start}",
+                    end - start
+                )));
+            }
+            start = end;
+            if start >= range.end {
+                return Ok(());
+            }
+            end = range.end.min(start + READ_CHUNK);
+            first = self.fetch(path, start..end).map_err(remote_error)?;
+        }
+    }
+
+    /// Stored bytes `range` of the payload at `path`: one request.
+    fn fetch(&self, path: &str, range: Range<u64>) -> Result<Fetched, HomebaseError> {
+        // The route takes 32-bit start and length; the Range header decides.
+        let (start, len) = (range.start, range.end - range.start);
+        self.client
+            .fetch(&format!("{path}/{start}/{len}"), start, range.end - 1)
     }
 }
 
 /// The hash of `upload` encrypted with `key` under `iv`: what the server checks the bytes
-/// against. Reads the source once, then rewinds it. Its plaintext must still hash to
-/// `upload.hash`: the server can't tell from ciphertext that the file changed since it was
-/// hashed.
+/// against. Reads the source once, then goes back to where it started. Its plaintext must
+/// still hash to `upload.hash`: the server can't tell from ciphertext that the file changed
+/// since it was hashed.
 fn sealed_hash(upload: &mut Upload<'_>, key: &Key, iv: &[u8; 16]) -> Result<ContentHash> {
     let algorithm = upload.hash.algorithm;
     let reader = &mut *upload.reader;
+    let start = reader.stream_position()?;
     let mut sealing = Encrypting::new(HashingReader::new(&mut *reader, algorithm), key, iv);
     let (stored, _) = hbsync_fileio::hash_reader(&mut sealing, algorithm)?;
     let (content, len) = sealing.into_inner().finish();
     if content != upload.hash || len != upload.size {
         return Err(RemoteError::HashMismatch);
     }
-    reader.seek(SeekFrom::Start(0))?;
+    reader.seek(SeekFrom::Start(start))?;
     Ok(stored)
-}
-
-/// A fresh transfer IV; the server refuses an all-zero one.
-fn transfer_iv() -> Result<[u8; 16], HomebaseError> {
-    loop {
-        let iv = random::<16>()?;
-        if iv != [0; 16] {
-            return Ok(iv);
-        }
-    }
 }
 
 impl Remote for HomebaseRemote {
@@ -283,15 +372,11 @@ impl Remote for HomebaseRemote {
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
-        let header: wire::FileHeader = self
-            .client
-            .get(&format!("{}/header", self.file(file_id)), &[])
-            .map_err(remote_error)?;
-        wire::to_remote(header, self.client.key()).map_err(RemoteError::Fatal)
+        wire::to_remote(self.raw_header(file_id)?, self.client.key()).map_err(RemoteError::Fatal)
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
-        self.write(None, node, payload)
+        self.write(None, node, payload, true)
     }
 
     fn update(
@@ -305,22 +390,7 @@ impl Remote for HomebaseRemote {
             file_id,
             version: expected,
         };
-        let error = match self.write(Some(at), meta, payload) {
-            Ok(written) => return Ok(written),
-            Err(e) => e,
-        };
-        // odin-core answers a content update of a deleted file with 500 (a null payload list in
-        // `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002, which maps to
-        // Transient: look before retrying.
-        if error.is_transient() {
-            match self.header(file_id) {
-                Ok(h) if h.is_deleted() => return Err(RemoteError::NotFound),
-                Ok(h) if h.version != expected => return Err(RemoteError::VersionMismatch),
-                Err(e @ (RemoteError::Denied(_) | RemoteError::NotFound)) => return Err(e),
-                _ => {}
-            }
-        }
-        Err(error)
+        self.write(Some(at), meta, payload, true)
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
@@ -345,141 +415,96 @@ impl Remote for HomebaseRemote {
         Ok(())
     }
 
-    /// Plaintext `range` of the payload, decrypted when the file is encrypted.
+    /// Plaintext `range` of the payload, decrypted when the file is encrypted. Whether it is,
+    /// and its key, come with the first response. It starts a block early (ciphertext needs
+    /// the block before, plaintext drops it) and ends at the whole block encryption needs; an
+    /// unencrypted payload ends at the plaintext and refuses a range past it (416): then the
+    /// first request is made again, to the plaintext end.
     fn read(
         &self,
         file_id: RemoteFileId,
-        range: Option<std::ops::Range<u64>>,
+        range: Option<Range<u64>>,
         sink: &mut dyn Write,
     ) -> Result<u64> {
-        if let Some(r) = &range {
-            if r.is_empty() {
-                return Ok(0);
-            }
-            if r.start == 0 && r.end <= WHOLE_READ {
-                return self.read_small(file_id, r.end, sink);
-            }
-        }
-        // The header first: whether it is encrypted, its key, and (without a range) its size.
-        let header: wire::FileHeader = self
-            .client
-            .get(&format!("{}/header", self.file(file_id)), &[])
-            .map_err(remote_error)?;
-        let payload = header
-            .file_metadata
-            .payloads
-            .iter()
-            .flatten()
-            .find(|p| p.key == PAYLOAD_KEY)
-            .cloned();
-        let key = match header.file_metadata.is_encrypted {
-            true => Some(
-                wire::file_key(
-                    header.shared_secret_encrypted_key_header.as_ref(),
-                    self.client.key(),
-                )
-                .map_err(remote_error)?,
-            ),
-            false => None,
-        };
         let range = match range {
             Some(r) => r,
-            None => {
-                let size = wire::to_remote(header, self.client.key())
-                    .map_err(RemoteError::Fatal)?
-                    .state()
-                    .and_then(|s| s.content)
-                    .ok_or(RemoteError::NotFound)?
-                    .size;
-                0..size
-            }
+            None => 0..self.payload_size(file_id)?,
         };
         if range.is_empty() {
             return Ok(0);
         }
-        let payload = payload.ok_or(RemoteError::NotFound)?;
         let len = range.end - range.start;
         let path = format!("{}/payload/{PAYLOAD_KEY}", self.file(file_id));
-        match key {
-            None => self.read_ranges(&path, range, sink)?,
-            Some(key) => {
-                let at = CipherRange::of(&range);
-                let iv = wire::payload_iv(&payload).map_err(RemoteError::Fatal)?;
-                let first_iv = (!at.iv_first).then_some(&iv);
-                let mut plain = Decrypting::new(&key.key, first_iv, at.skip, len, sink);
-                self.read_ranges(&path, at.fetch, &mut plain)?;
-                if plain.left() > 0 {
-                    return Err(RemoteError::Transient(format!(
-                        "short read: {} of {len} bytes",
-                        len - plain.left()
-                    )));
-                }
+        let at = CipherRange::of(&range);
+        let mut first_end = at.fetch.end.min(at.fetch.start + READ_CHUNK);
+        let first = match self.fetch(&path, at.fetch.start..first_end) {
+            Err(HomebaseError::Api { error, .. })
+                if error.status == 416 && first_end > range.end =>
+            {
+                first_end = range.end;
+                self.fetch(&path, at.fetch.start..first_end)
+                    .map_err(remote_error)?
             }
+            other => other.map_err(remote_error)?,
+        };
+        let left = match first.key_header.as_deref() {
+            Some(sealed) if first.encrypted => {
+                // A payload's key header carries the payload's IV.
+                let key = SealedKeyHeader::from_base64(sealed)
+                    .and_then(|s| KeyHeader::open(&s, self.client.key()))
+                    .map_err(remote_error)?;
+                let first_iv = (!at.iv_first).then_some(&key.iv);
+                let mut plain = Decrypting::new(&key.key, first_iv, at.skip, len, sink);
+                self.read_ranges(&path, at.fetch, (first, first_end), &mut plain)?;
+                plain.left()
+            }
+            None if first.encrypted => {
+                return Err(RemoteError::Fatal(format!("{path}: encrypted, but no key")));
+            }
+            _ => {
+                let mut plain = Window {
+                    sink,
+                    skip: range.start - at.fetch.start,
+                    left: len,
+                };
+                self.read_ranges(
+                    &path,
+                    at.fetch.start..range.end,
+                    (first, first_end),
+                    &mut plain,
+                )?;
+                plain.left
+            }
+        };
+        if left > 0 {
+            return Err(RemoteError::Transient(format!(
+                "short read: {} of {len} bytes",
+                len - left
+            )));
         }
         Ok(len)
     }
 }
 
-impl HomebaseRemote {
-    /// The first `end` bytes in one request, on the route that sends the whole payload and
-    /// says whether it is encrypted, with its key.
-    fn read_small(&self, file_id: RemoteFileId, end: u64, sink: &mut dyn Write) -> Result<u64> {
-        let path = format!("{}/payload/{PAYLOAD_KEY}", self.file(file_id));
-        let mut fetched = self.client.fetch(&path).map_err(remote_error)?;
-        let got = if fetched.encrypted {
-            let sealed = fetched
-                .key_header
-                .as_deref()
-                .ok_or_else(|| RemoteError::Fatal(format!("{path}: encrypted, but no key")))?;
-            let key = SealedKeyHeader::from_base64(sealed)
-                .and_then(|s| KeyHeader::open(&s, self.client.key()))
-                .map_err(remote_error)?;
-            // The key header of a payload carries the payload's IV.
-            let mut plain = Decrypting::new(&key.key, Some(&key.iv), 0, end, sink);
-            let at = CipherRange::of(&(0..end));
-            fetched
-                .copy_to(&mut plain, at.fetch.end)
-                .map_err(remote_error)?;
-            end - plain.left()
-        } else {
-            fetched.copy_to(sink, end).map_err(remote_error)?
-        };
-        if got != end {
-            return Err(RemoteError::Transient(format!(
-                "short read: {got} of {end} bytes"
-            )));
-        }
-        Ok(end)
+/// Passes on `left` bytes after the first `skip` written to it.
+struct Window<'a> {
+    sink: &'a mut dyn Write,
+    skip: u64,
+    left: u64,
+}
+
+impl Write for Window<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let skip = self.skip.min(buf.len() as u64) as usize;
+        self.skip -= skip as u64;
+        let keep = self.left.min((buf.len() - skip) as u64) as usize;
+        self.sink.write_all(&buf[skip..skip + keep])?;
+        self.left -= keep as u64;
+        Ok(buf.len())
     }
 
-    /// Stored bytes `range` of a payload into `sink`, a chunk per request.
-    fn read_ranges(
-        &self,
-        path: &str,
-        range: std::ops::Range<u64>,
-        sink: &mut dyn Write,
-    ) -> Result<()> {
-        let mut start = range.start;
-        while start < range.end {
-            let len = (range.end - start).min(READ_CHUNK);
-            // The route takes 32-bit start and length; the Range header decides.
-            let got = self
-                .client
-                .download(
-                    &format!("{path}/{start}/{len}"),
-                    start,
-                    start + len - 1,
-                    sink,
-                )
-                .map_err(remote_error)?;
-            if got != len {
-                return Err(RemoteError::Transient(format!(
-                    "short read: {got} of {len} bytes at {start}"
-                )));
-            }
-            start += len;
-        }
-        Ok(())
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.sink.flush()
     }
 }
 
