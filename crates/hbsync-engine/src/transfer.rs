@@ -6,6 +6,10 @@
 //!
 //! Order: jobs marked urgent (a file the user is waiting for) first, then smallest first, so
 //! many small files aren't stuck behind one large one.
+//!
+//! Small files wait on round trips, so many run at once. Large ones wait on bandwidth, so only
+//! a few do: more wouldn't move bytes faster, each would just finish later (and an upload cut
+//! off starts over).
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -22,6 +26,10 @@ use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef};
 pub struct TransferConfig {
     /// Concurrent transfers.
     pub workers: usize,
+    /// Concurrent transfers of large files, the rest of the workers being free for small ones.
+    pub large_at_once: usize,
+    /// Size from which a file counts as large, in bytes.
+    pub large_from: u64,
     /// Combined bandwidth cap for all transfers, bytes per second.
     pub max_bytes_per_sec: Option<u64>,
 }
@@ -29,7 +37,9 @@ pub struct TransferConfig {
 impl Default for TransferConfig {
     fn default() -> Self {
         TransferConfig {
-            workers: 4,
+            workers: 8,
+            large_at_once: 2,
+            large_from: 8 << 20,
             max_bytes_per_sec: None,
         }
     }
@@ -199,7 +209,11 @@ pub fn run_jobs_while(
     mut commit: impl FnMut(Job, JobResult) -> bool,
 ) {
     jobs.sort_by_key(|(urgent, job)| (!*urgent, job.size()));
-    let queue: Mutex<VecDeque<Job>> = Mutex::new(jobs.into_iter().map(|(_, j)| j).collect());
+    let queue = Mutex::new(Queue {
+        jobs: jobs.into_iter().map(|(_, j)| j).collect(),
+        large: 0,
+    });
+    let is_large = |job: &Job| job.size() >= cfg.large_from;
     let throttle = cfg.max_bytes_per_sec.map(Throttle::new);
     let (tx, rx) = mpsc::channel::<(Job, JobResult)>();
     std::thread::scope(|scope| {
@@ -207,9 +221,24 @@ pub fn run_jobs_while(
             let tx = tx.clone();
             let queue = &queue;
             let throttle = throttle.as_ref();
+            // A worker that finds only large jobs, with all their slots taken, ends: the
+            // workers holding the slots take them on.
             scope.spawn(move || {
-                while let Some(job) = queue.lock().ok().and_then(|mut q| q.pop_front()) {
+                while let Some(job) = queue.lock().ok().and_then(|mut q| {
+                    let i = q
+                        .jobs
+                        .iter()
+                        .position(|j| !is_large(j) || q.large < cfg.large_at_once.max(1))?;
+                    let job = q.jobs.remove(i)?;
+                    q.large += usize::from(is_large(&job));
+                    Some(job)
+                }) {
                     let result = run_job(remote, &job, throttle);
+                    if is_large(&job)
+                        && let Ok(mut q) = queue.lock()
+                    {
+                        q.large -= 1;
+                    }
                     if tx.send((job, result)).is_err() {
                         break;
                     }
@@ -221,10 +250,16 @@ pub fn run_jobs_while(
             if !commit(job, result)
                 && let Ok(mut q) = queue.lock()
             {
-                q.clear();
+                q.jobs.clear();
             }
         }
     });
+}
+
+/// Jobs not started yet, and how many large ones are running.
+struct Queue {
+    jobs: VecDeque<Job>,
+    large: usize,
 }
 
 fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobResult {

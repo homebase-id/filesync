@@ -74,7 +74,7 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
 | Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
-| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206; end past the payload → 416. Offsets are `int` (#1893) and every read is buffered whole in server memory (#1892) |
+| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206. With odin-core PR #1921 **[verified in the PR, not merged yet]**: offsets are 64-bit, reads stream, an end past the payload is cut short there, a start at or past it → 416. Before it: an end past the payload → 416, offsets `int` (#1893), every read buffered whole in server memory (#1892) |
 | Notify | `wss://{id}/api/v2/notify/ws-token` | see below |
 
 The client only soft-deletes: the tombstone is how the other clients learn of a delete
@@ -196,8 +196,11 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - Delete has no VersionTag guard → a delete can wipe a concurrent edit. Filed as odin-core
   #1903 (optional `versionTag` on delete, 4160 on mismatch; also: deleting a tombstone should
   be a no-op). Until then the client reads the header and compares right before deleting.
-- Payload reads are buffered whole in server memory (#1892) and ranges are `int` (#1893): the
-  client reads in chunks and refuses payloads of 2 GiB or more until #1893 lands.
+- Payload reads are buffered whole in server memory (#1892) and ranges are `int` (#1893)
+  until odin-core PR #1921. The client is written for #1921: it reads in pieces sized by
+  rate, not by server memory, and relies on a range past the end being cut short (an
+  unencrypted payload). Uploads over 4 GiB still fail (the `uint` byte count, the half of
+  #1893 the PR leaves open), so the client refuses payloads that large.
 - App clients can't read the drive's `requirePayloadHashes` **[verified]** (`ClientDriveData`
   has no such field); the client always sends hashes.
 - **The feed could hide a write until the next one** (fixed in odin-core #1906, 2026-10-09)

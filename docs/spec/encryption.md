@@ -100,9 +100,13 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   needed, and never checked: the content hash is.
 - No header is read first: every ranged payload response says whether the payload is
   encrypted and carries its key (with the payload IV). The first request asks for the
-  ciphertext extent above; an unencrypted payload (written before encryption) refuses a range
-  past its end with 416, and the first request is made again to the plaintext end. Then 8 MiB
-  ranges follow in the mode the first response gave.
+  ciphertext extent above. An unencrypted payload (written before encryption) may end inside
+  that extent's last block: the server cuts the range short at the payload's end (RFC 9110,
+  odin-core PR #1921), and the plaintext asked for is all there.
+- The extent comes in pieces, one request each, in the mode the first response gave: 8 MiB
+  first, then each sized to take about 15 s at the rate the one before came in (1 to 256
+  MiB). A piece stays well within the client's body timeout, which is how a stalled
+  connection is caught, and on a fast link the round trip between pieces doesn't matter.
 
 ## What it doesn't do
 - **End-to-end:** the server can decrypt; see above.
@@ -125,7 +129,7 @@ Measured on an i7-8700K (AES-NI, no VAES), against a Homebase on the same machin
 | download 1 GiB | 427 MB/s | 372 MB/s |
 | create / read / update a small file | 2.5 / 6.7 / 5.0 ms | 2.5 / 6.1 / 3.7 ms |
 
-(An unencrypted small read pays the 416 retry above.) The cipher alone: encrypting 970 MB/s,
+(Measured before odin-core #1921, when an unencrypted small read took a second request.) The cipher alone: encrypting 970 MB/s,
 decrypting 2.8 GB/s, where OpenSSL reaches 1.6 and 6.6 GB/s. The upload's first pass, about 1.3 s per GB here, is the cost that shows. It is small
 next to any internet link. A faster AES (aws-lc-rs) would bring a C build on three OSes, and
 isn't worth it until a measurement shows uploads bound by the CPU.

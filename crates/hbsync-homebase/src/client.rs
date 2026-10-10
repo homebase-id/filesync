@@ -29,8 +29,13 @@ pub(crate) fn agent() -> ureq::Agent {
         .timeout_send_request(Some(Duration::from_secs(60)))
         .timeout_recv_response(Some(Duration::from_secs(300)))
         // A body that stalls (a connection that died without a reset) ends the call instead of
-        // blocking a worker forever. Answers are bounded: JSON pages, 8 MiB payload ranges.
+        // blocking a worker forever. Answers are bounded: JSON pages, and payload pieces sized to
+        // arrive well within it (`drive::Pieces`).
         .timeout_recv_body(Some(Duration::from_secs(300)))
+        // More than the transfer workers (8): a connection over the limit is closed when it
+        // goes idle, and the next call pays a new TCP and TLS handshake.
+        .max_idle_connections_per_host(16)
+        .max_idle_connections(16)
         .user_agent(concat!("hbsync/", env!("CARGO_PKG_VERSION")))
         .build()
         .into()

@@ -2,7 +2,7 @@
 
 Progress (2026-10-10): Layers 0–4 are built against the fake remote; Layer 5's adapter syncs
 two folders through a live identity (frodo), including the WebSocket wake-up. Open in Layer 5:
-batch deletes, files of 2 GiB and over (#1893), app sign-in by slug (#1902), hash-less nodes
+batch deletes, files of 4 GiB and over (#1893), app sign-in by slug (#1902), hash-less nodes
 from other writers, and the interop work. Files are encrypted in Homebase's own format
 ([spec/encryption.md](spec/encryption.md)). Layer 6 has its filters, and the
 daemon with its config, keychain, control socket, CLI and autostart
@@ -104,8 +104,8 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 
 ## Layer 5: Homebase (server prerequisites can start in parallel with Layer 1)
 - **odin-core prerequisites**:
-  - streamed payload reads (#1892)
-  - 64-bit sizes and ranges (#1893)
+  - streamed payload reads (#1892, PR #1921; the client is written for it)
+  - 64-bit sizes and ranges (#1893: ranges in PR #1921, the upload byte count still open)
   - payload hashes + per-drive "hashes required" setting (#1895, merged as PR #1899)
   - guarded delete: optional `versionTag` (#1903)
   - apps sign in by slug (#1902)

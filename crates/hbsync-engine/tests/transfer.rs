@@ -42,7 +42,7 @@ fn transfers_run_in_parallel() -> R {
         &remote,
         TransferConfig {
             workers: 4,
-            max_bytes_per_sec: None,
+            ..TransferConfig::default()
         },
         jobs,
         |_, r| {
@@ -58,6 +58,53 @@ fn transfers_run_in_parallel() -> R {
         "{:?}",
         start.elapsed()
     );
+    Ok(())
+}
+
+#[test]
+fn only_a_few_large_files_at_once() -> R {
+    let dir = tempfile::tempdir()?;
+    let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
+    remote.faults().latency = Duration::from_millis(100);
+    // Urgent large files first: the ones over the limit wait, and small files go meanwhile.
+    let mut jobs = Vec::new();
+    for i in 0..4 {
+        jobs.push((true, upload_job(dir.path(), &format!("large{i}"), 1000)?));
+    }
+    for i in 0..8 {
+        jobs.push((false, upload_job(dir.path(), &format!("small{i}"), 10)?));
+    }
+    let start = Instant::now();
+    let mut done = Vec::new();
+    run_jobs(
+        &remote,
+        TransferConfig {
+            workers: 10,
+            large_at_once: 2,
+            large_from: 1000,
+            ..TransferConfig::default()
+        },
+        jobs,
+        |job, r| {
+            assert!(matches!(r, JobResult::Uploaded(_)));
+            done.push((job.size(), start.elapsed()));
+        },
+    );
+    assert_eq!(done.len(), 12);
+    // Two large files a round: two rounds for four. All ten workers at once would take one.
+    let last_large = done
+        .iter()
+        .filter(|(size, _)| *size == 1000)
+        .map(|d| d.1)
+        .max();
+    assert!(last_large >= Some(Duration::from_millis(200)), "{done:?}");
+    // The small files ran beside the first two large ones, not after them.
+    let last_small = done
+        .iter()
+        .filter(|(size, _)| *size == 10)
+        .map(|d| d.1)
+        .max();
+    assert!(last_small < last_large, "{done:?}");
     Ok(())
 }
 
@@ -83,7 +130,7 @@ fn urgent_first_then_smallest_first() -> R {
         &remote,
         TransferConfig {
             workers: 1,
-            max_bytes_per_sec: None,
+            ..TransferConfig::default()
         },
         jobs,
         |job, _| order.push(names[&job.node()].clone()),
@@ -127,7 +174,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
     };
     let cfg = TransferConfig {
         workers: 1,
-        max_bytes_per_sec: None,
+        ..TransferConfig::default()
     };
 
     remote.faults().cut_download_after = Some(30_000);
@@ -169,6 +216,7 @@ fn bandwidth_cap_slows_transfers() -> R {
         TransferConfig {
             workers: 2,
             max_bytes_per_sec: Some(600_000),
+            ..TransferConfig::default()
         },
         jobs,
         |_, _| {},
@@ -198,6 +246,7 @@ fn results_arrive_while_other_transfers_still_run() -> R {
         TransferConfig {
             workers: 2,
             max_bytes_per_sec: Some(800_000),
+            ..TransferConfig::default()
         },
         jobs,
         |job, _| {

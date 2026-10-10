@@ -161,8 +161,8 @@ the first three; the payload descriptor gives the hash.
 
 | # | Work | Status |
 |---|---|---|
-| 1 | Streamed payload and thumbnail reads via the existing `OpenReadAsync`, plus a ranged variant | odin-core **#1892** |
-| 2 | `long` for payload sizes and ranges throughout (`FileChunk`, `Convert.ToInt32`, `(uint)` byte count) | odin-core **#1893** |
+| 1 | Streamed payload and thumbnail reads via the existing `OpenReadAsync`, plus a ranged variant | odin-core **#1892**, PR #1921 |
+| 2 | `long` for payload sizes and ranges throughout (`FileChunk`, `Convert.ToInt32`, `(uint)` byte count) | odin-core **#1893**: ranges in PR #1921, the upload byte count open |
 | 3 | Payload hashes per section 1: descriptor fields, both-or-none, stored-hash check while streaming (also on peer incoming), equality check when unencrypted, per-drive "hashes required" setting, BLAKE3 package, spec + golden vectors | odin-core **#1895** |
 | 4 | Resumable / chunked payload upload; the hash check runs once, when the staged file is finalized | *not filed yet* |
 | 5 | "Files" drive type + reserved `SyncFile` / `SyncFolder` file types | *not filed yet*; can wait until the Homebase adapter (roadmap Layer 5) |
