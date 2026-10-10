@@ -235,12 +235,9 @@ pub struct LocalObserver {
 /// How long after a new folder is found it is rescanned once more. A watcher that watches
 /// folder by folder (inotify) starts watching a new one only after its creation event: what is
 /// written into it before that sends no event, and the rescan that found the folder may have
-/// come too early to see it. By then the watch is long in place.
+/// come too early to see it. By then the watch is long in place. Done on every OS: one more
+/// listing of a new folder is cheap, and it covers any watcher that drops an event.
 const RECHECK: Duration = Duration::from_secs(1);
-
-/// Whether the watcher watches folder by folder: FSEvents and ReadDirectoryChangesW watch the
-/// whole tree, and need no [`RECHECK`].
-const PER_FOLDER_WATCHES: bool = !cfg!(any(target_os = "macos", windows));
 
 impl LocalObserver {
     /// Starts watching. Call [`LocalObserver::catch_up`] next.
@@ -325,7 +322,7 @@ impl LocalObserver {
 
     /// Looks into the new folders of `report` once more after [`RECHECK`].
     fn note_new_folders(&mut self, report: &ScanReport) {
-        if PER_FOLDER_WATCHES && !report.new_folders.is_empty() {
+        if !report.new_folders.is_empty() {
             self.recheck
                 .get_or_insert_with(|| (Instant::now() + RECHECK, Vec::new()))
                 .1
