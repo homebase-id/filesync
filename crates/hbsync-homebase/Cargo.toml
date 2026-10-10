@@ -26,6 +26,7 @@ tungstenite = { version = "0.28.0", default-features = false, features = ["hands
 ureq = { version = "3.4.2", features = ["json"] }
 uuid.workspace = true
 webpki-roots = "1"
+zeroize = "1.8"
 
 [lints]
 workspace = true

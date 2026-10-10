@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::crypto::{Key, aes_cbc_encrypt};
+use crate::drive::sealed::KeyHeader;
 
 pub const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -239,12 +240,7 @@ pub fn metadata(
     shared_secret: &Key,
     transfer_iv: &[u8; 16],
 ) -> Vec<u8> {
-    let key_header = json!({
-        "encryptionVersion": 1,
-        "type": "aes",
-        "iv": STANDARD.encode(transfer_iv),
-        "encryptedAesKey": STANDARD.encode(aes_cbc_encrypt(shared_secret, transfer_iv, &[0u8; 32])),
-    });
+    let key_header = KeyHeader::seal_none(shared_secret, transfer_iv);
     let plain = metadata_json(meta, version, key_header).to_string();
     aes_cbc_encrypt(shared_secret, transfer_iv, plain.as_bytes())
 }

@@ -97,6 +97,30 @@ is unencrypted (4109 otherwise); chat-kmp encrypts an all-zero `KeyHeader` with 
 secret. `fileMetadata`: `{isEncrypted, allowDistribution, accessControlList, appData:
 {uniqueId, groupId, fileType, dataType, content, ...}, versionTag}`.
 
+Encrypted files **[verified]** on odin-core `main` @ 07657309e (the format: `encryption.md`):
+- **Upload:** with `isEncrypted: true`, the server opens `encryptedKeyHeader` (`iv || key`,
+  AES-CBC under the shared secret) and stores it re-encrypted with the drive storage key
+  (`FileSystemStreamWriterBase.cs:455-458`, `DriveStorageServiceBase.cs:688-696`). That key
+  needs a drive grant with Read (`ExchangeGrantService.cs:187-214`). Every payload of an
+  encrypted file needs a strong 16-byte `iv`; an unencrypted file's payloads need none
+  (`FileSystemUpdateWriterBase.cs:467-477`). "Strong": not every group of four bytes the same
+  (`ByteArrayUtil.IsStrongKey`).
+- **Update (PATCH):** the key header must still be strong in both IV and key
+  (`FileSystemUpdateWriterBase.cs:504-512`), but the server keeps the file's key and only
+  takes the IV as the new header IV (`DriveStorageServiceBase.cs:2297-2309`). So an update
+  sends the file's own key with a new IV, and `content` encrypted with those. `isEncrypted`
+  can't change on an update (`:2274-2278`). An overwritten payload needs a new IV
+  (`PayloadHash.AssertIvsRotatedAsync`).
+- **Download:** a header carries `sharedSecretEncryptedKeyHeader` (the file key and header IV,
+  under the shared secret, `DriveFileUtility.cs:44-51`). Payload responses on both payload
+  routes, ranged included, carry `PayloadEncrypted: True|False` and, when encrypted,
+  `SharedSecretEncryptedHeader64`: the key with that payload's IV, as IV (16) + encrypted key
+  (48) + version (4, little-endian), base64 (`DriveStorageControllerBase.cs:138-146`,
+  `EncryptedKeyHeader.ToBase64`). The bytes are the stored ciphertext, ranges included.
+- **Hashes:** `storedHash` is over the ciphertext and checked while it streams in;
+  `contentHash` is the plaintext hash encrypted with the file key under the payload IV XOR
+  `0xAA…` (48 bytes), and the server checks only its length (`PayloadHash.cs`).
+
 **Update replaces the metadata, it doesn't merge** **[verified]**
 `StandardFileUpdateWriter.cs:48-85`: an update that leaves out `uniqueId` clears it, and a
 missing `accessControlList` resets to owner. Every update resends the whole `appData`.

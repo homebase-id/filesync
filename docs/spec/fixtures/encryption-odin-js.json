@@ -1,0 +1,21 @@
+{
+  "_comment": "Made with odin-js js-lib (SecurityHelpers.encryptKeyHeader, encryptWithKeyheader, decryptChunkedBytesResponse; UploadHelpers.encryptMetaData; DriveFileHelper.getRangeHeader) by docs/spec/fixtures/encryption-odin-js.ts. Bytes are hex unless named base64.",
+  "sharedSecret": "101112131415161718191a1b1c1d1e1f",
+  "key": "202122232425262728292a2b2c2d2e2f",
+  "headerIv": "303132333435363738393a3b3c3d3e3f",
+  "transferIv": "404142434445464748494a4b4c4d4e4f",
+  "payloadIv": "505152535455565758595a5b5c5d5e5f",
+  "encryptedAesKey": "76201e3f4205e0ffd08c02ece1b850b44f8fdaea3eb3b13ea1cd2698663d7d238a40a59edae96fe8269930301f3f400f",
+  "content": "{\"v\":1,\"name\":\"Résumé.txt\",\"mtime\":1759920000123,\"size\":100}",
+  "sealedContentBase64": "xI3jwwzAJGGcwtRbugGjSFBJRR43WfuqVmTFat5cVksMEAi922gCjeXiTtJF5UCKnbCDJxG26a1ko5jRfQkFng==",
+  "payload": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5",
+  "sealedPayload": "7432302b116f0ebbea77de95fb8ff37f09912f8b61ad687c6af321a895e6dd30ccf10e0eb3261084cbc23a3a7a7d220f679580f134567913d75db70d25b3c8dda74705e5072ca1347e3264d2361103e89e7daa0461c246adfe9a8391b3ad5e0151edc8407e93cb62a9938c86c98f72c1",
+  "payloadKeyHeader64": "QEFCQ0RFRkdISUpLTE1OT81N+Y9qS0VXYKUjr6BoffzPu43VEZiwyWwMIG+yUV0tlpf9o0hXfJR/mC2on1uLhwEAAAA=",
+  "range": {
+    "start": 40,
+    "end": 80,
+    "fetchStart": 16,
+    "fetchEndInclusive": 79,
+    "plain": "181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b2229"
+  }
+}

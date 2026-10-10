@@ -19,6 +19,7 @@ use crate::crypto::random;
 use crate::multipart::{Multipart, Part};
 use crate::{HomebaseError, app};
 
+pub mod sealed;
 pub mod wire;
 
 /// Payload bytes per ranged read: odin-core reads each request whole into memory (#1892).
