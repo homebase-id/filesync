@@ -48,7 +48,8 @@ pub struct PayloadInfo {
     /// The content hash; `None` when the writer didn't send one (drive without the
     /// requirement): such a node is downloaded and hashed locally, and treated as unverified.
     pub hash: Option<ContentHash>,
-    /// Stored size (equals the plaintext size for unencrypted payloads).
+    /// Stored size: padded on Homebase, where payloads are encrypted; the plaintext size on
+    /// the fake.
     pub bytes: u64,
 }
 

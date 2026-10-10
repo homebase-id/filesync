@@ -7,7 +7,6 @@
 use std::io::{SeekFrom, Write};
 use std::ops::Range;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use hbsync_fileio::HashingReader;
 use hbsync_remote::{
@@ -240,33 +239,6 @@ impl HomebaseRemote {
         }
     }
 
-    /// The bytes `pieces` covers into `sink`: `response` answers its first piece, then a request
-    /// per piece.
-    fn read_ranges(
-        &self,
-        path: &str,
-        mut pieces: Pieces,
-        mut response: Fetched,
-        sink: &mut dyn Write,
-    ) -> Result<()> {
-        loop {
-            let asked = pieces.asked();
-            let len = asked.end - asked.start;
-            let got = response.copy_to(sink, len).map_err(remote_error)?;
-            if got != len {
-                return Err(RemoteError::Transient(format!(
-                    "short read: {got} of {len} bytes at {}",
-                    asked.start
-                )));
-            }
-            if asked.end == pieces.end() {
-                return Ok(());
-            }
-            pieces.done(got);
-            response = self.fetch(path, pieces.next()).map_err(remote_error)?;
-        }
-    }
-
     /// Stored bytes `range` of the payload at `path`: one request.
     fn fetch(&self, path: &str, range: Range<u64>) -> Result<Fetched, HomebaseError> {
         // The route names the range as well; the Range header decides.
@@ -396,11 +368,9 @@ impl Remote for HomebaseRemote {
         let len = range.end - range.start;
         let path = format!("{}/payload/{PAYLOAD_KEY}", self.file(file_id));
         let at = CipherRange::of(&range);
-        let mut pieces = Pieces::new(at.fetch.clone());
-        let first = self.fetch(&path, pieces.next()).map_err(remote_error)?;
-        // A range past the stored payload is cut short at its end (odin-core #1921).
-        pieces.end_at(first.size);
-        let sealed = match (first.encrypted, first.key_header.as_deref()) {
+        // One request, streamed: the client's idle timeout catches a stalled one.
+        let mut response = self.fetch(&path, at.fetch.clone()).map_err(remote_error)?;
+        let sealed = match (response.encrypted, response.key_header.as_deref()) {
             (true, Some(sealed)) => sealed,
             (true, None) => {
                 return Err(RemoteError::Fatal(format!("{path}: encrypted, but no key")));
@@ -411,72 +381,20 @@ impl Remote for HomebaseRemote {
         let key = SealedKeyHeader::from_base64(sealed)
             .and_then(|s| KeyHeader::open(&s, self.client.key()))
             .map_err(remote_error)?;
+        // A range past the stored payload is cut short at its end (odin-core #1921).
+        let end = at.fetch.end.min(response.size);
         let first_iv = (!at.iv_first).then_some(&key.iv);
         let mut plain = Decrypting::new(&key.key, first_iv, at.skip, len, sink);
-        if pieces.end() == first.size {
-            plain = plain.running_to_the_end();
+        let want = end.saturating_sub(at.fetch.start);
+        let got = response.copy_to(&mut plain, want).map_err(remote_error)?;
+        if got != want {
+            return Err(RemoteError::Transient(format!(
+                "{path}: short read, {got} of {want} bytes at {}",
+                at.fetch.start
+            )));
         }
-        self.read_ranges(&path, pieces, first, &mut plain)?;
-        plain.finish()?;
+        plain.finish(end == response.size)?;
         Ok(len - plain.left())
-    }
-}
-
-/// The first ranged request of a read: small files fit in it whole.
-const FIRST_PIECE: u64 = 8 << 20;
-/// How long a later piece should take at the rate the one before came in: well inside the
-/// client's body timeout, so a stalled connection is caught, and long enough that the round
-/// trip between pieces doesn't matter.
-const PIECE_TIME: f64 = 15.0;
-const MIN_PIECE: u64 = 1 << 20;
-const MAX_PIECE: u64 = 256 << 20;
-
-/// The ranged requests a read is made of, each sized from the rate the one before came in at.
-#[derive(Debug)]
-struct Pieces {
-    /// What is left to read.
-    left: Range<u64>,
-    size: u64,
-    /// When the last piece was asked for.
-    since: Instant,
-}
-
-impl Pieces {
-    fn new(range: Range<u64>) -> Self {
-        Pieces {
-            left: range,
-            size: FIRST_PIECE,
-            since: Instant::now(),
-        }
-    }
-
-    /// The next piece to ask for.
-    fn next(&mut self) -> Range<u64> {
-        self.since = Instant::now();
-        self.asked()
-    }
-
-    /// Where the read ends.
-    fn end(&self) -> u64 {
-        self.left.end
-    }
-
-    /// The payload ends at `size`: nothing past it is asked for.
-    fn end_at(&mut self, size: u64) {
-        self.left.end = self.left.end.min(size);
-    }
-
-    /// The piece asked for last.
-    fn asked(&self) -> Range<u64> {
-        self.left.start..self.left.end.min(self.left.start + self.size)
-    }
-
-    /// The piece asked for came in whole.
-    fn done(&mut self, bytes: u64) {
-        self.left.start += bytes;
-        let took = self.since.elapsed().max(Duration::from_millis(1));
-        let fits = bytes as f64 / took.as_secs_f64() * PIECE_TIME;
-        self.size = (fits as u64).clamp(MIN_PIECE, MAX_PIECE);
     }
 }
 
@@ -551,34 +469,5 @@ mod tests {
             let mapped = format!("{:?}", remote_error(error));
             assert!(mapped.starts_with(expected), "{mapped} isn't {expected}");
         }
-    }
-
-    #[test]
-    fn pieces_follow_the_rate() {
-        let mut pieces = Pieces::new(100..u64::MAX);
-        assert_eq!(pieces.next(), 100..100 + FIRST_PIECE);
-        // Came in at once: as large as a piece gets.
-        pieces.done(FIRST_PIECE);
-        assert_eq!(
-            pieces.next(),
-            100 + FIRST_PIECE..100 + FIRST_PIECE + MAX_PIECE
-        );
-        // A piece that took a while: smaller, but never below the floor.
-        pieces.since -= Duration::from_secs(6000);
-        pieces.done(MAX_PIECE);
-        assert_eq!(pieces.size, MIN_PIECE);
-        // About PIECE_TIME at the rate it came in.
-        pieces.next();
-        pieces.since -= Duration::from_secs(1);
-        pieces.done(MIN_PIECE);
-        let want = MIN_PIECE as f64 * PIECE_TIME;
-        assert!(
-            (pieces.size as f64 - want).abs() < want * 0.05,
-            "{}",
-            pieces.size
-        );
-        // The last piece ends with the range.
-        let mut pieces = Pieces::new(0..10);
-        assert_eq!(pieces.next(), 0..10);
     }
 }

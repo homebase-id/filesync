@@ -209,35 +209,25 @@ pub fn run_jobs_while(
     mut commit: impl FnMut(Job, JobResult) -> bool,
 ) {
     jobs.sort_by_key(|(urgent, job)| (!*urgent, job.size()));
+    let workers = cfg.workers.min(jobs.len()).max(1);
     let queue = Mutex::new(Queue {
         jobs: jobs.into_iter().map(|(_, j)| j).collect(),
         large: 0,
+        large_from: cfg.large_from,
+        large_at_once: cfg.large_at_once.max(1),
     });
-    let is_large = |job: &Job| job.size() >= cfg.large_from;
     let throttle = cfg.max_bytes_per_sec.map(Throttle::new);
     let (tx, rx) = mpsc::channel::<(Job, JobResult)>();
     std::thread::scope(|scope| {
-        for _ in 0..cfg.workers.max(1) {
+        for _ in 0..workers {
             let tx = tx.clone();
             let queue = &queue;
             let throttle = throttle.as_ref();
-            // A worker that finds only large jobs, with all their slots taken, ends: the
-            // workers holding the slots take them on.
             scope.spawn(move || {
-                while let Some(job) = queue.lock().ok().and_then(|mut q| {
-                    let i = q
-                        .jobs
-                        .iter()
-                        .position(|j| !is_large(j) || q.large < cfg.large_at_once.max(1))?;
-                    let job = q.jobs.remove(i)?;
-                    q.large += usize::from(is_large(&job));
-                    Some(job)
-                }) {
+                while let Some(job) = queue.lock().ok().and_then(|mut q| q.take()) {
                     let result = run_job(remote, &job, throttle);
-                    if is_large(&job)
-                        && let Ok(mut q) = queue.lock()
-                    {
-                        q.large -= 1;
+                    if let Ok(mut q) = queue.lock() {
+                        q.finished(&job);
                     }
                     if tx.send((job, result)).is_err() {
                         break;
@@ -260,6 +250,29 @@ pub fn run_jobs_while(
 struct Queue {
     jobs: VecDeque<Job>,
     large: usize,
+    large_from: u64,
+    large_at_once: usize,
+}
+
+impl Queue {
+    fn is_large(&self, job: &Job) -> bool {
+        job.size() >= self.large_from
+    }
+
+    /// The first job that may start: a small one, or a large one while a slot is free. `None`
+    /// when only large ones are left and their slots are all taken: the workers holding the
+    /// slots take them on, so the one asking can end.
+    fn take(&mut self) -> Option<Job> {
+        let free = self.large < self.large_at_once;
+        let i = self.jobs.iter().position(|j| free || !self.is_large(j))?;
+        let job = self.jobs.remove(i)?;
+        self.large += usize::from(self.is_large(&job));
+        Some(job)
+    }
+
+    fn finished(&mut self, job: &Job) {
+        self.large -= usize::from(self.is_large(job));
+    }
 }
 
 fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobResult {

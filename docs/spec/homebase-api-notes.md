@@ -199,8 +199,8 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   #1903 (optional `versionTag` on delete, 4160 on mismatch; also: deleting a tombstone should
   be a no-op). Until then the client reads the header and compares right before deleting.
 - Payload reads are buffered whole in server memory (#1892) and ranges are `int` (#1893)
-  until odin-core PR #1921. The client is written for #1921: it reads in pieces sized by
-  rate, not by server memory. Uploads over 4 GiB still fail (the `uint` byte count, the half of
+  until odin-core PR #1921. The client is written for #1921: a read is one streamed
+  request, whatever its size. Uploads over 4 GiB still fail (the `uint` byte count, the half of
   #1893 the PR leaves open), so the client refuses payloads that large.
 - App clients can't read the drive's `requirePayloadHashes` **[verified]** (`ClientDriveData`
   has no such field); the client always sends hashes.

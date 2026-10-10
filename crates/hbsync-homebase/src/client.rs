@@ -9,7 +9,12 @@ use std::time::Duration;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::de::DeserializeOwned;
+use ureq::Timeout;
 use ureq::http::Response;
+use ureq::unversioned::resolver::DefaultResolver;
+use ureq::unversioned::transport::{
+    Buffers, ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
+};
 
 use crate::HomebaseError;
 use crate::crypto::{Envelope, Key};
@@ -20,25 +25,103 @@ use crate::youauth::Credentials;
 /// The largest JSON answer read (a page of the change feed is far below it).
 const MAX_JSON: u64 = 256 * 1024 * 1024;
 
-/// One connection pool for all calls. No overall timeout: an upload of a large file takes as
-/// long as it takes.
+/// One connection pool for all calls. No overall timeout on a body: a large file takes as long
+/// as it takes, while [`IDLE`] ends one that stalls.
 pub(crate) fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+    agent_with(IDLE)
+}
+
+fn agent_with(idle: Duration) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_send_request(Some(Duration::from_secs(60)))
         .timeout_recv_response(Some(Duration::from_secs(300)))
-        // A body that stalls (a connection that died without a reset) ends the call instead of
-        // blocking a worker forever. Answers are bounded: JSON pages, and payload pieces sized to
-        // arrive well within it (`drive::Pieces`).
-        .timeout_recv_body(Some(Duration::from_secs(300)))
-        // More than the transfer workers (8): a connection over the limit is closed when it
-        // goes idle, and the next call pays a new TCP and TLS handshake.
+        // Bodies get an overall timeout no transfer reaches, so that their reads and writes
+        // carry it (not `Global`) and `IdleTimeout` caps them.
+        .timeout_send_body(Some(BODY))
+        .timeout_recv_body(Some(BODY))
+        // Well above the transfer workers (`TransferConfig::default`): a connection over the
+        // limit is closed when it goes idle, and the next call pays a new TCP and TLS handshake.
         .max_idle_connections_per_host(16)
         .max_idle_connections(16)
         .user_agent(concat!("hbsync/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .into()
+        .build();
+    ureq::Agent::with_parts(
+        config,
+        DefaultConnector::new().chain(IdleTimeout(idle)),
+        DefaultResolver::default(),
+    )
+}
+
+/// Longer than any body takes: a week.
+const BODY: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// The longest a request or response body may go without a byte: a connection that died
+/// without a reset ends the call instead of blocking a worker forever.
+const IDLE: Duration = Duration::from_secs(60);
+
+/// Gives every connection an idle timeout while a body moves. ureq has only overall timeouts;
+/// its transports take the time an overall one leaves as each read's or write's socket timeout,
+/// so capping that time makes it an idle timeout.
+#[derive(Debug)]
+struct IdleTimeout(Duration);
+
+impl<In: Transport> Connector<In> for IdleTimeout {
+    type Out = Idle<In>;
+
+    fn connect(
+        &self,
+        _: &ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Idle<In>>, ureq::Error> {
+        Ok(chained.map(|inner| Idle {
+            inner,
+            idle: self.0,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct Idle<T> {
+    inner: T,
+    idle: Duration,
+}
+
+impl<T: Transport> Idle<T> {
+    fn cap(&self, timeout: NextTimeout) -> NextTimeout {
+        match timeout.reason {
+            Timeout::SendBody | Timeout::RecvBody => NextTimeout {
+                after: timeout.after.min(self.idle.into()),
+                reason: timeout.reason,
+            },
+            _ => timeout,
+        }
+    }
+}
+
+impl<T: Transport> Transport for Idle<T> {
+    fn buffers(&mut self) -> &mut dyn Buffers {
+        self.inner.buffers()
+    }
+
+    fn transmit_output(&mut self, amount: usize, timeout: NextTimeout) -> Result<(), ureq::Error> {
+        let timeout = self.cap(timeout);
+        self.inner.transmit_output(amount, timeout)
+    }
+
+    fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+        let timeout = self.cap(timeout);
+        self.inner.await_input(timeout)
+    }
+
+    fn is_open(&mut self) -> bool {
+        self.inner.is_open()
+    }
+
+    fn is_tls(&self) -> bool {
+        self.inner.is_tls()
+    }
 }
 
 /// An authorized client of one identity. Cheap to clone; clones share the connection pool.
@@ -322,7 +405,41 @@ fn checked(
 
 #[cfg(test)]
 mod tests {
-    use super::content_range;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::{Duration, Instant};
+
+    use super::{agent_with, content_range};
+
+    /// A body that stops coming ends the read after the idle time, though the call has no
+    /// overall timeout.
+    #[test]
+    fn a_stalled_body_times_out() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request)?;
+            socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 1000\r\n\r\n0123456789")?;
+            socket.flush()?;
+            // Alive, but sends nothing more.
+            std::thread::sleep(Duration::from_millis(1500));
+            Ok(())
+        });
+        let idle = Duration::from_millis(200);
+        let began = Instant::now();
+        let mut body = agent_with(idle).get(&url).call()?.into_body().into_reader();
+        let mut got = Vec::new();
+        let result = body.read_to_end(&mut got);
+        let took = began.elapsed();
+        assert!(result.is_err(), "read {} bytes", got.len());
+        assert_eq!(got, b"0123456789");
+        assert!(took >= idle && took < Duration::from_secs(1), "{took:?}");
+        drop(body);
+        server.join().map_err(|_| "server panicked")??;
+        Ok(())
+    }
 
     #[test]
     fn content_ranges_parse() {

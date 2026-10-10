@@ -103,10 +103,9 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   and removed, and a range that runs past the plaintext comes back short, as from any
   `Remote`. Otherwise the padding is never needed; the content hash, not the padding, is the
   check on the bytes.
-- The extent comes in pieces, one request each: 8 MiB first, then each sized to take about
-  15 s at the rate the one before came in (1 to 256 MiB). A piece stays well within the
-  client's body timeout, which is how a stalled connection is caught, and on a fast link the
-  round trip between pieces doesn't matter.
+- The extent comes in one request, streamed. A body that goes 60 s without a byte ends the
+  call (the client's idle timeout, `client.rs`), and the download resumes from what it
+  has.
 
 ## What it doesn't do
 - **End-to-end:** the server can decrypt; see above.

@@ -9,6 +9,7 @@ use std::ops::Range;
 use aes::Aes128;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use cbc::cipher::block_padding::{Padding, Pkcs7};
 use cbc::cipher::{Array, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use hbsync_types::{ContentHash, HashAlgorithm};
 use serde::Deserialize;
@@ -286,8 +287,8 @@ pub(crate) struct CipherRange {
 }
 
 impl CipherRange {
-    /// Requires `range.end` ≤ the plaintext size: the padding block is never needed then, as
-    /// the caller knows where the plaintext ends.
+    /// A range past the plaintext reaches into the padding block, which the reader removes
+    /// ([`Decrypting::finish`]); past the stored payload, the server cuts it short.
     pub fn of(range: &Range<u64>) -> Self {
         let block = BLOCK as u64;
         let first = range.start / block * block;
@@ -309,11 +310,10 @@ impl CipherRange {
 }
 
 /// Decrypts the ciphertext written to it into `sink`, block by block: `len` plaintext bytes
-/// after the first `skip`. With no IV given, the first block written is the IV. Ciphertext
-/// that runs to the payload's end ([`Decrypting::running_to_the_end`]) ends with the
-/// padding, removed by [`Decrypting::finish`]; fewer than `len` bytes come out when the
-/// plaintext ends first.
-/// The content hash, not the padding, tells good bytes from changed ones (CBC can't).
+/// after the first `skip`. With no IV given, the first block written is the IV. The last block
+/// waits for [`Decrypting::finish`], which knows whether it is the payload's last, holding the
+/// padding; fewer than `len` bytes come out when the plaintext ends first. The content hash,
+/// not the padding, tells good bytes from changed ones (CBC can't).
 pub(crate) struct Decrypting<'a> {
     key: Key,
     cipher: Option<cbc::Decryptor<Aes128>>,
@@ -322,8 +322,6 @@ pub(crate) struct Decrypting<'a> {
     carry: Vec<u8>,
     skip: u64,
     left: u64,
-    /// The last block written is the payload's last: it holds the padding.
-    padded: bool,
 }
 
 impl std::fmt::Debug for Decrypting<'_> {
@@ -355,14 +353,7 @@ impl<'a> Decrypting<'a> {
             carry: Vec::with_capacity(CHUNK + BLOCK),
             skip,
             left: len,
-            padded: false,
         }
-    }
-
-    /// The ciphertext written runs to the payload's end.
-    pub fn running_to_the_end(mut self) -> Self {
-        self.padded = true;
-        self
     }
 
     /// Plaintext bytes asked for that didn't come (past the plaintext's end).
@@ -370,28 +361,26 @@ impl<'a> Decrypting<'a> {
         self.left
     }
 
-    /// After the last ciphertext: decrypts the payload's last block, when it was written, and
-    /// passes on what its padding leaves.
-    pub fn finish(&mut self) -> io::Result<()> {
-        if !self.padded {
+    /// After the last ciphertext: decrypts the last block and passes it on, without the
+    /// padding when it is the payload's last (`padded`).
+    pub fn finish(&mut self, padded: bool) -> io::Result<()> {
+        let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_owned());
+        if self.carry.is_empty() && !padded {
             return Ok(());
         }
-        let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_owned());
         let cipher = match (&mut self.cipher, self.carry.len()) {
             (Some(cipher), BLOCK) => cipher,
             _ => return Err(bad("the ciphertext doesn't end on a block")),
         };
         let (blocks, _) = Array::slice_as_chunks_mut(&mut self.carry[..BLOCK]);
         cipher.decrypt_blocks(blocks);
-        let pad = usize::from(self.carry[BLOCK - 1]);
-        if !(1..=BLOCK).contains(&pad)
-            || self.carry[BLOCK - pad..]
-                .iter()
-                .any(|&b| b != self.carry[BLOCK - 1])
-        {
-            return Err(bad("bad padding (another key, or changed bytes)"));
-        }
-        self.pass_on(BLOCK - pad)?;
+        let kept = match padded {
+            true => Pkcs7::raw_unpad(&self.carry)
+                .map_err(|_| bad("bad padding (another key, or changed bytes)"))?
+                .len(),
+            false => BLOCK,
+        };
+        self.pass_on(kept)?;
         self.carry.clear();
         Ok(())
     }
@@ -422,8 +411,8 @@ impl Write for Decrypting<'_> {
             }
         };
         let mut whole = self.carry.len() / BLOCK * BLOCK;
-        // The payload's last block waits for `finish`: only then is it known to be the last.
-        if self.padded && whole == self.carry.len() {
+        // The last block waits for `finish`: only then is it known to be the last.
+        if whole == self.carry.len() {
             whole = whole.saturating_sub(BLOCK);
         }
         let (blocks, _) = Array::slice_as_chunks_mut(&mut self.carry[..whole]);
@@ -510,14 +499,12 @@ mod tests {
                         end as u64 - start as u64,
                         &mut out,
                     );
-                    if at.fetch.end as usize == sealed.len() {
-                        d = d.running_to_the_end();
-                    }
                     // Written in odd pieces, as a network delivers them.
                     for piece in fetched.chunks(5) {
                         d.write_all(piece).map_err(HomebaseError::Io)?;
                     }
-                    d.finish().map_err(HomebaseError::Io)?;
+                    d.finish(at.fetch.end as usize == sealed.len())
+                        .map_err(HomebaseError::Io)?;
                     let there = end.min(n);
                     assert_eq!(d.left(), (end - there) as u64, "{n}: {range:?}");
                     drop(d);
@@ -532,10 +519,9 @@ mod tests {
                 None => changed_iv[BLOCK - 1] ^= 0x80,
             }
             let mut out = Vec::new();
-            let mut d = Decrypting::new(&kh.key, Some(&changed_iv), 0, n as u64, &mut out)
-                .running_to_the_end();
+            let mut d = Decrypting::new(&kh.key, Some(&changed_iv), 0, n as u64, &mut out);
             d.write_all(&changed).map_err(HomebaseError::Io)?;
-            assert!(d.finish().is_err(), "{n}");
+            assert!(d.finish(true).is_err(), "{n}");
         }
         Ok(())
     }
@@ -641,6 +627,7 @@ mod tests {
         let mut out = Vec::new();
         let mut d = Decrypting::new(&kh.key, None, at.skip, range.end - range.start, &mut out);
         d.write_all(&sealed_payload[at.fetch.start as usize..at.fetch.end as usize])?;
+        d.finish(at.fetch.end as usize == sealed_payload.len())?;
         drop(d);
         let want = r["plain"].as_str().ok_or("plain")?;
         assert_eq!(

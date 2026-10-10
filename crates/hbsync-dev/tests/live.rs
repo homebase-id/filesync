@@ -124,8 +124,7 @@ fn throughput() -> R {
 
     use hbsync_fileio::{HashAlgorithm, Hasher, hash_reader};
     use hbsync_remote::contract::{file, upload, with};
-    use hbsync_remote::{NodeMeta, Remote, RemoteError, Upload};
-    use hbsync_types::RemoteRef;
+    use hbsync_remote::{Remote, Upload};
     use hbsync_types::schema::NodeContent;
 
     struct Hashing(Hasher);
@@ -141,12 +140,6 @@ fn throughput() -> R {
 
     let remote = live_remote()?;
     let bench = Bench::new(&remote, &run_name("throughput"), Duration::ZERO)?;
-    // A create, remembered for cleanup.
-    let put = |meta: &NodeMeta, upload: Upload<'_>| -> Result<RemoteRef, RemoteError> {
-        let at = remote.create(meta, Some(upload))?;
-        bench.track(at.file_id);
-        Ok(at)
-    };
     let result = (|| -> R {
         let (dir, _) = bench.folder("throughput")?;
         let alg = HashAlgorithm::Blake3;
@@ -183,15 +176,16 @@ fn throughput() -> R {
         tmp.seek(SeekFrom::Start(0))?;
         let t = Instant::now();
         let reader = &mut tmp;
-        let at = put(
+        let at = remote.create(
             &meta,
-            Upload {
+            Some(Upload {
                 hash,
                 size,
                 reader,
                 pace: None,
-            },
+            }),
         )?;
+        bench.track(at.file_id);
         rate(&format!("upload {mb} MiB"), size, t);
         let t = Instant::now();
         let mut sink = Hashing(Hasher::new(alg));
@@ -209,7 +203,7 @@ fn throughput() -> R {
         let mut refs = Vec::new();
         for (i, data) in datas.iter().enumerate() {
             let meta = file(&format!("small-{i}"), dir.node, data);
-            let at = put(&meta, upload(&mut Cursor::new(&data[..])))?;
+            let at = bench.create(&meta, Some(data))?;
             refs.push((meta, at));
         }
         println!("create {N} small, {:>5.1} ms each", per(t));

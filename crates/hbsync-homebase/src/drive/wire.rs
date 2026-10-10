@@ -337,13 +337,35 @@ mod tests {
     /// The shared secret of the tests.
     const SS: Key = [3; 16];
 
-    fn fixture(name: &str) -> FileHeader {
+    fn fixture_value(name: &str) -> Value {
         let path = format!(
             "{}/../../docs/spec/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("{path}: {e}"))
+    }
+
+    fn fixture(name: &str) -> FileHeader {
+        serde_json::from_value(fixture_value(name)).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    /// Fixture `name` with each key header that doesn't parse (taken as none, through the
+    /// same lenient decoding as rows), marked `encrypted` or not.
+    fn with_unusable_key_headers(name: &str, encrypted: bool) -> Vec<(Value, FileHeader)> {
+        let nulls = json!({ "iv": null, "encryptedAesKey": null, "encryptionVersion": null });
+        [nulls, json!(null), json!("junk")]
+            .into_iter()
+            .map(|key_header| {
+                let mut row = fixture_value(name);
+                row["fileMetadata"]["isEncrypted"] = json!(encrypted);
+                row["sharedSecretEncryptedKeyHeader"] = key_header.clone();
+                let row: FileHeader =
+                    serde_json::from_value(row).unwrap_or_else(|e| panic!("{name}: {e}"));
+                assert!(row.shared_secret_encrypted_key_header.is_none());
+                (key_header, row)
+            })
+            .collect()
     }
 
     /// `header` (a spec fixture, plain) as Homebase stores it: content, payload IV and content
@@ -461,18 +483,7 @@ mod tests {
         let mut damaged = header.clone();
         damaged.file_metadata.app_data.content = Some(kh.seal_text("{not json"));
         assert!(to_remote(damaged, &SS).is_err());
-        // A key header that doesn't parse is none: through the same lenient decoding as rows.
-        let path = format!(
-            "{}/../../docs/spec/fixtures/file-node.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let mut row: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-        row["fileMetadata"]["isEncrypted"] = json!(true);
-        let nulls = json!({ "iv": null, "encryptedAesKey": null, "encryptionVersion": null });
-        for key_header in [nulls, json!(null), json!("junk")] {
-            let mut keyless = row.clone();
-            keyless["sharedSecretEncryptedKeyHeader"] = key_header.clone();
-            let keyless: FileHeader = serde_json::from_value(keyless)?;
+        for (key_header, keyless) in with_unusable_key_headers("file-node.json", true) {
             let why = to_remote(keyless, &SS).err().ok_or("decoded")?;
             assert!(why.contains("no key header"), "{key_header}: {why}");
         }
@@ -491,17 +502,7 @@ mod tests {
     /// carry) doesn't make the row unreadable.
     #[test]
     fn tombstones_need_no_key_header() -> R {
-        let path = format!(
-            "{}/../../docs/spec/fixtures/tombstone.json",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let tombstone: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
-        let nulls = json!({ "iv": null, "encryptedAesKey": null, "encryptionVersion": null });
-        for key_header in [nulls, json!(null), json!("junk")] {
-            let mut row = tombstone.clone();
-            row["sharedSecretEncryptedKeyHeader"] = key_header;
-            let row: FileHeader = serde_json::from_value(row)?;
-            assert!(row.shared_secret_encrypted_key_header.is_none());
+        for (_, row) in with_unusable_key_headers("tombstone.json", false) {
             assert!(to_remote(row, &SS)?.is_deleted());
         }
         Ok(())
