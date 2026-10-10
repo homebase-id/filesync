@@ -184,9 +184,20 @@ impl Client {
                 .and_then(|v| v.to_str().ok())
                 .map(str::to_owned)
         };
+        let range = header("Content-Range");
+        let size = range
+            .as_deref()
+            .and_then(|r| content_range(r).filter(|(first, _)| *first == start))
+            .map(|(_, size)| size)
+            .ok_or_else(|| {
+                HomebaseError::Protocol(format!(
+                    "{path}: asked for bytes {start}-{last}, got Content-Range {range:?}"
+                ))
+            })?;
         Ok(Fetched {
             encrypted: header("PayloadEncrypted").is_some_and(|v| v.eq_ignore_ascii_case("true")),
             key_header: header("SharedSecretEncryptedHeader64"),
+            size,
             what: path.to_owned(),
             body: response
                 .into_body()
@@ -228,8 +239,17 @@ pub struct Fetched {
     /// When encrypted: the key with this payload's IV, under the shared secret
     /// (`SharedSecretEncryptedHeader64`).
     pub key_header: Option<String>,
+    /// The whole payload's size, as stored (`Content-Range`).
+    pub size: u64,
     what: String,
     body: ureq::BodyReader<'static>,
+}
+
+/// The first byte and the whole size of a `Content-Range: bytes first-last/size`.
+fn content_range(value: &str) -> Option<(u64, u64)> {
+    let (range, size) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (first, _) = range.split_once('-')?;
+    Some((first.trim().parse().ok()?, size.trim().parse().ok()?))
 }
 
 impl std::fmt::Debug for Fetched {
@@ -298,4 +318,24 @@ fn checked(
             error,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::content_range;
+
+    #[test]
+    fn content_ranges_parse() {
+        assert_eq!(content_range("bytes 16-47/112"), Some((16, 112)));
+        assert_eq!(content_range("bytes 0-0/1"), Some((0, 1)));
+        for bad in [
+            "bytes */112",
+            "bytes 16-47/*",
+            "items 0-1/2",
+            "bytes 16/112",
+            "",
+        ] {
+            assert_eq!(content_range(bad), None, "{bad}");
+        }
+    }
 }

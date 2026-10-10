@@ -233,7 +233,8 @@ pub trait Remote: Send + Sync {
     /// Deletes (tombstones) a file if it is still at `expected`.
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()>;
 
-    /// Streams the payload (or `start..end` of it) into `sink`. Returns the bytes written.
+    /// Streams the payload (or `start..end` of it) into `sink`. Returns the bytes written: fewer
+    /// than asked when the range runs past the payload's end.
     fn read(
         &self,
         file_id: RemoteFileId,

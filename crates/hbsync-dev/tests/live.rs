@@ -113,8 +113,9 @@ fn nodes_are_stored_encrypted() -> R {
     result
 }
 
-/// Upload and download speed: one large file, then many small ones. `HBSYNC_LIVE=… cargo test --release -p hbsync-dev --test live throughput -- --ignored
-/// --nocapture` (`HBSYNC_BIG_MB` sets the large file's size, 1024 by default).
+/// Upload and download speed: one large file, then many small ones. `HBSYNC_LIVE=… cargo test
+/// --release -p hbsync-dev --test live throughput -- --ignored --nocapture` (`HBSYNC_BIG_MB`
+/// sets the large file's size, 1024 by default).
 #[test]
 #[ignore = "a measurement against a live identity (HBSYNC_LIVE)"]
 fn throughput() -> R {

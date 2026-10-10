@@ -13,7 +13,7 @@ use hbsync_fileio::HashingReader;
 use hbsync_remote::{
     ChangesPage, NodeMeta, Paced, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
-use hbsync_types::schema::PAYLOAD_KEY;
+use hbsync_types::schema::{NodeContent, PAYLOAD_KEY};
 use hbsync_types::{ContentHash, RemoteFileId, RemoteRef, VersionTag};
 use serde::Deserialize;
 use serde_json::json;
@@ -231,11 +231,11 @@ impl HomebaseRemote {
         match self.header(file_id)?.body {
             RemoteBody::Live {
                 payload: Some(_),
-                content,
+                content: NodeContent {
+                    size: Some(size), ..
+                },
                 ..
-            } => content
-                .size
-                .ok_or_else(|| RemoteError::Fatal("a file without its size".into())),
+            } => Ok(size),
             _ => Err(RemoteError::NotFound),
         }
     }
@@ -354,12 +354,13 @@ impl Remote for HomebaseRemote {
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
-        // Check, then act: the server's delete takes no version (odin-core #1903).
-        let current = self.header(file_id)?;
-        if current.is_deleted() {
+        // Check, then act: the server's delete takes no version (odin-core #1903). The raw
+        // header is enough: a row that doesn't decrypt can still be deleted.
+        let current = self.raw_header(file_id)?;
+        if current.file_state == "deleted" {
             return Ok(()); // a retry; deleting again would rewrite the tombstone
         }
-        if current.version != expected {
+        if current.file_metadata.version_tag != expected.0 {
             return Err(RemoteError::VersionMismatch);
         }
         let result: DeleteResult = self
@@ -377,7 +378,8 @@ impl Remote for HomebaseRemote {
 
     /// Plaintext `range` of the payload, decrypted with the key that comes with the first
     /// response. It starts a block early (ciphertext needs the block before, plaintext drops
-    /// it) and ends at the whole block encryption needs.
+    /// it) and ends at the whole block encryption needs. A range that reaches the payload's
+    /// last block has its padding removed, and comes back short if it runs past the plaintext.
     fn read(
         &self,
         file_id: RemoteFileId,
@@ -396,9 +398,14 @@ impl Remote for HomebaseRemote {
         let at = CipherRange::of(&range);
         let mut pieces = Pieces::new(at.fetch.clone());
         let first = self.fetch(&path, pieces.next()).map_err(remote_error)?;
-        let sealed = match first.key_header.as_deref() {
-            Some(sealed) if first.encrypted => sealed,
-            _ => return Err(RemoteError::Fatal(format!("{path}: not encrypted"))),
+        // A range past the stored payload is cut short at its end (odin-core #1921).
+        pieces.end_at(first.size);
+        let sealed = match (first.encrypted, first.key_header.as_deref()) {
+            (true, Some(sealed)) => sealed,
+            (true, None) => {
+                return Err(RemoteError::Fatal(format!("{path}: encrypted, but no key")));
+            }
+            (false, _) => return Err(RemoteError::Fatal(format!("{path}: not encrypted"))),
         };
         // A payload's key header carries the payload's IV.
         let key = SealedKeyHeader::from_base64(sealed)
@@ -406,15 +413,12 @@ impl Remote for HomebaseRemote {
             .map_err(remote_error)?;
         let first_iv = (!at.iv_first).then_some(&key.iv);
         let mut plain = Decrypting::new(&key.key, first_iv, at.skip, len, sink);
-        self.read_ranges(&path, pieces, first, &mut plain)?;
-        let left = plain.left();
-        if left > 0 {
-            return Err(RemoteError::Transient(format!(
-                "short read: {} of {len} bytes",
-                len - left
-            )));
+        if pieces.end() == first.size {
+            plain = plain.running_to_the_end();
         }
-        Ok(len)
+        self.read_ranges(&path, pieces, first, &mut plain)?;
+        plain.finish()?;
+        Ok(len - plain.left())
     }
 }
 
@@ -455,6 +459,11 @@ impl Pieces {
     /// Where the read ends.
     fn end(&self) -> u64 {
         self.left.end
+    }
+
+    /// The payload ends at `size`: nothing past it is asked for.
+    fn end_at(&mut self, size: u64) {
+        self.left.end = self.left.end.min(size);
     }
 
     /// The piece asked for last.

@@ -28,9 +28,8 @@ pub struct FileHeader {
     pub file_id: Uuid,
     pub file_state: String,
     pub file_metadata: FileMetadata,
-    /// The file key and header IV under the shared secret. Only read when the file is
-    /// encrypted: one that isn't usable (null fields on a tombstone, say) is taken as none, so
-    /// it can't make the row unreadable.
+    /// The file key and header IV under the shared secret. Not read on a tombstone: one that
+    /// isn't usable (null fields, say) is taken as none, so it can't make that row unreadable.
     #[serde(default, deserialize_with = "lenient")]
     pub shared_secret_encrypted_key_header: Option<SealedKeyHeader>,
 }
@@ -61,7 +60,7 @@ pub struct Payload {
     pub key: String,
     #[serde(default)]
     pub bytes_written: u64,
-    /// Base64; set when the file is encrypted.
+    /// Base64: the payload IV.
     #[serde(default)]
     pub iv: Option<String>,
     pub hash: Option<PayloadHash>,
@@ -106,8 +105,8 @@ pub fn feed_query(cursor: Option<&str>, limit: usize) -> Value {
     })
 }
 
-/// A header as a [`RemoteHeader`], decrypted with `shared_secret` when encrypted; `Err` says
-/// why it isn't a usable sync node.
+/// A header as a [`RemoteHeader`], decrypted with `shared_secret`; `Err` says why it isn't a
+/// usable sync node.
 pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
     let id = header.file_id;
     let meta = &header.file_metadata;
@@ -349,7 +348,7 @@ mod tests {
 
     /// `header` (a spec fixture, plain) as Homebase stores it: content, payload IV and content
     /// hash sealed with the file key `kh`, the key under the shared secret.
-    fn sealed_with(
+    fn as_stored_with(
         mut header: FileHeader,
         kh: &KeyHeader,
     ) -> Result<FileHeader, Box<dyn std::error::Error>> {
@@ -371,15 +370,15 @@ mod tests {
         Ok(header)
     }
 
-    fn sealed(header: FileHeader) -> Result<FileHeader, Box<dyn std::error::Error>> {
-        sealed_with(header, &KeyHeader::random()?)
+    fn as_stored(header: FileHeader) -> Result<FileHeader, Box<dyn std::error::Error>> {
+        as_stored_with(header, &KeyHeader::random()?)
     }
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
     fn spec_fixtures_map_to_remote_headers() -> R {
-        let file = to_remote(sealed(fixture("file-node.json"))?, &SS)?;
+        let file = to_remote(as_stored(fixture("file-node.json"))?, &SS)?;
         assert_eq!(file.kind, NodeKind::File);
         let state = file.state().ok_or("file state")?;
         assert_eq!(state.name, "Résumé.txt");
@@ -390,7 +389,7 @@ mod tests {
             "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444"
         );
 
-        let folder = to_remote(sealed(fixture("folder-node.json"))?, &SS)?;
+        let folder = to_remote(as_stored(fixture("folder-node.json"))?, &SS)?;
         assert_eq!(folder.kind, NodeKind::Folder);
         assert!(folder.state().is_some());
 
@@ -403,7 +402,7 @@ mod tests {
     #[test]
     fn rows_that_are_not_sync_nodes_are_refused() -> R {
         let refused = |row: FileHeader, why: &str| -> R {
-            let error = to_remote(sealed(row)?, &SS).err().ok_or("decoded")?;
+            let error = to_remote(as_stored(row)?, &SS).err().ok_or("decoded")?;
             assert!(error.contains(why), "{error}");
             Ok(())
         };
@@ -412,7 +411,7 @@ mod tests {
         refused(other, "isn't a sync node")?;
         let mut bad = fixture("file-node.json");
         bad.file_metadata.app_data.content = Some("{\"name\": 3}".into());
-        refused(bad, "node schema v1")?;
+        refused(bad, "content isn't node schema v1")?;
         let mut orphan = fixture("file-node.json");
         orphan.file_metadata.app_data.unique_id = None;
         refused(orphan, "no node id")?;
@@ -445,24 +444,38 @@ mod tests {
         // A file without its payload is kept, without a state (the engine waits for it).
         let mut bare = fixture("file-node.json");
         bare.file_metadata.payloads = None;
-        assert_eq!(to_remote(sealed(bare)?, &SS).map(|h| h.state()), Ok(None));
+        assert_eq!(
+            to_remote(as_stored(bare)?, &SS).map(|h| h.state()),
+            Ok(None)
+        );
         Ok(())
     }
 
     #[test]
     fn rows_that_do_not_decrypt_are_refused() -> R {
         let kh = KeyHeader::random()?;
-        let header = sealed_with(fixture("file-node.json"), &kh)?;
+        let header = as_stored_with(fixture("file-node.json"), &kh)?;
         to_remote(header.clone(), &SS)?;
         // Another shared secret, a damaged content, a missing key header or payload IV.
         assert!(to_remote(header.clone(), &[4; 16]).is_err());
         let mut damaged = header.clone();
         damaged.file_metadata.app_data.content = Some(kh.seal_text("{not json"));
         assert!(to_remote(damaged, &SS).is_err());
-        let mut keyless = header.clone();
-        keyless.shared_secret_encrypted_key_header = None;
-        let why = to_remote(keyless, &SS).err().ok_or("decoded")?;
-        assert!(why.contains("no key header"), "{why}");
+        // A key header that doesn't parse is none: through the same lenient decoding as rows.
+        let path = format!(
+            "{}/../../docs/spec/fixtures/file-node.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let mut row: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+        row["fileMetadata"]["isEncrypted"] = json!(true);
+        let nulls = json!({ "iv": null, "encryptedAesKey": null, "encryptionVersion": null });
+        for key_header in [nulls, json!(null), json!("junk")] {
+            let mut keyless = row.clone();
+            keyless["sharedSecretEncryptedKeyHeader"] = key_header.clone();
+            let keyless: FileHeader = serde_json::from_value(keyless)?;
+            let why = to_remote(keyless, &SS).err().ok_or("decoded")?;
+            assert!(why.contains("no key header"), "{key_header}: {why}");
+        }
         let mut no_iv = header;
         no_iv
             .file_metadata

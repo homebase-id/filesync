@@ -116,7 +116,9 @@ Encrypted files **[verified]** on odin-core `main` @ 07657309e (the format: `enc
   routes, ranged included, carry `PayloadEncrypted: True|False` and, when encrypted,
   `SharedSecretEncryptedHeader64`: the key with that payload's IV, as IV (16) + encrypted key
   (48) + version (4, little-endian), base64 (`DriveStorageControllerBase.cs:138-146`,
-  `EncryptedKeyHeader.ToBase64`). The bytes are the stored ciphertext, ranges included.
+  `EncryptedKeyHeader.ToBase64`). The bytes are the stored ciphertext, ranges included. A
+  ranged response's `Content-Range` gives the stored size (`DriveStorageControllerBase.cs:171-176`
+  on `main` @ acbd615ba; `OdinControllerBase.PayloadResult` in PR #1921).
 - **Hashes:** `storedHash` is over the ciphertext and checked while it streams in;
   `contentHash` is the plaintext hash encrypted with the file key under the payload IV XOR
   `0xAA…` (48 bytes), and the server checks only its length (`PayloadHash.cs`).

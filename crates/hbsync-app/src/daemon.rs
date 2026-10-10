@@ -166,7 +166,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         if let Phase::Waiting { paused, .. } = &*phase {
             cfg.paused = *paused;
         }
-        let spawned = Runner::spawn(cfg, remote, hints)?;
+        let spawned = Runner::spawn(cfg, remote.clone(), hints)?;
         *phase = Phase::Running(spawned.0.clone());
         spawned
     };
@@ -174,6 +174,11 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
     while !thread.is_finished() {
         if stop.load(Ordering::Relaxed) {
             handle.send(Control::Stop);
+        }
+        // Drive rows the client can't read (not encrypted, another key, not a sync node): not
+        // synced, so said in the log.
+        for why in remote.take_skipped() {
+            tracing::warn!("a file on the drive isn't synced: {why}");
         }
         std::thread::sleep(Duration::from_millis(200));
     }

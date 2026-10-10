@@ -556,5 +556,23 @@ fn ranged_reads(b: &Bench) -> Outcome {
         );
     }
     ensure!(b.read(w.file_id, None)? == data, "whole payload");
+    // A range that runs past the end stops there (sizes on and off a 16-byte block).
+    for len in [100usize, 112] {
+        let (_, w) = b.file(&format!("short-{len}.bin"), &data[..len])?;
+        for range in [
+            90..110u64,
+            96..200,
+            0..len as u64 + 1,
+            len as u64 - 1..len as u64 + 16,
+        ] {
+            let got = b.read(w.file_id, Some(range.clone()))?;
+            let there = range.end.min(len as u64) as usize;
+            ensure!(
+                got == data[range.start as usize..there],
+                "{len} bytes, range {range:?}: {} bytes",
+                got.len()
+            );
+        }
+    }
     Ok(())
 }

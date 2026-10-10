@@ -83,7 +83,8 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   key, and takes only the IV. New bytes get a new payload IV. The header read also finds a file
   deleted or changed since, before anything is uploaded.
 - **Every node is encrypted.** A live row that isn't is skipped as unreadable: no client has
-  users with unencrypted nodes. (The server couldn't change `isEncrypted` on an update anyway.)
+  users with unencrypted nodes. (The server couldn't change `isEncrypted` on an update anyway **[verified]**,
+  `homebase-api-notes.md`.)
 
 ### Reading
 - A header or feed row: open the key header with the shared secret, then
@@ -94,10 +95,14 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 - A tombstone's key header isn't read: one that doesn't parse (null fields, say) is ignored.
 - Payload range `p0..p1` (plaintext offsets, `p1` at most the plaintext size): fetch
   ciphertext from the block before `p0`'s block, or from 0, where the payload IV is the block
-  before, up to `p1` rounded up to a block. Decrypt and keep `p0..p1`. The padding block is never
-  needed, and never checked: the content hash is.
+  before, up to `p1` rounded up to a block. Decrypt and keep `p0..p1`.
 - No header is read first: every ranged payload response carries the file's key (with the
-  payload IV). The extent never runs past the stored payload, which is padded to whole blocks.
+  payload IV) and, in `Content-Range`, the stored size **[verified]**
+  (`homebase-api-notes.md`).
+- A range that reaches the stored payload's last block ends with the padding: it is checked
+  and removed, and a range that runs past the plaintext comes back short, as from any
+  `Remote`. Otherwise the padding is never needed; the content hash, not the padding, is the
+  check on the bytes.
 - The extent comes in pieces, one request each: 8 MiB first, then each sized to take about
   15 s at the rate the one before came in (1 to 256 MiB). A piece stays well within the
   client's body timeout, which is how a stalled connection is caught, and on a fast link the
