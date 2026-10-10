@@ -30,8 +30,10 @@ pub struct FileHeader {
     pub file_id: Uuid,
     pub file_state: String,
     pub file_metadata: FileMetadata,
-    /// The file key and header IV under the shared secret (only meaningful when encrypted).
-    #[serde(default)]
+    /// The file key and header IV under the shared secret. Only read when the file is
+    /// encrypted: one that isn't usable (null fields on a tombstone, say) is taken as none, so
+    /// it can't make the row unreadable.
+    #[serde(default, deserialize_with = "lenient")]
     pub shared_secret_encrypted_key_header: Option<SealedKeyHeader>,
 }
 
@@ -140,6 +142,12 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
             };
             let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
+            // The stored size of an encrypted payload isn't the file's: only `size` tells it.
+            if kind == NodeKind::File && key.is_some() && content.size.is_none() {
+                return Err(format!(
+                    "file {id}: encrypted, but no size (node schema v1)"
+                ));
+            }
             let payload = match kind {
                 NodeKind::Folder => None,
                 NodeKind::File => meta
@@ -164,6 +172,15 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         kind,
         body,
     })
+}
+
+/// `T` if the value is one, else `None`.
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(serde_json::from_value(Value::deserialize(d)?).ok())
 }
 
 impl FileHeader {
@@ -456,7 +473,7 @@ mod tests {
         let mut keyless = header.clone();
         keyless.shared_secret_encrypted_key_header = None;
         assert!(to_remote(keyless, &SS).is_err());
-        let mut no_iv = header;
+        let mut no_iv = header.clone();
         no_iv
             .file_metadata
             .payloads
@@ -464,6 +481,50 @@ mod tests {
             .flatten()
             .for_each(|p| p.iv = None);
         assert!(to_remote(no_iv, &SS).is_err());
+
+        // Without its size, the stored (padded) size would be taken for the file's.
+        let mut sizeless = header;
+        let sealed = sizeless
+            .file_metadata
+            .app_data
+            .content
+            .as_deref()
+            .ok_or("content")?;
+        let mut content = NodeContent::from_json(&kh.open_text(sealed)?)?;
+        content.size = None;
+        sizeless.file_metadata.app_data.content = Some(kh.seal_text(&content.to_json()));
+        let why = to_remote(sizeless, &SS).err().ok_or("decoded")?;
+        assert!(why.contains("no size"), "{why}");
+        Ok(())
+    }
+
+    /// The key header is read only when the file is encrypted: an unusable one elsewhere
+    /// (null fields, as a tombstone may carry) doesn't make the row unreadable.
+    #[test]
+    fn unusable_key_headers_only_matter_when_encrypted() -> Result<(), Box<dyn std::error::Error>> {
+        let with_key_header = |name: &str, key_header: Value| -> Result<FileHeader, String> {
+            let path = format!(
+                "{}/../../docs/spec/fixtures/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let mut row: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+            row["sharedSecretEncryptedKeyHeader"] = key_header;
+            serde_json::from_value(row).map_err(|e| e.to_string())
+        };
+        let nulls = json!({ "iv": null, "encryptedAesKey": null, "encryptionVersion": null });
+        for name in ["tombstone.json", "file-node.json", "folder-node.json"] {
+            for key_header in [nulls.clone(), json!(null), json!("junk")] {
+                let row = with_key_header(name, key_header.clone())?;
+                assert!(row.shared_secret_encrypted_key_header.is_none());
+                to_remote(row, &SS).map_err(|e| format!("{name} with {key_header}: {e}"))?;
+            }
+        }
+        // An encrypted file needs it.
+        let mut encrypted = with_key_header("file-node.json", nulls)?;
+        encrypted.file_metadata.is_encrypted = true;
+        let why = to_remote(encrypted, &SS).err().ok_or("decoded")?;
+        assert!(why.contains("no key header"), "{why}");
         Ok(())
     }
 

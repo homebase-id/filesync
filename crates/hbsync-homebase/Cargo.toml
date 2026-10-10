@@ -7,9 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-aes = "0.9.3"
+# zeroize: key schedules and chaining state are wiped when dropped.
+aes = { version = "0.9.3", features = ["zeroize"] }
 base64 = "0.23.1"
-cbc = { version = "0.2.1", features = ["alloc"] }
+cbc = { version = "0.2.1", features = ["alloc", "zeroize"] }
 getrandom = "0.3"
 hbsync-fileio.workspace = true
 hbsync-remote.workspace = true

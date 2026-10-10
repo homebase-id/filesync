@@ -44,7 +44,11 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
   and times.
 - It is not end-to-end. While serving a request from an app you approved, the server unlocks
   the drive key, and it sees the file key in the clear during an upload. That is how the web
-  and mobile Homebase apps work today. In exchange, they can read the same files.
+  and mobile Homebase apps work today **[verified]** (odin-js `SecurityHelpers.encryptKeyHeader`,
+  chat-kmp `PayloadBundleEncryptionService`, odin-core `FileSystemStreamWriterBase`). In
+  exchange, they can read the same files: the format is odin-js's byte for byte (the golden
+  vectors below) **[verified]**, and chat-kmp's code uses the same layout **[verified in its
+  code, not run]**. Neither app shows the sync drive yet.
 
 ## The format
 
@@ -85,7 +89,11 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 ### Reading
 - A header or feed row of an encrypted file: open the key header with the shared secret, then
   decrypt the content, and the content hash under its payload IV. A row that doesn't decrypt is
-  skipped with its reason, like any unreadable row.
+  skipped with its reason, like any unreadable row. So is an encrypted file whose content has
+  no `size` (node schema v1 requires it for files): its stored size is padded, and taking it
+  for the file's would make every download fail its hash.
+- The key header is read only when the file is encrypted. On any other row (a tombstone, an
+  unencrypted file) one that doesn't parse, null fields say, is ignored.
 - Payload range `p0..p1` (plaintext offsets, `p1` at most the plaintext size): fetch
   ciphertext from the block before `p0`'s block, or from 0, where the payload IV is the block
   before, up to `p1` rounded up to a block. Decrypt and keep `p0..p1`. The padding block is never
@@ -100,8 +108,12 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 - **End-to-end:** the server can decrypt; see above.
 - **Authentication of its own:** CBC has none. The content hash is the check, after
   decryption. A server could still swap in an older version of a file, with its matching hash.
-- **Thumbnails, video segments, GCM:** not used. Other Homebase clients play video by
-  decrypting ranges of plain CBC payloads (above), so synced videos stay playable there.
+- **Thumbnails, video segments, GCM:** not used. Other Homebase clients decrypt ranges of
+  plain CBC payloads the way this client does **[verified]** (odin-js
+  `decryptChunkedBytesResponse`, chat-kmp `DriveFileHttpProvider`), and play an unsegmented
+  encrypted video by decrypting it **[verified]** (odin-js `MediaProvider`, chat-kmp
+  `VideoContentResolver`). That a synced video would play there is **[inferred]**: neither app
+  shows the sync drive yet.
 
 ## Cost
 Measured on an i7-8700K (AES-NI, no VAES), against a Homebase on the same machine
