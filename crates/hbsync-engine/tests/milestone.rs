@@ -465,6 +465,42 @@ fn a_confirmed_delete_that_was_undone_is_forgotten() -> R {
     Ok(())
 }
 
+/// A confirmed trash of a folder takes the files under it along: they are the user's, and
+/// don't count against other deletes. A small delete that comes in with it isn't held.
+#[test]
+fn a_confirmed_folder_trash_does_not_hold_other_deletes() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    for i in 0..60 {
+        a.write(&format!("dir/f{i:02}"), format!("{i}").as_bytes())?;
+        a.write(&format!("g{i:02}"), format!("{i}").as_bytes())?;
+    }
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree().len(), 121);
+
+    // Deleted elsewhere: trashing it here is held (60 of 120 files, over the limit of 50).
+    fs::remove_dir_all(a.root.join("dir"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty());
+    assert!(b.root.join("dir").exists());
+    let seen: Vec<_> = report.held.iter().map(|op| op.node()).collect();
+
+    // The user confirms; meanwhile one more file is deleted elsewhere, well under the limit.
+    // One sync (as the daemon runs it) does both.
+    fs::remove_file(a.root.join("g00"))?;
+    a.sync()?;
+    b.engine.confirm_deletes(seen);
+    b.engine.scan_local()?;
+    let report = b.engine.sync_once("2026-10-08")?;
+    assert!(report.held.is_empty(), "{:?}", report.held);
+    assert!(!b.root.join("dir").exists());
+    assert!(!b.root.join("g00").exists());
+    Ok(())
+}
+
 #[test]
 fn held_deletes_do_not_hold_up_other_changes() -> R {
     let server = server();

@@ -904,20 +904,43 @@ impl<'a> Store<'a> {
         Ok((gone(GONE_LOCALLY)?, gone(GONE_REMOTELY)?))
     }
 
-    /// Whether dirty `node` counts in [`pending_file_deletes`](Self::pending_file_deletes):
-    /// (gone locally, gone remotely); `None` when it isn't dirty.
-    pub fn pending_file_delete(&self, node: NodeId) -> Result<Option<(bool, bool)>> {
+    /// What a confirmed delete of dirty `node` covers of the
+    /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
+    /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
+    /// subtree (a trash takes everything under it along). `None` when `node` isn't dirty.
+    pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
-                "SELECT coalesce({GONE_LOCALLY}, 0), coalesce({GONE_REMOTELY}, 0) \
-                 FROM dirty d LEFT JOIN base b ON b.id = d.id WHERE d.id = {ID_OF}"
+                "WITH RECURSIVE top(id) AS (SELECT {ID_OF}), \
+                 sub(id) AS (SELECT id FROM top \
+                   UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id) \
+                 SELECT n.uuid, d.id = (SELECT id FROM top), \
+                   coalesce({GONE_LOCALLY}, 0), coalesce({GONE_REMOTELY}, 0) \
+                 FROM sub JOIN dirty d ON d.id = sub.id JOIN nodes n ON n.id = d.id \
+                 LEFT JOIN base b ON b.id = d.id"
             )
         });
-        Ok(self
-            .conn
-            .prepare_cached(&SQL)?
-            .query_row([node.0.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?)
+        let mut stmt = self.conn.prepare_cached(&SQL)?;
+        let rows = stmt.query_map([node.0.as_bytes()], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, bool>(2)?,
+                r.get::<_, bool>(3)?,
+            ))
+        })?;
+        let (mut dirty, mut gone_here, mut gone_there) = (false, false, Vec::new());
+        for row in rows {
+            let (uuid, top, here, there) = row?;
+            if top {
+                dirty = true;
+                gone_here = here;
+            }
+            if there {
+                gone_there.push(codec::node(&uuid)?);
+            }
+        }
+        Ok(dirty.then_some((gone_here, gone_there)))
     }
 
     pub fn dirty_count(&self) -> Result<u64> {

@@ -289,16 +289,22 @@ impl Engine {
         // dropped (those whose plan no longer deletes them, in plan_and_execute).
         let confirmed = std::mem::take(&mut self.confirmed);
         let (pending_deletes, synced_files, confirmed) = self.db.read(|s| {
-            let (mut here, mut there) = s.pending_file_deletes()?;
+            let (here, there) = s.pending_file_deletes()?;
             let mut still = std::collections::HashSet::new();
+            // Each file once, however many confirmed trashes it is under.
+            let (mut confirmed_here, mut confirmed_there) = (0, std::collections::HashSet::new());
             for node in confirmed {
-                if let Some((h, t)) = s.pending_file_delete(node)? {
-                    here = here.saturating_sub(u64::from(h));
-                    there = there.saturating_sub(u64::from(t));
+                if let Some((gone_here, gone_there)) = s.confirmed_file_deletes(node)? {
+                    confirmed_here += u64::from(gone_here);
+                    confirmed_there.extend(gone_there);
                     still.insert(node);
                 }
             }
-            Ok(((here, there), s.base_file_count()?, still))
+            let pending = (
+                here.saturating_sub(confirmed_here),
+                there.saturating_sub(confirmed_there.len() as u64),
+            );
+            Ok((pending, s.base_file_count()?, still))
         })?;
         self.confirmed = confirmed;
         let opts = Options {
