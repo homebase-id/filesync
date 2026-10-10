@@ -132,7 +132,9 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Filters** (done 2026-10-09, sync semantics §10): built-in junk, per-device ignore rules in
   `.hbsync/ignore`, remote nodes masked per device, local-only semantics for ignored items
 - **Observability**: structured logs, per-item status, diagnostics bundle
-- **Packaging**: signing and notarization, auto-update
+- **Packaging**: release archives for Linux x86_64, macOS and Windows x86_64 (done
+  2026-10-10, `.github/workflows/release.yml`, unsigned); still open: signing and notarization,
+  auto-update, arm64 Linux and Windows
 
 ## Layer 7: Content on demand
 - **Selective sync**: all OSes; this is the Linux v1 answer

@@ -67,6 +67,11 @@ clippy and tests on Ubuntu, Windows and macOS. Crates without SQLite can also be
 the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-windows-msvc`
 (set `CARGO_FEATURE_PURE=1` so blake3 doesn't need a cross assembler).
 
+Releases (`.github/workflows/release.yml`): archives of `hbsync` + `hbsyncd` for Linux x86_64
+(static, musl), macOS (universal) and Windows x86_64, built with the `dist` profile and
+smoke-tested. Pushing a tag `vX.Y.Z` equal to the workspace version makes a draft GitHub
+release of them, to publish by hand; running the workflow by hand only builds them.
+
 ## Crates
 
 | Crate | Role |

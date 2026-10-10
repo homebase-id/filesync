@@ -1,0 +1,152 @@
+name: Release
+
+# Archives of hbsync and hbsyncd for Linux, macOS and Windows. A `v*` tag (matching the
+# workspace version) also makes a draft GitHub release of them; a manual run only builds them.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - id: version
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "hbsync") | .version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::the tag $GITHUB_REF_NAME doesn't match the workspace version $version"
+            exit 1
+          fi
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static (musl): runs on any distribution, whatever its glibc.
+          - platform: linux-x86_64
+            os: ubuntu-latest
+            targets: x86_64-unknown-linux-musl
+          # Both architectures, joined into universal binaries.
+          - platform: macos-universal
+            os: macos-latest
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+          - platform: windows-x86_64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # The C runtime linked in: no VC++ redistributable needed.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: rustup target add ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dist-${{ matrix.platform }}
+      # A C compiler for musl (bundled SQLite, ring, blake3).
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        shell: bash
+        run: |
+          for target in ${{ matrix.targets }}; do
+            cargo build --locked --profile dist -p hbsync --target "$target"
+          done
+      - name: Package
+        shell: bash
+        run: |
+          dir="hbsync-$VERSION-${{ matrix.platform }}"
+          exe=""
+          if [[ "$RUNNER_OS" == Windows ]]; then exe=.exe; fi
+          mkdir -p "dist/$dir"
+          targets=(${{ matrix.targets }})
+          for bin in hbsync hbsyncd; do
+            if (( ${#targets[@]} > 1 )); then
+              lipo -create -output "dist/$dir/$bin" $(printf "target/%s/dist/$bin " "${targets[@]}")
+            else
+              cp "target/${targets[0]}/dist/$bin$exe" "dist/$dir/"
+            fi
+          done
+          cp .github/release/README.txt "dist/$dir/"
+          echo "DIR=$dir" >> "$GITHUB_ENV"
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+      - name: Smoke test
+        shell: bash
+        run: |
+          hbsync="dist/$DIR/hbsync$EXE"
+          "$hbsync" --version | grep -Fx "hbsync $VERSION"
+          # No daemon in a fresh home: says so, with exit status 3.
+          home="$RUNNER_TEMP/hbsync-smoke"
+          mkdir -p "$home"
+          set +e
+          HBSYNC_HOME="$home" "$hbsync" status
+          status=$?
+          set -e
+          if [[ $status != 3 ]]; then
+            echo "::error::hbsync status exited $status, not 3"
+            exit 1
+          fi
+          case "$RUNNER_OS" in
+            Linux) file "dist/$DIR/hbsync" "dist/$DIR/hbsyncd" | grep -E "static(-pie)? linked" ;;
+            macOS) for bin in hbsync hbsyncd; do lipo -verify_arch "dist/$DIR/$bin" arm64 x86_64; done ;;
+          esac
+      - name: Archive
+        shell: bash
+        run: |
+          cd dist
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            7z a "$DIR.zip" "$DIR"
+          else
+            tar czf "$DIR.tar.gz" "$DIR"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - run: cd assets && sha256sum * > SHA256SUMS
+      # A draft: visible to the repository's members until published.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" assets/* --draft --verify-tag \
+            --title "Homebase Filesync $VERSION" --notes-file .github/release/notes.md
