@@ -33,8 +33,30 @@ use serde::{Deserialize, Serialize};
 use crate::MassDelete;
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
-pub(crate) const FIRST_BACKOFF: Duration = Duration::from_secs(5);
-pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(300);
+const FIRST_BACKOFF: Duration = Duration::from_secs(5);
+const MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// How long to wait after each failure in a row.
+#[derive(Debug)]
+pub(crate) struct Backoff(Duration);
+
+impl Backoff {
+    pub(crate) fn new() -> Backoff {
+        Backoff(FIRST_BACKOFF)
+    }
+
+    /// The wait after a failure that left `state`. A refusal won't change until this device is
+    /// authorized again: ask rarely.
+    pub(crate) fn after(&mut self, state: State) -> Duration {
+        let wait = if state == State::Denied {
+            MAX_BACKOFF
+        } else {
+            self.0
+        };
+        self.0 = (self.0 * 2).min(MAX_BACKOFF);
+        wait
+    }
+}
 /// How long the loop waits for local changes before looking at everything else.
 const TICK: Duration = Duration::from_millis(250);
 /// A wall-clock gap this much longer than a tick means the machine slept.
@@ -218,17 +240,15 @@ pub struct HeldDeletes {
     pub token: String,
 }
 
-/// The token of the held deletes of `nodes`: FNV-1a over their sorted ids.
+/// The token of the held deletes of `nodes`, a hash of their sorted ids (made and checked by
+/// one daemon process).
 fn held_token(nodes: &[NodeId]) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
     let mut sorted = nodes.to_vec();
     sorted.sort();
-    let hash = sorted
-        .iter()
-        .flat_map(|n| n.0.as_bytes().to_owned())
-        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        });
-    format!("{hash:016x}-{}", sorted.len())
+    let mut hasher = DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    format!("{:016x}-{}", hasher.finish(), sorted.len())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,16 +289,16 @@ impl Handle {
         if matches!(control, Control::Pause | Control::Stop) {
             self.stop.store(true, Ordering::Relaxed);
         }
-        let sent = self.control.send(control.clone()).is_ok();
-        // Seen at once by whoever asks next, not only once the runner gets to it.
-        if sent && control == Control::Pause {
-            lock(&self.status).state = State::Paused;
-        }
-        sent
+        self.control.send(control).is_ok()
     }
 
+    /// Paused while the pause flag is set: seen at once, not only once the runner gets to it.
     pub fn status(&self) -> Status {
-        lock(&self.status).clone()
+        let mut status = lock(&self.status).clone();
+        if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
+            status.state = State::Paused;
+        }
+        status
     }
 }
 
@@ -312,18 +332,15 @@ impl std::fmt::Debug for Runner {
 struct Parts {
     engine: Engine,
     observer: LocalObserver,
-    /// The filter's fingerprint (sync semantics §10): the rules changed when it does.
-    fingerprint: String,
-    case_insensitive: bool,
 }
 
 impl Parts {
-    /// Whether the ignore rules on disk differ from the ones in use (or don't parse).
+    /// Whether the ignore rules on disk differ from the ones in use (or don't parse): their
+    /// fingerprints differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
-        Filter::load(root, self.case_insensitive)
-            .map(|f| f.fingerprint())
-            .ok()
-            != Some(self.fingerprint.clone())
+        let exec = &self.engine.config().exec;
+        Filter::load(root, exec.case_insensitive)
+            .map_or(true, |f| f.fingerprint() != exec.filter.fingerprint())
     }
 }
 
@@ -384,8 +401,6 @@ impl Runner {
         cfg.mass_delete_min = self.cfg.mass_delete.min_files;
         cfg.mass_delete_fraction = self.cfg.mass_delete.fraction;
         cfg.exec.filter = Arc::new(Filter::load(root, cfg.exec.case_insensitive)?);
-        let (fingerprint, case_insensitive) =
-            (cfg.exec.filter.fingerprint(), cfg.exec.case_insensitive);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
@@ -413,12 +428,7 @@ impl Runner {
             s.rules = rules;
             s.watcher_error = observer.watcher_error.clone();
         });
-        Ok(Parts {
-            engine,
-            observer,
-            fingerprint,
-            case_insensitive,
-        })
+        Ok(Parts { engine, observer })
     }
 
     fn run(mut self) -> Result<(), RunnerError> {
@@ -434,16 +444,13 @@ impl Runner {
         let mut hints_open = true;
         let mut next_poll = Instant::now() + self.cfg.poll;
         let mut not_before = Instant::now();
-        let mut backoff = FIRST_BACKOFF;
+        let mut backoff = Backoff::new();
         tracing::info!(
             "syncing {} with {}{}",
             self.cfg.folder.display(),
             self.cfg.identity,
             if paused { " (paused)" } else { "" }
         );
-        if paused {
-            self.set(|s| s.state = State::Paused);
-        }
         loop {
             // Local changes: the watcher's batches are recorded in the DB as they come.
             let (wall, mono) = (SystemTime::now(), Instant::now());
@@ -467,7 +474,7 @@ impl Runner {
             ) {
                 tracing::info!("the machine woke up: syncing now");
                 wanted = true;
-                backoff = FIRST_BACKOFF;
+                backoff = Backoff::new();
                 not_before = Instant::now();
                 if let Some(n) = &self.hints.notifier {
                     n.reconnect();
@@ -483,7 +490,6 @@ impl Runner {
                     }
                     Ok(Control::Pause) => {
                         paused = true;
-                        self.set(|s| s.state = State::Paused);
                         tracing::info!("paused");
                     }
                     Ok(Control::Resume) => {
@@ -630,12 +636,10 @@ impl Runner {
             match result {
                 Ok(report) => {
                     started = true;
-                    backoff = FIRST_BACKOFF;
+                    backoff = Backoff::new();
                     self.record(&mut p.engine, &report, began.elapsed())?;
-                    if report.stopped {
-                        // Paused (or stopping): the rest waits for resume.
-                        self.set(|s| s.state = State::Paused);
-                    } else {
+                    // Stopped by a pause (or a stop): the rest waits for resume.
+                    if !report.stopped {
                         wanted = false;
                     }
                     if self.cfg.once {
@@ -643,16 +647,16 @@ impl Runner {
                     }
                 }
                 Err(e) => {
-                    let (state, wait) = if e.is_denied() {
-                        (State::Denied, MAX_BACKOFF)
+                    let state = if e.is_denied() {
+                        State::Denied
                     } else if is_offline(&e) {
-                        (State::Offline, backoff)
+                        State::Offline
                     } else {
-                        (State::Failing, backoff)
+                        State::Failing
                     };
+                    let wait = backoff.after(state);
                     tracing::warn!("sync failed ({e}); trying again in {wait:?}");
                     not_before = Instant::now() + wait;
-                    backoff = (backoff * 2).min(MAX_BACKOFF);
                     self.set(|s| {
                         s.state = state;
                         s.error = Some(e.to_string());
@@ -726,14 +730,8 @@ impl Runner {
                 h.remotely
             );
         }
-        // A sync that ended as a pause came in stays paused (the pause is what counts).
-        let state = if self.stop.load(Ordering::Relaxed) {
-            State::Paused
-        } else {
-            State::Idle
-        };
         self.set(|s| {
-            s.state = state;
+            s.state = State::Idle;
             s.error = None;
             s.retry_at = None;
             s.pending = report.pending;

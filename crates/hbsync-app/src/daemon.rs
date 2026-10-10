@@ -16,8 +16,7 @@ use hbsync_homebase::{Client, HomebaseError};
 use crate::ipc::{self, Ask, Reply, Request};
 use crate::lock::{InstanceLock, LockError};
 use crate::runner::{
-    Control, FIRST_BACKOFF, Handle, HintSource, MAX_BACKOFF, Runner, RunnerConfig, RunnerError,
-    State, Status, lock,
+    Backoff, Control, Handle, HintSource, Runner, RunnerConfig, RunnerError, State, Status, lock,
 };
 use crate::{Config, ConfigError, CredentialError, CredentialStore, Location, Paths, Root};
 
@@ -47,6 +46,8 @@ enum Phase {
         state: State,
         error: Option<String>,
         warning: Option<String>,
+        /// Kept in the config too: the runner starts paused.
+        paused: bool,
     },
     Running(Handle),
 }
@@ -65,13 +66,13 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         state: State::Starting,
         error: None,
         warning: None,
+        paused: config.paused,
     }));
-    let set = |state: State, error: String, warning: &Option<String>| {
-        *lock(&phase) = Phase::Waiting {
-            state,
-            error: Some(error),
-            warning: warning.clone(),
-        };
+    let set = |to: State, why: String| {
+        if let Phase::Waiting { state, error, .. } = &mut *lock(&phase) {
+            *state = to;
+            *error = Some(why);
+        }
     };
     let listener = ipc::listen(paths).map_err(DaemonError::Ipc)?;
     {
@@ -95,7 +96,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
 
     // The credentials: a keychain locked at logon is waited for, not taken for "not set up".
     let store = CredentialStore::open(paths);
-    let mut backoff = FIRST_BACKOFF;
+    let mut backoff = Backoff::new();
     let (creds, location) = loop {
         match store.load(&root.identity) {
             Ok(Some(found)) => break found,
@@ -106,16 +107,12 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
                 )));
             }
             Err(CredentialError::Keychain(why)) => {
-                tracing::warn!("can't read the keychain ({why}); trying again in {backoff:?}");
-                set(
-                    State::Failing,
-                    format!("can't read the keychain: {why}"),
-                    &None,
-                );
-                if wait(backoff, &stop) {
+                let wait_for = backoff.after(State::Failing);
+                tracing::warn!("can't read the keychain ({why}); trying again in {wait_for:?}");
+                set(State::Failing, format!("can't read the keychain: {why}"));
+                if wait(wait_for, &stop) {
                     return Ok(());
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
             Err(e) => return Err(e.into()),
         }
@@ -133,27 +130,25 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
 
     // Connect: finding the drive takes a request.
     let client = Client::new(&creds)?;
-    let mut backoff = FIRST_BACKOFF;
+    let mut backoff = Backoff::new();
     let remote = loop {
         match HomebaseRemote::connect(client.clone()) {
             Ok(r) => break Arc::new(r),
             Err(e) => {
-                // A refusal won't change until this computer is authorized again (which
-                // restarts the daemon): ask rarely.
-                let (state, wait_for) = match &e {
-                    HomebaseError::Denied(_) => (State::Denied, MAX_BACKOFF),
-                    HomebaseError::Network(_) => (State::Offline, backoff),
-                    _ => (State::Failing, backoff),
+                let state = match &e {
+                    HomebaseError::Denied(_) => State::Denied,
+                    HomebaseError::Network(_) => State::Offline,
+                    _ => State::Failing,
                 };
+                let wait_for = backoff.after(state);
                 tracing::warn!(
                     "can't connect to {} ({e}); trying again in {wait_for:?}",
                     root.identity
                 );
-                set(state, e.to_string(), &warning);
+                set(state, e.to_string());
                 if wait(wait_for, &stop) {
                     return Ok(());
                 }
-                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
     };
@@ -162,14 +157,19 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         notifier: Some(Notifier::spawn(client, remote.drive(), tx)),
         events: rx,
     };
-    // The config again: a pause may have come in meanwhile.
-    let config = Config::load(&paths.config_file())?.unwrap_or(config);
     let mut cfg = RunnerConfig::new(&root.folder, &root.identity, &config.device_name());
     cfg.mass_delete = config.mass_delete;
-    cfg.paused = config.paused;
     cfg.credentials_warning = warning;
-    let (handle, thread) = Runner::spawn(cfg, remote, hints)?;
-    *lock(&phase) = Phase::Running(handle.clone());
+    let (handle, thread) = {
+        // Under the lock: no pause gets lost between the two phases.
+        let mut phase = lock(&phase);
+        if let Phase::Waiting { paused, .. } = &*phase {
+            cfg.paused = *paused;
+        }
+        let spawned = Runner::spawn(cfg, remote, hints)?;
+        *phase = Phase::Running(spawned.0.clone());
+        spawned
+    };
 
     while !thread.is_finished() {
         if stop.load(Ordering::Relaxed) {
@@ -189,8 +189,8 @@ fn answer(
     root: &Root,
     paths: &Paths,
 ) -> Reply {
-    let phase = lock(phase);
-    match (request.ask, &*phase) {
+    let mut phase = lock(phase);
+    match (request.ask, &mut *phase) {
         (Ask::Status, Phase::Running(h)) => Reply::Status(Box::new(h.status())),
         (
             Ask::Status,
@@ -198,13 +198,11 @@ fn answer(
                 state,
                 error,
                 warning,
+                paused,
             },
         ) => {
             let mut s = Status::new(&root.identity, &root.folder);
-            s.state = *state;
-            if Config::load(&paths.config_file()).is_ok_and(|c| c.is_some_and(|c| c.paused)) {
-                s.state = State::Paused;
-            }
+            s.state = if *paused { State::Paused } else { *state };
             s.error.clone_from(error);
             s.credentials_warning.clone_from(warning);
             Reply::Status(Box::new(s))
@@ -231,22 +229,27 @@ fn answer(
                 return Reply::Refused(format!("couldn't save the pause in the config: {e}"));
             }
             match phase {
-                Phase::Running(h) if !h.send(c) => Reply::Refused("the sync has stopped".into()),
-                _ => Reply::Done,
+                Phase::Running(h) => send(h, c),
+                Phase::Waiting { paused, .. } => {
+                    *paused = c == Control::Pause;
+                    Reply::Done
+                }
             }
         }
-        (Ask::Control(c), Phase::Running(h)) => {
-            if h.send(c) {
-                Reply::Done
-            } else {
-                Reply::Refused("the sync has stopped".into())
-            }
-        }
+        (Ask::Control(c), Phase::Running(h)) => send(h, c),
         (Ask::Control(_), Phase::Waiting { error, .. }) => Reply::Refused(format!(
             "not connected to {} yet{}",
             root.identity,
             error.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
         )),
+    }
+}
+
+fn send(handle: &Handle, control: Control) -> Reply {
+    if handle.send(control) {
+        Reply::Done
+    } else {
+        Reply::Refused("the sync has stopped".into())
     }
 }
 

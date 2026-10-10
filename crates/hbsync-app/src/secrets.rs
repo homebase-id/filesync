@@ -107,32 +107,35 @@ impl CredentialStore {
     /// known to be missing: a keychain that is there but can't be read now (locked at logon)
     /// is an error, not "not set up".
     pub fn load(&self, identity: &str) -> Result<Option<(Credentials, Location)>, CredentialError> {
-        // Why the file is read: no keychain on this system, or one that failed.
-        let (why, failed) = match &self.keychain {
-            Err(why) => (Some(why.clone()), false),
-            Ok(_) => match self.keychain_entry(identity).and_then(|entry| {
-                entry.get_password().map_err(|e| match e {
-                    KeychainError::NoEntry => String::new(),
-                    e => e.to_string(),
-                })
-            }) {
+        // Why the file is read: no keychain on this system (`Ok`), or one that failed (`Err`);
+        // `None` when the keychain works and has no entry.
+        let why: Option<Result<String, String>> = match &self.keychain {
+            Err(why) => Some(Ok(why.clone())),
+            Ok(_) => match self
+                .keychain_entry(identity)
+                .map_err(Some)
+                .and_then(|entry| {
+                    entry.get_password().map_err(|e| match e {
+                        KeychainError::NoEntry => None,
+                        e => Some(e.to_string()),
+                    })
+                }) {
                 Ok(json) => {
                     let creds = serde_json::from_str(&json).map_err(CredentialError::Corrupt)?;
                     return Ok(Some((creds, Location::Keychain)));
                 }
-                Err(e) if e.is_empty() => (None, false),
-                Err(e) => (Some(e), true),
+                Err(failed) => failed.map(Err),
             },
         };
         let path = self.file(identity);
         let Some(creds) = Credentials::load(&path)? else {
             return match why {
-                Some(why) if failed => Err(CredentialError::Keychain(why)),
+                Some(Err(failed)) => Err(CredentialError::Keychain(failed)),
                 _ => Ok(None),
             };
         };
         let location = match why {
-            Some(why) => Location::File { path, why },
+            Some(Ok(why) | Err(why)) => Location::File { path, why },
             // The keychain works and is empty: move them there.
             None => self.save(&creds)?,
         };
@@ -176,11 +179,9 @@ fn os_keychain() -> keyring_core::Result<Arc<Keychain>> {
     Ok(store)
 }
 
-/// Writes `creds` to `path` in one step (a crash leaves the old file or the new one), in a
-/// folder only this user can open (on Windows, the user's profile folders already are). The
-/// file is created 0600.
+/// Writes `creds` to `path` (0600, in one step) in a folder only this user can open (on
+/// Windows, the user's profile folders already are).
 fn save_private(creds: &Credentials, path: &Path) -> Result<(), HomebaseError> {
-    use std::io::Write;
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
@@ -188,11 +189,7 @@ fn save_private(creds: &Credentials, path: &Path) -> Result<(), HomebaseError> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(&serde_json::to_vec_pretty(creds)?)?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| e.error)?;
-    Ok(())
+    creds.save(path)
 }
 
 fn remove(path: &Path) -> Result<(), CredentialError> {

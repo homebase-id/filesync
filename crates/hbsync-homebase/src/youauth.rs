@@ -66,18 +66,16 @@ impl Credentials {
         }
     }
 
-    /// Saves to `path`, readable by this user only (on Unix). Development storage: the product
-    /// keeps these in the OS keychain.
+    /// Saves to `path` in one step (a crash leaves the old file or the new one), readable by
+    /// this user only (0600 on Unix). The product keeps these in the OS keychain when there is
+    /// one.
     pub fn save(&self, path: &Path) -> Result<(), HomebaseError> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let mut open = std::fs::OpenOptions::new();
-        open.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
-        open.open(path)?
-            .write_all(&serde_json::to_vec_pretty(self)?)?;
+        let dir = path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(dir)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.write_all(&serde_json::to_vec_pretty(self)?)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(path).map_err(|e| e.error)?;
         Ok(())
     }
 }

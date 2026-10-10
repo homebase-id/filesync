@@ -178,12 +178,6 @@ impl Engine {
         self.stop = stop;
     }
 
-    /// Files waiting to be deleted: (gone here, so deleted remotely; gone remotely, so moved
-    /// to the trash here). What the mass-delete guard judges, and what a user confirms.
-    pub fn pending_deletes(&mut self) -> Result<(u64, u64), StateError> {
-        self.db.read(|s| s.pending_file_deletes())
-    }
-
     /// Lets the held deletes of `nodes` (those of [`SyncReport::held`] the user was shown)
     /// through, until they are done or undone. Deletes of other nodes are judged as before:
     /// one the user didn't see is never let through by a confirmation.
@@ -298,8 +292,7 @@ impl Engine {
             let (mut here, mut there) = s.pending_file_deletes()?;
             let mut still = std::collections::HashSet::new();
             for node in confirmed {
-                if s.is_dirty(node)? {
-                    let (h, t) = s.pending_file_delete(node)?;
+                if let Some((h, t)) = s.pending_file_delete(node)? {
                     here = here.saturating_sub(u64::from(h));
                     there = there.saturating_sub(u64::from(t));
                     still.insert(node);

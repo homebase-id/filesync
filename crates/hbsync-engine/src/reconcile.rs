@@ -186,10 +186,9 @@ impl Op {
     }
 
     pub fn is_delete(&self) -> bool {
-        self.trashes().is_some() || matches!(self, Op::RemoteDelete { .. })
+        self.deletes().is_some()
     }
 
-    /// The node whose local item (with everything below it) this op moves to the trash.
     /// The node this op deletes on the drive or trashes here: what the mass-delete guard
     /// judges, and what a user confirms.
     pub fn deletes(&self) -> Option<NodeId> {
@@ -199,6 +198,7 @@ impl Op {
         }
     }
 
+    /// The node whose local item (with everything below it) this op moves to the trash.
     pub fn trashes(&self) -> Option<NodeId> {
         match self {
             Op::LocalTrash { node, .. } => Some(*node),

@@ -69,7 +69,8 @@ impl Computer {
 
     /// The daemon's log so far.
     fn log(&self) -> String {
-        std::fs::read_dir(self.home.path().join("logs"))
+        let dir = self.ok(&["log"]).unwrap_or_default();
+        std::fs::read_dir(dir.trim())
             .into_iter()
             .flatten()
             .flatten()

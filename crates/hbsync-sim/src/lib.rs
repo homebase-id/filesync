@@ -410,7 +410,7 @@ impl Sim {
             .chain(client.local.ids())
             .chain(remote.ids())
             .collect();
-        let confirmed = client.confirmed.clone();
+        let confirmed = Arc::new(client.confirmed.clone());
         let synced_files = client
             .base
             .iter()
@@ -423,7 +423,7 @@ impl Sim {
             mass_delete_min: self.guard.unwrap_or_default(),
             mass_delete_fraction: 0.0,
             synced_files,
-            confirmed: Arc::new(confirmed.clone()),
+            confirmed: Arc::clone(&confirmed),
             filter: Arc::clone(&client.filter),
             ..Options::default()
         };

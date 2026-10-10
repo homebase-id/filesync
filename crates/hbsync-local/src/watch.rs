@@ -228,9 +228,8 @@ pub struct LocalObserver {
     pub watcher_error: Option<String>,
     /// A batch was recorded without storing the journal position (see [`LocalObserver::poll`]).
     unsaved: bool,
-    /// New folders to look into once more, and when (see [`RECHECK`]).
-    recheck: Vec<RelPath>,
-    recheck_at: Option<Instant>,
+    /// When to look into new folders once more, and which (see [`RECHECK`]).
+    recheck: Option<(Instant, Vec<RelPath>)>,
 }
 
 /// How long after a new folder is found it is rescanned once more. A watcher that watches
@@ -238,6 +237,10 @@ pub struct LocalObserver {
 /// written into it before that sends no event, and the rescan that found the folder may have
 /// come too early to see it. By then the watch is long in place.
 const RECHECK: Duration = Duration::from_secs(1);
+
+/// Whether the watcher watches folder by folder: FSEvents and ReadDirectoryChangesW watch the
+/// whole tree, and need no [`RECHECK`].
+const PER_FOLDER_WATCHES: bool = !cfg!(any(target_os = "macos", windows));
 
 impl LocalObserver {
     /// Starts watching. Call [`LocalObserver::catch_up`] next.
@@ -254,8 +257,7 @@ impl LocalObserver {
             watcher,
             watcher_error,
             unsaved: false,
-            recheck: Vec::new(),
-            recheck_at: None,
+            recheck: None,
         }
     }
 
@@ -271,13 +273,13 @@ impl LocalObserver {
         timeout: Duration,
         debounce: Debounce,
     ) -> Result<Option<ScanReport>, StateError> {
-        if self.watcher.is_none() {
-            std::thread::sleep(timeout);
-            return Ok(None);
-        }
-        if self.recheck_at.is_some_and(|at| Instant::now() >= at) {
-            self.recheck_at = None;
-            let dirs = std::mem::take(&mut self.recheck);
+        // Without a watcher nothing is ever due for a recheck.
+        if self
+            .recheck
+            .as_ref()
+            .is_some_and(|(at, _)| Instant::now() >= *at)
+            && let Some((_, dirs)) = self.recheck.take()
+        {
             let report = rescan_dirs(db, &self.root, &dirs, &self.opts)?;
             self.note_new_folders(&report);
             if report.added + report.removed + report.modified + report.moved > 0 {
@@ -285,6 +287,7 @@ impl LocalObserver {
             }
         }
         let Some(watcher) = &self.watcher else {
+            std::thread::sleep(timeout);
             return Ok(None);
         };
         // The journal position is taken before waiting. Once the queue has been drained (a
@@ -322,12 +325,12 @@ impl LocalObserver {
 
     /// Looks into the new folders of `report` once more after [`RECHECK`].
     fn note_new_folders(&mut self, report: &ScanReport) {
-        if report.new_folders.is_empty() {
-            return;
+        if PER_FOLDER_WATCHES && !report.new_folders.is_empty() {
+            self.recheck
+                .get_or_insert_with(|| (Instant::now() + RECHECK, Vec::new()))
+                .1
+                .extend(report.new_folders.iter().cloned());
         }
-        self.recheck.extend(report.new_folders.iter().cloned());
-        self.recheck_at
-            .get_or_insert_with(|| Instant::now() + RECHECK);
     }
 
     pub fn has_watcher(&self) -> bool {

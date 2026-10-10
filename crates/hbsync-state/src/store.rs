@@ -122,6 +122,12 @@ const LOCAL_FROM: &str = "FROM local l JOIN nodes n ON n.id = l.id";
 /// A node's integer id, by UUID.
 const ID_OF: &str = "(SELECT id FROM nodes WHERE uuid = ?1)";
 
+/// A dirty node `d` with base `b` is a synced file gone locally (online-only files have no
+/// local copy by design), or gone remotely: what the mass-delete guard counts.
+const GONE_LOCALLY: &str = "b.kind = 0 AND b.content_state != 2 \
+    AND NOT EXISTS (SELECT 1 FROM local l WHERE l.id = d.id)";
+const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)";
+
 impl<'a> Store<'a> {
     pub(crate) fn new(conn: &'a Connection) -> Self {
         Store { conn }
@@ -890,39 +896,28 @@ impl<'a> Store<'a> {
     /// no local copy by design and don't count. Used by the mass-delete guard, which must see
     /// the whole delete, not one planning batch.
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
-        let local_gone = self.count(
-            "SELECT COUNT(*) FROM dirty d JOIN base b ON b.id = d.id \
-             WHERE b.kind = 0 AND b.content_state != 2 \
-             AND NOT EXISTS (SELECT 1 FROM local l WHERE l.id = d.id)",
-        )?;
-        let remote_gone = self.count(
-            "SELECT COUNT(*) FROM dirty d JOIN base b ON b.id = d.id \
-             WHERE b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)",
-        )?;
-        Ok((local_gone, remote_gone))
+        let gone = |predicate: &str| {
+            self.count(&format!(
+                "SELECT COUNT(*) FROM dirty d JOIN base b ON b.id = d.id WHERE {predicate}"
+            ))
+        };
+        Ok((gone(GONE_LOCALLY)?, gone(GONE_REMOTELY)?))
     }
 
-    /// Whether `node` counts in [`pending_file_deletes`](Self::pending_file_deletes): (gone
-    /// locally, gone remotely).
-    pub fn pending_file_delete(&self, node: NodeId) -> Result<(bool, bool)> {
-        let found = |sql: String| -> Result<bool> {
-            Ok(self
-                .conn
-                .prepare_cached(&sql)?
-                .query_row([node.0.as_bytes()], |_| Ok(()))
-                .optional()?
-                .is_some())
-        };
-        let here = found(format!(
-            "SELECT 1 FROM dirty d JOIN base b ON b.id = d.id WHERE d.id = {ID_OF} \
-             AND b.kind = 0 AND b.content_state != 2 \
-             AND NOT EXISTS (SELECT 1 FROM local l WHERE l.id = d.id)"
-        ))?;
-        let there = found(format!(
-            "SELECT 1 FROM dirty d JOIN base b ON b.id = d.id WHERE d.id = {ID_OF} \
-             AND b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)"
-        ))?;
-        Ok((here, there))
+    /// Whether dirty `node` counts in [`pending_file_deletes`](Self::pending_file_deletes):
+    /// (gone locally, gone remotely); `None` when it isn't dirty.
+    pub fn pending_file_delete(&self, node: NodeId) -> Result<Option<(bool, bool)>> {
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "SELECT coalesce({GONE_LOCALLY}, 0), coalesce({GONE_REMOTELY}, 0) \
+                 FROM dirty d LEFT JOIN base b ON b.id = d.id WHERE d.id = {ID_OF}"
+            )
+        });
+        Ok(self
+            .conn
+            .prepare_cached(&SQL)?
+            .query_row([node.0.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
     }
 
     pub fn dirty_count(&self) -> Result<u64> {
