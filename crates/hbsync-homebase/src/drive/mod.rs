@@ -188,7 +188,7 @@ impl Remote for HomebaseRemote {
         for row in &page.search_results {
             match serde_json::from_str::<wire::FileHeader>(row.get())
                 .map_err(|e| format!("unreadable header: {e}"))
-                .and_then(wire::to_remote)
+                .and_then(|h| wire::to_remote(h, self.client.key()))
             {
                 Ok(header) => entries.push(header),
                 Err(why) => skipped.push(why),
@@ -215,7 +215,7 @@ impl Remote for HomebaseRemote {
             .client
             .get(&format!("{}/header", self.file(file_id)), &[])
             .map_err(remote_error)?;
-        wire::to_remote(header).map_err(RemoteError::Fatal)
+        wire::to_remote(header, self.client.key()).map_err(RemoteError::Fatal)
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {

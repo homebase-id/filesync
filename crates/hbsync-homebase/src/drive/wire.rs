@@ -14,8 +14,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::HomebaseError;
 use crate::crypto::{Key, aes_cbc_encrypt};
-use crate::drive::sealed::KeyHeader;
+use crate::drive::sealed::{KeyHeader, SealedKeyHeader};
 
 pub const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -27,6 +28,9 @@ pub struct FileHeader {
     pub file_id: Uuid,
     pub file_state: String,
     pub file_metadata: FileMetadata,
+    /// The file key and header IV under the shared secret (only meaningful when encrypted).
+    #[serde(default)]
+    pub shared_secret_encrypted_key_header: Option<SealedKeyHeader>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +59,9 @@ pub struct Payload {
     pub key: String,
     #[serde(default)]
     pub bytes_written: u64,
+    /// Base64; set when the file is encrypted.
+    #[serde(default)]
+    pub iv: Option<String>,
     pub hash: Option<PayloadHash>,
 }
 
@@ -97,8 +104,9 @@ pub fn feed_query(cursor: Option<&str>, limit: usize) -> Value {
     })
 }
 
-/// A header as a [`RemoteHeader`]; `Err` says why it isn't a usable sync node.
-pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
+/// A header as a [`RemoteHeader`], decrypted with `shared_secret` when encrypted; `Err` says
+/// why it isn't a usable sync node.
+pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
     let id = header.file_id;
     let meta = header.file_metadata;
     let kind = match meta.app_data.file_type {
@@ -113,15 +121,28 @@ pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
         "deleted" => (group.unwrap_or(NodeId::ROOT), RemoteBody::Deleted),
         "active" => {
             let parent = group.ok_or_else(|| format!("file {id}: no parent (groupId)"))?;
-            if meta.is_encrypted {
-                return Err(format!("file {id}: encrypted nodes aren't supported yet"));
-            }
             let node = meta
                 .app_data
                 .unique_id
                 .ok_or_else(|| format!("file {id}: no node id (uniqueId)"))?;
+            let key = match meta.is_encrypted {
+                true => Some(
+                    file_key(
+                        header.shared_secret_encrypted_key_header.as_ref(),
+                        shared_secret,
+                    )
+                    .map_err(|e| format!("file {id}: {e}"))?,
+                ),
+                false => None,
+            };
             let content = meta.app_data.content.as_deref().unwrap_or_default();
-            let content = NodeContent::from_json(content)
+            let content = match &key {
+                Some(key) => key
+                    .open_text(content)
+                    .map_err(|e| format!("file {id}: content: {e}"))?,
+                None => content.to_owned(),
+            };
+            let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
             let payload = match kind {
                 NodeKind::Folder => None,
@@ -130,7 +151,7 @@ pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
                     .iter()
                     .flatten()
                     .find(|p| p.key == PAYLOAD_KEY)
-                    .map(payload_info)
+                    .map(|p| payload_info(p, key.as_ref()))
                     .transpose()
                     .map_err(|e| format!("file {id}: {e}"))?,
             };
@@ -152,8 +173,28 @@ pub fn to_remote(header: FileHeader) -> Result<RemoteHeader, String> {
     })
 }
 
-fn payload_info(p: &Payload) -> Result<PayloadInfo, String> {
-    // Unencrypted: the content hash is the stored hash.
+/// The file key of an encrypted header.
+pub fn file_key(
+    sealed: Option<&SealedKeyHeader>,
+    shared_secret: &Key,
+) -> Result<KeyHeader, HomebaseError> {
+    let sealed = sealed.ok_or_else(|| HomebaseError::Crypto("no key header".into()))?;
+    KeyHeader::open(sealed, shared_secret)
+}
+
+/// The IV of a payload of an encrypted file.
+pub fn payload_iv(p: &Payload) -> Result<[u8; 16], String> {
+    let iv = p.iv.as_deref().ok_or("no payload IV")?;
+    STANDARD
+        .decode(iv)
+        .ok()
+        .and_then(|iv| iv.try_into().ok())
+        .ok_or_else(|| format!("payload IV {iv:?}"))
+}
+
+/// The payload's size and content hash. Unencrypted, the content hash is the stored hash;
+/// encrypted, it is sealed with the file `key` under the payload IV.
+fn payload_info(p: &Payload, key: Option<&KeyHeader>) -> Result<PayloadInfo, String> {
     let hash = p
         .hash
         .as_ref()
@@ -162,8 +203,13 @@ fn payload_info(p: &Payload) -> Result<PayloadInfo, String> {
                 .algorithm
                 .parse()
                 .map_err(|_| format!("hash algorithm {:?}", h.algorithm))?;
-            ContentHash::from_base64(algorithm, &h.content_hash)
-                .map_err(|e| format!("content hash: {e}"))
+            match key {
+                Some(key) => key
+                    .open_hash(&payload_iv(p)?, algorithm, &h.content_hash)
+                    .map_err(|e| format!("content hash: {e}")),
+                None => ContentHash::from_base64(algorithm, &h.content_hash)
+                    .map_err(|e| format!("content hash: {e}")),
+            }
         })
         .transpose()?;
     Ok(PayloadInfo {
@@ -250,6 +296,9 @@ mod tests {
     use super::*;
     use crate::crypto::aes_cbc_decrypt;
 
+    /// The shared secret of the tests.
+    const SS: Key = [3; 16];
+
     fn fixture(name: &str) -> FileHeader {
         let path = format!(
             "{}/../../docs/spec/fixtures/{name}",
@@ -261,7 +310,7 @@ mod tests {
 
     #[test]
     fn spec_fixtures_map_to_remote_headers() -> Result<(), String> {
-        let file = to_remote(fixture("file-node.json"))?;
+        let file = to_remote(fixture("file-node.json"), &SS)?;
         assert_eq!(file.kind, NodeKind::File);
         let state = file.state().ok_or("file state")?;
         assert_eq!(state.name, "Résumé.txt");
@@ -272,11 +321,11 @@ mod tests {
             "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444"
         );
 
-        let folder = to_remote(fixture("folder-node.json"))?;
+        let folder = to_remote(fixture("folder-node.json"), &SS)?;
         assert_eq!(folder.kind, NodeKind::Folder);
         assert!(folder.state().is_some());
 
-        let tomb = to_remote(fixture("tombstone.json"))?;
+        let tomb = to_remote(fixture("tombstone.json"), &SS)?;
         assert!(tomb.is_deleted());
         assert_eq!((tomb.file_id, tomb.parent), (file.file_id, file.parent));
         Ok(())
@@ -286,24 +335,79 @@ mod tests {
     fn rows_that_are_not_sync_nodes_are_refused() {
         let mut other = fixture("file-node.json");
         other.file_metadata.app_data.file_type = 100;
-        assert!(to_remote(other).is_err());
+        assert!(to_remote(other, &SS).is_err());
         let mut bad = fixture("file-node.json");
         bad.file_metadata.app_data.content = Some("{\"name\": 3}".into());
-        assert!(to_remote(bad).is_err());
+        assert!(to_remote(bad, &SS).is_err());
         let mut orphan = fixture("file-node.json");
         orphan.file_metadata.app_data.unique_id = None;
-        assert!(to_remote(orphan).is_err());
+        assert!(to_remote(orphan, &SS).is_err());
         let mut no_parent = fixture("file-node.json");
         no_parent.file_metadata.app_data.group_id = None;
-        assert!(to_remote(no_parent).is_err());
+        assert!(to_remote(no_parent, &SS).is_err());
         // A tombstone is never dropped, even without a parent.
         let mut tomb = fixture("tombstone.json");
         tomb.file_metadata.app_data.group_id = None;
-        assert!(to_remote(tomb).is_ok_and(|h| h.is_deleted()));
+        assert!(to_remote(tomb, &SS).is_ok_and(|h| h.is_deleted()));
         // A file without its payload is kept, without a state (the engine waits for it).
         let mut bare = fixture("file-node.json");
         bare.file_metadata.payloads = None;
-        assert_eq!(to_remote(bare).map(|h| h.state()), Ok(None));
+        assert_eq!(to_remote(bare, &SS).map(|h| h.state()), Ok(None));
+    }
+
+    /// An encrypted node as another Homebase client writes it: content, payload IV and
+    /// content hash sealed with the file key, the key under the shared secret.
+    fn encrypted(kh: &KeyHeader) -> Result<(FileHeader, ContentHash), Box<dyn std::error::Error>> {
+        let mut header = fixture("file-node.json");
+        let plain = header
+            .file_metadata
+            .app_data
+            .content
+            .clone()
+            .ok_or("content")?;
+        let meta = &mut header.file_metadata;
+        meta.is_encrypted = true;
+        meta.app_data.content = Some(kh.seal_text(&plain));
+        let payload = meta.payloads.iter_mut().flatten().next().ok_or("payload")?;
+        let payload_iv = crate::drive::sealed::strong()?;
+        payload.iv = Some(STANDARD.encode(payload_iv));
+        let hash = payload.hash.as_mut().ok_or("hash")?;
+        let content_hash = ContentHash::from_base64(HashAlgorithm::Blake3, &hash.content_hash)?;
+        hash.content_hash = kh.seal_hash(&payload_iv, &content_hash);
+        header.shared_secret_encrypted_key_header = Some(serde_json::from_value(
+            kh.seal(&SS, &crate::drive::sealed::strong()?),
+        )?);
+        Ok((header, content_hash))
+    }
+
+    #[test]
+    fn encrypted_rows_decode_like_plain_ones() -> Result<(), Box<dyn std::error::Error>> {
+        let kh = KeyHeader::random()?;
+        let (header, content_hash) = encrypted(&kh)?;
+        let plain = to_remote(fixture("file-node.json"), &SS)?;
+        let decoded = to_remote(header.clone(), &SS)?;
+        assert_eq!(decoded.state(), plain.state());
+        let state = decoded.state().ok_or("state")?;
+        assert_eq!(state.name, "Résumé.txt");
+        assert_eq!(state.content.ok_or("content")?.hash, content_hash);
+
+        // Another shared secret, a damaged content or a missing key header: not a node.
+        assert!(to_remote(header.clone(), &[4; 16]).is_err());
+        let mut damaged = header.clone();
+        damaged.file_metadata.app_data.content = Some(kh.seal_text("{not json"));
+        assert!(to_remote(damaged, &SS).is_err());
+        let mut keyless = header.clone();
+        keyless.shared_secret_encrypted_key_header = None;
+        assert!(to_remote(keyless, &SS).is_err());
+        let mut no_iv = header;
+        no_iv
+            .file_metadata
+            .payloads
+            .iter_mut()
+            .flatten()
+            .for_each(|p| p.iv = None);
+        assert!(to_remote(no_iv, &SS).is_err());
+        Ok(())
     }
 
     #[test]
