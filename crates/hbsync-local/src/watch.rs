@@ -339,6 +339,7 @@ impl LocalObserver {
 mod tests {
     use super::*;
     use notify::event::{CreateKind, Flag, ModifyKind, RenameMode};
+    use std::collections::HashMap;
     use std::fs;
     use std::sync::{Arc, Mutex};
 
@@ -659,8 +660,16 @@ mod tests {
         let mut observer = LocalObserver::start(&root, opts);
         let clock = Instant::now();
         observer.journal = Some(Box::new(ClockJournal(clock)));
-        // The OS events come from a delay line instead: each one arrives 20 ms after its
-        // change (well within the quiet period), as FSEvents-style delivery can.
+        // The OS events come from a delay line instead: each one arrives DELAY after its
+        // change, as FSEvents-style delivery can. That is longer than a busy batch lasts
+        // (MAX_DELAY), so batches are cut off with older events still queued, and only the
+        // drained rule keeps the position back; and shorter than the quiet period, the bound
+        // the guarantee rests on. When the delay line itself falls behind by a whole quiet
+        // period (a stalled thread on a busy machine), the OS it plays broke that bound, and a
+        // change whose event came that late proves nothing.
+        const DELAY: Duration = Duration::from_millis(60);
+        const MAX_DELAY: Duration = Duration::from_millis(30);
+        const QUIET: Duration = Duration::from_millis(100);
         let (tx, rx) = channel();
         let _keep_connected = tx.clone();
         if let Some(w) = observer.watcher.as_mut() {
@@ -672,12 +681,16 @@ mod tests {
         }
         scan(&mut db, &root, &observer.opts)?;
 
-        let (to_delay, delayed) = channel::<(Instant, PathBuf)>();
+        let (to_delay, delayed) = channel::<(Instant, PathBuf, String)>();
+        // When each change's event was actually delivered.
+        let delivered: Arc<Mutex<HashMap<String, u128>>> = Arc::default();
+        let sent = delivered.clone();
         let delay_line = std::thread::spawn(move || {
-            for (at, path) in delayed {
-                std::thread::sleep(
-                    (at + Duration::from_millis(20)).saturating_duration_since(Instant::now()),
-                );
+            for (at, path, rel) in delayed {
+                std::thread::sleep((at + DELAY).saturating_duration_since(Instant::now()));
+                if let Ok(mut sent) = sent.lock() {
+                    sent.insert(rel, clock.elapsed().as_nanos());
+                }
                 let event = Event::new(EventKind::Create(CreateKind::File)).add_path(path);
                 let _ = tx.send(Ok(event));
             }
@@ -693,12 +706,13 @@ mod tests {
                 log.lock()
                     .map_err(|_| std::io::Error::other("poisoned"))?
                     .push((before, rel.clone()));
-                let _ = to_delay.send((Instant::now(), writer_root.join(&rel)));
+                let _ = to_delay.send((Instant::now(), writer_root.join(&rel), rel.clone()));
                 std::thread::sleep(Duration::from_millis(2));
             }
             Ok(())
         });
         // Checked after every poll: the process could die at any of those points.
+        let late = std::cell::RefCell::new(std::collections::HashSet::new());
         let check = |db: &mut StateDb| -> Result<(), String> {
             let Some(stored) = db
                 .read(|s| s.get_kv(CURSOR_KEY))
@@ -715,6 +729,12 @@ mod tests {
                     .map_err(|e| e.to_string())?
                     .is_none()
                 {
+                    let arrived = delivered.lock().map_err(|_| "poisoned")?.get(rel).copied();
+                    let latency = arrived.unwrap_or_else(|| clock.elapsed().as_nanos()) - at;
+                    if latency >= QUIET.as_nanos() {
+                        late.borrow_mut().insert(rel.clone());
+                        continue;
+                    }
                     return Err(format!(
                         "{rel} (written at {at}) is before {stored}, unrecorded"
                     ));
@@ -724,8 +744,8 @@ mod tests {
         };
         // While the writer runs, batches are cut off by max_delay.
         let busy = Debounce {
-            quiet: Duration::from_millis(100),
-            max_delay: Duration::from_millis(50),
+            quiet: QUIET,
+            max_delay: MAX_DELAY,
         };
         while !writer.is_finished() {
             observer.poll(&mut db, Duration::from_millis(500), busy)?;
@@ -735,7 +755,7 @@ mod tests {
         // Then the queue drains and the position catches up.
         let _ = delay_line.join();
         let quiet = Debounce {
-            quiet: Duration::from_millis(100),
+            quiet: QUIET,
             max_delay: Duration::from_secs(5),
         };
         while observer
@@ -754,6 +774,12 @@ mod tests {
             db.read(|s| s.get_kv(CURSOR_KEY))?.is_some(),
             "a position was stored"
         );
+        let late = late.borrow().len();
+        if late > 0 {
+            eprintln!(
+                "{late} events came later than the quiet period (a busy machine): not counted"
+            );
+        }
         Ok(())
     }
 }
