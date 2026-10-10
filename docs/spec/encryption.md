@@ -82,31 +82,26 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   IV, and the content encrypted with those: the server requires a strong key, keeps the file's
   key, and takes only the IV. New bytes get a new payload IV. The header read also finds a file
   deleted or changed since, before anything is uploaded.
-- **The mode never changes.** The server refuses to change `isEncrypted` on an update. A file
-  stored unencrypted by an earlier version of the client stays unencrypted: it is read and
-  updated as before.
+- **Every node is encrypted.** A live row that isn't is skipped as unreadable: no client has
+  users with unencrypted nodes. (The server couldn't change `isEncrypted` on an update anyway.)
 
 ### Reading
-- A header or feed row of an encrypted file: open the key header with the shared secret, then
+- A header or feed row: open the key header with the shared secret, then
   decrypt the content, and the content hash under its payload IV. A row that doesn't decrypt is
-  skipped with its reason, like any unreadable row. So is an encrypted file whose content has
+  skipped with its reason, like any unreadable row. So is a file whose content has
   no `size` (node schema v1 requires it for files): its stored size is padded, and taking it
   for the file's would make every download fail its hash.
-- The key header is read only when the file is encrypted. On any other row (a tombstone, an
-  unencrypted file) one that doesn't parse, null fields say, is ignored.
+- A tombstone's key header isn't read: one that doesn't parse (null fields, say) is ignored.
 - Payload range `p0..p1` (plaintext offsets, `p1` at most the plaintext size): fetch
   ciphertext from the block before `p0`'s block, or from 0, where the payload IV is the block
   before, up to `p1` rounded up to a block. Decrypt and keep `p0..p1`. The padding block is never
   needed, and never checked: the content hash is.
-- No header is read first: every ranged payload response says whether the payload is
-  encrypted and carries its key (with the payload IV). The first request asks for the
-  ciphertext extent above. An unencrypted payload (written before encryption) may end inside
-  that extent's last block: the server cuts the range short at the payload's end (RFC 9110,
-  odin-core PR #1921), and the plaintext asked for is all there.
-- The extent comes in pieces, one request each, in the mode the first response gave: 8 MiB
-  first, then each sized to take about 15 s at the rate the one before came in (1 to 256
-  MiB). A piece stays well within the client's body timeout, which is how a stalled
-  connection is caught, and on a fast link the round trip between pieces doesn't matter.
+- No header is read first: every ranged payload response carries the file's key (with the
+  payload IV). The extent never runs past the stored payload, which is padded to whole blocks.
+- The extent comes in pieces, one request each: 8 MiB first, then each sized to take about
+  15 s at the rate the one before came in (1 to 256 MiB). A piece stays well within the
+  client's body timeout, which is how a stalled connection is caught, and on a fast link the
+  round trip between pieces doesn't matter.
 
 ## What it doesn't do
 - **End-to-end:** the server can decrypt; see above.
@@ -121,7 +116,8 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 
 ## Cost
 Measured on an i7-8700K (AES-NI, no VAES), against a Homebase on the same machine
-(`hbsync-dev` test `throughput`, and `sealed.rs` test `throughput`):
+(`hbsync-dev` test `throughput`, and `sealed.rs` test `throughput`), with an unencrypted mode
+the client had then for comparison, and 8 MiB read pieces:
 
 | | unencrypted | encrypted |
 |---|---|---|
@@ -129,7 +125,7 @@ Measured on an i7-8700K (AES-NI, no VAES), against a Homebase on the same machin
 | download 1 GiB | 427 MB/s | 372 MB/s |
 | create / read / update a small file | 2.5 / 6.7 / 5.0 ms | 2.5 / 6.1 / 3.7 ms |
 
-(Measured before odin-core #1921, when an unencrypted small read took a second request.) The cipher alone: encrypting 970 MB/s,
+(An unencrypted small read took a second request then.) The cipher alone: encrypting 970 MB/s,
 decrypting 2.8 GB/s, where OpenSSL reaches 1.6 and 6.6 GB/s. The upload's first pass, about 1.3 s per GB here, is the cost that shows. It is small
 next to any internet link. A faster AES (aws-lc-rs) would bring a C build on three OSes, and
 isn't worth it until a measurement shows uploads bound by the CPU.

@@ -61,15 +61,14 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 |---|---|
 | `key` | `sync_data` (matches `^[a-z0-9_]{8,10}$` **[verified]**) |
 | `contentType` | `application/octet-stream` |
-| `iv` | the payload IV (`encryption.md`); empty when unencrypted |
+| `iv` | the payload IV (`encryption.md`) |
 | `hash` | `{ "algorithm": "blake3", "storedHash": b64, "contentHash": b64 }` |
 
 - This client writes BLAKE3. It accepts `sha256` nodes written by other clients and computes
   SHA-256 for the local file when it needs to compare.
-- Encrypted: `storedHash` is over the ciphertext; `contentHash` is the plaintext hash,
-  encrypted (`encryption.md`).
-- Unencrypted (nodes written before encryption): `contentHash == storedHash` **[verified]**
-  rule 5 of `../odin-core/docs/payload-hashes.md`.
+- `storedHash` is over the ciphertext; `contentHash` is the plaintext hash, encrypted
+  (`encryption.md`). (On an unencrypted payload, which this client doesn't write, the server
+  requires them equal **[verified]**, rule 5 of `../odin-core/docs/payload-hashes.md`.)
 - A node with no `hash` (drive without the requirement) is downloaded, hashed locally and
   marked unverified.
 

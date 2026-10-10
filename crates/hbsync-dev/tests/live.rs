@@ -113,66 +113,7 @@ fn nodes_are_stored_encrypted() -> R {
     result
 }
 
-/// A file an earlier version stored unencrypted still reads and updates, and stays
-/// unencrypted (the server can't change that on an update).
-#[test]
-#[ignore = "needs a live identity (HBSYNC_LIVE)"]
-fn unencrypted_files_still_sync() -> R {
-    use std::io::Cursor;
-
-    use hbsync_remote::Remote;
-    use hbsync_remote::contract::{file, upload, with};
-    use hbsync_types::schema::NodeContent;
-
-    let remote = live_remote()?;
-    let bench = Bench::new(&remote, &run_name("legacy"), Duration::ZERO)?;
-    let result = (|| -> R {
-        let (dir, _) = bench.folder("legacy")?;
-        let data = b"written before encryption".to_vec();
-        let meta = file("old.txt", dir.node, &data);
-        let written =
-            remote.create_unencrypted(&meta, Some(upload(&mut Cursor::new(&data[..]))))?;
-        let id = written.file_id;
-        bench.track(id);
-        let encrypted = || remote.raw_header(id).map(|h| h.file_metadata.is_encrypted);
-        assert!(!encrypted()?);
-        let state = remote
-            .header(id)?
-            .state()
-            .and_then(|s| s.content)
-            .ok_or("content")?;
-        assert_eq!(
-            state.hash,
-            hbsync_fileio::hash_bytes(&data, state.hash.algorithm)
-        );
-        let mut back = Vec::new();
-        remote.read(id, None, &mut back)?;
-        assert_eq!(back, data);
-
-        // An update of its bytes and name keeps it unencrypted.
-        let new = b"updated after encryption".to_vec();
-        let renamed = with(
-            &meta,
-            NodeContent::file("renamed.txt", 2, new.len() as u64, false),
-        );
-        remote.update(
-            id,
-            written.version,
-            &renamed,
-            Some(upload(&mut Cursor::new(&new[..]))),
-        )?;
-        assert!(!encrypted()?);
-        let mut back = Vec::new();
-        remote.read(id, None, &mut back)?;
-        assert_eq!(back, new);
-        Ok(())
-    })();
-    bench.cleanup()?;
-    result
-}
-
-/// Upload and download speed, encrypted against unencrypted: one large file, then many small
-/// ones. `HBSYNC_LIVE=… cargo test --release -p hbsync-dev --test live throughput -- --ignored
+/// Upload and download speed: one large file, then many small ones. `HBSYNC_LIVE=… cargo test --release -p hbsync-dev --test live throughput -- --ignored
 /// --nocapture` (`HBSYNC_BIG_MB` sets the large file's size, 1024 by default).
 #[test]
 #[ignore = "a measurement against a live identity (HBSYNC_LIVE)"]
@@ -199,17 +140,12 @@ fn throughput() -> R {
 
     let remote = live_remote()?;
     let bench = Bench::new(&remote, &run_name("throughput"), Duration::ZERO)?;
-    // A create in either mode, remembered for cleanup.
-    let put =
-        |encrypted: bool, meta: &NodeMeta, upload: Upload<'_>| -> Result<RemoteRef, RemoteError> {
-            let at = match encrypted {
-                true => remote.create(meta, Some(upload))?,
-                false => remote.create_unencrypted(meta, Some(upload))?,
-            };
-            bench.track(at.file_id);
-            Ok(at)
-        };
-    let mode = |encrypted: bool| if encrypted { "encrypted" } else { "plain" };
+    // A create, remembered for cleanup.
+    let put = |meta: &NodeMeta, upload: Upload<'_>| -> Result<RemoteRef, RemoteError> {
+        let at = remote.create(meta, Some(upload))?;
+        bench.track(at.file_id);
+        Ok(at)
+    };
     let result = (|| -> R {
         let (dir, _) = bench.folder("throughput")?;
         let alg = HashAlgorithm::Blake3;
@@ -239,70 +175,63 @@ fn throughput() -> R {
                 bytes as f64 / secs / 1e6
             );
         };
-        for encrypted in [false, true] {
-            let name = format!("big {}", mode(encrypted));
-            let meta = with(
-                &file(&name, dir.node, &[]),
-                NodeContent::file(&name, 1, size, false),
-            );
-            tmp.seek(SeekFrom::Start(0))?;
-            let t = Instant::now();
-            let reader = &mut tmp;
-            let at = put(
-                encrypted,
-                &meta,
-                Upload {
-                    hash,
-                    size,
-                    reader,
-                    pace: None,
-                },
-            )?;
-            rate(&format!("upload {mb} MiB, {}", mode(encrypted)), size, t);
-            let t = Instant::now();
-            let mut sink = Hashing(Hasher::new(alg));
-            remote.read(at.file_id, Some(0..size), &mut sink)?;
-            assert_eq!(sink.0.finalize(), hash);
-            rate(&format!("download {mb} MiB, {}", mode(encrypted)), size, t);
-        }
+        let meta = with(
+            &file("big", dir.node, &[]),
+            NodeContent::file("big", 1, size, false),
+        );
+        tmp.seek(SeekFrom::Start(0))?;
+        let t = Instant::now();
+        let reader = &mut tmp;
+        let at = put(
+            &meta,
+            Upload {
+                hash,
+                size,
+                reader,
+                pace: None,
+            },
+        )?;
+        rate(&format!("upload {mb} MiB"), size, t);
+        let t = Instant::now();
+        let mut sink = Hashing(Hasher::new(alg));
+        remote.read(at.file_id, Some(0..size), &mut sink)?;
+        assert_eq!(sink.0.finalize(), hash);
+        rate(&format!("download {mb} MiB"), size, t);
 
         // Many small files: create, read, update.
         const N: usize = 200;
-        for encrypted in [false, true] {
-            let mode = mode(encrypted);
-            let datas: Vec<Vec<u8>> = (0..N)
-                .map(|i| format!("small file {i} {mode}").repeat(100).into_bytes())
-                .collect();
-            let per = |t: Instant| t.elapsed().as_secs_f64() * 1000.0 / N as f64;
-            let t = Instant::now();
-            let mut refs = Vec::new();
-            for (i, data) in datas.iter().enumerate() {
-                let meta = file(&format!("{mode}-{i}"), dir.node, data);
-                let at = put(encrypted, &meta, upload(&mut Cursor::new(&data[..])))?;
-                refs.push((meta, at));
-            }
-            println!("create {N} small, {mode:<9}      {:>5.1} ms each", per(t));
-            let t = Instant::now();
-            for ((_, at), data) in refs.iter().zip(&datas) {
-                let mut back = Vec::new();
-                remote.read(at.file_id, Some(0..data.len() as u64), &mut back)?;
-                assert_eq!(&back, data);
-            }
-            println!("read {N} small, {mode:<9}        {:>5.1} ms each", per(t));
-            let t = Instant::now();
-            for ((meta, at), data) in refs.iter().zip(&datas) {
-                let new = [data.as_slice(), b"!"].concat();
-                let content = NodeContent::file(&meta.content.name, 2, new.len() as u64, false);
-                let mut source = Cursor::new(&new[..]);
-                remote.update(
-                    at.file_id,
-                    at.version,
-                    &with(meta, content),
-                    Some(upload(&mut source)),
-                )?;
-            }
-            println!("update {N} small, {mode:<9}      {:>5.1} ms each", per(t));
+        let datas: Vec<Vec<u8>> = (0..N)
+            .map(|i| format!("small file {i}").repeat(100).into_bytes())
+            .collect();
+        let per = |t: Instant| t.elapsed().as_secs_f64() * 1000.0 / N as f64;
+        let t = Instant::now();
+        let mut refs = Vec::new();
+        for (i, data) in datas.iter().enumerate() {
+            let meta = file(&format!("small-{i}"), dir.node, data);
+            let at = put(&meta, upload(&mut Cursor::new(&data[..])))?;
+            refs.push((meta, at));
         }
+        println!("create {N} small, {:>5.1} ms each", per(t));
+        let t = Instant::now();
+        for ((_, at), data) in refs.iter().zip(&datas) {
+            let mut back = Vec::new();
+            remote.read(at.file_id, Some(0..data.len() as u64), &mut back)?;
+            assert_eq!(&back, data);
+        }
+        println!("read {N} small,   {:>5.1} ms each", per(t));
+        let t = Instant::now();
+        for ((meta, at), data) in refs.iter().zip(&datas) {
+            let new = [data.as_slice(), b"!"].concat();
+            let content = NodeContent::file(&meta.content.name, 2, new.len() as u64, false);
+            let mut source = Cursor::new(&new[..]);
+            remote.update(
+                at.file_id,
+                at.version,
+                &with(meta, content),
+                Some(upload(&mut source)),
+            )?;
+        }
+        println!("update {N} small, {:>5.1} ms each", per(t));
         Ok(())
     })();
     bench.cleanup()?;
