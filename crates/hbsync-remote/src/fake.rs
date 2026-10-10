@@ -318,7 +318,7 @@ impl FakeServer {
         let upload = Upload {
             hash,
             size: data.len() as u64,
-            reader: &mut &data[..],
+            reader: &mut std::io::Cursor::new(data),
         };
         Ok((node, self.create(&new, Some(upload))?))
     }
@@ -479,7 +479,7 @@ fn replay<T>(
     send(Some(Upload {
         hash,
         size: bytes.len() as u64,
-        reader: &mut bytes.as_slice(),
+        reader: &mut std::io::Cursor::new(bytes.as_slice()),
     }))
 }
 

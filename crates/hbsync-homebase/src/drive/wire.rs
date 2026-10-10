@@ -218,21 +218,66 @@ fn payload_info(p: &Payload, key: Option<&KeyHeader>) -> Result<PayloadInfo, Str
     })
 }
 
+/// What an upload says about the `sync_data` payload it sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayloadDescriptor {
+    pub algorithm: HashAlgorithm,
+    /// Base64, over the bytes sent.
+    pub stored_hash: String,
+    /// Base64: the plaintext hash, sealed when encrypted.
+    pub content_hash: String,
+    /// The payload IV, when encrypted.
+    pub iv: Option<[u8; 16]>,
+}
+
+impl PayloadDescriptor {
+    /// An unencrypted payload: both hashes are the plaintext's.
+    pub fn plain(hash: &ContentHash) -> Self {
+        PayloadDescriptor {
+            algorithm: hash.algorithm,
+            stored_hash: hash.to_base64(),
+            content_hash: hash.to_base64(),
+            iv: None,
+        }
+    }
+
+    /// A payload encrypted with `key` under `iv`, whose ciphertext hashes to `stored`.
+    pub fn sealed(
+        key: &KeyHeader,
+        iv: [u8; 16],
+        content: &ContentHash,
+        stored: &ContentHash,
+    ) -> Self {
+        PayloadDescriptor {
+            algorithm: content.algorithm,
+            stored_hash: stored.to_base64(),
+            content_hash: key.seal_hash(&iv, content),
+            iv: Some(iv),
+        }
+    }
+}
+
 /// The `instructions` part of a create (`update: false`) or update. With `payload`, the
-/// `sync_data` payload is (over)written with that hash.
-pub fn instructions(transfer_iv: &[u8; 16], payload: Option<&ContentHash>, update: bool) -> Value {
+/// `sync_data` payload is (over)written.
+pub fn instructions(
+    transfer_iv: &[u8; 16],
+    payload: Option<&PayloadDescriptor>,
+    update: bool,
+) -> Value {
     let descriptors: Vec<Value> = payload
-        .map(|hash| {
-            let b64 = hash.to_base64();
+        .map(|p| {
             let mut d = json!({
                 "payloadKey": PAYLOAD_KEY,
                 "contentType": CONTENT_TYPE,
                 "hash": {
-                    "algorithm": hash.algorithm.as_str(),
-                    "storedHash": b64,
-                    "contentHash": b64,
+                    "algorithm": p.algorithm.as_str(),
+                    "storedHash": p.stored_hash,
+                    "contentHash": p.content_hash,
                 },
             });
+            if let Some(iv) = &p.iv {
+                d["iv"] = json!(STANDARD.encode(iv));
+            }
             if update {
                 d["payloadUpdateOperationType"] = json!("appendOrOverwrite");
             }
@@ -253,16 +298,23 @@ pub fn instructions(transfer_iv: &[u8; 16], payload: Option<&ContentHash>, updat
 }
 
 /// The plaintext of the `metadata` part. Homebase replaces the whole header on update, so
-/// every field is always sent: node id, parent, kind, content, and the owner-only ACL.
-fn metadata_json(meta: &NodeMeta, version: Option<VersionTag>, key_header: Value) -> Value {
+/// every field is always sent: node id, parent, kind, content, and the owner-only ACL. With
+/// `key`, the file is encrypted and its content sealed with it.
+fn metadata_json(
+    meta: &NodeMeta,
+    version: Option<VersionTag>,
+    key_header: Value,
+    key: Option<&KeyHeader>,
+) -> Value {
     let file_type = match meta.kind {
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,
     };
+    let content = meta.content.to_json();
     json!({
         "encryptedKeyHeader": key_header,
         "fileMetadata": {
-            "isEncrypted": false,
+            "isEncrypted": key.is_some(),
             "allowDistribution": false,
             "accessControlList": { "requiredSecurityGroup": "owner" },
             "appData": {
@@ -270,24 +322,28 @@ fn metadata_json(meta: &NodeMeta, version: Option<VersionTag>, key_header: Value
                 "groupId": meta.parent.0,
                 "fileType": file_type,
                 "dataType": 0,
-                "content": meta.content.to_json(),
+                "content": key.map_or(content.clone(), |k| k.seal_text(&content)),
             },
             "versionTag": version.map(|v| v.0),
         },
     })
 }
 
-/// The `metadata` part: the header JSON, AES-CBC under the shared secret with `transfer_iv`.
-/// An unencrypted file still needs a key header; like chat-kmp, an all-zero key encrypted the
-/// same way.
+/// The `metadata` part: the header JSON, AES-CBC under the shared secret with `transfer_iv`,
+/// with the file `key` sealed the same way. An unencrypted file still needs a key header;
+/// like chat-kmp, an all-zero key.
 pub fn metadata(
     meta: &NodeMeta,
     version: Option<VersionTag>,
     shared_secret: &Key,
     transfer_iv: &[u8; 16],
+    key: Option<&KeyHeader>,
 ) -> Vec<u8> {
-    let key_header = KeyHeader::seal_none(shared_secret, transfer_iv);
-    let plain = metadata_json(meta, version, key_header).to_string();
+    let key_header = match key {
+        Some(key) => key.seal(shared_secret, transfer_iv),
+        None => KeyHeader::seal_none(shared_secret, transfer_iv),
+    };
+    let plain = metadata_json(meta, version, key_header, key).to_string();
     aes_cbc_encrypt(shared_secret, transfer_iv, plain.as_bytes())
 }
 
@@ -295,6 +351,7 @@ pub fn metadata(
 mod tests {
     use super::*;
     use crate::crypto::aes_cbc_decrypt;
+    use crate::drive::sealed;
 
     /// The shared secret of the tests.
     const SS: Key = [3; 16];
@@ -414,7 +471,7 @@ mod tests {
     fn upload_parts() -> Result<(), Box<dyn std::error::Error>> {
         let hash = hbsync_fileio::hash_bytes(b"x", HashAlgorithm::Blake3);
         let iv = [7u8; 16];
-        let create = instructions(&iv, Some(&hash), false);
+        let create = instructions(&iv, Some(&PayloadDescriptor::plain(&hash)), false);
         assert_eq!(create["transferIv"], STANDARD.encode(iv));
         let d = &create["manifest"]["payloadDescriptors"][0];
         assert_eq!(
@@ -422,6 +479,8 @@ mod tests {
             (Some("sync_data"), Some("blake3"))
         );
         assert!(create.get("locale").is_none() && d.get("payloadUpdateOperationType").is_none());
+        assert!(d.get("iv").is_none());
+        assert_eq!(d["hash"]["storedHash"], d["hash"]["contentHash"]);
         let update = instructions(&iv, None, true);
         assert_eq!(update["locale"], "local");
         assert_eq!(update["manifest"]["payloadDescriptors"], json!([]));
@@ -434,7 +493,7 @@ mod tests {
         };
         let key = [9u8; 16];
         let version = VersionTag(Uuid::from_u128(5));
-        let sealed = metadata(&meta, Some(version), &key, &iv);
+        let sealed = metadata(&meta, Some(version), &key, &iv, None);
         let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&key, &iv, &sealed)?)?;
         let app = &plain["fileMetadata"]["appData"];
         assert_eq!(app["uniqueId"], json!(meta.node.0));
@@ -448,6 +507,41 @@ mod tests {
                 .ok_or("key")?,
         )?;
         assert_eq!(aes_cbc_decrypt(&key, &iv, &wrapped)?, [0u8; 32]);
+        assert_eq!(plain["fileMetadata"]["isEncrypted"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn encrypted_upload_parts() -> Result<(), Box<dyn std::error::Error>> {
+        let kh = KeyHeader::random()?;
+        let (payload_iv, transfer_iv) = (sealed::strong()?, sealed::strong()?);
+        let content = hbsync_fileio::hash_bytes(b"x", HashAlgorithm::Blake3);
+        let stored = hbsync_fileio::hash_bytes(b"ciphertext", HashAlgorithm::Blake3);
+        let p = PayloadDescriptor::sealed(&kh, payload_iv, &content, &stored);
+        let d = &instructions(&transfer_iv, Some(&p), true)["manifest"]["payloadDescriptors"][0];
+        assert_eq!(d["iv"], STANDARD.encode(payload_iv));
+        assert_eq!(d["hash"]["storedHash"], stored.to_base64());
+        let sealed_hash = d["hash"]["contentHash"].as_str().ok_or("hash")?;
+        assert_eq!(
+            kh.open_hash(&payload_iv, HashAlgorithm::Blake3, sealed_hash)?,
+            content
+        );
+
+        let meta = NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            content: NodeContent::file("Résumé.txt", 1, 1, false),
+        };
+        let sealed = metadata(&meta, None, &SS, &transfer_iv, Some(&kh));
+        let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
+        assert_eq!(plain["fileMetadata"]["isEncrypted"], true);
+        let key: SealedKeyHeader = serde_json::from_value(plain["encryptedKeyHeader"].clone())?;
+        assert_eq!(KeyHeader::open(&key, &SS)?, kh);
+        let content = plain["fileMetadata"]["appData"]["content"]
+            .as_str()
+            .ok_or("content")?;
+        assert_eq!(kh.open_text(content)?, meta.content.to_json());
         Ok(())
     }
 }

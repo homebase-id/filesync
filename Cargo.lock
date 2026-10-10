@@ -1101,11 +1101,13 @@ version = "0.1.0"
 dependencies = [
  "hbsync-app",
  "hbsync-engine",
+ "hbsync-fileio",
  "hbsync-homebase",
  "hbsync-local",
  "hbsync-platform",
  "hbsync-remote",
  "hbsync-state",
+ "hbsync-types",
  "serde_json",
  "tempfile",
  "tracing-subscriber",

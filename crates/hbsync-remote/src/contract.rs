@@ -6,6 +6,7 @@
 //! [`Bench::cleanup`].
 
 use std::collections::HashSet;
+use std::io::Cursor;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -187,9 +188,9 @@ impl<'a> Bench<'a> {
     }
 }
 
-/// `data` as an upload with its BLAKE3 hash; `reader` must start as `data`.
-pub fn upload<'a>(reader: &'a mut &[u8]) -> Upload<'a> {
-    let data: &[u8] = reader;
+/// `data` as an upload with its BLAKE3 hash.
+pub fn upload<'a>(reader: &'a mut Cursor<&[u8]>) -> Upload<'a> {
+    let data: &[u8] = reader.get_ref();
     Upload {
         hash: hash_bytes(data, HashAlgorithm::Blake3),
         size: data.len() as u64,
@@ -200,7 +201,7 @@ pub fn upload<'a>(reader: &'a mut &[u8]) -> Upload<'a> {
 /// Calls `f` with `data` as an upload, or with none.
 fn with_upload<T>(data: Option<&[u8]>, f: impl FnOnce(Option<Upload<'_>>) -> T) -> T {
     match data {
-        Some(mut data) => f(Some(upload(&mut data))),
+        Some(data) => f(Some(upload(&mut Cursor::new(data)))),
         None => f(None),
     }
 }
@@ -450,7 +451,7 @@ fn tombstone_in_the_feed(b: &Bench) -> Outcome {
 
 fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     let f = file("f", b.scratch, b"real");
-    let mut reader: &[u8] = b"fake";
+    let mut reader = Cursor::new(&b"fake"[..]);
     let lying = Upload {
         hash: hash_bytes(b"real", HashAlgorithm::Blake3),
         size: 4,

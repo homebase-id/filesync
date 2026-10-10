@@ -18,8 +18,7 @@ fn create_file(
     node: &NodeMeta,
     data: &[u8],
 ) -> Result<hbsync_types::RemoteRef, RemoteError> {
-    let mut reader = data;
-    r.create(node, Some(upload(&mut reader)))
+    r.create(node, Some(upload(&mut std::io::Cursor::new(data))))
 }
 
 #[test]
@@ -62,7 +61,7 @@ fn an_update_keeps_node_id_and_kind() -> R {
 fn hash_rules() -> R {
     let r = remote();
     let f = file("f", NodeId::ROOT, b"real");
-    let mut reader: &[u8] = b"corrupted";
+    let mut reader = std::io::Cursor::new(&b"corrupted"[..]);
     let lying = Upload {
         hash: hash_bytes(b"real", HashAlgorithm::Blake3),
         size: 4,

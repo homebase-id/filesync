@@ -198,6 +198,34 @@ impl Client {
         }
     }
 
+    /// `GET {path}` of a whole payload (the route that ignores `Range`): what the response says
+    /// about it, and its bytes to read.
+    pub fn fetch(&self, path: &str) -> Result<Fetched, HomebaseError> {
+        let response = self
+            .agent
+            .get(self.url(path))
+            .header("Authorization", &self.bearer())
+            .call();
+        let response = checked(response, path)?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        Ok(Fetched {
+            encrypted: header("PayloadEncrypted").is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            key_header: header("SharedSecretEncryptedHeader64"),
+            what: path.to_owned(),
+            body: response
+                .into_body()
+                .into_with_config()
+                .limit(u64::MAX)
+                .reader(),
+        })
+    }
+
     fn decode<T: DeserializeOwned>(
         &self,
         response: Result<Response<ureq::Body>, ureq::Error>,
@@ -220,6 +248,47 @@ impl Client {
             body
         };
         Ok(serde_json::from_slice(&plain)?)
+    }
+}
+
+/// A payload being read whole ([`Client::fetch`]).
+pub struct Fetched {
+    /// The payload is encrypted (`PayloadEncrypted`).
+    pub encrypted: bool,
+    /// When encrypted: the key with this payload's IV, under the shared secret
+    /// (`SharedSecretEncryptedHeader64`).
+    pub key_header: Option<String>,
+    what: String,
+    body: ureq::BodyReader<'static>,
+}
+
+impl std::fmt::Debug for Fetched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Fetched")
+            .field("what", &self.what)
+            .field("encrypted", &self.encrypted)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Fetched {
+    /// Copies up to `limit` bytes into `sink`; returns how many came.
+    pub fn copy_to(&mut self, sink: &mut dyn Write, limit: u64) -> Result<u64, HomebaseError> {
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut written = 0u64;
+        while written < limit {
+            let want = (limit - written).min(buf.len() as u64) as usize;
+            let n = self
+                .body
+                .read(&mut buf[..want])
+                .map_err(|e| HomebaseError::Network(format!("{}: {e}", self.what)))?;
+            if n == 0 {
+                break;
+            }
+            sink.write_all(&buf[..n])?;
+            written += n as u64;
+        }
+        Ok(written)
     }
 }
 

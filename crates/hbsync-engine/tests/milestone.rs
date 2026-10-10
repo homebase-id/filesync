@@ -579,7 +579,7 @@ fn an_edit_keeps_the_executable_bit() -> R {
         Some(Upload {
             hash: hbsync_fileio::hash_bytes(script, hbsync_fileio::HashAlgorithm::Blake3),
             size: script.len() as u64,
-            reader: &mut &script[..],
+            reader: &mut std::io::Cursor::new(&script[..]),
         }),
     )?;
     let mut a = Client::with_config(&server, "a", |_| {})?;

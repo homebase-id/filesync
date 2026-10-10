@@ -8,7 +8,7 @@
 //! many small files aren't stuck behind one large one.
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc;
@@ -89,6 +89,13 @@ impl<R: Read> Read for ThrottledRead<'_, R> {
             t.take(n);
         }
         Ok(n)
+    }
+}
+
+/// Seeking takes no bandwidth.
+impl<R: Seek> Seek for ThrottledRead<'_, R> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
     }
 }
 

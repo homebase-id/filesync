@@ -239,6 +239,10 @@ impl<R: Read> Encrypting<R> {
         }
     }
 
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
     /// Encrypts the next chunk into `out`.
     fn refill(&mut self) -> io::Result<()> {
         let mut plain = std::mem::take(&mut self.carry);
@@ -594,6 +598,74 @@ mod tests {
             out.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             want
         );
+        Ok(())
+    }
+
+    /// Throughput of the stream cipher, next to hashing (what an upload also does):
+    /// `cargo test --release -p hbsync-homebase throughput -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement"]
+    fn throughput() -> Result<(), Box<dyn std::error::Error>> {
+        const SIZE: u64 = 1 << 30;
+        let kh = KeyHeader::random()?;
+        let iv = strong()?;
+        let rate = |what: &str, started: std::time::Instant| {
+            let secs = started.elapsed().as_secs_f64();
+            eprintln!("{what:<34} {:>7.0} MB/s", SIZE as f64 / secs / 1e6);
+        };
+        let source = || io::repeat(0x5a).take(SIZE);
+
+        let started = std::time::Instant::now();
+        io::copy(
+            &mut Encrypting::new(source(), &kh.key, &iv),
+            &mut io::sink(),
+        )?;
+        rate("encrypt (stream)", started);
+
+        let started = std::time::Instant::now();
+        let mut hasher = hbsync_fileio::Hasher::new(HashAlgorithm::Blake3);
+        let mut reader = Encrypting::new(source(), &kh.key, &iv);
+        let mut buf = vec![0u8; CHUNK];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        rate("encrypt + BLAKE3 (upload pass 1)", started);
+
+        let started = std::time::Instant::now();
+        hbsync_fileio::hash_reader(source(), HashAlgorithm::Blake3)?;
+        rate("BLAKE3 alone", started);
+        let started = std::time::Instant::now();
+        hbsync_fileio::hash_reader(source(), HashAlgorithm::Sha256)?;
+        rate("SHA-256 alone", started);
+
+        // The crates alone, in place on one buffer: the ceiling for the streams above.
+        let mut buf = vec![0x33u8; CHUNK];
+        let mut cipher = cbc::Encryptor::<Aes128>::new((&kh.key).into(), (&iv).into());
+        let started = std::time::Instant::now();
+        for _ in 0..SIZE / CHUNK as u64 {
+            cipher.encrypt_blocks(Array::slice_as_chunks_mut(&mut buf).0);
+        }
+        rate("encrypt (cbc crate, in place)", started);
+        let mut cipher = cbc::Decryptor::<Aes128>::new((&kh.key).into(), (&iv).into());
+        let started = std::time::Instant::now();
+        for _ in 0..SIZE / CHUNK as u64 {
+            cipher.decrypt_blocks(Array::slice_as_chunks_mut(&mut buf).0);
+        }
+        rate("decrypt (cbc crate, in place)", started);
+
+        // Decrypting what arrives in 64 KiB pieces, as a download does.
+        let sealed = vec![0x33u8; CHUNK];
+        let mut sink = io::sink();
+        let mut d = Decrypting::new(&kh.key, Some(&iv), 0, SIZE, &mut sink);
+        let started = std::time::Instant::now();
+        for _ in 0..SIZE / CHUNK as u64 {
+            d.write_all(&sealed)?;
+        }
+        rate("decrypt (stream)", started);
         Ok(())
     }
 
