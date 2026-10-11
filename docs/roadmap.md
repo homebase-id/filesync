@@ -132,9 +132,10 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Filters** (done 2026-10-09, sync semantics §10): built-in junk, per-device ignore rules in
   `.hbsync/ignore`, remote nodes masked per device, local-only semantics for ignored items
 - **Observability**: structured logs, per-item status, diagnostics bundle
-- **Packaging**: release archives for Linux x86_64, macOS and Windows x86_64 (done
-  2026-10-10, `.github/workflows/release.yml`, unsigned); still open: signing and notarization,
-  auto-update, arm64 Linux and Windows
+- **Packaging** (2026-10-11, `docs/spec/packaging.md`, `RELEASING.md`): Conveyor installers
+  that update themselves (MSIX, Mac apps and `.dmg`, `.deb` with its apt repository), an `.rpm`,
+  a static tarball and a Windows zip; still open: signing and notarization (DevOps' keys),
+  confirming the Windows and Mac updates on real machines, arm64 Linux and Windows
 
 ## Layer 7: Content on demand
 - **Selective sync**: all OSes; this is the Linux v1 answer

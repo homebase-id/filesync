@@ -1,27 +1,37 @@
 name: Release
 
-# Archives of hbsync and hbsyncd for Linux, macOS and Windows. A `v*` tag (matching the
-# workspace version) also makes a draft GitHub release of them; a manual run only builds them.
+# Homebase Filesync's installers and update sites (RELEASING.md, docs/spec/packaging.md):
+# Conveyor's MSIX, Mac apps and .deb with their update feeds, plus a .dmg per Mac architecture
+# and an .rpm. The build and package jobs hold no secrets and run for every trigger; their
+# packages carry a throwaway key (the bleeding channel's feed, self-signed for macOS and
+# Windows), for testing. A `v*` tag (matching the workspace version) also makes a draft GitHub
+# release of them, from the protected `release-signing` environment, where signing goes once
+# DevOps has the keys. A manual run only builds and tests.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
+  CONVEYOR_VERSION: "22.3"
+  CONVEYOR_SHA256: 35b89e746af469f81fb7762a6b14e1458bead71b54b778d199664a871d8e6620
 
 jobs:
   version:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: rustup toolchain install
       - id: version
         shell: bash
@@ -34,6 +44,7 @@ jobs:
             exit 1
           fi
 
+  # The three programs per platform, staged as Conveyor takes them.
   build:
     needs: version
     strategy:
@@ -41,118 +52,302 @@ jobs:
       matrix:
         include:
           # Static (musl): runs on any distribution, whatever its glibc.
-          - platform: linux-x86_64
-            os: ubuntu-latest
-            targets: x86_64-unknown-linux-musl
-          # Both architectures, joined into universal binaries.
-          - platform: macos-universal
-            os: macos-latest
-            targets: aarch64-apple-darwin x86_64-apple-darwin
-          - platform: windows-x86_64
-            os: windows-latest
-            targets: x86_64-pc-windows-msvc
+          - { stage: linux, os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { stage: mac-amd64, os: macos-latest, target: x86_64-apple-darwin }
+          - { stage: mac-aarch64, os: macos-latest, target: aarch64-apple-darwin }
+          - { stage: windows, os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    permissions:
+      contents: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      STAGE: ${{ matrix.stage }}
+      TARGET: ${{ matrix.target }}
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       # The C runtime linked in: no VC++ redistributable needed.
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      # Room in the Mach-O headers for Conveyor's Sparkle loader and its signing.
+      CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-headerpad,0xFF
+      CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-headerpad,0xFF
     steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install
-      - run: rustup target add ${{ matrix.targets }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          key: dist-${{ matrix.platform }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: dist-${{ matrix.stage }}
       # A C compiler for musl (bundled SQLite, ring, blake3).
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - name: Build
+      - run: cargo build --locked --profile dist -p hbsync -p hbsync-tray --target "$TARGET"
+      - name: Stage
         shell: bash
         run: |
-          for target in ${{ matrix.targets }}; do
-            cargo build --locked --profile dist -p hbsync -p hbsync-tray --target "$target"
-          done
-      - name: Package
-        shell: bash
-        run: |
-          dir="hbsync-$VERSION-${{ matrix.platform }}"
-          exe=""
-          if [[ "$RUNNER_OS" == Windows ]]; then exe=.exe; fi
-          mkdir -p "dist/$dir"
-          targets=(${{ matrix.targets }})
-          for bin in hbsync hbsyncd homebase-filesync; do
-            if (( ${#targets[@]} > 1 )); then
-              lipo -create -output "dist/$dir/$bin" $(printf "target/%s/dist/$bin " "${targets[@]}")
-            else
-              cp "target/${targets[0]}/dist/$bin$exe" "dist/$dir/"
-            fi
-          done
-          cp .github/release/README.txt LICENSE LICENSE-GPL "dist/$dir/"
-          echo "DIR=$dir" >> "$GITHUB_ENV"
-          echo "EXE=$exe" >> "$GITHUB_ENV"
+          out=target/$TARGET/dist
+          case "$STAGE" in
+            linux)
+              mkdir -p stage/linux/bin
+              cp $out/hbsync $out/hbsyncd $out/homebase-filesync stage/linux/bin/ ;;
+            # The tray alone in Contents/MacOS, the daemon and the CLI as helpers.
+            mac-*)
+              mkdir -p stage/$STAGE/MacOS stage/$STAGE/Helpers
+              cp $out/homebase-filesync stage/$STAGE/MacOS/
+              cp $out/hbsync $out/hbsyncd stage/$STAGE/Helpers/ ;;
+            windows)
+              mkdir -p stage/windows
+              cp $out/hbsync.exe $out/hbsyncd.exe $out/homebase-filesync.exe stage/windows/ ;;
+          esac
       - name: Smoke test
         shell: bash
         run: |
-          hbsync="dist/$DIR/hbsync$EXE"
-          # The version carries the commit built (from the build script).
+          exe=""
+          case "$STAGE" in
+            linux)
+              cli=stage/linux/bin; tray=$cli
+              for bin in hbsync hbsyncd homebase-filesync; do
+                file $cli/$bin | grep -E "static(-pie)? linked"
+              done ;;
+            mac-amd64)
+              # Not run on the ARM runner: only its architecture checked.
+              lipo -archs stage/$STAGE/MacOS/homebase-filesync | grep -Fx x86_64
+              exit 0 ;;
+            mac-aarch64) cli=stage/$STAGE/Helpers; tray=stage/$STAGE/MacOS ;;
+            windows) cli=stage/windows; tray=$cli; exe=.exe ;;
+          esac
           stamped="$VERSION ($(git rev-parse --short=7 HEAD))"
-          "$hbsync" --version | grep -Fx "hbsync $stamped"
-          "dist/$DIR/homebase-filesync$EXE" --version | grep -Fx "homebase-filesync $stamped"
+          "$cli/hbsync$exe" --version | grep -Fx "hbsync $stamped"
+          "$tray/homebase-filesync$exe" --version | grep -Fx "homebase-filesync $stamped"
           # No daemon in a fresh home: says so, with exit status 3.
           home="$RUNNER_TEMP/hbsync-smoke"
           mkdir -p "$home"
           set +e
-          HBSYNC_HOME="$home" "$hbsync" status
+          HBSYNC_HOME="$home" "$cli/hbsync$exe" status
           status=$?
           set -e
           if [[ $status != 3 ]]; then
             echo "::error::hbsync status exited $status, not 3"
             exit 1
           fi
-          case "$RUNNER_OS" in
-            Linux)
-              for bin in hbsync hbsyncd homebase-filesync; do
-                file "dist/$DIR/$bin" | grep -E "static(-pie)? linked"
-              done ;;
-            macOS)
-              for bin in hbsync hbsyncd homebase-filesync; do
-                lipo "dist/$DIR/$bin" -verify_arch arm64 x86_64
-              done ;;
-          esac
-      - name: Archive
-        shell: bash
-        run: |
-          cd dist
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            7z a "$DIR.zip" "$DIR"
-          else
-            tar czf "$DIR.tar.gz" "$DIR"
-          fi
-      - uses: actions/upload-artifact@v4
+      # Artifacts lose the executable bit: tar first.
+      - shell: bash
+        run: tar cf stage-$STAGE.tar stage
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ matrix.platform }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
+          name: stage-${{ matrix.stage }}
+          path: stage-${{ matrix.stage }}.tar
           if-no-files-found: error
 
-  release:
-    if: github.ref_type == 'tag'
+  # Conveyor's site: the MSIX, the Mac app zips, the .deb with its apt repository, the update
+  # feeds, a tarball and a zip. With a throwaway key: the signed ones come from the release job.
+  package:
     needs: [version, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      CONVEYOR_AGREE_TO_LICENSE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: stage-*
+          path: dl
+          merge-multiple: true
+      - run: for t in dl/*.tar; do tar xf "$t" -C packaging; done
+      - name: Install Conveyor
+        run: |
+          f=conveyor-$CONVEYOR_VERSION-linux-amd64.tar.gz
+          curl -sSfLO "https://downloads.hydraulic.dev/conveyor/$f"
+          echo "$CONVEYOR_SHA256  $f" | sha256sum -c
+          mkdir -p "$RUNNER_TEMP/conveyor" && tar xzf "$f" -C "$RUNNER_TEMP/conveyor"
+          echo "$RUNNER_TEMP/conveyor/conveyor-$CONVEYOR_VERSION/bin" >> "$GITHUB_PATH"
+      - name: Make the site
+        working-directory: packaging
+        run: |
+          conveyor keys generate --no-passphrase --no-keyring -o "$RUNNER_TEMP/keys"
+          cat > unsigned.conf <<EOF
+          include required("conveyor.conf")
+          include required("$RUNNER_TEMP/keys/defaults.conf")
+          EOF
+          conveyor -f unsigned.conf -Kapp.version="$VERSION" --console=plain make site
+          mv output ../site
+          ls -l ../site
+      - run: tar cf site.tar site
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site
+          path: site.tar
+          if-no-files-found: error
+
+  dmg:
+    needs: [version, package]
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+      - run: tar xf site.tar
+      - name: Make the disk images
+        run: |
+          mkdir dmg
+          for arch in aarch64 amd64; do
+            packaging/macos/make-dmg.sh site/homebase-filesync-$VERSION-mac-$arch.zip \
+              dmg/Homebase-Filesync-$VERSION-mac-$arch.dmg
+          done
+          ls -l dmg
+      - name: Test the Apple Silicon one
+        run: |
+          mount=$(hdiutil attach -nobrowse -readonly dmg/Homebase-Filesync-$VERSION-mac-aarch64.dmg \
+            | tail -1 | cut -f3)
+          app="$mount/Homebase Filesync.app"
+          test -L "$mount/Applications"
+          codesign --verify --deep --strict "$app"
+          plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist" | grep -Fx homebase-filesync
+          "$app/Contents/MacOS/homebase-filesync" --version
+          "$app/Contents/Helpers/hbsync" --version
+          hdiutil detach "$mount"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dmg
+          path: dmg/*.dmg
+          if-no-files-found: error
+
+  rpm:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: stage-linux
+      - run: tar xf stage-linux.tar && mkdir rpm
+      # Fedora's own rpmbuild, in Fedora: no third-party packager.
+      - name: Build
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e VERSION fedora:42 bash -euc '
+            dnf -y -q install rpm-build >/dev/null
+            rpmbuild -bb --define "_topdir /tmp/rpm" --define "pkg_version $VERSION" \
+              --define "stage /src/stage/linux" --define "src /src" packaging/linux/homebase-filesync.spec
+            cp /tmp/rpm/RPMS/x86_64/*.rpm rpm/'
+      - name: Install, run, remove
+        run: |
+          docker run --rm -v "$PWD/rpm:/rpm:ro" fedora:42 bash -euxc '
+            dnf -y -q --setopt=install_weak_deps=False install /rpm/*.rpm desktop-file-utils >/dev/null
+            hbsync --version
+            homebase-filesync --version
+            desktop-file-validate /usr/share/applications/id.homebase.filesync.desktop
+            dnf -y -q remove homebase-filesync >/dev/null
+            test ! -e /usr/bin/hbsync'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rpm
+          path: rpm/*.rpm
+          if-no-files-found: error
+
+  test-deb:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+      - run: tar xf site.tar
+      - name: Install, run, remove
+        run: |
+          docker run --rm -v "$PWD/site:/site:ro" ubuntu:24.04 bash -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends /site/debian/homebase-filesync_*_amd64.deb desktop-file-utils >/dev/null
+            hbsync --version
+            homebase-filesync --version
+            desktop-file-validate /usr/share/applications/id.homebase.filesync.desktop
+            test -f /etc/apt/sources.list.d/homebase-filesync.sources
+            apt-get remove -y -qq homebase-filesync >/dev/null
+            test ! -e /usr/bin/hbsync'
+
+  test-msix:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: site
+      - run: tar xf site.tar
+      - name: Install, run, remove
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Self-signed in these builds: trusted first, as Conveyor's install.ps1 does.
+          Import-Certificate -FilePath site/homebase-filesync.crt -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          Add-AppxPackage -Path (Get-ChildItem site/*.msix).FullName
+          $p = Get-AppxPackage HomebaseFilesync
+          Start-Process "shell:AppsFolder\$($p.PackageFamilyName)!HomebaseFilesync"
+          Start-Sleep -Seconds 15
+          if (-not (Get-Process homebase-filesync -ErrorAction SilentlyContinue)) { throw "the tray isn't running" }
+          # Its files go to the real LocalAppData (excluded from the package's virtualization).
+          if (-not (Test-Path "$env:LOCALAPPDATA\Homebase Filesync\logs")) { throw "no log in LocalAppData" }
+          Get-Process homebase-filesync, hbsyncd -ErrorAction SilentlyContinue | Stop-Process -Force
+          Remove-AppxPackage $p.PackageFullName
+          if (Get-AppxPackage HomebaseFilesync) { throw "still installed" }
+
+  # A draft release of the tag, from the protected environment (a required reviewer, tags
+  # only: RELEASING.md), so that signing can join it without its secrets reaching the jobs above.
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, package, dmg, rpm, test-deb, test-msix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release-signing
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: assets
-          merge-multiple: true
-      - run: cd assets && sha256sum * > SHA256SUMS
-      # A draft: visible to the repository's members until published.
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dl
+      - name: Collect
+        run: |
+          mkdir assets
+          tar xf dl/site/site.tar
+          cp site/*.msix site/*.crt site/*.zip site/*.tar.gz site/debian/*.deb dl/dmg/*.dmg dl/rpm/*.rpm assets/
+          cd assets && sha256sum * > SHA256SUMS
+      # Signing goes here once DevOps has the keys (RELEASING.md): Conveyor again with
+      # conveyor-production.conf (it signs, notarizes and uploads the update site), then the
+      # disk images signed and notarized.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: assets/*
+      # A draft: visible to the repository's members until published by hand.
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}

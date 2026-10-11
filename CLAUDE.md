@@ -71,10 +71,14 @@ clippy and tests on Ubuntu, Windows and macOS. Crates without SQLite can also be
 the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-windows-msvc`
 (set `CARGO_FEATURE_PURE=1` so blake3 doesn't need a cross assembler).
 
-Releases (`.github/workflows/release.yml`): archives of `hbsync` + `hbsyncd` for Linux x86_64
-(static, musl), macOS (universal) and Windows x86_64, built with the `dist` profile and
-smoke-tested. Pushing a tag `vX.Y.Z` equal to the workspace version makes a draft GitHub
-release of them, to publish by hand; running the workflow by hand only builds them.
+Releases (`RELEASING.md`, `.github/workflows/release.yml`, `docs/spec/packaging.md`): installers
+made with Conveyor (`packaging/conveyor.conf`): an MSIX for Windows, a Mac app per architecture
+(also as a `.dmg`), a `.deb` with its apt repository, an `.rpm` (Fedora's `rpmbuild`), a static
+Linux tarball and a Windows zip, all with `hbsync`, `hbsyncd` and the tray `homebase-filesync`
+(built with the `dist` profile, smoke-tested, installed and removed on fresh runners). Build
+jobs hold no secrets; a tag `vX.Y.Z` equal to the workspace version makes a draft GitHub
+release from the protected `release-signing` environment, to publish by hand; running the
+workflow by hand only builds and tests. Signing waits for DevOps' keys.
 
 ## Crates
 

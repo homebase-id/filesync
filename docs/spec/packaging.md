@@ -15,8 +15,8 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
 | | Package | Where the programs are | Starts at login | Updates |
 |---|---|---|---|---|
 | Windows | MSIX, plus Conveyor's small installer EXE; a zip without updates | `C:\Program Files\WindowsApps\HomebaseFilesync_<version>_x64__<id>\` | the package's startup task (`HomebaseFilesync.StartupTask`) | the `.appinstaller` feed; Conveyor's `updatecheck.exe` runs first at logon (`updates = aggressive`) |
-| macOS | `Homebase Filesync.app` per architecture, in a zip; our own `.dmg` around it (to do) | the tray in `Contents/MacOS`, `hbsyncd` and `hbsync` in `Contents/Helpers` | our launchd agent | Sparkle 2, injected by Conveyor (`SUFeedURL` = `appcast-<arch>.rss`) |
-| Linux | `.deb` (package `homebase-filesync`) that adds its own apt source and key; a tarball without updates; `.rpm` from nfpm (to do) | `/usr/lib/homebase/homebase-filesync/bin/`, `/usr/bin/homebase-filesync` and `/usr/bin/hbsync` symlinks, `id.homebase.filesync.desktop` | our XDG autostart entry | `apt upgrade` from the signed repo in the site |
+| macOS | `Homebase Filesync.app` per architecture, in a zip; our own `.dmg` around it (`packaging/macos/make-dmg.sh`) | the tray in `Contents/MacOS`, `hbsyncd` and `hbsync` in `Contents/Helpers` | our launchd agent | Sparkle 2, injected by Conveyor (`SUFeedURL` = `appcast-<arch>.rss`) |
+| Linux | `.deb` (package `homebase-filesync`) that adds its own apt source and key; a tarball without updates; an `.rpm` from Fedora's `rpmbuild` (`packaging/linux/`), no update repository yet | `/usr/lib/homebase/homebase-filesync/bin/`, `/usr/bin/homebase-filesync` and `/usr/bin/hbsync` symlinks, `id.homebase.filesync.desktop` | our XDG autostart entry | `apt upgrade` from the signed repo in the site |
 
 **Verified on fresh runners:**
 - **Linux:** the deb installs in `ubuntu:24.04`, both programs run (`--version` with the commit),
@@ -57,11 +57,17 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
   it's the same mechanism chat-kmp ships with. The macOS update (Sparkle) likewise waits for a
   real Mac and a properly signed app.
 
+## The release workflow
+
+`.github/workflows/release.yml` (RELEASING.md): `build` (the programs per platform, staged as
+above), `package` (Conveyor, with a throwaway key), `dmg` (`packaging/macos/make-dmg.sh` around
+each Mac app, on macOS), `rpm` (`packaging/linux/homebase-filesync.spec`, Fedora's `rpmbuild` in
+Fedora), and installs on fresh runners (`.deb` in Ubuntu, `.rpm` in Fedora, the MSIX on Windows,
+the `.dmg` on macOS); on a tag, `release` in the protected `release-signing` environment.
+
 ## Still to do
 
-- The `.dmg` around the Mac app, the `.rpm`, and the release workflow (build jobs without
-  secrets, Conveyor in a protected `release-signing` job once DevOps has the keys; see the
-  DevOps proposal in the plan and `RELEASING.md` when it exists).
-- Signing keys: a new Conveyor root key for filesync, the Apple Developer ID and notarization
-  key, the Azure Trusted Signing profile. Until then sites are self-signed: Windows needs the
-  certificate installed (Conveyor's `install.ps1`), macOS needs "Open Anyway".
+- Signing (RELEASING.md): DevOps' keys, then Conveyor with `conveyor-production.conf` and the
+  `.dmg` files signed and notarized; the release repos `filesync-release-{production,bleeding}`.
+- Confirm the Windows and Mac updates on real machines once signed.
+- An update repository for the `.rpm` (dnf).

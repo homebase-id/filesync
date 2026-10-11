@@ -1,3 +1,7 @@
 /target
 *.swp
 .DS_Store
+
+# Conveyor (packaging/): staged programs, its output
+/packaging/stage/
+/packaging/output/
