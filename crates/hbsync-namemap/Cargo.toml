@@ -2,6 +2,7 @@
 name = "hbsync-namemap"
 description = "Reversible local spelling of remote names that are illegal on this OS"
 version.workspace = true
+license-file.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

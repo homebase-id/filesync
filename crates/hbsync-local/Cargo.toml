@@ -2,6 +2,7 @@
 name = "hbsync-local"
 description = "Local observation: bulk listing, tier-C walk, scan merge into the state DB"
 version.workspace = true
+license-file.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

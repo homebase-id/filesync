@@ -89,7 +89,7 @@ jobs:
               cp "target/${targets[0]}/dist/$bin$exe" "dist/$dir/"
             fi
           done
-          cp .github/release/README.txt "dist/$dir/"
+          cp .github/release/README.txt LICENSE LICENSE-GPL "dist/$dir/"
           echo "DIR=$dir" >> "$GITHUB_ENV"
           echo "EXE=$exe" >> "$GITHUB_ENV"
       - name: Smoke test

@@ -1,8 +1,8 @@
 //! Starting Filesync at logon, as this user (never as a service: it needs the user's keychain
 //! and writes the user's files). What starts is the tray app when it is installed beside the
 //! command line (it starts the daemon), else the daemon itself:
-//! - macOS: a launchd agent, `~/Library/LaunchAgents/cloud.homebase.filesync.plist` (the
-//!   tray's: `cloud.homebase.filesync.tray.plist`);
+//! - macOS: a launchd agent, `~/Library/LaunchAgents/id.homebase.filesync.plist` (the
+//!   tray's: `id.homebase.filesync.tray.plist`);
 //! - Linux: the daemon as a systemd user unit, `~/.config/systemd/user/hbsync.service`; the tray
 //!   as a desktop session autostart entry, `~/.config/autostart/homebase-filesync.desktop` (a
 //!   GUI needs the session);
@@ -16,8 +16,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The launchd label (the daemon's; the tray's adds `.tray`).
-pub const LABEL: &str = "cloud.homebase.filesync";
+/// The app identity (as in the packages; chat is `id.homebase.feed`), and the daemon's launchd
+/// label (the tray's adds `.tray`).
+pub const LABEL: &str = "id.homebase.filesync";
 /// The tray's program name.
 pub const TRAY: &str = "hbsync-tray";
 /// The tray's desktop entry (Linux): in the session's autostart folder to start at logon, and
@@ -552,7 +553,7 @@ mod tests {
             &Program::Daemon("/Applications/Filesync/hbsyncd".into()),
             &[],
         );
-        assert!(plist.contains("<string>cloud.homebase.filesync</string>"));
+        assert!(plist.contains("<string>id.homebase.filesync</string>"));
         assert!(plist.contains("<string>/Applications/Filesync/hbsyncd</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key>\n    <false/>"));
         assert!(!plist.contains("EnvironmentVariables"));
@@ -590,7 +591,7 @@ mod tests {
         assert!(desktop_entry(tray, &[]).contains("Exec=\"/opt/Filesync/hbsync-tray\"\n"));
         assert!(entry.contains("Icon=homebase-filesync\n"));
         let plist = launchd_plist(&Program::Tray(tray.into()), &[]);
-        assert!(plist.contains("<string>cloud.homebase.filesync.tray</string>"));
+        assert!(plist.contains("<string>id.homebase.filesync.tray</string>"));
         assert!(plist.contains("<string>Interactive</string>"));
     }
 

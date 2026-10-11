@@ -1,6 +1,7 @@
 # CLAUDE.md
 
-Homebase desktop file-sync client, written in Rust, targeting Windows, macOS and Linux. It
+Homebase desktop file-sync client, written in Rust, targeting Windows, macOS and Linux
+(licence: `LICENSE`, the Homebase.id License = AGPL-3.0, as chat-kmp; app ID `id.homebase.filesync`). It
 syncs a local folder tree with a Homebase drive (server: `../odin-core`; mobile client
 reference: `../chat-kmp`).
 

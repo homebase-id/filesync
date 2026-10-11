@@ -2,6 +2,7 @@
 name = "hbsync-homebase"
 description = "The Homebase side: YouAuth app registration, the shared-secret envelope, the V2 API client"
 version.workspace = true
+license-file.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

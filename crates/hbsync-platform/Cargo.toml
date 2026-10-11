@@ -2,6 +2,7 @@
 name = "hbsync-platform"
 description = "OS differences behind one API: paths, file ids, atomic replace, timestamps, locks"
 version.workspace = true
+license-file.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
