@@ -48,11 +48,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Static (musl): runs on any distribution, whatever its glibc.
-          - { stage: linux, os: ubuntu-latest, target: x86_64-unknown-linux-musl, tray: bin, cli: bin }
+          # Static (musl): runs on any distribution, whatever its glibc. Each on a runner of
+          # its own architecture (GitHub's ARM runners), so that the smoke test runs it.
+          - { stage: linux-amd64, os: ubuntu-latest, target: x86_64-unknown-linux-musl, tray: bin, cli: bin }
+          - { stage: linux-aarch64, os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, tray: bin, cli: bin }
           - { stage: mac-amd64, os: macos-latest, target: x86_64-apple-darwin, tray: MacOS, cli: Helpers }
           - { stage: mac-aarch64, os: macos-latest, target: aarch64-apple-darwin, tray: MacOS, cli: Helpers }
-          - { stage: windows, os: windows-latest, target: x86_64-pc-windows-msvc, tray: ., cli: ., exe: .exe }
+          - { stage: windows-amd64, os: windows-latest, target: x86_64-pc-windows-msvc, tray: ., cli: ., exe: .exe }
+          - { stage: windows-aarch64, os: windows-11-arm, target: aarch64-pc-windows-msvc, tray: ., cli: ., exe: .exe }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     permissions:
@@ -69,6 +72,7 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       # The C runtime linked in: no VC++ redistributable needed.
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
       # Room in the Mach-O headers for Conveyor's Sparkle loader and its signing.
       CARGO_TARGET_X86_64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-headerpad,0xFF
       CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS: -C link-arg=-Wl,-headerpad,0xFF
@@ -76,6 +80,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The Windows ARM runner's image may come without rustup.
+      - if: matrix.stage == 'windows-aarch64'
+        run: |
+          if command -v rustup; then exit 0; fi
+          url=https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe
+          curl -sSfLO "$url"
+          echo "$(curl -sSfL "$url.sha256" | cut -d' ' -f1)  rustup-init.exe" | sha256sum -c
+          ./rustup-init.exe -y --default-toolchain none --profile minimal
+          echo "$USERPROFILE/.cargo/bin" >> "$GITHUB_PATH"
       - run: rustup toolchain install && rustup target add "$TARGET"
       # Not for a tag: a release build never depends on what earlier runs left in the cache.
       - if: github.ref_type != 'tag'
@@ -92,7 +105,7 @@ jobs:
           mkdir -p "$TRAY" "$CLI"
           cp "$out/homebase-filesync$EXE" "$TRAY/"
           cp "$out/hbsync$EXE" "$out/hbsyncd$EXE" "$CLI/"
-      - if: matrix.stage == 'linux'
+      - if: runner.os == 'Linux'
         run: file "$CLI"/* | grep -vE "static(-pie)? linked" && exit 1 || true
       # The Intel Mac programs can't run on the ARM runner: their architecture only.
       - if: matrix.stage == 'mac-amd64'
@@ -200,15 +213,21 @@ jobs:
           if-no-files-found: error
 
   # The .rpm is Conveyor's .deb, its files as they are (without the apt repository it adds),
-  # packaged by Fedora's own rpmbuild.
+  # packaged by Fedora's own rpmbuild, for each architecture on a runner of its own.
   rpm:
     needs: [version, package]
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { deb: amd64, rpm: x86_64, os: ubuntu-latest }
+          - { deb: arm64, rpm: aarch64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
       contents: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      ARCH: ${{ matrix.rpm }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -217,14 +236,15 @@ jobs:
         with:
           name: site
           path: site
-      - run: dpkg-deb -x site/homebase-filesync_*_amd64.deb deb && rm -r deb/etc && mkdir rpm
+      - run: dpkg-deb -x site/homebase-filesync_*_${{ matrix.deb }}.deb deb && rm -r deb/etc && mkdir rpm
       - name: Build, then install, run and remove
         run: |
-          docker run --rm -v "$PWD:/src" -w /src -e VERSION "$FEDORA_IMAGE" bash -euc '
+          docker run --rm -v "$PWD:/src" -w /src -e VERSION -e ARCH "$FEDORA_IMAGE" bash -euc '
             dnf -y -q install rpm-build >/dev/null
             rpmbuild -bb --define "_topdir /tmp/rpm" --define "pkg_version $VERSION" \
-              --define "root /src/deb" --define "src /src" packaging/linux/homebase-filesync.spec
-            cp /tmp/rpm/RPMS/x86_64/*.rpm rpm/'
+              --define "pkg_arch $ARCH" --define "root /src/deb" --define "src /src" \
+              packaging/linux/homebase-filesync.spec
+            cp /tmp/rpm/RPMS/$ARCH/*.rpm rpm/'
           docker run --rm -v "$PWD/rpm:/rpm:ro" "$FEDORA_IMAGE" bash -euxc '
             dnf -y -q --setopt=install_weak_deps=False install /rpm/*.rpm desktop-file-utils >/dev/null
             hbsync --version
@@ -234,15 +254,22 @@ jobs:
             test ! -e /usr/bin/hbsync'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rpm
+          name: rpm-${{ matrix.rpm }}
           path: rpm/*.rpm
           if-no-files-found: error
 
   test-deb:
     needs: package
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-latest }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions: {}
+    env:
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -250,10 +277,10 @@ jobs:
           path: site
       - name: Install, run, remove
         run: |
-          docker run --rm -v "$PWD/site:/site:ro" ubuntu:24.04 bash -euxc '
+          docker run --rm -v "$PWD/site:/site:ro" -e ARCH ubuntu:24.04 bash -euxc '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq
-            apt-get install -y -qq --no-install-recommends /site/homebase-filesync_*_amd64.deb desktop-file-utils >/dev/null
+            apt-get install -y -qq --no-install-recommends /site/homebase-filesync_*_$ARCH.deb desktop-file-utils >/dev/null
             hbsync --version
             homebase-filesync --version
             desktop-file-validate /usr/share/applications/id.homebase.filesync.desktop
@@ -263,9 +290,16 @@ jobs:
 
   test-msix:
     needs: package
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - { arch: x64, os: windows-latest }
+          - { arch: arm64, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions: {}
+    env:
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -277,7 +311,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           # Self-signed in these builds: trusted first, as Conveyor's install.ps1 does.
           Import-Certificate -FilePath site/homebase-filesync.crt -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
-          Add-AppxPackage -Path (Get-ChildItem site/*.msix).FullName
+          Add-AppxPackage -Path (Get-ChildItem "site/*.$env:ARCH.msix").FullName
           $p = Get-AppxPackage HomebaseFilesync
           Start-Process "shell:AppsFolder\$($p.PackageFamilyName)!HomebaseFilesync"
           Start-Sleep -Seconds 15
@@ -309,7 +343,7 @@ jobs:
           path: site
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: "{dmg,rpm}"
+          pattern: "{dmg,rpm-*}"
           path: assets
           merge-multiple: true
       - run: cp site/*.msix site/*.crt site/*.zip site/*.tar.gz site/*.deb assets/
