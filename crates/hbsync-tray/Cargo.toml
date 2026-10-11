@@ -8,14 +8,12 @@ publish.workspace = true
 
 [dependencies]
 hbsync-app.workspace = true
-hbsync-homebase.workspace = true
 hbsync-types.workspace = true
+form_urlencoded = "1.2"
 notify-rust = "4.18"
 png = "0.18"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 tracing = "0.1.44"
-tracing-appender = "0.2.5"
-tracing-subscriber = "0.3.23"
 uuid.workspace = true
 
 # Linux: the StatusNotifierItem over D-Bus (what KDE and the AppIndicator extension show), in
@@ -33,13 +31,3 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
-
-# The folder's icon in Finder.
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSWorkspace"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
-
-# The folder's attributes for its icon in Explorer.
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

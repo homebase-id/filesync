@@ -22,7 +22,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let _flush = match hbsync_app::logging::init(&paths, "hbsyncd") {
+    let _flush = match hbsync_app::logging::init(&paths, hbsync_app::lock::DAEMON) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("hbsyncd: can't log to {}: {e}", paths.logs.display());

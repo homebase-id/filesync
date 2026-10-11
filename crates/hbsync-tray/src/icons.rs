@@ -9,8 +9,11 @@ const MARK: &[u8] = include_bytes!("../assets/mark-64.png");
 const GLYPH: &[u8] = include_bytes!("../assets/glyph-36.png");
 /// For pages and folder icons.
 pub const MARK_256: &[u8] = include_bytes!("../assets/mark-256.png");
-#[cfg(windows)]
-pub const ICO: &[u8] = include_bytes!("../assets/homebase.ico");
+/// The synced folder's icon.
+pub const FOLDER: hbsync_app::shell::Icons<'static> = hbsync_app::shell::Icons {
+    png: MARK_256,
+    ico: include_bytes!("../assets/homebase.ico"),
+};
 
 /// An image as RGBA rows.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -5,9 +5,10 @@ use std::path::Path;
 use std::process::Command;
 
 /// Opens a folder in the file manager, or a page in the browser.
-pub fn open(what: &str) {
+pub fn open(what: impl AsRef<std::ffi::OsStr>) {
+    let what = what.as_ref();
     if let Err(e) = hbsync_app::setup::open_browser(None, what) {
-        tracing::warn!("can't open {what}: {e}");
+        tracing::warn!("can't open {}: {e}", what.display());
     }
 }
 
@@ -19,7 +20,7 @@ pub fn reveal(path: &Path) {
             path.display()
         );
         if let Some(folder) = path.parent() {
-            open(&folder.display().to_string());
+            open(folder);
         }
     }
 }
@@ -47,7 +48,10 @@ fn show_selected(path: &Path) -> std::io::Result<()> {
             "/org/freedesktop/FileManager1",
             "org.freedesktop.FileManager1.ShowItems",
         ])
-        .arg(format!("array:string:{}", crate::shell::file_uri(path)))
+        .arg(format!(
+            "array:string:{}",
+            hbsync_app::shell::file_uri(path)
+        ))
         .arg("string:")
         .status()?;
     if status.success() {

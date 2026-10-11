@@ -12,6 +12,7 @@ hbsync-homebase.workspace = true
 hbsync-local.workspace = true
 interprocess = "2.4"
 keyring-core = "1"
+percent-encoding = "2"
 serde_json.workspace = true
 hbsync-platform.workspace = true
 hbsync-remote.workspace = true
@@ -28,11 +29,15 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
+# The folder's icon in Finder.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSWorkspace"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1.0.2"
 windows-native-keyring-store = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Registry"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

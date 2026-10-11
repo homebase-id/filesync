@@ -227,6 +227,9 @@ pub fn unlink(paths: &Paths) -> Result<Option<Unlinked>> {
     config.paused = false;
     let roots = std::mem::take(&mut config.roots);
     config.save(&path)?;
+    for root in &roots {
+        crate::shell::undecorate(paths, &root.folder);
+    }
     Ok(Some(Unlinked {
         roots,
         autostart_was_on,

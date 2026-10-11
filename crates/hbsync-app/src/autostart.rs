@@ -43,19 +43,35 @@ pub fn passed_env() -> Vec<(String, String)> {
     .collect()
 }
 
-/// Whether `program` is the tray app (else the daemon).
-pub fn is_tray(program: &Path) -> bool {
-    program
-        .file_stem()
-        .is_some_and(|stem| stem.eq_ignore_ascii_case(TRAY))
+/// What starts at logon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Program {
+    Daemon(PathBuf),
+    /// The tray app, which starts the daemon.
+    Tray(PathBuf),
 }
 
-/// The launchd agent for `program` (the daemon, or the tray).
-pub fn launchd_plist(program: &Path, env: &[(String, String)]) -> String {
-    let (label, kind) = if is_tray(program) {
-        (format!("{LABEL}.tray"), "Interactive")
-    } else {
-        (LABEL.to_owned(), "Background")
+impl Program {
+    pub fn path(&self) -> &Path {
+        match self {
+            Program::Daemon(p) | Program::Tray(p) => p,
+        }
+    }
+
+    /// Its launchd label.
+    fn label(&self) -> String {
+        match self {
+            Program::Daemon(_) => LABEL.to_owned(),
+            Program::Tray(_) => format!("{LABEL}.tray"),
+        }
+    }
+}
+
+/// The launchd agent for `program`.
+pub fn launchd_plist(program: &Program, env: &[(String, String)]) -> String {
+    let (label, kind) = match program {
+        Program::Tray(_) => (program.label(), "Interactive"),
+        Program::Daemon(_) => (program.label(), "Background"),
     };
     let esc = crate::words::escape_xml;
     let mut env_xml = String::new();
@@ -93,7 +109,7 @@ pub fn launchd_plist(program: &Path, env: &[(String, String)]) -> String {
 {env_xml}</dict>
 </plist>
 "#,
-        esc(&program.display().to_string())
+        esc(&program.path().display().to_string())
     )
 }
 
@@ -167,20 +183,24 @@ pub fn run_value(daemon: &Path) -> String {
     format!("\"{}\"", daemon.display())
 }
 
+/// The program `name` beside the running one.
+fn beside(name: &str) -> io::Result<PathBuf> {
+    Ok(std::env::current_exe()?.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+}
+
 /// Where the daemon is: beside the running program.
 pub fn daemon_exe() -> io::Result<PathBuf> {
-    Ok(std::env::current_exe()?.with_file_name(format!("hbsyncd{}", std::env::consts::EXE_SUFFIX)))
+    beside(crate::lock::DAEMON)
 }
 
 /// What starts at logon: the tray beside the running program if it is there (it starts the
 /// daemon), else the daemon.
-pub fn logon_program() -> io::Result<PathBuf> {
-    let tray =
-        std::env::current_exe()?.with_file_name(format!("{TRAY}{}", std::env::consts::EXE_SUFFIX));
+pub fn logon_program() -> io::Result<Program> {
+    let tray = beside(TRAY)?;
     if tray.is_file() {
-        return Ok(tray);
+        return Ok(Program::Tray(tray));
     }
-    daemon_exe()
+    Ok(Program::Daemon(daemon_exe()?))
 }
 
 #[cfg(unix)]
@@ -212,7 +232,11 @@ mod os {
 
     /// The daemon's and the tray's labels.
     fn labels() -> [String; 2] {
-        [LABEL.to_owned(), format!("{LABEL}.tray")]
+        let none = PathBuf::new();
+        [
+            Program::Daemon(none.clone()).label(),
+            Program::Tray(none).label(),
+        ]
     }
 
     fn plist(label: &str) -> io::Result<PathBuf> {
@@ -235,14 +259,17 @@ mod os {
         Ok(false)
     }
 
-    pub fn install(program: &Path) -> io::Result<()> {
+    pub fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
-        let label = &labels()[usize::from(is_tray(program))];
-        let path = plist(label)?;
+        let path = plist(&program.label())?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         std::fs::write(&path, launchd_plist(program, &passed_env()))?;
+        // The tray asks for this itself, running: launchd loads the agent at the next logon.
+        if matches!(program, Program::Tray(_)) {
+            return Ok(());
+        }
         run(
             "launchctl",
             &["bootstrap", &domain(), &path.display().to_string()],
@@ -255,8 +282,11 @@ mod os {
 
     pub fn uninstall() -> io::Result<()> {
         for label in labels() {
-            // Not loaded is fine.
-            let _ = run("launchctl", &["bootout", &format!("{}/{label}", domain())]);
+            // The daemon's agent is unloaded too (not loaded is fine); the tray's isn't: that
+            // would end the tray that asks.
+            if label == LABEL {
+                let _ = run("launchctl", &["bootout", &format!("{}/{label}", domain())]);
+            }
             match std::fs::remove_file(plist(&label)?) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
                 _ => {}
@@ -310,20 +340,23 @@ mod os {
         Ok(unit()?.exists() || desktop()?.exists())
     }
 
-    pub fn install(program: &Path) -> io::Result<()> {
+    pub fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
-        if is_tray(program) {
-            let path = desktop()?;
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
+        let daemon = match program {
+            Program::Tray(tray) => {
+                let path = desktop()?;
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                return std::fs::write(&path, desktop_entry(tray, &passed_env()));
             }
-            return std::fs::write(&path, desktop_entry(program, &passed_env()));
-        }
+            Program::Daemon(daemon) => daemon,
+        };
         let path = unit()?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, systemd_unit(program, &passed_env()))?;
+        std::fs::write(&path, systemd_unit(daemon, &passed_env()))?;
         systemctl(&["daemon-reload"])
             .and_then(|()| systemctl(&["enable", UNIT]))
             // A unit systemd didn't take mustn't look installed.
@@ -400,8 +433,12 @@ mod os {
         }
     }
 
-    pub fn install(program: &Path) -> io::Result<()> {
-        let (key, value, data) = (wide(RUN_KEY), wide(RUN_VALUE), wide(&run_value(program)));
+    pub fn install(program: &Program) -> io::Result<()> {
+        let (key, value, data) = (
+            wide(RUN_KEY),
+            wide(RUN_VALUE),
+            wide(&run_value(program.path())),
+        );
         // SAFETY: valid NUL-terminated strings; the data's size includes its terminator.
         check(unsafe {
             RegSetKeyValueW(
@@ -435,9 +472,9 @@ pub fn installed() -> io::Result<bool> {
     os::installed()
 }
 
-/// Starts `program` (the daemon or the tray, [`logon_program`]) at every logon from now on,
-/// replacing an earlier entry.
-pub fn install(program: &Path) -> io::Result<()> {
+/// Starts `program` ([`logon_program`]) at every logon from now on, replacing an earlier
+/// entry.
+pub fn install(program: &Program) -> io::Result<()> {
     os::install(program)
 }
 
@@ -462,12 +499,15 @@ mod tests {
 
     #[test]
     fn the_launchd_agent_restarts_after_a_crash_only() {
-        let plist = launchd_plist(Path::new("/Applications/Filesync/hbsyncd"), &[]);
+        let plist = launchd_plist(
+            &Program::Daemon("/Applications/Filesync/hbsyncd".into()),
+            &[],
+        );
         assert!(plist.contains("<string>cloud.homebase.filesync</string>"));
         assert!(plist.contains("<string>/Applications/Filesync/hbsyncd</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key>\n    <false/>"));
         assert!(!plist.contains("EnvironmentVariables"));
-        let plist = launchd_plist(Path::new("/x/hbsyncd"), &env());
+        let plist = launchd_plist(&Program::Daemon("/x/hbsyncd".into()), &env());
         assert!(plist.contains(
             "<key>HBSYNC_HOME</key>\n    <string>/tmp/a b &amp; &lt;c&gt; 100% $x</string>"
         ));
@@ -491,8 +531,6 @@ mod tests {
     #[test]
     fn the_tray_starts_with_the_session() {
         let tray = Path::new("/opt/Filesync/hbsync-tray");
-        assert!(is_tray(tray) && is_tray(Path::new("hbsync-tray.exe")));
-        assert!(!is_tray(Path::new("/opt/Filesync/hbsyncd")));
         let entry = desktop_entry(tray, &env());
         assert!(
             entry.contains(
@@ -501,7 +539,7 @@ mod tests {
             "{entry}"
         );
         assert!(desktop_entry(tray, &[]).contains("Exec=\"/opt/Filesync/hbsync-tray\"\n"));
-        let plist = launchd_plist(tray, &[]);
+        let plist = launchd_plist(&Program::Tray(tray.into()), &[]);
         assert!(plist.contains("<string>cloud.homebase.filesync.tray</string>"));
         assert!(plist.contains("<string>Interactive</string>"));
     }
@@ -521,7 +559,7 @@ mod tests {
         if std::env::var_os("CI").is_none() {
             return Ok(());
         }
-        install(Path::new(r"C:\hbsync-test\hbsyncd.exe"))?;
+        install(&Program::Daemon(r"C:\hbsync-test\hbsyncd.exe".into()))?;
         assert!(installed()?);
         uninstall()?;
         assert!(!installed()?);

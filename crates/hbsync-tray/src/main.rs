@@ -11,7 +11,6 @@ mod model;
 mod os;
 mod pages;
 mod poll;
-mod shell;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
 use hbsync_app::runner::{State, Status};
-use hbsync_app::{Control, Paths, autostart, control, words};
+use hbsync_app::{Control, Paths, autostart, control, shell, words};
 use hbsync_types::activity::Synced;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -42,13 +41,15 @@ pub enum Event {
     PickFolder(mpsc::Sender<Option<PathBuf>>),
     /// Something changed: look again soon.
     Wake,
+    /// Starting at login is now on (or off).
+    StartAtLogin(bool),
     Exit,
 }
 
 /// Sends an [`Event`] to the main thread, from any thread.
 pub type Sender = Arc<dyn Fn(Event) + Send + Sync>;
 
-const PROGRAM: &str = "hbsync-tray";
+const PROGRAM: &str = autostart::TRAY;
 /// A notification of one kind at most this often.
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
@@ -179,17 +180,16 @@ impl App {
         match event {
             Event::Daemon(daemon, recent) => {
                 self.notices(&daemon);
-                if let Daemon::Running(s) = &daemon
+                if let Some(s) = daemon.status()
                     && self.decorated.as_ref() != Some(&s.folder)
                     && s.folder.is_dir()
                 {
-                    shell::decorate(&self.paths, &s.folder);
+                    // Off this thread: some file managers take their time (PowerShell).
+                    let (paths, folder) = (self.paths.clone(), s.folder.clone());
+                    std::thread::spawn(move || shell::decorate(&paths, &folder, icons::FOLDER));
                     self.decorated = Some(s.folder.clone());
                 }
-                self.pages.set_status(match &daemon {
-                    Daemon::Running(s) => Some((**s).clone()),
-                    _ => None,
-                });
+                self.pages.set_status(daemon.status().cloned());
                 self.daemon = daemon;
                 self.recent = recent;
             }
@@ -208,6 +208,7 @@ impl App {
             Event::Wake => {
                 let _ = self.wake.send(());
             }
+            Event::StartAtLogin(on) => self.start_at_login = on,
             Event::Exit => return false,
         }
         self.render();
@@ -215,10 +216,7 @@ impl App {
     }
 
     fn status(&self) -> Option<&Status> {
-        match &self.daemon {
-            Daemon::Running(s) => Some(s),
-            _ => None,
-        }
+        self.daemon.status()
     }
 
     fn act(&mut self, action: Action) -> bool {
@@ -226,14 +224,14 @@ impl App {
         match action {
             Action::LogIn => {
                 self.pages.prepare_setup("", None);
-                os::open(&self.pages.url("setup"));
+                os::open(self.pages.url("setup"));
             }
             Action::LogInAgain => {
                 if let Some(s) = self.status() {
                     let (identity, folder) = (s.identity.clone(), s.folder.clone());
                     self.pages.prepare_setup(&identity, Some(folder));
                 }
-                os::open(&self.pages.url("setup"));
+                os::open(self.pages.url("setup"));
             }
             Action::OpenFolder => {
                 let folder = match self.status() {
@@ -244,34 +242,36 @@ impl App {
                         .map(|r| r.folder),
                 };
                 if let Some(folder) = folder {
-                    os::open(&folder.display().to_string());
+                    os::open(folder);
                 }
             }
-            Action::Reveal(path) => os::reveal(&path),
+            Action::Reveal(path) => {
+                std::thread::spawn(move || os::reveal(&path));
+            }
             Action::PauseFor(secs) => self.send_control(Control::Pause {
                 until: Some(words::now() + secs),
             }),
             Action::Pause => self.send_control(Control::Pause { until: None }),
             Action::Resume => self.send_control(Control::Resume),
             Action::SyncNow => self.send_control(Control::SyncNow),
-            Action::ReviewDeletions => os::open(&self.pages.url("deletions")),
+            Action::ReviewDeletions => os::open(self.pages.url("deletions")),
             Action::StartAtLogin => {
-                let on = !self.start_at_login;
-                let result = if on {
-                    autostart::logon_program().and_then(|exe| autostart::install(&exe))
-                } else {
-                    autostart::uninstall()
-                };
-                match result {
-                    Ok(()) => self.start_at_login = on,
-                    Err(e) => os::notify("Start at login".into(), e.to_string()),
-                }
+                let (on, send) = (!self.start_at_login, self.send.clone());
+                std::thread::spawn(move || {
+                    let result = if on {
+                        autostart::logon_program().and_then(|exe| autostart::install(&exe))
+                    } else {
+                        autostart::uninstall()
+                    };
+                    if let Err(e) = result {
+                        os::notify("Start at login".into(), e.to_string());
+                    }
+                    send(Event::StartAtLogin(autostart::installed().unwrap_or(on)));
+                });
             }
             Action::LogOut => {
-                if let Some(folder) = self.status().map(|s| s.folder.clone()) {
-                    shell::undecorate(&self.paths, &folder);
-                    self.decorated = None;
-                }
+                // Unlinking takes the folder's icon and shortcut off too.
+                self.decorated = None;
                 let (paths, send) = (self.paths.clone(), self.send.clone());
                 std::thread::spawn(move || {
                     let done = control::log_out(&paths).and_then(|_| control::unlink(&paths));
@@ -281,14 +281,20 @@ impl App {
                     send(Event::Wake);
                 });
             }
-            Action::OpenLogs => os::open(&self.paths.logs.display().to_string()),
+            Action::OpenLogs => os::open(&self.paths.logs),
             Action::Quit => {
-                // Quitting stops syncing too, as people expect of a sync app.
-                if let Err(e) = control::stop(&self.paths) {
-                    tracing::warn!("stopping the daemon: {e}");
-                }
-                tracing::info!("quit");
-                return false;
+                // Quitting stops syncing too, as people expect of a sync app. The icon goes at
+                // once; the daemon may first finish a transfer.
+                self.tray = None;
+                let (paths, send) = (self.paths.clone(), self.send.clone());
+                std::thread::spawn(move || {
+                    if let Err(e) = control::stop(&paths) {
+                        tracing::warn!("stopping the daemon: {e}");
+                    }
+                    tracing::info!("quit");
+                    send(Event::Exit);
+                });
+                return true;
             }
         }
         self.render();
@@ -360,8 +366,13 @@ impl App {
             return;
         }
         if same_shape(&items, &self.shown.items) {
-            // Only texts and ticks changed: an open menu stays open.
-            for (item, handle) in flatten(&items).iter().zip(&self.shown.handles) {
+            // Only texts and ticks changed: those are set, and an open menu stays open.
+            let was = flatten(&self.shown.items);
+            for ((item, before), handle) in flatten(&items).iter().zip(was).zip(&self.shown.handles)
+            {
+                if *item == before {
+                    continue;
+                }
                 match (item, handle) {
                     (Item::Label(t) | Item::Action(_, t), Handle::Item(h)) => h.set_text(t),
                     (Item::Check(_, t, on), Handle::Check(h)) => {
@@ -377,9 +388,7 @@ impl App {
             let mut handles = Vec::new();
             let mut actions = HashMap::new();
             for item in &items {
-                if let Some(entry) = build(item, &mut handles, &mut actions) {
-                    let _ = menu.append(entry.as_ref());
-                }
+                let _ = menu.append(build(item, &mut handles, &mut actions).as_ref());
             }
             tray.set_menu(Some(Box::new(menu)));
             self.shown.handles = handles;
@@ -443,13 +452,13 @@ fn build(
     item: &Item,
     handles: &mut Vec<Handle>,
     actions: &mut HashMap<MenuId, Action>,
-) -> Option<Box<dyn tray_icon::menu::IsMenuItem>> {
+) -> Box<dyn tray_icon::menu::IsMenuItem> {
     let mut id = |action: &Action| {
         let id = MenuId::new(actions.len().to_string());
         actions.insert(id.clone(), action.clone());
         id
     };
-    Some(match item {
+    match item {
         Item::Label(text) => {
             let h = MenuItem::new(text, false, None);
             handles.push(Handle::Item(h.clone()));
@@ -469,9 +478,7 @@ fn build(
             let h = Submenu::new(text, true);
             handles.push(Handle::Sub(h.clone()));
             for child in children {
-                if let Some(entry) = build(child, handles, actions) {
-                    let _ = h.append(entry.as_ref());
-                }
+                let _ = h.append(build(child, handles, actions).as_ref());
             }
             Box::new(h)
         }
@@ -479,7 +486,7 @@ fn build(
             handles.push(Handle::Separator);
             Box::new(PredefinedMenuItem::separator())
         }
-    })
+    }
 }
 
 /// The items depth first, as [`build`] makes their handles.

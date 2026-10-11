@@ -27,6 +27,15 @@ pub fn when(at: u64, now: u64) -> String {
     }
 }
 
+/// [`when`], but "just now" for the last minute: text that changes once a minute at most.
+pub fn when_roughly(at: u64, now: u64) -> String {
+    if at <= now && now - at < 60 {
+        "just now".into()
+    } else {
+        when(at, now)
+    }
+}
+
 /// A size: "512 bytes", "40 kB", "2.1 MB", "1.2 GB" (decimal units, as file managers show).
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];

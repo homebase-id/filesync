@@ -24,6 +24,15 @@ pub enum Daemon {
     Running(Box<Status>),
 }
 
+impl Daemon {
+    pub fn status(&self) -> Option<&Status> {
+        match self {
+            Daemon::Running(s) => Some(s),
+            _ => None,
+        }
+    }
+}
+
 /// Everything the menu depends on.
 #[derive(Debug, Clone)]
 pub struct View<'a> {
@@ -108,7 +117,10 @@ pub fn status_line(view: &View) -> String {
             },
             State::Idle if s.pending > 0 => format!("{} items waiting", s.pending),
             State::Idle => match &s.last_sync {
-                Some(last) => format!("Up to date · synced {}", words::when(last.at, view.now)),
+                Some(last) => format!(
+                    "Up to date · synced {}",
+                    words::when_roughly(last.at, view.now)
+                ),
                 None => "Up to date".into(),
             },
             State::Paused => match s.paused_until {
@@ -138,10 +150,7 @@ pub fn menu(view: &View) -> Vec<Item> {
         "Homebase Filesync {}",
         env!("CARGO_PKG_VERSION")
     ))];
-    let status = match view.daemon {
-        Daemon::Running(s) => Some(s.as_ref()),
-        _ => None,
-    };
+    let status = view.daemon.status();
     if let Some(s) = status {
         items.push(Item::Label(s.identity.clone()));
     }
@@ -250,7 +259,11 @@ pub fn recent_line(s: &Synced, now: u64) -> String {
     } else {
         s.path.rsplit('/').next().unwrap_or(&s.path).to_owned()
     };
-    format!("{name} · {} · {}", words::what(s), words::when(s.at, now))
+    format!(
+        "{name} · {} · {}",
+        words::what(s),
+        words::when_roughly(s.at, now)
+    )
 }
 
 fn problems(s: &Status, now: u64) -> Vec<Item> {
@@ -448,7 +461,7 @@ mod tests {
             entries[0],
             Item::Action(
                 Action::Reveal(PathBuf::from("/home/anna/Homebase/Docs/report.txt")),
-                "report.txt · uploaded · 30 s ago".into()
+                "report.txt · uploaded · just now".into()
             )
         );
         assert_eq!(

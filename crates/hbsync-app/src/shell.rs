@@ -1,12 +1,21 @@
 //! The synced folder in the file manager: the Homebase icon on it, and a shortcut in the
 //! sidebar (Quick access on Windows; the bookmarks of GTK file managers and KDE's places on
 //! Linux; Finder's sidebar has no public interface, so not on macOS). Done once per folder (a
-//! note in the state folder), so a shortcut the user removed stays removed; undone at log out.
-//! All best effort: a file manager that doesn't take it is no failure.
+//! note in the state folder), so a shortcut the user removed stays removed; undone when the
+//! folder is unlinked. All best effort: a file manager that doesn't take it is no failure.
 
 use std::path::{Path, PathBuf};
 
-use hbsync_app::Paths;
+use crate::Paths;
+
+/// The Homebase icon, as each OS wants it.
+#[derive(Debug, Clone, Copy)]
+pub struct Icons<'a> {
+    /// A PNG (Linux, macOS).
+    pub png: &'a [u8],
+    /// An ICO (Windows).
+    pub ico: &'a [u8],
+}
 
 /// The note of the folder already given its icon and shortcut.
 const DONE: &str = "folder-decorated";
@@ -16,13 +25,13 @@ fn note(paths: &Paths) -> PathBuf {
 }
 
 /// Gives `folder` its icon and shortcut, unless it already had them once.
-pub fn decorate(paths: &Paths, folder: &Path) {
+pub fn decorate(paths: &Paths, folder: &Path, icons: Icons<'_>) {
     let done = note(paths);
     if std::fs::read_to_string(&done).is_ok_and(|f| Path::new(f.trim()) == folder) {
         return;
     }
     tracing::info!("giving {} its icon and a shortcut", folder.display());
-    if let Err(e) = os::decorate(paths, folder) {
+    if let Err(e) = os::decorate(paths, folder, icons) {
         tracing::info!("the folder's icon or shortcut: {e}");
     }
     if let Err(e) = std::fs::write(&done, folder.display().to_string()) {
@@ -30,7 +39,7 @@ pub fn decorate(paths: &Paths, folder: &Path) {
     }
 }
 
-/// Takes the icon and shortcut off `folder` again (logging out).
+/// Takes the icon and shortcut off `folder` again (unlinking it).
 pub fn undecorate(paths: &Paths, folder: &Path) {
     if let Err(e) = os::undecorate(paths, folder) {
         tracing::info!("removing the folder's icon or shortcut: {e}");
@@ -38,18 +47,20 @@ pub fn undecorate(paths: &Paths, folder: &Path) {
     let _ = std::fs::remove_file(note(paths));
 }
 
-/// `file:///home/anna/My%20Files`, as bookmark files want it.
+/// `file:///home/anna/My%20Files`, as bookmark files and the file manager interface want it.
 #[cfg(any(target_os = "linux", test))]
 pub fn file_uri(path: &Path) -> String {
-    let mut uri = String::from("file://");
-    for &b in path.as_os_str().as_encoded_bytes() {
-        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
-            uri.push(b as char);
-        } else {
-            uri.push_str(&format!("%{b:02X}"));
-        }
-    }
-    uri
+    use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
+    const KEEP: &percent_encoding::AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'/')
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
+    format!(
+        "file://{}",
+        percent_encode(path.as_os_str().as_encoded_bytes(), KEEP)
+    )
 }
 
 /// GTK's bookmarks (`gtk-3.0/bookmarks`): one `URI label` per line. With `uri`, labelled.
@@ -87,7 +98,7 @@ pub fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
         " <bookmark href=\"{uri}\">\n  <title>{title}</title>\n  <info>\n   \
          <metadata owner=\"http://freedesktop.org\">\n    \
          <bookmark:icon name=\"folder-cloud\"/>\n   </metadata>\n  </info>\n </bookmark>\n",
-        title = hbsync_app::words::escape_xml(title),
+        title = crate::words::escape_xml(title),
     );
     Some(format!("{}{bookmark}{}", &xbel[..end], &xbel[end..]))
 }
@@ -109,7 +120,7 @@ pub fn kde_places_without(xbel: &str, uri: &str) -> Option<String> {
 #[cfg(target_os = "linux")]
 mod os {
     use super::*;
-    use hbsync_app::paths::xdg_dir;
+    use crate::paths::xdg_dir;
     use std::process::Command;
 
     /// Rewrites `path` with `change` when it says so; a missing file counts as empty when
@@ -130,9 +141,18 @@ mod os {
         }
     }
 
-    pub fn decorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
-        let icon = paths.state.join("homebase.png");
-        std::fs::write(&icon, crate::icons::MARK_256)?;
+    fn icon(paths: &Paths) -> PathBuf {
+        paths.state.join("homebase.png")
+    }
+
+    /// Dolphin's folder settings, giving the icon.
+    fn dolphin(icon: &Path) -> String {
+        format!("[Desktop Entry]\nIcon={}\n", icon.display())
+    }
+
+    pub fn decorate(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+        let icon = icon(paths);
+        std::fs::write(&icon, icons.png)?;
         // GNOME's Files and others: GIO metadata (outside the folder).
         let _ = Command::new("gio")
             .args(["set", "-t", "string"])
@@ -143,10 +163,7 @@ mod os {
         // KDE's Dolphin: `.directory` in the folder (never synced: it is built-in junk).
         let directory = folder.join(".directory");
         if !directory.exists() {
-            std::fs::write(
-                &directory,
-                format!("[Desktop Entry]\nIcon={}\n", icon.display()),
-            )?;
+            std::fs::write(&directory, dolphin(&icon))?;
         }
         let uri = file_uri(folder);
         if let Some(config) = xdg_dir("XDG_CONFIG_HOME", ".config") {
@@ -170,10 +187,7 @@ mod os {
             .arg("metadata::custom-icon")
             .output();
         let directory = folder.join(".directory");
-        let icon = paths.state.join("homebase.png");
-        if std::fs::read_to_string(&directory)
-            .is_ok_and(|t| t == format!("[Desktop Entry]\nIcon={}\n", icon.display()))
-        {
+        if std::fs::read_to_string(&directory).is_ok_and(|t| t == dolphin(&icon(paths))) {
             std::fs::remove_file(&directory)?;
         }
         let uri = file_uri(folder);
@@ -219,8 +233,8 @@ mod os {
         }
     }
 
-    pub fn decorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
-        set_icon(folder, Some(crate::icons::MARK_256))
+    pub fn decorate(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+        set_icon(folder, Some(icons.png))
     }
 
     pub fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
@@ -278,18 +292,24 @@ mod os {
             .output();
     }
 
-    pub fn decorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
-        let icon = paths.state.join("homebase.ico");
-        std::fs::write(&icon, crate::icons::ICO)?;
+    fn icon(paths: &Paths) -> PathBuf {
+        paths.state.join("homebase.ico")
+    }
+
+    /// Explorer's folder settings, giving the icon.
+    fn desktop_ini(icon: &Path) -> String {
+        format!(
+            "[.ShellClassInfo]\r\nIconResource={},0\r\nInfoTip=Synced with Homebase\r\n",
+            icon.display()
+        )
+    }
+
+    pub fn decorate(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+        let icon = icon(paths);
+        std::fs::write(&icon, icons.ico)?;
         let ini = folder.join("desktop.ini");
         if !ini.exists() {
-            std::fs::write(
-                &ini,
-                format!(
-                    "[.ShellClassInfo]\r\nIconResource={},0\r\nInfoTip=Synced with Homebase\r\n",
-                    icon.display()
-                ),
-            )?;
+            std::fs::write(&ini, desktop_ini(&icon))?;
             attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, true)?;
         }
         // Explorer reads desktop.ini of read-only (or system) folders only.
@@ -300,12 +320,7 @@ mod os {
 
     pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let ini = folder.join("desktop.ini");
-        let ours = std::fs::read_to_string(&ini).is_ok_and(|t| {
-            t.contains(&format!(
-                "IconResource={},0",
-                paths.state.join("homebase.ico").display()
-            ))
-        });
+        let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t == desktop_ini(&icon(paths)));
         if ours {
             attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, false)?;
             std::fs::remove_file(&ini)?;

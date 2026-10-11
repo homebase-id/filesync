@@ -475,38 +475,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
 
 /// `a=1&b=x%20y` (also `+` for spaces).
 fn parse_form(s: &str) -> HashMap<String, String> {
-    s.split('&')
-        .filter(|p| !p.is_empty())
-        .map(|pair| {
-            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-            (decode(k), decode(v))
-        })
-        .collect()
-}
-
-fn decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => out.push(b' '),
-            b'%' if i + 2 < bytes.len() => match (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                (Some(high), Some(low)) => {
-                    out.push(high << 4 | low);
-                    i += 2;
-                }
-                _ => out.push(b'%'),
-            },
-            b => out.push(b),
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex(b: u8) -> Option<u8> {
-    (b as char).to_digit(16).map(|d| d as u8)
+    form_urlencoded::parse(s.as_bytes()).into_owned().collect()
 }
 
 fn respond(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -> std::io::Result<()> {
@@ -574,8 +543,12 @@ mod tests {
         assert_eq!(f["identity"], "Anna.Example.com/");
         assert_eq!(f["merge"], "on");
         assert_eq!(f["x"], "a b%");
-        assert_eq!(decode("%E2%9C%93"), "✓");
-        assert_eq!(decode("%ä"), "%ä", "no panic in the middle of a character");
+        assert_eq!(parse_form("x=%E2%9C%93")["x"], "✓");
+        assert_eq!(
+            parse_form("x=%ä")["x"],
+            "%ä",
+            "no panic in the middle of a character"
+        );
     }
 
     #[test]

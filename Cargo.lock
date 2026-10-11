@@ -1556,6 +1556,10 @@ dependencies = [
  "interprocess",
  "keyring-core",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tempfile",
@@ -1720,23 +1724,17 @@ dependencies = [
 name = "hbsync-tray"
 version = "0.1.0"
 dependencies = [
+ "form_urlencoded",
  "hbsync-app",
- "hbsync-homebase",
  "hbsync-types",
  "notify-rust",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
  "png",
  "rfd",
  "tao",
  "tempfile",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
  "tray-icon",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

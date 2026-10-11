@@ -13,6 +13,7 @@ pub mod paths;
 pub mod runner;
 pub mod secrets;
 pub mod setup;
+pub mod shell;
 pub mod words;
 
 pub use config::{Config, ConfigError, MassDelete, Root};

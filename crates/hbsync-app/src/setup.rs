@@ -79,7 +79,10 @@ pub fn prepare<E: std::fmt::Display>(
 }
 
 /// Opens `url` with `command`, or with the system's opener.
-pub fn open_browser(command: Option<&str>, url: &str) -> std::io::Result<()> {
+pub fn open_browser(
+    command: Option<&str>,
+    url: impl AsRef<std::ffi::OsStr>,
+) -> std::io::Result<()> {
     let opener = command.unwrap_or(if cfg!(target_os = "macos") {
         "open"
     } else if cfg!(windows) {
