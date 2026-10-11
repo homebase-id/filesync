@@ -68,6 +68,7 @@ MSIX's unvirtualized folders as the code does.
 
 ## Still to do
 
-- Signing (RELEASING.md): DevOps' keys, then the signing step and the publish workflow.
+- The Apple and Azure signing secrets (RELEASING.md): the Mac app and the Windows packages are
+  self-signed until then; then the `.dmg` files signed and notarized too.
 - Confirm the Windows and Mac updates on real machines once signed.
 - An update repository for the `.rpm` (dnf), which needs a signing key of its own.
