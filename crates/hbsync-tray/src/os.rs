@@ -13,35 +13,7 @@ pub fn open(what: &str) {
 
 /// Shows `path` selected in its folder (or its folder, where that can't be done).
 pub fn reveal(path: &Path) {
-    let shown = if cfg!(target_os = "macos") {
-        Command::new("open").arg("-R").arg(path).spawn().map(drop)
-    } else if cfg!(windows) {
-        let mut arg = std::ffi::OsString::from("/select,");
-        arg.push(path);
-        Command::new("explorer").arg(arg).spawn().map(drop)
-    } else {
-        // The file manager interface Dolphin, Nautilus and others implement.
-        let uri = crate::shell::file_uri(path);
-        Command::new("dbus-send")
-            .args([
-                "--session",
-                "--dest=org.freedesktop.FileManager1",
-                "--type=method_call",
-                "/org/freedesktop/FileManager1",
-                "org.freedesktop.FileManager1.ShowItems",
-            ])
-            .arg(format!("array:string:{uri}"))
-            .arg("string:")
-            .status()
-            .and_then(|s| {
-                if s.success() {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::other("no file manager answered"))
-                }
-            })
-    };
-    if let Err(e) = shown {
+    if let Err(e) = show_selected(path) {
         tracing::debug!(
             "can't show {} in its folder ({e}): opening the folder",
             path.display()
@@ -49,6 +21,39 @@ pub fn reveal(path: &Path) {
         if let Some(folder) = path.parent() {
             open(&folder.display().to_string());
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_selected(path: &Path) -> std::io::Result<()> {
+    Command::new("open").arg("-R").arg(path).spawn().map(drop)
+}
+
+#[cfg(windows)]
+fn show_selected(path: &Path) -> std::io::Result<()> {
+    let mut arg = std::ffi::OsString::from("/select,");
+    arg.push(path);
+    Command::new("explorer").arg(arg).spawn().map(drop)
+}
+
+/// The file manager interface Dolphin, Nautilus and others implement.
+#[cfg(target_os = "linux")]
+fn show_selected(path: &Path) -> std::io::Result<()> {
+    let status = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--dest=org.freedesktop.FileManager1",
+            "--type=method_call",
+            "/org/freedesktop/FileManager1",
+            "org.freedesktop.FileManager1.ShowItems",
+        ])
+        .arg(format!("array:string:{}", crate::shell::file_uri(path)))
+        .arg("string:")
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("no file manager answered"))
     }
 }
 

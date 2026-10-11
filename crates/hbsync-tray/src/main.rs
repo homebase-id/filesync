@@ -53,6 +53,10 @@ const PROGRAM: &str = "hbsync-tray";
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
 fn main() -> ExitCode {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("{PROGRAM} {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let paths = match Paths::resolve() {
         Ok(p) => p,
         Err(e) => {

@@ -1,8 +1,8 @@
 # The daemon, its config and its control socket
 
-How the product runs on a computer: one daemon per OS user (`hbsyncd`), set up and controlled
-with the command line (`hbsync`). Code: `crates/hbsync-app` (library), `crates/hbsync`
-(the two programs).
+How the product runs on a computer: one daemon per OS user (`hbsyncd`), shown and controlled
+by the tray app (`hbsync-tray`) and the command line (`hbsync`). Code: `crates/hbsync-app`
+(library), `crates/hbsync` (the daemon and the command line), `crates/hbsync-tray`.
 
 ## Scope
 
@@ -19,7 +19,7 @@ Otherwise:
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | config, credentials file | `$XDG_CONFIG_HOME/hbsync` (`~/.config/hbsync`) | `~/Library/Application Support/Homebase Filesync` | `%APPDATA%\Homebase Filesync` |
-| lock, pid, pipe token | `$XDG_STATE_HOME/hbsync` (`~/.local/state/hbsync`) | same as config | `%LOCALAPPDATA%\Homebase Filesync` |
+| locks, pids, pipe token, the tray's icon files | `$XDG_STATE_HOME/hbsync` (`~/.local/state/hbsync`) | same as config | `%LOCALAPPDATA%\Homebase Filesync` |
 | logs | `<state>/logs` | `~/Library/Logs/Homebase Filesync` | `<state>\logs` |
 | control socket | `$XDG_RUNTIME_DIR/hbsync`, else `<state>` | same as config | a named pipe |
 
@@ -141,12 +141,44 @@ Only the user can connect:
   SYSTEM. The token is random, kept in `<state>/hbsyncd.pipe`, so another user can't squat the
   name. Named pipes have no read timeout.
 
+## The tray app
+
+`hbsync-tray` is what people see, and what starts at logon when it is installed beside the
+command line. It keeps the daemon running while a folder is set up (starting it when it
+doesn't answer, at most every 30 s after a failed start, and once more when the daemon runs
+another version), and **Quit stops the daemon too**. One tray per user (`hbsync-tray.lock`).
+
+- **Linux:** a StatusNotifierItem over D-Bus (pure Rust, no GTK), as KDE, Xfce, Cinnamon and
+  most panels show them; GNOME needs the AppIndicator extension. Windows and macOS: tao's event
+  loop on the main thread; on macOS a menu bar item without a Dock icon, the glyph as a
+  template image.
+- **Icon:** the Homebase mark with a dot: green up to date, blue syncing, grey paused or
+  offline or not set up, magenta when something needs the user (a failure, held deletes, a
+  refused login).
+- **Menu:** version, identity, a status line (with progress while syncing), Open Homebase
+  folder, Recently synced (the last 10; clicking one shows it in the file manager), Problems
+  (the status notes), Review N deletions…, Log in again… (refused), Pause syncing (1 h, 8 h,
+  24 h, until resumed) or Resume, Sync now, Start at login, Open logs, Log out, Quit.
+- **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the
+  OS's picker, merging a folder with files only when ticked) and reviewing held deletes are
+  pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
+  browser; the identity's approval returns there.
+- **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a
+  minute.
+- **The folder:** once per folder the tray gives it the Homebase icon (`desktop.ini` on
+  Windows, Finder's custom icon on macOS, `.directory` and GIO metadata on Linux) and a
+  shortcut (Quick access; GTK bookmarks and KDE places; Finder's sidebar has no public
+  interface). Log out takes them off again.
+
 ## Autostart
+
+What starts at logon is the tray when `hbsync-tray` is beside the command line (it starts the
+daemon), else the daemon:
 
 | | how | restarts |
 |---|---|---|
-| macOS | launchd agent `~/Library/LaunchAgents/cloud.homebase.filesync.plist`, `launchctl bootstrap gui/<uid>` | after a crash (`KeepAlive`/`SuccessfulExit` = false) |
-| Linux | systemd user unit `~/.config/systemd/user/hbsync.service`, enabled | `Restart=on-failure` |
+| macOS | launchd agent `~/Library/LaunchAgents/cloud.homebase.filesync.plist` (the tray's: `cloud.homebase.filesync.tray.plist`), `launchctl bootstrap gui/<uid>` | after a crash (`KeepAlive`/`SuccessfulExit` = false) |
+| Linux | the daemon: systemd user unit `~/.config/systemd/user/hbsync.service`, enabled; the tray: `~/.config/autostart/homebase-filesync.desktop` (a GUI needs the session) | the unit: `Restart=on-failure` |
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Homebase Filesync` | no |
 
 Windows uses the `Run` key rather than a logon task: creating an `ONLOGON` task needs an
@@ -157,8 +189,8 @@ that set it up. The unit goes where the user's systemd looks by default, whateve
 `XDG_CONFIG_HOME`. An install the service manager refuses leaves no file behind.
 
 `hbsync setup` turns autostart on, `logout` and `unlink` turn it off, `hbsync autostart on|off`
-by hand. With autostart on, `hbsync start` goes through launchd or systemd so that they supervise
-the daemon. With `HBSYNC_HOME` set, only `hbsync autostart` touches the user's logon entry.
+by hand. With the daemon starting at logon, `hbsync start` goes through launchd or systemd so
+that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches the user's logon entry.
 
 ## Command line
 
@@ -178,7 +210,7 @@ the daemon. With `HBSYNC_HOME` set, only `hbsync autostart` touches the user's l
 ## Not yet
 
 - several folders or identities;
-- a tray or menubar app, packaging, signing, auto-update;
+- packaging, signing, auto-update;
 - OS network-change notifications;
 - revoking the device on the identity at logout (no endpoint known yet);
 - structured per-item status and a diagnostics bundle (Observability).

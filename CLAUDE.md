@@ -15,9 +15,10 @@ WebSocket; two folders converge through a live identity. Facts and server bugs:
 (**[verified]**, odin-core #1892, #1893). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up within a minute of an edit); an ignored item is kept on its device only. The
-product runs as a per-user daemon (`hbsyncd`) set up and controlled with `hbsync`
-(`docs/spec/daemon.md`): `cargo run -p hbsync --bin hbsync -- setup <identity>`; `HBSYNC_HOME`
-gives a private instance. Dev tools (`hbsync-dev`), credentials in
+product runs as a per-user daemon (`hbsyncd`) shown and controlled by the tray app
+(`hbsync-tray`: status, recently synced, pause, logging in through the browser) and by `hbsync`
+(`docs/spec/daemon.md`): `cargo run -p hbsync --bin hbsync -- setup <identity>`,
+`cargo run -p hbsync-tray`; `HBSYNC_HOME` gives a private instance. Dev tools (`hbsync-dev`), credentials in
 `~/.config/hbsync/dev/<identity>.json`:
 - `cargo run -p hbsync-dev --bin hbsync-register -- <identity> [--browser firefox]`
 - `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]
@@ -89,5 +90,6 @@ release of them, to publish by hand; running the workflow by hand only builds th
 | `hbsync-sim` | deterministic multi-client simulator with convergence/no-loss properties |
 | `hbsync-homebase` | YouAuth app registration (P-384 ECDH, HKDF), the AES-CBC shared-secret envelope, a V2 API client, the Filesync app definition, the drive as a `Remote`, the notification WebSocket |
 | `hbsync-app` | the product shell: paths, `config.toml`, credentials in the OS keychain (a 0600 file when there is none), setting the app up on an identity, the sync runner (the daemon's loop: pause, sync now, confirming held deletes, sleep, live rule changes), the daemon, its control socket and one-daemon lock, autostart (launchd agent, systemd user unit, the Windows `Run` key) |
-| `hbsync` | the product's two programs: `hbsyncd` (the daemon) and `hbsync` (the CLI: `setup`, `status`, `sync`, `pause`, `resume`, `confirm-deletes`, `start`, `stop`, `autostart`, `logout`, `unlink`, `log`) |
+| `hbsync` | the daemon `hbsyncd` and the CLI `hbsync` (`setup`, `status`, `recent`, `sync`, `pause [--for]`, `resume`, `confirm-deletes`, `start`, `stop`, `autostart`, `logout`, `unlink`, `log`) |
+| `hbsync-tray` | the tray app: menu from the daemon's status (`model.rs`, pure), local pages for logging in and held deletes, notifications, the folder's icon and sidebar shortcut; Linux via StatusNotifierItem (no GTK), tao's event loop elsewhere |
 | `hbsync-dev` | development tools: `hbsync-register`, `hbsync-sync` (a folder synced with a live identity), the live end-to-end test |

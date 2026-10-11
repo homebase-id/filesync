@@ -140,7 +140,10 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Selective sync**: all OSes; this is the Linux v1 answer
 - **Windows Cloud Files placeholders**: pin states, hydration through ranged reads
 - **macOS File Provider extension**: the OS owns the folder and becomes a tier-A local observation source. Keep this in mind from Layer 2 on: retrofitting it is structural.
-- **Tray / menubar UI**: status, conflicts, selective sync
+- **Tray / menubar UI**: status, conflicts, selective sync. The v0.1 tray is built
+  (2026-10-11, `crates/hbsync-tray`: status and progress, recently synced, problems, timed
+  pause, logging in, held deletes, notifications, folder icon and shortcut); selective sync
+  and several folders come next
 - **Linux FUSE mount** (later)
 
 ## Continuous: hardening

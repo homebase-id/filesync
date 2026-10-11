@@ -72,7 +72,7 @@ jobs:
         shell: bash
         run: |
           for target in ${{ matrix.targets }}; do
-            cargo build --locked --profile dist -p hbsync --target "$target"
+            cargo build --locked --profile dist -p hbsync -p hbsync-tray --target "$target"
           done
       - name: Package
         shell: bash
@@ -82,7 +82,7 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then exe=.exe; fi
           mkdir -p "dist/$dir"
           targets=(${{ matrix.targets }})
-          for bin in hbsync hbsyncd; do
+          for bin in hbsync hbsyncd hbsync-tray; do
             if (( ${#targets[@]} > 1 )); then
               lipo -create -output "dist/$dir/$bin" $(printf "target/%s/dist/$bin " "${targets[@]}")
             else
@@ -97,6 +97,7 @@ jobs:
         run: |
           hbsync="dist/$DIR/hbsync$EXE"
           "$hbsync" --version | grep -Fx "hbsync $VERSION"
+          "dist/$DIR/hbsync-tray$EXE" --version | grep -Fx "hbsync-tray $VERSION"
           # No daemon in a fresh home: says so, with exit status 3.
           home="$RUNNER_TEMP/hbsync-smoke"
           mkdir -p "$home"
@@ -109,8 +110,14 @@ jobs:
             exit 1
           fi
           case "$RUNNER_OS" in
-            Linux) file "dist/$DIR/hbsync" "dist/$DIR/hbsyncd" | grep -E "static(-pie)? linked" ;;
-            macOS) for bin in hbsync hbsyncd; do lipo "dist/$DIR/$bin" -verify_arch arm64 x86_64; done ;;
+            Linux)
+              for bin in hbsync hbsyncd hbsync-tray; do
+                file "dist/$DIR/$bin" | grep -E "static(-pie)? linked"
+              done ;;
+            macOS)
+              for bin in hbsync hbsyncd hbsync-tray; do
+                lipo "dist/$DIR/$bin" -verify_arch arm64 x86_64
+              done ;;
           esac
       - name: Archive
         shell: bash
