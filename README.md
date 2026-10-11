@@ -41,7 +41,7 @@ They update themselves.
 - **Encrypted on your computer.** Each file gets its own random AES key before it leaves your
   computer, and folder names are encrypted too. It uses Homebase's own format, so your other
   Homebase apps can open the files. The cipher handles about 1 GB/s encrypting and 2.8 GB/s
-  decrypting, more than any internet link. Dropbox, by comparison, encrypts files once they
+  decrypting, more than any internet link. Dropbox, by default, encrypts files once they
   reach its servers, with keys Dropbox holds. With Filesync, the files are encrypted before
   they leave your computer, and the keys stay with your own Homebase, not with a company. (So
   it isn't end-to-end: your Homebase can open them. See
