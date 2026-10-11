@@ -72,7 +72,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let _lock = match InstanceLock::acquire_for(&paths, PROGRAM) {
+    // Restarted for an update: the old tray is about to end.
+    let restarted = std::env::args().any(|a| a == os::RESTARTED);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let acquired = loop {
+        match InstanceLock::acquire_for(&paths, PROGRAM) {
+            Err(LockError::Held { .. }) if restarted && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            other => break other,
+        }
+    };
+    let _lock = match acquired {
         Ok(lock) => lock,
         // Started again (at logon, by hand): the one running is enough.
         Err(e @ LockError::Held { .. }) => {
@@ -85,6 +96,10 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
+    os::name_notifications();
+    if let Some(why) = os::INSTALL.not_settled() {
+        os::notify("Homebase Filesync".into(), format!("{why}."));
+    }
     // A private instance (HBSYNC_HOME) mustn't replace the launcher of the real one.
     #[cfg(target_os = "linux")]
     if !control::dev_home() {
@@ -115,6 +130,8 @@ struct App {
     daemon: Daemon,
     recent: Vec<Synced>,
     start_at_login: bool,
+    /// Replaced on disk by an update ([`os::replaced`]).
+    updated: bool,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
@@ -156,6 +173,7 @@ impl App {
             daemon: Daemon::Starting(None),
             recent: Vec::new(),
             start_at_login: autostart::installed().unwrap_or(false),
+            updated: false,
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
@@ -201,6 +219,7 @@ impl App {
                     self.decorated = Some(s.folder.clone());
                 }
                 self.pages.set_status(daemon.status().cloned());
+                self.updated = os::replaced();
                 self.daemon = daemon;
                 self.recent = recent;
             }
@@ -293,6 +312,17 @@ impl App {
                 });
             }
             Action::OpenLogs => os::open(&self.paths.logs),
+            Action::Restart => {
+                // The daemon goes on; the new tray restarts it if it's of another build.
+                match os::start_again() {
+                    Ok(()) => {
+                        tracing::info!("restarting for an update");
+                        self.tray = None;
+                        return false;
+                    }
+                    Err(e) => os::notify("Restart".into(), e.to_string()),
+                }
+            }
             Action::Quit => {
                 // Quitting stops syncing too, as people expect of a sync app. The icon goes at
                 // once; the daemon may first finish a transfer.
@@ -349,6 +379,7 @@ impl App {
             daemon: &self.daemon,
             recent: &self.recent,
             start_at_login: self.start_at_login,
+            updated: self.updated,
             busy,
             now: words::now(),
         };

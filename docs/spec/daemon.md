@@ -181,6 +181,7 @@ daemon), else the daemon:
 | macOS | launchd agent `~/Library/LaunchAgents/id.homebase.filesync.plist` (the tray's: `id.homebase.filesync.tray.plist`), `launchctl bootstrap gui/<uid>` | after a crash (`KeepAlive`/`SuccessfulExit` = false) |
 | Linux | the daemon: systemd user unit `~/.config/systemd/user/hbsync.service`, enabled; the tray: `~/.config/autostart/homebase-filesync.desktop` (a GUI needs the session) | the unit: `Restart=on-failure` |
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Homebase Filesync` | no |
+| Windows, MSIX package | the package's startup task `HomebaseFilesync.StartupTask` (Conveyor's `start-on-login`); the user can also turn it off in Task Manager | no |
 
 Windows uses the `Run` key rather than a logon task: creating an `ONLOGON` task needs an
 administrator **[inferred, not tried]**. `hbsyncd.exe` has no console window.
@@ -188,6 +189,15 @@ administrator **[inferred, not tried]**. `hbsyncd.exe` has no console window.
 the plist and the unit (not on Windows), so the daemon uses the same files as the command line
 that set it up. The unit goes where the user's systemd looks by default, whatever the shell's
 `XDG_CONFIG_HOME`. An install the service manager refuses leaves no file behind.
+
+How it was installed (`hbsync_app::install`) changes three things: an MSIX package uses its
+startup task (the `Run` key would be virtualized there, and the package's folder changes with
+each version) and names its notifications by its AppUserModelID; a Mac app run from its disk
+image or App Translocation doesn't turn on starting at logon (the path wouldn't last) and says
+to move it to Applications; under a Linux package (`/usr`) the tray writes no launcher of its
+own. On Linux a tray whose program was replaced on disk (`apt upgrade`, `cargo install`) offers
+"Restart to finish the update"; the new tray waits for the old one's lock (`--restarted`) and
+restarts a daemon of another build.
 
 On Linux the tray also lists itself among the desktop's applications each time it starts
 (unless `HBSYNC_HOME` is set): the same entry in `~/.local/share/applications/` and its icon in

@@ -39,6 +39,8 @@ pub struct View<'a> {
     pub daemon: &'a Daemon,
     pub recent: &'a [Synced],
     pub start_at_login: bool,
+    /// This program was replaced on disk (an update, on Linux): restarting runs the new one.
+    pub updated: bool,
     /// Something the tray itself is doing ("Logging in…").
     pub busy: Option<&'a str>,
     pub now: u64,
@@ -71,6 +73,8 @@ pub enum Action {
     StartAtLogin,
     LogOut,
     OpenLogs,
+    /// Start the program that replaced this one, and end this one.
+    Restart,
     Quit,
 }
 
@@ -150,6 +154,12 @@ pub fn menu(view: &View) -> Vec<Item> {
         "Homebase Filesync {}",
         hbsync_app::VERSION
     ))];
+    if view.updated {
+        items.push(Item::Action(
+            Action::Restart,
+            "Restart to finish the update".into(),
+        ));
+    }
     let status = view.daemon.status();
     if let Some(s) = status {
         items.push(Item::Label(s.identity.clone()));
@@ -312,6 +322,7 @@ mod tests {
             daemon,
             recent,
             start_at_login: true,
+            updated: false,
             busy: None,
             now: NOW,
         }
@@ -483,5 +494,17 @@ mod tests {
         let c = cut(&long);
         assert_eq!(c.chars().count(), WIDTH);
         assert!(c.starts_with("Problem: ") && c.contains('…'));
+    }
+
+    #[test]
+    fn an_update_asks_for_a_restart() {
+        let daemon = Daemon::NotSetUp;
+        let mut v = view(&daemon, &[]);
+        assert!(!actions(&menu(&v)).contains(&Action::Restart));
+        v.updated = true;
+        assert_eq!(
+            menu(&v)[1],
+            Item::Action(Action::Restart, "Restart to finish the update".into())
+        );
     }
 }

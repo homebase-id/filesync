@@ -7,7 +7,9 @@
 //!   as a desktop session autostart entry, `~/.config/autostart/homebase-filesync.desktop` (a
 //!   GUI needs the session);
 //! - Windows: the per-user `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`),
-//!   which needs no administrator, unlike a logon task.
+//!   which needs no administrator, unlike a logon task; in the MSIX package, its startup task
+//!   (the `Run` key would be virtualized there, and the package's path changes with each
+//!   version).
 //!
 //! launchd and systemd restart the daemon if it crashes, not when it was stopped. The
 //! environment overrides (`HBSYNC_HOME`, `HBSYNC_CREDENTIALS`) are passed on where the manager
@@ -202,6 +204,9 @@ pub fn daemon_exe() -> io::Result<PathBuf> {
 /// What starts at logon: the tray beside the running program if it is there (it starts the
 /// daemon), else the daemon.
 pub fn logon_program() -> io::Result<Program> {
+    if let Some(why) = crate::install::Install::detect().not_settled() {
+        return Err(io::Error::other(why));
+    }
     let tray = beside(TRAY)?;
     if tray.is_file() {
         return Ok(Program::Tray(tray));
@@ -389,7 +394,8 @@ mod os {
     pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
         let data = crate::paths::xdg_dir("XDG_DATA_HOME", ".local/share")
             .ok_or_else(|| io::Error::other("HOME isn't set"))?;
-        write_launcher(&data, &desktop()?, tray, icon_png)
+        let packaged = crate::install::Install::detect() == crate::install::Install::LinuxPackage;
+        write_launcher(&data, &desktop()?, tray, icon_png, packaged)
     }
 
     /// Through systemd only when it starts the daemon (not the tray).
@@ -424,7 +430,17 @@ mod os {
         }
     }
 
+    fn msix() -> bool {
+        matches!(
+            crate::install::Install::detect(),
+            crate::install::Install::Msix { .. }
+        )
+    }
+
     pub fn installed() -> io::Result<bool> {
+        if msix() {
+            return startup_task::enabled();
+        }
         let (key, value) = (wide(RUN_KEY), wide(RUN_VALUE));
         let mut size = 0u32;
         // SAFETY: valid NUL-terminated strings; a null buffer only asks for the size.
@@ -446,6 +462,9 @@ mod os {
     }
 
     pub fn install(program: &Program) -> io::Result<()> {
+        if msix() {
+            return startup_task::enable();
+        }
         let (key, value, data) = (
             wide(RUN_KEY),
             wide(RUN_VALUE),
@@ -465,6 +484,9 @@ mod os {
     }
 
     pub fn uninstall() -> io::Result<()> {
+        if msix() {
+            return startup_task::disable();
+        }
         let (key, value) = (wide(RUN_KEY), wide(RUN_VALUE));
         // SAFETY: valid NUL-terminated strings.
         match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr()) } {
@@ -476,6 +498,53 @@ mod os {
     /// The Run key only starts programs at logon: the caller starts the daemon itself.
     pub fn start() -> io::Result<bool> {
         Ok(false)
+    }
+
+    /// The MSIX package's startup task (Conveyor's `start-on-login`), which starts the tray.
+    mod startup_task {
+        use crate::install::MSIX_STARTUP_TASK;
+        use std::io;
+        use windows::ApplicationModel::{StartupTask, StartupTaskState};
+        use windows::core::HSTRING;
+
+        fn err(e: windows::core::Error) -> io::Error {
+            io::Error::other(e.message())
+        }
+
+        fn task() -> io::Result<StartupTask> {
+            StartupTask::GetAsync(&HSTRING::from(MSIX_STARTUP_TASK))
+                .and_then(|op| op.join())
+                .map_err(err)
+        }
+
+        fn on(state: StartupTaskState) -> bool {
+            state == StartupTaskState::Enabled || state == StartupTaskState::EnabledByPolicy
+        }
+
+        pub fn enabled() -> io::Result<bool> {
+            task()?.State().map(on).map_err(err)
+        }
+
+        pub fn enable() -> io::Result<()> {
+            let state = task()?
+                .RequestEnableAsync()
+                .and_then(|op| op.join())
+                .map_err(err)?;
+            match state {
+                s if on(s) => Ok(()),
+                StartupTaskState::DisabledByUser => Err(io::Error::other(
+                    "it was turned off in Task Manager (Startup apps): turn it on there",
+                )),
+                StartupTaskState::DisabledByPolicy => Err(io::Error::other(
+                    "your organization's policy doesn't allow it",
+                )),
+                _ => Err(io::Error::other("Windows didn't turn it on")),
+            }
+        }
+
+        pub fn disable() -> io::Result<()> {
+            task()?.Disable().map_err(err)
+        }
     }
 }
 
@@ -504,15 +573,22 @@ pub fn start() -> io::Result<bool> {
 /// Lists the tray among the desktop's applications (Linux; elsewhere the installer will): its
 /// desktop entry in `$XDG_DATA_HOME/applications` and its icon in the icon theme. Started from
 /// there or at logon, the session sees it as its own app (in System Monitor, say), not as part
-/// of the terminal that started it. An autostart entry there is brought up to date with it (a
-/// moved or updated tray). Written only when it changed.
+/// of the terminal that started it. Installed from a package, which lists it itself, a launcher
+/// written earlier goes. An autostart entry is brought up to date with it either way (a moved
+/// or updated tray). Written only when it changed.
 #[cfg(target_os = "linux")]
 pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
     os::add_launcher(tray, icon_png)
 }
 
 #[cfg(target_os = "linux")]
-fn write_launcher(data: &Path, autostart: &Path, tray: &Path, icon_png: &[u8]) -> io::Result<()> {
+fn write_launcher(
+    data: &Path,
+    autostart: &Path,
+    tray: &Path,
+    icon_png: &[u8],
+    packaged: bool,
+) -> io::Result<()> {
     let write = |path: &Path, bytes: &[u8]| -> io::Result<()> {
         if std::fs::read(path).is_ok_and(|old| old == bytes) {
             return Ok(());
@@ -523,16 +599,22 @@ fn write_launcher(data: &Path, autostart: &Path, tray: &Path, icon_png: &[u8]) -
         std::fs::write(path, bytes)
     };
     let entry = desktop_entry(tray, &passed_env());
-    write(
-        &data
-            .join("icons/hicolor/256x256/apps")
-            .join(format!("{ICON}.png")),
-        icon_png,
-    )?;
-    write(
-        &data.join("applications").join(DESKTOP_ENTRY),
-        entry.as_bytes(),
-    )?;
+    let icon = data
+        .join("icons/hicolor/256x256/apps")
+        .join(format!("{ICON}.png"));
+    let launcher = data.join("applications").join(DESKTOP_ENTRY);
+    if packaged {
+        // The package lists it (and has the icon): a copy of ours would show it twice.
+        for path in [launcher, icon] {
+            match std::fs::remove_file(path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+    } else {
+        write(&icon, icon_png)?;
+        write(&launcher, entry.as_bytes())?;
+    }
     if autostart.exists() {
         write(autostart, entry.as_bytes())?;
     }
@@ -601,7 +683,7 @@ mod tests {
         let data = tempfile::tempdir()?;
         let autostart = data.path().join("autostart.desktop");
         let tray = Path::new("/opt/Filesync/homebase-filesync");
-        write_launcher(data.path(), &autostart, tray, b"png")?;
+        write_launcher(data.path(), &autostart, tray, b"png", false)?;
         assert!(
             !autostart.exists(),
             "starting at logon stays the user's choice"
@@ -614,7 +696,7 @@ mod tests {
         assert_eq!(std::fs::read(&icon)?, b"png");
         let written = std::fs::metadata(&entry)?.modified()?;
         std::thread::sleep(std::time::Duration::from_millis(20));
-        write_launcher(data.path(), &autostart, tray, b"png")?;
+        write_launcher(data.path(), &autostart, tray, b"png", false)?;
         assert_eq!(
             std::fs::metadata(&entry)?.modified()?,
             written,
@@ -623,8 +705,14 @@ mod tests {
 
         // An autostart entry from an older tray is brought up to date.
         std::fs::write(&autostart, "[Desktop Entry]\nExec=/old/homebase-filesync\n")?;
-        write_launcher(data.path(), &autostart, tray, b"png")?;
+        write_launcher(data.path(), &autostart, tray, b"png", false)?;
         assert_eq!(std::fs::read(&autostart)?, std::fs::read(&entry)?);
+
+        // Installed from a package: our launcher goes, the autostart entry follows the tray.
+        let packaged = Path::new("/usr/lib/homebase/homebase-filesync/bin/homebase-filesync");
+        write_launcher(data.path(), &autostart, packaged, b"png", true)?;
+        assert!(!entry.exists() && !icon.exists());
+        assert!(std::fs::read_to_string(&autostart)?.contains(&packaged.display().to_string()));
         Ok(())
     }
 
