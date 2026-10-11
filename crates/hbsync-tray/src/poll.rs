@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use hbsync_app::Paths;
 use hbsync_app::control;
-use hbsync_app::ipc::{Ask, IpcError, Reply};
 use hbsync_types::activity::Synced;
 
 use crate::model::{Daemon, RECENT_SHOWN};
@@ -29,8 +28,8 @@ pub fn spawn(paths: Paths, send: Sender) -> std::io::Result<mpsc::Sender<()>> {
 #[derive(Default)]
 struct Watcher {
     recent: Vec<Synced>,
-    /// The last sync the recent list was read after.
-    read_after: Option<u64>,
+    /// The daemon's `synced_added` when the recent list was read.
+    read_at: Option<u64>,
     next_start: Option<Instant>,
     start_failed: Option<String>,
     /// Restarted a daemon of another version once (after an update).
@@ -50,49 +49,43 @@ impl Watcher {
     }
 
     fn look(&mut self, paths: &Paths, send: &Sender) -> Daemon {
-        match control::configured(paths) {
+        let status = match control::status(paths) {
+            Ok(Some(status)) => status,
+            // Not running: started if a folder is set up.
             Ok(None) => {
-                self.recent.clear();
-                self.read_after = None;
-                return Daemon::NotSetUp;
+                return match control::configured(paths) {
+                    Ok(Some(_)) => self.start(paths, send),
+                    Ok(None) => {
+                        self.recent.clear();
+                        self.read_at = None;
+                        Daemon::NotSetUp
+                    }
+                    Err(e) => Daemon::Starting(Some(e.to_string())),
+                };
             }
-            Ok(Some(_)) => {}
             Err(e) => return Daemon::Starting(Some(e.to_string())),
-        }
-        match control::ask(paths, Ask::Status) {
-            Ok(Reply::Status(status)) => {
-                self.start_failed = None;
-                if status.version != env!("CARGO_PKG_VERSION") && !self.restarted {
-                    // Updated beside a daemon still running the old version.
-                    tracing::info!(
-                        "the daemon runs {}, this is {}: restarting it",
-                        status.version,
-                        env!("CARGO_PKG_VERSION")
-                    );
-                    self.restarted = true;
-                    if let Err(e) = control::stop(paths) {
-                        tracing::warn!("stopping the daemon: {e}");
-                    }
-                    return Daemon::Starting(None);
-                }
-                let last = status.last_sync.as_ref().map(|l| l.at);
-                if self.read_after != last || self.recent.is_empty() {
-                    if let Ok(Reply::Recent(list)) = control::ask(
-                        paths,
-                        Ask::Recent {
-                            limit: RECENT_SHOWN,
-                        },
-                    ) {
-                        self.recent = list;
-                    }
-                    self.read_after = last;
-                }
-                Daemon::Running(status)
+        };
+        self.start_failed = None;
+        if status.version != env!("CARGO_PKG_VERSION") && !self.restarted {
+            // Updated beside a daemon still running the old version.
+            tracing::info!(
+                "the daemon runs {:?}, this is {}: restarting it",
+                status.version,
+                env!("CARGO_PKG_VERSION")
+            );
+            self.restarted = true;
+            if let Err(e) = control::stop(paths) {
+                tracing::warn!("stopping the daemon: {e}");
             }
-            Ok(other) => Daemon::Starting(Some(format!("unexpected answer: {other:?}"))),
-            Err(IpcError::NotRunning) => self.start(paths, send),
-            Err(e) => Daemon::Starting(Some(e.to_string())),
+            return Daemon::Starting(None);
         }
+        if self.read_at != Some(status.synced_added)
+            && let Ok(Some(list)) = control::recent(paths, RECENT_SHOWN)
+        {
+            self.recent = list;
+            self.read_at = Some(status.synced_added);
+        }
+        Daemon::Running(Box::new(status))
     }
 
     fn start(&mut self, paths: &Paths, send: &Sender) -> Daemon {

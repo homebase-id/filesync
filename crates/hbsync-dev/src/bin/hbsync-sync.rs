@@ -17,6 +17,7 @@ use hbsync_app::{HintSource, Runner, RunnerConfig, State};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::Notifier;
 use hbsync_local::{IGNORE_FILE, STATE_DIR};
+use hbsync_remote::Remote;
 
 fn main() {
     if let Err(e) = run() {

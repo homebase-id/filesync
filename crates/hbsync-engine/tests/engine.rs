@@ -1183,7 +1183,15 @@ fn what_was_synced_is_listed_and_kept() -> R {
     a.engine.scan_local()?;
     let mut up = a.engine.sync_once("2026-10-11")?;
     // That sync's progress: both files, all their bytes.
-    assert_eq!(a.engine.progress().get(), (2, 2, 12, 12));
+    assert_eq!(
+        a.engine.progress().get(),
+        hbsync_types::activity::Progress {
+            files_done: 2,
+            files_total: 2,
+            bytes_done: 12,
+            bytes_total: 12
+        }
+    );
     up.absorb(a.sync()?);
     let mut listed = kinds(&up);
     listed.sort();

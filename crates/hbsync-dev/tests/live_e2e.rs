@@ -11,6 +11,7 @@ use std::time::Duration;
 use hbsync_engine::{Engine, EngineConfig, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_local::{Filter, IGNORE_FILE, STATE_DIR, state_db_path};
+use hbsync_remote::Remote;
 use hbsync_state::StateDb;
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;

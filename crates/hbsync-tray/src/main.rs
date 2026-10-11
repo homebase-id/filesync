@@ -201,7 +201,7 @@ impl App {
             Event::PickFolder(reply) => {
                 let picked = rfd::FileDialog::new()
                     .set_title("Choose the folder to sync")
-                    .set_directory(hbsync_app::setup::home().unwrap_or_default())
+                    .set_directory(hbsync_app::paths::home().unwrap_or_default())
                     .pick_folder();
                 let _ = reply.send(picked);
             }
@@ -248,10 +248,10 @@ impl App {
                 }
             }
             Action::Reveal(path) => os::reveal(&path),
-            Action::PauseFor(secs) => self.send_control(Control::PauseUntil {
-                until: words::now() + secs,
+            Action::PauseFor(secs) => self.send_control(Control::Pause {
+                until: Some(words::now() + secs),
             }),
-            Action::Pause => self.send_control(Control::Pause),
+            Action::Pause => self.send_control(Control::Pause { until: None }),
             Action::Resume => self.send_control(Control::Resume),
             Action::SyncNow => self.send_control(Control::SyncNow),
             Action::ReviewDeletions => os::open(&self.pages.url("deletions")),
@@ -396,8 +396,9 @@ fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, S
         return Vec::new();
     };
     let mut out = Vec::new();
-    let newest = before.recent.last().map_or(0, |n| n.at);
-    let fresh: Vec<_> = now.recent.iter().filter(|n| n.at > newest).collect();
+    // The notes added since the last look (the newest are last).
+    let added = now.notes_added.saturating_sub(before.notes_added) as usize;
+    let fresh = &now.recent[now.recent.len().saturating_sub(added)..];
     if let Some(first) = fresh.first() {
         let body = match fresh.len() {
             1 => first.text.clone(),
@@ -414,7 +415,7 @@ fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, S
             "Deletions waiting for you",
             format!(
                 "{} deletions wait until you review them (in the menu).",
-                held.here + held.remotely
+                held.total()
             ),
         ));
     }

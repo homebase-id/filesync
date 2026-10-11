@@ -86,7 +86,8 @@ pub fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
     let bookmark = format!(
         " <bookmark href=\"{uri}\">\n  <title>{title}</title>\n  <info>\n   \
          <metadata owner=\"http://freedesktop.org\">\n    \
-         <bookmark:icon name=\"folder-cloud\"/>\n   </metadata>\n  </info>\n </bookmark>\n"
+         <bookmark:icon name=\"folder-cloud\"/>\n   </metadata>\n  </info>\n </bookmark>\n",
+        title = hbsync_app::words::escape_xml(title),
     );
     Some(format!("{}{bookmark}{}", &xbel[..end], &xbel[end..]))
 }
@@ -108,21 +109,8 @@ pub fn kde_places_without(xbel: &str, uri: &str) -> Option<String> {
 #[cfg(target_os = "linux")]
 mod os {
     use super::*;
+    use hbsync_app::paths::xdg_dir;
     use std::process::Command;
-
-    fn config_home() -> Option<PathBuf> {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| hbsync_app::setup::home().map(|h| h.join(".config")))
-    }
-
-    fn data_home() -> Option<PathBuf> {
-        std::env::var_os("XDG_DATA_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| hbsync_app::setup::home().map(|h| h.join(".local/share")))
-    }
 
     /// Rewrites `path` with `change` when it says so; a missing file counts as empty when
     /// `create` (else it's left alone).
@@ -161,13 +149,13 @@ mod os {
             )?;
         }
         let uri = file_uri(folder);
-        if let Some(config) = config_home() {
+        if let Some(config) = xdg_dir("XDG_CONFIG_HOME", ".config") {
             edit(&config.join("gtk-3.0/bookmarks"), true, |t| {
                 gtk_bookmarks_with(t, &uri, "Homebase")
             });
         }
         // KDE writes this file on first start; with none, there is no KDE to tell.
-        if let Some(data) = data_home() {
+        if let Some(data) = xdg_dir("XDG_DATA_HOME", ".local/share") {
             edit(&data.join("user-places.xbel"), false, |t| {
                 kde_places_with(t, &uri, "Homebase")
             });
@@ -189,12 +177,12 @@ mod os {
             std::fs::remove_file(&directory)?;
         }
         let uri = file_uri(folder);
-        if let Some(config) = config_home() {
+        if let Some(config) = xdg_dir("XDG_CONFIG_HOME", ".config") {
             edit(&config.join("gtk-3.0/bookmarks"), false, |t| {
                 gtk_bookmarks_without(t, &uri)
             });
         }
-        if let Some(data) = data_home() {
+        if let Some(data) = xdg_dir("XDG_DATA_HOME", ".local/share") {
             edit(&data.join("user-places.xbel"), false, |t| {
                 kde_places_without(t, &uri)
             });

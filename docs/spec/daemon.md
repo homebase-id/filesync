@@ -119,17 +119,18 @@ a failure (service managers restart it then).
 ## Control socket
 
 One request line, one reply line (JSON), then the connection closes. Requests carry the protocol
-version (now 1); a daemon refuses another one with the reason (after an update: restart it).
+version (now 2); a daemon refuses another one with the reason (after an update: restart it).
 
 ```json
-{"protocol":1,"ask":"status"}
-{"protocol":1,"ask":{"control":"sync_now"}}            // pause, resume, stop
-{"protocol":1,"ask":{"control":{"pause_until":{"until":1800000000}}}}
-{"protocol":1,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
-{"protocol":1,"ask":{"recent":{"limit":10}}}
+{"protocol":2,"ask":"status"}
+{"protocol":2,"ask":{"control":"sync_now"}}            // resume, stop
+{"protocol":2,"ask":{"control":{"pause":{"until":1800000000}}}}   // "until":null: until resumed
+{"protocol":2,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
+{"protocol":2,"ask":{"recent":{"limit":10}}}
 ```
 
-Replies: `{"status":{...}}` (with the daemon's `version`, `progress` and `paused_until`),
+Replies: `{"status":{...}}` (with the daemon's `version`, `progress`, `paused_until`, and the
+counts `notes_added` and `synced_added` that tell a client what is new),
 `{"recent":[...]}` (newest first), `"done"`, `{"refused":"why"}`.
 
 Only the user can connect:

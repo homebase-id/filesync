@@ -14,12 +14,13 @@ use hbsync_homebase::notify::Notifier;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_local::state_db_path;
 use hbsync_state::StateDb;
+use hbsync_types::unix_now;
 
 use crate::ipc::{self, Ask, Reply, Request};
 use crate::lock::{InstanceLock, LockError};
 use crate::runner::{
-    Backoff, Control, Handle, HintSource, Runner, RunnerConfig, RunnerError, State, Status, lock,
-    unix_now,
+    Backoff, Control, Handle, HintSource, Runner, RunnerConfig, RunnerError, State, Status, Until,
+    lock,
 };
 use crate::{Config, ConfigError, CredentialError, CredentialStore, Location, Paths, Root};
 
@@ -50,8 +51,7 @@ enum Phase {
         error: Option<String>,
         warning: Option<String>,
         /// Kept in the config too: the runner starts paused.
-        paused: bool,
-        paused_until: Option<u64>,
+        paused: Option<Until>,
     },
     Running(Handle),
 }
@@ -71,8 +71,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         error: None,
         warning: None,
         // A pause that ended while the daemon wasn't running is over.
-        paused: config.paused && config.paused_until.is_none_or(|t| t > unix_now()),
-        paused_until: config.paused_until.filter(|_| config.paused),
+        paused: config.pause(unix_now()),
     }));
     let set = |to: State, why: String| {
         if let Phase::Waiting { state, error, .. } = &mut *lock(&phase) {
@@ -169,14 +168,8 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
     let (handle, thread) = {
         // Under the lock: no pause gets lost between the two phases.
         let mut phase = lock(&phase);
-        if let Phase::Waiting {
-            paused,
-            paused_until,
-            ..
-        } = &*phase
-        {
+        if let Phase::Waiting { paused, .. } = &*phase {
             cfg.paused = *paused;
-            cfg.paused_until = *paused_until;
         }
         let spawned = Runner::spawn(cfg, remote.clone(), hints)?;
         *phase = Phase::Running(spawned.0.clone());
@@ -186,12 +179,6 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
     while !thread.is_finished() {
         if stop.load(Ordering::Relaxed) {
             handle.send(Control::Stop);
-        }
-        // Drive rows the client can't read (not encrypted, another key, not a sync node): not
-        // synced, so said in the log and the status.
-        for why in remote.take_skipped() {
-            tracing::warn!("a file on the drive isn't synced: {why}");
-            handle.note(format!("a file on Homebase can't be synced: {why}"));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -207,8 +194,18 @@ fn answer(
     root: &Root,
     paths: &Paths,
 ) -> Reply {
+    // From the folder's state DB, in any phase (WAL: a sync writing doesn't block it), and
+    // without holding up the other requests.
+    if let Ask::Recent { limit } = request.ask {
+        return Reply::Recent(
+            StateDb::open(&state_db_path(&root.folder))
+                .and_then(|mut db| db.read(|s| s.recent_synced(limit)))
+                .unwrap_or_default(),
+        );
+    }
     let mut phase = lock(phase);
     match (request.ask, &mut *phase) {
+        (Ask::Recent { .. }, _) => unreachable!("answered above"),
         (Ask::Status, Phase::Running(h)) => Reply::Status(Box::new(h.status())),
         (
             Ask::Status,
@@ -217,12 +214,15 @@ fn answer(
                 error,
                 warning,
                 paused,
-                paused_until,
             },
         ) => {
             let mut s = Status::new(&root.identity, &root.folder);
-            s.state = if *paused { State::Paused } else { *state };
-            s.paused_until = *paused_until;
+            s.state = if paused.is_some() {
+                State::Paused
+            } else {
+                *state
+            };
+            s.paused_until = paused.flatten();
             s.error.clone_from(error);
             s.credentials_warning.clone_from(warning);
             Reply::Status(Box::new(s))
@@ -243,35 +243,19 @@ fn answer(
                     .into(),
             )
         }
-        (Ask::Recent { limit }, Phase::Running(h)) => Reply::Recent(h.recent(limit)),
-        // Not syncing yet: the list as the last run left it.
-        (Ask::Recent { limit }, Phase::Waiting { .. }) => Reply::Recent(
-            StateDb::open(&state_db_path(&root.folder))
-                .and_then(|mut db| db.read(|s| s.recent_synced(limit)))
-                .unwrap_or_default(),
-        ),
-        (
-            Ask::Control(c @ (Control::Pause | Control::PauseUntil { .. } | Control::Resume)),
-            phase,
-        ) => {
-            let (pause, until) = match c {
-                Control::Pause => (true, None),
-                Control::PauseUntil { until } => (true, Some(until)),
-                _ => (false, None),
+        (Ask::Control(c @ (Control::Pause { .. } | Control::Resume)), phase) => {
+            let pause = match c {
+                Control::Pause { until } => Some(until),
+                _ => None,
             };
             // Pausing survives a restart, and is kept until the sync starts.
-            if let Err(e) = remember_paused(paths, pause, until) {
+            if let Err(e) = remember_paused(paths, pause) {
                 return Reply::Refused(format!("couldn't save the pause in the config: {e}"));
             }
             match phase {
                 Phase::Running(h) => send(h, c),
-                Phase::Waiting {
-                    paused,
-                    paused_until,
-                    ..
-                } => {
+                Phase::Waiting { paused, .. } => {
                     *paused = pause;
-                    *paused_until = until;
                     Reply::Done
                 }
             }
@@ -293,12 +277,12 @@ fn send(handle: &Handle, control: Control) -> Reply {
     }
 }
 
-fn remember_paused(paths: &Paths, paused: bool, until: Option<u64>) -> Result<(), ConfigError> {
+fn remember_paused(paths: &Paths, pause: Option<Until>) -> Result<(), ConfigError> {
     let path = paths.config_file();
     let mut config = Config::load(&path)?.unwrap_or_default();
-    if (config.paused, config.paused_until) != (paused, until) {
-        config.paused = paused;
-        config.paused_until = until;
+    let was = (config.paused, config.paused_until);
+    config.set_pause(pause);
+    if (config.paused, config.paused_until) != was {
         config.save(&path)?;
     }
     Ok(())

@@ -115,7 +115,7 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     wait_until("b is idle", || b.status().state == State::Idle)?;
     assert!(b.status().last_sync.is_some());
 
-    b.handle.send(Control::Pause);
+    b.handle.send(Control::Pause { until: None });
     assert_eq!(b.status().state, State::Paused, "shown at once");
     a.write("two.txt", "2")?;
     wait_until("two.txt is up", || on_server(&server, "two.txt"))?;
@@ -306,19 +306,13 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
     Ok(())
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 #[test]
 fn a_timed_pause_ends_by_itself() -> R {
     let server = server();
     let a = Device::start(&server, "a", NO_POLL)?;
     wait_until("a is idle", || a.status().state == State::Idle)?;
-    let until = unix_now() + 2;
-    a.handle.send(Control::PauseUntil { until });
+    let until = hbsync_types::unix_now() + 2;
+    a.handle.send(Control::Pause { until: Some(until) });
     assert_eq!(a.status().state, State::Paused);
     wait_until("the pause shows its end", || {
         a.status().paused_until == Some(until)
@@ -340,14 +334,16 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
     let a = Device::start(&server, "a", NO_POLL)?;
     a.write("Docs/one.txt", "1")?;
     a.write("two.txt", "22")?;
-    wait_until("both are listed", || a.handle.recent(10).len() == 2)?;
-    let recent = a.handle.recent(10);
+    wait_until("both are listed", || a.status().synced_added == 2)?;
+    // The list is the folder's state DB's.
+    let recent = hbsync_state::StateDb::open(&hbsync_local::state_db_path(&a.root))?
+        .read(|s| s.recent_synced(10))?;
+    assert_eq!(recent.len(), 2);
     assert!(
         recent
             .iter()
             .all(|s| s.kind == hbsync_types::activity::SyncedKind::Uploaded)
     );
-    assert_eq!(a.handle.recent(1).len(), 1);
     // The status shows no progress once idle.
     wait_until("a is idle", || a.status().state == State::Idle)?;
     assert_eq!(a.status().progress, None);

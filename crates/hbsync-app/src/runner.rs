@@ -12,15 +12,14 @@
 //! - **Ignore rules** (`.hbsync/ignore`) are checked for changes at every poll and on request;
 //!   a change restarts the engine, which re-plans everything (sync semantics §10).
 
-use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
-use hbsync_engine::activity::{self, Progress as Counters};
+use hbsync_engine::activity::Counters;
 use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
 use hbsync_engine::{Conflict, Engine, EngineConfig, EngineError, SyncReport};
@@ -30,7 +29,8 @@ use hbsync_local::{Filter, FilterError, LocalObserver, STATE_DIR, state_db_path}
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{StateDb, StateError};
 use hbsync_types::NodeId;
-use hbsync_types::activity::Synced;
+pub use hbsync_types::activity::Progress;
+use hbsync_types::unix_now;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
@@ -99,10 +99,8 @@ pub struct RunnerConfig {
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
-    /// Start paused.
-    pub paused: bool,
-    /// Resume by itself then (Unix seconds).
-    pub paused_until: Option<u64>,
+    /// Start paused: until then, or until resumed (`Some(None)`).
+    pub paused: Option<Until>,
     /// A sync at least this often.
     pub poll: Duration,
     /// Catch up, sync once, and stop (development).
@@ -120,8 +118,7 @@ impl RunnerConfig {
             identity: identity.to_owned(),
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
-            paused: false,
-            paused_until: None,
+            paused: None,
             poll: Duration::from_secs(60),
             once: false,
             credentials_warning: None,
@@ -130,16 +127,18 @@ impl RunnerConfig {
     }
 }
 
+/// How long a pause lasts: until then (Unix seconds), or until resumed (`None`).
+pub type Until = Option<u64>;
+
 /// Requests to the runner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Control {
     /// Sync now, without waiting out a backoff.
     SyncNow,
-    Pause,
-    /// Pause until then (Unix seconds), then resume by itself.
-    PauseUntil {
-        until: u64,
+    /// Pause until then (Unix seconds), or until resumed (`None`).
+    Pause {
+        until: Until,
     },
     Resume,
     /// Let the held deletes the user was shown through: `token` is
@@ -184,7 +183,8 @@ pub enum Hints {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
-    /// The daemon's version.
+    /// The daemon's version (empty from a daemon too old to say).
+    #[serde(default)]
     pub version: String,
     pub state: State,
     /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
@@ -204,6 +204,12 @@ pub struct Status {
     pub held_deletes: Option<HeldDeletes>,
     /// Conflicts and failures of recent syncs, newest last.
     pub recent: Vec<Note>,
+    /// Notes added since the daemon started (more than [`Status::recent`] keeps): what is
+    /// new since a client last looked.
+    pub notes_added: u64,
+    /// Entries added to the recently synced list since the daemon started: a client reads
+    /// the list again ([`crate::ipc::Ask::Recent`]) when this changes.
+    pub synced_added: u64,
     /// Why there is no live watcher (the folder is then rescanned at every poll).
     pub watcher_error: Option<String>,
     pub hints: Hints,
@@ -229,22 +235,14 @@ impl Status {
             pending: 0,
             held_deletes: None,
             recent: Vec::new(),
+            notes_added: 0,
+            synced_added: 0,
             watcher_error: None,
             hints: Hints::Off,
             rules: 0,
             credentials_warning: None,
         }
     }
-}
-
-/// How far a sync is: the files (and moves and deletes) and the bytes of its transfers. The
-/// bytes moved can run a little past the total (encryption's padding).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Progress {
-    pub files_done: u64,
-    pub files_total: u64,
-    pub bytes_done: u64,
-    pub bytes_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -267,6 +265,17 @@ pub struct HeldDeletes {
     pub examples: Vec<String>,
     /// Names exactly these deletes: a confirmation carries it back.
     pub token: String,
+}
+
+impl HeldDeletes {
+    pub fn total(&self) -> u64 {
+        self.here + self.remotely
+    }
+
+    /// More are held than [`HeldDeletes::examples`] shows.
+    pub fn more_than_shown(&self) -> bool {
+        (self.examples.len() as u64) < self.total()
+    }
 }
 
 /// The token of the held deletes of `nodes`, a hash of their sorted ids (made and checked by
@@ -310,17 +319,13 @@ pub struct Handle {
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
     progress: Arc<Counters>,
-    synced: Arc<Mutex<VecDeque<Synced>>>,
 }
 
 impl Handle {
     /// Passes `control` on. Pause and stop also interrupt a sync in progress. False when the
     /// runner has ended.
     pub fn send(&self, control: Control) -> bool {
-        if matches!(
-            control,
-            Control::Pause | Control::PauseUntil { .. } | Control::Stop
-        ) {
+        if matches!(control, Control::Pause { .. } | Control::Stop) {
             self.stop.store(true, Ordering::Relaxed);
         }
         self.control.send(control).is_ok()
@@ -332,37 +337,11 @@ impl Handle {
         if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
             status.state = State::Paused;
         }
-        let (files_done, files_total, bytes_done, bytes_total) = self.progress.get();
-        if matches!(status.state, State::Starting | State::Syncing) && files_total > 0 {
-            status.progress = Some(Progress {
-                files_done,
-                files_total,
-                bytes_done,
-                bytes_total,
-            });
+        let progress = self.progress.get();
+        if matches!(status.state, State::Starting | State::Syncing) && progress.files_total > 0 {
+            status.progress = Some(progress);
         }
         status
-    }
-
-    /// The newest `limit` entries of the recently synced list, newest first.
-    pub fn recent(&self, limit: usize) -> Vec<Synced> {
-        lock(&self.synced)
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
-    }
-
-    /// Adds a note to [`Status::recent`] (something the user should know about).
-    pub fn note(&self, text: String) {
-        let mut status = lock(&self.status);
-        status.recent.push(Note {
-            at: unix_now(),
-            text,
-        });
-        let excess = status.recent.len().saturating_sub(RECENT);
-        status.recent.drain(..excess);
     }
 }
 
@@ -379,8 +358,6 @@ pub struct Runner {
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
     progress: Arc<Counters>,
-    /// The recently synced list, oldest first: loaded from the state DB, then added to.
-    synced: Arc<Mutex<VecDeque<Synced>>>,
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
     /// The conflicts and failures of the last sync, to tell each one only once.
@@ -419,24 +396,20 @@ impl Runner {
         hints: HintSource,
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
         let (tx, rx) = channel();
-        let stop = Arc::new(AtomicBool::new(cfg.paused));
+        let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = Status::new(&cfg.identity, &cfg.folder);
         if hints.notifier.is_some() {
             status.hints = Hints::Connecting;
         }
         status.credentials_warning = cfg.credentials_warning.clone();
-        if cfg.paused {
-            status.paused_until = cfg.paused_until;
-        }
+        status.paused_until = cfg.paused.flatten();
         let status = Arc::new(Mutex::new(status));
         let progress = Arc::new(Counters::default());
-        let synced = Arc::new(Mutex::new(VecDeque::new()));
         let handle = Handle {
             control: tx,
             stop: Arc::clone(&stop),
             status: Arc::clone(&status),
             progress: Arc::clone(&progress),
-            synced: Arc::clone(&synced),
         };
         let runner = Runner {
             cfg,
@@ -446,7 +419,6 @@ impl Runner {
             stop,
             status,
             progress,
-            synced,
             held: Vec::new(),
             last_notes: Default::default(),
         };
@@ -467,6 +439,15 @@ impl Runner {
 
     fn set(&self, f: impl FnOnce(&mut Status)) {
         f(&mut lock(&self.status));
+    }
+
+    /// The end of a pause: syncing goes on.
+    fn resume(&self) {
+        self.stop.store(false, Ordering::Relaxed);
+        self.set(|s| {
+            s.state = State::Idle;
+            s.paused_until = None;
+        });
     }
 
     /// The engine and observer for the folder, which must have been set up (its `.hbsync`
@@ -497,8 +478,6 @@ impl Runner {
         let mut engine = Engine::new(db, Box::new(Arc::clone(&self.remote)), cfg);
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
-        let recent = engine.recent_synced(activity::KEEP)?;
-        *lock(&self.synced) = recent.into_iter().rev().collect();
         let observer = LocalObserver::start(root, engine.scan_options().clone());
         if let Some(why) = &observer.watcher_error {
             tracing::warn!("no live watcher ({why}); the folder is rescanned at every poll");
@@ -516,8 +495,7 @@ impl Runner {
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
         let db_path = state_db_path(&self.cfg.folder);
-        let mut paused = self.cfg.paused;
-        let mut paused_until = self.cfg.paused_until.filter(|_| paused);
+        let mut pause = self.cfg.paused;
         let mut started = false;
         let mut wanted = true;
         let mut check_rules = false;
@@ -529,7 +507,7 @@ impl Runner {
             "syncing {} with {}{}",
             self.cfg.folder.display(),
             self.cfg.identity,
-            if paused { " (paused)" } else { "" }
+            if pause.is_some() { " (paused)" } else { "" }
         );
         loop {
             // Local changes: the watcher's batches are recorded in the DB as they come.
@@ -568,31 +546,24 @@ impl Runner {
                         check_rules = true;
                         not_before = Instant::now();
                     }
-                    Ok(Control::Pause) => {
-                        paused = true;
-                        paused_until = None;
-                        self.set(|s| s.paused_until = None);
-                        tracing::info!("paused");
-                    }
-                    Ok(Control::PauseUntil { until }) => {
-                        paused = true;
-                        paused_until = Some(until);
-                        self.set(|s| s.paused_until = Some(until));
-                        tracing::info!("paused for {} min", until.saturating_sub(unix_now()) / 60);
+                    Ok(Control::Pause { until }) => {
+                        pause = Some(until);
+                        self.set(|s| s.paused_until = until);
+                        match until {
+                            Some(t) => tracing::info!(
+                                "paused for {} min",
+                                t.saturating_sub(unix_now()) / 60
+                            ),
+                            None => tracing::info!("paused"),
+                        }
                     }
                     Ok(Control::Resume) => {
-                        if paused {
+                        if pause.take().is_some() {
                             tracing::info!("resumed");
                         }
-                        paused = false;
-                        paused_until = None;
-                        self.stop.store(false, Ordering::Relaxed);
                         wanted = true;
                         not_before = Instant::now();
-                        self.set(|s| {
-                            s.state = State::Idle;
-                            s.paused_until = None;
-                        });
+                        self.resume();
                     }
                     Ok(Control::ConfirmDeletes { token }) => {
                         if token != held_token(&self.held) {
@@ -642,17 +613,12 @@ impl Runner {
                 self.set(|s| s.hints = hints);
             }
 
-            if paused && paused_until.is_some_and(|t| unix_now() >= t) {
+            if pause.flatten().is_some_and(|t| unix_now() >= t) {
                 tracing::info!("the pause is over: resuming");
-                paused = false;
-                paused_until = None;
-                self.stop.store(false, Ordering::Relaxed);
+                pause = None;
                 wanted = true;
                 not_before = Instant::now();
-                self.set(|s| {
-                    s.state = State::Idle;
-                    s.paused_until = None;
-                });
+                self.resume();
             }
             let now = Instant::now();
             if now >= next_poll {
@@ -661,7 +627,7 @@ impl Runner {
                 wanted = true;
                 check_rules = true;
                 if let Some(p) = &mut parts
-                    && !paused
+                    && pause.is_none()
                     && !p.observer.has_watcher()
                     && let Err(e) = p.engine.scan_local()
                 {
@@ -677,7 +643,7 @@ impl Runner {
                 parts = None;
                 wanted = true;
             }
-            if paused || !wanted || now < not_before {
+            if pause.is_some() || !wanted || now < not_before {
                 continue;
             }
             if !self.cfg.folder.join(STATE_DIR).is_dir() {
@@ -792,6 +758,10 @@ impl Runner {
             let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
             notes.push(format!("{path}: {} ({why})", op_name(op)));
         }
+        // Drive rows the client can't read (not encrypted, another key, not a sync node).
+        for why in self.remote.take_skipped() {
+            notes.push(format!("a file on Homebase can't be synced: {why}"));
+        }
         let seen = std::mem::take(&mut self.last_notes);
         self.last_notes = notes.iter().cloned().collect();
         notes.retain(|n| !seen.contains(n));
@@ -847,15 +817,13 @@ impl Runner {
                 downloaded_changes: report.feed.live + report.feed.deleted,
                 adopted: report.adopted,
             });
+            s.notes_added += notes.len() as u64;
             s.recent
                 .extend(notes.into_iter().map(|text| Note { at, text }));
             let excess = s.recent.len().saturating_sub(RECENT);
             s.recent.drain(..excess);
+            s.synced_added += report.synced.len() as u64;
         });
-        let mut synced = lock(&self.synced);
-        synced.extend(report.synced.iter().cloned());
-        let excess = synced.len().saturating_sub(activity::KEEP);
-        synced.drain(..excess);
         Ok(())
     }
 }
@@ -880,12 +848,6 @@ fn is_offline(e: &EngineError) -> bool {
         }
         _ => false,
     }
-}
-
-pub(crate) fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// The operation's kind, from its debug form (`RemoteCreate { .. }` → `RemoteCreate`).

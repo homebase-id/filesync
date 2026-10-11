@@ -40,3 +40,13 @@ pub enum SyncedKind {
     /// Deleted on another device; moved to this computer's trash.
     TrashedLocally,
 }
+
+/// How far a sync is: its files (transfers, moves and deletes) and the bytes of its transfers,
+/// done and to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Progress {
+    pub files_done: u64,
+    pub files_total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
+}

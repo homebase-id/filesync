@@ -5,8 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use hbsync_app::control::{ask, control, running, start, stop};
-use hbsync_app::ipc::{Ask, IpcError, Reply};
+use hbsync_app::control::{control, running, start, stop};
 use hbsync_app::runner::Hints;
 use hbsync_app::{Control, Paths, State, Status, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
@@ -107,8 +106,11 @@ fn main() -> ExitCode {
     }
 }
 
-/// Exit code of `status` when the daemon isn't running.
-const NOT_RUNNING: u8 = 3;
+/// Says the daemon isn't running: exit status 3.
+fn not_running() -> ExitCode {
+    println!("The daemon isn't running (`hbsync start` starts it).");
+    ExitCode::from(3)
+}
 
 fn run(command: Command) -> Res<ExitCode> {
     let paths = Paths::resolve()?;
@@ -141,46 +143,36 @@ fn run(command: Command) -> Res<ExitCode> {
                 println!("{line}")
             })?;
         }
-        Command::Status { json } => match ask(&paths, Ask::Status) {
-            Ok(Reply::Status(s)) if json => println!("{}", serde_json::to_string_pretty(&s)?),
-            Ok(Reply::Status(s)) => print_status(&s),
-            Ok(other) => return Err(format!("unexpected answer: {other:?}").into()),
-            Err(IpcError::NotRunning) => {
-                println!("The daemon isn't running (`hbsync start` starts it).");
-                return Ok(ExitCode::from(NOT_RUNNING));
-            }
-            Err(e) => return Err(e.into()),
+        Command::Status { json } => match daemon::status(&paths)? {
+            Some(s) if json => println!("{}", serde_json::to_string_pretty(&s)?),
+            Some(s) => print_status(&s),
+            None => return Ok(not_running()),
         },
         Command::Sync => {
             control(&paths, Control::SyncNow)?;
             println!("Syncing now.");
         }
         Command::Pause { for_: None } => {
-            control(&paths, Control::Pause)?;
+            control(&paths, Control::Pause { until: None })?;
             println!("Paused. `hbsync resume` syncs again.");
         }
         Command::Pause { for_: Some(secs) } => {
             let until = words::now() + secs;
-            control(&paths, Control::PauseUntil { until })?;
+            control(&paths, Control::Pause { until: Some(until) })?;
             println!(
                 "Paused; syncing again {}. `hbsync resume` syncs now.",
                 words::when(until, words::now())
             );
         }
-        Command::Recent { limit } => match ask(&paths, Ask::Recent { limit }) {
-            Ok(Reply::Recent(list)) if list.is_empty() => println!("Nothing synced yet."),
-            Ok(Reply::Recent(list)) => {
+        Command::Recent { limit } => match daemon::recent(&paths, limit)? {
+            Some(list) if list.is_empty() => println!("Nothing synced yet."),
+            Some(list) => {
                 let now = words::now();
                 for s in &list {
                     println!("{:>12}  {}", words::when(s.at, now), words::synced(s));
                 }
             }
-            Ok(other) => return Err(format!("unexpected answer: {other:?}").into()),
-            Err(IpcError::NotRunning) => {
-                println!("The daemon isn't running (`hbsync start` starts it).");
-                return Ok(ExitCode::from(NOT_RUNNING));
-            }
-            Err(e) => return Err(e.into()),
+            None => return Ok(not_running()),
         },
         Command::Resume => {
             control(&paths, Control::Resume)?;
@@ -259,30 +251,20 @@ fn run(command: Command) -> Res<ExitCode> {
 }
 
 fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
-    let status = match ask(paths, Ask::Status)? {
-        Reply::Status(s) => s,
-        other => return Err(format!("unexpected answer: {other:?}").into()),
+    let Some(status) = daemon::status(paths)? else {
+        return Err("the daemon isn't running (`hbsync start` starts it)".into());
     };
     let Some(held) = status.held_deletes else {
         println!("No deletes are waiting for confirmation.");
         return Ok(());
     };
-    if held.here > 0 {
-        println!(
-            "{} items deleted on this computer will be deleted from {} and your other devices.",
-            held.here, status.identity
-        );
-    }
-    if held.remotely > 0 {
-        println!(
-            "{} items deleted elsewhere will be moved to this computer's trash.",
-            held.remotely
-        );
+    for line in words::held_deletes(&held) {
+        println!("{line}");
     }
     for path in &held.examples {
         println!("  {path}");
     }
-    if (held.examples.len() as u64) < held.here + held.remotely {
+    if held.more_than_shown() {
         println!("  ...");
     }
     if !yes {

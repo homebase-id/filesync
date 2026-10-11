@@ -9,6 +9,13 @@ pub use uuid::Uuid;
 pub mod activity;
 pub mod schema;
 
+/// Now, in Unix seconds.
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// A node's identity: a client-generated UUID, stable across rename and move. Stored remotely
 /// as the Homebase `UniqueId`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

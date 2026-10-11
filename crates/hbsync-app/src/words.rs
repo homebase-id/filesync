@@ -1,17 +1,11 @@
 //! How the client words things for people, shared by the CLI and the tray.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use hbsync_types::activity::{Progress, Synced, SyncedKind};
 
-use hbsync_types::activity::{Synced, SyncedKind};
-
-use crate::runner::Progress;
+use crate::runner::HeldDeletes;
 
 /// Now, in Unix seconds.
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
+pub use hbsync_types::unix_now as now;
 
 /// `at` (Unix seconds) relative to `now`: "12 s ago", "in 3 min".
 pub fn when(at: u64, now: u64) -> String {
@@ -64,6 +58,16 @@ pub fn verb(kind: SyncedKind) -> &'static str {
     }
 }
 
+/// What happened to an entry: "uploaded", or for several taken together "312 files
+/// downloaded".
+pub fn what(s: &Synced) -> String {
+    if s.is_group() {
+        format!("{} files {}", s.files, verb(s.kind))
+    } else {
+        verb(s.kind).to_owned()
+    }
+}
+
 /// One entry of the recently synced list: "Docs/report.txt: uploaded, 2.1 MB", or for
 /// several taken together "Photos/2024: 312 files downloaded, 1.2 GB".
 pub fn synced(s: &Synced) -> String {
@@ -77,11 +81,35 @@ pub fn synced(s: &Synced) -> String {
     } else {
         String::new()
     };
-    if s.is_group() {
-        format!("{place}: {} files {}{size}", s.files, verb(s.kind))
-    } else {
-        format!("{place}: {}{size}", verb(s.kind))
+    format!("{place}: {}{size}", what(s))
+}
+
+/// What held deletes would do, a sentence for each side: "100 items deleted on this computer
+/// will be deleted from your Homebase and your other devices."
+pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
+    let mut out = Vec::new();
+    if held.here > 0 {
+        out.push(format!(
+            "{} items deleted on this computer will be deleted from your Homebase and your \
+             other devices.",
+            held.here
+        ));
     }
+    if held.remotely > 0 {
+        out.push(format!(
+            "{} items deleted on another device will be moved to this computer's trash.",
+            held.remotely
+        ));
+    }
+    out
+}
+
+/// `s` safe in HTML and XML text and attribute values.
+pub fn escape_xml(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// A sync in progress: "12 of 40 files, 3.1 MB of 40 MB".

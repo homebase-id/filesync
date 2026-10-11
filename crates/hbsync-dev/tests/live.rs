@@ -7,6 +7,7 @@ use std::time::Duration;
 use hbsync_dev::{live_identity, run_name, saved_client};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
+use hbsync_remote::Remote;
 use hbsync_remote::contract::Bench;
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -67,7 +68,6 @@ fn a_change_on_the_drive_is_announced() -> R {
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn nodes_are_stored_encrypted() -> R {
     use hbsync_homebase::drive::sealed::sealed_len;
-    use hbsync_remote::Remote;
     use hbsync_remote::contract::file;
 
     let remote = live_remote()?;
@@ -123,8 +123,8 @@ fn throughput() -> R {
     use std::time::Instant;
 
     use hbsync_fileio::{HashAlgorithm, Hasher, hash_reader};
+    use hbsync_remote::Upload;
     use hbsync_remote::contract::{file, upload, with};
-    use hbsync_remote::{Remote, Upload};
     use hbsync_types::schema::NodeContent;
 
     struct Hashing(Hasher);

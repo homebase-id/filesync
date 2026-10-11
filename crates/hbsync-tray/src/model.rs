@@ -173,7 +173,7 @@ pub fn menu(view: &View) -> Vec<Item> {
         if let Some(h) = &s.held_deletes {
             items.push(Item::Action(
                 Action::ReviewDeletions,
-                format!("Review {} deletions…", h.here + h.remotely),
+                format!("Review {} deletions…", h.total()),
             ));
         }
         if s.state == State::Denied {
@@ -250,12 +250,7 @@ pub fn recent_line(s: &Synced, now: u64) -> String {
     } else {
         s.path.rsplit('/').next().unwrap_or(&s.path).to_owned()
     };
-    let what = if s.is_group() {
-        format!("{} files {}", s.files, words::verb(s.kind))
-    } else {
-        words::verb(s.kind).to_owned()
-    };
-    format!("{name} · {what} · {}", words::when(s.at, now))
+    format!("{name} · {} · {}", words::what(s), words::when(s.at, now))
 }
 
 fn problems(s: &Status, now: u64) -> Vec<Item> {

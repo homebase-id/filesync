@@ -10,7 +10,7 @@ use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
-use crate::activity::{self, Progress};
+use crate::activity::{self, Counters};
 use crate::adopt::adopt;
 use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
@@ -152,7 +152,7 @@ pub struct Engine {
     /// Nodes whose held deletes the user confirmed, until they are done (or undone).
     confirmed: std::collections::HashSet<NodeId>,
     /// How far the current sync is.
-    progress: Arc<Progress>,
+    progress: Arc<Counters>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -181,12 +181,12 @@ impl Engine {
     }
 
     /// How far the current sync is (started over at each sync), to show while it runs.
-    pub fn progress(&self) -> Arc<Progress> {
+    pub fn progress(&self) -> Arc<Counters> {
         Arc::clone(&self.progress)
     }
 
     /// Counts into `progress` from now on (shared with whoever shows it).
-    pub fn set_progress(&mut self, progress: Arc<Progress>) {
+    pub fn set_progress(&mut self, progress: Arc<Counters>) {
         self.progress = progress;
     }
 
@@ -268,11 +268,6 @@ impl Engine {
     /// (a node deleted here). `None` for a node this device never had.
     pub fn path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
         self.db.read(|s| activity::path_of(s, node))
-    }
-
-    /// The newest `limit` entries of the recently synced list, newest first.
-    pub fn recent_synced(&mut self, limit: usize) -> Result<Vec<Synced>, StateError> {
-        self.db.read(|s| s.recent_synced(limit))
     }
 
     /// A full local scan (tier C). The live observer does this incrementally in production.

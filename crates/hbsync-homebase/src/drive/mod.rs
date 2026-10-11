@@ -98,11 +98,6 @@ impl HomebaseRemote {
         &self.client
     }
 
-    /// The feed rows skipped since the last call, with the reason (at most a thousand).
-    pub fn take_skipped(&self) -> Vec<String> {
-        std::mem::take(&mut *self.skipped.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
     /// The route of the drive's files.
     pub fn files(&self) -> String {
         format!("/api/v2/drives/{}/files", self.drive.alias.simple())
@@ -267,6 +262,11 @@ fn sealed_hash(upload: &mut Upload<'_>, key: &Key, iv: &[u8; 16]) -> Result<Cont
 }
 
 impl Remote for HomebaseRemote {
+    /// At most a thousand are kept between calls.
+    fn take_skipped(&self) -> Vec<String> {
+        std::mem::take(&mut *self.skipped.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let size = limit.max(1);
         let page: wire::QueryBatchResponse = self

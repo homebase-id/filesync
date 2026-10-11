@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::runner::Until;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("{0}: {1}")]
@@ -112,6 +114,17 @@ impl Config {
     }
 
     /// The name shown in conflict copies: the configured one, or the computer's.
+    /// The pause in effect at `now` (Unix seconds): until when, or until resumed; `None`
+    /// when syncing, also after a pause that has run out.
+    pub fn pause(&self, now: u64) -> Option<Until> {
+        (self.paused && self.paused_until.is_none_or(|t| t > now)).then_some(self.paused_until)
+    }
+
+    pub fn set_pause(&mut self, pause: Option<Until>) {
+        self.paused = pause.is_some();
+        self.paused_until = pause.flatten();
+    }
+
     pub fn device_name(&self) -> String {
         self.device_name
             .clone()

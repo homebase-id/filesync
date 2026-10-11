@@ -57,11 +57,7 @@ pub fn launchd_plist(program: &Path, env: &[(String, String)]) -> String {
     } else {
         (LABEL.to_owned(), "Background")
     };
-    let esc = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-    };
+    let esc = crate::words::escape_xml;
     let mut env_xml = String::new();
     if !env.is_empty() {
         env_xml.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
@@ -189,9 +185,7 @@ pub fn logon_program() -> io::Result<PathBuf> {
 
 #[cfg(unix)]
 fn home() -> io::Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("HOME isn't set"))
+    crate::paths::home().ok_or_else(|| io::Error::other("HOME isn't set"))
 }
 
 /// Runs a service manager command, turning a failure into an error with its output.
@@ -307,10 +301,8 @@ mod os {
 
     /// The session's autostart folder (`$XDG_CONFIG_HOME/autostart`).
     fn desktop() -> io::Result<PathBuf> {
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|v| !v.is_empty())
-            .map(PathBuf::from)
-            .map_or_else(|| home().map(|h| h.join(".config")), Ok)?;
+        let config = crate::paths::xdg_dir("XDG_CONFIG_HOME", ".config")
+            .ok_or_else(|| io::Error::other("HOME isn't set"))?;
         Ok(config.join("autostart").join(DESKTOP_ENTRY))
     }
 

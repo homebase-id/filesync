@@ -14,6 +14,7 @@ use std::time::Duration;
 use hbsync_app::control;
 use hbsync_app::runner::Status;
 use hbsync_app::setup::{self, FolderState};
+use hbsync_app::words::{self, escape_xml as escape};
 use hbsync_app::{Config, Control, Paths};
 
 use crate::{Event, Sender};
@@ -277,7 +278,7 @@ impl Server {
                 form.contains_key("merge"),
                 self.folder().as_deref(),
                 config,
-                setup::home().as_deref(),
+                hbsync_app::paths::home().as_deref(),
             ),
             Err(e) => Checked::Refused(e.to_string()),
         };
@@ -394,27 +395,16 @@ impl Server {
         let Some(held) = &status.held_deletes else {
             return "<h1>Deletions</h1><p>No deletions are waiting.</p>".into();
         };
-        let mut what = String::new();
-        if held.here > 0 {
-            what += &format!(
-                "<p>{} items deleted on this computer will be deleted from your Homebase and \
-                 your other devices.</p>",
-                held.here
-            );
-        }
-        if held.remotely > 0 {
-            what += &format!(
-                "<p>{} items deleted on another device will be moved to this computer's \
-                 trash.</p>",
-                held.remotely
-            );
-        }
+        let what: String = words::held_deletes(held)
+            .iter()
+            .map(|line| format!("<p>{}</p>", escape(line)))
+            .collect();
         let examples: String = held
             .examples
             .iter()
             .map(|p| format!("<li><code>{}</code></li>", escape(p)))
             .collect();
-        let more = if (held.examples.len() as u64) < held.here + held.remotely {
+        let more = if held.more_than_shown() {
             "<li>…</li>"
         } else {
             ""
@@ -428,7 +418,7 @@ impl Server {
              <button>Delete them</button></form>\
              <p class=small>Not sure? Leave this page: nothing is deleted, and the files stay \
              as they are on every device until you confirm.</p>",
-            held.here + held.remotely,
+            held.total(),
             url = self.pages.url("deletions"),
             token = escape(&held.token),
         )
@@ -580,13 +570,6 @@ fn decode(s: &str) -> String {
 
 fn hex(b: u8) -> Option<u8> {
     (b as char).to_digit(16).map(|d| d as u8)
-}
-
-fn escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 fn respond(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -> std::io::Result<()> {

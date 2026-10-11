@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use hbsync_state::{StateError, Store};
-use hbsync_types::activity::{Synced, SyncedKind};
+use hbsync_types::activity::{Progress, Synced, SyncedKind};
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::reconcile::Op;
@@ -16,18 +16,18 @@ pub const GROUP_OVER: usize = 10;
 /// Entries kept in the state DB.
 pub const KEEP: usize = 500;
 
-/// How far a sync is, for people: files (and other visible changes) and bytes, done and to
-/// do. Shared with whoever shows it; the engine starts it over at each sync.
+/// How far a sync is, counted as it goes ([`Progress`] when read). Shared with whoever shows
+/// it; started over at each sync.
 #[derive(Debug, Default)]
-pub struct Progress {
+pub struct Counters {
     pub files_done: AtomicU64,
     pub files_total: AtomicU64,
     pub bytes_done: AtomicU64,
     pub bytes_total: AtomicU64,
 }
 
-impl Progress {
-    pub(crate) fn reset(&self) {
+impl Counters {
+    pub fn reset(&self) {
         for n in [
             &self.files_done,
             &self.files_total,
@@ -38,19 +38,14 @@ impl Progress {
         }
     }
 
-    pub(crate) fn add(n: &AtomicU64, by: u64) {
-        n.fetch_add(by, Ordering::Relaxed);
-    }
-
-    /// (files done, files to do, bytes done, bytes to do).
-    pub fn get(&self) -> (u64, u64, u64, u64) {
+    pub fn get(&self) -> Progress {
         let get = |n: &AtomicU64| n.load(Ordering::Relaxed);
-        (
-            get(&self.files_done),
-            get(&self.files_total),
-            get(&self.bytes_done),
-            get(&self.bytes_total),
-        )
+        Progress {
+            files_done: get(&self.files_done),
+            files_total: get(&self.files_total),
+            bytes_done: get(&self.bytes_done),
+            bytes_total: get(&self.bytes_total),
+        }
     }
 }
 

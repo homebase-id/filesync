@@ -20,7 +20,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
@@ -32,7 +32,7 @@ use hbsync_types::activity::{Synced, SyncedKind};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef};
 
-use crate::activity::{self, Progress};
+use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::{feed, view};
@@ -163,7 +163,7 @@ pub struct Executor<'a> {
     stop: Option<Arc<AtomicBool>>,
     /// The path of the item an operation removes, taken before it runs.
     before: Option<String>,
-    progress: Option<Arc<Progress>>,
+    progress: Arc<Counters>,
 }
 
 /// A transfer whose guards passed, waiting for a worker.
@@ -227,7 +227,7 @@ impl<'a> Executor<'a> {
             resume_at: None,
             stop: None,
             before: None,
-            progress: None,
+            progress: Arc::default(),
         }
     }
 
@@ -252,8 +252,8 @@ impl<'a> Executor<'a> {
     }
 
     /// Counts what the run does (and, for transfers, the bytes) into `progress`.
-    pub fn with_progress(mut self, progress: Arc<Progress>) -> Self {
-        self.progress = Some(progress);
+    pub fn with_progress(mut self, progress: Arc<Counters>) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -270,13 +270,10 @@ impl<'a> Executor<'a> {
             .filter(|op| matches!(op, Op::Forget { .. }))
             .map(Op::node)
             .collect();
-        if let Some(p) = &self.progress {
-            let visible = ops
-                .iter()
-                .filter(|op| activity::kind_of(op).is_some())
-                .count();
-            Progress::add(&p.files_total, visible as u64);
-        }
+        let visible = ops.iter().filter(|op| activity::kind_of(op).is_some());
+        self.progress
+            .files_total
+            .fetch_add(visible.count() as u64, Ordering::Relaxed);
         self.queue = ops.into_iter().map(|op| (op, 0)).collect();
         let mut batch: Vec<Prepared> = Vec::new();
         loop {
@@ -447,9 +444,7 @@ impl<'a> Executor<'a> {
         let Some(kind) = activity::kind_of(op) else {
             return Ok(());
         };
-        if let Some(p) = &self.progress {
-            Progress::add(&p.files_done, 1);
-        }
+        self.progress.files_done.fetch_add(1, Ordering::Relaxed);
         let node = op.node();
         let (path, bytes) = self.db.read(|s| {
             let bytes = match kind {
@@ -465,11 +460,8 @@ impl<'a> Executor<'a> {
             Ok((path, bytes))
         })?;
         if let Some(path) = path {
-            let at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
             self.report.synced.push(Synced {
-                at,
+                at: hbsync_types::unix_now(),
                 kind,
                 path,
                 files: 1,
@@ -505,10 +497,10 @@ impl<'a> Executor<'a> {
             jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
             pending.insert(p.job.node(), p);
         }
-        let progress = self.progress.clone();
-        if let Some(p) = &progress {
-            Progress::add(&p.bytes_total, jobs.iter().map(|(_, j)| j.size()).sum());
-        }
+        let progress = Arc::clone(&self.progress);
+        progress
+            .bytes_total
+            .fetch_add(jobs.iter().map(|(_, j)| j.size()).sum(), Ordering::Relaxed);
         // Commit each transfer as soon as it finishes: small files don't wait for a large
         // one, and a crash loses only transfers still in flight.
         let remote = self.remote;
@@ -516,19 +508,24 @@ impl<'a> Executor<'a> {
         let mut first_error = None;
         // A DB error or a stopped run (requested, denied, unreachable) starts no further
         // transfers; the nodes stay dirty for the next sync.
-        let moved = progress.as_ref().map(|p| &p.bytes_done);
-        run_jobs_while(remote, transfer, moved, jobs, |job, result| {
-            if first_error.is_some() {
-                return false;
-            }
-            if let Some(p) = pending.remove(&job.node()) {
-                let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
-                if let Err(e) = self.handle(p.op, p.attempts, outcome) {
-                    first_error = Some(e);
+        run_jobs_while(
+            remote,
+            transfer,
+            Some(&progress.bytes_done),
+            jobs,
+            |job, result| {
+                if first_error.is_some() {
+                    return false;
                 }
-            }
-            first_error.is_none() && !self.should_stop()
-        });
+                if let Some(p) = pending.remove(&job.node()) {
+                    let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
+                    if let Err(e) = self.handle(p.op, p.attempts, outcome) {
+                        first_error = Some(e);
+                    }
+                }
+                first_error.is_none() && !self.should_stop()
+            },
+        );
         if let Some(e) = first_error {
             return Err(e);
         }
@@ -1207,9 +1204,7 @@ impl<'a> Executor<'a> {
 
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
     fn move_to_trash(&self, path: &RelPath, node: NodeId) -> io::Result<()> {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let stamp = hbsync_types::unix_now();
         let dir = self
             .cfg
             .state_dir()

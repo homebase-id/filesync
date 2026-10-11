@@ -13,6 +13,7 @@ use hbsync_remote::Remote;
 use hbsync_state::StateDb;
 
 use crate::control;
+use crate::paths::home;
 use crate::runner::IDENTITY_KEY;
 use crate::{Config, CredentialStore, Location, Paths, Root, autostart};
 
@@ -177,13 +178,6 @@ pub fn resolve(path: &Path) -> PathBuf {
         return out;
     }
     path
-}
-
-/// The user's home folder.
-pub fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
 }
 
 /// What a folder holds, as far as setting it up goes.

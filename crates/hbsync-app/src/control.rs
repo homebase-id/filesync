@@ -4,8 +4,10 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use hbsync_types::activity::Synced;
+
 use crate::ipc::{self, Ask, IpcError, Reply, Request};
-use crate::{Config, Control, CredentialStore, Paths, Root, autostart};
+use crate::{Config, Control, CredentialStore, Paths, Root, Status, autostart};
 
 /// An error worded for people: the CLI prints it, the tray shows it.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -13,6 +15,27 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn ask(paths: &Paths, what: Ask) -> std::result::Result<Reply, IpcError> {
     ipc::call(paths, &Request::new(what))
+}
+
+/// The daemon's status; `None` when it isn't running.
+pub fn status(paths: &Paths) -> Result<Option<Status>> {
+    match ask(paths, Ask::Status) {
+        Ok(Reply::Status(s)) => Ok(Some(*s)),
+        Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
+        Err(IpcError::NotRunning) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The newest `limit` entries of the recently synced list, newest first; `None` when the
+/// daemon isn't running.
+pub fn recent(paths: &Paths, limit: usize) -> Result<Option<Vec<Synced>>> {
+    match ask(paths, Ask::Recent { limit }) {
+        Ok(Reply::Recent(list)) => Ok(Some(list)),
+        Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
+        Err(IpcError::NotRunning) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Sends `c`; the daemon's refusal is an error.

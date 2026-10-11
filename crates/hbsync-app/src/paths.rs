@@ -30,6 +30,24 @@ pub struct Paths {
     pub runtime: PathBuf,
 }
 
+/// The user's home folder: `HOME`, or on Windows `USERPROFILE` (absolute only).
+pub fn home() -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"].iter().find_map(|key| {
+        std::env::var_os(key)
+            .map(PathBuf::from)
+            .filter(|p| p.has_root())
+    })
+}
+
+/// An XDG base folder: `$var` when it is absolute (the spec ignores relative ones), else
+/// `default` in the home folder (`XDG_CONFIG_HOME`, `.config`).
+pub fn xdg_dir(var: &str, default: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.has_root())
+        .or_else(|| home().map(|h| h.join(default)))
+}
+
 impl Paths {
     /// This user's paths on this OS.
     pub fn resolve() -> Result<Paths, NoHome> {
