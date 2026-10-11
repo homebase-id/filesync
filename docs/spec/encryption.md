@@ -43,12 +43,11 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
 - What lies on the server's disk and in its backups is encrypted: file contents, names, sizes
   and times.
 - It is zero-knowledge at rest: the server doesn't hold the key to the drive key. Only the
-  owner and the apps and devices they approved do. It is not end-to-end: while serving a
-  request from one of them, the server unlocks the drive key in memory for that request, and
-  it sees the file key in the clear during an upload. That is how the web
+  owner and the apps and devices they approved do. The server unlocks a key in
+  memory only for the request that needs it, from one of them. That is how the web
   and mobile Homebase apps work today **[verified]** (odin-js `SecurityHelpers.encryptKeyHeader`,
-  chat-kmp `PayloadBundleEncryptionService`, odin-core `FileSystemStreamWriterBase`). In
-  exchange, they can read the same files: the format is odin-js's byte for byte (the golden
+  chat-kmp `PayloadBundleEncryptionService`, odin-core `FileSystemStreamWriterBase`), and
+  they can read the same files: the format is odin-js's byte for byte (the golden
   vectors below) **[verified]**, and chat-kmp's code uses the same layout **[verified in its
   code, not run]**. Neither app shows the sync drive yet.
 
@@ -110,7 +109,6 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   has.
 
 ## What it doesn't do
-- **End-to-end:** the server can decrypt; see above.
 - **Authentication of its own:** CBC has none. The content hash is the check, after
   decryption. A server could still swap in an older version of a file, with its matching hash.
 - **Thumbnails, video segments, GCM:** not used. Other Homebase clients decrypt ranges of
