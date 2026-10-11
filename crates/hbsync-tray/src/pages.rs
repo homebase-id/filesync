@@ -615,6 +615,42 @@ mod tests {
         );
     }
 
+    /// Sends a request to the pages, returns the whole answer.
+    fn request(url: &str, method: &str, form: &str) -> std::io::Result<String> {
+        let rest = url.trim_start_matches("http://");
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let mut s = TcpStream::connect(host)?;
+        write!(
+            s,
+            "{method} /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\n\r\n{form}",
+            form.len()
+        )?;
+        let mut out = String::new();
+        s.read_to_string(&mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn the_login_form_checks_before_connecting() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let folder = dir.path().join("Mine");
+        std::fs::create_dir(&folder)?;
+        std::fs::write(folder.join("notes.txt"), "x")?;
+        let send: Sender = Arc::new(|_| {});
+        let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
+        pages.prepare_setup("", Some(folder));
+
+        let page = request(&pages.url("setup"), "POST", "identity=anna")?;
+        assert!(page.contains("doesn't look like"), "{page}");
+        assert!(page.contains("value=\"anna\""), "kept what was typed");
+
+        let page = request(&pages.url("setup"), "POST", "identity=Anna.Example.com")?;
+        assert!(page.contains("This folder has files in it"), "{page}");
+        assert!(page.contains("name=merge"), "the box to tick");
+        assert_eq!(pages.busy(), None, "nothing started");
+        Ok(())
+    }
+
     #[test]
     fn only_the_secret_paths_answer() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
