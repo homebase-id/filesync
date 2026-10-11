@@ -105,8 +105,9 @@ jobs:
           mkdir -p "$TRAY" "$CLI"
           cp "$out/homebase-filesync$EXE" "$TRAY/"
           cp "$out/hbsync$EXE" "$out/hbsyncd$EXE" "$CLI/"
+      # Static, whatever `file` calls it on this architecture.
       - if: runner.os == 'Linux'
-        run: file "$CLI"/* | grep -vE "static(-pie)? linked" && exit 1 || true
+        run: if file "$CLI"/* | grep -vE "static-pie linked|statically linked"; then exit 1; fi
       # The Intel Mac programs can't run on the ARM runner: their architecture only.
       - if: matrix.stage == 'mac-amd64'
         run: lipo -archs "$TRAY/homebase-filesync" | grep -Fx x86_64
