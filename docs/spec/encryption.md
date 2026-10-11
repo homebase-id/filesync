@@ -129,7 +129,9 @@ the client had then for comparison, and 8 MiB read pieces:
 | download 1 GiB | 427 MB/s | 372 MB/s |
 | create / read / update a small file | 2.5 / 6.7 / 5.0 ms | 2.5 / 6.1 / 3.7 ms |
 
-(An unencrypted small read took a second request then.) The cipher alone: encrypting 970 MB/s,
+(An unencrypted small read took a second request then.) Since reads are one streamed request
+(odin-core #1921, 2026-10-11), the same 1 GiB downloads at about 600 MB/s; uploads are
+unchanged at 155–175 MB/s, the first upload after the test starts being the slowest of a run. The cipher alone: encrypting 970 MB/s,
 decrypting 2.8 GB/s, where OpenSSL reaches 1.6 and 6.6 GB/s. The upload's first pass, about 1.3 s per GB here, is the cost that shows. It is small
 next to any internet link. A faster AES (aws-lc-rs) would bring a C build on three OSes, and
 isn't worth it until a measurement shows uploads bound by the CPU.
