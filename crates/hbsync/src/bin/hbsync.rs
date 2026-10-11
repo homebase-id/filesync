@@ -208,7 +208,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             if out.autostart_was_on {
-                println!("The daemon no longer starts at logon.");
+                println!("Filesync no longer starts at logon.");
             }
             if let Some(why) = out.keychain_unreachable {
                 println!(
@@ -231,7 +231,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             if out.autostart_was_on {
-                println!("The daemon no longer starts at logon.");
+                println!("Filesync no longer starts at logon.");
             }
             for root in out.roots {
                 println!(
@@ -242,15 +242,15 @@ fn run(command: Command) -> Res<ExitCode> {
             }
         }
         Command::Autostart { state } => match state {
-            None if autostart::installed()? => println!("The daemon starts at logon."),
-            None => println!("The daemon doesn't start at logon."),
+            None if autostart::installed()? => println!("Filesync starts at logon."),
+            None => println!("Filesync doesn't start at logon."),
             Some(OnOff::On) => {
-                autostart::install(&autostart::daemon_exe()?)?;
-                println!("The daemon starts at logon.");
+                autostart::install(&autostart::logon_program()?)?;
+                println!("Filesync starts at logon.");
             }
             Some(OnOff::Off) => {
                 autostart::uninstall()?;
-                println!("The daemon no longer starts at logon.");
+                println!("Filesync no longer starts at logon.");
             }
         },
         Command::Log => println!("{}", paths.logs.display()),

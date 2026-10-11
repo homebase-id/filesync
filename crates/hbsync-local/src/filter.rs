@@ -40,6 +40,8 @@ const JUNK: &[Pat] = &[
     Pat::Name(".TemporaryItems"),
     Pat::Name(".DocumentRevisions-V100"),
     Pat::Name(".apdisk"),
+    // KDE: Dolphin's folder settings (and the folder icon the tray sets).
+    Pat::Name(".directory"),
     // Windows: thumbnail caches, folder view settings, the recycle bin and restore points.
     Pat::Name("Thumbs.db"),
     Pat::Name("ehthumbs.db"),
@@ -260,6 +262,7 @@ mod tests {
             ".ds_store",
             "THUMBS.DB",
             "Desktop.ini",
+            ".directory",
             "._report.pdf",
             "Icon\r",
             "~$budget.xlsx",

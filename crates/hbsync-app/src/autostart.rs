@@ -1,19 +1,27 @@
-//! Starting the daemon at logon, as this user (never as a service: it needs the user's
-//! keychain and writes the user's files):
-//! - macOS: a launchd agent, `~/Library/LaunchAgents/cloud.homebase.filesync.plist`;
-//! - Linux: a systemd user unit, `~/.config/systemd/user/hbsync.service`;
+//! Starting Filesync at logon, as this user (never as a service: it needs the user's keychain
+//! and writes the user's files). What starts is the tray app when it is installed beside the
+//! command line (it starts the daemon), else the daemon itself:
+//! - macOS: a launchd agent, `~/Library/LaunchAgents/cloud.homebase.filesync.plist` (the
+//!   tray's: `cloud.homebase.filesync.tray.plist`);
+//! - Linux: the daemon as a systemd user unit, `~/.config/systemd/user/hbsync.service`; the tray
+//!   as a desktop session autostart entry, `~/.config/autostart/homebase-filesync.desktop` (a
+//!   GUI needs the session);
 //! - Windows: the per-user `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`),
 //!   which needs no administrator, unlike a logon task.
 //!
-//! launchd and systemd restart the daemon if it crashes, not when it was stopped. The daemon's
+//! launchd and systemd restart the daemon if it crashes, not when it was stopped. The
 //! environment overrides (`HBSYNC_HOME`, `HBSYNC_CREDENTIALS`) are passed on where the manager
 //! can (not on Windows).
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The launchd label.
+/// The launchd label (the daemon's; the tray's adds `.tray`).
 pub const LABEL: &str = "cloud.homebase.filesync";
+/// The tray's program name.
+pub const TRAY: &str = "hbsync-tray";
+/// The tray's desktop autostart entry (Linux).
+pub const DESKTOP_ENTRY: &str = "homebase-filesync.desktop";
 /// The systemd unit.
 pub const UNIT: &str = "hbsync.service";
 /// The `Run` value's name.
@@ -35,8 +43,20 @@ pub fn passed_env() -> Vec<(String, String)> {
     .collect()
 }
 
-/// The launchd agent for `daemon`.
-pub fn launchd_plist(daemon: &Path, env: &[(String, String)]) -> String {
+/// Whether `program` is the tray app (else the daemon).
+pub fn is_tray(program: &Path) -> bool {
+    program
+        .file_stem()
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(TRAY))
+}
+
+/// The launchd agent for `program` (the daemon, or the tray).
+pub fn launchd_plist(program: &Path, env: &[(String, String)]) -> String {
+    let (label, kind) = if is_tray(program) {
+        (format!("{LABEL}.tray"), "Interactive")
+    } else {
+        (LABEL.to_owned(), "Background")
+    };
     let esc = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -60,7 +80,7 @@ pub fn launchd_plist(daemon: &Path, env: &[(String, String)]) -> String {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>{LABEL}</string>
+  <string>{label}</string>
   <key>ProgramArguments</key>
   <array>
     <string>{}</string>
@@ -73,11 +93,44 @@ pub fn launchd_plist(daemon: &Path, env: &[(String, String)]) -> String {
     <false/>
   </dict>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>{kind}</string>
 {env_xml}</dict>
 </plist>
 "#,
-        esc(&daemon.display().to_string())
+        esc(&program.display().to_string())
+    )
+}
+
+/// The desktop session autostart entry for the tray (freedesktop Desktop Entry spec: the
+/// environment through `env`, every argument quoted).
+pub fn desktop_entry(tray: &Path, env: &[(String, String)]) -> String {
+    let quote = |s: &str| {
+        let s = s
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('`', "\\`")
+            .replace('$', "\\$")
+            .replace('%', "%%");
+        format!("\"{s}\"")
+    };
+    let mut exec = String::new();
+    if !env.is_empty() {
+        exec.push_str("env");
+        for (k, v) in env {
+            exec.push(' ');
+            exec.push_str(&quote(&format!("{k}={v}")));
+        }
+        exec.push(' ');
+    }
+    exec.push_str(&quote(&tray.display().to_string()));
+    format!(
+        "[Desktop Entry]\n\
+         Type=Application\n\
+         Name=Homebase Filesync\n\
+         Comment=Keeps your Homebase folder in sync\n\
+         Exec={exec}\n\
+         Terminal=false\n\
+         X-GNOME-Autostart-enabled=true\n"
     )
 }
 
@@ -123,6 +176,17 @@ pub fn daemon_exe() -> io::Result<PathBuf> {
     Ok(std::env::current_exe()?.with_file_name(format!("hbsyncd{}", std::env::consts::EXE_SUFFIX)))
 }
 
+/// What starts at logon: the tray beside the running program if it is there (it starts the
+/// daemon), else the daemon.
+pub fn logon_program() -> io::Result<PathBuf> {
+    let tray =
+        std::env::current_exe()?.with_file_name(format!("{TRAY}{}", std::env::consts::EXE_SUFFIX));
+    if tray.is_file() {
+        return Ok(tray);
+    }
+    daemon_exe()
+}
+
 #[cfg(unix)]
 fn home() -> io::Result<PathBuf> {
     std::env::var_os("HOME")
@@ -152,10 +216,15 @@ fn run(program: &str, args: &[&str]) -> io::Result<()> {
 mod os {
     use super::*;
 
-    fn plist() -> io::Result<PathBuf> {
+    /// The daemon's and the tray's labels.
+    fn labels() -> [String; 2] {
+        [LABEL.to_owned(), format!("{LABEL}.tray")]
+    }
+
+    fn plist(label: &str) -> io::Result<PathBuf> {
         Ok(home()?
             .join("Library/LaunchAgents")
-            .join(format!("{LABEL}.plist")))
+            .join(format!("{label}.plist")))
     }
 
     fn domain() -> String {
@@ -164,18 +233,22 @@ mod os {
     }
 
     pub fn installed() -> io::Result<bool> {
-        Ok(plist()?.exists())
+        for label in labels() {
+            if plist(&label)?.exists() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    pub fn install(daemon: &Path) -> io::Result<()> {
-        let path = plist()?;
-        if path.exists() {
-            uninstall()?;
-        }
+    pub fn install(program: &Path) -> io::Result<()> {
+        uninstall()?;
+        let label = &labels()[usize::from(is_tray(program))];
+        let path = plist(label)?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, launchd_plist(daemon, &passed_env()))?;
+        std::fs::write(&path, launchd_plist(program, &passed_env()))?;
         run(
             "launchctl",
             &["bootstrap", &domain(), &path.display().to_string()],
@@ -187,15 +260,22 @@ mod os {
     }
 
     pub fn uninstall() -> io::Result<()> {
-        // Not loaded is fine.
-        let _ = run("launchctl", &["bootout", &format!("{}/{LABEL}", domain())]);
-        match std::fs::remove_file(plist()?) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
+        for label in labels() {
+            // Not loaded is fine.
+            let _ = run("launchctl", &["bootout", &format!("{}/{label}", domain())]);
+            match std::fs::remove_file(plist(&label)?) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
         }
+        Ok(())
     }
 
+    /// Through launchd only when it starts the daemon (not the tray).
     pub fn start() -> io::Result<bool> {
+        if !plist(LABEL)?.exists() {
+            return Ok(false);
+        }
         run(
             "launchctl",
             &["kickstart", &format!("{}/{LABEL}", domain())],
@@ -225,16 +305,33 @@ mod os {
         })
     }
 
-    pub fn installed() -> io::Result<bool> {
-        Ok(unit()?.exists())
+    /// The session's autostart folder (`$XDG_CONFIG_HOME/autostart`).
+    fn desktop() -> io::Result<PathBuf> {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .map_or_else(|| home().map(|h| h.join(".config")), Ok)?;
+        Ok(config.join("autostart").join(DESKTOP_ENTRY))
     }
 
-    pub fn install(daemon: &Path) -> io::Result<()> {
+    pub fn installed() -> io::Result<bool> {
+        Ok(unit()?.exists() || desktop()?.exists())
+    }
+
+    pub fn install(program: &Path) -> io::Result<()> {
+        uninstall()?;
+        if is_tray(program) {
+            let path = desktop()?;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            return std::fs::write(&path, desktop_entry(program, &passed_env()));
+        }
         let path = unit()?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&path, systemd_unit(daemon, &passed_env()))?;
+        std::fs::write(&path, systemd_unit(program, &passed_env()))?;
         systemctl(&["daemon-reload"])
             .and_then(|()| systemctl(&["enable", UNIT]))
             // A unit systemd didn't take mustn't look installed.
@@ -245,6 +342,10 @@ mod os {
     }
 
     pub fn uninstall() -> io::Result<()> {
+        match std::fs::remove_file(desktop()?) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
         let path = unit()?;
         if !path.exists() {
             return Ok(());
@@ -254,7 +355,11 @@ mod os {
         systemctl(&["daemon-reload"])
     }
 
+    /// Through systemd only when it starts the daemon (not the tray).
     pub fn start() -> io::Result<bool> {
+        if !unit()?.exists() {
+            return Ok(false);
+        }
         systemctl(&["start", UNIT])?;
         Ok(true)
     }
@@ -303,8 +408,8 @@ mod os {
         }
     }
 
-    pub fn install(daemon: &Path) -> io::Result<()> {
-        let (key, value, data) = (wide(RUN_KEY), wide(RUN_VALUE), wide(&run_value(daemon)));
+    pub fn install(program: &Path) -> io::Result<()> {
+        let (key, value, data) = (wide(RUN_KEY), wide(RUN_VALUE), wide(&run_value(program)));
         // SAFETY: valid NUL-terminated strings; the data's size includes its terminator.
         check(unsafe {
             RegSetKeyValueW(
@@ -333,23 +438,24 @@ mod os {
     }
 }
 
-/// Whether the daemon starts at logon.
+/// Whether Filesync starts at logon.
 pub fn installed() -> io::Result<bool> {
     os::installed()
 }
 
-/// Starts `daemon` at every logon from now on (replacing an earlier entry).
-pub fn install(daemon: &Path) -> io::Result<()> {
-    os::install(daemon)
+/// Starts `program` (the daemon or the tray, [`logon_program`]) at every logon from now on,
+/// replacing an earlier entry.
+pub fn install(program: &Path) -> io::Result<()> {
+    os::install(program)
 }
 
-/// No more starting at logon. Doesn't stop a running daemon.
+/// No more starting at logon. Doesn't stop what runs.
 pub fn uninstall() -> io::Result<()> {
     os::uninstall()
 }
 
 /// Starts the daemon through the service manager, so that it supervises it; false where
-/// there is none to ask (Windows), and the caller starts it.
+/// there is none to ask (Windows, or the tray starts at logon), and the caller starts it.
 pub fn start() -> io::Result<bool> {
     os::start()
 }
@@ -388,6 +494,24 @@ mod tests {
         );
         assert!(unit.contains("Restart=on-failure\n"));
         assert!(unit.contains("WantedBy=default.target\n"));
+    }
+
+    #[test]
+    fn the_tray_starts_with_the_session() {
+        let tray = Path::new("/opt/Filesync/hbsync-tray");
+        assert!(is_tray(tray) && is_tray(Path::new("hbsync-tray.exe")));
+        assert!(!is_tray(Path::new("/opt/Filesync/hbsyncd")));
+        let entry = desktop_entry(tray, &env());
+        assert!(
+            entry.contains(
+                "Exec=env \"HBSYNC_HOME=/tmp/a b & <c> 100%% \\$x\" \"/opt/Filesync/hbsync-tray\"\n"
+            ),
+            "{entry}"
+        );
+        assert!(desktop_entry(tray, &[]).contains("Exec=\"/opt/Filesync/hbsync-tray\"\n"));
+        let plist = launchd_plist(tray, &[]);
+        assert!(plist.contains("<string>cloud.homebase.filesync.tray</string>"));
+        assert!(plist.contains("<string>Interactive</string>"));
     }
 
     #[test]

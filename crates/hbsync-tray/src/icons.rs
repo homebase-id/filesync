@@ -3,6 +3,7 @@
 
 use crate::model::Look;
 
+#[cfg(any(not(target_os = "macos"), test))]
 const MARK: &[u8] = include_bytes!("../assets/mark-64.png");
 #[cfg(target_os = "macos")]
 const GLYPH: &[u8] = include_bytes!("../assets/glyph-36.png");
@@ -77,17 +78,16 @@ pub fn with_dot(image: &Rgba, look: Look) -> Rgba {
 
 /// The tray's icon for `look`, and whether it is a template image (macOS).
 pub fn tray(look: Look) -> Result<(Rgba, bool), png::DecodingError> {
+    // The menu bar shows monochrome glyphs; the state shows in the menu's first lines. A
+    // problem still gets the dot, in colour.
     #[cfg(target_os = "macos")]
-    {
-        // The menu bar shows monochrome glyphs; the state shows in the menu's first lines. A
-        // problem still gets the dot, in colour.
-        if look != Look::Attention {
-            return Ok((decode(GLYPH)?, true));
-        }
-        return Ok((with_dot(&decode(GLYPH)?, look), false));
-    }
+    let icon = match look {
+        Look::Attention => (with_dot(&decode(GLYPH)?, look), false),
+        _ => (decode(GLYPH)?, true),
+    };
     #[cfg(not(target_os = "macos"))]
-    Ok((with_dot(&decode(MARK)?, look), false))
+    let icon = (with_dot(&decode(MARK)?, look), false);
+    Ok(icon)
 }
 
 #[cfg(test)]

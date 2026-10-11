@@ -1,0 +1,373 @@
+//! The synced folder in the file manager: the Homebase icon on it, and a shortcut in the
+//! sidebar (Quick access on Windows; the bookmarks of GTK file managers and KDE's places on
+//! Linux; Finder's sidebar has no public interface, so not on macOS). Done once per folder (a
+//! note in the state folder), so a shortcut the user removed stays removed; undone at log out.
+//! All best effort: a file manager that doesn't take it is no failure.
+
+use std::path::{Path, PathBuf};
+
+use hbsync_app::Paths;
+
+/// The note of the folder already given its icon and shortcut.
+const DONE: &str = "folder-decorated";
+
+fn note(paths: &Paths) -> PathBuf {
+    paths.state.join(DONE)
+}
+
+/// Gives `folder` its icon and shortcut, unless it already had them once.
+pub fn decorate(paths: &Paths, folder: &Path) {
+    let done = note(paths);
+    if std::fs::read_to_string(&done).is_ok_and(|f| Path::new(f.trim()) == folder) {
+        return;
+    }
+    tracing::info!("giving {} its icon and a shortcut", folder.display());
+    if let Err(e) = os::decorate(paths, folder) {
+        tracing::info!("the folder's icon or shortcut: {e}");
+    }
+    if let Err(e) = std::fs::write(&done, folder.display().to_string()) {
+        tracing::warn!("{}: {e}", done.display());
+    }
+}
+
+/// Takes the icon and shortcut off `folder` again (logging out).
+pub fn undecorate(paths: &Paths, folder: &Path) {
+    if let Err(e) = os::undecorate(paths, folder) {
+        tracing::info!("removing the folder's icon or shortcut: {e}");
+    }
+    let _ = std::fs::remove_file(note(paths));
+}
+
+/// `file:///home/anna/My%20Files`, as bookmark files want it.
+#[cfg(any(target_os = "linux", test))]
+pub fn file_uri(path: &Path) -> String {
+    let mut uri = String::from("file://");
+    for &b in path.as_os_str().as_encoded_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
+
+/// GTK's bookmarks (`gtk-3.0/bookmarks`): one `URI label` per line. With `uri`, labelled.
+#[cfg(any(target_os = "linux", test))]
+pub fn gtk_bookmarks_with(text: &str, uri: &str, label: &str) -> Option<String> {
+    if text.lines().any(|l| l.split(' ').next() == Some(uri)) {
+        return None;
+    }
+    let mut out = text.to_owned();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(&format!("{uri} {label}\n"));
+    Some(out)
+}
+
+/// GTK's bookmarks without `uri`.
+#[cfg(any(target_os = "linux", test))]
+pub fn gtk_bookmarks_without(text: &str, uri: &str) -> Option<String> {
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| l.split(' ').next() != Some(uri))
+        .collect();
+    (kept.len() != text.lines().count()).then(|| kept.iter().map(|l| format!("{l}\n")).collect())
+}
+
+/// KDE's places (`user-places.xbel`) with a bookmark for `uri`, before the closing tag.
+#[cfg(any(target_os = "linux", test))]
+pub fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
+    if xbel.contains(&format!("href=\"{uri}\"")) {
+        return None;
+    }
+    let end = xbel.rfind("</xbel>")?;
+    let bookmark = format!(
+        " <bookmark href=\"{uri}\">\n  <title>{title}</title>\n  <info>\n   \
+         <metadata owner=\"http://freedesktop.org\">\n    \
+         <bookmark:icon name=\"folder-cloud\"/>\n   </metadata>\n  </info>\n </bookmark>\n"
+    );
+    Some(format!("{}{bookmark}{}", &xbel[..end], &xbel[end..]))
+}
+
+/// KDE's places without the bookmark for `uri`.
+#[cfg(any(target_os = "linux", test))]
+pub fn kde_places_without(xbel: &str, uri: &str) -> Option<String> {
+    let start = xbel.find(&format!("<bookmark href=\"{uri}\""))?;
+    let start = xbel[..start].rfind('\n').map_or(start, |nl| nl + 1);
+    let end = start + xbel[start..].find("</bookmark>")? + "</bookmark>".len();
+    let end = if xbel[end..].starts_with('\n') {
+        end + 1
+    } else {
+        end
+    };
+    Some(format!("{}{}", &xbel[..start], &xbel[end..]))
+}
+
+#[cfg(target_os = "linux")]
+mod os {
+    use super::*;
+    use std::process::Command;
+
+    fn config_home() -> Option<PathBuf> {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| hbsync_app::setup::home().map(|h| h.join(".config")))
+    }
+
+    fn data_home() -> Option<PathBuf> {
+        std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| hbsync_app::setup::home().map(|h| h.join(".local/share")))
+    }
+
+    /// Rewrites `path` with `change` when it says so; a missing file counts as empty when
+    /// `create` (else it's left alone).
+    fn edit(path: &Path, create: bool, change: impl FnOnce(&str) -> Option<String>) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && create => String::new(),
+            Err(_) => return,
+        };
+        if let Some(new) = change(&text) {
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            if let Err(e) = std::fs::write(path, new) {
+                tracing::info!("{}: {e}", path.display());
+            }
+        }
+    }
+
+    pub fn decorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        let icon = paths.state.join("homebase.png");
+        std::fs::write(&icon, crate::icons::MARK_256)?;
+        // GNOME's Files and others: GIO metadata (outside the folder).
+        let _ = Command::new("gio")
+            .args(["set", "-t", "string"])
+            .arg(folder)
+            .arg("metadata::custom-icon")
+            .arg(file_uri(&icon))
+            .output();
+        // KDE's Dolphin: `.directory` in the folder (never synced: it is built-in junk).
+        let directory = folder.join(".directory");
+        if !directory.exists() {
+            std::fs::write(
+                &directory,
+                format!("[Desktop Entry]\nIcon={}\n", icon.display()),
+            )?;
+        }
+        let uri = file_uri(folder);
+        if let Some(config) = config_home() {
+            edit(&config.join("gtk-3.0/bookmarks"), true, |t| {
+                gtk_bookmarks_with(t, &uri, "Homebase")
+            });
+        }
+        // KDE writes this file on first start; with none, there is no KDE to tell.
+        if let Some(data) = data_home() {
+            edit(&data.join("user-places.xbel"), false, |t| {
+                kde_places_with(t, &uri, "Homebase")
+            });
+        }
+        Ok(())
+    }
+
+    pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        let _ = Command::new("gio")
+            .args(["set", "-d"])
+            .arg(folder)
+            .arg("metadata::custom-icon")
+            .output();
+        let directory = folder.join(".directory");
+        let icon = paths.state.join("homebase.png");
+        if std::fs::read_to_string(&directory)
+            .is_ok_and(|t| t == format!("[Desktop Entry]\nIcon={}\n", icon.display()))
+        {
+            std::fs::remove_file(&directory)?;
+        }
+        let uri = file_uri(folder);
+        if let Some(config) = config_home() {
+            edit(&config.join("gtk-3.0/bookmarks"), false, |t| {
+                gtk_bookmarks_without(t, &uri)
+            });
+        }
+        if let Some(data) = data_home() {
+            edit(&data.join("user-places.xbel"), false, |t| {
+                kde_places_without(t, &uri)
+            });
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod os {
+    use super::*;
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSImage, NSWorkspace, NSWorkspaceIconCreationOptions};
+    use objc2_foundation::{NSData, NSString};
+
+    fn set_icon(folder: &Path, png: Option<&[u8]>) -> std::io::Result<()> {
+        let path = NSString::from_str(&folder.display().to_string());
+        let image = match png {
+            Some(bytes) => Some(
+                NSImage::initWithData(NSImage::alloc(), &NSData::with_bytes(bytes))
+                    .ok_or_else(|| std::io::Error::other("the icon isn't an image"))?,
+            ),
+            None => None,
+        };
+        let set = NSWorkspace::sharedWorkspace().setIcon_forFile_options(
+            image.as_deref(),
+            &path,
+            NSWorkspaceIconCreationOptions(0),
+        );
+        if set {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("Finder didn't take the icon"))
+        }
+    }
+
+    pub fn decorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        set_icon(folder, Some(crate::icons::MARK_256))
+    }
+
+    pub fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        set_icon(folder, None)
+    }
+}
+
+#[cfg(windows)]
+mod os {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+    use std::process::Command;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, GetFileAttributesW,
+        INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
+    };
+
+    fn wide(path: &Path) -> Vec<u16> {
+        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+
+    /// Adds (or with `on` false, removes) attribute bits.
+    fn attributes(path: &Path, bits: u32, on: bool) -> std::io::Result<()> {
+        let name = wide(path);
+        // SAFETY: a NUL-terminated path.
+        let now = unsafe { GetFileAttributesW(name.as_ptr()) };
+        if now == INVALID_FILE_ATTRIBUTES {
+            return Err(std::io::Error::last_os_error());
+        }
+        let new = if on { now | bits } else { now & !bits };
+        // SAFETY: a NUL-terminated path.
+        if unsafe { SetFileAttributesW(name.as_ptr(), new) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Explorer's Quick access, through the shell's verbs.
+    fn quick_access(folder: &Path, pin: bool) {
+        let path = folder.display().to_string().replace('\'', "''");
+        let script = if pin {
+            format!(
+                "(New-Object -ComObject Shell.Application).Namespace('{path}').Self.InvokeVerb('pintohome')"
+            )
+        } else {
+            format!(
+                "(New-Object -ComObject Shell.Application).Namespace(\
+                 'shell:::{{679f85cb-0220-4080-b29b-5540cc05aab6}}').Items() | \
+                 Where-Object {{ $_.Path -eq '{path}' }} | \
+                 ForEach-Object {{ $_.InvokeVerb('unpinfromhome') }}"
+            )
+        };
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output();
+    }
+
+    pub fn decorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        let icon = paths.state.join("homebase.ico");
+        std::fs::write(&icon, crate::icons::ICO)?;
+        let ini = folder.join("desktop.ini");
+        if !ini.exists() {
+            std::fs::write(
+                &ini,
+                format!(
+                    "[.ShellClassInfo]\r\nIconResource={},0\r\nInfoTip=Synced with Homebase\r\n",
+                    icon.display()
+                ),
+            )?;
+            attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, true)?;
+        }
+        // Explorer reads desktop.ini of read-only (or system) folders only.
+        attributes(folder, FILE_ATTRIBUTE_READONLY, true)?;
+        quick_access(folder, true);
+        Ok(())
+    }
+
+    pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        let ini = folder.join("desktop.ini");
+        let ours = std::fs::read_to_string(&ini).is_ok_and(|t| {
+            t.contains(&format!(
+                "IconResource={},0",
+                paths.state.join("homebase.ico").display()
+            ))
+        });
+        if ours {
+            attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, false)?;
+            std::fs::remove_file(&ini)?;
+            attributes(folder, FILE_ATTRIBUTE_READONLY, false)?;
+        }
+        quick_access(folder, false);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URI: &str = "file:///home/anna/Homebase";
+
+    #[test]
+    fn uris() {
+        assert_eq!(
+            file_uri(Path::new("/home/anna/My Files/ø")),
+            "file:///home/anna/My%20Files/%C3%B8"
+        );
+    }
+
+    #[test]
+    fn gtk_bookmarks() {
+        let before = "file:///home/anna/Music\nfile:///home/anna/Work Work";
+        let with = gtk_bookmarks_with(before, URI, "Homebase").unwrap_or_default();
+        assert_eq!(
+            with,
+            "file:///home/anna/Music\nfile:///home/anna/Work Work\nfile:///home/anna/Homebase Homebase\n"
+        );
+        assert_eq!(gtk_bookmarks_with(&with, URI, "Homebase"), None, "once");
+        assert_eq!(
+            gtk_bookmarks_without(&with, URI).as_deref(),
+            Some("file:///home/anna/Music\nfile:///home/anna/Work Work\n")
+        );
+        assert_eq!(gtk_bookmarks_without(before, URI), None);
+    }
+
+    #[test]
+    fn kde_places() {
+        let before = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xbel>\n\
+            <xbel xmlns:bookmark=\"http://www.freedesktop.org/standards/desktop-bookmarks\">\n \
+            <bookmark href=\"file:///home/anna\">\n  <title>Home</title>\n </bookmark>\n</xbel>\n";
+        let with = kde_places_with(before, URI, "Homebase").unwrap_or_default();
+        assert!(with.contains("<bookmark href=\"file:///home/anna/Homebase\">"));
+        assert!(with.ends_with(" </bookmark>\n</xbel>\n"), "{with}");
+        assert_eq!(kde_places_with(&with, URI, "Homebase"), None, "once");
+        assert_eq!(kde_places_without(&with, URI).as_deref(), Some(before));
+        assert_eq!(kde_places_without(before, URI), None);
+    }
+}

@@ -11,6 +11,7 @@ mod model;
 mod os;
 mod pages;
 mod poll;
+mod shell;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -100,6 +101,8 @@ struct App {
     start_at_login: bool,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
+    /// The folder given its icon and shortcut ([`shell`]) by this run.
+    decorated: Option<PathBuf>,
 }
 
 /// What the tray shows now, to change only what changed.
@@ -139,6 +142,7 @@ impl App {
             start_at_login: autostart::installed().unwrap_or(false),
             shown: Shown::default(),
             notified: HashMap::new(),
+            decorated: None,
         })
     }
 
@@ -171,6 +175,13 @@ impl App {
         match event {
             Event::Daemon(daemon, recent) => {
                 self.notices(&daemon);
+                if let Daemon::Running(s) = &daemon
+                    && self.decorated.as_ref() != Some(&s.folder)
+                    && s.folder.is_dir()
+                {
+                    shell::decorate(&self.paths, &s.folder);
+                    self.decorated = Some(s.folder.clone());
+                }
                 self.pages.set_status(match &daemon {
                     Daemon::Running(s) => Some((**s).clone()),
                     _ => None,
@@ -243,7 +254,7 @@ impl App {
             Action::StartAtLogin => {
                 let on = !self.start_at_login;
                 let result = if on {
-                    autostart::daemon_exe().and_then(|exe| autostart::install(&exe))
+                    autostart::logon_program().and_then(|exe| autostart::install(&exe))
                 } else {
                     autostart::uninstall()
                 };
@@ -253,6 +264,10 @@ impl App {
                 }
             }
             Action::LogOut => {
+                if let Some(folder) = self.status().map(|s| s.folder.clone()) {
+                    shell::undecorate(&self.paths, &folder);
+                    self.decorated = None;
+                }
                 let (paths, send) = (self.paths.clone(), self.send.clone());
                 std::thread::spawn(move || {
                     let done = control::log_out(&paths).and_then(|_| control::unlink(&paths));

@@ -21,7 +21,7 @@ pub fn reveal(path: &Path) {
         Command::new("explorer").arg(arg).spawn().map(drop)
     } else {
         // The file manager interface Dolphin, Nautilus and others implement.
-        let uri = file_uri(path);
+        let uri = crate::shell::file_uri(path);
         Command::new("dbus-send")
             .args([
                 "--session",
@@ -64,31 +64,4 @@ pub fn notify(summary: String, body: String) {
             tracing::debug!("no notification ({e}): {summary}: {body}");
         }
     });
-}
-
-/// `file:///home/anna/My%20Files/x.txt`: the path's bytes, percent-encoded but for the ones
-/// URIs leave as they are.
-fn file_uri(path: &Path) -> String {
-    let mut uri = String::from("file://");
-    for &b in path.as_os_str().as_encoded_bytes() {
-        if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
-            uri.push(b as char);
-        } else {
-            uri.push_str(&format!("%{b:02X}"));
-        }
-    }
-    uri
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_uris_are_encoded() {
-        assert_eq!(
-            file_uri(Path::new("/home/anna/My Files/ø.txt")),
-            "file:///home/anna/My%20Files/%C3%B8.txt"
-        );
-    }
 }

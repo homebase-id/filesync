@@ -1724,6 +1724,9 @@ dependencies = [
  "hbsync-homebase",
  "hbsync-types",
  "notify-rust",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "png",
  "rfd",
  "tao",
@@ -1733,6 +1736,7 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

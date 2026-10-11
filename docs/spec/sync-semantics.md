@@ -208,7 +208,8 @@ on its own.
 - **Junk**: a built-in list of names the OS or an application creates by itself, matched in any
   case at any depth: macOS `.DS_Store`, `._*`, `Icon\r`, `.Spotlight-V100`, `.Trashes`,
   `.fseventsd`, `.TemporaryItems`, `.DocumentRevisions-V100`, `.apdisk`; Windows `Thumbs.db`,
-  `ehthumbs.db`, `desktop.ini`, `$RECYCLE.BIN`, `System Volume Information`; Office `~$*` and
+  `ehthumbs.db`, `desktop.ini`, `$RECYCLE.BIN`, `System Volume Information`; KDE `.directory`;
+  Office `~$*` and
   `~*.tmp`; LibreOffice `.~lock.*#`; vim `.*.swp`, `.*.swx`; downloads in progress
   `*.crdownload`, `*.part`. Junk is disposable.
 - **Ignored**: the user's rules in `.hbsync/ignore` (gitignore syntax, per device, never

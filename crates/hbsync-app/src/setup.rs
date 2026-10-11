@@ -289,8 +289,8 @@ pub fn set_up(
         if control::dev_home() {
             say("HBSYNC_HOME is set: not starting at logon (`hbsync autostart on` does).");
         } else {
-            autostart::install(&autostart::daemon_exe()?)?;
-            say("The daemon starts at logon (`hbsync autostart off` stops that).");
+            autostart::install(&autostart::logon_program()?)?;
+            say("Filesync starts at logon (`hbsync autostart off` stops that).");
         }
     }
     if !request.start {
