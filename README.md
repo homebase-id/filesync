@@ -19,7 +19,7 @@ They update themselves.
   polling. A restart with nothing changed is idle again in about 55 ms. (A big first sync takes
   more for a while: about 160 MB at its peak for 10,000 files.)
 
-  Side by side on one Linux desktop (2026-10-11, both idle):
+  Side by side on one six-year-old Linux desktop (Intel i7-8700K, 2026-10-11, both idle):
 
   | | Memory (RSS) | Threads |
   |---|---|---|
@@ -31,17 +31,16 @@ They update themselves.
   stays flat as a folder grows: it walks the tree a branch at a time and keeps the rest in its
   database, not in memory.
 - **Every file is hashed in full with BLAKE3,** one of the fastest cryptographic hashes there
-  is, while the file is read.
-  The hash goes along with each file and is checked on the way back: a file that
-  doesn't match is refused and downloaded again. The hash also tells real edits from touched
+  is, while the file is read. The hash goes along with each file and is checked on the way
+  back: a file that doesn't match is refused and downloaded again. The hash also tells real edits from touched
   timestamps, so unchanged files are never uploaded twice.
 - **Encrypted on your computer.** Each file gets its own random AES key before it leaves your
   computer, and folder names are encrypted too. It uses Homebase's own format, so your other
   Homebase apps can open the files. The cipher handles about 1 GB/s encrypting and 2.8 GB/s
   decrypting, more than any internet link. (It isn't end-to-end: your own Homebase holds the
   keys. See [docs/spec/encryption.md](docs/spec/encryption.md).)
-- **Fast.** On a local test server, it uploads 1 GiB at about 170 MB/s and downloads it at
-  about 600 MB/s. An edit shows up on your other computer in about half a second. Big files
+- **Fast,** even on a six-year-old desktop (Intel i7-8700K). With a test server on the same
+  machine, it uploads 1 GiB at about 170 MB/s and downloads it at about 600 MB/s. An edit shows up on your other computer in about half a second. Big files
   are streamed in both directions in constant memory, and a broken transfer picks up where it
   stopped.
 - **Careful with your data.** Losing nothing is the first rule:
