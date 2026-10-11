@@ -2,20 +2,17 @@
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::process::{Command as Process, ExitCode, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use hbsync_app::ipc::{self, Ask, IpcError, Reply, Request};
-use hbsync_app::runner::{Hints, IDENTITY_KEY};
-use hbsync_app::{
-    Config, Control, CredentialStore, Location, Paths, Root, State, Status, autostart, setup,
-};
-use hbsync_homebase::{Credentials, HomebaseError};
-use hbsync_local::{STATE_DIR, state_db_path};
-use hbsync_state::StateDb;
+use hbsync_app::control::{ask, control, running, start, stop};
+use hbsync_app::ipc::{Ask, IpcError, Reply};
+use hbsync_app::runner::Hints;
+use hbsync_app::{Control, Paths, State, Status, autostart, control as daemon, setup};
+use hbsync_local::STATE_DIR;
 
-type Res<T> = Result<T, Box<dyn std::error::Error>>;
+type Res<T> = hbsync_app::control::Result<T>;
 
 #[derive(Parser)]
 #[command(
@@ -114,15 +111,27 @@ fn run(command: Command) -> Res<ExitCode> {
             browser,
             no_start,
             no_autostart,
-        } => set_up(
-            &paths,
-            &identity,
-            folder,
-            existing,
-            browser.as_deref(),
-            !no_start,
-            !no_autostart,
-        )?,
+        } => {
+            let request = setup::SetUp {
+                identity: setup::normalize_identity(&identity),
+                folder: match folder {
+                    Some(f) => std::path::absolute(f)?,
+                    None => setup::default_folder()?,
+                },
+                existing,
+                start: !no_start,
+                at_logon: !no_autostart,
+            };
+            let mut authorize = |identity: &str, device: &str| {
+                println!("Opening your browser to authorize this computer on {identity}...");
+                setup::authorize(identity, device, browser.as_deref(), |url| {
+                    println!("If it doesn't open, visit:\n{url}\n");
+                })
+            };
+            setup::set_up(&paths, &request, &mut authorize, &mut |line| {
+                println!("{line}")
+            })?;
+        }
         Command::Status { json } => match ask(&paths, Ask::Status) {
             Ok(Reply::Status(s)) if json => println!("{}", serde_json::to_string_pretty(&s)?),
             Ok(Reply::Status(s)) => print_status(&s),
@@ -162,19 +171,21 @@ fn run(command: Command) -> Res<ExitCode> {
             }
         }
         Command::Logout => {
-            let Some(root) = configured(&paths)? else {
+            let Some(out) = daemon::log_out(&paths)? else {
                 println!("Not set up.");
                 return Ok(ExitCode::SUCCESS);
             };
-            stop(&paths)?;
-            autostart_off_unless_dev()?;
-            if let Some(why) = CredentialStore::open(&paths).delete(&root.identity)? {
+            if out.autostart_was_on {
+                println!("The daemon no longer starts at logon.");
+            }
+            if let Some(why) = out.keychain_unreachable {
                 println!(
                     "The system keychain couldn't be reached ({why}): if it holds the \
                      credentials, run `hbsync logout` again where it can be (your desktop \
                      session)."
                 );
             }
+            let root = out.root;
             println!(
                 "Logged out of {}. {} and its files stay; `hbsync setup {}` signs in again.",
                 root.identity,
@@ -183,23 +194,20 @@ fn run(command: Command) -> Res<ExitCode> {
             );
         }
         Command::Unlink => {
-            let path = paths.config_file();
-            let Some(mut config) = Config::load(&path)? else {
+            let Some(out) = daemon::unlink(&paths)? else {
                 println!("Not set up.");
                 return Ok(ExitCode::SUCCESS);
             };
-            stop(&paths)?;
-            autostart_off_unless_dev()?;
-            // Setting a folder up again starts afresh.
-            config.paused = false;
-            for root in config.roots.drain(..) {
+            if out.autostart_was_on {
+                println!("The daemon no longer starts at logon.");
+            }
+            for root in out.roots {
                 println!(
                     "{} is no longer synced with {}. Its files stay.",
                     root.folder.display(),
                     root.identity
                 );
             }
-            config.save(&path)?;
         }
         Command::Autostart { state } => match state {
             None if autostart::installed()? => println!("The daemon starts at logon."),
@@ -216,267 +224,6 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Log => println!("{}", paths.logs.display()),
     }
     Ok(ExitCode::SUCCESS)
-}
-
-fn configured(paths: &Paths) -> Res<Option<Root>> {
-    Ok(Config::load(&paths.config_file())?.and_then(|c| c.root().ok().flatten().cloned()))
-}
-
-fn set_up(
-    paths: &Paths,
-    identity: &str,
-    folder: Option<PathBuf>,
-    existing: bool,
-    browser: Option<&str>,
-    start_now: bool,
-    at_logon: bool,
-) -> Res<()> {
-    let identity = identity.trim().trim_end_matches('/').to_lowercase();
-    let folder = match folder {
-        Some(f) => std::path::absolute(f)?,
-        None => home()?.join("Homebase"),
-    };
-    let config_path = paths.config_file();
-    let mut config = Config::load(&config_path)?.unwrap_or_default();
-
-    // The folder: new, empty, already this identity's, or adopted on purpose.
-    std::fs::create_dir_all(&folder)?;
-    let folder = folder.canonicalize()?;
-    if let Some(root) = config.root()?
-        && (root.identity != identity || root.folder != folder)
-    {
-        return Err(format!(
-            "already set up to sync {} with {}: `hbsync unlink` first",
-            root.folder.display(),
-            root.identity
-        )
-        .into());
-    }
-    let state = folder.join(STATE_DIR);
-    if state.is_dir() {
-        let theirs = StateDb::open(&state_db_path(&folder))?.read(|s| s.get_kv(IDENTITY_KEY))?;
-        if let Some(theirs) = theirs.filter(|t| *t != identity) {
-            return Err(format!("{} is synced with {theirs}", folder.display()).into());
-        }
-    } else if !existing && std::fs::read_dir(&folder)?.next().is_some() {
-        return Err(format!(
-            "{} has files in it: they would be uploaded and merged with the drive. Add \
-             --existing to do that, or pick an empty or new folder with --folder.",
-            folder.display()
-        )
-        .into());
-    }
-
-    // This computer, authorized on the identity. New credentials are kept at once: an
-    // approval lost to a later failure would have to be given again.
-    let store = CredentialStore::open(paths);
-    let authorize = || -> Res<Credentials> {
-        println!("Opening your browser to authorize this computer on {identity}...");
-        let creds = setup::authorize(&identity, &config.device_name(), browser, |url| {
-            println!("If it doesn't open, visit:\n{url}\n");
-        })?;
-        store.save(&creds)?;
-        Ok(creds)
-    };
-    let save = |c: &Credentials| store.save(c).map(drop);
-    let mut creds = match store.load(&identity)? {
-        Some((creds, _)) => {
-            println!("This computer is already authorized on {identity}.");
-            creds
-        }
-        None => authorize()?,
-    };
-    match setup::prepare(&mut creds, save) {
-        // Revoked since: authorize again.
-        Err(HomebaseError::Denied(why)) => {
-            println!("{identity} no longer accepts this computer's authorization ({why}).");
-            store.delete(&identity)?;
-            creds = authorize()?;
-            setup::prepare(&mut creds, save)?;
-        }
-        other => drop(other?),
-    }
-    match store.save(&creds)? {
-        Location::Keychain => println!("Credentials saved in the system keychain."),
-        Location::File { path, why } => println!(
-            "No keychain ({why}): credentials saved in {}, readable only by you.",
-            path.display()
-        ),
-    }
-
-    std::fs::create_dir_all(&state)?;
-    StateDb::open(&state_db_path(&folder))?.write(|s| s.set_kv(IDENTITY_KEY, &identity))?;
-    config.roots = vec![Root {
-        identity: identity.clone(),
-        folder: folder.clone(),
-    }];
-    config.save(&config_path)?;
-    println!("{} syncs with {identity}.", folder.display());
-
-    if at_logon {
-        if dev_home() {
-            println!("HBSYNC_HOME is set: not starting at logon (`hbsync autostart on` does).");
-        } else {
-            autostart::install(&autostart::daemon_exe()?)?;
-            println!("The daemon starts at logon (`hbsync autostart off` stops that).");
-        }
-    }
-    if !start_now {
-        return Ok(());
-    }
-    if running(paths)? {
-        stop(paths)?;
-    }
-    start(paths)?;
-    println!("The daemon is running: `hbsync status` shows what it does.");
-    Ok(())
-}
-
-/// A private instance (`HBSYNC_HOME`): tests, development. It leaves the user's logon entry
-/// alone unless asked by `hbsync autostart`.
-fn dev_home() -> bool {
-    std::env::var_os("HBSYNC_HOME").is_some()
-}
-
-fn autostart_off_unless_dev() -> Res<()> {
-    if !dev_home() && autostart::installed()? {
-        autostart::uninstall()?;
-        println!("The daemon no longer starts at logon.");
-    }
-    Ok(())
-}
-
-fn home() -> Res<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .ok_or_else(|| "no home folder (HOME unset): pass --folder".into())
-}
-
-fn ask(paths: &Paths, what: Ask) -> Result<Reply, IpcError> {
-    ipc::call(paths, &Request::new(what))
-}
-
-fn control(paths: &Paths, c: Control) -> Res<()> {
-    match ask(paths, Ask::Control(c)) {
-        Ok(Reply::Done) => Ok(()),
-        Ok(Reply::Refused(why)) => Err(why.into()),
-        Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
-        Err(IpcError::NotRunning) => {
-            Err("the daemon isn't running (`hbsync start` starts it)".into())
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// Whether a daemon answers.
-fn running(paths: &Paths) -> Result<bool, IpcError> {
-    match ask(paths, Ask::Status) {
-        Ok(_) => Ok(true),
-        Err(IpcError::NotRunning) => Ok(false),
-        Err(e) => Err(e),
-    }
-}
-
-/// Starts the daemon and waits until it answers: through the service manager when it starts
-/// the daemon at logon (so that it supervises it), else `hbsyncd` beside this program, on its
-/// own.
-fn start(paths: &Paths) -> Res<()> {
-    if !dev_home() && autostart::installed()? && autostart::start()? {
-        return wait_until_running(paths, None);
-    }
-    let exe = autostart::daemon_exe()?;
-    #[cfg(windows)]
-    keep_std_handles_from_children();
-    let mut process = Process::new(&exe);
-    process
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut process, 0);
-    #[cfg(windows)]
-    {
-        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: not tied to this console.
-        std::os::windows::process::CommandExt::creation_flags(&mut process, 0x8 | 0x200);
-    }
-    let child = process
-        .spawn()
-        .map_err(|e| format!("can't start {}: {e}", exe.display()))?;
-    wait_until_running(paths, Some(child))
-}
-
-/// Windows children inherit every inheritable handle, and ours are when we were started with
-/// redirected output: the daemon would hold our stdout open, and whoever reads it would wait
-/// until the daemon stops.
-#[cfg(windows)]
-fn keep_std_handles_from_children() {
-    use windows_sys::Win32::Foundation::{
-        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
-    };
-    use windows_sys::Win32::System::Console::{
-        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-    };
-    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: GetStdHandle has no preconditions; SetHandleInformation gets a handle of
-        // this process (or fails harmlessly on a missing one).
-        unsafe {
-            let handle = GetStdHandle(which);
-            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
-                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
-            }
-        }
-    }
-}
-
-/// Waits until the daemon answers, or `child` (when we started it) exits.
-fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> Res<()> {
-    let until = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < until {
-        if running(paths)? {
-            return Ok(());
-        }
-        if let Some(status) = child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
-            return Err(format!(
-                "the daemon exited ({status}); its log is in {}",
-                paths.logs.display()
-            )
-            .into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err(format!(
-        "the daemon didn't answer; its log is in {}",
-        paths.logs.display()
-    )
-    .into())
-}
-
-/// Stops the daemon and waits until it's gone. False when it wasn't running.
-fn stop(paths: &Paths) -> Res<bool> {
-    match ask(paths, Ask::Control(Control::Stop)) {
-        Err(IpcError::NotRunning) => return Ok(false),
-        // The daemon may exit before its answer is out: the connection just ends.
-        Err(IpcError::Protocol(_)) => {}
-        Err(IpcError::Io(e))
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::UnexpectedEof
-            ) => {}
-        Err(e) => return Err(e.into()),
-        Ok(_) => {}
-    }
-    let until = Instant::now() + Duration::from_secs(60);
-    while Instant::now() < until {
-        // A daemon on its way out may drop a connection: that's not an answer.
-        if matches!(running(paths), Ok(false)) {
-            return Ok(true);
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Err("the daemon is still finishing a transfer; try again in a moment".into())
 }
 
 fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {

@@ -2,12 +2,19 @@
 //! browser), then the one-time work on the identity (the app's circle) and a first look at the
 //! sync drive.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, HomebaseError, app};
+use hbsync_local::{STATE_DIR, state_db_path};
 use hbsync_remote::Remote;
+use hbsync_state::StateDb;
+
+use crate::control;
+use crate::runner::IDENTITY_KEY;
+use crate::{Config, CredentialStore, Location, Paths, Root, autostart};
 
 /// How long the owner has to approve in the browser.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -73,4 +80,226 @@ pub fn open_browser(command: Option<&str>, url: &str) -> std::io::Result<()> {
         "xdg-open"
     });
     Command::new(opener).arg(url).spawn().map(drop)
+}
+
+/// An identity as typed (`Anna.Example.com/`) as the client keeps it (`anna.example.com`).
+pub fn normalize_identity(typed: &str) -> String {
+    typed.trim().trim_end_matches('/').to_lowercase()
+}
+
+/// The folder synced when none is chosen: `Homebase` in the home folder.
+pub fn default_folder() -> control::Result<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| PathBuf::from(home).join("Homebase"))
+        .ok_or_else(|| "no home folder (HOME unset): choose a folder".into())
+}
+
+/// What a folder holds, as far as setting it up goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FolderState {
+    /// Missing or empty.
+    Fresh,
+    /// Synced with this identity before: setting it up picks up where it was.
+    Ours,
+    /// Has files: they would be uploaded and merged with the drive.
+    HasFiles,
+}
+
+/// Whether `folder` can be synced with `identity`: refused if another folder or identity is
+/// set up, or the folder is another identity's.
+pub fn check_folder(
+    config: &Config,
+    identity: &str,
+    folder: &Path,
+) -> control::Result<FolderState> {
+    if let Some(root) = config.root()?
+        && (root.identity != identity || root.folder != folder)
+    {
+        return Err(format!(
+            "already set up to sync {} with {}: unlink it first",
+            root.folder.display(),
+            root.identity
+        )
+        .into());
+    }
+    if folder.join(STATE_DIR).is_dir() {
+        let theirs = StateDb::open(&state_db_path(folder))?.read(|s| s.get_kv(IDENTITY_KEY))?;
+        return match theirs.filter(|t| t != identity) {
+            Some(theirs) => Err(format!("{} is synced with {theirs}", folder.display()).into()),
+            None => Ok(FolderState::Ours),
+        };
+    }
+    match std::fs::read_dir(folder) {
+        Ok(mut entries) => Ok(match entries.next() {
+            Some(_) => FolderState::HasFiles,
+            None => FolderState::Fresh,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FolderState::Fresh),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// What to set up.
+#[derive(Debug, Clone)]
+pub struct SetUp {
+    /// As [`normalize_identity`] leaves it.
+    pub identity: String,
+    /// Absolute; created if missing.
+    pub folder: PathBuf,
+    /// Merge the files of a folder that has some with the drive.
+    pub existing: bool,
+    /// Start (or restart) the daemon.
+    pub start: bool,
+    /// Start the daemon at logon (not in a private instance).
+    pub at_logon: bool,
+}
+
+/// Sets syncing up: authorizes this computer on the identity unless it already is and the
+/// identity still accepts it (`authorize` gets the identity and the device's name, and waits
+/// for the owner's approval), prepares the identity, the folder and the config, and starts the
+/// daemon. Progress goes to `say`, a line at a time.
+pub fn set_up(
+    paths: &Paths,
+    request: &SetUp,
+    authorize: &mut dyn FnMut(&str, &str) -> Result<Credentials, HomebaseError>,
+    say: &mut dyn FnMut(&str),
+) -> control::Result<()> {
+    let identity = request.identity.as_str();
+    let config_path = paths.config_file();
+    let mut config = Config::load(&config_path)?.unwrap_or_default();
+
+    // The folder: new, empty, already this identity's, or adopted on purpose.
+    std::fs::create_dir_all(&request.folder)?;
+    let folder = request.folder.canonicalize()?;
+    if check_folder(&config, identity, &folder)? == FolderState::HasFiles && !request.existing {
+        return Err(format!(
+            "{} has files in it: they would be uploaded and merged with the drive. Add \
+             --existing to do that, or pick an empty or new folder with --folder.",
+            folder.display()
+        )
+        .into());
+    }
+
+    // This computer, authorized on the identity. New credentials are kept at once: an
+    // approval lost to a later failure would have to be given again.
+    let store = CredentialStore::open(paths);
+    let device = config.device_name();
+    let mut authorize = || -> control::Result<Credentials> {
+        let creds = authorize(identity, &device)?;
+        store.save(&creds)?;
+        Ok(creds)
+    };
+    let save = |c: &Credentials| store.save(c).map(drop);
+    let mut creds = match store.load(identity)? {
+        Some((creds, _)) => {
+            say(&format!(
+                "This computer is already authorized on {identity}."
+            ));
+            creds
+        }
+        None => authorize()?,
+    };
+    match prepare(&mut creds, save) {
+        // Revoked since: authorize again.
+        Err(HomebaseError::Denied(why)) => {
+            say(&format!(
+                "{identity} no longer accepts this computer's authorization ({why})."
+            ));
+            store.delete(identity)?;
+            creds = authorize()?;
+            prepare(&mut creds, save)?;
+        }
+        other => drop(other?),
+    }
+    match store.save(&creds)? {
+        Location::Keychain => say("Credentials saved in the system keychain."),
+        Location::File { path, why } => say(&format!(
+            "No keychain ({why}): credentials saved in {}, readable only by you.",
+            path.display()
+        )),
+    }
+
+    std::fs::create_dir_all(folder.join(STATE_DIR))?;
+    StateDb::open(&state_db_path(&folder))?.write(|s| s.set_kv(IDENTITY_KEY, identity))?;
+    config.roots = vec![Root {
+        identity: identity.to_owned(),
+        folder: folder.clone(),
+    }];
+    config.save(&config_path)?;
+    say(&format!("{} syncs with {identity}.", folder.display()));
+
+    if request.at_logon {
+        if control::dev_home() {
+            say("HBSYNC_HOME is set: not starting at logon (`hbsync autostart on` does).");
+        } else {
+            autostart::install(&autostart::daemon_exe()?)?;
+            say("The daemon starts at logon (`hbsync autostart off` stops that).");
+        }
+    }
+    if !request.start {
+        return Ok(());
+    }
+    if control::running(paths)? {
+        control::stop(paths)?;
+    }
+    control::start(paths)?;
+    say("The daemon is running: `hbsync status` shows what it does.");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type R = control::Result<()>;
+
+    #[test]
+    fn identities_are_kept_lowercase_without_a_slash() {
+        assert_eq!(
+            normalize_identity(" Anna.Example.com/ "),
+            "anna.example.com"
+        );
+    }
+
+    #[test]
+    fn folders_are_checked_before_setting_up() -> R {
+        let dir = tempfile::tempdir()?;
+        let folder = dir.path().join("Homebase");
+        let config = Config::default();
+        assert_eq!(
+            check_folder(&config, "a.example", &folder)?,
+            FolderState::Fresh
+        );
+        std::fs::create_dir(&folder)?;
+        assert_eq!(
+            check_folder(&config, "a.example", &folder)?,
+            FolderState::Fresh
+        );
+        std::fs::write(folder.join("notes.txt"), "x")?;
+        assert_eq!(
+            check_folder(&config, "a.example", &folder)?,
+            FolderState::HasFiles
+        );
+
+        // Synced before: with this identity it picks up where it was, with another it's refused.
+        std::fs::create_dir(folder.join(STATE_DIR))?;
+        StateDb::open(&state_db_path(&folder))?.write(|s| s.set_kv(IDENTITY_KEY, "a.example"))?;
+        assert_eq!(
+            check_folder(&config, "a.example", &folder)?,
+            FolderState::Ours
+        );
+        assert!(check_folder(&config, "b.example", &folder).is_err());
+
+        // Another folder already set up.
+        let config = Config {
+            roots: vec![Root {
+                identity: "a.example".into(),
+                folder: dir.path().join("Other"),
+            }],
+            ..Config::default()
+        };
+        assert!(check_folder(&config, "a.example", &folder).is_err());
+        Ok(())
+    }
 }
