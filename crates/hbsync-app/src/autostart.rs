@@ -191,9 +191,11 @@ pub fn run_value(daemon: &Path) -> String {
     format!("\"{}\"", daemon.display())
 }
 
-/// The program `name` beside the running one.
+/// The program `name` of this installation: beside the running one, or where a Mac app keeps
+/// it ([`crate::install::Install::program`]).
 fn beside(name: &str) -> io::Result<PathBuf> {
-    Ok(std::env::current_exe()?.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+    let exe = std::env::current_exe()?;
+    Ok(crate::install::Install::detect().program(name, &exe))
 }
 
 /// Where the daemon is: beside the running program.

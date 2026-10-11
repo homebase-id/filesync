@@ -36,6 +36,20 @@ impl Install {
         }
     }
 
+    /// Where its program `name` is: beside this one, but in a Mac app the tray is the app's
+    /// program (`Contents/MacOS`) and the daemon and the command line are its helpers
+    /// (`Contents/Helpers`), so that macOS and the packager know which one to launch.
+    pub fn program(&self, name: &str, beside: &Path) -> PathBuf {
+        let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        match self {
+            Install::MacApp { bundle } if name == crate::autostart::TRAY => {
+                bundle.join("Contents/MacOS").join(file)
+            }
+            Install::MacApp { bundle } => bundle.join("Contents/Helpers").join(file),
+            _ => beside.with_file_name(file),
+        }
+    }
+
     /// The Windows AppUserModelID that names it in notifications, in a package.
     pub fn app_user_model_id(&self) -> Option<String> {
         match self {
@@ -62,7 +76,7 @@ pub fn from_path(os: Os, exe: &Path) -> Install {
         Os::MacOs => {
             let bundle = exe
                 .parent()
-                .filter(|d| d.ends_with("Contents/MacOS"))
+                .filter(|d| d.ends_with("Contents/MacOS") || d.ends_with("Contents/Helpers"))
                 .and_then(Path::parent)
                 .and_then(Path::parent)
                 .filter(|b| b.extension().is_some_and(|e| e == "app"));
@@ -120,6 +134,23 @@ mod tests {
         );
         assert_eq!(installed, Install::MacApp { bundle: app.into() });
         assert_eq!(installed.not_settled(), None);
+        let helper = format!("{app}/Contents/Helpers/hbsync");
+        assert_eq!(from_path(Os::MacOs, Path::new(&helper)), installed);
+        assert_eq!(
+            installed.program("hbsyncd", Path::new(&helper)),
+            Path::new(&format!("{app}/Contents/Helpers/hbsyncd"))
+        );
+        assert_eq!(
+            installed.program("homebase-filesync", Path::new(&helper)),
+            Path::new(&format!("{app}/Contents/MacOS/homebase-filesync"))
+        );
+        assert_eq!(
+            Install::LinuxPackage.program("hbsyncd", Path::new("/usr/lib/h/bin/hbsync")),
+            Path::new(&format!(
+                "/usr/lib/h/bin/hbsyncd{}",
+                std::env::consts::EXE_SUFFIX
+            ))
+        );
         assert_eq!(
             from_path(Os::MacOs, Path::new("/Users/a/bin/homebase-filesync")),
             Install::Plain
