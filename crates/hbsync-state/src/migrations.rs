@@ -113,6 +113,17 @@ const MIGRATIONS: &[&str] = &[
     -- Cursors and small settings.
     CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
     "#,
+    // 2: what was synced, for people to see (the writer keeps the newest few hundred).
+    r#"
+    CREATE TABLE synced (
+        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+        at    INTEGER NOT NULL,                       -- Unix seconds
+        kind  INTEGER NOT NULL,
+        path  TEXT NOT NULL,
+        files INTEGER NOT NULL,
+        bytes INTEGER NOT NULL
+    );
+    "#,
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {

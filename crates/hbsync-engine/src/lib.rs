@@ -1,6 +1,7 @@
 //! The sync engine. `tree` and `reconcile` are pure; `view`, `exec`, `feed` and `engine` are
 //! the shell that reads and writes the state DB, the disk and the remote.
 
+pub mod activity;
 pub mod adopt;
 pub mod engine;
 pub mod exec;

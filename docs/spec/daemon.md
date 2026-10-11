@@ -100,7 +100,15 @@ a failure (service managers restart it then).
   exactly them through; when the held deletes changed since, it is refused (sync semantics,
   the mass-delete guard).
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
-  file that can't be read) isn't noted again until it has gone away.
+  file that can't be read) isn't noted again until it has gone away. A row on the drive the
+  client can't read (not encrypted, another key, no content hash) is noted too.
+- **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
+  transfers, done and to do.
+- **Pause for a while:** a pause can carry its end (Unix seconds), kept in the config with the
+  pause; the runner resumes by itself then, also after a restart.
+- **Recently synced:** each upload, download, move and delete, with its path, size and time;
+  more than 10 of one kind in one folder in one sync become one entry for the folder. The
+  newest 500 are kept in the folder's state DB (table `synced`), so the list survives a restart.
 
 ### States
 
@@ -116,10 +124,13 @@ version (now 1); a daemon refuses another one with the reason (after an update: 
 ```json
 {"protocol":1,"ask":"status"}
 {"protocol":1,"ask":{"control":"sync_now"}}            // pause, resume, stop
+{"protocol":1,"ask":{"control":{"pause_until":{"until":1800000000}}}}
 {"protocol":1,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
+{"protocol":1,"ask":{"recent":{"limit":10}}}
 ```
 
-Replies: `{"status":{...}}`, `"done"`, `{"refused":"why"}`.
+Replies: `{"status":{...}}` (with the daemon's `version`, `progress` and `paused_until`),
+`{"recent":[...]}` (newest first), `"done"`, `{"refused":"why"}`.
 
 Only the user can connect:
 
@@ -155,7 +166,8 @@ the daemon. With `HBSYNC_HOME` set, only `hbsync autostart` touches the user's l
 |---|---|
 | `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), saves the config, turns autostart on, (re)starts the daemon |
 | `hbsync status [--json]` | what the daemon does; exit status 3 when it isn't running |
-| `hbsync sync`, `pause`, `resume` | |
+| `hbsync sync`, `pause [--for 1h]`, `resume` | a pause with `--for` ends by itself |
+| `hbsync recent [-n N]` | what was synced lately, newest first |
 | `hbsync confirm-deletes [--yes]` | shows the held deletes and lets them through |
 | `hbsync start`, `stop` | |
 | `hbsync autostart [on\|off]` | |

@@ -1164,3 +1164,73 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 6);
     Ok(())
 }
+
+#[test]
+fn what_was_synced_is_listed_and_kept() -> R {
+    use hbsync_types::activity::SyncedKind::*;
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    let kinds = |r: &hbsync_engine::SyncReport| -> Vec<_> {
+        r.synced
+            .iter()
+            .map(|s| (s.kind, s.path.clone(), s.files, s.bytes))
+            .collect()
+    };
+    a.write("Docs/report.txt", "quarterly")?;
+    a.write("old.txt", "old")?;
+    a.engine.scan_local()?;
+    let mut up = a.engine.sync_once("2026-10-11")?;
+    // That sync's progress: both files, all their bytes.
+    assert_eq!(a.engine.progress().get(), (2, 2, 12, 12));
+    up.absorb(a.sync()?);
+    let mut listed = kinds(&up);
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            (Uploaded, "Docs/report.txt".into(), 1, 9),
+            (Uploaded, "old.txt".into(), 1, 3)
+        ]
+    );
+    let down = b.sync()?;
+    assert_eq!(kinds(&down).len(), 2);
+    assert!(kinds(&down).iter().all(|k| k.0 == Downloaded));
+
+    // A move and a delete here; the other device follows.
+    fs::rename(a.root.join("Docs/report.txt"), a.root.join("report.txt"))?;
+    fs::remove_file(a.root.join("old.txt"))?;
+    let mut here = kinds(&a.sync()?);
+    here.sort();
+    assert_eq!(
+        here,
+        [
+            (MovedRemotely, "report.txt".into(), 1, 0),
+            (DeletedRemotely, "old.txt".into(), 1, 0)
+        ]
+    );
+    let mut there = kinds(&b.sync()?);
+    there.sort();
+    assert_eq!(
+        there,
+        [
+            (MovedLocally, "report.txt".into(), 1, 0),
+            (TrashedLocally, "old.txt".into(), 1, 0)
+        ]
+    );
+
+    // Many files in one folder come down as one entry.
+    for i in 0..12 {
+        a.write(&format!("Photos/p{i}.jpg"), "jpeg")?;
+    }
+    a.sync()?;
+    let photos = kinds(&b.sync()?);
+    assert_eq!(photos, [(Downloaded, "Photos".into(), 12, 48)]);
+
+    // The list survives a restart, newest first.
+    let recent = StateDb::open(&b.db_path())?.read(|s| s.recent_synced(3))?;
+    assert_eq!(recent[0].path, "Photos");
+    assert_eq!(recent.len(), 3);
+    Ok(())
+}

@@ -6,6 +6,7 @@ use std::fmt;
 pub use hbsync_fileio::{ContentHash, HashAlgorithm};
 pub use uuid::Uuid;
 
+pub mod activity;
 pub mod schema;
 
 /// A node's identity: a client-generated UUID, stable across rename and move. Stored remotely

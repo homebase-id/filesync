@@ -20,7 +20,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
@@ -28,9 +28,11 @@ use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{BaseRow, LocalRow, MirrorFile, MirrorRow, StateDb, StateError, Store};
+use hbsync_types::activity::{Synced, SyncedKind};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef};
 
+use crate::activity::{self, Progress};
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::{feed, view};
@@ -97,6 +99,8 @@ pub struct ExecReport {
     pub rescan: Vec<RelPath>,
     /// Why the run stopped early, leaving the rest dirty for a later sync.
     pub stopped: Option<Stopped>,
+    /// What was done, for people (one entry per file or item).
+    pub synced: Vec<Synced>,
 }
 
 /// Why a run stopped before its plan was done.
@@ -157,6 +161,9 @@ pub struct Executor<'a> {
     resume_at: Option<Instant>,
     /// Set by the caller to stop the run between operations.
     stop: Option<Arc<AtomicBool>>,
+    /// The path of the item an operation removes, taken before it runs.
+    before: Option<String>,
+    progress: Option<Arc<Progress>>,
 }
 
 /// A transfer whose guards passed, waiting for a worker.
@@ -219,6 +226,8 @@ impl<'a> Executor<'a> {
             streak: 0,
             resume_at: None,
             stop: None,
+            before: None,
+            progress: None,
         }
     }
 
@@ -242,6 +251,12 @@ impl<'a> Executor<'a> {
         self.report.stopped.is_some()
     }
 
+    /// Counts what the run does (and, for transfers, the bytes) into `progress`.
+    pub fn with_progress(mut self, progress: Arc<Progress>) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
     /// Marks nodes whose transfers go first (files the user is waiting for).
     pub fn with_urgent(mut self, urgent: HashSet<NodeId>) -> Self {
         self.urgent = urgent;
@@ -255,6 +270,13 @@ impl<'a> Executor<'a> {
             .filter(|op| matches!(op, Op::Forget { .. }))
             .map(Op::node)
             .collect();
+        if let Some(p) = &self.progress {
+            let visible = ops
+                .iter()
+                .filter(|op| activity::kind_of(op).is_some())
+                .count();
+            Progress::add(&p.files_total, visible as u64);
+        }
         self.queue = ops.into_iter().map(|op| (op, 0)).collect();
         let mut batch: Vec<Prepared> = Vec::new();
         loop {
@@ -297,6 +319,9 @@ impl<'a> Executor<'a> {
             }
             if op.touches_remote() {
                 self.wait_out_backoff();
+            }
+            if let Op::LocalTrash { node, .. } | Op::RemoteDelete { node, .. } = op {
+                self.before = self.db.read(|s| activity::path_of(s, node))?;
             }
             let outcome = self.execute(&op);
             self.handle(op, attempts, outcome)?;
@@ -369,6 +394,7 @@ impl<'a> Executor<'a> {
     }
 
     fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), StateError> {
+        let before = self.before.take();
         if matches!(outcome, Outcome::Done | Outcome::Settled | Outcome::Skip(_)) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
@@ -379,12 +405,16 @@ impl<'a> Executor<'a> {
         }
         match outcome {
             Outcome::Done => {
+                self.record(&op, before)?;
                 self.report.done += 1;
                 let os = self.cfg.os;
                 let same_bytes = is_transfer(&op);
                 self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
             }
-            Outcome::Settled => self.report.done += 1,
+            Outcome::Settled => {
+                self.record(&op, before)?;
+                self.report.done += 1;
+            }
             Outcome::Backoff(why) => {
                 self.streak += 1;
                 if self.streak >= UNREACHABLE_AFTER {
@@ -407,6 +437,44 @@ impl<'a> Executor<'a> {
                 self.db.write(|s| s.mark_dirty(node))?;
                 self.report.stopped.get_or_insert(Stopped::Denied(why));
             }
+        }
+        Ok(())
+    }
+
+    /// Adds what `op` did to the report, for people: transfers, moves and deletes. `before`:
+    /// the path of an item it removed, taken before it ran (its rows may be gone now).
+    fn record(&mut self, op: &Op, before: Option<String>) -> Result<(), StateError> {
+        let Some(kind) = activity::kind_of(op) else {
+            return Ok(());
+        };
+        if let Some(p) = &self.progress {
+            Progress::add(&p.files_done, 1);
+        }
+        let node = op.node();
+        let (path, bytes) = self.db.read(|s| {
+            let bytes = match kind {
+                SyncedKind::Uploaded | SyncedKind::Downloaded => {
+                    s.local_by_node(node)?.map_or(0, |row| row.fingerprint.size)
+                }
+                _ => 0,
+            };
+            let path = match before {
+                Some(p) => Some(p),
+                None => activity::path_of(s, node)?,
+            };
+            Ok((path, bytes))
+        })?;
+        if let Some(path) = path {
+            let at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            self.report.synced.push(Synced {
+                at,
+                kind,
+                path,
+                files: 1,
+                bytes,
+            });
         }
         Ok(())
     }
@@ -437,6 +505,10 @@ impl<'a> Executor<'a> {
             jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
             pending.insert(p.job.node(), p);
         }
+        let progress = self.progress.clone();
+        if let Some(p) = &progress {
+            Progress::add(&p.bytes_total, jobs.iter().map(|(_, j)| j.size()).sum());
+        }
         // Commit each transfer as soon as it finishes: small files don't wait for a large
         // one, and a crash loses only transfers still in flight.
         let remote = self.remote;
@@ -444,7 +516,8 @@ impl<'a> Executor<'a> {
         let mut first_error = None;
         // A DB error or a stopped run (requested, denied, unreachable) starts no further
         // transfers; the nodes stay dirty for the next sync.
-        run_jobs_while(remote, transfer, jobs, |job, result| {
+        let moved = progress.as_ref().map(|p| &p.bytes_done);
+        run_jobs_while(remote, transfer, moved, jobs, |job, result| {
             if first_error.is_some() {
                 return false;
             }

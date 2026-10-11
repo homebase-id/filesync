@@ -15,6 +15,7 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -83,26 +84,37 @@ impl Throttle {
     }
 }
 
+/// What every byte of a transfer goes through: the bandwidth cap, if any, and the count of
+/// bytes moved, if anyone watches.
+#[derive(Debug, Default)]
+pub struct Meter<'a> {
+    pub throttle: Option<Throttle>,
+    pub moved: Option<&'a AtomicU64>,
+}
+
 /// Uploads: the remote paces what it sends.
-impl Pace for Throttle {
+impl Pace for Meter<'_> {
     fn take(&self, bytes: usize) {
-        Throttle::take(self, bytes);
+        if let Some(t) = &self.throttle {
+            t.take(bytes);
+        }
+        if let Some(moved) = self.moved {
+            moved.fetch_add(bytes as u64, Ordering::Relaxed);
+        }
     }
 }
 
-/// A writer that respects a [`Throttle`].
+/// A writer whose bytes go through a [`Meter`].
 #[derive(Debug)]
-pub struct ThrottledWrite<'a, W> {
+pub struct MeteredWrite<'a, W> {
     pub inner: W,
-    pub throttle: Option<&'a Throttle>,
+    pub meter: &'a Meter<'a>,
 }
 
-impl<W: Write> Write for ThrottledWrite<'_, W> {
+impl<W: Write> Write for MeteredWrite<'_, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let max = buf.len().min(64 * 1024);
-        if let Some(t) = self.throttle {
-            t.take(max);
-        }
+        self.meter.take(max);
         self.inner.write(&buf[..max])
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -194,17 +206,18 @@ pub fn run_jobs(
     jobs: Vec<(bool, Job)>,
     mut commit: impl FnMut(Job, JobResult),
 ) {
-    run_jobs_while(remote, cfg, jobs, |job, result| {
+    run_jobs_while(remote, cfg, None, jobs, |job, result| {
         commit(job, result);
         true
     });
 }
 
 /// [`run_jobs`], until `commit` returns `false`: jobs not started by then are dropped (jobs
-/// already running finish and are committed).
+/// already running finish and are committed). The bytes moved are added to `moved`.
 pub fn run_jobs_while(
     remote: &dyn Remote,
     cfg: TransferConfig,
+    moved: Option<&AtomicU64>,
     mut jobs: Vec<(bool, Job)>,
     mut commit: impl FnMut(Job, JobResult) -> bool,
 ) {
@@ -216,16 +229,19 @@ pub fn run_jobs_while(
         large_from: cfg.large_from,
         large_at_once: cfg.large_at_once.max(1),
     });
-    let throttle = cfg.max_bytes_per_sec.map(Throttle::new);
+    let meter = Meter {
+        throttle: cfg.max_bytes_per_sec.map(Throttle::new),
+        moved,
+    };
     let (tx, rx) = mpsc::channel::<(Job, JobResult)>();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let tx = tx.clone();
             let queue = &queue;
-            let throttle = throttle.as_ref();
+            let meter = &meter;
             scope.spawn(move || {
                 while let Some(job) = queue.lock().ok().and_then(|mut q| q.take()) {
-                    let result = run_job(remote, &job, throttle);
+                    let result = run_job(remote, &job, meter);
                     if let Ok(mut q) = queue.lock() {
                         q.finished(&job);
                     }
@@ -275,7 +291,7 @@ impl Queue {
     }
 }
 
-fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobResult {
+fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
     let result = match job {
         Job::Download {
             file_id,
@@ -297,7 +313,7 @@ fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobRe
             tmp_dir,
             key,
             *local_algorithm,
-            throttle,
+            meter,
         ),
         Job::Upload {
             meta,
@@ -311,7 +327,7 @@ fn run_job(remote: &dyn Remote, job: &Job, throttle: Option<&Throttle>) -> JobRe
                 hash: *hash,
                 size: *size,
                 reader: &mut file,
-                pace: throttle.map(|t| t as &dyn Pace),
+                pace: Some(meter),
             });
             Ok(JobResult::Uploaded(match target {
                 None => remote.create(meta, upload)?,
@@ -333,7 +349,7 @@ fn download(
     tmp_dir: &std::path::Path,
     key: &str,
     local_algorithm: HashAlgorithm,
-    throttle: Option<&Throttle>,
+    meter: &Meter<'_>,
 ) -> Result<JobResult, JobError> {
     let mut partial = PartialFile::open(tmp_dir, key, expected.algorithm)?;
     let offset = partial.offset();
@@ -341,9 +357,9 @@ fn download(
     // a remote needn't look it up first.
     if offset < size {
         let range = Some(offset..size);
-        let mut sink = ThrottledWrite {
+        let mut sink = MeteredWrite {
             inner: &mut partial,
-            throttle,
+            meter,
         };
         remote.read(file_id, range, &mut sink)?;
     }

@@ -40,6 +40,9 @@ pub struct Config {
     /// Syncing stopped by the user (survives a restart).
     #[serde(default)]
     pub paused: bool,
+    /// A pause ends then (Unix seconds); `None`: when resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_until: Option<u64>,
     #[serde(default)]
     pub mass_delete: MassDelete,
     #[serde(default)]
@@ -130,6 +133,7 @@ mod tests {
         let config = Config {
             device_name: Some("Anna's laptop".into()),
             paused: true,
+            paused_until: Some(1_800_000_000),
             mass_delete: MassDelete {
                 min_files: 10,
                 fraction: 0.5,

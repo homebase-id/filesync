@@ -95,6 +95,12 @@ fn status_without_a_daemon() -> R {
     let out = home.hbsync(&["sync"])?;
     assert!(!out.status.success());
     assert!(text(&out).contains("isn't running"), "{}", text(&out));
+    let out = home.hbsync(&["recent"])?;
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let out = home.hbsync(&["pause", "--for", "1h"])?;
+    assert!(text(&out).contains("isn't running"), "{}", text(&out));
+    let out = home.hbsync(&["pause", "--for", "soon"])?;
+    assert!(text(&out).contains("1h or 30m"), "{}", text(&out));
     Ok(())
 }
 

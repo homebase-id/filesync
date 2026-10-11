@@ -3,13 +3,12 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{ask, control, running, start, stop};
 use hbsync_app::ipc::{Ask, IpcError, Reply};
 use hbsync_app::runner::Hints;
-use hbsync_app::{Control, Paths, State, Status, autostart, control as daemon, setup};
+use hbsync_app::{Control, Paths, State, Status, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
 
 type Res<T> = hbsync_app::control::Result<T>;
@@ -56,9 +55,19 @@ enum Command {
     },
     /// Syncs now.
     Sync,
-    /// Stops syncing until `resume` (also across restarts).
-    Pause,
+    /// Stops syncing until `resume` (also across restarts), or for a while.
+    Pause {
+        /// Resume by itself after this long: 1h, 8h, 24h, 30m...
+        #[arg(long = "for", value_name = "DURATION", value_parser = parse_duration)]
+        for_: Option<u64>,
+    },
     Resume,
+    /// Shows what was synced lately, newest first.
+    Recent {
+        /// How many entries.
+        #[arg(short = 'n', default_value_t = 20)]
+        limit: usize,
+    },
     /// Lets through the deletes held for confirmation.
     ConfirmDeletes {
         /// Don't ask.
@@ -146,10 +155,33 @@ fn run(command: Command) -> Res<ExitCode> {
             control(&paths, Control::SyncNow)?;
             println!("Syncing now.");
         }
-        Command::Pause => {
+        Command::Pause { for_: None } => {
             control(&paths, Control::Pause)?;
             println!("Paused. `hbsync resume` syncs again.");
         }
+        Command::Pause { for_: Some(secs) } => {
+            let until = words::now() + secs;
+            control(&paths, Control::PauseUntil { until })?;
+            println!(
+                "Paused; syncing again {}. `hbsync resume` syncs now.",
+                words::when(until, words::now())
+            );
+        }
+        Command::Recent { limit } => match ask(&paths, Ask::Recent { limit }) {
+            Ok(Reply::Recent(list)) if list.is_empty() => println!("Nothing synced yet."),
+            Ok(Reply::Recent(list)) => {
+                let now = words::now();
+                for s in &list {
+                    println!("{:>12}  {}", words::when(s.at, now), words::synced(s));
+                }
+            }
+            Ok(other) => return Err(format!("unexpected answer: {other:?}").into()),
+            Err(IpcError::NotRunning) => {
+                println!("The daemon isn't running (`hbsync start` starts it).");
+                return Ok(ExitCode::from(NOT_RUNNING));
+            }
+            Err(e) => return Err(e.into()),
+        },
         Command::Resume => {
             control(&paths, Control::Resume)?;
             println!("Resumed.");
@@ -283,6 +315,12 @@ fn print_status(s: &Status) {
     };
     println!("Homebase Filesync: {state}");
     println!("  {} <-> {}", s.identity, s.folder.display());
+    if let Some(p) = &s.progress {
+        println!("  {}", words::progress(p));
+    }
+    if let Some(until) = s.paused_until {
+        println!("  syncing again {}", when(until));
+    }
     if let Some(e) = &s.error {
         println!("  problem: {e}");
     }
@@ -343,23 +381,40 @@ fn print_status(s: &Status) {
 
 /// `at` (Unix seconds) relative to now: "12 s ago", "in 3 min".
 fn when(at: u64) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let (secs, ago) = if at <= now {
-        (now - at, true)
-    } else {
-        (at - now, false)
+    words::when(at, words::now())
+}
+
+/// "90s", "30m", "8h", "2d" (or plain seconds) as seconds.
+fn parse_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (number, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = number
+        .parse()
+        .map_err(|_| format!("{s:?}: expected a number and a unit, like 1h or 30m"))?;
+    let unit = match unit {
+        "" | "s" => 1,
+        "m" | "min" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        other => return Err(format!("{other:?}: use s, m, h or d")),
     };
-    let span = match secs {
-        0..60 => format!("{secs} s"),
-        60..3600 => format!("{} min", secs / 60),
-        3600..86_400 => format!("{} h", secs / 3600),
-        _ => format!("{} days", secs / 86_400),
-    };
-    if ago {
-        format!("{span} ago")
-    } else {
-        format!("in {span}")
+    n.checked_mul(unit)
+        .filter(|&secs| secs > 0)
+        .ok_or_else(|| format!("{s:?} isn't a usable duration"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("1h"), Ok(3600));
+        assert_eq!(parse_duration("30m"), Ok(1800));
+        assert_eq!(parse_duration("90"), Ok(90));
+        assert_eq!(parse_duration("2d"), Ok(172_800));
+        assert!(parse_duration("0h").is_err());
+        assert!(parse_duration("1w").is_err());
+        assert!(parse_duration("h").is_err());
     }
 }

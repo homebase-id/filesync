@@ -1,6 +1,7 @@
 //! Column encodings.
 
 use hbsync_platform::{FileId, Fingerprint, RelPath};
+use hbsync_types::activity::SyncedKind;
 use hbsync_types::{
     ContentHash, ContentState, HashAlgorithm, NodeId, NodeKind, RemoteFileId, Uuid, VersionTag,
 };
@@ -114,4 +115,27 @@ pub fn fingerprint_from(
             file,
         },
     }
+}
+
+pub fn synced_kind_to(kind: SyncedKind) -> i64 {
+    match kind {
+        SyncedKind::Uploaded => 0,
+        SyncedKind::Downloaded => 1,
+        SyncedKind::MovedRemotely => 2,
+        SyncedKind::MovedLocally => 3,
+        SyncedKind::DeletedRemotely => 4,
+        SyncedKind::TrashedLocally => 5,
+    }
+}
+
+pub fn synced_kind_from(v: i64) -> Result<SyncedKind> {
+    Ok(match v {
+        0 => SyncedKind::Uploaded,
+        1 => SyncedKind::Downloaded,
+        2 => SyncedKind::MovedRemotely,
+        3 => SyncedKind::MovedLocally,
+        4 => SyncedKind::DeletedRemotely,
+        5 => SyncedKind::TrashedLocally,
+        _ => return Err(StateError::Corrupt(format!("synced kind {v}"))),
+    })
 }

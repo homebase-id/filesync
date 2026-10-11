@@ -5,6 +5,7 @@
 //! parent and its name, and paths are derived. Moving a folder rewrites one row.
 
 use hbsync_platform::{FileId, Fingerprint, RelPath};
+use hbsync_types::activity::Synced;
 use hbsync_types::{
     ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
@@ -966,6 +967,58 @@ impl<'a> Store<'a> {
     pub fn delete_kv(&self, key: &str) -> Result<()> {
         self.change("DELETE FROM kv WHERE key = ?1", key)?;
         Ok(())
+    }
+
+    // ---- what was synced ----
+
+    /// Adds `entries` (oldest first) and keeps only the newest `keep`.
+    pub fn add_synced(&self, entries: &[Synced], keep: usize) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.conn.prepare_cached(
+            "INSERT INTO synced (at, kind, path, files, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for e in entries {
+            insert.execute(params![
+                e.at as i64,
+                codec::synced_kind_to(e.kind),
+                e.path,
+                e.files as i64,
+                e.bytes as i64
+            ])?;
+        }
+        self.conn
+            .prepare_cached("DELETE FROM synced WHERE id <= (SELECT MAX(id) FROM synced) - ?1")?
+            .execute([keep as i64])?;
+        Ok(())
+    }
+
+    /// The newest `limit` entries, newest first.
+    pub fn recent_synced(&self, limit: usize) -> Result<Vec<Synced>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT at, kind, path, files, bytes FROM synced ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, i64>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (at, kind, path, files, bytes) = row?;
+            Ok(Synced {
+                at: at as u64,
+                kind: codec::synced_kind_from(kind)?,
+                path,
+                files: files as u64,
+                bytes: bytes as u64,
+            })
+        })
+        .collect()
     }
 
     // ---- statement helpers (all through the statement cache) ----

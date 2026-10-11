@@ -12,6 +12,7 @@
 //! - **Ignore rules** (`.hbsync/ignore`) are checked for changes at every poll and on request;
 //!   a change restarts the engine, which re-plans everything (sync semantics §10).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use hbsync_engine::activity::{self, Progress as Counters};
 use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
 use hbsync_engine::{Conflict, Engine, EngineConfig, EngineError, SyncReport};
@@ -28,6 +30,7 @@ use hbsync_local::{Filter, FilterError, LocalObserver, STATE_DIR, state_db_path}
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{StateDb, StateError};
 use hbsync_types::NodeId;
+use hbsync_types::activity::Synced;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
@@ -98,6 +101,8 @@ pub struct RunnerConfig {
     pub mass_delete: MassDelete,
     /// Start paused.
     pub paused: bool,
+    /// Resume by itself then (Unix seconds).
+    pub paused_until: Option<u64>,
     /// A sync at least this often.
     pub poll: Duration,
     /// Catch up, sync once, and stop (development).
@@ -116,6 +121,7 @@ impl RunnerConfig {
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
             paused: false,
+            paused_until: None,
             poll: Duration::from_secs(60),
             once: false,
             credentials_warning: None,
@@ -131,6 +137,10 @@ pub enum Control {
     /// Sync now, without waiting out a backoff.
     SyncNow,
     Pause,
+    /// Pause until then (Unix seconds), then resume by itself.
+    PauseUntil {
+        until: u64,
+    },
     Resume,
     /// Let the held deletes the user was shown through: `token` is
     /// [`HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
@@ -174,7 +184,13 @@ pub enum Hints {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Status {
+    /// The daemon's version.
+    pub version: String,
     pub state: State,
+    /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
+    pub paused_until: Option<u64>,
+    /// How far the sync in progress is.
+    pub progress: Option<Progress>,
     pub identity: String,
     pub folder: PathBuf,
     /// Why the last sync failed (states `Offline`, `Failing`, `Denied`).
@@ -201,7 +217,10 @@ impl Status {
     /// Starting to sync `folder` with `identity`.
     pub fn new(identity: &str, folder: &Path) -> Status {
         Status {
+            version: env!("CARGO_PKG_VERSION").into(),
             state: State::Starting,
+            paused_until: None,
+            progress: None,
             identity: identity.to_owned(),
             folder: folder.to_path_buf(),
             error: None,
@@ -216,6 +235,16 @@ impl Status {
             credentials_warning: None,
         }
     }
+}
+
+/// How far a sync is: the files (and moves and deletes) and the bytes of its transfers. The
+/// bytes moved can run a little past the total (encryption's padding).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Progress {
+    pub files_done: u64,
+    pub files_total: u64,
+    pub bytes_done: u64,
+    pub bytes_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -280,13 +309,18 @@ pub struct Handle {
     control: Sender<Control>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
+    progress: Arc<Counters>,
+    synced: Arc<Mutex<VecDeque<Synced>>>,
 }
 
 impl Handle {
     /// Passes `control` on. Pause and stop also interrupt a sync in progress. False when the
     /// runner has ended.
     pub fn send(&self, control: Control) -> bool {
-        if matches!(control, Control::Pause | Control::Stop) {
+        if matches!(
+            control,
+            Control::Pause | Control::PauseUntil { .. } | Control::Stop
+        ) {
             self.stop.store(true, Ordering::Relaxed);
         }
         self.control.send(control).is_ok()
@@ -298,7 +332,37 @@ impl Handle {
         if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
             status.state = State::Paused;
         }
+        let (files_done, files_total, bytes_done, bytes_total) = self.progress.get();
+        if matches!(status.state, State::Starting | State::Syncing) && files_total > 0 {
+            status.progress = Some(Progress {
+                files_done,
+                files_total,
+                bytes_done,
+                bytes_total,
+            });
+        }
         status
+    }
+
+    /// The newest `limit` entries of the recently synced list, newest first.
+    pub fn recent(&self, limit: usize) -> Vec<Synced> {
+        lock(&self.synced)
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Adds a note to [`Status::recent`] (something the user should know about).
+    pub fn note(&self, text: String) {
+        let mut status = lock(&self.status);
+        status.recent.push(Note {
+            at: unix_now(),
+            text,
+        });
+        let excess = status.recent.len().saturating_sub(RECENT);
+        status.recent.drain(..excess);
     }
 }
 
@@ -314,6 +378,9 @@ pub struct Runner {
     control: Receiver<Control>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<Status>>,
+    progress: Arc<Counters>,
+    /// The recently synced list, oldest first: loaded from the state DB, then added to.
+    synced: Arc<Mutex<VecDeque<Synced>>>,
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
     /// The conflicts and failures of the last sync, to tell each one only once.
@@ -358,11 +425,18 @@ impl Runner {
             status.hints = Hints::Connecting;
         }
         status.credentials_warning = cfg.credentials_warning.clone();
+        if cfg.paused {
+            status.paused_until = cfg.paused_until;
+        }
         let status = Arc::new(Mutex::new(status));
+        let progress = Arc::new(Counters::default());
+        let synced = Arc::new(Mutex::new(VecDeque::new()));
         let handle = Handle {
             control: tx,
             stop: Arc::clone(&stop),
             status: Arc::clone(&status),
+            progress: Arc::clone(&progress),
+            synced: Arc::clone(&synced),
         };
         let runner = Runner {
             cfg,
@@ -371,6 +445,8 @@ impl Runner {
             control: rx,
             stop,
             status,
+            progress,
+            synced,
             held: Vec::new(),
             last_notes: Default::default(),
         };
@@ -420,6 +496,9 @@ impl Runner {
         })?;
         let mut engine = Engine::new(db, Box::new(Arc::clone(&self.remote)), cfg);
         engine.set_stop(Arc::clone(&self.stop));
+        engine.set_progress(Arc::clone(&self.progress));
+        let recent = engine.recent_synced(activity::KEEP)?;
+        *lock(&self.synced) = recent.into_iter().rev().collect();
         let observer = LocalObserver::start(root, engine.scan_options().clone());
         if let Some(why) = &observer.watcher_error {
             tracing::warn!("no live watcher ({why}); the folder is rescanned at every poll");
@@ -438,6 +517,7 @@ impl Runner {
         let mut confirmed = None;
         let db_path = state_db_path(&self.cfg.folder);
         let mut paused = self.cfg.paused;
+        let mut paused_until = self.cfg.paused_until.filter(|_| paused);
         let mut started = false;
         let mut wanted = true;
         let mut check_rules = false;
@@ -490,17 +570,29 @@ impl Runner {
                     }
                     Ok(Control::Pause) => {
                         paused = true;
+                        paused_until = None;
+                        self.set(|s| s.paused_until = None);
                         tracing::info!("paused");
+                    }
+                    Ok(Control::PauseUntil { until }) => {
+                        paused = true;
+                        paused_until = Some(until);
+                        self.set(|s| s.paused_until = Some(until));
+                        tracing::info!("paused for {} min", until.saturating_sub(unix_now()) / 60);
                     }
                     Ok(Control::Resume) => {
                         if paused {
                             tracing::info!("resumed");
                         }
                         paused = false;
+                        paused_until = None;
                         self.stop.store(false, Ordering::Relaxed);
                         wanted = true;
                         not_before = Instant::now();
-                        self.set(|s| s.state = State::Idle);
+                        self.set(|s| {
+                            s.state = State::Idle;
+                            s.paused_until = None;
+                        });
                     }
                     Ok(Control::ConfirmDeletes { token }) => {
                         if token != held_token(&self.held) {
@@ -550,6 +642,18 @@ impl Runner {
                 self.set(|s| s.hints = hints);
             }
 
+            if paused && paused_until.is_some_and(|t| unix_now() >= t) {
+                tracing::info!("the pause is over: resuming");
+                paused = false;
+                paused_until = None;
+                self.stop.store(false, Ordering::Relaxed);
+                wanted = true;
+                not_before = Instant::now();
+                self.set(|s| {
+                    s.state = State::Idle;
+                    s.paused_until = None;
+                });
+            }
             let now = Instant::now();
             if now >= next_poll {
                 // At every poll, whether the syncs succeed or back off.
@@ -748,6 +852,10 @@ impl Runner {
             let excess = s.recent.len().saturating_sub(RECENT);
             s.recent.drain(..excess);
         });
+        let mut synced = lock(&self.synced);
+        synced.extend(report.synced.iter().cloned());
+        let excess = synced.len().saturating_sub(activity::KEEP);
+        synced.drain(..excess);
         Ok(())
     }
 }
@@ -774,7 +882,7 @@ fn is_offline(e: &EngineError) -> bool {
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

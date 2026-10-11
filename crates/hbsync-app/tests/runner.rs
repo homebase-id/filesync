@@ -305,3 +305,78 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
     assert!(live_names(&server).is_empty(), "nothing was uploaded");
     Ok(())
 }
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+#[test]
+fn a_timed_pause_ends_by_itself() -> R {
+    let server = server();
+    let a = Device::start(&server, "a", NO_POLL)?;
+    wait_until("a is idle", || a.status().state == State::Idle)?;
+    let until = unix_now() + 2;
+    a.handle.send(Control::PauseUntil { until });
+    assert_eq!(a.status().state, State::Paused);
+    wait_until("the pause shows its end", || {
+        a.status().paused_until == Some(until)
+    })?;
+    a.write("later.txt", "x")?;
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!on_server(&server, "later.txt"), "synced while paused");
+    // Over by itself, and what waited goes up.
+    wait_until("later.txt is up", || on_server(&server, "later.txt"))?;
+    let status = a.status();
+    assert_ne!(status.state, State::Paused);
+    assert_eq!(status.paused_until, None);
+    Ok(())
+}
+
+#[test]
+fn the_recently_synced_list_follows_the_syncs() -> R {
+    let server = server();
+    let a = Device::start(&server, "a", NO_POLL)?;
+    a.write("Docs/one.txt", "1")?;
+    a.write("two.txt", "22")?;
+    wait_until("both are listed", || a.handle.recent(10).len() == 2)?;
+    let recent = a.handle.recent(10);
+    assert!(
+        recent
+            .iter()
+            .all(|s| s.kind == hbsync_types::activity::SyncedKind::Uploaded)
+    );
+    assert_eq!(a.handle.recent(1).len(), 1);
+    // The status shows no progress once idle.
+    wait_until("a is idle", || a.status().state == State::Idle)?;
+    assert_eq!(a.status().progress, None);
+    assert_eq!(a.status().version, env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+#[test]
+fn progress_shows_while_a_transfer_runs() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    std::fs::create_dir_all(root.join(".hbsync"))?;
+    let mut cfg = RunnerConfig::new(&root, "test.example", "a");
+    cfg.poll = NO_POLL;
+    // 600 kB at 300 kB/s: two seconds to watch.
+    cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
+    let remote = Arc::new(FakeRemote::new(server.clone()));
+    let (handle, _thread) = Runner::spawn(cfg, remote, HintSource::none())?;
+    std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
+    let mut seen = None;
+    wait_until("progress shows", || {
+        seen = handle.status().progress;
+        seen.is_some_and(|p| p.bytes_done > 0)
+    })?;
+    let p = seen.ok_or("no progress")?;
+    assert_eq!((p.files_total, p.bytes_total), (1, 600_000));
+    assert!(p.bytes_done < p.bytes_total, "{p:?}");
+    wait_until("big.bin is up", || on_server(&server, "big.bin"))?;
+    handle.send(Control::Stop);
+    Ok(())
+}

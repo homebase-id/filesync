@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use hbsync_types::activity::Synced;
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream};
 use serde::{Deserialize, Serialize};
@@ -50,12 +51,18 @@ impl Request {
 pub enum Ask {
     Status,
     Control(Control),
+    /// The newest entries of the recently synced list.
+    Recent {
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reply {
     Status(Box<Status>),
+    /// Newest first.
+    Recent(Vec<Synced>),
     Done,
     Refused(String),
 }
@@ -310,6 +317,17 @@ mod tests {
                     let _ = tx.lock().map(|tx| tx.send(c));
                     Reply::Done
                 }
+                Ask::Recent { limit } => Reply::Recent(
+                    (0..limit as u64)
+                        .map(|i| Synced {
+                            at: 1_800_000_000 - i,
+                            kind: hbsync_types::activity::SyncedKind::Downloaded,
+                            path: format!("Photos/p{i}.jpg"),
+                            files: 1,
+                            bytes: 1000,
+                        })
+                        .collect(),
+                ),
             })
         });
 
@@ -325,6 +343,10 @@ mod tests {
             Reply::Done
         );
         assert_eq!(rx.recv_timeout(PATIENCE)?, confirm);
+        match call(&paths, &Request::new(Ask::Recent { limit: 3 }))? {
+            Reply::Recent(list) => assert_eq!(list.len(), 3),
+            other => panic!("{other:?}"),
+        }
 
         // Another protocol version is refused, with the reason.
         let old = Request {
@@ -347,6 +369,16 @@ mod tests {
         assert_eq!(
             json(Ask::Control(Control::ConfirmDeletes { token: "t".into() }))?,
             r#"{"protocol":1,"ask":{"control":{"confirm_deletes":{"token":"t"}}}}"#
+        );
+        assert_eq!(
+            json(Ask::Control(Control::PauseUntil {
+                until: 1_800_000_000
+            }))?,
+            r#"{"protocol":1,"ask":{"control":{"pause_until":{"until":1800000000}}}}"#
+        );
+        assert_eq!(
+            json(Ask::Recent { limit: 10 })?,
+            r#"{"protocol":1,"ask":{"recent":{"limit":10}}}"#
         );
         assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);
         Ok(())

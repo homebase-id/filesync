@@ -231,7 +231,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 1);
+    assert_eq!(db.schema_version()?, 2);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -426,5 +426,32 @@ fn local_tree_keeps_rows_connected() -> R {
     db.write(|s| s.delete_local(adopted))?;
     db.write(|s| s.collect_nodes())?;
     assert_eq!(db.read(|s| s.node_count())?, 0);
+    Ok(())
+}
+
+#[test]
+fn synced_keeps_the_newest() -> R {
+    use hbsync_types::activity::{Synced, SyncedKind};
+
+    let mut db = StateDb::open_in_memory()?;
+    let entry = |i: u64| Synced {
+        at: 1_700_000_000 + i,
+        kind: if i.is_multiple_of(2) {
+            SyncedKind::Uploaded
+        } else {
+            SyncedKind::TrashedLocally
+        },
+        path: format!("f{i}"),
+        files: 1,
+        bytes: i,
+    };
+    let first: Vec<_> = (0..4).map(entry).collect();
+    db.write(|s| s.add_synced(&first, 5))?;
+    let second: Vec<_> = (4..7).map(entry).collect();
+    db.write(|s| s.add_synced(&second, 5))?;
+    let recent = db.read(|s| s.recent_synced(10))?;
+    // Newest first, the oldest two gone.
+    assert_eq!(recent, (2..7).rev().map(entry).collect::<Vec<_>>());
+    assert_eq!(db.read(|s| s.recent_synced(2))?, vec![entry(6), entry(5)]);
     Ok(())
 }

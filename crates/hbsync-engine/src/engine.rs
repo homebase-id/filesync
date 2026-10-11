@@ -8,7 +8,9 @@ use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs,
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
+use hbsync_types::activity::Synced;
 
+use crate::activity::{self, Progress};
 use crate::adopt::adopt;
 use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
@@ -110,6 +112,8 @@ pub struct SyncReport {
     /// Stopped on request ([`Engine::set_stop`]) before the end: what was done is in the
     /// report, the rest stays dirty.
     pub stopped: bool,
+    /// What was done, for people, oldest first (also kept in the state DB).
+    pub synced: Vec<Synced>,
 }
 
 impl SyncReport {
@@ -130,6 +134,7 @@ impl SyncReport {
         self.pending = later.pending;
         self.adopted += later.adopted;
         self.stopped = later.stopped;
+        self.synced.extend(later.synced);
     }
 }
 
@@ -146,6 +151,8 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     /// Nodes whose held deletes the user confirmed, until they are done (or undone).
     confirmed: std::collections::HashSet<NodeId>,
+    /// How far the current sync is.
+    progress: Arc<Progress>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -169,7 +176,18 @@ impl Engine {
             sweep_after: None,
             stop: Arc::default(),
             confirmed: Default::default(),
+            progress: Arc::default(),
         }
+    }
+
+    /// How far the current sync is (started over at each sync), to show while it runs.
+    pub fn progress(&self) -> Arc<Progress> {
+        Arc::clone(&self.progress)
+    }
+
+    /// Counts into `progress` from now on (shared with whoever shows it).
+    pub fn set_progress(&mut self, progress: Arc<Progress>) {
+        self.progress = progress;
     }
 
     /// A sync stops between operations while `stop` is set, with [`SyncReport::stopped`].
@@ -249,23 +267,12 @@ impl Engine {
     /// Where `node` is, for people: its local path, or else the path it had when last synced
     /// (a node deleted here). `None` for a node this device never had.
     pub fn path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
-        self.db.read(|s| {
-            if let Some(row) = s.local_by_node(node)? {
-                return Ok(Some(row.path.as_str().to_owned()));
-            }
-            let mut names = Vec::new();
-            let mut at = node;
-            // Bounded: the base is a tree, but a damaged DB must not hang the status.
-            while !at.is_root() && names.len() < 256 {
-                let Some(base) = s.get_base(at)? else {
-                    return Ok(None);
-                };
-                names.push(base.local_name.unwrap_or(base.state.name));
-                at = base.state.parent;
-            }
-            names.reverse();
-            Ok(Some(names.join("/")))
-        })
+        self.db.read(|s| activity::path_of(s, node))
+    }
+
+    /// The newest `limit` entries of the recently synced list, newest first.
+    pub fn recent_synced(&mut self, limit: usize) -> Result<Vec<Synced>, StateError> {
+        self.db.read(|s| s.recent_synced(limit))
     }
 
     /// A full local scan (tier C). The live observer does this incrementally in production.
@@ -277,6 +284,7 @@ impl Engine {
     /// round limit is hit). `date` (`YYYY-MM-DD`) is used for conflict-copy names.
     pub fn sync_once(&mut self, date: &str) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
+        self.progress.reset();
         // After the scan, before planning: see recover_forks.
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec)?;
@@ -394,12 +402,16 @@ impl Engine {
         let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
             .with_urgent(self.urgent.clone())
             .with_stop(Arc::clone(&self.stop))
+            .with_progress(Arc::clone(&self.progress))
             .run(plan.ops)?;
         // What was done counts, and the folders it asks to look at are looked at, however
         // the run ended.
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
+        let synced = activity::group(exec.synced, activity::GROUP_OVER);
+        self.db.write(|s| s.add_synced(&synced, activity::KEEP))?;
+        report.synced.extend(synced);
         if !exec.rescan.is_empty() {
             rescan_dirs(
                 &mut self.db,
