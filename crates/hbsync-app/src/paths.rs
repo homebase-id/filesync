@@ -136,6 +136,17 @@ impl Paths {
 mod tests {
     use super::*;
 
+    /// The MSIX keeps these folders out of its virtualization (packaging/conveyor.conf), so the
+    /// command line and the zip build see the same files.
+    #[test]
+    fn the_msix_leaves_our_folders_alone() {
+        let conf = include_str!("../../../packaging/conveyor.conf");
+        for known in ["RoamingAppData", "LocalAppData"] {
+            let dir = format!("\"{known}/{APP_FOLDER}\"");
+            assert!(conf.contains(&dir), "conveyor.conf lacks {dir}");
+        }
+    }
+
     fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |key| {
             vars.iter()

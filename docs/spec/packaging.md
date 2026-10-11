@@ -16,7 +16,7 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
 |---|---|---|---|---|
 | Windows | MSIX, plus Conveyor's small installer EXE; a zip without updates | `C:\Program Files\WindowsApps\HomebaseFilesync_<version>_x64__<id>\` | the package's startup task (`HomebaseFilesync.StartupTask`) | the `.appinstaller` feed; Conveyor's `updatecheck.exe` runs first at logon (`updates = aggressive`) |
 | macOS | `Homebase Filesync.app` per architecture, in a zip; our own `.dmg` around it (`packaging/macos/make-dmg.sh`) | the tray in `Contents/MacOS`, `hbsyncd` and `hbsync` in `Contents/Helpers` | our launchd agent | Sparkle 2, injected by Conveyor (`SUFeedURL` = `appcast-<arch>.rss`) |
-| Linux | `.deb` (package `homebase-filesync`) that adds its own apt source and key; a tarball without updates; an `.rpm` from Fedora's `rpmbuild` (`packaging/linux/`), no update repository yet | `/usr/lib/homebase/homebase-filesync/bin/`, `/usr/bin/homebase-filesync` and `/usr/bin/hbsync` symlinks, `id.homebase.filesync.desktop` | our XDG autostart entry | `apt upgrade` from the signed repo in the site |
+| Linux | `.deb` (package `homebase-filesync`) that adds its own apt source and key; a tarball without updates; an `.rpm` of the `.deb`'s files (Fedora's `rpmbuild`, `packaging/linux/`), no update repository yet | `/usr/lib/homebase/homebase-filesync/bin/`, `/usr/bin/homebase-filesync` and `/usr/bin/hbsync` symlinks, `id.homebase.filesync.desktop` | our XDG autostart entry | `apt upgrade` from the signed repo in the site |
 
 **Verified on fresh runners:**
 - **Linux:** the deb installs in `ubuntu:24.04`, both programs run (`--version` with the commit),
@@ -59,15 +59,15 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
 
 ## The release workflow
 
-`.github/workflows/release.yml` (RELEASING.md): `build` (the programs per platform, staged as
-above), `package` (Conveyor, with a throwaway key), `dmg` (`packaging/macos/make-dmg.sh` around
-each Mac app, on macOS), `rpm` (`packaging/linux/homebase-filesync.spec`, Fedora's `rpmbuild` in
-Fedora), and installs on fresh runners (`.deb` in Ubuntu, `.rpm` in Fedora, the MSIX on Windows,
-the `.dmg` on macOS); on a tag, `release` in the `release-signing` environment (`v*` tags only).
+How the workflow makes, tests, signs and publishes them: `RELEASING.md`. With the update site on
+GitHub releases (a flat folder of files), Conveyor puts the apt repository (`InRelease`,
+`Packages`) and the `.deb` at the site's top, not in a `debian/` folder. The `.rpm` is made from
+the `.deb`'s files (`packaging/linux/homebase-filesync.spec`), so `conveyor.conf` alone decides
+the layout; a test in `hbsync-app` checks that it names the app, the tray, its icon and the
+MSIX's unvirtualized folders as the code does.
 
 ## Still to do
 
-- Signing (RELEASING.md): DevOps' keys, then Conveyor with `conveyor-production.conf` and the
-  `.dmg` files signed and notarized; the release repos `filesync-release-{production,bleeding}`.
+- Signing (RELEASING.md): DevOps' keys, then the signing step and the publish workflow.
 - Confirm the Windows and Mac updates on real machines once signed.
-- An update repository for the `.rpm` (dnf).
+- An update repository for the `.rpm` (dnf), which needs a signing key of its own.
