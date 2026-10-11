@@ -973,6 +973,7 @@ impl<'a> Store<'a> {
 
     /// Adds `entries` (oldest first) and keeps only the newest `keep`.
     pub fn add_synced(&self, entries: &[Synced], keep: usize) -> Result<()> {
+        let entries = &entries[entries.len().saturating_sub(keep)..];
         if entries.is_empty() {
             return Ok(());
         }

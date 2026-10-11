@@ -93,27 +93,21 @@ fn folder_of(path: &str) -> &str {
 /// Takes the changes of one kind in one folder together when there are more than `over`:
 /// one entry for the folder, at the place of the first, with their count and sizes added up.
 pub fn group(entries: Vec<Synced>, over: usize) -> Vec<Synced> {
-    let mut counts: HashMap<(SyncedKind, &str), usize> = HashMap::new();
+    let key = |e: &Synced| (e.kind, folder_of(&e.path).to_owned());
+    let mut counts: HashMap<(SyncedKind, String), usize> = HashMap::new();
     for e in &entries {
-        *counts.entry((e.kind, folder_of(&e.path))).or_default() += 1;
+        *counts.entry(key(e)).or_default() += 1;
     }
-    let grouped: Vec<(SyncedKind, String)> = counts
-        .into_iter()
-        .filter(|(_, n)| *n > over)
-        .map(|((kind, folder), _)| (kind, folder.to_owned()))
-        .collect();
-    if grouped.is_empty() {
-        return entries;
-    }
-    let mut out: Vec<Synced> = Vec::new();
+    // Where each group's entry is in `out`.
     let mut at: HashMap<(SyncedKind, String), usize> = HashMap::new();
+    let mut out: Vec<Synced> = Vec::new();
     for e in entries {
-        let key = (e.kind, folder_of(&e.path).to_owned());
-        if !grouped.contains(&key) {
+        let k = key(&e);
+        if counts[&k] <= over {
             out.push(e);
             continue;
         }
-        match at.get(&key) {
+        match at.get(&k) {
             Some(&i) => {
                 let g = &mut out[i];
                 g.files += e.files;
@@ -121,8 +115,8 @@ pub fn group(entries: Vec<Synced>, over: usize) -> Vec<Synced> {
                 g.at = g.at.max(e.at);
             }
             None => {
-                at.insert(key.clone(), out.len());
-                out.push(Synced { path: key.1, ..e });
+                at.insert(k.clone(), out.len());
+                out.push(Synced { path: k.1, ..e });
             }
         }
     }

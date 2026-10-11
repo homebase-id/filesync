@@ -41,6 +41,21 @@ pub enum SyncedKind {
     TrashedLocally,
 }
 
+impl SyncedKind {
+    /// The item is gone from where it was (here or on Homebase).
+    pub fn removes(self) -> bool {
+        matches!(
+            self,
+            SyncedKind::DeletedRemotely | SyncedKind::TrashedLocally
+        )
+    }
+
+    /// A file's bytes went over.
+    pub fn moves_bytes(self) -> bool {
+        matches!(self, SyncedKind::Uploaded | SyncedKind::Downloaded)
+    }
+}
+
 /// How far a sync is: its files (transfers, moves and deletes) and the bytes of its transfers,
 /// done and to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]

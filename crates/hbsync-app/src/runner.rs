@@ -688,6 +688,8 @@ impl Runner {
             }
 
             let began = Instant::now();
+            // Before showing it syncs: the last sync's numbers aren't this one's.
+            self.progress.reset();
             self.set(|s| {
                 s.state = if started {
                     State::Syncing

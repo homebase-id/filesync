@@ -28,7 +28,7 @@ use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{BaseRow, LocalRow, MirrorFile, MirrorRow, StateDb, StateError, Store};
-use hbsync_types::activity::{Synced, SyncedKind};
+use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef};
 
@@ -161,9 +161,9 @@ pub struct Executor<'a> {
     resume_at: Option<Instant>,
     /// Set by the caller to stop the run between operations.
     stop: Option<Arc<AtomicBool>>,
-    /// The path of the item an operation removes, taken before it runs.
-    before: Option<String>,
     progress: Arc<Counters>,
+    /// The transfers already in `progress`'s total.
+    counted: HashSet<NodeId>,
 }
 
 /// A transfer whose guards passed, waiting for a worker.
@@ -226,8 +226,8 @@ impl<'a> Executor<'a> {
             streak: 0,
             resume_at: None,
             stop: None,
-            before: None,
             progress: Arc::default(),
+            counted: HashSet::new(),
         }
     }
 
@@ -288,7 +288,7 @@ impl<'a> Executor<'a> {
                 continue;
             };
             if let Err(wait) = self.ready(&op) {
-                self.handle(op, attempts, wait)?;
+                self.handle(op, attempts, wait, None)?;
                 continue;
             }
             if is_transfer(&op) {
@@ -300,7 +300,7 @@ impl<'a> Executor<'a> {
                         job,
                         ctx,
                     }),
-                    Err(outcome) => self.handle(op, attempts, outcome)?,
+                    Err(outcome) => self.handle(op, attempts, outcome, None)?,
                 }
                 continue;
             }
@@ -317,11 +317,15 @@ impl<'a> Executor<'a> {
             if op.touches_remote() {
                 self.wait_out_backoff();
             }
-            if let Op::LocalTrash { node, .. } | Op::RemoteDelete { node, .. } = op {
-                self.before = self.db.read(|s| activity::path_of(s, node))?;
-            }
+            // What a delete removes is described before its rows go.
+            let gone = match activity::kind_of(&op) {
+                Some(kind) if kind.removes() => {
+                    self.db.read(|s| activity::path_of(s, op.node()))?
+                }
+                _ => None,
+            };
             let outcome = self.execute(&op);
-            self.handle(op, attempts, outcome)?;
+            self.handle(op, attempts, outcome, gone)?;
             if self.crashed {
                 return Err(StateError::Conflict("crash point reached".into()));
             }
@@ -390,8 +394,14 @@ impl<'a> Executor<'a> {
         }
     }
 
-    fn handle(&mut self, op: Op, attempts: u8, outcome: Outcome) -> Result<(), StateError> {
-        let before = self.before.take();
+    /// `gone`: the path of what the operation removed, taken before it ran.
+    fn handle(
+        &mut self,
+        op: Op,
+        attempts: u8,
+        outcome: Outcome,
+        gone: Option<String>,
+    ) -> Result<(), StateError> {
         if matches!(outcome, Outcome::Done | Outcome::Settled | Outcome::Skip(_)) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
@@ -402,14 +412,14 @@ impl<'a> Executor<'a> {
         }
         match outcome {
             Outcome::Done => {
-                self.record(&op, before)?;
+                self.record(&op, gone)?;
                 self.report.done += 1;
                 let os = self.cfg.os;
                 let same_bytes = is_transfer(&op);
                 self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
             }
             Outcome::Settled => {
-                self.record(&op, before)?;
+                self.record(&op, gone)?;
                 self.report.done += 1;
             }
             Outcome::Backoff(why) => {
@@ -438,27 +448,26 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    /// Adds what `op` did to the report, for people: transfers, moves and deletes. `before`:
+    /// Adds what `op` did to the report, for people: transfers, moves and deletes. `gone`:
     /// the path of an item it removed, taken before it ran (its rows may be gone now).
-    fn record(&mut self, op: &Op, before: Option<String>) -> Result<(), StateError> {
+    fn record(&mut self, op: &Op, gone: Option<String>) -> Result<(), StateError> {
         let Some(kind) = activity::kind_of(op) else {
             return Ok(());
         };
         self.progress.files_done.fetch_add(1, Ordering::Relaxed);
         let node = op.node();
-        let (path, bytes) = self.db.read(|s| {
-            let bytes = match kind {
-                SyncedKind::Uploaded | SyncedKind::Downloaded => {
-                    s.local_by_node(node)?.map_or(0, |row| row.fingerprint.size)
-                }
-                _ => 0,
-            };
-            let path = match before {
-                Some(p) => Some(p),
-                None => activity::path_of(s, node)?,
-            };
-            Ok((path, bytes))
-        })?;
+        let (path, bytes) = match gone {
+            Some(path) => (Some(path), 0),
+            None => self.db.read(|s| {
+                Ok(match s.local_by_node(node)? {
+                    Some(row) if kind.moves_bytes() => {
+                        (Some(row.path.as_str().to_owned()), row.fingerprint.size)
+                    }
+                    Some(row) => (Some(row.path.as_str().to_owned()), 0),
+                    None => (activity::path_of(s, node)?, 0),
+                })
+            })?,
+        };
         if let Some(path) = path {
             self.report.synced.push(Synced {
                 at: hbsync_types::unix_now(),
@@ -497,10 +506,14 @@ impl<'a> Executor<'a> {
             jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
             pending.insert(p.job.node(), p);
         }
+        // A retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
-        progress
-            .bytes_total
-            .fetch_add(jobs.iter().map(|(_, j)| j.size()).sum(), Ordering::Relaxed);
+        let new_bytes: u64 = jobs
+            .iter()
+            .filter(|(_, j)| self.counted.insert(j.node()))
+            .map(|(_, j)| j.size())
+            .sum();
+        progress.bytes_total.fetch_add(new_bytes, Ordering::Relaxed);
         // Commit each transfer as soon as it finishes: small files don't wait for a large
         // one, and a crash loses only transfers still in flight.
         let remote = self.remote;
@@ -519,7 +532,7 @@ impl<'a> Executor<'a> {
                 }
                 if let Some(p) = pending.remove(&job.node()) {
                     let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
-                    if let Err(e) = self.handle(p.op, p.attempts, outcome) {
+                    if let Err(e) = self.handle(p.op, p.attempts, outcome, None) {
                         first_error = Some(e);
                     }
                 }
