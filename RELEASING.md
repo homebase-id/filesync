@@ -45,12 +45,22 @@ and attestations are made after signing. The Conveyor root key is generated off 
 backup in the DevOps vault. A repository ruleset for `v*` tags (only maintainers create, move or
 delete them) backs the environment's tag rule, which checks only the name.
 
-Then the `release` job runs Conveyor with `conveyor-production.conf` (it signs and notarizes)
-and signs and notarizes the `.dmg` files. **Uploading the update site is a separate step:**
-Conveyor's `copied-site` (as chat-kmp does) puts the feed live at once, with no human in
-between, so it should run when the draft release is published (a workflow on
-`release: published`, or `make copied-site` by hand), not from the tag. Then publishing the
-draft stays the human check for the update feed too, not only for the GitHub release. Someone creates the release repos first
+Then, as DevOps proposed:
+
+1. **Sign once, in the tag's `release` job.** Conveyor `make site` with
+   `conveyor-production.conf` (it signs and notarizes), and the `.dmg` files signed and
+   notarized. The whole signed site, update feeds included, goes onto the draft with
+   `SHA256SUMS` and the attestations.
+2. **Publish what was looked at.** A second workflow, on `release: published`, in its own
+   environment (`release-publish`, `v*` tags only) that holds no signing keys, only a GitHub
+   App's key for the release repo:
+   - it downloads the draft's files;
+   - it checks them (`sha256sum -c SHA256SUMS`, `gh attestation verify`);
+   - it uploads them unchanged to `filesync-release-production`.
+
+   It never runs Conveyor again: signing again would give other bytes than the ones published.
+   Publishing the draft is then the human check for the update feed too, not only for the
+   GitHub release, and the signing keys and the upload credential never meet in one job. Someone creates the release repos first
 (`filesync-release-production`, `filesync-release-bleeding`). DevOps may move signing off GitHub
 later (their own host, `rcodesign` and `jsign`); the build jobs stay the same.
 
