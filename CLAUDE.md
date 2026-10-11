@@ -10,8 +10,8 @@ sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebas
 `Remote` on the drive's V2 API (`drive::HomebaseRemote`, every node encrypted:
 `docs/spec/encryption.md`) and listens on the notification
 WebSocket; two folders converge through a live identity. Facts and server bugs:
-`docs/spec/homebase-api-notes.md`. Large files need odin-core with PR #1921 (streamed, 64-bit
-payload ranges): a server without it holds each read in memory and can't read past 2 GiB
+`docs/spec/homebase-api-notes.md`. Large files need odin-core with PR #1921 (merged 2026-10-11: streamed,
+64-bit payload ranges): a server without it holds each read in memory and can't read past 2 GiB
 (**[verified]**, odin-core #1892, #1893). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up within a minute of an edit); an ignored item is kept on its device only. The

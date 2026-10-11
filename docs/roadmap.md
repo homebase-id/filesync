@@ -104,8 +104,8 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 
 ## Layer 5: Homebase (server prerequisites can start in parallel with Layer 1)
 - **odin-core prerequisites**:
-  - streamed payload reads (#1892, PR #1921; the client is written for it)
-  - 64-bit sizes and ranges (#1893: ranges in PR #1921, the upload byte count still open)
+  - streamed payload reads (#1892, done in PR #1921)
+  - 64-bit sizes and ranges (#1893: ranges done in PR #1921, the upload byte count still open)
   - payload hashes + per-drive "hashes required" setting (#1895, merged as PR #1899)
   - guarded delete: optional `versionTag` (#1903)
   - apps sign in by slug (#1902)

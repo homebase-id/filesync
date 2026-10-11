@@ -27,7 +27,7 @@ Explored 2026-10-08: `../odin-core` server model and `../chat-kmp` `HomebaseFile
   - They keep fileId, GroupId, FileType and GlobalTransitId.
   - They **null the UniqueId** and clear Content and Payloads.
   - [inferred] User-delete tombstones are never reaped.
-- **Large-file limits** (odin-core #1892, #1893):
+- **Large-file limits** (odin-core #1892, #1893; reads stream and ranges are 64-bit since PR #1921, the rest of this list is as read before it):
   - **Uploads stream; downloads do not** [read]. `GetPayloadStreamAsync` loads the payload or range into a `MemoryStream` (`LongTermStorageManager.cs:308,312`). A streaming `OpenReadAsync` exists but only payload move uses it.
   - **32-bit sizes** [read]:
     - `FileChunk.Start` / `Length` are `int`, parsed with `Convert.ToInt32`.
@@ -161,8 +161,8 @@ the first three; the payload descriptor gives the hash.
 
 | # | Work | Status |
 |---|---|---|
-| 1 | Streamed payload and thumbnail reads via the existing `OpenReadAsync`, plus a ranged variant | odin-core **#1892**, PR #1921 |
-| 2 | `long` for payload sizes and ranges throughout (`FileChunk`, `Convert.ToInt32`, `(uint)` byte count) | odin-core **#1893**: ranges in PR #1921, the upload byte count open |
+| 1 | Streamed payload and thumbnail reads via the existing `OpenReadAsync`, plus a ranged variant | odin-core **#1892**, done (PR #1921) |
+| 2 | `long` for payload sizes and ranges throughout (`FileChunk`, `Convert.ToInt32`, `(uint)` byte count) | odin-core **#1893**: ranges done (PR #1921), the upload byte count open |
 | 3 | Payload hashes per section 1: descriptor fields, both-or-none, stored-hash check while streaming (also on peer incoming), equality check when unencrypted, per-drive "hashes required" setting, BLAKE3 package, spec + golden vectors | odin-core **#1895** |
 | 4 | Resumable / chunked payload upload; the hash check runs once, when the staged file is finalized | *not filed yet* |
 | 5 | "Files" drive type + reserved `SyncFile` / `SyncFolder` file types | *not filed yet*; can wait until the Homebase adapter (roadmap Layer 5) |

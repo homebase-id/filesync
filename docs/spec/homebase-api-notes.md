@@ -74,7 +74,7 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
 | Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
-| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206. With odin-core PR #1921 **[verified in the PR, not merged yet]**: offsets are 64-bit, reads stream, an end past the payload is cut short there, a start at or past it → 416. Before it: an end past the payload → 416, offsets `int` (#1893), every read buffered whole in server memory (#1892) |
+| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206. With odin-core PR #1921 (merged 2026-10-11) **[verified]**: offsets are 64-bit, reads stream, an end past the payload is cut short there, a start at or past it → 416. Before it: an end past the payload → 416, offsets `int` (#1893), every read buffered whole in server memory (#1892) |
 | Notify | `wss://{id}/api/v2/notify/ws-token` | see below |
 
 The client only soft-deletes: the tombstone is how the other clients learn of a delete
@@ -118,7 +118,7 @@ Encrypted files **[verified]** on odin-core `main` @ 07657309e (the format: `enc
   (48) + version (4, little-endian), base64 (`DriveStorageControllerBase.cs:138-146`,
   `EncryptedKeyHeader.ToBase64`). The bytes are the stored ciphertext, ranges included. A
   ranged response's `Content-Range` gives the stored size (`DriveStorageControllerBase.cs:171-176`
-  on `main` @ acbd615ba; `OdinControllerBase.PayloadResult` in PR #1921).
+  before PR #1921; `OdinControllerBase.PayloadResult` since).
 - **Hashes:** `storedHash` is over the ciphertext and checked while it streams in;
   `contentHash` is the plaintext hash encrypted with the file key under the payload IV XOR
   `0xAA…` (48 bytes), and the server checks only its length (`PayloadHash.cs`).
@@ -198,8 +198,8 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - Delete has no VersionTag guard → a delete can wipe a concurrent edit. Filed as odin-core
   #1903 (optional `versionTag` on delete, 4160 on mismatch; also: deleting a tombstone should
   be a no-op). Until then the client reads the header and compares right before deleting.
-- Payload reads are buffered whole in server memory (#1892) and ranges are `int` (#1893)
-  until odin-core PR #1921. The client is written for #1921: a read is one streamed
+- Payload reads were buffered whole in server memory (#1892) and ranges were `int` (#1893)
+  until odin-core PR #1921 (merged 2026-10-11). The client is written for #1921: a read is one streamed
   request, whatever its size. Uploads over 4 GiB still fail (the `uint` byte count, the half of
   #1893 the PR leaves open), so the client refuses payloads that large.
 - App clients can't read the drive's `requirePayloadHashes` **[verified]** (`ClientDriveData`

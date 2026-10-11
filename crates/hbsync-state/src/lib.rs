@@ -33,8 +33,6 @@ pub enum StateError {
     Corrupt(String),
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
-    #[error("state DB was made by a pre-release build (schema {found}): delete it to start over")]
-    PreRelease { found: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
 }
