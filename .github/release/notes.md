@@ -5,12 +5,12 @@ menu bar on macOS), a per-user daemon that syncs (`hbsyncd`) and a command line 
 
 | | Download | Updates |
 |---|---|---|
-| **Windows** 10/11 (x64) | `homebase-filesync-*.x64.msix` | by themselves (the package's update feed) |
+| **Windows** 10/11 | `homebase-filesync-*.x64.msix` (Intel/AMD) or `…arm64.msix` (ARM) | by themselves (the package's update feed) |
 | **macOS** 11+ | `Homebase-Filesync-*-mac-aarch64.dmg` (Apple Silicon) or `…-mac-amd64.dmg` (Intel): drag the app to Applications | by themselves (Sparkle) |
-| **Ubuntu, Debian** (x86_64) | `homebase-filesync_*_amd64.deb`: `sudo apt install ./homebase-filesync_*_amd64.deb` | with `apt upgrade` (the package adds its repository) |
-| **Fedora, openSUSE** (x86_64) | `homebase-filesync-*.x86_64.rpm`: `sudo dnf install ./homebase-filesync-*.rpm` | by hand, for now |
-| **Other Linux, servers** | `homebase-filesync-*-linux-amd64.tar.gz` (static programs) | by hand |
-| **Windows command line** | `homebase-filesync-*-windows-amd64.zip` | by hand |
+| **Ubuntu, Debian** | `homebase-filesync_*_amd64.deb` (or `_arm64`): `sudo apt install ./homebase-filesync_*.deb` | with `apt upgrade` (the package adds its repository) |
+| **Fedora, openSUSE** | `homebase-filesync-*.x86_64.rpm` (or `.aarch64`): `sudo dnf install ./homebase-filesync-*.rpm` | by hand, for now |
+| **Other Linux, servers** | `homebase-filesync-*-linux-amd64.tar.gz` (or `-aarch64`; static programs) | by hand |
+| **Windows command line** | `homebase-filesync-*-windows-amd64.zip` (or `-aarch64`): the MSIX can't put `hbsync` on the PATH | by hand |
 
 Then start **Homebase Filesync** and choose **Log in to Homebase…**: a page opens in your browser
 for your Homebase address and the folder (`~/Homebase` unless you change it), and your Homebase

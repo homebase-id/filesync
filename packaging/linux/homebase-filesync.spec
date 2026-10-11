@@ -1,14 +1,15 @@
 # The .rpm (Fedora, openSUSE): Conveyor's .deb, its files as they are, so the layout comes from
 # packaging/conveyor.conf alone (without the apt repository the .deb adds under /etc). The
 # programs are static: no library dependencies. No update repository yet: updates by hand.
-# rpmbuild -bb --define "pkg_version 0.1.0" --define "root <the .deb's files>" --define "src <repo>"
+# rpmbuild -bb --define "pkg_version 0.1.0" --define "pkg_arch x86_64" --define "root <the .deb's
+# files>" --define "src <repo>"
 Name:           homebase-filesync
 Version:        %{pkg_version}
 Release:        1
 Summary:        Keeps your Homebase folder in sync
 License:        AGPL-3.0-only
 URL:            https://github.com/homebase-id/filesync
-BuildArch:      x86_64
+BuildArch:      %{pkg_arch}
 Recommends:     xdg-desktop-portal
 
 # Release builds, already stripped: nothing for rpmbuild to extract or strip.

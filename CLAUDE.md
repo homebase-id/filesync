@@ -72,7 +72,7 @@ the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-wind
 (set `CARGO_FEATURE_PURE=1` so blake3 doesn't need a cross assembler).
 
 Releases (`RELEASING.md`, `.github/workflows/release.yml`, `docs/spec/packaging.md`): installers
-made with Conveyor (`packaging/conveyor.conf`): an MSIX for Windows, a Mac app per architecture
+made with Conveyor (`packaging/conveyor.conf`) for Intel and ARM: an MSIX for Windows, a Mac app per architecture
 (also as a `.dmg`), a `.deb` with its apt repository, an `.rpm` (Fedora's `rpmbuild`), a static
 Linux tarball and a Windows zip, all with `hbsync`, `hbsyncd` and the tray `homebase-filesync`
 (built with the `dist` profile, smoke-tested, installed and removed on fresh runners). Build

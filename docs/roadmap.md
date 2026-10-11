@@ -135,7 +135,8 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Packaging** (2026-10-11, `docs/spec/packaging.md`, `RELEASING.md`): Conveyor installers
   that update themselves (MSIX, Mac apps and `.dmg`, `.deb` with its apt repository), an `.rpm`,
   a static tarball and a Windows zip; still open: signing and notarization (DevOps' keys),
-  confirming the Windows and Mac updates on real machines, arm64 Linux and Windows
+  confirming the Windows and Mac updates on real machines (arm64 Linux and Windows built since
+  2026-10-11)
 
 ## Layer 7: Content on demand
 - **Selective sync**: all OSes; this is the Linux v1 answer

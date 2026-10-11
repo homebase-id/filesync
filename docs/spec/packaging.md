@@ -7,7 +7,7 @@ terms ask. Running it means accepting its licence (`CONVEYOR_AGREE_TO_LICENSE=1`
 2026-10-11).
 
 Config: `packaging/conveyor.conf`. The binaries are built by our own jobs (no Rust inside
-Conveyor) and staged as `packaging/stage/{windows,mac-amd64,mac-aarch64,linux}`; Conveyor
+Conveyor) and staged as `packaging/stage/{windows,mac,linux}-{amd64,aarch64}`; Conveyor
 makes the "site" (packages, update feeds, a download page), signs it and uploads it.
 
 ## What each OS gets (spike, 2026-10-11, `conveyor-spike` branch, all checked on CI runners)
