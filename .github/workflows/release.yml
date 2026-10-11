@@ -76,13 +76,16 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - run: rustup target add ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # Not for a tag: a release build never depends on what earlier runs left in the cache.
+      - if: github.ref_type != 'tag'
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: dist-${{ matrix.stage }}
       # A C compiler for musl (bundled SQLite, ring, blake3).
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --locked --profile dist -p hbsync -p hbsync-tray --target "$TARGET"
+      - shell: bash
+        run: cargo build --locked --profile dist -p hbsync -p hbsync-tray --target "$TARGET"
       - name: Stage
         shell: bash
         run: |
@@ -243,10 +246,11 @@ jobs:
         with:
           name: stage-linux
       - run: tar xf stage-linux.tar && mkdir rpm
-      # Fedora's own rpmbuild, in Fedora: no third-party packager.
+      # Fedora's own rpmbuild, in Fedora (pinned: its output ships): no third-party packager.
       - name: Build
         run: |
-          docker run --rm -v "$PWD:/src" -w /src -e VERSION fedora:42 bash -euc '
+          docker run --rm -v "$PWD:/src" -w /src -e VERSION \
+            fedora:42@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814 bash -euc '
             dnf -y -q install rpm-build >/dev/null
             rpmbuild -bb --define "_topdir /tmp/rpm" --define "pkg_version $VERSION" \
               --define "stage /src/stage/linux" --define "src /src" packaging/linux/homebase-filesync.spec
@@ -340,10 +344,12 @@ jobs:
           mkdir assets
           tar xf dl/site/site.tar
           cp site/*.msix site/*.crt site/*.zip site/*.tar.gz site/debian/*.deb dl/dmg/*.dmg dl/rpm/*.rpm assets/
-          cd assets && sha256sum * > SHA256SUMS
       # Signing goes here once DevOps has the keys (RELEASING.md): Conveyor again with
       # conveyor-production.conf (it signs, notarizes and uploads the update site), then the
-      # disk images signed and notarized.
+      # disk images signed and notarized. The secrets in that step's env only, the .p12 staged
+      # in $RUNNER_TEMP and removed in an `if: always()` step.
+      # Checksums and provenance last: of the files as published.
+      - run: cd assets && sha256sum * > SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: assets/*

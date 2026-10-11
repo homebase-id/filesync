@@ -36,6 +36,12 @@ chat-kmp's, which were in GitHub during the breach):
 | An App Store Connect API key (lowest role that notarizes) | notarization | `APPSTORE_API_ISSUER_ID`, `APPSTORE_API_KEY_ID`, `APPLE_NOTARIZATION_KEY` |
 | An Azure Trusted Signing certificate profile, through OIDC federated on `repo:homebase-id/filesync:environment:release-signing` | the MSIX and the EXEs | `AZURE_ACCESS_TOKEN` (fetched in the job), `AZURE_SIGNING_PROFILE` |
 
+The secrets go in the signing step's own `env:` (not the job's, where the other steps would see
+them); the `.p12` is staged in `$RUNNER_TEMP` and removed in an `if: always()` step; checksums
+and attestations are made after signing. The Conveyor root key is generated off GitHub, its
+backup in the DevOps vault. A repository ruleset for `v*` tags (only maintainers create, move or
+delete them) backs the environment's tag rule, which checks only the name.
+
 Then the `release` job runs Conveyor with `conveyor-production.conf` (`make copied-site`: it
 signs, notarizes and uploads the site to `homebase-id/filesync-release-production`, as chat-kmp
 does), and signs and notarizes the `.dmg` files. Someone creates the release repos first
