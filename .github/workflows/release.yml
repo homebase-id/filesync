@@ -1,7 +1,8 @@
 name: Release
 
-# Installers and update sites (RELEASING.md, docs/spec/packaging.md). The jobs before `release`
-# hold no secrets; a `v*` tag also makes a draft release from the `release-signing` environment.
+# Installers and update sites (RELEASING.md, docs/spec/packaging.md). Only `sign` holds secrets
+# (the `release-signing` environment); a `v*` tag signs and makes a draft release, and
+# publishing it runs publish.yml.
 
 on:
   push:
@@ -35,7 +36,10 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "hbsync") | .version')
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+          # vX.Y.Z, or a release candidate vX.Y.Z-rc.N (a pre-release, never published to the
+          # update site: publish.yml).
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" \
+                && "$GITHUB_REF_NAME" != "v$version"-* ]]; then
             echo "::error::the tag $GITHUB_REF_NAME doesn't match the workspace version $version"
             exit 1
           fi
@@ -150,13 +154,7 @@ jobs:
           path: dl
           merge-multiple: true
       - run: for t in dl/*.tar; do tar xf "$t" -C packaging; done
-      - name: Install Conveyor
-        run: |
-          f=conveyor-$CONVEYOR_VERSION-linux-amd64.tar.gz
-          curl -sSfLO "https://downloads.hydraulic.dev/conveyor/$f"
-          echo "$CONVEYOR_SHA256  $f" | sha256sum -c
-          mkdir -p "$RUNNER_TEMP/conveyor" && tar xzf "$f" -C "$RUNNER_TEMP/conveyor"
-          echo "$RUNNER_TEMP/conveyor/conveyor-$CONVEYOR_VERSION/bin" >> "$GITHUB_PATH"
+      - run: packaging/install-conveyor.sh
       - name: Make the site
         working-directory: packaging
         run: |
@@ -173,8 +171,92 @@ jobs:
           path: site
           if-no-files-found: error
 
+  # A tag's site, signed (RELEASING.md): the feeds with the root key; the Mac app and the
+  # Windows packages as well once their secrets exist (self-signed until then). The secrets are
+  # in this step's env only.
+  sign:
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release-signing
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      CONVEYOR_AGREE_TO_LICENSE: 1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: stage-*
+          path: dl
+          merge-multiple: true
+      - run: for t in dl/*.tar; do tar xf "$t" -C packaging; done
+      - run: packaging/install-conveyor.sh
+      - name: Make the signed site
+        working-directory: packaging
+        env:
+          CONVEYOR_SIGNING_KEY: ${{ secrets.CONVEYOR_SIGNING_KEY }}
+          APPLE_SIGNING_KEY: ${{ secrets.APPLE_SIGNING_KEY }}
+          APPLE_SIGNING_KEY_PASS: ${{ secrets.APPLE_SIGNING_KEY_PASS }}
+          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+          APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
+        run: |
+          if [[ -z "$CONVEYOR_SIGNING_KEY" ]]; then
+            echo "::error::no CONVEYOR_SIGNING_KEY in release-signing"; exit 1
+          fi
+          echo 'include required("conveyor-production.conf")' > signed.conf
+          if [[ -n "$APPLE_SIGNING_KEY" ]]; then
+            keys="$RUNNER_TEMP/apple"
+            mkdir -m 700 "$keys"
+            printf '%s' "$APPLE_SIGNING_KEY" | base64 -d > "$keys/developerid.p12"
+            printf '%s' "$APPLE_NOTARIZATION_KEY" > "$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
+            export APPLE_P12_PATH="$keys/developerid.p12"
+            export APPLE_NOTARIZATION_KEY_PATH="$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
+            echo 'include required("conveyor-apple.conf")' >> signed.conf
+          else
+            echo "::warning::no Apple secrets yet: the Mac app is self-signed"
+          fi
+          if [[ -n "$AZURE_CLIENT_ID" ]]; then
+            # azure/login isn't an allowed action: GitHub's OIDC token exchanged by hand.
+            oidc=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+            echo "::add-mask::$oidc"
+            AZURE_ACCESS_TOKEN=$(curl -sSf \
+              "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+              --data-urlencode "client_id=$AZURE_CLIENT_ID" \
+              --data-urlencode "grant_type=client_credentials" \
+              --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+              --data-urlencode "client_assertion=$oidc" \
+              --data-urlencode "scope=https://codesigning.azure.net/.default" | jq -r .access_token)
+            echo "::add-mask::$AZURE_ACCESS_TOKEN"
+            export AZURE_ACCESS_TOKEN
+            echo 'include required("conveyor-azure.conf")' >> signed.conf
+          else
+            echo "::warning::no Azure signing yet: the Windows packages are self-signed"
+          fi
+          conveyor -f signed.conf -Kapp.version="$VERSION" --console=plain make site
+          mv output ../signed-site
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/apple"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-site
+          path: signed-site
+          if-no-files-found: error
+
+  # From a tag's signed site, else the throwaway one.
   dmg:
-    needs: [version, package]
+    needs: [version, package, sign]
+    if: ${{ !failure() && !cancelled() }}
     runs-on: macos-latest
     timeout-minutes: 20
     permissions:
@@ -187,7 +269,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: site
+          name: ${{ github.ref_type == 'tag' && 'signed-site' || 'site' }}
           path: site
       - name: Make the disk images
         run: |
@@ -323,13 +405,13 @@ jobs:
           Remove-AppxPackage $p.PackageFullName
           if (Get-AppxPackage HomebaseFilesync) { throw "still installed" }
 
-  # The draft release of a tag (RELEASING.md: what signing adds here, and how it's published).
+  # The draft release of a tag: the whole signed site (its feeds too, so that publishing can
+  # upload exactly these files: publish.yml), the disk images and the .rpm files.
   release:
     if: github.ref_type == 'tag'
-    needs: [version, package, dmg, rpm, test-deb, test-msix]
+    needs: [version, sign, dmg, rpm, test-deb, test-msix]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    environment: release-signing
     permissions:
       contents: write
       id-token: write
@@ -340,15 +422,9 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: site
-          path: site
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: "{dmg,rpm-*}"
+          pattern: "{signed-site,dmg,rpm-*}"
           path: assets
           merge-multiple: true
-      - run: cp site/*.msix site/*.crt site/*.zip site/*.tar.gz site/*.deb assets/
-      # Signing goes here (RELEASING.md); checksums and provenance after it.
       - run: cd assets && sha256sum * > SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -358,5 +434,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" assets/* --draft --verify-tag \
-            --title "Homebase Filesync $VERSION" --notes-file .github/release/notes.md
+          candidate=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then candidate=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" assets/* --draft --verify-tag "${candidate[@]}" \
+            --title "Homebase Filesync ${GITHUB_REF_NAME#v}" --notes-file .github/release/notes.md

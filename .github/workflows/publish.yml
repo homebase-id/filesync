@@ -1,0 +1,55 @@
+name: Publish
+
+# When a release's draft is published by hand: its files, exactly as published (checked against
+# SHA256SUMS and their build provenance), become the update site's newest release, which the
+# installed apps update from (RELEASING.md). No signing keys here, and Conveyor doesn't run
+# again: signing again would give other bytes than the ones looked at.
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  publish:
+    # Not a release candidate (a pre-release): those are for testing the signed packages.
+    if: startsWith(github.event.release.tag_name, 'v') && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release-publish
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Download the release's files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets
+      - name: Check them
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: assets
+        run: |
+          sha256sum -c SHA256SUMS
+          for f in *; do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" > /dev/null
+          done
+      # A short-lived token of the release App, for the update site's repository only.
+      - id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: homebase-id
+          repositories: filesync-release-production
+          permission-contents: write
+      - name: Put them on the update site
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          NOTES: ${{ github.event.release.html_url }}
+        run: |
+          gh release create "$TAG" assets/* --repo homebase-id/filesync-release-production \
+            --title "Homebase Filesync ${TAG#v}" --notes "Release notes: $NOTES" --latest
