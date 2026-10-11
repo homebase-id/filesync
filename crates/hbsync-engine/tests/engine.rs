@@ -268,6 +268,37 @@ fn a_stopped_sync_keeps_what_it_did_and_the_next_one_finishes() -> R {
     Ok(())
 }
 
+/// The progress total holds every byte of the plan from the start, not only the batches that
+/// have started.
+#[test]
+fn progress_knows_the_whole_plan_up_front() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    for i in 0..5 {
+        a.write(&format!("d{i}/f.txt"), "0123456789")?;
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let remote = StopAfterCreates {
+        inner: a.remote.clone(),
+        creates: AtomicUsize::new(0),
+        after: 2,
+        stop: Arc::clone(&stop),
+    };
+    a.engine = Engine::new(
+        StateDb::open(&a.db_path())?,
+        Box::new(remote),
+        common::config(&a.root, "a"),
+    );
+    a.engine.set_stop(Arc::clone(&stop));
+    a.engine.scan_local()?;
+    let report = a.engine.sync_once("2026-10-11")?;
+    assert!(report.stopped, "{report:?}");
+    let progress = a.engine.progress().get();
+    assert_eq!(progress.bytes_total, 50, "{progress:?}");
+    assert!(progress.bytes_done < 50, "stopped part way: {progress:?}");
+    Ok(())
+}
+
 /// When the remote stops answering mid-plan, the run gives up after a few transient errors in
 /// a row (pausing between them) instead of trying every queued operation four times.
 #[test]

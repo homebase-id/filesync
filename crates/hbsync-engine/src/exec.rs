@@ -274,6 +274,7 @@ impl<'a> Executor<'a> {
         self.progress
             .files_total
             .fetch_add(visible.count() as u64, Ordering::Relaxed);
+        self.count_bytes(&ops)?;
         self.queue = ops.into_iter().map(|op| (op, 0)).collect();
         let mut batch: Vec<Prepared> = Vec::new();
         loop {
@@ -497,6 +498,34 @@ impl<'a> Executor<'a> {
         }
     }
 
+    /// Adds the bytes of every transfer in the plan to `progress`'s total before any starts, so
+    /// the total doesn't grow batch by batch. One the guards skip later stays in it.
+    fn count_bytes(&mut self, ops: &[Op]) -> Result<(), StateError> {
+        let sizes = self.db.read(|s| {
+            let mut sizes = Vec::new();
+            for op in ops.iter().filter(|op| is_transfer(op)) {
+                let node = op.node();
+                let size = match op {
+                    Op::LocalDownload { .. } => {
+                        s.get_mirror(node)?.and_then(|m| m.file).map(|f| f.size)
+                    }
+                    _ => s.local_by_node(node)?.map(|row| row.fingerprint.size),
+                };
+                sizes.extend(size.map(|size| (node, size)));
+            }
+            Ok(sizes)
+        })?;
+        let total: u64 = sizes
+            .into_iter()
+            .filter(|(node, _)| self.counted.insert(*node))
+            .map(|(_, size)| size)
+            .sum();
+        self.progress
+            .bytes_total
+            .fetch_add(total, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Runs the collected transfers in parallel and commits each as it finishes.
     fn flush(&mut self, batch: &mut Vec<Prepared>) -> Result<(), StateError> {
         self.wait_out_backoff();
@@ -506,7 +535,7 @@ impl<'a> Executor<'a> {
             jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
             pending.insert(p.job.node(), p);
         }
-        // A retried transfer's bytes count once.
+        // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
         let new_bytes: u64 = jobs
             .iter()
