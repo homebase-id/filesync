@@ -347,7 +347,7 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
     // The status shows no progress once idle.
     wait_until("a is idle", || a.status().state == State::Idle)?;
     assert_eq!(a.status().progress, None);
-    assert_eq!(a.status().version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(a.status().version, hbsync_app::VERSION);
     Ok(())
 }
 

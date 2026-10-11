@@ -96,8 +96,10 @@ jobs:
         shell: bash
         run: |
           hbsync="dist/$DIR/hbsync$EXE"
-          "$hbsync" --version | grep -Fx "hbsync $VERSION"
-          "dist/$DIR/hbsync-tray$EXE" --version | grep -Fx "hbsync-tray $VERSION"
+          # The version carries the commit built (from the build script).
+          stamped="$VERSION ($(git rev-parse --short=7 HEAD))"
+          "$hbsync" --version | grep -Fx "hbsync $stamped"
+          "dist/$DIR/hbsync-tray$EXE" --version | grep -Fx "hbsync-tray $stamped"
           # No daemon in a fresh home: says so, with exit status 3.
           home="$RUNNER_TEMP/hbsync-smoke"
           mkdir -p "$home"

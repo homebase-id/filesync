@@ -17,7 +17,7 @@ type Res<T> = hbsync_app::control::Result<T>;
 #[derive(Parser)]
 #[command(
     name = "hbsync",
-    version,
+    version = hbsync_app::VERSION,
     about = "Homebase Filesync: keeps a folder in sync with your Homebase identity"
 )]
 struct Cli {

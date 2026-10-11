@@ -192,7 +192,7 @@ that set it up. The unit goes where the user's systemd looks by default, whateve
 On Linux the tray also lists itself among the desktop's applications each time it starts
 (unless `HBSYNC_HOME` is set): the same entry in `~/.local/share/applications/` and its icon in
 `~/.local/share/icons/hicolor/256x256/apps/homebase-filesync.png`, rewritten only when they
-changed. Started from there or at logon, the session gives it a group of its own (System
+changed; an autostart entry is brought up to date with it. Started from there or at logon, the session gives it a group of its own (System
 Monitor shows Homebase Filesync, the daemon below it); started from a terminal, it belongs to
 the terminal. The launcher stays after Log out, as the way to log in again. Elsewhere the
 installer will do this (not built yet).

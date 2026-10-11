@@ -148,7 +148,7 @@ pub fn tooltip(view: &View) -> String {
 pub fn menu(view: &View) -> Vec<Item> {
     let mut items = vec![Item::Label(format!(
         "Homebase Filesync {}",
-        env!("CARGO_PKG_VERSION")
+        hbsync_app::VERSION
     ))];
     let status = view.daemon.status();
     if let Some(s) = status {

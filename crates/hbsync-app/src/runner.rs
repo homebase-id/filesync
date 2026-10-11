@@ -223,7 +223,7 @@ impl Status {
     /// Starting to sync `folder` with `identity`.
     pub fn new(identity: &str, folder: &Path) -> Status {
         Status {
-            version: env!("CARGO_PKG_VERSION").into(),
+            version: crate::VERSION.into(),
             state: State::Starting,
             paused_until: None,
             progress: None,

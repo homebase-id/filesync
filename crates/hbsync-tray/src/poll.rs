@@ -66,12 +66,12 @@ impl Watcher {
             Err(e) => return Daemon::Starting(Some(e.to_string())),
         };
         self.start_failed = None;
-        if status.version != env!("CARGO_PKG_VERSION") && !self.restarted {
+        if status.version != hbsync_app::VERSION && !self.restarted {
             // Updated beside a daemon still running the old version.
             tracing::info!(
                 "the daemon runs {:?}, this is {}: restarting it",
                 status.version,
-                env!("CARGO_PKG_VERSION")
+                hbsync_app::VERSION
             );
             self.restarted = true;
             if let Err(e) = control::stop(paths) {

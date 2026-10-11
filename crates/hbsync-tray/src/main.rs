@@ -55,7 +55,7 @@ const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
 fn main() -> ExitCode {
     if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("{PROGRAM} {}", env!("CARGO_PKG_VERSION"));
+        println!("{PROGRAM} {}", hbsync_app::VERSION);
         return ExitCode::SUCCESS;
     }
     let paths = match Paths::resolve() {
@@ -84,7 +84,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!("{PROGRAM} {} started", env!("CARGO_PKG_VERSION"));
+    tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
     // A private instance (HBSYNC_HOME) mustn't replace the launcher of the real one.
     #[cfg(target_os = "linux")]
     if !control::dev_home() {

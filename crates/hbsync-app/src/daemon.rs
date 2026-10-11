@@ -94,7 +94,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
     }
     tracing::info!(
         "daemon {} started for {} at {}",
-        env!("CARGO_PKG_VERSION"),
+        crate::VERSION,
         root.identity,
         root.folder.display()
     );

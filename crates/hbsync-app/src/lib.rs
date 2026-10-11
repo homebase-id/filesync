@@ -23,6 +23,11 @@ pub use secrets::{CredentialError, CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// This build's version, with the git commit it was built from when known: `0.1.0 (47f0273)`.
+/// In the logs, `--version`, About, and the daemon's status (the tray restarts a daemon of
+/// another build).
+pub const VERSION: &str = env!("HBSYNC_VERSION");
+
 /// Today's date (UTC) as `YYYY-MM-DD`, for conflict-copy names.
 pub fn today() -> String {
     let days = SystemTime::now()

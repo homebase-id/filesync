@@ -388,7 +388,7 @@ mod os {
     pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
         let data = crate::paths::xdg_dir("XDG_DATA_HOME", ".local/share")
             .ok_or_else(|| io::Error::other("HOME isn't set"))?;
-        write_launcher(&data, tray, icon_png)
+        write_launcher(&data, &desktop()?, tray, icon_png)
     }
 
     /// Through systemd only when it starts the daemon (not the tray).
@@ -503,16 +503,17 @@ pub fn start() -> io::Result<bool> {
 /// Lists the tray among the desktop's applications (Linux; elsewhere the installer will): its
 /// desktop entry in `$XDG_DATA_HOME/applications` and its icon in the icon theme. Started from
 /// there or at logon, the session sees it as its own app (in System Monitor, say), not as part
-/// of the terminal that started it. Written only when it changed.
+/// of the terminal that started it. An autostart entry there is brought up to date with it (a
+/// moved or updated tray). Written only when it changed.
 #[cfg(target_os = "linux")]
 pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
     os::add_launcher(tray, icon_png)
 }
 
 #[cfg(target_os = "linux")]
-fn write_launcher(data: &Path, tray: &Path, icon_png: &[u8]) -> io::Result<()> {
-    let write = |path: PathBuf, bytes: &[u8]| -> io::Result<()> {
-        if std::fs::read(&path).is_ok_and(|old| old == bytes) {
+fn write_launcher(data: &Path, autostart: &Path, tray: &Path, icon_png: &[u8]) -> io::Result<()> {
+    let write = |path: &Path, bytes: &[u8]| -> io::Result<()> {
+        if std::fs::read(path).is_ok_and(|old| old == bytes) {
             return Ok(());
         }
         if let Some(dir) = path.parent() {
@@ -520,15 +521,21 @@ fn write_launcher(data: &Path, tray: &Path, icon_png: &[u8]) -> io::Result<()> {
         }
         std::fs::write(path, bytes)
     };
+    let entry = desktop_entry(tray, &passed_env());
     write(
-        data.join("icons/hicolor/256x256/apps")
+        &data
+            .join("icons/hicolor/256x256/apps")
             .join(format!("{ICON}.png")),
         icon_png,
     )?;
     write(
-        data.join("applications").join(DESKTOP_ENTRY),
-        desktop_entry(tray, &passed_env()).as_bytes(),
-    )
+        &data.join("applications").join(DESKTOP_ENTRY),
+        entry.as_bytes(),
+    )?;
+    if autostart.exists() {
+        write(autostart, entry.as_bytes())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -591,8 +598,13 @@ mod tests {
     #[test]
     fn the_launcher_is_written_once() -> io::Result<()> {
         let data = tempfile::tempdir()?;
+        let autostart = data.path().join("autostart.desktop");
         let tray = Path::new("/opt/Filesync/hbsync-tray");
-        write_launcher(data.path(), tray, b"png")?;
+        write_launcher(data.path(), &autostart, tray, b"png")?;
+        assert!(
+            !autostart.exists(),
+            "starting at logon stays the user's choice"
+        );
         let entry = data.path().join("applications/homebase-filesync.desktop");
         let icon = data
             .path()
@@ -601,12 +613,17 @@ mod tests {
         assert_eq!(std::fs::read(&icon)?, b"png");
         let written = std::fs::metadata(&entry)?.modified()?;
         std::thread::sleep(std::time::Duration::from_millis(20));
-        write_launcher(data.path(), tray, b"png")?;
+        write_launcher(data.path(), &autostart, tray, b"png")?;
         assert_eq!(
             std::fs::metadata(&entry)?.modified()?,
             written,
             "unchanged, not rewritten"
         );
+
+        // An autostart entry from an older tray is brought up to date.
+        std::fs::write(&autostart, "[Desktop Entry]\nExec=/old/hbsync-tray\n")?;
+        write_launcher(data.path(), &autostart, tray, b"png")?;
+        assert_eq!(std::fs::read(&autostart)?, std::fs::read(&entry)?);
         Ok(())
     }
 
