@@ -13,7 +13,6 @@ use std::sync::atomic::AtomicBool;
 use hbsync_app::Paths;
 use hbsync_app::daemon::DaemonError;
 use hbsync_app::lock::LockError;
-use tracing_subscriber::prelude::*;
 
 fn main() -> ExitCode {
     let paths = match Paths::resolve() {
@@ -23,7 +22,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let _flush = match logging(&paths) {
+    let _flush = match hbsync_app::logging::init(&paths, "hbsyncd") {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("hbsyncd: can't log to {}: {e}", paths.logs.display());
@@ -55,34 +54,4 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// A daily log file in the log folder (a week of them kept), and stderr from a terminal.
-fn logging(
-    paths: &Paths,
-) -> Result<tracing_appender::non_blocking::WorkerGuard, Box<dyn std::error::Error>> {
-    let file = tracing_appender::rolling::Builder::new()
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("hbsyncd")
-        .filename_suffix("log")
-        .max_log_files(7)
-        .build(&paths.logs)?;
-    let (file, guard) = tracing_appender::non_blocking(file);
-    let filter = || tracing_subscriber::filter::Targets::new().with_default(tracing::Level::INFO);
-    let to_file = tracing_subscriber::fmt::layer()
-        .with_writer(file)
-        .with_ansi(false)
-        .with_filter(filter());
-    let terminal = std::io::stderr().is_terminal();
-    let to_stderr = terminal.then(|| {
-        tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_target(false)
-            .with_filter(filter())
-    });
-    tracing_subscriber::registry()
-        .with(to_file)
-        .with(to_stderr)
-        .try_init()?;
-    Ok(guard)
 }

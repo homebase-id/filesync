@@ -17,7 +17,7 @@ use crate::runner::IDENTITY_KEY;
 use crate::{Config, CredentialStore, Location, Paths, Root, autostart};
 
 /// How long the owner has to approve in the browser.
-const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Authorizes this device for Filesync on `identity`: opens the authorize page in `browser`
 /// (the system's default when `None`), passes its URL to `show` for when no browser opens,
@@ -28,11 +28,18 @@ pub fn authorize(
     browser: Option<&str>,
     show: impl FnOnce(&str),
 ) -> Result<Credentials, HomebaseError> {
-    let pending = hbsync_homebase::begin(identity, &format!("Filesync on {device}"))?;
+    let pending = begin(identity, device)?;
     show(&pending.authorize_url);
     // The URL was shown: a browser that doesn't start isn't an error.
     let _ = open_browser(browser, &pending.authorize_url);
     pending.finish(APPROVAL_TIMEOUT)
+}
+
+/// Starts authorizing this device (named after `device` in the owner's list) on `identity`:
+/// the caller takes the browser to `authorize_url` and waits with `finish`
+/// ([`APPROVAL_TIMEOUT`]).
+pub fn begin(identity: &str, device: &str) -> Result<hbsync_homebase::Pending, HomebaseError> {
+    hbsync_homebase::begin(identity, &format!("Filesync on {device}"))
 }
 
 /// What [`prepare`] found and did.
@@ -89,10 +96,56 @@ pub fn normalize_identity(typed: &str) -> String {
 
 /// The folder synced when none is chosen: `Homebase` in the home folder.
 pub fn default_folder() -> control::Result<PathBuf> {
+    home()
+        .map(|home| home.join("Homebase"))
+        .ok_or_else(|| "no home folder (HOME unset): choose a folder".into())
+}
+
+/// Why `folder` (absolute) must not be synced, if it mustn't: the home folder itself or a folder
+/// above it, the top of a disk, or a system folder. Syncing those would take in (and on
+/// another device, put down) files that aren't the user's to sync.
+pub fn refuse_folder(folder: &Path, home: Option<&Path>) -> Option<String> {
+    if folder.parent().is_none() {
+        return Some(format!("{} is the top of a disk", folder.display()));
+    }
+    if let Some(home) = home
+        && home.starts_with(folder)
+    {
+        return Some(format!(
+            "{} holds your whole home folder: choose a folder inside it",
+            folder.display()
+        ));
+    }
+    const SYSTEM: &[&str] = &[
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/lib",
+        "/opt",
+        "/proc",
+        "/sbin",
+        "/sys",
+        "/usr",
+        "/Applications",
+        "/Library",
+        "/System",
+        "C:\\Windows",
+        "C:\\Program Files",
+        "C:\\Program Files (x86)",
+        "C:\\ProgramData",
+    ];
+    SYSTEM
+        .iter()
+        .find(|s| folder.starts_with(s))
+        .map(|s| format!("{} is in a system folder ({s})", folder.display()))
+}
+
+/// The user's home folder.
+pub fn home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(|home| PathBuf::from(home).join("Homebase"))
-        .ok_or_else(|| "no home folder (HOME unset): choose a folder".into())
+        .map(PathBuf::from)
 }
 
 /// What a folder holds, as far as setting it up goes.
@@ -170,6 +223,9 @@ pub fn set_up(
     let mut config = Config::load(&config_path)?.unwrap_or_default();
 
     // The folder: new, empty, already this identity's, or adopted on purpose.
+    if let Some(why) = refuse_folder(&request.folder, home().as_deref()) {
+        return Err(why.into());
+    }
     std::fs::create_dir_all(&request.folder)?;
     let folder = request.folder.canonicalize()?;
     if check_folder(&config, identity, &folder)? == FolderState::HasFiles && !request.existing {
@@ -253,6 +309,18 @@ mod tests {
     use super::*;
 
     type R = control::Result<()>;
+
+    #[test]
+    fn some_folders_are_refused() {
+        let home = Path::new("/home/anna");
+        let refused = |f: &str| refuse_folder(Path::new(f), Some(home));
+        assert!(refused("/").is_some());
+        assert!(refused("/home").is_some(), "above home");
+        assert!(refused("/home/anna").is_some(), "home itself");
+        assert!(refused("/usr/share/docs").is_some());
+        assert_eq!(refused("/home/anna/Homebase"), None);
+        assert_eq!(refused("/media/disk/Homebase"), None);
+    }
 
     #[test]
     fn identities_are_kept_lowercase_without_a_slash() {

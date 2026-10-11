@@ -8,6 +8,7 @@ pub mod control;
 pub mod daemon;
 pub mod ipc;
 pub mod lock;
+pub mod logging;
 pub mod paths;
 pub mod runner;
 pub mod secrets;

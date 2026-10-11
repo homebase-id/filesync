@@ -89,6 +89,9 @@ pub struct Pending {
     listener: TcpListener,
     /// Open this in the browser.
     pub authorize_url: String,
+    /// Where the browser goes once the identity is back (`?error=` added on failure); else it
+    /// shows a line of text.
+    return_to: Option<String>,
 }
 
 /// Starts authorizing this device for the app on `identity` (a domain such as
@@ -123,10 +126,18 @@ pub fn begin(identity: &str, friendly_name: &str) -> Result<Pending, HomebaseErr
         state,
         listener,
         authorize_url,
+        return_to: None,
     })
 }
 
 impl Pending {
+    /// Sends the browser to `url` once the identity is back, instead of showing a line of text
+    /// (`?error=<why>` added when connecting failed).
+    pub fn return_to(mut self, url: &str) -> Self {
+        self.return_to = Some(url.to_owned());
+        self
+    }
+
     /// Waits up to `timeout` for the browser's callback, then exchanges it for credentials.
     pub fn finish(self, timeout: Duration) -> Result<Credentials, HomebaseError> {
         let deadline = Instant::now() + timeout;
@@ -153,11 +164,24 @@ impl Pending {
                 continue;
             };
             let result = self.complete(&query);
-            let page = match &result {
-                Ok(_) => "Homebase Filesync is connected. You can close this window.".to_owned(),
-                Err(e) => format!("Homebase Filesync could not connect: {e}"),
-            };
-            respond(stream, 200, &page)?;
+            match (&self.return_to, &result) {
+                (Some(url), Ok(_)) => redirect(stream, url)?,
+                (Some(url), Err(e)) => {
+                    let why = utf8_percent_encode(&e.to_string(), NON_ALPHANUMERIC).to_string();
+                    let sep = if url.contains('?') { '&' } else { '?' };
+                    redirect(stream, &format!("{url}{sep}error={why}"))?;
+                }
+                (None, Ok(_)) => respond(
+                    stream,
+                    200,
+                    "Homebase Filesync is connected. You can close this window.",
+                )?,
+                (None, Err(e)) => respond(
+                    stream,
+                    200,
+                    &format!("Homebase Filesync could not connect: {e}"),
+                )?,
+            }
             return result;
         }
     }
@@ -269,6 +293,14 @@ fn read_callback(stream: &TcpStream) -> Option<Vec<(String, String)>> {
                 (decode(k), decode(v))
             })
             .collect(),
+    )
+}
+
+fn redirect(mut stream: TcpStream, url: &str) -> std::io::Result<()> {
+    write!(
+        stream,
+        "HTTP/1.1 303 See Other\r\nLocation: {url}\r\nContent-Length: 0\r\n\
+         Connection: close\r\n\r\n"
     )
 }
 

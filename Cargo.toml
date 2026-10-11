@@ -19,6 +19,7 @@ hbsync-namemap = { path = "crates/hbsync-namemap" }
 hbsync-platform = { path = "crates/hbsync-platform" }
 hbsync-remote = { path = "crates/hbsync-remote" }
 hbsync-state = { path = "crates/hbsync-state" }
+hbsync-tray = { path = "crates/hbsync-tray" }
 hbsync-types = { path = "crates/hbsync-types" }
 proptest = "1.11"
 rusqlite = { version = "0.40", features = ["bundled", "collation"] }
