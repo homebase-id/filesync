@@ -5,6 +5,7 @@
 
 use hbsync_platform::Os;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// The MSIX application's ID in Conveyor's manifest (its display name without spaces).
 pub const MSIX_APP_ID: &str = "HomebaseFilesync";
@@ -23,30 +24,60 @@ pub enum Install {
     Plain,
 }
 
+/// This program's path with symlinks resolved (a CLI linked onto the PATH still finds its app).
+/// Not on Windows: its canonical form (`\\?\`) isn't wanted, and there are no such links.
+pub fn current_exe() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    if cfg!(unix) {
+        // A replaced program (Linux: "… (deleted)") can't be resolved: its path as it is.
+        return Ok(exe.canonicalize().unwrap_or(exe));
+    }
+    Ok(exe)
+}
+
 impl Install {
-    /// This program's.
-    pub fn detect() -> Install {
-        #[cfg(windows)]
-        if let Some(family) = package_family() {
-            return Install::Msix { family };
-        }
-        match std::env::current_exe() {
-            Ok(exe) => from_path(Os::current(), &exe),
-            Err(_) => Install::Plain,
-        }
+    /// This program's, found once.
+    pub fn current() -> &'static Install {
+        static CURRENT: OnceLock<Install> = OnceLock::new();
+        CURRENT.get_or_init(|| {
+            #[cfg(windows)]
+            if let Some(family) = package_family() {
+                return Install::Msix { family };
+            }
+            match current_exe() {
+                Ok(exe) => from_path(Os::current(), &exe),
+                Err(_) => Install::Plain,
+            }
+        })
     }
 
     /// Where its program `name` is: beside this one, but in a Mac app the tray is the app's
     /// program (`Contents/MacOS`) and the daemon and the command line are its helpers
-    /// (`Contents/Helpers`), so that macOS and the packager know which one to launch.
+    /// (`Contents/Helpers`), so that macOS and the packager know which one to launch. A bundle
+    /// with all three in `Contents/MacOS` still works.
     pub fn program(&self, name: &str, beside: &Path) -> PathBuf {
         let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-        match self {
+        let packaged = match self {
             Install::MacApp { bundle } if name == crate::autostart::TRAY => {
-                bundle.join("Contents/MacOS").join(file)
+                bundle.join("Contents/MacOS").join(&file)
             }
-            Install::MacApp { bundle } => bundle.join("Contents/Helpers").join(file),
-            _ => beside.with_file_name(file),
+            Install::MacApp { bundle } => bundle.join("Contents/Helpers").join(&file),
+            _ => return beside.with_file_name(file),
+        };
+        if packaged.exists() {
+            packaged
+        } else {
+            beside.with_file_name(file)
+        }
+    }
+
+    /// The path that lasts to start the tray `exe` by: a Linux package's link in `/usr/bin`
+    /// (where its program lives is the packager's to change), else `exe` itself.
+    pub fn lasting_path(&self, exe: &Path) -> PathBuf {
+        let link = Path::new("/usr/bin").join(crate::autostart::TRAY);
+        match self {
+            Install::LinuxPackage if link.exists() => link,
+            _ => exe.to_path_buf(),
         }
     }
 
@@ -62,7 +93,7 @@ impl Install {
     /// from the temporary copy macOS makes of an app it hasn't moved (App Translocation).
     pub fn not_settled(&self) -> Option<&'static str> {
         match self {
-            Install::MacApp { bundle } if temporary(bundle) => Some(
+            Install::MacApp { bundle } if temporary(bundle) || read_only(bundle) => Some(
                 "Move Homebase Filesync to the Applications folder first, then start it from there",
             ),
             _ => None,
@@ -87,17 +118,42 @@ pub fn from_path(os: Os, exe: &Path) -> Install {
                 None => Install::Plain,
             }
         }
-        Os::Linux if exe.starts_with("/usr") => Install::LinuxPackage,
+        // /usr/local is where software goes by hand, not by the package manager.
+        Os::Linux if exe.starts_with("/usr") && !exe.starts_with("/usr/local") => {
+            Install::LinuxPackage
+        }
         _ => Install::Plain,
     }
 }
 
-/// A disk image, or App Translocation's randomized read-only copy.
+/// App Translocation's randomized copy of an app macOS hasn't seen moved.
 fn temporary(bundle: &Path) -> bool {
-    bundle.starts_with("/Volumes")
-        || bundle
-            .components()
-            .any(|c| c.as_os_str() == "AppTranslocation")
+    bundle
+        .components()
+        .any(|c| c.as_os_str() == "AppTranslocation")
+}
+
+/// On a read-only volume: a mounted disk image (an app kept on an external drive is fine).
+fn read_only(bundle: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(bundle.as_os_str().as_bytes()) else {
+            return false;
+        };
+        // SAFETY: statvfs is plain data; all zeroes is a valid value to fill.
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: a NUL-terminated path and a statvfs to fill.
+        if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } == 0 {
+            return stat.f_flag & libc::ST_RDONLY != 0;
+        }
+        false
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bundle;
+        false
+    }
 }
 
 /// The package family this process runs in, if it runs in a package.
@@ -137,21 +193,6 @@ mod tests {
         let helper = format!("{app}/Contents/Helpers/hbsync");
         assert_eq!(from_path(Os::MacOs, Path::new(&helper)), installed);
         assert_eq!(
-            installed.program("hbsyncd", Path::new(&helper)),
-            Path::new(&format!("{app}/Contents/Helpers/hbsyncd"))
-        );
-        assert_eq!(
-            installed.program("homebase-filesync", Path::new(&helper)),
-            Path::new(&format!("{app}/Contents/MacOS/homebase-filesync"))
-        );
-        assert_eq!(
-            Install::LinuxPackage.program("hbsyncd", Path::new("/usr/lib/h/bin/hbsync")),
-            Path::new(&format!(
-                "/usr/lib/h/bin/hbsyncd{}",
-                std::env::consts::EXE_SUFFIX
-            ))
-        );
-        assert_eq!(
             from_path(Os::MacOs, Path::new("/Users/a/bin/homebase-filesync")),
             Install::Plain
         );
@@ -162,10 +203,12 @@ mod tests {
             ),
             Install::LinuxPackage
         );
-        assert_eq!(
-            from_path(Os::Linux, Path::new("/home/a/.cargo/bin/homebase-filesync")),
-            Install::Plain
-        );
+        for plain in [
+            "/home/a/.cargo/bin/homebase-filesync",
+            "/usr/local/bin/homebase-filesync",
+        ] {
+            assert_eq!(from_path(Os::Linux, Path::new(plain)), Install::Plain);
+        }
         assert_eq!(
             from_path(
                 Os::Windows,
@@ -176,19 +219,41 @@ mod tests {
     }
 
     #[test]
-    fn a_mac_app_must_be_moved_before_it_starts_at_logon() {
-        for bundle in [
-            "/Volumes/Homebase Filesync/Homebase Filesync.app",
-            "/private/var/folders/x/y/T/AppTranslocation/1234-5678/d/Homebase Filesync.app",
-        ] {
-            let exe = format!("{bundle}/Contents/MacOS/homebase-filesync");
-            assert!(
-                from_path(Os::MacOs, Path::new(&exe))
-                    .not_settled()
-                    .is_some(),
-                "{bundle}"
-            );
-        }
+    fn programs_are_found_where_the_app_keeps_them() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let bundle = dir.path().join("Homebase Filesync.app");
+        let macos = bundle.join("Contents/MacOS");
+        let helpers = bundle.join("Contents/Helpers");
+        let exe = |d: &Path, n: &str| d.join(format!("{n}{}", std::env::consts::EXE_SUFFIX));
+        let app = Install::MacApp { bundle };
+        let tray = exe(&macos, "homebase-filesync");
+        // All three in Contents/MacOS (an older layout): beside each other.
+        assert_eq!(app.program("hbsyncd", &tray), exe(&macos, "hbsyncd"));
+        // The daemon and the CLI as helpers, found from either side.
+        std::fs::create_dir_all(&macos)?;
+        std::fs::create_dir_all(&helpers)?;
+        std::fs::write(exe(&helpers, "hbsyncd"), "")?;
+        std::fs::write(&tray, "")?;
+        assert_eq!(app.program("hbsyncd", &tray), exe(&helpers, "hbsyncd"));
+        let cli = exe(&helpers, "hbsync");
+        assert_eq!(app.program("homebase-filesync", &cli), tray);
+        assert_eq!(
+            Install::Plain.program("hbsyncd", &cli),
+            exe(&helpers, "hbsyncd")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_translocated_mac_app_must_be_moved_before_it_starts_at_logon() {
+        let bundle =
+            "/private/var/folders/x/y/T/AppTranslocation/1234-5678/d/Homebase Filesync.app";
+        let exe = format!("{bundle}/Contents/MacOS/homebase-filesync");
+        assert!(
+            from_path(Os::MacOs, Path::new(&exe))
+                .not_settled()
+                .is_some()
+        );
     }
 
     #[test]

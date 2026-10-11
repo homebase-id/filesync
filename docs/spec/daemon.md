@@ -173,7 +173,7 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
 
 ## Autostart
 
-What starts at logon is the tray when `homebase-filesync` is beside the command line (it starts the
+What starts at logon is the tray when `homebase-filesync` is installed with the command line (beside it; in a Mac app the tray is in `Contents/MacOS` and `hbsyncd` and `hbsync` in `Contents/Helpers`, `hbsync_app::install`) (it starts the
 daemon), else the daemon:
 
 | | how | restarts |

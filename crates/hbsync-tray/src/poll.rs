@@ -66,8 +66,12 @@ impl Watcher {
             Err(e) => return Daemon::Starting(Some(e.to_string())),
         };
         self.start_failed = None;
-        if status.version != hbsync_app::VERSION && !self.restarted {
-            // Updated beside a daemon still running the old version.
+        // Updated beside a daemon still running the old version. Not when this tray is the old
+        // one (replaced on disk): the daemon may be the new one, and this tray goes first.
+        if status.version != hbsync_app::VERSION
+            && !self.restarted
+            && crate::os::replacement().is_none()
+        {
             tracing::info!(
                 "the daemon runs {:?}, this is {}: restarting it",
                 status.version,

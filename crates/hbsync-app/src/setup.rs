@@ -382,7 +382,7 @@ pub fn set_up(
     if request.at_logon {
         if control::dev_home() {
             say("HBSYNC_HOME is set: not starting at logon (`hbsync autostart on` does).");
-        } else if let Some(why) = crate::install::Install::detect().not_settled() {
+        } else if let Some(why) = crate::install::Install::current().not_settled() {
             say(&format!("Not starting at logon yet: {why}."));
         } else {
             autostart::install(&autostart::logon_program()?)?;

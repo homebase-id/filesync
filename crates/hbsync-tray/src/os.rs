@@ -4,10 +4,6 @@
 use hbsync_app::install::Install;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::LazyLock;
-
-/// How this copy was installed.
-pub static INSTALL: LazyLock<Install> = LazyLock::new(Install::detect);
 
 /// Opens a folder in the file manager, or a page in the browser.
 pub fn open(what: impl AsRef<std::ffi::OsStr>) {
@@ -76,7 +72,7 @@ pub fn notify(summary: String, body: String) {
             .body(&body);
         // In the MSIX package, as the package (its name and icon), not as PowerShell.
         #[cfg(windows)]
-        if let Some(id) = INSTALL.app_user_model_id() {
+        if let Some(id) = Install::current().app_user_model_id() {
             notification.app_id(&id);
         }
         let shown = notification.show();
@@ -89,36 +85,38 @@ pub fn notify(summary: String, body: String) {
 /// Notifications on macOS come from the app bundle, when there is one.
 pub fn name_notifications() {
     #[cfg(target_os = "macos")]
-    if matches!(*INSTALL, Install::MacApp { .. })
+    if matches!(Install::current(), Install::MacApp { .. })
         && let Err(e) = notify_rust::set_application(hbsync_app::autostart::LABEL)
     {
         tracing::debug!("notifications keep the default sender: {e}");
     }
 }
 
-/// This program, replaced on disk since it started (a package or `cargo install` update): Linux
-/// keeps running the old one until it restarts. Elsewhere the updater restarts it.
-pub fn replaced() -> bool {
-    cfg!(target_os = "linux")
-        && std::fs::read_link("/proc/self/exe")
-            .is_ok_and(|exe| exe.to_string_lossy().ends_with(" (deleted)"))
+/// The program that replaced this one on disk since it started (a package or `cargo install`
+/// update): Linux keeps running the old one until it restarts; elsewhere the updater restarts
+/// it. Not when it was removed (nothing to restart into).
+pub fn replacement() -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let exe = std::fs::read_link("/proc/self/exe").ok()?;
+    let path = PathBuf::from(exe.to_str()?.strip_suffix(" (deleted)")?);
+    path.is_file()
+        .then(|| Install::current().lasting_path(&path))
 }
 
-/// Starts the program now at this one's path, which waits for this one to end.
-pub fn start_again() -> std::io::Result<()> {
-    let exe = std::env::current_exe()?;
-    // Linux names a replaced program's path with this suffix.
-    let exe = match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
-        Some(path) => PathBuf::from(path),
-        None => exe,
-    };
-    Command::new(exe)
+/// Starts `exe` (the [`replacement`]) on its own, to wait for this tray to end and take over.
+pub fn start_again(exe: &Path) -> std::io::Result<()> {
+    let mut command = Command::new(exe);
+    command
         .arg(RESTARTED)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map(drop)
+        .stderr(Stdio::null());
+    // Its own process group: closing the terminal this tray was started from mustn't end it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command.spawn().map(drop)
 }
 
 /// The argument of a tray started by [`start_again`]: it waits for the old one to end.

@@ -1,6 +1,7 @@
 //! Starting Filesync at logon, as this user (never as a service: it needs the user's keychain
-//! and writes the user's files). What starts is the tray app when it is installed beside the
-//! command line (it starts the daemon), else the daemon itself:
+//! and writes the user's files). What starts is the tray app when it is installed with the
+//! command line (beside it, or in a Mac app in `Contents/MacOS`; it starts the daemon), else
+//! the daemon itself:
 //! - macOS: a launchd agent, `~/Library/LaunchAgents/id.homebase.filesync.plist` (the
 //!   tray's: `id.homebase.filesync.tray.plist`);
 //! - Linux: the daemon as a systemd user unit, `~/.config/systemd/user/hbsync.service`; the tray
@@ -194,19 +195,19 @@ pub fn run_value(daemon: &Path) -> String {
 /// The program `name` of this installation: beside the running one, or where a Mac app keeps
 /// it ([`crate::install::Install::program`]).
 fn beside(name: &str) -> io::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    Ok(crate::install::Install::detect().program(name, &exe))
+    let exe = crate::install::current_exe()?;
+    Ok(crate::install::Install::current().program(name, &exe))
 }
 
-/// Where the daemon is: beside the running program.
+/// Where the daemon is: with the running program ([`beside`]).
 pub fn daemon_exe() -> io::Result<PathBuf> {
     beside(crate::lock::DAEMON)
 }
 
-/// What starts at logon: the tray beside the running program if it is there (it starts the
-/// daemon), else the daemon.
+/// What starts at logon: the tray of this installation if it is there (it starts the daemon),
+/// else the daemon.
 pub fn logon_program() -> io::Result<Program> {
-    if let Some(why) = crate::install::Install::detect().not_settled() {
+    if let Some(why) = crate::install::Install::current().not_settled() {
         return Err(io::Error::other(why));
     }
     let tray = beside(TRAY)?;
@@ -214,6 +215,14 @@ pub fn logon_program() -> io::Result<Program> {
         return Ok(Program::Tray(tray));
     }
     Ok(Program::Daemon(daemon_exe()?))
+}
+
+/// Removes `path`; already gone is fine.
+fn remove_if_exists(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(unix)]
@@ -300,10 +309,7 @@ mod os {
             if label == LABEL {
                 let _ = run("launchctl", &["bootout", &format!("{}/{label}", domain())]);
             }
-            match std::fs::remove_file(plist(&label)?) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            }
+            remove_if_exists(&plist(&label)?)?;
         }
         Ok(())
     }
@@ -380,10 +386,7 @@ mod os {
     }
 
     pub fn uninstall() -> io::Result<()> {
-        match std::fs::remove_file(desktop()?) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-            _ => {}
-        }
+        remove_if_exists(&desktop()?)?;
         let path = unit()?;
         if !path.exists() {
             return Ok(());
@@ -396,8 +399,15 @@ mod os {
     pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
         let data = crate::paths::xdg_dir("XDG_DATA_HOME", ".local/share")
             .ok_or_else(|| io::Error::other("HOME isn't set"))?;
-        let packaged = crate::install::Install::detect() == crate::install::Install::LinuxPackage;
-        write_launcher(&data, &desktop()?, tray, icon_png, packaged)
+        let install = crate::install::Install::current();
+        let packaged = *install == crate::install::Install::LinuxPackage;
+        write_launcher(
+            &data,
+            &desktop()?,
+            &install.lasting_path(tray),
+            icon_png,
+            packaged,
+        )
     }
 
     /// Through systemd only when it starts the daemon (not the tray).
@@ -434,14 +444,19 @@ mod os {
 
     fn msix() -> bool {
         matches!(
-            crate::install::Install::detect(),
+            crate::install::Install::current(),
             crate::install::Install::Msix { .. }
         )
     }
 
     pub fn installed() -> io::Result<bool> {
+        // Unreadable, it counts as off: callers that only consult it (starting the daemon,
+        // logging out) mustn't fail on it.
         if msix() {
-            return startup_task::enabled();
+            return Ok(startup_task::enabled().unwrap_or_else(|e| {
+                tracing::warn!("the startup task: {e}");
+                false
+            }));
         }
         let (key, value) = (wide(RUN_KEY), wide(RUN_VALUE));
         let mut size = 0u32;
@@ -487,8 +502,17 @@ mod os {
 
     pub fn uninstall() -> io::Result<()> {
         if msix() {
+            // Also a Run value an earlier, unpackaged copy left (it would start that one too).
+            // The package sees the registry through its own layer: try, but don't depend on it.
+            if let Err(e) = uninstall_run_value() {
+                tracing::debug!("the Run value: {e}");
+            }
             return startup_task::disable();
         }
+        uninstall_run_value()
+    }
+
+    fn uninstall_run_value() -> io::Result<()> {
         let (key, value) = (wide(RUN_KEY), wide(RUN_VALUE));
         // SAFETY: valid NUL-terminated strings.
         match unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), value.as_ptr()) } {
@@ -607,12 +631,8 @@ fn write_launcher(
     let launcher = data.join("applications").join(DESKTOP_ENTRY);
     if packaged {
         // The package lists it (and has the icon): a copy of ours would show it twice.
-        for path in [launcher, icon] {
-            match std::fs::remove_file(path) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            }
-        }
+        remove_if_exists(&launcher)?;
+        remove_if_exists(&icon)?;
     } else {
         write(&icon, icon_png)?;
         write(&launcher, entry.as_bytes())?;

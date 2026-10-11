@@ -97,14 +97,14 @@ fn main() -> ExitCode {
     };
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
     os::name_notifications();
-    if let Some(why) = os::INSTALL.not_settled() {
+    if let Some(why) = hbsync_app::install::Install::current().not_settled() {
         os::notify("Homebase Filesync".into(), format!("{why}."));
     }
     // A private instance (HBSYNC_HOME) mustn't replace the launcher of the real one.
     #[cfg(target_os = "linux")]
     if !control::dev_home() {
         std::thread::spawn(|| {
-            let added = std::env::current_exe()
+            let added = hbsync_app::install::current_exe()
                 .and_then(|tray| autostart::add_launcher(&tray, icons::MARK_256));
             if let Err(e) = added {
                 tracing::info!("no launcher: {e}");
@@ -130,8 +130,8 @@ struct App {
     daemon: Daemon,
     recent: Vec<Synced>,
     start_at_login: bool,
-    /// Replaced on disk by an update ([`os::replaced`]).
-    updated: bool,
+    /// The program that replaced this one on disk ([`os::replacement`]), once seen.
+    updated: Option<PathBuf>,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
@@ -173,7 +173,7 @@ impl App {
             daemon: Daemon::Starting(None),
             recent: Vec::new(),
             start_at_login: autostart::installed().unwrap_or(false),
-            updated: false,
+            updated: None,
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
@@ -219,7 +219,10 @@ impl App {
                     self.decorated = Some(s.folder.clone());
                 }
                 self.pages.set_status(daemon.status().cloned());
-                self.updated = os::replaced();
+                // Once replaced, it stays so: no need to look again.
+                if self.updated.is_none() {
+                    self.updated = os::replacement();
+                }
                 self.daemon = daemon;
                 self.recent = recent;
             }
@@ -314,7 +317,11 @@ impl App {
             Action::OpenLogs => os::open(&self.paths.logs),
             Action::Restart => {
                 // The daemon goes on; the new tray restarts it if it's of another build.
-                match os::start_again() {
+                let started = match &self.updated {
+                    Some(exe) => os::start_again(exe),
+                    None => Err(std::io::Error::other("no new program to start")),
+                };
+                match started {
                     Ok(()) => {
                         tracing::info!("restarting for an update");
                         self.tray = None;
@@ -379,7 +386,7 @@ impl App {
             daemon: &self.daemon,
             recent: &self.recent,
             start_at_login: self.start_at_login,
-            updated: self.updated,
+            updated: self.updated.is_some(),
             busy,
             now: words::now(),
         };
