@@ -94,7 +94,7 @@ impl Install {
     pub fn not_settled(&self) -> Option<&'static str> {
         match self {
             Install::MacApp { bundle } if temporary(bundle) || read_only(bundle) => Some(
-                "Move Homebase Filesync to the Applications folder first, then start it from there",
+                "move Homebase Filesync to the Applications folder and start it from there, then turn on Start at login in its menu",
             ),
             _ => None,
         }

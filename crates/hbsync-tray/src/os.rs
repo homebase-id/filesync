@@ -101,8 +101,9 @@ pub fn replacement() -> Option<PathBuf> {
     }
     let exe = std::fs::read_link("/proc/self/exe").ok()?;
     let path = PathBuf::from(exe.to_str()?.strip_suffix(" (deleted)")?);
-    path.is_file()
-        .then(|| Install::current().lasting_path(&path))
+    // A package's link, which follows the program if the package moved it.
+    let next = Install::current().lasting_path(&path);
+    next.is_file().then_some(next)
 }
 
 /// Starts `exe` (the [`replacement`]) on its own, to wait for this tray to end and take over.

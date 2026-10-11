@@ -5,7 +5,7 @@
 //! - macOS: a launchd agent, `~/Library/LaunchAgents/id.homebase.filesync.plist` (the
 //!   tray's: `id.homebase.filesync.tray.plist`);
 //! - Linux: the daemon as a systemd user unit, `~/.config/systemd/user/hbsync.service`; the tray
-//!   as a desktop session autostart entry, `~/.config/autostart/homebase-filesync.desktop` (a
+//!   as a desktop session autostart entry, `~/.config/autostart/id.homebase.filesync.desktop` (a
 //!   GUI needs the session);
 //! - Windows: the per-user `Run` key (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`),
 //!   which needs no administrator, unlike a logon task; in the MSIX package, its startup task
@@ -25,8 +25,11 @@ pub const LABEL: &str = "id.homebase.filesync";
 /// The tray's program name.
 pub const TRAY: &str = "homebase-filesync";
 /// The tray's desktop entry (Linux): in the session's autostart folder to start at logon, and
-/// in the applications folder as its launcher.
-pub const DESKTOP_ENTRY: &str = "homebase-filesync.desktop";
+/// in the applications folder as its launcher. Named after the app ID, as the package's is.
+pub const DESKTOP_ENTRY: &str = "id.homebase.filesync.desktop";
+/// Its name before 0.1.0 shipped, cleaned up.
+#[cfg(target_os = "linux")]
+const OLD_DESKTOP_ENTRY: &str = "homebase-filesync.desktop";
 /// The tray's icon name in the icon theme (Linux).
 pub const ICON: &str = "homebase-filesync";
 /// The systemd unit.
@@ -212,18 +215,12 @@ pub fn logon_program() -> io::Result<Program> {
     }
     let tray = beside(TRAY)?;
     if tray.is_file() {
-        return Ok(Program::Tray(tray));
+        // By a path that lasts (a package's link), as the entry outlives this program.
+        return Ok(Program::Tray(
+            crate::install::Install::current().lasting_path(&tray),
+        ));
     }
     Ok(Program::Daemon(daemon_exe()?))
-}
-
-/// Removes `path`; already gone is fine.
-#[cfg(unix)]
-fn remove_if_exists(path: &Path) -> io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
-    }
 }
 
 #[cfg(unix)]
@@ -310,7 +307,7 @@ mod os {
             if label == LABEL {
                 let _ = run("launchctl", &["bootout", &format!("{}/{label}", domain())]);
             }
-            remove_if_exists(&plist(&label)?)?;
+            crate::paths::remove_if_exists(&plist(&label)?)?;
         }
         Ok(())
     }
@@ -357,7 +354,8 @@ mod os {
     }
 
     pub fn installed() -> io::Result<bool> {
-        Ok(unit()?.exists() || desktop()?.exists())
+        let entry = desktop()?;
+        Ok(unit()?.exists() || entry.exists() || entry.with_file_name(OLD_DESKTOP_ENTRY).exists())
     }
 
     pub fn install(program: &Program) -> io::Result<()> {
@@ -387,7 +385,9 @@ mod os {
     }
 
     pub fn uninstall() -> io::Result<()> {
-        remove_if_exists(&desktop()?)?;
+        let entry = desktop()?;
+        crate::paths::remove_if_exists(&entry)?;
+        crate::paths::remove_if_exists(&entry.with_file_name(OLD_DESKTOP_ENTRY))?;
         let path = unit()?;
         if !path.exists() {
             return Ok(());
@@ -444,10 +444,11 @@ mod os {
     }
 
     fn msix() -> bool {
-        matches!(
-            crate::install::Install::current(),
-            crate::install::Install::Msix { .. }
-        )
+        cfg!(feature = "msix")
+            && matches!(
+                crate::install::Install::current(),
+                crate::install::Install::Msix { .. }
+            )
     }
 
     pub fn installed() -> io::Result<bool> {
@@ -528,6 +529,7 @@ mod os {
     }
 
     /// The MSIX package's startup task (Conveyor's `start-on-login`), which starts the tray.
+    #[cfg(feature = "msix")]
     mod startup_task {
         use crate::install::MSIX_STARTUP_TASK;
         use std::io;
@@ -571,6 +573,24 @@ mod os {
 
         pub fn disable() -> io::Result<()> {
             task()?.Disable().map_err(err)
+        }
+    }
+
+    /// Without the `msix` feature, never asked (`msix()` is false).
+    #[cfg(not(feature = "msix"))]
+    mod startup_task {
+        use std::io;
+
+        pub fn enabled() -> io::Result<bool> {
+            Ok(false)
+        }
+        pub fn enable() -> io::Result<()> {
+            Err(io::Error::other(
+                "this program can't change the startup task",
+            ))
+        }
+        pub fn disable() -> io::Result<()> {
+            Ok(())
         }
     }
 }
@@ -630,10 +650,17 @@ fn write_launcher(
         .join("icons/hicolor/256x256/apps")
         .join(format!("{ICON}.png"));
     let launcher = data.join("applications").join(DESKTOP_ENTRY);
+    // Entries by their old name: gone, an autostart one carried over.
+    crate::paths::remove_if_exists(&launcher.with_file_name(OLD_DESKTOP_ENTRY))?;
+    let old_autostart = autostart.with_file_name(OLD_DESKTOP_ENTRY);
+    if old_autostart.exists() {
+        write(autostart, entry.as_bytes())?;
+        crate::paths::remove_if_exists(&old_autostart)?;
+    }
     if packaged {
         // The package lists it (and has the icon): a copy of ours would show it twice.
-        remove_if_exists(&launcher)?;
-        remove_if_exists(&icon)?;
+        crate::paths::remove_if_exists(&launcher)?;
+        crate::paths::remove_if_exists(&icon)?;
     } else {
         write(&icon, icon_png)?;
         write(&launcher, entry.as_bytes())?;
@@ -711,7 +738,9 @@ mod tests {
             !autostart.exists(),
             "starting at logon stays the user's choice"
         );
-        let entry = data.path().join("applications/homebase-filesync.desktop");
+        let entry = data
+            .path()
+            .join("applications/id.homebase.filesync.desktop");
         let icon = data
             .path()
             .join("icons/hicolor/256x256/apps/homebase-filesync.png");
@@ -736,6 +765,13 @@ mod tests {
         write_launcher(data.path(), &autostart, packaged, b"png", true)?;
         assert!(!entry.exists() && !icon.exists());
         assert!(std::fs::read_to_string(&autostart)?.contains(&packaged.display().to_string()));
+
+        // An autostart entry by the old name is carried over.
+        std::fs::remove_file(&autostart)?;
+        let old = autostart.with_file_name("homebase-filesync.desktop");
+        std::fs::write(&old, "[Desktop Entry]\n")?;
+        write_launcher(data.path(), &autostart, tray, b"png", false)?;
+        assert!(autostart.exists() && !old.exists());
         Ok(())
     }
 

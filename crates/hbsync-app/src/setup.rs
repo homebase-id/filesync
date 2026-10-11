@@ -382,11 +382,12 @@ pub fn set_up(
     if request.at_logon {
         if control::dev_home() {
             say("HBSYNC_HOME is set: not starting at logon (`hbsync autostart on` does).");
-        } else if let Some(why) = crate::install::Install::current().not_settled() {
-            say(&format!("Not starting at logon yet: {why}."));
         } else {
-            autostart::install(&autostart::logon_program()?)?;
-            say("Filesync starts at logon (`hbsync autostart off` stops that).");
+            // Set up all the same: syncing doesn't depend on it, and it can be turned on later.
+            match autostart::logon_program().and_then(|p| autostart::install(&p)) {
+                Ok(()) => say("Filesync starts at logon (`hbsync autostart off` stops that)."),
+                Err(e) => say(&format!("Not starting at logon: {e}.")),
+            }
         }
     }
     if !request.start {

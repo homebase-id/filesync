@@ -179,7 +179,7 @@ daemon), else the daemon:
 | | how | restarts |
 |---|---|---|
 | macOS | launchd agent `~/Library/LaunchAgents/id.homebase.filesync.plist` (the tray's: `id.homebase.filesync.tray.plist`), `launchctl bootstrap gui/<uid>` | after a crash (`KeepAlive`/`SuccessfulExit` = false) |
-| Linux | the daemon: systemd user unit `~/.config/systemd/user/hbsync.service`, enabled; the tray: `~/.config/autostart/homebase-filesync.desktop` (a GUI needs the session) | the unit: `Restart=on-failure` |
+| Linux | the daemon: systemd user unit `~/.config/systemd/user/hbsync.service`, enabled; the tray: `~/.config/autostart/id.homebase.filesync.desktop` (a GUI needs the session) | the unit: `Restart=on-failure` |
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Homebase Filesync` | no |
 | Windows, MSIX package | the package's startup task `HomebaseFilesync.StartupTask` (Conveyor's `start-on-login`); the user can also turn it off in Task Manager | no |
 

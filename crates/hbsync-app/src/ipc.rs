@@ -254,10 +254,7 @@ fn endpoint(paths: &Paths, serving: bool) -> io::Result<Name<'static>> {
         }
     }
     if serving {
-        match std::fs::remove_file(&path) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-            _ => {}
-        }
+        crate::paths::remove_if_exists(&path)?;
     }
     path.to_fs_name::<GenericFilePath>()
 }

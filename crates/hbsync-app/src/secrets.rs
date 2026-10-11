@@ -193,11 +193,7 @@ fn save_private(creds: &Credentials, path: &Path) -> Result<(), HomebaseError> {
 }
 
 fn remove(path: &Path) -> Result<(), CredentialError> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(HomebaseError::from(e).into()),
-    }
+    crate::paths::remove_if_exists(path).map_err(|e| HomebaseError::from(e).into())
 }
 
 #[cfg(test)]

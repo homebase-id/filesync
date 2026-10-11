@@ -35,10 +35,15 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSWorkspace"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData", "NSString"] }
 
+[features]
+# Start at login through the MSIX package's startup task (the tray, the one program that
+# toggles it from inside the package). Without it, the Run key.
+msix = ["dep:windows"]
+
 [target.'cfg(windows)'.dependencies]
 widestring = "1.0.2"
-# The MSIX startup task (WinRT).
-windows = { version = "0.62", features = ["ApplicationModel"] }
+# The MSIX startup task (WinRT), for the tray only: feature `msix`.
+windows = { version = "0.62", features = ["ApplicationModel"], optional = true }
 windows-native-keyring-store = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_System_Console", "Win32_System_Registry"] }
 

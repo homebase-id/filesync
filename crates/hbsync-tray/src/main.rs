@@ -72,19 +72,23 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Restarted for an update: the old tray is about to end.
-    let restarted = std::env::args().any(|a| a == os::RESTARTED);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // Restarted for an update: the old tray is about to end (it has already hidden its icon).
+    let restarted = std::env::args_os().any(|a| a == os::RESTARTED);
+    let deadline = Instant::now() + Duration::from_secs(60);
     let acquired = loop {
         match InstanceLock::acquire_for(&paths, PROGRAM) {
-            Err(LockError::Held { .. }) if restarted && std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(200));
+            Err(LockError::Held { .. }) if restarted && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(200));
             }
             other => break other,
         }
     };
     let _lock = match acquired {
         Ok(lock) => lock,
+        Err(e @ LockError::Held { .. }) if restarted => {
+            tracing::error!("restarted for an update, but the old tray didn't end: {e}");
+            return ExitCode::FAILURE;
+        }
         // Started again (at logon, by hand): the one running is enough.
         Err(e @ LockError::Held { .. }) => {
             tracing::info!("{e}");
@@ -98,7 +102,10 @@ fn main() -> ExitCode {
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
     os::name_notifications();
     if let Some(why) = hbsync_app::install::Install::current().not_settled() {
-        os::notify("Homebase Filesync".into(), format!("{why}."));
+        os::notify(
+            "Homebase Filesync".into(),
+            format!("To start at login, {why}."),
+        );
     }
     // A private instance (HBSYNC_HOME) mustn't replace the launcher of the real one.
     #[cfg(target_os = "linux")]
@@ -132,6 +139,7 @@ struct App {
     start_at_login: bool,
     /// The program that replaced this one on disk ([`os::replacement`]), once seen.
     updated: Option<PathBuf>,
+    update_looked: Instant,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
@@ -174,6 +182,7 @@ impl App {
             recent: Vec::new(),
             start_at_login: autostart::installed().unwrap_or(false),
             updated: None,
+            update_looked: Instant::now(),
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
@@ -219,8 +228,10 @@ impl App {
                     self.decorated = Some(s.folder.clone());
                 }
                 self.pages.set_status(daemon.status().cloned());
-                // Once replaced, it stays so: no need to look again.
-                if self.updated.is_none() {
+                // Once replaced, it stays so; until then, a look a minute is enough.
+                if self.updated.is_none() && self.update_looked.elapsed() >= Duration::from_secs(60)
+                {
+                    self.update_looked = Instant::now();
                     self.updated = os::replacement();
                 }
                 self.daemon = daemon;
@@ -316,6 +327,14 @@ impl App {
             }
             Action::OpenLogs => os::open(&self.paths.logs),
             Action::Restart => {
+                // A login waiting for the browser comes back to this tray's pages.
+                if let Some(busy) = self.pages.busy() {
+                    os::notify(
+                        "Restart".into(),
+                        format!("After the login: {}", busy.to_lowercase()),
+                    );
+                    return true;
+                }
                 // The daemon goes on; the new tray restarts it if it's of another build.
                 let started = match &self.updated {
                     Some(exe) => os::start_again(exe),
