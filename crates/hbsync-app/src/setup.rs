@@ -104,12 +104,15 @@ pub fn default_folder() -> control::Result<PathBuf> {
 /// Why `folder` (absolute) must not be synced, if it mustn't: the home folder itself or a folder
 /// above it, the top of a disk, or a system folder. Syncing those would take in (and on
 /// another device, put down) files that aren't the user's to sync.
+///
+/// It compares the paths as given: pass them through [`resolve`] first, so a symlink or `..`
+/// can't hide what a folder really is.
 pub fn refuse_folder(folder: &Path, home: Option<&Path>) -> Option<String> {
     if folder.parent().is_none() {
         return Some(format!("{} is the top of a disk", folder.display()));
     }
     if let Some(home) = home
-        && home.starts_with(folder)
+        && within(home, folder)
     {
         return Some(format!(
             "{} holds your whole home folder: choose a folder inside it",
@@ -137,8 +140,43 @@ pub fn refuse_folder(folder: &Path, home: Option<&Path>) -> Option<String> {
     ];
     SYSTEM
         .iter()
-        .find(|s| folder.starts_with(s))
+        .find(|s| within(folder, Path::new(s)))
         .map(|s| format!("{} is in a system folder ({s})", folder.display()))
+}
+
+/// Whether `path` is `folder` or inside it; ignoring case where the file system usually does
+/// (Windows, macOS).
+fn within(path: &Path, folder: &Path) -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+        lower(path).starts_with(lower(folder))
+    } else {
+        path.starts_with(folder)
+    }
+}
+
+/// `path` as it really is: absolute, its longest existing part with symlinks resolved, and
+/// `..` in the rest taken away. What [`refuse_folder`] and [`check_folder`] look at.
+pub fn resolve(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let parts: Vec<Component> = path.components().collect();
+    for exists in (1..=parts.len()).rev() {
+        let Ok(mut out) = parts[..exists].iter().collect::<PathBuf>().canonicalize() else {
+            continue;
+        };
+        for part in &parts[exists..] {
+            match part {
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::CurDir => {}
+                other => out.push(other),
+            }
+        }
+        return out;
+    }
+    path
 }
 
 /// The user's home folder.
@@ -160,14 +198,16 @@ pub enum FolderState {
 }
 
 /// Whether `folder` can be synced with `identity`: refused if another folder or identity is
-/// set up, or the folder is another identity's.
+/// set up, or the folder is another identity's. The folder is [`resolve`]d first, as the
+/// config keeps it.
 pub fn check_folder(
     config: &Config,
     identity: &str,
     folder: &Path,
 ) -> control::Result<FolderState> {
+    let folder = &resolve(folder);
     if let Some(root) = config.root()?
-        && (root.identity != identity || root.folder != folder)
+        && (root.identity != identity || root.folder != *folder)
     {
         return Err(format!(
             "already set up to sync {} with {}: unlink it first",
@@ -194,7 +234,7 @@ pub fn check_folder(
 }
 
 /// What to set up.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetUp {
     /// As [`normalize_identity`] leaves it.
     pub identity: String,
@@ -223,11 +263,12 @@ pub fn set_up(
     let mut config = Config::load(&config_path)?.unwrap_or_default();
 
     // The folder: new, empty, already this identity's, or adopted on purpose.
-    if let Some(why) = refuse_folder(&request.folder, home().as_deref()) {
+    let folder = resolve(&request.folder);
+    if let Some(why) = refuse_folder(&folder, home().map(|h| resolve(&h)).as_deref()) {
         return Err(why.into());
     }
-    std::fs::create_dir_all(&request.folder)?;
-    let folder = request.folder.canonicalize()?;
+    std::fs::create_dir_all(&folder)?;
+    let folder = folder.canonicalize()?;
     if check_folder(&config, identity, &folder)? == FolderState::HasFiles && !request.existing {
         return Err(format!(
             "{} has files in it: they would be uploaded and merged with the drive. Add \
@@ -320,6 +361,31 @@ mod tests {
         assert!(refused("/usr/share/docs").is_some());
         assert_eq!(refused("/home/anna/Homebase"), None);
         assert_eq!(refused("/media/disk/Homebase"), None);
+        if cfg!(any(windows, target_os = "macos")) {
+            assert!(refused("/library/Stuff").is_some(), "in any case");
+        }
+    }
+
+    #[test]
+    fn folders_are_resolved_before_they_are_judged() -> control::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().canonicalize()?.join("anna");
+        std::fs::create_dir_all(home.join("Docs"))?;
+        // `..` and a symlink can't make a folder look like something else.
+        assert_eq!(
+            resolve(&home.join("Docs/../..")),
+            home.parent().unwrap_or(&home)
+        );
+        assert_eq!(resolve(&home.join("New/Sub/..")), home.join("New"));
+        #[cfg(unix)]
+        {
+            let link = home.join("Docs/everything");
+            std::os::unix::fs::symlink(&home, &link)?;
+            assert_eq!(resolve(&link), home);
+            assert!(refuse_folder(&resolve(&link), Some(&home)).is_some());
+            assert_eq!(resolve(&link.join("Homebase")), home.join("Homebase"));
+        }
+        Ok(())
     }
 
     #[test]

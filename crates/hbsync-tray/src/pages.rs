@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,8 +37,10 @@ struct Shared {
     merge_asked: bool,
     error: Option<String>,
     phase: Phase,
-    /// Counts login attempts: an abandoned one (never approved) mustn't overwrite a later one.
+    /// Counts login attempts: an abandoned one mustn't overwrite a later one.
     attempt: u64,
+    /// Gives up the login waiting for approval (starting over).
+    cancel: Option<Arc<AtomicBool>>,
     /// The daemon's latest status, for the deletes page.
     status: Option<Status>,
 }
@@ -71,6 +74,7 @@ impl Pages {
                 error: None,
                 phase: Phase::Form,
                 attempt: 0,
+                cancel: None,
                 status: None,
             })),
         };
@@ -100,12 +104,14 @@ impl Pages {
         format!("{}/{page}", self.base)
     }
 
-    /// Opens the login page, with `identity` and `folder` filled in (logging in again).
+    /// Opens the login page, with `identity` and `folder` filled in (logging in again). A login
+    /// waiting for approval goes on (its page offers to start over).
     pub fn prepare_setup(&self, identity: &str, folder: Option<PathBuf>) {
         let mut s = lock(&self.shared);
         if s.phase != Phase::Connecting {
             s.phase = Phase::Form;
             s.error = None;
+            s.merge_asked = false;
         }
         if !identity.is_empty() {
             s.identity = identity.to_owned();
@@ -113,6 +119,18 @@ impl Pages {
         if folder.is_some() {
             s.folder = folder;
         }
+    }
+
+    /// Gives up the login in progress, if any, and shows the form again.
+    fn start_over(&self) {
+        let mut s = lock(&self.shared);
+        if let Some(cancel) = s.cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        s.attempt += 1;
+        s.phase = Phase::Form;
+        s.error = None;
+        s.merge_asked = false;
     }
 
     /// Something the tray shows while a login goes on.
@@ -166,7 +184,8 @@ impl Server {
             },
             ("GET", "setup/done") => self.html(&mut stream, self.done_page()),
             ("POST", "setup/again") => {
-                self.pages.prepare_setup("", None);
+                self.pages.start_over();
+                (self.send)(Event::Wake);
                 redirect(&mut stream, &self.pages.url("setup"))
             }
             ("GET", "deletions") => self.html(&mut stream, self.deletions_page(None)),
@@ -247,72 +266,64 @@ impl Server {
             .map_or_else(|| "(choose one)".into(), |f| f.display().to_string())
     }
 
-    /// Checks the form and starts connecting. The browser goes to the identity's approval page
-    /// (`Some`), or back to the form with what's wrong (`None`).
+    /// Checks the form and starts connecting, one login at a time. The browser goes to the
+    /// identity's approval page (`Some`), or back to the form with what's wrong (`None`).
     fn start_setup(&self, form: &HashMap<String, String>) -> Option<String> {
-        let identity = setup::normalize_identity(form.get("identity").map_or("", |s| s.as_str()));
-        let merge = form.contains_key("merge");
-        let fail = |why: String| {
-            let mut s = lock(&self.pages.shared);
-            s.identity.clone_from(&identity);
-            s.error = Some(why);
-            None
+        let typed = form.get("identity").map_or("", |s| s.as_str());
+        let config = Config::load(&self.paths.config_file()).map(Option::unwrap_or_default);
+        let checked = match &config {
+            Ok(config) => check(
+                typed,
+                form.contains_key("merge"),
+                self.folder().as_deref(),
+                config,
+                setup::home().as_deref(),
+            ),
+            Err(e) => Checked::Refused(e.to_string()),
         };
-        if !looks_like_a_domain(&identity) {
-            return fail(format!(
-                "{identity:?} doesn't look like a Homebase address (like anna.example.com)"
-            ));
-        }
-        let Some(folder) = self.folder() else {
-            return fail("choose a folder".into());
-        };
-        if let Some(why) = setup::refuse_folder(&folder, setup::home().as_deref()) {
-            return fail(why);
-        }
-        let config = match Config::load(&self.paths.config_file()) {
-            Ok(c) => c.unwrap_or_default(),
-            Err(e) => return fail(e.to_string()),
-        };
-        match setup::check_folder(&config, &identity, &folder) {
-            Ok(FolderState::HasFiles) if !merge => {
+        let request = match checked {
+            Checked::Go(request) => request,
+            refused => {
                 let mut s = lock(&self.pages.shared);
-                s.identity.clone_from(&identity);
-                s.merge_asked = true;
-                s.error = Some(
-                    "This folder has files in it. Tick the box to merge them with your Homebase, \
-                     or choose an empty or new folder."
-                        .into(),
-                );
+                s.identity = setup::normalize_identity(typed);
+                if refused == Checked::AskMerge {
+                    s.merge_asked = true;
+                    s.error = Some(
+                        "This folder has files in it. Tick the box to merge them with your \
+                         Homebase, or choose an empty or new folder."
+                            .into(),
+                    );
+                } else if let Checked::Refused(why) = refused {
+                    s.error = Some(why);
+                }
                 return None;
             }
-            Ok(_) => {}
-            Err(e) => return fail(e.to_string()),
-        }
+        };
 
-        let attempt = {
+        let (attempt, cancel) = {
             let mut s = lock(&self.pages.shared);
-            s.identity.clone_from(&identity);
+            // A second submit (a double click) joins the login in progress.
+            if s.phase == Phase::Connecting {
+                return Some(self.pages.url("setup/done"));
+            }
+            s.identity.clone_from(&request.identity);
             s.error = None;
+            s.merge_asked = false;
             s.phase = Phase::Connecting;
             s.attempt += 1;
-            s.attempt
+            let cancel = Arc::new(AtomicBool::new(false));
+            s.cancel = Some(Arc::clone(&cancel));
+            (s.attempt, cancel)
         };
         (self.send)(Event::Wake);
         let (url_tx, url_rx) = mpsc::channel::<String>();
         let done = self.pages.url("setup/done");
-        let request = setup::SetUp {
-            identity: identity.clone(),
-            folder: folder.clone(),
-            existing: merge,
-            start: true,
-            at_logon: true,
-        };
         let (paths, pages, send) = (self.paths.clone(), self.pages.clone(), self.send.clone());
         std::thread::spawn(move || {
             let mut authorize = |identity: &str, device: &str| {
                 let pending = setup::begin(identity, device)?.return_to(&done);
                 let _ = url_tx.send(pending.authorize_url.clone());
-                pending.finish(setup::APPROVAL_TIMEOUT)
+                pending.finish_unless(setup::APPROVAL_TIMEOUT, &cancel)
             };
             let result = setup::set_up(&paths, &request, &mut authorize, &mut |line| {
                 tracing::info!("{line}");
@@ -333,6 +344,7 @@ impl Server {
             let mut s = lock(&pages.shared);
             if s.attempt == attempt {
                 s.phase = Phase::Done(result);
+                s.cancel = None;
             }
             drop(s);
             send(Event::Wake);
@@ -349,10 +361,14 @@ impl Server {
         let s = lock(&self.pages.shared);
         match &s.phase {
             Phase::Form => "<h1>Not connected yet</h1>".to_owned(),
-            Phase::Connecting => "<meta http-equiv=refresh content=1>\
+            Phase::Connecting => format!(
+                "<meta http-equiv=refresh content=2>\
                  <h1>Connecting…</h1><p>Approve this computer on your Homebase, in the page \
-                 that opened. This page follows along.</p>"
-                .to_owned(),
+                 that opened. This page follows along.</p>\
+                 <form method=post action=\"{}\"><p class=small>A typo in the address, or the \
+                 page closed? <button class=secondary>Start over</button></p></form>",
+                self.pages.url("setup/again")
+            ),
             Phase::Done(Ok(what)) => format!(
                 "<h1>Connected</h1><p>{}</p><p>The Homebase icon in your tray shows what it \
                  does. You can close this page.</p>",
@@ -434,6 +450,51 @@ impl Server {
             }
             Err(e) => format!("Not confirmed: {e}"),
         }
+    }
+}
+
+/// What the login form asks for, checked.
+#[derive(Debug, PartialEq)]
+enum Checked {
+    Go(setup::SetUp),
+    Refused(String),
+    /// The folder has files: ask before merging them with the drive.
+    AskMerge,
+}
+
+/// Checks the login form: the address `typed`, whether merging was ticked, the folder chosen
+/// (resolved, so a symlink or `..` can't hide what it is), against the config and the home
+/// folder. Nothing is changed.
+fn check(
+    typed: &str,
+    merge: bool,
+    folder: Option<&std::path::Path>,
+    config: &Config,
+    home: Option<&std::path::Path>,
+) -> Checked {
+    let identity = setup::normalize_identity(typed);
+    if !looks_like_a_domain(&identity) {
+        return Checked::Refused(format!(
+            "{identity:?} doesn't look like a Homebase address (like anna.example.com)"
+        ));
+    }
+    let Some(folder) = folder else {
+        return Checked::Refused("choose a folder".into());
+    };
+    let folder = setup::resolve(folder);
+    if let Some(why) = setup::refuse_folder(&folder, home.map(setup::resolve).as_deref()) {
+        return Checked::Refused(why);
+    }
+    match setup::check_folder(config, &identity, &folder) {
+        Ok(FolderState::HasFiles) if !merge => Checked::AskMerge,
+        Ok(_) => Checked::Go(setup::SetUp {
+            identity,
+            folder,
+            existing: merge,
+            start: true,
+            at_logon: true,
+        }),
+        Err(e) => Checked::Refused(e.to_string()),
     }
 }
 
@@ -586,6 +647,7 @@ button.secondary{margin:0;color:var(--purple);background:#fff;border:1px solid v
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn forms_decode() {
@@ -615,11 +677,15 @@ mod tests {
         );
     }
 
-    /// Sends a request to the pages, returns the whole answer.
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// Sends a request to the pages, returns the whole answer (failing, not hanging, if they
+    /// don't answer).
     fn request(url: &str, method: &str, form: &str) -> std::io::Result<String> {
         let rest = url.trim_start_matches("http://");
         let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
         let mut s = TcpStream::connect(host)?;
+        s.set_read_timeout(Some(Duration::from_secs(10)))?;
         write!(
             s,
             "{method} /{path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\n\r\n{form}",
@@ -630,43 +696,162 @@ mod tests {
         Ok(out)
     }
 
+    fn go(c: &Checked) -> Option<&setup::SetUp> {
+        match c {
+            Checked::Go(request) => Some(request),
+            _ => None,
+        }
+    }
+
     #[test]
-    fn the_login_form_checks_before_connecting() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_login_form_is_checked() -> R {
+        let dir = tempfile::tempdir()?;
+        let home = dir.path().canonicalize()?.join("anna");
+        let fresh = home.join("Homebase");
+        let full = home.join("Mine");
+        std::fs::create_dir_all(&full)?;
+        std::fs::write(full.join("notes.txt"), "x")?;
+        let none = Config::default();
+        let check = |typed, merge, folder: &std::path::Path, config: &Config| {
+            check(typed, merge, Some(folder), config, Some(&home))
+        };
+        let refused = |c: Checked, why: &str| match c {
+            Checked::Refused(said) => assert!(said.contains(why), "{said}"),
+            other => panic!("{other:?}"),
+        };
+
+        // The address, normalised; the folder, resolved.
+        let ok = check(
+            " Anna.Example.com/ ",
+            false,
+            &home.join("x/../Homebase"),
+            &none,
+        );
+        let request = go(&ok).ok_or("refused")?;
+        assert_eq!(request.identity, "anna.example.com");
+        assert_eq!(request.folder, fresh);
+        assert!(!request.existing);
+        refused(check("anna", false, &fresh, &none), "doesn't look like");
+        refused(
+            super::check("anna.example.com", false, None, &none, Some(&home)),
+            "choose a folder",
+        );
+        // Never the home folder (also through a symlink), a disk's top, a system folder.
+        refused(
+            check("anna.example.com", false, &home, &none),
+            "whole home folder",
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&home, home.join("everything"))?;
+            refused(
+                check("anna.example.com", true, &home.join("everything"), &none),
+                "whole home folder",
+            );
+            refused(
+                check("anna.example.com", false, Path::new("/"), &none),
+                "top of a disk",
+            );
+            refused(
+                check("anna.example.com", false, Path::new("/usr/x"), &none),
+                "system",
+            );
+        }
+        // Files in it: asked first, then merged.
+        assert_eq!(
+            check("anna.example.com", false, &full, &none),
+            Checked::AskMerge
+        );
+        assert!(go(&check("anna.example.com", true, &full, &none)).is_some_and(|r| r.existing));
+        // Another folder or identity set up already.
+        let set = Config {
+            roots: vec![hbsync_app::Root {
+                identity: "anna.example.com".into(),
+                folder: fresh.clone(),
+            }],
+            ..Config::default()
+        };
+        assert!(go(&check("anna.example.com", false, &fresh, &set)).is_some());
+        refused(
+            check("bob.example.com", false, &fresh, &set),
+            "unlink it first",
+        );
+        refused(
+            check("anna.example.com", true, &full, &set),
+            "unlink it first",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_login_page_starts_nothing_until_the_form_is_right() -> R {
         let dir = tempfile::tempdir()?;
         let folder = dir.path().join("Mine");
         std::fs::create_dir(&folder)?;
         std::fs::write(folder.join("notes.txt"), "x")?;
         let send: Sender = Arc::new(|_| {});
         let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
-        pages.prepare_setup("", Some(folder));
+        pages.prepare_setup("", Some(folder.clone()));
+        let nothing_started = || {
+            let s = lock(&pages.shared);
+            s.attempt == 0 && s.phase == Phase::Form && s.cancel.is_none()
+        };
 
         let page = request(&pages.url("setup"), "POST", "identity=anna")?;
-        assert!(page.contains("doesn't look like"), "{page}");
         assert!(page.contains("value=\"anna\""), "kept what was typed");
+        assert_eq!(
+            lock(&pages.shared)
+                .error
+                .as_deref()
+                .map(|e| e.contains("look like")),
+            Some(true)
+        );
+        assert!(nothing_started());
 
-        let page = request(&pages.url("setup"), "POST", "identity=Anna.Example.com")?;
-        assert!(page.contains("This folder has files in it"), "{page}");
-        assert!(page.contains("name=merge"), "the box to tick");
-        assert_eq!(pages.busy(), None, "nothing started");
+        request(&pages.url("setup"), "POST", "identity=anna.example.com")?;
+        assert!(lock(&pages.shared).merge_asked);
+        assert!(nothing_started());
+        // A new login starts with a clean form.
+        pages.prepare_setup("", None);
+        assert!(!lock(&pages.shared).merge_asked);
         Ok(())
     }
 
     #[test]
-    fn only_the_secret_paths_answer() -> Result<(), Box<dyn std::error::Error>> {
+    fn one_login_at_a_time_and_start_over() -> R {
         let dir = tempfile::tempdir()?;
-        let paths = Paths::under(dir.path());
         let send: Sender = Arc::new(|_| {});
-        let pages = Pages::start(paths, send)?;
-        let get = |url: &str| -> std::io::Result<String> {
-            let rest = url.trim_start_matches("http://");
-            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-            let mut s = TcpStream::connect(host)?;
-            write!(s, "GET /{path} HTTP/1.1\r\nHost: {host}\r\n\r\n")?;
-            let mut out = String::new();
-            s.read_to_string(&mut out)?;
-            Ok(out)
-        };
-        let page = get(&pages.url("setup"))?;
+        let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
+        pages.prepare_setup("", Some(dir.path().join("New")));
+        // As if a login waits for approval: a second submit joins it, starting nothing.
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut s = lock(&pages.shared);
+            s.phase = Phase::Connecting;
+            s.attempt = 1;
+            s.cancel = Some(Arc::clone(&cancel));
+        }
+        let answer = request(&pages.url("setup"), "POST", "identity=anna.example.com")?;
+        assert!(
+            answer.contains(&format!("Location: {}", pages.url("setup/done"))),
+            "{answer}"
+        );
+        assert_eq!(lock(&pages.shared).attempt, 1);
+        assert!(pages.busy().is_some());
+        // Starting over gives the waiting login up.
+        request(&pages.url("setup/again"), "POST", "")?;
+        assert!(cancel.load(Ordering::Relaxed));
+        let s = lock(&pages.shared);
+        assert_eq!((s.phase.clone(), s.attempt), (Phase::Form, 2));
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_secret_paths_answer() -> R {
+        let dir = tempfile::tempdir()?;
+        let send: Sender = Arc::new(|_| {});
+        let pages = Pages::start(Paths::under(dir.path()), send)?;
+        let page = request(&pages.url("setup"), "GET", "")?;
         assert!(page.starts_with("HTTP/1.1 200"), "{page}");
         assert!(page.contains("Connect to your Homebase"));
         let base = pages.url("setup");
@@ -675,7 +860,7 @@ mod tests {
             .split('/')
             .next()
             .unwrap_or("");
-        let guess = get(&format!("http://{host}/setup"))?;
+        let guess = request(&format!("http://{host}/setup"), "GET", "")?;
         assert!(guess.starts_with("HTTP/1.1 404"), "{guess}");
         Ok(())
     }

@@ -13,6 +13,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -140,12 +141,24 @@ impl Pending {
 
     /// Waits up to `timeout` for the browser's callback, then exchanges it for credentials.
     pub fn finish(self, timeout: Duration) -> Result<Credentials, HomebaseError> {
+        self.finish_unless(timeout, &AtomicBool::new(false))
+    }
+
+    /// [`Pending::finish`], given up as soon as `cancel` is set (the user started over).
+    pub fn finish_unless(
+        self,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<Credentials, HomebaseError> {
         let deadline = Instant::now() + timeout;
         self.listener.set_nonblocking(true)?;
         loop {
             let (stream, _) = match self.listener.accept() {
                 Ok(conn) => conn,
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(HomebaseError::Protocol("given up: started over".into()));
+                    }
                     if Instant::now() > deadline {
                         return Err(HomebaseError::Protocol(
                             "no answer from the browser in time".into(),

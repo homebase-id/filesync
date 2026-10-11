@@ -149,10 +149,9 @@ pub fn menu(view: &View) -> Vec<Item> {
     items.push(Item::Separator);
 
     if *view.daemon == Daemon::NotSetUp {
-        if view.busy.is_none() {
-            items.push(Item::Action(Action::LogIn, "Log in to Homebase…".into()));
-            items.push(Item::Separator);
-        }
+        // Also while logging in: it opens the page that follows the login, or starts over.
+        items.push(Item::Action(Action::LogIn, "Log in to Homebase…".into()));
+        items.push(Item::Separator);
         items.push(Item::Action(Action::OpenLogs, "Open logs".into()));
         items.push(quit());
         return items;
@@ -177,7 +176,7 @@ pub fn menu(view: &View) -> Vec<Item> {
                 format!("Review {} deletions…", h.here + h.remotely),
             ));
         }
-        if s.state == State::Denied && view.busy.is_none() {
+        if s.state == State::Denied {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
         items.push(Item::Separator);
@@ -332,12 +331,12 @@ mod tests {
             actions(&menu(&v)),
             [Action::LogIn, Action::OpenLogs, Action::Quit]
         );
-        // While logging in, no second login.
+        // While logging in, the login stays at hand: its page can start over.
         let busy = View {
             busy: Some("Logging in…"),
             ..v
         };
-        assert!(!actions(&menu(&busy)).contains(&Action::LogIn));
+        assert!(actions(&menu(&busy)).contains(&Action::LogIn));
         assert_eq!(status_line(&busy), "Logging in…");
     }
 
