@@ -157,7 +157,7 @@ fn within(path: &Path, folder: &Path) -> bool {
 }
 
 /// `path` as it really is: absolute, its longest existing part with symlinks resolved, and
-/// `..` in the rest taken away. What [`refuse_folder`] and [`check_folder`] look at.
+/// `..` in the rest taken away. What [`plan`] looks at.
 pub fn resolve(path: &Path) -> PathBuf {
     use std::path::Component;
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
@@ -182,7 +182,7 @@ pub fn resolve(path: &Path) -> PathBuf {
 
 /// What a folder holds, as far as setting it up goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FolderState {
+enum FolderState {
     /// Missing or empty.
     Fresh,
     /// Synced with this identity before: setting it up picks up where it was.
@@ -191,29 +191,24 @@ pub enum FolderState {
     HasFiles,
 }
 
-/// Whether `folder` can be synced with `identity`: refused if another folder or identity is
-/// set up, or the folder is another identity's. The folder is [`resolve`]d first, as the
-/// config keeps it.
-pub fn check_folder(
-    config: &Config,
-    identity: &str,
-    folder: &Path,
-) -> control::Result<FolderState> {
-    let folder = &resolve(folder);
-    if let Some(root) = config.root()?
-        && (root.identity != identity || root.folder != *folder)
+/// What `folder` (resolved) holds for `identity`: refused if another folder or identity is
+/// set up, or the folder is another identity's.
+fn folder_state(config: &Config, identity: &str, folder: &Path) -> Result<FolderState, String> {
+    if let Some(root) = config.root().map_err(|e| e.to_string())?
+        && (root.identity != identity || root.folder != folder)
     {
         return Err(format!(
             "already set up to sync {} with {}: unlink it first",
             root.folder.display(),
             root.identity
-        )
-        .into());
+        ));
     }
     if folder.join(STATE_DIR).is_dir() {
-        let theirs = StateDb::open(&state_db_path(folder))?.read(|s| s.get_kv(IDENTITY_KEY))?;
+        let theirs = StateDb::open(&state_db_path(folder))
+            .and_then(|mut db| db.read(|s| s.get_kv(IDENTITY_KEY)))
+            .map_err(|e| e.to_string())?;
         return match theirs.filter(|t| t != identity) {
-            Some(theirs) => Err(format!("{} is synced with {theirs}", folder.display()).into()),
+            Some(theirs) => Err(format!("{} is synced with {theirs}", folder.display())),
             None => Ok(FolderState::Ours),
         };
     }
@@ -223,16 +218,83 @@ pub fn check_folder(
             None => FolderState::Fresh,
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FolderState::Fresh),
-        Err(e) => Err(e.into()),
+        Err(e) => Err(format!("{}: {e}", folder.display())),
     }
 }
 
-/// What to set up.
+/// `anna.example.com`, `frodo.dotyou.cloud:8443`: letters, digits, dots, hyphens, a port.
+fn looks_like_a_domain(s: &str) -> bool {
+    let host = s.split(':').next().unwrap_or_default();
+    host.contains('.')
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+}
+
+/// Why setting up can't go ahead as asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// The folder has files in it: they would be uploaded and merged with the drive. Only
+    /// when asked for (`merge`).
+    NeedsMerge(PathBuf),
+    No(String),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::NeedsMerge(folder) => write!(
+                f,
+                "{} has files in it: they would be uploaded and merged with your Homebase",
+                folder.display()
+            ),
+            Refusal::No(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// Checks what to set up, changing nothing: the address as `typed` (normalised; it must look
+/// like a domain), and the folder, resolved (symlinks, `..`) so it is judged as it really is:
+/// never the home folder or one above it, a disk's top or a system folder; not another
+/// identity's, nor a second folder; with files in it only when `merge`.
+pub fn plan(
+    config: &Config,
+    typed: &str,
+    folder: &Path,
+    merge: bool,
+    home: Option<&Path>,
+) -> Result<SetUp, Refusal> {
+    let identity = normalize_identity(typed);
+    if !looks_like_a_domain(&identity) {
+        return Err(Refusal::No(format!(
+            "{identity:?} doesn't look like a Homebase address (like anna.example.com)"
+        )));
+    }
+    let folder = resolve(folder);
+    if let Some(why) = refuse_folder(&folder, home.map(resolve).as_deref()) {
+        return Err(Refusal::No(why));
+    }
+    match folder_state(config, &identity, &folder).map_err(Refusal::No)? {
+        FolderState::HasFiles if !merge => Err(Refusal::NeedsMerge(folder)),
+        _ => Ok(SetUp {
+            identity,
+            folder,
+            existing: merge,
+            start: true,
+            at_logon: true,
+        }),
+    }
+}
+
+/// What to set up, as [`plan`] makes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetUp {
     /// As [`normalize_identity`] leaves it.
     pub identity: String,
-    /// Absolute; created if missing.
+    /// Resolved ([`resolve`]); created if missing.
     pub folder: PathBuf,
     /// Merge the files of a folder that has some with the drive.
     pub existing: bool,
@@ -252,25 +314,19 @@ pub fn set_up(
     authorize: &mut dyn FnMut(&str, &str) -> Result<Credentials, HomebaseError>,
     say: &mut dyn FnMut(&str),
 ) -> control::Result<()> {
-    let identity = request.identity.as_str();
     let config_path = paths.config_file();
     let mut config = Config::load(&config_path)?.unwrap_or_default();
-
-    // The folder: new, empty, already this identity's, or adopted on purpose.
-    let folder = resolve(&request.folder);
-    if let Some(why) = refuse_folder(&folder, home().map(|h| resolve(&h)).as_deref()) {
-        return Err(why.into());
-    }
-    std::fs::create_dir_all(&folder)?;
-    let folder = folder.canonicalize()?;
-    if check_folder(&config, identity, &folder)? == FolderState::HasFiles && !request.existing {
-        return Err(format!(
-            "{} has files in it: they would be uploaded and merged with the drive. Add \
-             --existing to do that, or pick an empty or new folder with --folder.",
-            folder.display()
-        )
-        .into());
-    }
+    // Checked again: the config may have changed since the request was planned.
+    let checked = plan(
+        &config,
+        &request.identity,
+        &request.folder,
+        request.existing,
+        home().as_deref(),
+    )?;
+    let identity = checked.identity.as_str();
+    std::fs::create_dir_all(&checked.folder)?;
+    let folder = checked.folder.canonicalize()?;
 
     // This computer, authorized on the identity. New credentials are kept at once: an
     // approval lost to a later failure would have to be given again.
@@ -391,43 +447,79 @@ mod tests {
     }
 
     #[test]
-    fn folders_are_checked_before_setting_up() -> R {
+    fn plans_are_checked() -> R {
         let dir = tempfile::tempdir()?;
-        let folder = dir.path().join("Homebase");
-        let config = Config::default();
-        assert_eq!(
-            check_folder(&config, "a.example", &folder)?,
-            FolderState::Fresh
-        );
-        std::fs::create_dir(&folder)?;
-        assert_eq!(
-            check_folder(&config, "a.example", &folder)?,
-            FolderState::Fresh
-        );
-        std::fs::write(folder.join("notes.txt"), "x")?;
-        assert_eq!(
-            check_folder(&config, "a.example", &folder)?,
-            FolderState::HasFiles
-        );
+        let home = dir.path().canonicalize()?.join("anna");
+        let fresh = home.join("Homebase");
+        let full = home.join("Mine");
+        std::fs::create_dir_all(&full)?;
+        std::fs::write(full.join("notes.txt"), "x")?;
+        let none = Config::default();
+        let plan = |typed, folder: &Path, merge, config: &Config| {
+            plan(config, typed, folder, merge, Some(&home))
+        };
+        let refused = |r: Result<SetUp, Refusal>, why: &str| match r {
+            Err(Refusal::No(said)) => assert!(said.contains(why), "{said}"),
+            other => panic!("{other:?}"),
+        };
 
+        // The address normalised, the folder resolved.
+        let ok = plan(
+            " Anna.Example.com/ ",
+            &home.join("x/../Homebase"),
+            false,
+            &none,
+        )?;
+        assert_eq!(
+            (ok.identity.as_str(), &ok.folder),
+            ("anna.example.com", &fresh)
+        );
+        refused(plan("anna", &fresh, false, &none), "doesn't look like");
+        refused(plan("a b.com", &fresh, false, &none), "doesn't look like");
+        assert!(plan("frodo.dotyou.cloud:8443", &fresh, false, &none).is_ok());
+        // Never the home folder (also through a symlink), a disk's top, a system folder.
+        refused(plan("a.example", &home, false, &none), "whole home folder");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&home, home.join("everything"))?;
+            refused(
+                plan("a.example", &home.join("everything"), true, &none),
+                "whole home folder",
+            );
+            refused(
+                plan("a.example", Path::new("/"), false, &none),
+                "top of a disk",
+            );
+            refused(
+                plan("a.example", Path::new("/usr/x"), false, &none),
+                "system",
+            );
+        }
+        // Files in it: merged only when asked.
+        assert_eq!(
+            plan("a.example", &full, false, &none),
+            Err(Refusal::NeedsMerge(full.clone()))
+        );
+        assert!(plan("a.example", &full, true, &none)?.existing);
         // Synced before: with this identity it picks up where it was, with another it's refused.
-        std::fs::create_dir(folder.join(STATE_DIR))?;
-        StateDb::open(&state_db_path(&folder))?.write(|s| s.set_kv(IDENTITY_KEY, "a.example"))?;
-        assert_eq!(
-            check_folder(&config, "a.example", &folder)?,
-            FolderState::Ours
+        std::fs::create_dir(full.join(STATE_DIR))?;
+        StateDb::open(&state_db_path(&full))?.write(|s| s.set_kv(IDENTITY_KEY, "a.example"))?;
+        assert!(plan("a.example", &full, false, &none).is_ok());
+        refused(
+            plan("b.example", &full, false, &none),
+            "is synced with a.example",
         );
-        assert!(check_folder(&config, "b.example", &folder).is_err());
-
-        // Another folder already set up.
-        let config = Config {
+        // Another folder or identity already set up.
+        let set = Config {
             roots: vec![Root {
                 identity: "a.example".into(),
-                folder: dir.path().join("Other"),
+                folder: fresh.clone(),
             }],
             ..Config::default()
         };
-        assert!(check_folder(&config, "a.example", &folder).is_err());
+        assert!(plan("a.example", &fresh, false, &set).is_ok());
+        refused(plan("b.example", &fresh, false, &set), "unlink it first");
+        refused(plan("a.example", &full, false, &set), "unlink it first");
         Ok(())
     }
 }

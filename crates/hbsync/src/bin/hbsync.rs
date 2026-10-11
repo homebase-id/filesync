@@ -7,7 +7,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{control, running, start, stop};
 use hbsync_app::runner::Hints;
-use hbsync_app::{Control, Paths, State, Status, autostart, control as daemon, setup, words};
+use hbsync_app::{
+    Config, Control, Paths, State, Status, autostart, control as daemon, setup, words,
+};
 use hbsync_local::STATE_DIR;
 
 type Res<T> = hbsync_app::control::Result<T>;
@@ -123,16 +125,26 @@ fn run(command: Command) -> Res<ExitCode> {
             no_start,
             no_autostart,
         } => {
-            let request = setup::SetUp {
-                identity: setup::normalize_identity(&identity),
-                folder: match folder {
-                    Some(f) => std::path::absolute(f)?,
-                    None => setup::default_folder()?,
-                },
-                existing,
-                start: !no_start,
-                at_logon: !no_autostart,
+            let folder = match folder {
+                Some(f) => f,
+                None => setup::default_folder()?,
             };
+            let config = Config::load(&paths.config_file())?.unwrap_or_default();
+            let home = hbsync_app::paths::home();
+            let mut request =
+                match setup::plan(&config, &identity, &folder, existing, home.as_deref()) {
+                    Ok(request) => request,
+                    Err(refused @ setup::Refusal::NeedsMerge(_)) => {
+                        return Err(format!(
+                            "{refused}. Add --existing to do that, or pick an empty or new folder \
+                         with --folder."
+                        )
+                        .into());
+                    }
+                    Err(refused) => return Err(refused.into()),
+                };
+            request.start = !no_start;
+            request.at_logon = !no_autostart;
             let mut authorize = |identity: &str, device: &str| {
                 println!("Opening your browser to authorize this computer on {identity}...");
                 setup::authorize(identity, device, browser.as_deref(), |url| {
