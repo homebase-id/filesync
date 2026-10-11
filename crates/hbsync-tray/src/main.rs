@@ -85,6 +85,17 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!("{PROGRAM} {} started", env!("CARGO_PKG_VERSION"));
+    // A private instance (HBSYNC_HOME) mustn't replace the launcher of the real one.
+    #[cfg(target_os = "linux")]
+    if !control::dev_home() {
+        std::thread::spawn(|| {
+            let added = std::env::current_exe()
+                .and_then(|tray| autostart::add_launcher(&tray, icons::MARK_256));
+            if let Err(e) = added {
+                tracing::info!("no launcher: {e}");
+            }
+        });
+    }
     match run(paths) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

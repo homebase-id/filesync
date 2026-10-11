@@ -20,8 +20,11 @@ use std::path::{Path, PathBuf};
 pub const LABEL: &str = "cloud.homebase.filesync";
 /// The tray's program name.
 pub const TRAY: &str = "hbsync-tray";
-/// The tray's desktop autostart entry (Linux).
+/// The tray's desktop entry (Linux): in the session's autostart folder to start at logon, and
+/// in the applications folder as its launcher.
 pub const DESKTOP_ENTRY: &str = "homebase-filesync.desktop";
+/// The tray's icon name in the icon theme (Linux).
+pub const ICON: &str = "homebase-filesync";
 /// The systemd unit.
 pub const UNIT: &str = "hbsync.service";
 /// The `Run` value's name.
@@ -113,8 +116,8 @@ pub fn launchd_plist(program: &Program, env: &[(String, String)]) -> String {
     )
 }
 
-/// The desktop session autostart entry for the tray (freedesktop Desktop Entry spec: the
-/// environment through `env`, every argument quoted).
+/// The tray's desktop entry, for autostart and the launcher (freedesktop Desktop Entry spec:
+/// the environment through `env`, every argument quoted).
 pub fn desktop_entry(tray: &Path, env: &[(String, String)]) -> String {
     let quote = |s: &str| {
         let s = s
@@ -141,6 +144,8 @@ pub fn desktop_entry(tray: &Path, env: &[(String, String)]) -> String {
          Name=Homebase Filesync\n\
          Comment=Keeps your Homebase folder in sync\n\
          Exec={exec}\n\
+         Icon={ICON}\n\
+         Categories=Network;FileTransfer;\n\
          Terminal=false\n\
          X-GNOME-Autostart-enabled=true\n"
     )
@@ -380,6 +385,12 @@ mod os {
         systemctl(&["daemon-reload"])
     }
 
+    pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
+        let data = crate::paths::xdg_dir("XDG_DATA_HOME", ".local/share")
+            .ok_or_else(|| io::Error::other("HOME isn't set"))?;
+        write_launcher(&data, tray, icon_png)
+    }
+
     /// Through systemd only when it starts the daemon (not the tray).
     pub fn start() -> io::Result<bool> {
         if !unit()?.exists() {
@@ -489,6 +500,37 @@ pub fn start() -> io::Result<bool> {
     os::start()
 }
 
+/// Lists the tray among the desktop's applications (Linux; elsewhere the installer will): its
+/// desktop entry in `$XDG_DATA_HOME/applications` and its icon in the icon theme. Started from
+/// there or at logon, the session sees it as its own app (in System Monitor, say), not as part
+/// of the terminal that started it. Written only when it changed.
+#[cfg(target_os = "linux")]
+pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
+    os::add_launcher(tray, icon_png)
+}
+
+#[cfg(target_os = "linux")]
+fn write_launcher(data: &Path, tray: &Path, icon_png: &[u8]) -> io::Result<()> {
+    let write = |path: PathBuf, bytes: &[u8]| -> io::Result<()> {
+        if std::fs::read(&path).is_ok_and(|old| old == bytes) {
+            return Ok(());
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(path, bytes)
+    };
+    write(
+        data.join("icons/hicolor/256x256/apps")
+            .join(format!("{ICON}.png")),
+        icon_png,
+    )?;
+    write(
+        data.join("applications").join(DESKTOP_ENTRY),
+        desktop_entry(tray, &passed_env()).as_bytes(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,9 +581,33 @@ mod tests {
             "{entry}"
         );
         assert!(desktop_entry(tray, &[]).contains("Exec=\"/opt/Filesync/hbsync-tray\"\n"));
+        assert!(entry.contains("Icon=homebase-filesync\n"));
         let plist = launchd_plist(&Program::Tray(tray.into()), &[]);
         assert!(plist.contains("<string>cloud.homebase.filesync.tray</string>"));
         assert!(plist.contains("<string>Interactive</string>"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_launcher_is_written_once() -> io::Result<()> {
+        let data = tempfile::tempdir()?;
+        let tray = Path::new("/opt/Filesync/hbsync-tray");
+        write_launcher(data.path(), tray, b"png")?;
+        let entry = data.path().join("applications/homebase-filesync.desktop");
+        let icon = data
+            .path()
+            .join("icons/hicolor/256x256/apps/homebase-filesync.png");
+        assert!(std::fs::read_to_string(&entry)?.contains("Name=Homebase Filesync\n"));
+        assert_eq!(std::fs::read(&icon)?, b"png");
+        let written = std::fs::metadata(&entry)?.modified()?;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_launcher(data.path(), tray, b"png")?;
+        assert_eq!(
+            std::fs::metadata(&entry)?.modified()?,
+            written,
+            "unchanged, not rewritten"
+        );
+        Ok(())
     }
 
     #[test]

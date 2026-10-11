@@ -189,6 +189,14 @@ the plist and the unit (not on Windows), so the daemon uses the same files as th
 that set it up. The unit goes where the user's systemd looks by default, whatever the shell's
 `XDG_CONFIG_HOME`. An install the service manager refuses leaves no file behind.
 
+On Linux the tray also lists itself among the desktop's applications each time it starts
+(unless `HBSYNC_HOME` is set): the same entry in `~/.local/share/applications/` and its icon in
+`~/.local/share/icons/hicolor/256x256/apps/homebase-filesync.png`, rewritten only when they
+changed. Started from there or at logon, the session gives it a group of its own (System
+Monitor shows Homebase Filesync, the daemon below it); started from a terminal, it belongs to
+the terminal. The launcher stays after Log out, as the way to log in again. Elsewhere the
+installer will do this (not built yet).
+
 `hbsync setup` turns autostart on, `logout` and `unlink` turn it off, `hbsync autostart on|off`
 by hand. With the daemon starting at logon, `hbsync start` goes through launchd or systemd so
 that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches the user's logon entry.
