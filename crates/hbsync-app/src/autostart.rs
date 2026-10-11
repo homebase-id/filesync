@@ -218,6 +218,7 @@ pub fn logon_program() -> io::Result<Program> {
 }
 
 /// Removes `path`; already gone is fine.
+#[cfg(unix)]
 fn remove_if_exists(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
