@@ -137,7 +137,7 @@ impl FakeServer {
                     return Err(RemoteError::HashMismatch);
                 }
                 let info = PayloadInfo {
-                    hash: Some(upload.hash),
+                    hash: upload.hash,
                     bytes: bytes.len() as u64,
                 };
                 Ok(Some((Arc::new(bytes), info)))
@@ -324,8 +324,7 @@ impl FakeServer {
         Ok((node, self.create(&new, Some(upload))?))
     }
 
-    /// The content names of all live files, straight from their headers (also for files
-    /// without a hash), for test assertions.
+    /// The content names of all live files, straight from their headers, for test assertions.
     pub fn live_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .files

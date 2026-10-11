@@ -275,41 +275,24 @@ mod mirror {
             folder.node,
             "f",
             Some(MirrorFile {
-                hash: Some(c.hash),
+                hash: c.hash,
                 size: c.size,
                 mtime_ms: c.mtime_ms,
                 executable: true,
             }),
         );
-        let unhashed = row(
-            NodeId::new(),
-            folder.node,
-            "legacy",
-            Some(MirrorFile {
-                hash: None,
-                size: 3,
-                mtime_ms: 0,
-                executable: false,
-            }),
-        );
         db.write(|s| {
             s.put_mirror(&folder)?;
-            s.put_mirror(&file)?;
-            s.put_mirror(&unhashed)
+            s.put_mirror(&file)
         })?;
         db.read(|s| {
             assert_eq!(s.get_mirror(file.node)?, Some(file.clone()));
             assert_eq!(s.mirror_by_file(folder.file_id)?, Some(folder.clone()));
-            assert_eq!(s.mirror_children(folder.node)?.len(), 2);
-            assert_eq!(s.mirror_count()?, 3);
+            assert_eq!(s.mirror_children(folder.node)?.len(), 1);
+            assert_eq!(s.mirror_count()?, 2);
             Ok(())
         })?;
         assert_eq!(file.state().map(|st| st.name), Some("f".into()));
-        assert_eq!(
-            unhashed.state(),
-            None,
-            "a file without hash has no complete state"
-        );
         let removed = db.write(|s| s.delete_mirror(file.file_id))?;
         assert_eq!(removed, Some(file.clone()));
         assert_eq!(db.read(|s| s.get_mirror(file.node))?, None);

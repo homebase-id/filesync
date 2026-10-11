@@ -58,8 +58,7 @@ pub struct MirrorRow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MirrorFile {
-    /// `None` if the writer sent no hash: the content must be downloaded to be compared.
-    pub hash: Option<hbsync_types::ContentHash>,
+    pub hash: hbsync_types::ContentHash,
     pub size: u64,
     pub mtime_ms: i64,
     pub executable: bool,
@@ -77,12 +76,12 @@ impl MirrorRow {
         }
     }
 
-    /// The node state, if complete (files need a hash).
+    /// The node state, if complete (files need their [`MirrorFile`]).
     pub fn state(&self) -> Option<NodeState> {
         let content = match (self.kind, &self.file) {
             (NodeKind::Folder, _) => None,
             (NodeKind::File, Some(f)) => Some(FileContent {
-                hash: f.hash?,
+                hash: f.hash,
                 size: f.size,
                 mtime_ms: f.mtime_ms,
                 executable: f.executable,
@@ -780,7 +779,7 @@ impl<'a> Store<'a> {
                 parent,
                 codec::kind_to(row.kind),
                 row.name,
-                f.and_then(|f| f.hash.as_ref().map(codec::hash_to)),
+                f.map(|f| codec::hash_to(&f.hash)),
                 f.map(|f| f.size as i64),
                 f.map(|f| f.mtime_ms),
                 f.is_some_and(|f| f.executable),
@@ -1106,11 +1105,7 @@ fn mirror_row(r: &Row<'_>) -> Result<MirrorRow> {
     let file = match kind {
         NodeKind::Folder => None,
         NodeKind::File => Some(MirrorFile {
-            hash: r
-                .get::<_, Option<Vec<u8>>>(6)?
-                .as_deref()
-                .map(codec::hash_from)
-                .transpose()?,
+            hash: codec::hash_from(&r.get::<_, Vec<u8>>(6)?)?,
             size: r.get::<_, Option<i64>>(7)?.unwrap_or(0) as u64,
             mtime_ms: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
             executable: r.get(9)?,

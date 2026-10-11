@@ -92,8 +92,6 @@ pub struct Input {
     pub remote_refs: HashMap<NodeId, RemoteRef>,
     /// Local files whose hash isn't known yet (being written, locked): decided later.
     pub local_unhashed: HashSet<NodeId>,
-    /// Remote files without a hash: their content can only be compared after a download.
-    pub remote_unhashed: HashSet<NodeId>,
     pub dirty: BTreeSet<NodeId>,
     /// The remote tree holds every live node the remote has that matters here (the feed is
     /// drained and parents were looked up). Then a remote node whose parent is unknown
@@ -527,7 +525,7 @@ impl<'a> Reconciler<'a> {
 
     fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
-        if i.local_unhashed.contains(&node) || i.remote_unhashed.contains(&node) {
+        if i.local_unhashed.contains(&node) {
             self.defer(node);
             return;
         }
@@ -622,11 +620,7 @@ impl<'a> Reconciler<'a> {
         let mut origin = Origin::Remote;
         if l.kind == NodeKind::File {
             let same_edit = match (&l.content, &r.content) {
-                (Some(lc), Some(rc)) => {
-                    lc.hash == rc.hash
-                        && lc.executable == rc.executable
-                        && !self.input.remote_unhashed.contains(&node)
-                }
+                (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
                 _ => false,
             };
             if l_edited && r_edited && !same_edit {

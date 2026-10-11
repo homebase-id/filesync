@@ -259,23 +259,8 @@ impl Builder<'_, '_> {
 
     fn add_mirror(&mut self, row: MirrorRow) {
         self.input.remote_refs.insert(row.node, row.remote_ref());
-        match row.state() {
-            Some(state) => {
-                self.input.remote.insert(row.node, state);
-            }
-            None => {
-                // A file without a hash: present, but its content can't be compared.
-                self.input.remote_unhashed.insert(row.node);
-                self.input.remote.insert(
-                    row.node,
-                    NodeState {
-                        parent: row.parent,
-                        name: row.name,
-                        kind: row.kind,
-                        content: None,
-                    },
-                );
-            }
+        if let Some(state) = row.state() {
+            self.input.remote.insert(row.node, state);
         }
     }
 

@@ -68,7 +68,7 @@ They are stored in the existing header JSON (`hdrFileMetaData`; there is no payl
 **Sync client usage:**
 - It writes BLAKE3 for its own uploads.
 - When comparing a local file against a node written with SHA-256, it computes SHA-256 for that one file on demand.
-- On a drive that doesn't require hashes, a node without hashes is downloaded and hashed locally, and treated as unverified.
+- It requires them: a file node without a content hash (or without its payload) isn't synced. The row is skipped as unreadable and reported, like one that doesn't decrypt. Every decision about a file's content rests on its hash; a node that could only be compared after a download is a way to lose an edit, and no writer needs it.
 
 **What the hashes buy:**
 - **Upload integrity**: the server rejects corrupted transfers.
@@ -171,7 +171,7 @@ With #1892, #1893 and #1895 filed, the Homebase side of the design is settled. T
 design work is on the client.
 
 ## Decisions (2026-10-08)
-- **Hashes:** client-computed stored + content hash; SHA-256 or BLAKE3; optional but recommended; both or none; the server (and a receiving peer server) checks the stored hash; the content hash is encrypted on encrypted payloads with IV = payloadIv XOR 0xAA…AA; base64 on `PayloadDescriptor` (#1895). The sync client writes BLAKE3.
+- **Hashes:** client-computed stored + content hash; SHA-256 or BLAKE3; optional on the server but required by the sync client; both or none; the server (and a receiving peer server) checks the stored hash; the content hash is encrypted on encrypted payloads with IV = payloadIv XOR 0xAA…AA; base64 on `PayloadDescriptor` (#1895). The sync client writes BLAKE3.
 - **Folders:** id tree (`UniqueId` = node id, `GroupId` = parent id).
 - **Large files:** fix the server first (#1892, #1893; resumable upload still to file).
 - **Linux offline:** selective sync in v1, FUSE later.

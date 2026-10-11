@@ -177,7 +177,6 @@ impl Masks {
             base_extra: input.base_extra.clone(),
             remote_refs: input.remote_refs.clone(),
             local_unhashed,
-            remote_unhashed: input.remote_unhashed.clone(),
             dirty,
             remote_complete: input.remote_complete,
         };

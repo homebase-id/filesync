@@ -123,9 +123,7 @@ fn find_match(
         let (Some(local_hash), Some(file)) = (row.hash, remote.file) else {
             continue;
         };
-        let Some(remote_hash) = file.hash else {
-            continue;
-        };
+        let remote_hash = file.hash;
         if file.size != row.fingerprint.size {
             continue;
         }

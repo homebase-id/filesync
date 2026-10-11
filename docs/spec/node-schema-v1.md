@@ -69,8 +69,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 - `storedHash` is over the ciphertext; `contentHash` is the plaintext hash, encrypted
   (`encryption.md`). (On an unencrypted payload, which this client doesn't write, the server
   requires them equal **[verified]**, rule 5 of `../odin-core/docs/payload-hashes.md`.)
-- A node with no `hash` (drive without the requirement) is downloaded, hashed locally and
-  marked unverified.
+- A file node with no `hash`, or no `sync_data` payload, isn't a node: the client skips the row
+  as unreadable and reports it.
 
 ## Identity and tombstones
 - `uniqueId` is the node id. Creates are idempotent: a retry that gets `ExistingFileWithUniqueId`

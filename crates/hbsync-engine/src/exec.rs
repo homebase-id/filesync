@@ -800,9 +800,7 @@ impl<'a> Executor<'a> {
         let Some(file) = mirror.file else {
             return Err(Outcome::Skip("not a file".into()));
         };
-        let Some(expected) = file.hash else {
-            return Err(Outcome::Skip("no remote hash".into()));
-        };
+        let expected = file.hash;
         if replace != current.is_some() {
             return Err(Outcome::Skip("local presence changed".into()));
         }
@@ -1205,7 +1203,7 @@ impl<'a> Executor<'a> {
             Ok(w) => w,
             Err(e) => return Ok(remote_outcome(e)),
         };
-        let hash = mirror.file.and_then(|f| f.hash);
+        let hash = mirror.file.map(|f| f.hash);
         let row = mirror_from(
             node,
             parent,
@@ -1299,7 +1297,7 @@ fn mirror_from(
     parent: NodeId,
     kind: NodeKind,
     content: &NodeContent,
-    hash: Option<hbsync_types::ContentHash>,
+    hash: Option<hbsync_types::ContentHash>, // `Some` for files
     written: hbsync_types::RemoteRef,
     extra: Option<String>,
 ) -> MirrorRow {
@@ -1310,7 +1308,7 @@ fn mirror_from(
         parent,
         name: content.name.clone(),
         kind,
-        file: (kind == NodeKind::File).then(|| MirrorFile {
+        file: hash.map(|hash| MirrorFile {
             hash,
             size: content.size.unwrap_or(0),
             mtime_ms: content.mtime.unwrap_or(0),
@@ -1548,8 +1546,7 @@ fn wanted_download(db: &mut StateDb, file_name: &str) -> Result<bool, StateError
         let current = s
             .get_mirror(node)?
             .and_then(|m| m.file)
-            .and_then(|f| f.hash)
-            .map(|h| download_key(node, &h));
+            .map(|f| download_key(node, &f.hash));
         Ok(s.is_dirty(node)?
             && current.is_some_and(|key| file_name.strip_suffix(".partial") == Some(&key)))
     })

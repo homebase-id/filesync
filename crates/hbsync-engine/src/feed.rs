@@ -5,7 +5,7 @@
 //! touches is marked dirty. The feed is drained completely before planning, which is what
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
-use hbsync_remote::{PayloadInfo, Remote, RemoteBody, RemoteError, RemoteHeader};
+use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{MirrorFile, MirrorRow, REMOTE_CURSOR_KEY, StateDb, StateError, Store};
 use hbsync_types::NodeKind;
 
@@ -76,25 +76,24 @@ pub fn with_retries<T>(mut f: impl FnMut() -> Result<T, RemoteError>) -> Result<
 
 /// Applies one header to the mirror. Returns `true` for a live node, `false` for a tombstone.
 pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
-    match mirror_row(header) {
-        Some(row) => {
-            s.put_mirror(&row)?;
+    if header.is_deleted() {
+        // A tombstone has no node id: find the node by file id.
+        if let Some(row) = s.delete_mirror(header.file_id)? {
             s.mark_dirty(row.node)?;
-            Ok(true)
+        } else if let Some(base) = s.base_by_remote_file(header.file_id)? {
+            s.mark_dirty(base.node)?;
         }
-        None => {
-            // A tombstone has no node id: find the node by file id.
-            if let Some(row) = s.delete_mirror(header.file_id)? {
-                s.mark_dirty(row.node)?;
-            } else if let Some(base) = s.base_by_remote_file(header.file_id)? {
-                s.mark_dirty(base.node)?;
-            }
-            Ok(false)
-        }
+        return Ok(false);
     }
+    // A live file without its payload changes nothing: it must never read as a delete.
+    if let Some(row) = mirror_row(header) {
+        s.put_mirror(&row)?;
+        s.mark_dirty(row.node)?;
+    }
+    Ok(true)
 }
 
-/// The mirror row of a live header; `None` for tombstones.
+/// The mirror row of a live header; `None` for tombstones and for files without a payload.
 pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     let RemoteBody::Live {
         node,
@@ -107,10 +106,8 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     let file = match header.kind {
         NodeKind::Folder => None,
         NodeKind::File => {
-            let info = payload.unwrap_or(PayloadInfo {
-                hash: None,
-                bytes: 0,
-            });
+            let info = payload.as_ref()?; // `Remote`s refuse such rows
+
             Some(MirrorFile {
                 hash: info.hash,
                 size: content.size.unwrap_or(info.bytes),
@@ -140,4 +137,45 @@ pub(crate) fn unknown_keys(row: &MirrorRow) -> serde_json::Map<String, serde_jso
         .as_deref()
         .and_then(|extra| serde_json::from_str(extra).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use hbsync_fileio::{HashAlgorithm, hash_bytes};
+    use hbsync_remote::PayloadInfo;
+    use hbsync_types::Uuid;
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeId, RemoteFileId, VersionTag};
+
+    use super::*;
+
+    #[test]
+    fn a_live_file_without_its_payload_is_no_delete() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let mut header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            body: RemoteBody::Live {
+                node: NodeId::new(),
+                content: NodeContent::file("f", 0, 1, false),
+                payload: Some(PayloadInfo {
+                    hash: hash_bytes(b"x", HashAlgorithm::Blake3),
+                    bytes: 1,
+                }),
+            },
+        };
+        assert!(db.write(|s| apply(s, &header))?);
+        if let RemoteBody::Live { payload, .. } = &mut header.body {
+            *payload = None;
+        }
+        assert!(db.write(|s| apply(s, &header))?);
+        assert_eq!(
+            db.read(|s| s.mirror_count())?,
+            1,
+            "the mirror keeps the file"
+        );
+        Ok(())
+    }
 }

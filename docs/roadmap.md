@@ -2,8 +2,8 @@
 
 Progress (2026-10-10): Layers 0–4 are built against the fake remote; Layer 5's adapter syncs
 two folders through a live identity (frodo), including the WebSocket wake-up. Open in Layer 5:
-batch deletes, files of 4 GiB and over (#1893), app sign-in by slug (#1902), hash-less nodes
-from other writers, and the interop work. Files are encrypted in Homebase's own format
+batch deletes, files of 4 GiB and over (#1893), app sign-in by slug (#1902), and the interop
+work. Files are encrypted in Homebase's own format
 ([spec/encryption.md](spec/encryption.md)). Layer 6 has its filters, and the
 daemon with its config, keychain, control socket, CLI and autostart
 ([spec/daemon.md](spec/daemon.md)).

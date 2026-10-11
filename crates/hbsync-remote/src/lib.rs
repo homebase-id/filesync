@@ -35,7 +35,7 @@ pub enum RemoteBody {
         /// `UniqueId`.
         node: NodeId,
         content: NodeContent,
-        /// Files only.
+        /// Every file has one; folders have none.
         payload: Option<PayloadInfo>,
     },
     /// A tombstone: `UniqueId`, content and payloads are gone.
@@ -45,9 +45,8 @@ pub enum RemoteBody {
 /// What the header says about the `sync_data` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PayloadInfo {
-    /// The content hash; `None` when the writer didn't send one (drive without the
-    /// requirement): such a node is downloaded and hashed locally, and treated as unverified.
-    pub hash: Option<ContentHash>,
+    /// The content hash. Every file has one: a row without it isn't a node.
+    pub hash: ContentHash,
     /// Stored size: padded on Homebase, where payloads are encrypted; the plaintext size on
     /// the fake.
     pub bytes: u64,
@@ -65,7 +64,7 @@ impl RemoteHeader {
         matches!(self.body, RemoteBody::Deleted)
     }
 
-    /// The node state, if the header is live and complete (files need a hash).
+    /// The node state, if the header is live (and, for a file, has its payload).
     pub fn state(&self) -> Option<NodeState> {
         let RemoteBody::Live {
             content, payload, ..
@@ -81,7 +80,7 @@ impl RemoteHeader {
                     self.parent,
                     content.name.clone(),
                     FileContent {
-                        hash: payload.hash?,
+                        hash: payload.hash,
                         size: content.size.unwrap_or(payload.bytes),
                         mtime_ms: content.mtime.unwrap_or(0),
                         executable: content.x,

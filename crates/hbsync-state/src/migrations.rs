@@ -62,7 +62,7 @@ const MIGRATIONS: &[&str] = &[
         parent        INTEGER NOT NULL,               -- nodes.id
         kind          INTEGER NOT NULL,
         name          TEXT NOT NULL,
-        hash          BLOB,                           -- NULL: file written without a hash
+        hash          BLOB,                           -- files only
         size          INTEGER,
         mtime_ms      INTEGER,
         executable    INTEGER NOT NULL DEFAULT 0,

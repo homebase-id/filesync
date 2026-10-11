@@ -140,11 +140,12 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
             }
             let payload = match kind {
                 NodeKind::Folder => None,
-                NodeKind::File => meta
-                    .sync_payload()
-                    .map(|p| payload_info(p, &key))
-                    .transpose()
-                    .map_err(|e| format!("file {id}: {e}"))?,
+                NodeKind::File => {
+                    let p = meta
+                        .sync_payload()
+                        .ok_or_else(|| format!("file {id}: no payload"))?;
+                    Some(payload_info(p, &key).map_err(|e| format!("file {id}: {e}"))?)
+                }
             };
             let body = RemoteBody::Live {
                 node: NodeId(node),
@@ -209,18 +210,14 @@ fn payload_iv(p: &Payload) -> Result<[u8; 16], String> {
 
 /// The payload's size and content hash, sealed with the file `key` under the payload IV.
 fn payload_info(p: &Payload, key: &KeyHeader) -> Result<PayloadInfo, String> {
-    let hash = p
-        .hash
-        .as_ref()
-        .map(|h| {
-            let algorithm: HashAlgorithm = h
-                .algorithm
-                .parse()
-                .map_err(|_| format!("hash algorithm {:?}", h.algorithm))?;
-            key.open_hash(&payload_iv(p)?, algorithm, &h.content_hash)
-                .map_err(|e| format!("content hash: {e}"))
-        })
-        .transpose()?;
+    let h = p.hash.as_ref().ok_or("no content hash")?;
+    let algorithm: HashAlgorithm = h
+        .algorithm
+        .parse()
+        .map_err(|_| format!("hash algorithm {:?}", h.algorithm))?;
+    let hash = key
+        .open_hash(&payload_iv(p)?, algorithm, &h.content_hash)
+        .map_err(|e| format!("content hash: {e}"))?;
     Ok(PayloadInfo {
         hash,
         bytes: p.bytes_written,
@@ -453,6 +450,15 @@ mod tests {
         content.size = None;
         sizeless.file_metadata.app_data.content = Some(content.to_json());
         refused(sizeless, "no size")?;
+        // A file is its payload, and its content hash is what sync compares.
+        let mut bare = fixture("file-node.json");
+        bare.file_metadata.payloads = None;
+        refused(bare, "no payload")?;
+        let mut unhashed = fixture("file-node.json");
+        for payload in unhashed.file_metadata.payloads.iter_mut().flatten() {
+            payload.hash = None;
+        }
+        refused(unhashed, "no content hash")?;
         // Every node is encrypted.
         let error = to_remote(fixture("file-node.json"), &SS)
             .err()
@@ -463,13 +469,6 @@ mod tests {
         let mut tomb = fixture("tombstone.json");
         tomb.file_metadata.app_data.group_id = None;
         assert!(to_remote(tomb, &SS).is_ok_and(|h| h.is_deleted()));
-        // A file without its payload is kept, without a state (the engine waits for it).
-        let mut bare = fixture("file-node.json");
-        bare.file_metadata.payloads = None;
-        assert_eq!(
-            to_remote(as_stored(bare)?, &SS).map(|h| h.state()),
-            Ok(None)
-        );
         Ok(())
     }
 
