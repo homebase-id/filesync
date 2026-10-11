@@ -647,7 +647,6 @@ button.secondary{margin:0;color:var(--purple);background:#fff;border:1px solid v
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn forms_decode() {
@@ -749,11 +748,16 @@ mod tests {
                 "whole home folder",
             );
             refused(
-                check("anna.example.com", false, Path::new("/"), &none),
+                check("anna.example.com", false, std::path::Path::new("/"), &none),
                 "top of a disk",
             );
             refused(
-                check("anna.example.com", false, Path::new("/usr/x"), &none),
+                check(
+                    "anna.example.com",
+                    false,
+                    std::path::Path::new("/usr/x"),
+                    &none,
+                ),
                 "system",
             );
         }
