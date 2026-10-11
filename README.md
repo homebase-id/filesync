@@ -19,17 +19,21 @@ They update themselves.
   polling. A restart with nothing changed is idle again in about 55 ms. (A big first sync takes
   more for a while: about 160 MB at its peak for 10,000 files.)
 
-  Side by side on one six-year-old Linux desktop (Intel i7-8700K, 2026-10-11, both idle):
+  Side by side on one six-year-old Linux desktop (Intel i7-8700K, October 2026), both started
+  at boot and left alone:
 
-  | | Memory (RSS) | Threads |
-  |---|---|---|
-  | Homebase Filesync (daemon + tray) | **33 MB** | 18 |
-  | Dropbox 272.4 | 469 MB | 86 |
+  | | Memory (RSS) | Threads | CPU, first 10 minutes after boot | CPU, idle on average |
+  |---|---|---|---|---|
+  | Homebase Filesync (daemon + tray) | **33 MB** | 18 | **1.2 s** | **≈ 0** (0.03 s a minute) |
+  | Dropbox 272.4 | 469 MB | 86 | 18.9 s | 2.7% of a core, all the time (over 8 days) |
 
-  That's about 14 times less memory. To be fair, Dropbox was watching a bigger folder (127,000
-  files and 288 GB, against Filesync's 11,700 files and 1 GB). Filesync is built so its memory
-  stays flat as a folder grows: it walks the tree a branch at a time and keeps the rest in its
-  database, not in memory.
+  That's about 14 times less memory and 15 times less CPU at start-up. When idle, Filesync
+  sleeps until something changes, so a laptop's battery barely notices it.
+
+  To be fair, Dropbox was watching a bigger folder: 127,000 files and 288 GB, against
+  Filesync's 11,700 files and 1 GB. Filesync's memory stays flat as a folder grows. It walks
+  the tree a branch at a time and keeps the rest in its database. Pointed at that same Dropbox
+  folder (137,000 entries), Filesync's start-up check took 4.7 s and left it at 13 MB.
 - **Every file is hashed in full with BLAKE3,** one of the fastest cryptographic hashes there
   is, while the file is read. The hash goes along with each file and is checked on the way
   back: a file that doesn't match is refused and downloaded again. The hash also tells real edits from touched
@@ -37,8 +41,11 @@ They update themselves.
 - **Encrypted on your computer.** Each file gets its own random AES key before it leaves your
   computer, and folder names are encrypted too. It uses Homebase's own format, so your other
   Homebase apps can open the files. The cipher handles about 1 GB/s encrypting and 2.8 GB/s
-  decrypting, more than any internet link. (It isn't end-to-end: your own Homebase holds the
-  keys. See [docs/spec/encryption.md](docs/spec/encryption.md).)
+  decrypting, more than any internet link. Dropbox, by comparison, encrypts files once they
+  reach its servers, with keys Dropbox holds. With Filesync, the files are encrypted before
+  they leave your computer, and the keys stay with your own Homebase, not with a company. (So
+  it isn't end-to-end: your Homebase can open them. See
+  [docs/spec/encryption.md](docs/spec/encryption.md).)
 - **Fast,** even on a six-year-old desktop (Intel i7-8700K). With a test server on the same
   machine, it uploads 1 GiB at about 170 MB/s and downloads it at about 600 MB/s. An edit shows up on your other computer in about half a second. Big files
   are streamed in both directions in constant memory, and a broken transfer picks up where it
