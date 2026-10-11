@@ -42,8 +42,10 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
 **What it protects, honestly**
 - What lies on the server's disk and in its backups is encrypted: file contents, names, sizes
   and times.
-- It is not end-to-end. While serving a request from an app you approved, the server unlocks
-  the drive key, and it sees the file key in the clear during an upload. That is how the web
+- It is zero-knowledge at rest: the server doesn't hold the key to the drive key. Only the
+  owner and the apps and devices they approved do. It is not end-to-end: while serving a
+  request from one of them, the server unlocks the drive key in memory for that request, and
+  it sees the file key in the clear during an upload. That is how the web
   and mobile Homebase apps work today **[verified]** (odin-js `SecurityHelpers.encryptKeyHeader`,
   chat-kmp `PayloadBundleEncryptionService`, odin-core `FileSystemStreamWriterBase`). In
   exchange, they can read the same files: the format is odin-js's byte for byte (the golden

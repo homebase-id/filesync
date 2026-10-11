@@ -36,20 +36,22 @@ They update themselves.
   folder (137,000 entries), Filesync's start-up check took 4.7 s and left it at 13 MB.
 - **Every file is hashed in full with BLAKE3,** one of the fastest cryptographic hashes there
   is, while the file is read. The hash goes along with each file and is checked on the way
-  back: a file that doesn't match is refused and downloaded again. The hash also tells real edits from touched
-  timestamps, so unchanged files are never uploaded twice.
-- **Encrypted on your computer.** Each file gets its own random AES key before it leaves your
-  computer, and folder names are encrypted too. It uses Homebase's own format, so your other
-  Homebase apps can open the files. The cipher handles about 1 GB/s encrypting and 2.8 GB/s
-  decrypting, more than any internet link. Dropbox, by default, encrypts files once they
-  reach its servers, with keys Dropbox holds. With Filesync, the files are encrypted before
-  they leave your computer, and the keys stay with your own Homebase, not with a company. (So
-  it isn't end-to-end: your Homebase can open them. See
-  [docs/spec/encryption.md](docs/spec/encryption.md).)
+  back: a file that doesn't match is refused and downloaded again. The hash also tells real
+  edits from touched timestamps, so unchanged files are never uploaded twice.
+- **Zero-knowledge encrypted at rest.** Each file gets its own random AES key before it leaves
+  your computer, and names, sizes and times are encrypted too. What lies on your Homebase's
+  disk and in its backups is ciphertext. The server doesn't hold the key: only you and the
+  devices you approved do. It unlocks a file's key for a moment, in memory, only while
+  serving a request from one of them. It uses
+  Homebase's own format, so your other Homebase apps can open the files. The cipher handles
+  about 1 GB/s encrypting and 2.8 GB/s decrypting, more than any internet link. Dropbox, by
+  default, encrypts files once they reach its servers, with keys Dropbox holds. With Filesync,
+  the files are encrypted before they leave your computer, and the keys stay with your own
+  Homebase, not with a company. More: [docs/spec/encryption.md](docs/spec/encryption.md).
 - **Fast,** even on a six-year-old desktop (Intel i7-8700K). With a test server on the same
-  machine, it uploads 1 GiB at about 170 MB/s and downloads it at about 600 MB/s. An edit shows up on your other computer in about half a second. Big files
-  are streamed in both directions in constant memory, and a broken transfer picks up where it
-  stopped.
+  machine, it uploads 1 GiB at about 170 MB/s and downloads it at about 600 MB/s. An edit
+  shows up on your other computer in about half a second. Big files are streamed in both
+  directions in constant memory, and a broken transfer picks up where it stopped.
 - **Careful with your data.** Losing nothing is the first rule:
   - When two computers edit the same file, both versions are kept as a conflict copy.
   - A sync that would delete many files at once waits for you to confirm.
