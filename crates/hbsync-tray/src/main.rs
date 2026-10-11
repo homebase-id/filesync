@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
 use hbsync_app::runner::{State, Status};
-use hbsync_app::{Control, Paths, autostart, control, shell, words};
+use hbsync_app::{APP_NAME, Control, Paths, autostart, control, shell, words};
 use hbsync_types::activity::Synced;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -34,8 +34,9 @@ use pages::Pages;
 /// What reaches the tray's main thread.
 #[derive(Debug)]
 pub enum Event {
-    /// The watcher's latest look at the daemon, and the recently synced list.
-    Daemon(Daemon, Vec<Synced>),
+    /// The watcher's latest look at the daemon, the recently synced list, and the program
+    /// that replaced this one on disk ([`os::replacement`]).
+    Daemon(Daemon, Vec<Synced>, Option<PathBuf>),
     Menu(MenuId),
     /// A page wants a folder chosen (the OS's picker runs on the main thread).
     PickFolder(mpsc::Sender<Option<PathBuf>>),
@@ -72,23 +73,8 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Restarted for an update: the old tray is about to end (it has already hidden its icon).
-    let restarted = std::env::args_os().any(|a| a == os::RESTARTED);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let acquired = loop {
-        match InstanceLock::acquire_for(&paths, PROGRAM) {
-            Err(LockError::Held { .. }) if restarted && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            other => break other,
-        }
-    };
-    let _lock = match acquired {
+    let _lock = match InstanceLock::acquire_for(&paths, PROGRAM) {
         Ok(lock) => lock,
-        Err(e @ LockError::Held { .. }) if restarted => {
-            tracing::error!("restarted for an update, but the old tray didn't end: {e}");
-            return ExitCode::FAILURE;
-        }
         // Started again (at logon, by hand): the one running is enough.
         Err(e @ LockError::Held { .. }) => {
             tracing::info!("{e}");
@@ -102,24 +88,31 @@ fn main() -> ExitCode {
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
     os::name_notifications();
     if let Some(why) = hbsync_app::install::Install::current().not_settled() {
-        os::notify(
-            "Homebase Filesync".into(),
-            format!("To start at login, {why}."),
-        );
+        os::notify(APP_NAME.into(), format!("To start at login, {why}."));
     }
     // A private instance (HBSYNC_HOME) mustn't replace the launcher of the real one.
     #[cfg(target_os = "linux")]
     if !control::dev_home() {
         std::thread::spawn(|| {
-            let added = hbsync_app::install::current_exe()
-                .and_then(|tray| autostart::add_launcher(&tray, icons::MARK_256));
-            if let Err(e) = added {
+            if let Err(e) = autostart::add_launcher(icons::MARK_256) {
                 tracing::info!("no launcher: {e}");
             }
         });
     }
     match run(paths) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(None) => ExitCode::SUCCESS,
+        // Linux, after an update: the new program in this process's place. The lock is
+        // released (its file is closed on exec), and the new tray takes it.
+        #[cfg(unix)]
+        Ok(Some(exe)) => {
+            tracing::info!("restarting into {}", exe.display());
+            drop(_flush);
+            let e = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new(&exe));
+            eprintln!("{PROGRAM}: can't restart into {}: {e}", exe.display());
+            ExitCode::FAILURE
+        }
+        #[cfg(not(unix))]
+        Ok(Some(_)) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");
             ExitCode::FAILURE
@@ -139,7 +132,8 @@ struct App {
     start_at_login: bool,
     /// The program that replaced this one on disk ([`os::replacement`]), once seen.
     updated: Option<PathBuf>,
-    update_looked: Instant,
+    /// Set by Restart: the program to run in this one's place once the loop ends.
+    restart: Option<PathBuf>,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
@@ -172,6 +166,12 @@ impl App {
             let send = send.clone();
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| send(Event::Menu(e.id))));
         }
+        {
+            let send = send.clone();
+            std::thread::spawn(move || {
+                send(Event::StartAtLogin(autostart::installed().unwrap_or(false)));
+            });
+        }
         Ok(App {
             paths,
             send,
@@ -180,9 +180,10 @@ impl App {
             tray: None,
             daemon: Daemon::Starting(None),
             recent: Vec::new(),
-            start_at_login: autostart::installed().unwrap_or(false),
+            // Asked from a thread (the MSIX startup task takes a moment): Event::StartAtLogin.
+            start_at_login: false,
             updated: None,
-            update_looked: Instant::now(),
+            restart: None,
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
@@ -194,7 +195,7 @@ impl App {
         let look = Look::Quiet;
         let (icon, template) = tray_icon_for(look)?;
         let builder = TrayIconBuilder::new()
-            .with_tooltip("Homebase Filesync")
+            .with_tooltip(APP_NAME)
             .with_menu(Box::new(Menu::new()));
         #[cfg(target_os = "macos")]
         let builder = if template {
@@ -216,7 +217,7 @@ impl App {
     /// Handles one event; false to end.
     fn handle(&mut self, event: Event) -> bool {
         match event {
-            Event::Daemon(daemon, recent) => {
+            Event::Daemon(daemon, recent, updated) => {
                 self.notices(&daemon);
                 if let Some(s) = daemon.status()
                     && self.decorated.as_ref() != Some(&s.folder)
@@ -228,12 +229,7 @@ impl App {
                     self.decorated = Some(s.folder.clone());
                 }
                 self.pages.set_status(daemon.status().cloned());
-                // Once replaced, it stays so; until then, a look a minute is enough.
-                if self.updated.is_none() && self.update_looked.elapsed() >= Duration::from_secs(60)
-                {
-                    self.update_looked = Instant::now();
-                    self.updated = os::replacement();
-                }
+                self.updated = updated;
                 self.daemon = daemon;
                 self.recent = recent;
             }
@@ -336,17 +332,10 @@ impl App {
                     return true;
                 }
                 // The daemon goes on; the new tray restarts it if it's of another build.
-                let started = match &self.updated {
-                    Some(exe) => os::start_again(exe),
-                    None => Err(std::io::Error::other("no new program to start")),
-                };
-                match started {
-                    Ok(()) => {
-                        tracing::info!("restarting for an update");
-                        self.tray = None;
-                        return false;
-                    }
-                    Err(e) => os::notify("Restart".into(), e.to_string()),
+                if let Some(exe) = self.updated.clone() {
+                    self.tray = None;
+                    self.restart = Some(exe);
+                    return false;
                 }
             }
             Action::Quit => {
@@ -373,7 +362,7 @@ impl App {
         let (paths, send) = (self.paths.clone(), self.send.clone());
         std::thread::spawn(move || {
             if let Err(e) = control::control(&paths, c) {
-                os::notify("Homebase Filesync".into(), e.to_string());
+                os::notify(APP_NAME.into(), e.to_string());
             }
             send(Event::Wake);
         });
@@ -585,7 +574,7 @@ fn same_shape(a: &[Item], b: &[Item]) -> bool {
 /// Linux: the tray (StatusNotifierItem over D-Bus) runs on threads of its own; this thread
 /// waits for events.
 #[cfg(target_os = "linux")]
-fn run(paths: Paths) -> Result<(), Box<dyn std::error::Error>> {
+fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
     let send: Sender = Arc::new(move |e| {
@@ -600,12 +589,12 @@ fn run(paths: Paths) -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
     }
-    Ok(())
+    Ok(app.restart.take())
 }
 
 /// Windows and macOS: the tray lives in the main thread's event loop.
 #[cfg(not(target_os = "linux"))]
-fn run(paths: Paths) -> Result<(), Box<dyn std::error::Error>> {
+fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     use tao::event::{Event as TaoEvent, StartCause};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
 

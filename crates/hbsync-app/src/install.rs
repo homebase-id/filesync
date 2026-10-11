@@ -24,15 +24,22 @@ pub enum Install {
     Plain,
 }
 
-/// This program's path with symlinks resolved (a CLI linked onto the PATH still finds its app).
-/// Not on Windows: its canonical form (`\\?\`) isn't wanted, and there are no such links.
-pub fn current_exe() -> std::io::Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    if cfg!(unix) {
-        // A replaced program (Linux: "… (deleted)") can't be resolved: its path as it is.
-        return Ok(exe.canonicalize().unwrap_or(exe));
-    }
-    Ok(exe)
+/// This program's path with symlinks resolved (a CLI linked onto the PATH still finds its app),
+/// found once. Not resolved on Windows: its canonical form (`\\?\`) isn't wanted, and there
+/// are no such links.
+pub fn current_exe() -> std::io::Result<&'static Path> {
+    static CURRENT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    CURRENT
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok()?;
+            Some(if cfg!(unix) {
+                exe.canonicalize().unwrap_or(exe)
+            } else {
+                exe
+            })
+        })
+        .as_deref()
+        .ok_or_else(|| std::io::Error::other("this program's path is unknown"))
 }
 
 impl Install {
@@ -45,40 +52,40 @@ impl Install {
                 return Install::Msix { family };
             }
             match current_exe() {
-                Ok(exe) => from_path(Os::current(), &exe),
+                Ok(exe) => from_path(Os::current(), exe),
                 Err(_) => Install::Plain,
             }
         })
     }
 
-    /// Where its program `name` is: beside this one, but in a Mac app the tray is the app's
-    /// program (`Contents/MacOS`) and the daemon and the command line are its helpers
-    /// (`Contents/Helpers`), so that macOS and the packager know which one to launch. A bundle
-    /// with all three in `Contents/MacOS` still works.
+    /// Where its program `name` is, found from the program at `beside`: beside it, except
+    /// - in a Mac app the tray is the app's program (`Contents/MacOS`) and the daemon and the
+    ///   command line are its helpers (`Contents/Helpers`), so that macOS and the packager know
+    ///   which one to launch (a bundle with all three in `Contents/MacOS` still works);
+    /// - a Linux package's programs are started by their links in `/usr/bin`, which last
+    ///   (where the programs live is the packager's to change).
     pub fn program(&self, name: &str, beside: &Path) -> PathBuf {
         let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
         let packaged = match self {
-            Install::MacApp { bundle } if name == crate::autostart::TRAY => {
-                bundle.join("Contents/MacOS").join(&file)
+            Install::MacApp { bundle } => {
+                let dir = if name == crate::autostart::TRAY {
+                    "Contents/MacOS"
+                } else {
+                    "Contents/Helpers"
+                };
+                Some(bundle.join(dir).join(&file))
             }
-            Install::MacApp { bundle } => bundle.join("Contents/Helpers").join(&file),
-            _ => return beside.with_file_name(file),
+            Install::LinuxPackage => Some(Path::new("/usr/bin").join(&file)),
+            _ => None,
         };
-        if packaged.exists() {
-            packaged
-        } else {
-            beside.with_file_name(file)
-        }
+        packaged
+            .filter(|p| p.exists())
+            .unwrap_or_else(|| beside.with_file_name(file))
     }
 
-    /// The path that lasts to start the tray `exe` by: a Linux package's link in `/usr/bin`
-    /// (where its program lives is the packager's to change), else `exe` itself.
-    pub fn lasting_path(&self, exe: &Path) -> PathBuf {
-        let link = Path::new("/usr/bin").join(crate::autostart::TRAY);
-        match self {
-            Install::LinuxPackage if link.exists() => link,
-            _ => exe.to_path_buf(),
-        }
+    /// Whether the package lists it among the desktop's applications itself (Linux).
+    pub fn lists_itself(&self) -> bool {
+        matches!(self, Install::LinuxPackage)
     }
 
     /// The Windows AppUserModelID that names it in notifications, in a package.
@@ -93,9 +100,14 @@ impl Install {
     /// from the temporary copy macOS makes of an app it hasn't moved (App Translocation).
     pub fn not_settled(&self) -> Option<&'static str> {
         match self {
-            Install::MacApp { bundle } if temporary(bundle) || read_only(bundle) => Some(
-                "move Homebase Filesync to the Applications folder and start it from there, then turn on Start at login in its menu",
-            ),
+            Install::MacApp { bundle }
+                if temporary(bundle)
+                    || hbsync_platform::fskind::read_only(bundle).unwrap_or(false) =>
+            {
+                Some(
+                    "move Homebase Filesync to the Applications folder and start it from there, then turn on Start at login in its menu",
+                )
+            }
             _ => None,
         }
     }
@@ -131,29 +143,6 @@ fn temporary(bundle: &Path) -> bool {
     bundle
         .components()
         .any(|c| c.as_os_str() == "AppTranslocation")
-}
-
-/// On a read-only volume: a mounted disk image (an app kept on an external drive is fine).
-fn read_only(bundle: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        let Ok(path) = std::ffi::CString::new(bundle.as_os_str().as_bytes()) else {
-            return false;
-        };
-        // SAFETY: statvfs is plain data; all zeroes is a valid value to fill.
-        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-        // SAFETY: a NUL-terminated path and a statvfs to fill.
-        if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } == 0 {
-            return stat.f_flag & libc::ST_RDONLY != 0;
-        }
-        false
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = bundle;
-        false
-    }
 }
 
 /// The package family this process runs in, if it runs in a package.

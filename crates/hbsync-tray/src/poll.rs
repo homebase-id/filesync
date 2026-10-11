@@ -2,6 +2,7 @@
 //! the recently synced list when a sync ended, and starting the daemon when it isn't running.
 //! The tray keeps it running while a folder is set up.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,8 @@ use crate::model::{Daemon, RECENT_SHOWN};
 use crate::{Event, Sender};
 
 const EVERY: Duration = Duration::from_secs(1);
+/// How often to look whether this program was replaced on disk.
+const LOOK_FOR_UPDATE: Duration = Duration::from_secs(60);
 /// After a failed start, the next try waits this long.
 const START_AGAIN: Duration = Duration::from_secs(30);
 
@@ -34,13 +37,29 @@ struct Watcher {
     start_failed: Option<String>,
     /// Restarted a daemon of another version once (after an update).
     restarted: bool,
+    /// The program that replaced this one on disk ([`crate::os::replacement`]): once found,
+    /// it stays; until then, looked for once a minute.
+    replaced: Option<PathBuf>,
+    replaced_looked: Option<Instant>,
 }
 
 impl Watcher {
     fn run(mut self, paths: &Paths, send: &Sender, woken: &mpsc::Receiver<()>) {
         loop {
+            if self.replaced.is_none()
+                && self
+                    .replaced_looked
+                    .is_none_or(|at| at.elapsed() >= LOOK_FOR_UPDATE)
+            {
+                self.replaced_looked = Some(Instant::now());
+                self.replaced = crate::os::replacement();
+            }
             let daemon = self.look(paths, send);
-            send(Event::Daemon(daemon, self.recent.clone()));
+            send(Event::Daemon(
+                daemon,
+                self.recent.clone(),
+                self.replaced.clone(),
+            ));
             match woken.recv_timeout(EVERY) {
                 Ok(()) | Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -68,10 +87,7 @@ impl Watcher {
         self.start_failed = None;
         // Updated beside a daemon still running the old version. Not when this tray is the old
         // one (replaced on disk): the daemon may be the new one, and this tray goes first.
-        if status.version != hbsync_app::VERSION
-            && !self.restarted
-            && crate::os::replacement().is_none()
-        {
+        if status.version != hbsync_app::VERSION && !self.restarted && self.replaced.is_none() {
             tracing::info!(
                 "the daemon runs {:?}, this is {}: restarting it",
                 status.version,
@@ -96,7 +112,11 @@ impl Watcher {
         if self.next_start.is_some_and(|at| Instant::now() < at) {
             return Daemon::Starting(self.start_failed.clone());
         }
-        send(Event::Daemon(Daemon::Starting(None), self.recent.clone()));
+        send(Event::Daemon(
+            Daemon::Starting(None),
+            self.recent.clone(),
+            self.replaced.clone(),
+        ));
         tracing::info!("starting the daemon");
         match control::start(paths) {
             Ok(()) => {

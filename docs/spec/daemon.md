@@ -196,8 +196,9 @@ each version) and names its notifications by its AppUserModelID; a Mac app run f
 image or App Translocation doesn't turn on starting at logon (the path wouldn't last) and says
 to move it to Applications; under a Linux package (`/usr`) the tray writes no launcher of its
 own. On Linux a tray whose program was replaced on disk (`apt upgrade`, `cargo install`) offers
-"Restart to finish the update"; the new tray waits for the old one's lock (`--restarted`) and
-restarts a daemon of another build.
+"Restart to finish the update", which runs the new program in the old one's place (`exec`;
+the instance lock's file closes with it) and restarts a daemon of another build. A package's
+programs are started by their links in `/usr/bin`, which last across package versions.
 
 On Linux the tray also lists itself among the desktop's applications each time it starts
 (unless `HBSYNC_HOME` is set): the same entry in `~/.local/share/applications/` and its icon in

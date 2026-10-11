@@ -3,7 +3,7 @@
 
 use hbsync_app::install::Install;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Opens a folder in the file manager, or a page in the browser.
 pub fn open(what: impl AsRef<std::ffi::OsStr>) {
@@ -67,7 +67,7 @@ pub fn notify(summary: String, body: String) {
     std::thread::spawn(move || {
         let mut notification = notify_rust::Notification::new();
         notification
-            .appname("Homebase Filesync")
+            .appname(hbsync_app::APP_NAME)
             .summary(&summary)
             .body(&body);
         // In the MSIX package, as the package (its name and icon), not as PowerShell.
@@ -102,23 +102,6 @@ pub fn replacement() -> Option<PathBuf> {
     let exe = std::fs::read_link("/proc/self/exe").ok()?;
     let path = PathBuf::from(exe.to_str()?.strip_suffix(" (deleted)")?);
     // A package's link, which follows the program if the package moved it.
-    let next = Install::current().lasting_path(&path);
+    let next = Install::current().program(hbsync_app::autostart::TRAY, &path);
     next.is_file().then_some(next)
 }
-
-/// Starts `exe` (the [`replacement`]) on its own, to wait for this tray to end and take over.
-pub fn start_again(exe: &Path) -> std::io::Result<()> {
-    let mut command = Command::new(exe);
-    command
-        .arg(RESTARTED)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // Its own process group: closing the terminal this tray was started from mustn't end it.
-    #[cfg(unix)]
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    command.spawn().map(drop)
-}
-
-/// The argument of a tray started by [`start_again`]: it waits for the old one to end.
-pub const RESTARTED: &str = "--restarted";

@@ -13,7 +13,7 @@ name = "homebase-filesync"
 path = "src/main.rs"
 
 [dependencies]
-hbsync-app = { workspace = true, features = ["msix"] }
+hbsync-app.workspace = true
 hbsync-types.workspace = true
 form_urlencoded = "1.2"
 notify-rust = "4.18"

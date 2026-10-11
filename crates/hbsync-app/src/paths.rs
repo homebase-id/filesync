@@ -30,7 +30,6 @@ pub struct Paths {
     pub runtime: PathBuf,
 }
 
-/// The user's home folder: `HOME`, or on Windows `USERPROFILE` (absolute only).
 /// Removes the file at `path`; already gone is fine.
 pub fn remove_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
@@ -39,6 +38,7 @@ pub fn remove_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// The user's home folder: `HOME`, or on Windows `USERPROFILE` (absolute only).
 pub fn home() -> Option<PathBuf> {
     ["HOME", "USERPROFILE"].iter().find_map(|key| {
         std::env::var_os(key)

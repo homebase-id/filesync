@@ -55,6 +55,20 @@ pub fn detect(path: &Path) -> io::Result<FsFamily> {
     imp::detect(path)
 }
 
+/// Whether the volume holding `path` is mounted read-only (on macOS, a disk image). Elsewhere
+/// not asked: false.
+pub fn read_only(path: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        imp::read_only(path)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
 /// Probes whether names in `dir` are case-sensitive, by creating a temporary file.
 ///
 /// Per-directory on Windows (case sensitivity can be enabled per folder), per-volume elsewhere.
@@ -124,6 +138,16 @@ mod imp {
         }
         let name = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) };
         Ok(from_name(&name.to_string_lossy()))
+    }
+
+    pub fn read_only(path: &Path) -> io::Result<bool> {
+        let c_path = CString::new(path.as_os_str().as_bytes())?;
+        // SAFETY: zeroed POD out struct, valid path.
+        let mut st: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statfs(c_path.as_ptr(), &mut st) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(st.f_flags & libc::MNT_RDONLY as u32 != 0)
     }
 
     pub fn from_name(name: &str) -> FsFamily {

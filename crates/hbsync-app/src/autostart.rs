@@ -27,9 +27,6 @@ pub const TRAY: &str = "homebase-filesync";
 /// The tray's desktop entry (Linux): in the session's autostart folder to start at logon, and
 /// in the applications folder as its launcher. Named after the app ID, as the package's is.
 pub const DESKTOP_ENTRY: &str = "id.homebase.filesync.desktop";
-/// Its name before 0.1.0 shipped, cleaned up.
-#[cfg(target_os = "linux")]
-const OLD_DESKTOP_ENTRY: &str = "homebase-filesync.desktop";
 /// The tray's icon name in the icon theme (Linux).
 pub const ICON: &str = "homebase-filesync";
 /// The systemd unit.
@@ -195,16 +192,15 @@ pub fn run_value(daemon: &Path) -> String {
     format!("\"{}\"", daemon.display())
 }
 
-/// The program `name` of this installation: beside the running one, or where a Mac app keeps
-/// it ([`crate::install::Install::program`]).
-fn beside(name: &str) -> io::Result<PathBuf> {
+/// The program `name` of this installation ([`crate::install::Install::program`]).
+pub fn program_of(name: &str) -> io::Result<PathBuf> {
     let exe = crate::install::current_exe()?;
-    Ok(crate::install::Install::current().program(name, &exe))
+    Ok(crate::install::Install::current().program(name, exe))
 }
 
-/// Where the daemon is: with the running program ([`beside`]).
+/// Where the daemon is ([`program_of`]).
 pub fn daemon_exe() -> io::Result<PathBuf> {
-    beside(crate::lock::DAEMON)
+    program_of(crate::lock::DAEMON)
 }
 
 /// What starts at logon: the tray of this installation if it is there (it starts the daemon),
@@ -213,12 +209,9 @@ pub fn logon_program() -> io::Result<Program> {
     if let Some(why) = crate::install::Install::current().not_settled() {
         return Err(io::Error::other(why));
     }
-    let tray = beside(TRAY)?;
+    let tray = program_of(TRAY)?;
     if tray.is_file() {
-        // By a path that lasts (a package's link), as the entry outlives this program.
-        return Ok(Program::Tray(
-            crate::install::Install::current().lasting_path(&tray),
-        ));
+        return Ok(Program::Tray(tray));
     }
     Ok(Program::Daemon(daemon_exe()?))
 }
@@ -354,8 +347,7 @@ mod os {
     }
 
     pub fn installed() -> io::Result<bool> {
-        let entry = desktop()?;
-        Ok(unit()?.exists() || entry.exists() || entry.with_file_name(OLD_DESKTOP_ENTRY).exists())
+        Ok(unit()?.exists() || desktop()?.exists())
     }
 
     pub fn install(program: &Program) -> io::Result<()> {
@@ -385,9 +377,7 @@ mod os {
     }
 
     pub fn uninstall() -> io::Result<()> {
-        let entry = desktop()?;
-        crate::paths::remove_if_exists(&entry)?;
-        crate::paths::remove_if_exists(&entry.with_file_name(OLD_DESKTOP_ENTRY))?;
+        crate::paths::remove_if_exists(&desktop()?)?;
         let path = unit()?;
         if !path.exists() {
             return Ok(());
@@ -397,18 +387,11 @@ mod os {
         systemctl(&["daemon-reload"])
     }
 
-    pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
+    pub fn add_launcher(icon_png: &[u8]) -> io::Result<()> {
         let data = crate::paths::xdg_dir("XDG_DATA_HOME", ".local/share")
             .ok_or_else(|| io::Error::other("HOME isn't set"))?;
-        let install = crate::install::Install::current();
-        let packaged = *install == crate::install::Install::LinuxPackage;
-        write_launcher(
-            &data,
-            &desktop()?,
-            &install.lasting_path(tray),
-            icon_png,
-            packaged,
-        )
+        let packaged = crate::install::Install::current().lists_itself();
+        write_launcher(&data, &desktop()?, &program_of(TRAY)?, icon_png, packaged)
     }
 
     /// Through systemd only when it starts the daemon (not the tray).
@@ -443,12 +426,12 @@ mod os {
         }
     }
 
+    /// In the MSIX package, its startup task; else the Run key.
     fn msix() -> bool {
-        cfg!(feature = "msix")
-            && matches!(
-                crate::install::Install::current(),
-                crate::install::Install::Msix { .. }
-            )
+        matches!(
+            crate::install::Install::current(),
+            crate::install::Install::Msix { .. }
+        )
     }
 
     pub fn installed() -> io::Result<bool> {
@@ -529,7 +512,6 @@ mod os {
     }
 
     /// The MSIX package's startup task (Conveyor's `start-on-login`), which starts the tray.
-    #[cfg(feature = "msix")]
     mod startup_task {
         use crate::install::MSIX_STARTUP_TASK;
         use std::io;
@@ -575,24 +557,6 @@ mod os {
             task()?.Disable().map_err(err)
         }
     }
-
-    /// Without the `msix` feature, never asked (`msix()` is false).
-    #[cfg(not(feature = "msix"))]
-    mod startup_task {
-        use std::io;
-
-        pub fn enabled() -> io::Result<bool> {
-            Ok(false)
-        }
-        pub fn enable() -> io::Result<()> {
-            Err(io::Error::other(
-                "this program can't change the startup task",
-            ))
-        }
-        pub fn disable() -> io::Result<()> {
-            Ok(())
-        }
-    }
 }
 
 /// Whether Filesync starts at logon.
@@ -624,8 +588,8 @@ pub fn start() -> io::Result<bool> {
 /// written earlier goes. An autostart entry is brought up to date with it either way (a moved
 /// or updated tray). Written only when it changed.
 #[cfg(target_os = "linux")]
-pub fn add_launcher(tray: &Path, icon_png: &[u8]) -> io::Result<()> {
-    os::add_launcher(tray, icon_png)
+pub fn add_launcher(icon_png: &[u8]) -> io::Result<()> {
+    os::add_launcher(icon_png)
 }
 
 #[cfg(target_os = "linux")]
@@ -650,13 +614,6 @@ fn write_launcher(
         .join("icons/hicolor/256x256/apps")
         .join(format!("{ICON}.png"));
     let launcher = data.join("applications").join(DESKTOP_ENTRY);
-    // Entries by their old name: gone, an autostart one carried over.
-    crate::paths::remove_if_exists(&launcher.with_file_name(OLD_DESKTOP_ENTRY))?;
-    let old_autostart = autostart.with_file_name(OLD_DESKTOP_ENTRY);
-    if old_autostart.exists() {
-        write(autostart, entry.as_bytes())?;
-        crate::paths::remove_if_exists(&old_autostart)?;
-    }
     if packaged {
         // The package lists it (and has the icon): a copy of ours would show it twice.
         crate::paths::remove_if_exists(&launcher)?;
@@ -765,13 +722,6 @@ mod tests {
         write_launcher(data.path(), &autostart, packaged, b"png", true)?;
         assert!(!entry.exists() && !icon.exists());
         assert!(std::fs::read_to_string(&autostart)?.contains(&packaged.display().to_string()));
-
-        // An autostart entry by the old name is carried over.
-        std::fs::remove_file(&autostart)?;
-        let old = autostart.with_file_name("homebase-filesync.desktop");
-        std::fs::write(&old, "[Desktop Entry]\n")?;
-        write_launcher(data.path(), &autostart, tray, b"png", false)?;
-        assert!(autostart.exists() && !old.exists());
         Ok(())
     }
 
