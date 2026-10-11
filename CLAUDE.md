@@ -17,7 +17,7 @@ WebSocket; two folders converge through a live identity. Facts and server bugs:
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up within a minute of an edit); an ignored item is kept on its device only. The
 product runs as a per-user daemon (`hbsyncd`) shown and controlled by the tray app
-(`hbsync-tray`: status, recently synced, pause, logging in through the browser) and by `hbsync`
+(`hbsync-tray`, program `homebase-filesync`: status, recently synced, pause, logging in through the browser) and by `hbsync`
 (`docs/spec/daemon.md`): `cargo run -p hbsync --bin hbsync -- setup <identity>`,
 `cargo run -p hbsync-tray`; `HBSYNC_HOME` gives a private instance. Dev tools (`hbsync-dev`), credentials in
 `~/.config/hbsync/dev/<identity>.json`:

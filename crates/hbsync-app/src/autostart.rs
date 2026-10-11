@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 /// label (the tray's adds `.tray`).
 pub const LABEL: &str = "id.homebase.filesync";
 /// The tray's program name.
-pub const TRAY: &str = "hbsync-tray";
+pub const TRAY: &str = "homebase-filesync";
 /// The tray's desktop entry (Linux): in the session's autostart folder to start at logon, and
 /// in the applications folder as its launcher.
 pub const DESKTOP_ENTRY: &str = "homebase-filesync.desktop";
@@ -580,15 +580,15 @@ mod tests {
 
     #[test]
     fn the_tray_starts_with_the_session() {
-        let tray = Path::new("/opt/Filesync/hbsync-tray");
+        let tray = Path::new("/opt/Filesync/homebase-filesync");
         let entry = desktop_entry(tray, &env());
         assert!(
             entry.contains(
-                "Exec=env \"HBSYNC_HOME=/tmp/a b & <c> 100%% \\$x\" \"/opt/Filesync/hbsync-tray\"\n"
+                "Exec=env \"HBSYNC_HOME=/tmp/a b & <c> 100%% \\$x\" \"/opt/Filesync/homebase-filesync\"\n"
             ),
             "{entry}"
         );
-        assert!(desktop_entry(tray, &[]).contains("Exec=\"/opt/Filesync/hbsync-tray\"\n"));
+        assert!(desktop_entry(tray, &[]).contains("Exec=\"/opt/Filesync/homebase-filesync\"\n"));
         assert!(entry.contains("Icon=homebase-filesync\n"));
         let plist = launchd_plist(&Program::Tray(tray.into()), &[]);
         assert!(plist.contains("<string>id.homebase.filesync.tray</string>"));
@@ -600,7 +600,7 @@ mod tests {
     fn the_launcher_is_written_once() -> io::Result<()> {
         let data = tempfile::tempdir()?;
         let autostart = data.path().join("autostart.desktop");
-        let tray = Path::new("/opt/Filesync/hbsync-tray");
+        let tray = Path::new("/opt/Filesync/homebase-filesync");
         write_launcher(data.path(), &autostart, tray, b"png")?;
         assert!(
             !autostart.exists(),
@@ -622,7 +622,7 @@ mod tests {
         );
 
         // An autostart entry from an older tray is brought up to date.
-        std::fs::write(&autostart, "[Desktop Entry]\nExec=/old/hbsync-tray\n")?;
+        std::fs::write(&autostart, "[Desktop Entry]\nExec=/old/homebase-filesync\n")?;
         write_launcher(data.path(), &autostart, tray, b"png")?;
         assert_eq!(std::fs::read(&autostart)?, std::fs::read(&entry)?);
         Ok(())

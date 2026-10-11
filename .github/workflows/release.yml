@@ -82,7 +82,7 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then exe=.exe; fi
           mkdir -p "dist/$dir"
           targets=(${{ matrix.targets }})
-          for bin in hbsync hbsyncd hbsync-tray; do
+          for bin in hbsync hbsyncd homebase-filesync; do
             if (( ${#targets[@]} > 1 )); then
               lipo -create -output "dist/$dir/$bin" $(printf "target/%s/dist/$bin " "${targets[@]}")
             else
@@ -99,7 +99,7 @@ jobs:
           # The version carries the commit built (from the build script).
           stamped="$VERSION ($(git rev-parse --short=7 HEAD))"
           "$hbsync" --version | grep -Fx "hbsync $stamped"
-          "dist/$DIR/hbsync-tray$EXE" --version | grep -Fx "hbsync-tray $stamped"
+          "dist/$DIR/homebase-filesync$EXE" --version | grep -Fx "homebase-filesync $stamped"
           # No daemon in a fresh home: says so, with exit status 3.
           home="$RUNNER_TEMP/hbsync-smoke"
           mkdir -p "$home"
@@ -113,11 +113,11 @@ jobs:
           fi
           case "$RUNNER_OS" in
             Linux)
-              for bin in hbsync hbsyncd hbsync-tray; do
+              for bin in hbsync hbsyncd homebase-filesync; do
                 file "dist/$DIR/$bin" | grep -E "static(-pie)? linked"
               done ;;
             macOS)
-              for bin in hbsync hbsyncd hbsync-tray; do
+              for bin in hbsync hbsyncd homebase-filesync; do
                 lipo "dist/$DIR/$bin" -verify_arch arm64 x86_64
               done ;;
           esac

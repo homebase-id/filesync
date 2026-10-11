@@ -81,11 +81,11 @@ mod tests {
         let err = InstanceLock::acquire(&paths).expect_err("held").to_string();
         assert!(err.contains("already running"), "{err}");
         // The tray's lock is another one.
-        let tray = InstanceLock::acquire_for(&paths, "hbsync-tray")?;
-        let err = InstanceLock::acquire_for(&paths, "hbsync-tray").expect_err("held");
+        let tray = InstanceLock::acquire_for(&paths, "homebase-filesync")?;
+        let err = InstanceLock::acquire_for(&paths, "homebase-filesync").expect_err("held");
         assert!(
             err.to_string()
-                .starts_with("hbsync-tray is already running"),
+                .starts_with("homebase-filesync is already running"),
             "{err}"
         );
         drop((held, tray));

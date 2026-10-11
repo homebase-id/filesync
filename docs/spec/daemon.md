@@ -1,7 +1,7 @@
 # The daemon, its config and its control socket
 
 How the product runs on a computer: one daemon per OS user (`hbsyncd`), shown and controlled
-by the tray app (`hbsync-tray`) and the command line (`hbsync`). Code: `crates/hbsync-app`
+by the tray app (crate `hbsync-tray`, program `homebase-filesync`) and the command line (`hbsync`). Code: `crates/hbsync-app`
 (library), `crates/hbsync` (the daemon and the command line), `crates/hbsync-tray`.
 
 ## Scope
@@ -144,10 +144,10 @@ Only the user can connect:
 
 ## The tray app
 
-`hbsync-tray` is what people see, and what starts at logon when it is installed beside the
+`homebase-filesync` (the tray) is what people see, and what starts at logon when it is installed beside the
 command line. It keeps the daemon running while a folder is set up (starting it when it
 doesn't answer, at most every 30 s after a failed start, and once more when the daemon runs
-another version), and **Quit stops the daemon too**. One tray per user (`hbsync-tray.lock`).
+another version), and **Quit stops the daemon too**. One tray per user (`homebase-filesync.lock`).
 
 - **Linux:** a StatusNotifierItem over D-Bus (pure Rust, no GTK), as KDE, Xfce, Cinnamon and
   most panels show them; GNOME needs the AppIndicator extension. Windows and macOS: tao's event
@@ -173,7 +173,7 @@ another version), and **Quit stops the daemon too**. One tray per user (`hbsync-
 
 ## Autostart
 
-What starts at logon is the tray when `hbsync-tray` is beside the command line (it starts the
+What starts at logon is the tray when `homebase-filesync` is beside the command line (it starts the
 daemon), else the daemon:
 
 | | how | restarts |
