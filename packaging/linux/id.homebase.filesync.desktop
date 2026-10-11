@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Homebase Filesync
-Comment=Keeps your Homebase folder in sync
-Exec=/usr/bin/homebase-filesync
-Icon=homebase-filesync
-Categories=Network;FileTransfer;
-Terminal=false

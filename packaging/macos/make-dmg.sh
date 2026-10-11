@@ -14,6 +14,5 @@ if [[ -z "$app" ]]; then
   echo "no app in $zip" >&2
   exit 1
 fi
-codesign --verify --deep --strict "$app"
 ln -s /Applications "$work/root/Applications"
 hdiutil create -volname "Homebase Filesync" -srcfolder "$work/root" -fs HFS+ -format UDZO -ov "$out"

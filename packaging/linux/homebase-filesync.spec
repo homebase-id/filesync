@@ -1,6 +1,7 @@
-# The .rpm (Fedora, openSUSE): the same layout as Conveyor's .deb, from the release's staged
-# programs (static, so no library dependencies). No update repository yet: updates by hand.
-# rpmbuild -bb --define "pkg_version 0.1.0" --define "stage <dir with bin/>" --define "src <repo>"
+# The .rpm (Fedora, openSUSE): Conveyor's .deb, its files as they are, so the layout comes from
+# packaging/conveyor.conf alone (without the apt repository the .deb adds under /etc). The
+# programs are static: no library dependencies. No update repository yet: updates by hand.
+# rpmbuild -bb --define "pkg_version 0.1.0" --define "root <the .deb's files>" --define "src <repo>"
 Name:           homebase-filesync
 Version:        %{pkg_version}
 Release:        1
@@ -19,16 +20,7 @@ Homebase Filesync keeps a folder on this computer in sync with your Homebase dri
 app, a per-user daemon (hbsyncd) and a command line (hbsync).
 
 %install
-lib=%{buildroot}/usr/lib/homebase/homebase-filesync/bin
-install -d $lib %{buildroot}/usr/bin %{buildroot}/usr/share/applications
-install -m 0755 %{stage}/bin/homebase-filesync %{stage}/bin/hbsyncd %{stage}/bin/hbsync $lib/
-ln -s ../lib/homebase/homebase-filesync/bin/homebase-filesync %{buildroot}/usr/bin/homebase-filesync
-ln -s ../lib/homebase/homebase-filesync/bin/hbsync %{buildroot}/usr/bin/hbsync
-install -m 0644 %{src}/packaging/linux/id.homebase.filesync.desktop %{buildroot}/usr/share/applications/
-for size in 64 256; do
-  install -D -m 0644 %{src}/crates/hbsync-tray/assets/mark-$size.png \
-    %{buildroot}/usr/share/icons/hicolor/${size}x${size}/apps/homebase-filesync.png
-done
+cp -a %{root}/usr %{buildroot}/
 install -D -m 0644 %{src}/LICENSE %{buildroot}/usr/share/licenses/homebase-filesync/LICENSE
 
 %files
@@ -36,6 +28,6 @@ install -D -m 0644 %{src}/LICENSE %{buildroot}/usr/share/licenses/homebase-files
 /usr/bin/homebase-filesync
 /usr/bin/hbsync
 /usr/share/applications/id.homebase.filesync.desktop
-/usr/share/icons/hicolor/64x64/apps/homebase-filesync.png
-/usr/share/icons/hicolor/256x256/apps/homebase-filesync.png
+/usr/share/icons/hicolor/*/apps/homebase-filesync.png
+/usr/share/metainfo/id.homebase.filesync.metainfo.xml
 /usr/share/licenses/homebase-filesync/LICENSE

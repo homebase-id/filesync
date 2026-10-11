@@ -632,6 +632,22 @@ fn write_launcher(
 mod tests {
     use super::*;
 
+    /// The packages (packaging/conveyor.conf) name the app, the tray and its icon as the code
+    /// does: the bundle ID and launchd labels, the program the packages start, the icon our
+    /// desktop entries name.
+    #[test]
+    fn the_packages_say_what_the_code_says() {
+        let conf = include_str!("../../../packaging/conveyor.conf");
+        for line in [
+            format!("rdns-name = \"{LABEL}\""),
+            format!("fsname = \"{TRAY}\""),
+            format!("long-fsname = \"{ICON}\""),
+            format!("main-binary = bin/{TRAY}"),
+        ] {
+            assert!(conf.contains(&line), "conveyor.conf lacks {line}");
+        }
+    }
+
     fn env() -> Vec<(String, String)> {
         vec![("HBSYNC_HOME".into(), "/tmp/a b & <c> 100% $x".into())]
     }
