@@ -63,7 +63,7 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
 above), `package` (Conveyor, with a throwaway key), `dmg` (`packaging/macos/make-dmg.sh` around
 each Mac app, on macOS), `rpm` (`packaging/linux/homebase-filesync.spec`, Fedora's `rpmbuild` in
 Fedora), and installs on fresh runners (`.deb` in Ubuntu, `.rpm` in Fedora, the MSIX on Windows,
-the `.dmg` on macOS); on a tag, `release` in the protected `release-signing` environment.
+the `.dmg` on macOS); on a tag, `release` in the `release-signing` environment (`v*` tags only).
 
 ## Still to do
 

@@ -9,18 +9,21 @@ How installers are made: `docs/spec/packaging.md`. The workflow: `.github/workfl
 2. Optionally, run the Release workflow by hand first: it builds and tests everything without
    releasing.
 3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`. The workflow builds, packages and
-   tests; then the `release` job waits in the `release-signing` environment for its reviewer.
-4. Once approved, it makes a **draft** GitHub release with every file, `SHA256SUMS` and build
-   provenance attestations. Check it, then publish it by hand. Approving and publishing are the
-   two people of a release.
+   tests; then the `release` job (in the `release-signing` environment, which only `v*` tags
+   reach) makes a **draft** GitHub release with every file, `SHA256SUMS` and build provenance
+   attestations.
+4. Check the draft, then publish it by hand: the one human step of a release.
 
 ## What runs where (DevOps' rules)
 
 - `build`, `package`, `dmg`, `rpm` and the tests hold **no secrets**. Their packages carry a
   throwaway Conveyor key made for each run (the bleeding channel's feed; self-signed for Windows
   and macOS): they are for testing.
-- Only `release` runs in the **`release-signing` environment**: tags `v*` only, a required
-  reviewer, no self-review. Its secrets are environment secrets, never organization secrets.
+- Only `release` runs in the **`release-signing` environment**: tags `v*` only (no required
+  reviewer, so the team can release; DevOps, 2026-10-11). Its secrets are environment secrets,
+  never organization secrets.
+- The repository allows only GitHub's own actions and `Swatinem/rust-cache`, pinned by SHA; the
+  default token is read-only, so each job asks for the permissions it needs.
 - Every action is pinned to a commit SHA; Conveyor is pinned by version and SHA-256; the `.rpm`
   is built with Fedora's own `rpmbuild` in Fedora.
 
@@ -42,9 +45,12 @@ and attestations are made after signing. The Conveyor root key is generated off 
 backup in the DevOps vault. A repository ruleset for `v*` tags (only maintainers create, move or
 delete them) backs the environment's tag rule, which checks only the name.
 
-Then the `release` job runs Conveyor with `conveyor-production.conf` (`make copied-site`: it
-signs, notarizes and uploads the site to `homebase-id/filesync-release-production`, as chat-kmp
-does), and signs and notarizes the `.dmg` files. Someone creates the release repos first
+Then the `release` job runs Conveyor with `conveyor-production.conf` (it signs and notarizes)
+and signs and notarizes the `.dmg` files. **Uploading the update site is a separate step:**
+Conveyor's `copied-site` (as chat-kmp does) puts the feed live at once, with no human in
+between, so it should run when the draft release is published (a workflow on
+`release: published`, or `make copied-site` by hand), not from the tag. Then publishing the
+draft stays the human check for the update feed too, not only for the GitHub release. Someone creates the release repos first
 (`filesync-release-production`, `filesync-release-bleeding`). DevOps may move signing off GitHub
 later (their own host, `rcodesign` and `jsign`); the build jobs stay the same.
 

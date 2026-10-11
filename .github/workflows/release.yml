@@ -5,7 +5,7 @@ name: Release
 # and an .rpm. The build and package jobs hold no secrets and run for every trigger; their
 # packages carry a throwaway key (the bleeding channel's feed, self-signed for macOS and
 # Windows), for testing. A `v*` tag (matching the workspace version) also makes a draft GitHub
-# release of them, from the protected `release-signing` environment, where signing goes once
+# release of them, from the `release-signing` environment (`v*` tags only), where signing goes once
 # DevOps has the keys. A manual run only builds and tests.
 
 on:
@@ -320,8 +320,8 @@ jobs:
           Remove-AppxPackage $p.PackageFullName
           if (Get-AppxPackage HomebaseFilesync) { throw "still installed" }
 
-  # A draft release of the tag, from the protected environment (a required reviewer, tags
-  # only: RELEASING.md), so that signing can join it without its secrets reaching the jobs above.
+  # A draft release of the tag, from the release-signing environment (`v*` tags only:
+  # RELEASING.md), so that signing can join it without its secrets reaching the jobs above.
   release:
     if: github.ref_type == 'tag'
     needs: [version, package, dmg, rpm, test-deb, test-msix]

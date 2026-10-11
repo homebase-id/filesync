@@ -77,7 +77,7 @@ made with Conveyor (`packaging/conveyor.conf`): an MSIX for Windows, a Mac app p
 Linux tarball and a Windows zip, all with `hbsync`, `hbsyncd` and the tray `homebase-filesync`
 (built with the `dist` profile, smoke-tested, installed and removed on fresh runners). Build
 jobs hold no secrets; a tag `vX.Y.Z` equal to the workspace version makes a draft GitHub
-release from the protected `release-signing` environment, to publish by hand; running the
+release from the `release-signing` environment (`v*` tags only), to publish by hand; running the
 workflow by hand only builds and tests. Signing waits for DevOps' keys.
 
 ## Crates
