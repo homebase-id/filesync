@@ -347,9 +347,29 @@ jobs:
             echo "::error::no APPLE_SIGNING_KEY in release-signing"; exit 1
           fi
           KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
-          p12="$RUNNER_TEMP/developerid.p12"
-          printf '%s' "$APPLE_SIGNING_KEY" | base64 --decode > "$p12"
-          password=$(openssl rand -hex 24)
+          original="$RUNNER_TEMP/developerid.p12"
+          printf '%s' "$APPLE_SIGNING_KEY" | base64 --decode > "$original"
+          # macOS's `security import` reads only the older PKCS#12 format (3DES, SHA-1 MAC):
+          # one made with OpenSSL 3's defaults (AES, SHA-256 MAC) fails with "MAC verification
+          # failed". So it is written again in that format, the key and the certificates (the
+          # intermediate too) from two pipes, never in the clear on disk. Homebrew's OpenSSL 3:
+          # macOS's own is LibreSSL.
+          openssl="$(brew --prefix openssl@3)/bin/openssl"
+          legacy=()
+          "$openssl" pkcs12 -in "$original" -passin env:APPLE_SIGNING_KEY_PASS -noout 2> /dev/null \
+            || legacy=(-legacy)
+          "$openssl" pkcs12 "${legacy[@]}" -in "$original" -passin env:APPLE_SIGNING_KEY_PASS \
+            -info -noout 2>&1 | grep -E '^(MAC:|PKCS7 Encrypted data:|Shrouded Keybag:)' || true
+          p12="$RUNNER_TEMP/developerid-mac.p12"
+          "$openssl" pkcs12 -export \
+            -inkey <("$openssl" pkcs12 "${legacy[@]}" -in "$original" \
+              -passin env:APPLE_SIGNING_KEY_PASS -nocerts -nodes) \
+            -in <("$openssl" pkcs12 "${legacy[@]}" -in "$original" \
+              -passin env:APPLE_SIGNING_KEY_PASS -nokeys) \
+            -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
+            -passout env:APPLE_SIGNING_KEY_PASS -out "$p12"
+          rm "$original"
+          password=$("$openssl" rand -hex 24)
           security create-keychain -p "$password" "$KEYCHAIN"
           security set-keychain-settings -lut 3600 "$KEYCHAIN"
           security unlock-keychain -p "$password" "$KEYCHAIN"
@@ -388,7 +408,7 @@ jobs:
       - if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2> /dev/null || true
-          rm -f "$RUNNER_TEMP"/developerid.p12 "$RUNNER_TEMP"/AuthKey_*.p8
+          rm -f "$RUNNER_TEMP"/developerid.p12 "$RUNNER_TEMP"/developerid-mac.p12 "$RUNNER_TEMP"/AuthKey_*.p8
       # What a Mac does with a download: the disk image and the app inside both pass Gatekeeper,
       # notarized, with the ticket stapled (so it opens offline too).
       - name: Check them as Gatekeeper does
