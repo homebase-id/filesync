@@ -48,11 +48,11 @@ DevOps (their PR #227). In the `release-signing` environment:
 | An Azure Trusted Signing certificate profile | the MSIX and the EXEs | vars `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` (Conveyor's alias is `<account>/<profile>`); the token by OIDC in the job |
 
 All are set (2026-10-12; first fully signed: v0.1.0-rc.6). `sign` refuses to start if any is
-missing: a tag is never signed by halves. It signs with `conveyor-production.conf`,
-`packaging/conveyor-apple.conf` and `conveyor-azure.conf`. `sign-dmg` signs, notarizes and
+missing: a tag is never signed by halves. It signs with `packaging/conveyor-signed.conf`
+(the production channel, Apple and Azure). `sign-dmg` signs, notarizes and
 staples the disk images on a Mac, then checks them and the app inside as Gatekeeper does;
-`test-signed-msix` installs each signed MSIX (Intel and ARM) on a fresh Windows runner without
-trusting any certificate first and runs `signtool verify` on every package. Installs of the
+on a tag `test-msix` runs `signtool verify` on every Windows package and installs and starts
+each signed MSIX (Intel and ARM) on a fresh runner without trusting any certificate first. Installs of the
 self-signed v0.1.0-rc.1 can't update to signed ones (another publisher): they are reinstalled
 once.
 
@@ -77,9 +77,11 @@ The secrets go in the signing step's own `env:` (not the job's, where the other 
 them); the keys are staged in a `mkdir -m 700` folder in `$RUNNER_TEMP` (`sign-dmg`: imported
 into a keychain of its own there, put on the search list where `codesign` looks) and removed
 in an `if: always()` step. Anyone with write access may push a `v*` tag, with no reviewer (the
-user's decision, 2026-10-12), but only a commit on `main` is signed: the `version` job refuses
-a tag on any other commit, so what gets signed has been through a pull request. (The
-environment's tag rule checks only the name; the tag's own signature isn't checked.)
+user's decision, 2026-10-12). The `version` job refuses a tag on a commit that isn't on
+`main`: a guard against tagging the wrong commit, not a control, since the check runs from the
+tagged commit's own workflow, which whoever tags can change. Making sure only reviewed code is
+signed takes a tag ruleset (who may create `v*` tags) or signing from a workflow on `main`; the
+environment's tag rule checks only the name, and the tag's own signature isn't checked.
 
 As DevOps proposed:
 

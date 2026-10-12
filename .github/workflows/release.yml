@@ -11,6 +11,12 @@ on:
 
 permissions: {}
 
+# `bash` (not the bare default) runs with -eo pipefail: a failing command in a pipe fails the
+# step. The pwsh steps name their own shell.
+defaults:
+  run:
+    shell: bash
+
 env:
   CARGO_TERM_COLOR: always
   CONVEYOR_VERSION: "22.3"
@@ -30,9 +36,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
       - run: rustup toolchain install
       - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "hbsync") | .version')
@@ -44,12 +51,13 @@ jobs:
             echo "::error::the tag $GITHUB_REF_NAME doesn't match the workspace version $version"
             exit 1
           fi
-          # Only reviewed code is signed: a tag must be on main (anyone with write access may
-          # tag, RELEASING.md).
+          # A tag on a commit that isn't on main is refused: a guard against tagging the wrong
+          # commit (RELEASING.md says what it doesn't guard against).
           if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-            git fetch --quiet --no-tags origin main
-            if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
-              echo "::error::the tag $GITHUB_REF_NAME is on a commit that isn't on main"; exit 1
+            on_main=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$GITHUB_SHA" --jq .status)
+            if [[ "$on_main" != identical && "$on_main" != behind ]]; then
+              echo "::error::the tag $GITHUB_REF_NAME is on a commit that isn't on main ($on_main)"
+              exit 1
             fi
           fi
 
@@ -73,9 +81,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-    defaults:
-      run:
-        shell: bash
     env:
       VERSION: ${{ needs.version.outputs.version }}
       TARGET: ${{ matrix.target }}
@@ -222,7 +227,7 @@ jobs:
           AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
         run: |
           # Every input first: a tag is only ever signed for real (no self-signed fallback,
-          # which sign-dmg and test-signed-msix would refuse much later).
+          # which sign-dmg and test-msix would refuse much later).
           missing=()
           for name in CONVEYOR_SIGNING_KEY APPLE_SIGNING_KEY APPLE_SIGNING_KEY_PASS \
               APPLE_NOTARIZATION_KEY APPSTORE_API_KEY_ID APPSTORE_API_ISSUER_ID AZURE_CLIENT_ID \
@@ -234,9 +239,8 @@ jobs:
           fi
           keys="$RUNNER_TEMP/apple"
           mkdir -m 700 "$keys"
-          printf '%s' "$APPLE_SIGNING_KEY" | base64 -d > "$keys/developerid.p12"
+          ./apple-p12.sh conveyor "$keys"
           printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
-          ./apple-p12.sh conveyor "$keys/developerid.p12" "$keys"
           export APPLE_CERT_PATH="$keys/developerid.cer"
           export APPLE_P12_PATH="$keys/developerid-only.p12"
           export APPLE_NOTARIZATION_KEY_PATH="$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
@@ -262,12 +266,7 @@ jobs:
           export AZURE_ACCESS_TOKEN
           AZURE_SIGNING_ENDPOINT=${AZURE_SIGNING_ENDPOINT#https://}
           export AZURE_SIGNING_ENDPOINT=${AZURE_SIGNING_ENDPOINT%/}
-          cat > signed.conf <<EOF
-          include required("conveyor-production.conf")
-          include required("conveyor-apple.conf")
-          include required("conveyor-azure.conf")
-          EOF
-          conveyor -f signed.conf -Kapp.version="$VERSION" --console=plain make site
+          conveyor -f conveyor-signed.conf -Kapp.version="$VERSION" --console=plain make site
           mv output ../signed-site
       - if: always()
         run: rm -rf "$RUNNER_TEMP/apple"
@@ -326,8 +325,8 @@ jobs:
     if: github.ref_type == 'tag'
     needs: dmg
     runs-on: macos-latest
-    # Two notarizations, one after the other, each waiting up to 30 minutes.
-    timeout-minutes: 75
+    # The two notarizations run side by side, each given up to 30 minutes.
+    timeout-minutes: 45
     environment: release-signing
     permissions:
       contents: read
@@ -344,14 +343,9 @@ jobs:
           APPLE_SIGNING_KEY: ${{ secrets.APPLE_SIGNING_KEY }}
           APPLE_SIGNING_KEY_PASS: ${{ secrets.APPLE_SIGNING_KEY_PASS }}
         run: |
-          if [[ -z "$APPLE_SIGNING_KEY" ]]; then
-            echo "::error::no APPLE_SIGNING_KEY in release-signing"; exit 1
-          fi
           keys="$RUNNER_TEMP/apple"
           mkdir -m 700 "$keys"
-          printf '%s' "$APPLE_SIGNING_KEY" | base64 --decode > "$keys/developerid.p12"
-          OPENSSL="$(brew --prefix openssl@3)/bin/openssl" \
-            packaging/apple-p12.sh keychain "$keys/developerid.p12" "$keys/developerid-mac.p12"
+          OPENSSL="$(brew --prefix openssl@3)/bin/openssl" packaging/apple-p12.sh keychain "$keys"
           keychain="$keys/signing.keychain-db"
           password=$(openssl rand -hex 24)
           security create-keychain -p "$password" "$keychain"
@@ -369,7 +363,7 @@ jobs:
           done < <(security list-keychains -d user)
           security list-keychains -d user -s "$keychain" "${keychains[@]}"
           identity=$(security find-identity -v -p codesigning "$keychain" \
-            | awk '/Developer ID Application/ { print $2; exit }')
+            | awk '/Developer ID Application/ && !id { id = $2 } END { print id }')
           if [[ -z "$identity" ]]; then
             echo "::error::no Developer ID Application identity in the .p12"; exit 1
           fi
@@ -386,18 +380,26 @@ jobs:
           key="$RUNNER_TEMP/apple/AuthKey_$APPSTORE_API_KEY_ID.p8"
           printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$key"
           auth=(--key "$key" --key-id "$APPSTORE_API_KEY_ID" --issuer "$APPSTORE_API_ISSUER_ID")
-          for dmg in dmg/*.dmg; do
-            # notarytool exits non-zero when it gives up waiting or fails to talk to Apple: its
-            # answer (with the submission's id, to look it up by hand) is shown either way.
-            answer=$(xcrun notarytool submit "$dmg" "${auth[@]}" --wait --timeout 30m \
+          # Both submitted, then waited for: Apple works on them side by side. notarytool exits
+          # non-zero when it gives up or can't reach Apple; its answer (with the submission's
+          # id, to look it up by hand) is shown either way.
+          dmgs=(dmg/*.dmg)
+          ids=()
+          for dmg in "${dmgs[@]}"; do
+            answer=$(xcrun notarytool submit "$dmg" "${auth[@]}" --output-format json) || true
+            id=$(jq -r '.id // empty' <<< "$answer" 2> /dev/null || true)
+            if [[ -z "$id" ]]; then echo "::error::$dmg wasn't submitted: $answer"; exit 1; fi
+            ids+=("$id")
+          done
+          for i in "${!dmgs[@]}"; do
+            answer=$(xcrun notarytool wait "${ids[$i]}" "${auth[@]}" --timeout 30m \
               --output-format json) || true
             if [[ $(jq -r '.status // empty' <<< "$answer" 2> /dev/null) != Accepted ]]; then
-              echo "::error::$dmg wasn't notarized: $answer"
-              id=$(jq -r '.id // empty' <<< "$answer" 2> /dev/null || true)
-              if [[ -n "$id" ]]; then xcrun notarytool log "$id" "${auth[@]}" || true; fi
+              echo "::error::${dmgs[$i]} wasn't notarized: $answer"
+              xcrun notarytool log "${ids[$i]}" "${auth[@]}" || true
               exit 1
             fi
-            xcrun stapler staple "$dmg"
+            xcrun stapler staple "${dmgs[$i]}"
           done
       - if: always()
         run: |
@@ -425,44 +427,6 @@ jobs:
           name: signed-dmg
           path: dmg/*.dmg
           if-no-files-found: error
-
-  # A tag's Windows packages, signed by Azure Trusted Signing: they install on a fresh runner
-  # without trusting any certificate first, and signtool accepts them.
-  test-signed-msix:
-    if: github.ref_type == 'tag'
-    needs: sign
-    strategy:
-      matrix:
-        include:
-          - { arch: x64, os: windows-latest }
-          - { arch: arm64, os: windows-11-arm }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    permissions: {}
-    env:
-      ARCH: ${{ matrix.arch }}
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: signed-site
-          path: site
-      - name: Verify the signatures, install, remove
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $sdk = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$sdk\signtool.exe" |
-            Sort-Object FullName | Select-Object -Last 1
-          if (-not $signtool) { throw "no signtool.exe for $sdk" }
-          foreach ($f in Get-ChildItem site/*.msix, site/*.exe) {
-            & $signtool.FullName verify /pa /v $f.FullName
-            if ($LASTEXITCODE -ne 0) { throw "$($f.Name) isn't validly signed" }
-          }
-          Add-AppxPackage -Path (Get-ChildItem "site/*.$env:ARCH.msix").FullName
-          $p = Get-AppxPackage HomebaseFilesync
-          if (-not $p) { throw "not installed" }
-          Write-Output "installed $($p.PackageFullName), publisher $($p.Publisher)"
-          Remove-AppxPackage $p.PackageFullName
 
   # The .rpm is Conveyor's .deb, its files as they are (without the apt repository it adds),
   # packaged by Fedora's own rpmbuild, for each architecture on a runner of its own.
@@ -540,8 +504,13 @@ jobs:
             apt-get remove -y -qq homebase-filesync >/dev/null
             test ! -e /usr/bin/hbsync'
 
+  # Each MSIX installed on a fresh runner, the tray started and stopped, then removed. A tag's
+  # are the signed ones (Azure Trusted Signing), the ones that ship: signtool verifies every
+  # package, and they install without trusting any certificate first. Other runs' are
+  # self-signed, trusted first as Conveyor's install.ps1 does.
   test-msix:
-    needs: package
+    needs: [package, sign]
+    if: ${{ !failure() && !cancelled() }}
     strategy:
       matrix:
         include:
@@ -552,19 +521,32 @@ jobs:
     permissions: {}
     env:
       ARCH: ${{ matrix.arch }}
+      SIGNED: ${{ github.ref_type == 'tag' }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: site
+          name: ${{ github.ref_type == 'tag' && 'signed-site' || 'site' }}
           path: site
       - name: Install, run, remove
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # Self-signed in these builds: trusted first, as Conveyor's install.ps1 does.
-          Import-Certificate -FilePath site/homebase-filesync.crt -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          if ($env:SIGNED -eq "true") {
+            $sdk = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$sdk\signtool.exe" |
+              Sort-Object FullName | Select-Object -Last 1
+            if (-not $signtool) { throw "no signtool.exe for $sdk" }
+            foreach ($f in Get-ChildItem site/*.msix, site/*.exe) {
+              & $signtool.FullName verify /pa /v $f.FullName
+              if ($LASTEXITCODE -ne 0) { throw "$($f.Name) isn't validly signed" }
+            }
+          } else {
+            Import-Certificate -FilePath site/homebase-filesync.crt -CertStoreLocation Cert:\LocalMachine\TrustedPeople | Out-Null
+          }
           Add-AppxPackage -Path (Get-ChildItem "site/*.$env:ARCH.msix").FullName
           $p = Get-AppxPackage HomebaseFilesync
+          if (-not $p) { throw "not installed" }
+          Write-Output "installed $($p.PackageFullName), publisher $($p.Publisher)"
           Start-Process "shell:AppsFolder\$($p.PackageFamilyName)!HomebaseFilesync"
           Start-Sleep -Seconds 15
           if (-not (Get-Process homebase-filesync -ErrorAction SilentlyContinue)) { throw "the tray isn't running" }
@@ -578,7 +560,7 @@ jobs:
   # upload exactly these files: publish.yml), the disk images and the .rpm files.
   release:
     if: github.ref_type == 'tag'
-    needs: [version, sign, sign-dmg, rpm, test-deb, test-msix, test-signed-msix]
+    needs: [version, sign, sign-dmg, rpm, test-deb, test-msix]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
