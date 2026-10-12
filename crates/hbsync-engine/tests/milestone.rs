@@ -599,6 +599,65 @@ fn an_edit_keeps_the_executable_bit() -> R {
     Ok(())
 }
 
+/// A file's and a folder's creation time travels with them, set where the system allows it
+/// (Windows, macOS; Linux can't set one), and stays through an edit and a rename elsewhere,
+/// and through the replaced download that brings the edit back.
+#[test]
+fn creation_times_travel_and_stay() -> R {
+    use hbsync_platform::ops;
+    use hbsync_remote::RemoteBody;
+
+    let settable = cfg!(any(windows, target_os = "macos"));
+    let (y2016, y2020) = (1_451_606_400_123, 1_577_836_800_456);
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Folder/doc.txt", b"first")?;
+    for rel in ["Folder/doc.txt", "Folder"] {
+        let path = a.root.join(rel);
+        ops::set_mtime(&path, y2020 * 1_000_000)?;
+        ops::set_created(&path, y2016)?;
+    }
+    let sent = ops::created_ms(&a.root.join("Folder/doc.txt"));
+    if settable {
+        assert_eq!(sent, Some(y2016));
+    }
+    let on_server = |name: &str| -> Result<Option<i64>, Box<dyn std::error::Error>> {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        let found = srv.live().find_map(|h| match &h.body {
+            RemoteBody::Live { content, .. } if content.name == name => Some(content.ct),
+            _ => None,
+        });
+        Ok(found.ok_or("not on the server")?)
+    };
+    settle_all(&mut a, &mut b)?;
+    assert_eq!(on_server("doc.txt")?, sent);
+    if settable {
+        assert_eq!(on_server("Folder")?, Some(y2016));
+        assert_eq!(ops::created_ms(&b.root.join("Folder/doc.txt")), Some(y2016));
+        assert_eq!(ops::created_ms(&b.root.join("Folder")), Some(y2016));
+    }
+
+    // Edited and renamed on b: the node keeps its creation time. (Where inode numbers are
+    // recycled, Linux, an edit and a rename at once make a new node: scan.rs.)
+    b.write("Folder/doc.txt", b"second")?;
+    fs::rename(
+        b.root.join("Folder/doc.txt"),
+        b.root.join("Folder/renamed.txt"),
+    )?;
+    settle_all(&mut a, &mut b)?;
+    assert_eq!(a.read("Folder/renamed.txt")?, "second");
+    if settable {
+        assert_eq!(on_server("renamed.txt")?, Some(y2016));
+        // a got the edit as a new file swapped in: it still has the node's creation time.
+        assert_eq!(
+            ops::created_ms(&a.root.join("Folder/renamed.txt")),
+            Some(y2016)
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn executable_bit_syncs() -> R {

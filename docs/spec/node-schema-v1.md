@@ -39,7 +39,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 ## `appData.content`
 
 ```json
-{ "v": 1, "name": "Report Q3.pdf", "mtime": 1759920000123, "size": 52311, "x": true }
+{ "v": 1, "name": "Report Q3.pdf", "mtime": 1759920000123, "size": 52311, "x": true, "ct": 1451606400123 }
 ```
 
 | Key | Type | Required | Meaning |
@@ -49,8 +49,13 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 | `mtime` | int | files | local modification time, Unix ms |
 | `size` | int | files | plaintext size in bytes |
 | `x` | bool | no | executable bit; omitted when false |
+| `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime` |
 
 - Readers ignore unknown keys. Writers keep unknown keys they read (forward compatibility).
+- `ct` is kept the same way through every rewrite (new bytes, a rename, a move): editors that
+  save by writing a new file and renaming it over the old one would otherwise reset it. A
+  download applies it to the new file before it takes the old one's place; a node without one
+  keeps the replaced file's own.
 - A reader that finds `v > 1` treats the node as read-only.
 - Content is capped by the server at 10,240 characters **[verified]**; with names capped at 255
   UTF-8 bytes by this client, v1 content stays far below it.

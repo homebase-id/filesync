@@ -168,6 +168,7 @@ impl CompletedFile {
     pub fn set_attributes(
         &self,
         mtime_ns: Option<i64>,
+        created_ms: Option<i64>,
         executable: Option<bool>,
     ) -> io::Result<()> {
         if let Some(x) = executable {
@@ -175,6 +176,11 @@ impl CompletedFile {
         }
         if let Some(t) = mtime_ns {
             ops::set_mtime(&self.path, t)?;
+        }
+        // After the mtime (see `set_created`). Only shown, never synced on: a file system that
+        // won't take it doesn't fail the download.
+        if let Some(t) = created_ms {
+            let _ = ops::set_created(&self.path, t);
         }
         Ok(())
     }
@@ -256,7 +262,7 @@ mod tests {
         assert_eq!(done.hash, expected);
 
         let target = dir.path().join("out.bin");
-        done.set_attributes(Some(1_700_000_000_000_000_000), None)?;
+        done.set_attributes(Some(1_700_000_000_000_000_000), None, None)?;
         let meta = done.persist_new(&target)?;
         assert_eq!(fs::read(&target)?, data);
         assert_eq!(meta.mtime_ns, 1_700_000_000_000_000_000);

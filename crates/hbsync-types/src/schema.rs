@@ -24,6 +24,10 @@ pub struct NodeContent {
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub x: bool,
+    /// Creation time, Unix ms: the item's own when it was first uploaded, then never changed
+    /// (an editor that saves by replacing the file would otherwise reset it every time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ct: Option<i64>,
     /// Keys from newer writers, kept so a rewrite doesn't drop them.
     #[serde(flatten)]
     pub unknown: Map<String, Value>,
@@ -37,6 +41,7 @@ impl NodeContent {
             mtime: None,
             size: None,
             x: false,
+            ct: None,
             unknown: Map::new(),
         }
     }
@@ -48,6 +53,7 @@ impl NodeContent {
             mtime: Some(mtime_ms),
             size: Some(size),
             x: executable,
+            ct: None,
             unknown: Map::new(),
         }
     }
@@ -59,6 +65,22 @@ impl NodeContent {
 
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
+    }
+
+    /// The keys sync carries along without acting on them: `ct` and the unknown ones. Every
+    /// rewrite of the node puts them back ([`NodeContent::carry`]).
+    pub fn carried(&self) -> Map<String, Value> {
+        let mut keys = self.unknown.clone();
+        if let Some(ct) = self.ct {
+            keys.insert("ct".into(), ct.into());
+        }
+        keys
+    }
+
+    /// Puts back what [`NodeContent::carried`] gave.
+    pub fn carry(&mut self, mut keys: Map<String, Value>) {
+        self.ct = keys.remove("ct").and_then(|ct| ct.as_i64());
+        self.unknown = keys;
     }
 
     /// A reader that finds a newer version treats the node as read-only.
@@ -94,6 +116,21 @@ mod tests {
                 .to_json()
                 .contains(r#""x":true"#)
         );
+    }
+
+    #[test]
+    fn creation_time_is_carried_with_the_unknown_keys() -> Result<(), serde_json::Error> {
+        let json = r#"{"v":1,"name":"a","mtime":5,"size":1,"ct":1451606400123,"future":7}"#;
+        let read = NodeContent::from_json(json)?;
+        assert_eq!(read.ct, Some(1_451_606_400_123));
+        // A rewrite (new bytes, a rename) starts from scratch and gets them back.
+        let mut rewritten = NodeContent::file("b", 6, 2, false);
+        rewritten.carry(read.carried());
+        assert_eq!(
+            rewritten.to_json(),
+            r#"{"v":1,"name":"b","mtime":6,"size":2,"ct":1451606400123,"future":7}"#
+        );
+        Ok(())
     }
 
     #[test]

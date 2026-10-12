@@ -132,6 +132,7 @@ pub enum Job {
         size: u64,
         /// Applied to the temp file before it becomes visible.
         mtime_ms: i64,
+        created_ms: Option<i64>,
         executable: Option<bool>,
         tmp_dir: PathBuf,
         /// Identifies the exact content, so a partial file is only resumed for the same bytes.
@@ -298,6 +299,7 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             expected,
             size,
             mtime_ms,
+            created_ms,
             executable,
             tmp_dir,
             key,
@@ -309,6 +311,7 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             *expected,
             *size,
             *mtime_ms,
+            *created_ms,
             *executable,
             tmp_dir,
             key,
@@ -345,6 +348,7 @@ fn download(
     expected: ContentHash,
     size: u64,
     mtime_ms: i64,
+    created_ms: Option<i64>,
     executable: Option<bool>,
     tmp_dir: &std::path::Path,
     key: &str,
@@ -364,7 +368,11 @@ fn download(
         remote.read(file_id, range, &mut sink)?;
     }
     let file = partial.finish(Some(expected), Some(size))?;
-    file.set_attributes(Some(mtime_ms.saturating_mul(1_000_000)), executable)?;
+    file.set_attributes(
+        Some(mtime_ms.saturating_mul(1_000_000)),
+        created_ms,
+        executable,
+    )?;
     let local_hash = if expected.algorithm == local_algorithm {
         expected
     } else {

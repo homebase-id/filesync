@@ -392,6 +392,7 @@ fn guarded_updates(b: &Bench) -> Outcome {
 
 fn content_round_trips(b: &Bench) -> Outcome {
     let mut content = NodeContent::file("Résumé – 履歴書 🗂.txt", -1_000, 4, false);
+    content.ct = Some(-2_000);
     content
         .unknown
         .insert("future".into(), serde_json::json!({"k": [1, 2]}));

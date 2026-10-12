@@ -124,19 +124,25 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
         name: content.name.clone(),
         kind: header.kind,
         file,
-        // Read back by `unknown_keys`.
-        content_extra: (!content.unknown.is_empty())
-            .then(|| serde_json::Value::Object(content.unknown.clone()).to_string()),
+        // Read back by `carried_keys`.
+        content_extra: Some(content.carried())
+            .filter(|keys| !keys.is_empty())
+            .map(|keys| serde_json::Value::Object(keys).to_string()),
     })
 }
 
-/// The content keys of `row` this client doesn't know (stored by [`mirror_row`]), to be written
-/// back unchanged.
-pub(crate) fn unknown_keys(row: &MirrorRow) -> serde_json::Map<String, serde_json::Value> {
+/// The content keys of `row` that sync carries along (`NodeContent::carried`, stored by
+/// [`mirror_row`]), to be written back unchanged.
+pub(crate) fn carried_keys(row: &MirrorRow) -> serde_json::Map<String, serde_json::Value> {
     row.content_extra
         .as_deref()
         .and_then(|extra| serde_json::from_str(extra).ok())
         .unwrap_or_default()
+}
+
+/// The creation time `row`'s node carries, Unix ms.
+pub(crate) fn created_ms(row: &MirrorRow) -> Option<i64> {
+    carried_keys(row).get("ct").and_then(|ct| ct.as_i64())
 }
 
 #[cfg(test)]

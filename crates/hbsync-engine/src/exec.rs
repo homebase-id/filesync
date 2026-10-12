@@ -187,7 +187,6 @@ enum Ctx {
         kind: NodeKind,
         content: NodeContent,
         hash: hbsync_types::ContentHash,
-        extra: Option<String>,
     },
 }
 
@@ -809,6 +808,15 @@ impl<'a> Executor<'a> {
             if let Err(e) = fs::create_dir(&abs) {
                 return Ok(io_outcome(e));
             }
+            // Only shown, never synced on: a file system that won't take it is no failure.
+            if let Some(ct) = self
+                .db
+                .read(|s| s.get_mirror(node))?
+                .as_ref()
+                .and_then(feed::created_ms)
+            {
+                let _ = ops::set_created(&abs, ct);
+            }
         }
         let meta = match hbsync_platform::stat(&abs) {
             Ok(m) => m,
@@ -922,12 +930,20 @@ impl<'a> Executor<'a> {
             return Err(rescan(&mut self.report, &row.path));
         }
         let target = self.target_path(parent, name)?;
+        // The node's creation time; a node from a client that sends none keeps the replaced
+        // file's own.
+        let created_ms = feed::created_ms(&mirror).or_else(|| {
+            current
+                .as_ref()
+                .and_then(|row| ops::created_ms(&self.abs(&row.path)))
+        });
         let job = Job::Download {
             node,
             file_id: mirror.file_id,
             expected,
             size: file.size,
             mtime_ms: file.mtime_ms,
+            created_ms,
             executable: (self.cfg.os != Os::Windows).then_some(file.executable),
             tmp_dir: self.cfg.state_dir().join(TMP_DIR),
             key: download_key(node, &expected),
@@ -970,14 +986,17 @@ impl<'a> Executor<'a> {
         let mut content = NodeContent::file(name, file.mtime_ms, file.size, file.executable);
         let (hash, size) = (file.hash, file.size);
         let path = self.abs(&row.path);
-        let extra = mirror.as_ref().and_then(|m| m.content_extra.clone());
         let target = match existing {
-            None => None,
+            // A new node: the file's own creation time, kept from then on.
+            None => {
+                content.ct = ops::created_ms(&path);
+                None
+            }
             Some((file_id, version)) => {
                 let Some(mirror) = &mirror else {
                     return Err(Outcome::Skip("gone remotely".into()));
                 };
-                content.unknown = feed::unknown_keys(mirror);
+                content.carry(feed::carried_keys(mirror));
                 Some(RemoteRef { file_id, version })
             }
         };
@@ -1001,7 +1020,6 @@ impl<'a> Executor<'a> {
                 kind,
                 content,
                 hash,
-                extra,
             },
         ))
     }
@@ -1029,11 +1047,10 @@ impl<'a> Executor<'a> {
                     kind,
                     content,
                     hash,
-                    extra,
                 },
                 JobResult::Uploaded(written),
             ) => {
-                let row = mirror_from(node, parent, kind, &content, Some(hash), written, extra);
+                let row = mirror_from(node, parent, kind, &content, Some(hash), written);
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 self.finish(&[(node, true)], |s| s.put_mirror(&row))
             }
@@ -1267,7 +1284,8 @@ impl<'a> Executor<'a> {
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let content = NodeContent::folder(name);
+        let mut content = NodeContent::folder(name);
+        content.ct = ops::created_ms(&self.abs(&row.path));
         let new = NodeMeta {
             node,
             parent,
@@ -1280,9 +1298,7 @@ impl<'a> Executor<'a> {
             Err(e) => return Ok(remote_outcome(e)),
         };
         self.finish(&[(node, false)], |s| {
-            s.put_mirror(&mirror_from(
-                node, parent, kind, &content, None, written, None,
-            ))
+            s.put_mirror(&mirror_from(node, parent, kind, &content, None, written))
         })
     }
 
@@ -1302,7 +1318,7 @@ impl<'a> Executor<'a> {
             (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
             _ => NodeContent::folder(name),
         };
-        content.unknown = feed::unknown_keys(&mirror);
+        content.carry(feed::carried_keys(&mirror));
         let meta = NodeMeta {
             node,
             parent,
@@ -1314,15 +1330,7 @@ impl<'a> Executor<'a> {
             Err(e) => return Ok(remote_outcome(e)),
         };
         let hash = mirror.file.map(|f| f.hash);
-        let row = mirror_from(
-            node,
-            parent,
-            mirror.kind,
-            &meta.content,
-            hash,
-            written,
-            mirror.content_extra.clone(),
-        );
+        let row = mirror_from(node, parent, mirror.kind, &meta.content, hash, written);
         self.finish(&[(node, false)], |s| s.put_mirror(&row))
     }
 
@@ -1409,7 +1417,6 @@ fn mirror_from(
     content: &NodeContent,
     hash: Option<hbsync_types::ContentHash>, // `Some` for files
     written: hbsync_types::RemoteRef,
-    extra: Option<String>,
 ) -> MirrorRow {
     MirrorRow {
         file_id: written.file_id,
@@ -1424,7 +1431,9 @@ fn mirror_from(
             mtime_ms: content.mtime.unwrap_or(0),
             executable: content.x,
         }),
-        content_extra: extra,
+        content_extra: Some(content.carried())
+            .filter(|keys| !keys.is_empty())
+            .map(|keys| serde_json::Value::Object(keys).to_string()),
     }
 }
 

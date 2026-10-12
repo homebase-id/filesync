@@ -56,6 +56,56 @@ pub fn set_mtime(path: &Path, mtime_ns: i64) -> io::Result<()> {
     )
 }
 
+/// The creation ("birth") time of a file or directory, Unix ms; `None` where the system or
+/// file system doesn't record one.
+pub fn created_ms(path: &Path) -> Option<i64> {
+    let created = fs::symlink_metadata(path).ok()?.created().ok()?;
+    let ms = match created.duration_since(std::time::UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_millis()).ok()?,
+        Err(before) => -i64::try_from(before.duration().as_millis()).ok()?,
+    };
+    Some(ms)
+}
+
+/// Sets the creation time of a file or directory, Unix ms, where the system allows it (Windows,
+/// macOS); elsewhere (Linux has no way to) it does nothing. Call it after [`set_mtime`]: on
+/// macOS a modification time earlier than the creation time moves the creation time back.
+pub fn set_created(path: &Path, created_ms: i64) -> io::Result<()> {
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        #[cfg(target_os = "macos")]
+        use std::os::macos::fs::FileTimesExt;
+        #[cfg(windows)]
+        use std::os::windows::fs::{FileTimesExt, OpenOptionsExt};
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let at = if created_ms >= 0 {
+            UNIX_EPOCH + Duration::from_millis(created_ms.unsigned_abs())
+        } else {
+            UNIX_EPOCH - Duration::from_millis(created_ms.unsigned_abs())
+        };
+        // Opened only to set its times; a directory too (Windows needs backup semantics).
+        #[cfg(windows)]
+        let file = {
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+            };
+            fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)?
+        };
+        #[cfg(target_os = "macos")]
+        let file = fs::File::open(path)?;
+        file.set_times(fs::FileTimes::new().set_created(at))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (path, created_ms);
+        Ok(())
+    }
+}
+
 /// Sets or clears the executable bits (`u+x`, `g+x`, `o+x` following the read bits).
 /// No-op on Windows.
 pub fn set_executable(path: &Path, executable: bool) -> io::Result<()> {
@@ -252,6 +302,29 @@ mod tests {
         assert_eq!(meta::stat(&file)?.mtime_ns, t);
         set_mtime(dir.path(), t)?;
         assert_eq!(meta::stat(dir.path())?.mtime_ns, t);
+        Ok(())
+    }
+
+    /// Both orders: a file older than its last edit (the usual case), and a copy, whose
+    /// creation is later than the modification it kept. Linux can't set it and reports what
+    /// the file system has.
+    #[test]
+    fn set_created_round_trips_where_the_system_allows() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("f");
+        fs::write(&file, b"x")?;
+        let (y2016, y2020) = (1_451_606_400_123, 1_577_836_800_456);
+        for (created, modified) in [(y2016, y2020), (y2020, y2016)] {
+            for path in [file.as_path(), dir.path()] {
+                set_mtime(path, modified * 1_000_000)?;
+                set_created(path, created)?;
+                let expected = cfg!(any(windows, target_os = "macos")).then_some(created);
+                if expected.is_some() {
+                    assert_eq!(created_ms(path), expected, "{}", path.display());
+                }
+                assert_eq!(meta::stat(path)?.mtime_ns, modified * 1_000_000);
+            }
+        }
         Ok(())
     }
 
