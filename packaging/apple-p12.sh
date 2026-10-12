@@ -30,7 +30,8 @@ legacy=()
 "$openssl" pkcs12 -in "$p12" -passin env:APPLE_SIGNING_KEY_PASS -noout 2> /dev/null ||
   legacy=(-legacy)
 read_p12() {
-  "$openssl" pkcs12 "${legacy[@]}" -in "$p12" -passin env:APPLE_SIGNING_KEY_PASS "$@"
+  # ${a[@]+...}: macOS's bash 3.2 calls an empty array unbound under set -u.
+  "$openssl" pkcs12 ${legacy[@]+"${legacy[@]}"} -in "$p12" -passin env:APPLE_SIGNING_KEY_PASS "$@"
 }
 # A .p12 of the key and `certs` (a file; openssl reads it twice, so not a plain pipe).
 export_p12() {
