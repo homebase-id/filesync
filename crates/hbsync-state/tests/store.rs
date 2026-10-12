@@ -2,8 +2,8 @@ use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_state::{BaseRow, LocalRow, StateDb, StateError};
 use hbsync_types::RemoteRef;
 use hbsync_types::{
-    ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Uuid,
-    VersionTag,
+    ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Tag, Tags,
+    Uuid, VersionTag,
 };
 
 type R = Result<(), StateError>;
@@ -55,13 +55,15 @@ fn local(p: &str, kind: NodeKind, inode: u128) -> LocalRow {
         },
         executable: Some(false),
         hash: None,
+        tags: None,
     }
 }
 
 #[test]
 fn base_round_trip() -> R {
     let mut db = StateDb::open_in_memory()?;
-    let folder = base(NodeState::folder(NodeId::ROOT, "Docs"));
+    let mut folder = base(NodeState::folder(NodeId::ROOT, "Docs"));
+    folder.state.tags = Tags::new([Tag::new("Work", 0), Tag::new("Red", 6)]);
     let mut file = base(NodeState::file(folder.node, "a.txt", content(b"a")));
     file.content_state = ContentState::Pinned;
     file.local_name = Some("a\u{F022}.txt".into());
@@ -90,9 +92,17 @@ fn base_round_trip() -> R {
 #[test]
 fn local_rows_and_walk_order() -> R {
     let mut db = StateDb::open_in_memory()?;
+    let tagged = LocalRow {
+        tags: Some(Tags::new([Tag::new("Blue", 4)])),
+        ..local("a-b", NodeKind::File, 2)
+    };
+    let untagged = LocalRow {
+        tags: Some(Tags::default()),
+        ..local("b", NodeKind::File, 1)
+    };
     let rows = [
-        local("b", NodeKind::File, 1),
-        local("a-b", NodeKind::File, 2),
+        untagged,
+        tagged,
         local("a", NodeKind::Folder, 3),
         local("a/z", NodeKind::File, 4),
         local("a/b", NodeKind::Folder, 5),
@@ -122,7 +132,9 @@ fn local_rows_and_walk_order() -> R {
             .collect();
         assert_eq!(subtree, ["a", "a/b", "a/b/c", "a/z"]);
 
-        assert_eq!(s.local_by_node(rows[3].node)?, Some(rows[3].clone()));
+        for row in &rows {
+            assert_eq!(s.local_by_node(row.node)?.as_ref(), Some(row));
+        }
         let by_id = s.local_by_file_id(&rows[5].fingerprint.file_id)?;
         assert_eq!(by_id, vec![rows[5].clone()]);
         assert_eq!(s.local_count()?, 7);
@@ -231,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 3);
+    assert_eq!(db.schema_version()?, 4);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -293,6 +305,13 @@ mod mirror {
             Ok(())
         })?;
         assert_eq!(file.state().map(|st| st.name), Some("f".into()));
+        let tagged = MirrorRow {
+            content_extra: Some(r#"{"ct":1,"tags":[{"n":"Red","c":6}]}"#.into()),
+            ..folder.clone()
+        };
+        let red = Tags::new([Tag::new("Red", 6)]);
+        assert_eq!(tagged.state().map(|st| st.tags), Some(red));
+        assert_eq!(folder.state().map(|st| st.tags), Some(Tags::default()));
         let removed = db.write(|s| s.delete_mirror(file.file_id))?;
         assert_eq!(removed, Some(file.clone()));
         assert_eq!(db.read(|s| s.get_mirror(file.node))?, None);

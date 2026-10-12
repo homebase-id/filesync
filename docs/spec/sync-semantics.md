@@ -15,6 +15,7 @@ changes). Attributes:
 | `name` | Unicode, NFC | same |
 | `content` | `{ hash, size, mtime }` | none |
 | `x` (executable) | bool | none |
+| `tags` | Finder tags, a set of (name, colour) | same |
 
 The **root** is implicit: it has the fixed id from the node schema and is never stored as a node.
 
@@ -38,7 +39,8 @@ For each node, compare each side against the base:
 | `edited` | content hash (or `x`) differs from base |
 | `moved` | `parent` or `name` differs from base |
 
-`edited` and `moved` are independent and can both be true.
+`edited` and `moved` are independent and can both be true. Tags are compared on their own and
+merged three-way whatever else changed (section 11): a tag change is never an `edited`.
 
 ## 3. Local identity matching
 
@@ -128,11 +130,13 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
 ## 8. Operations
 
-Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `trash`,
+Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `tags`, `trash`,
 `rename-for-conflict`, and for filters (section 10) `detach` (a new node id in place) and
 `forget` (trash plus dropping the base). Remote: `create-folder`, `upload` (create by node id),
-`update-content`, `move`, `remove` (to Recently deleted; a create of a removed node restores
-it). Outside plans: `restore` and `purge` (Recently deleted).
+`update-content`, `move`, `tags`, `remove` (to Recently deleted; a create of a removed node
+restores it). Outside plans: `restore` and `purge` (Recently deleted). Every op that writes a
+node (create, upload, move, download, mkdir) writes its merged tags too; `tags` is for a change
+of tags alone.
 
 Ordering within one plan: folder creates top-down, then moves, then content, then deletes
 bottom-up. A move whose target name is occupied by a node that is itself moving away goes
@@ -204,6 +208,10 @@ expected fingerprint is treated as done.
 4. **Filters** (section 10): convergence and no loss hold for what each client syncs; a
    filtered local item is never changed or removed by sync, except junk going to the trash
    with its folder.
+5. **Tags** (section 11): convergence includes the tags as each client sees them (clients tag
+   like macOS, Linux and Windows); a tag some user added and no user removed is on its node in
+   the end, unless the node was deleted, or the item it was added to went to the trash or got
+   a new id on that device (then it went along).
 
 ## 10. Filters
 
@@ -263,3 +271,35 @@ An item inside a filtered folder is filtered too.
    is stored in the same transaction. Items that come into view are new items. The sync loop
    checks the ignore file for an edit at every poll (once a minute) and on a sync request, and
    starts over with the new rules when it changed.
+
+## 11. Tags
+
+Finder tags: a name and optionally one of Finder's seven colours, on files and folders (node
+schema `tags`). They are a sync dimension of their own: adding or removing a tag, or changing
+its colour, syncs even when nothing else changed.
+
+**Where they live** (`hbsync-platform/src/tags.rs`): macOS `com.apple.metadata:_kMDItemUserTags`
+(a binary plist array of `"Name"` or `"Name\nColour"`, what Finder and Spotlight use); Linux
+`user.xdg.tags` (comma-separated names, what KDE uses); Windows nowhere. A file system without
+extended attributes counts as "nowhere".
+
+**What a device can't hold is the drive's.** The local side of a node's tags is what the device
+read, completed from the drive's tags (the base's when the drive has none): a tag the system
+can't hold (any on Windows, colours and names with a comma on Linux, names with a newline on
+macOS) is taken as it is on the drive, and a tag read as the system shows a drive tag is that
+tag (Linux's `Red` is the drive's `Red`, orange). So a device never removes or recolours a tag
+it can't see.
+
+**Merge**, per name, three-way: a tag either side added is in, a tag either side removed is out;
+a colour comes from the side that changed it, the remote's if both did. Never a conflict copy.
+
+**A tag change is not an edit.** Against a delete on the other side the delete wins (the item
+is in Recently deleted, with its tags); it never makes a conflict copy. A conflict copy keeps
+the local file's tags, and an edit that restores a removed node merges the removed version's
+tags in (it may hold tags this device never saw).
+
+**Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
+then reads the tags. Rows from before tags were synced get theirs read once at start-up.
+Downloads write the tags onto the temp file before it is put in place: a file without them
+would read as the user removing them. An item with more than about 2,000 characters of tags
+isn't tag-synced: it reads as "can't tell", and keeps what the drive has.

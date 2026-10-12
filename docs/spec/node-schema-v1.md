@@ -39,7 +39,7 @@ reserved in odin-core.
 | `appData.groupId` | parent node id | parent node id |
 | `appData.content` | JSON, see below | JSON, see below |
 | `appData.archivalStatus` | `0` live, `2` removed | `0` live, `2` removed |
-| `appData.tags` | none | none |
+| `appData.tags` | none (Finder tags are `content.tags`, encrypted) | none |
 | `isEncrypted` | `true` (`encryption.md`) | `true` (`encryption.md`) |
 | payloads | none | exactly one, key `sync_data` |
 
@@ -49,7 +49,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 ## `appData.content`
 
 ```json
-{ "v": 1, "name": "Report Q3.pdf", "mtime": 1759920000123, "size": 52311, "x": true, "ct": 1451606400123 }
+{ "v": 1, "name": "Report Q3.pdf", "mtime": 1759920000123, "size": 52311, "x": true, "ct": 1451606400123,
+  "tags": [{ "n": "Red", "c": 6 }, { "n": "Work" }] }
 ```
 
 | Key | Type | Required | Meaning |
@@ -61,6 +62,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 | `x` | bool | no | executable bit; omitted when false |
 | `rm` | object | removed nodes | `{"at": <Unix ms>, "root": "<node id>"}`: when the node was removed, and the topmost node of what was deleted with it (the node itself for a single delete, the folder for a folder's). Present exactly while `archivalStatus` is `2` |
 | `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime`. Readers round a fractional value and take anything else as none (and keep it) |
+| `tags` | array | no | Finder tags (files and folders): `[{"n": <name>, "c": <colour>}, …]`. `n` is the tag's name (NFC, not empty, one entry per name); `c` is Finder's colour, `1` grey, `2` green, `3` purple, `4` blue, `5` yellow, `6` red, `7` orange, left out when none. Order doesn't matter (this client sorts by name). No key means no tags. Synced: adding or removing a tag, or changing its colour, reaches every device (sync-semantics §11). Readers skip an entry without a string `n` and read any other `c` as none |
 
 - "Required" is for writers. A reader skips a file without `size` (an encrypted payload's stored
   size is padded, `encryption.md`) but keeps one without `mtime`, as a file with no date (this
@@ -70,6 +72,11 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   save by writing a new file and renaming it over the old one would otherwise reset it. A
   download gives it to the file once in place (after the mtime). A node without one (from
   before `ct`, or a client that sends none) gets its file's on its next update or rename.
+- `tags` is kept the same way through every write that isn't about tags. Where they live on
+  each system: macOS `com.apple.metadata:_kMDItemUserTags` (what Finder and Spotlight use),
+  Linux `user.xdg.tags` (KDE; names only, so a Linux device keeps the colours as they are on
+  the drive), Windows nowhere (a Windows device keeps them all as they are). This client syncs
+  at most about 2,000 characters of tags per item; an item with more keeps what the drive has.
 - A reader that finds `v > 1` treats the node as read-only.
 - Content is capped by the server at 10,240 characters **[verified]**; with names capped at 255
   UTF-8 bytes by this client, v1 content stays far below it.
@@ -134,13 +141,17 @@ write nodes this client syncs:
   is about and write the rest back as read, unknown keys included. Never rebuild content from a
   model that knows only some keys: that drops `ct` and `x` (and any later key) for every device.
   If a client can't keep unknown keys, it doesn't update nodes.
-- **Read:** ignore keys you don't use. Showing `ct` is optional. Leave nodes with
+- **Read:** ignore keys you don't use. Showing `ct` and `tags` is optional. Leave nodes with
   `archivalStatus` `2` out of the folder tree (a "Recently deleted" view may show them).
 - **Delete:** remove (set `archivalStatus` `2` and `rm`), never delete a live node outright.
   Don't write to a removed node except to restore it.
+- **Tags:** a client that lets people change tags writes the whole `tags` list as it should
+  be now (the other keys as read), never a part of it. A client that doesn't keeps `tags` as
+  read, like any other key.
 - **Every write** sends `archivalStatus`: Homebase sets a missing one to `0`.
 
 ## Changes
+- 2026-10-12: `tags`, the Finder tags and colours (optional, files and folders), synced.
 - 2026-10-12: Recently deleted: a delete sets `archivalStatus` `2` and `rm`, kept 30 days.
 - 2026-10-12: other apps find the drive by slug too (the alias also works); readers keep a file
   without `mtime`.

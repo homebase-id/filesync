@@ -15,7 +15,7 @@ use hbsync_local::Filter;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
-use hbsync_types::{FileContent, NodeId, NodeKind, NodeState};
+use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
 
 use crate::exec::parked_name;
 use crate::reconcile::{BaseExtra, Input};
@@ -55,12 +55,21 @@ fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState
             Err(_) => return Ok(None),
         },
     };
+    // What this device can't hold of the tags is the drive's (else the agreed) (§11).
+    let reference = match s.get_mirror(row.node)? {
+        Some(m) => m.tags(),
+        None => base
+            .as_ref()
+            .map(|b| b.state.tags.clone())
+            .unwrap_or_default(),
+    };
     Ok(Some(NodeState {
         parent,
         name,
         kind: row.kind,
         // An unhashed file is reported without content; the caller defers it.
         content: local_content(row, base.as_ref()),
+        tags: Tags::fill(row.tags.as_ref(), &reference, os),
     }))
 }
 

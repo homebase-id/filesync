@@ -4,6 +4,7 @@
 use std::fmt;
 
 pub use hbsync_fileio::{ContentHash, HashAlgorithm};
+pub use hbsync_platform::tags::{Tag, Tags};
 pub use uuid::Uuid;
 
 pub mod activity;
@@ -148,6 +149,8 @@ pub struct NodeState {
     pub kind: NodeKind,
     /// `Some` for files, `None` for folders.
     pub content: Option<FileContent>,
+    /// Finder tags (files and folders): synced, merged three-way (sync-semantics §11).
+    pub tags: Tags,
 }
 
 impl NodeState {
@@ -157,6 +160,7 @@ impl NodeState {
             name: name.into(),
             kind: NodeKind::Folder,
             content: None,
+            tags: Tags::default(),
         }
     }
 
@@ -166,6 +170,7 @@ impl NodeState {
             name: name.into(),
             kind: NodeKind::File,
             content: Some(content),
+            tags: Tags::default(),
         }
     }
 

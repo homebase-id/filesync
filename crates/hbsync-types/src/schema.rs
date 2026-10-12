@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::NodeId;
+use crate::{NodeId, Tag, Tags};
 
 /// `appData.fileType` of a folder node (provisional, see the spec).
 pub const FILE_TYPE_FOLDER: i32 = 7101;
@@ -16,6 +16,8 @@ pub const PAYLOAD_KEY: &str = "sync_data";
 pub const VERSION: u32 = 1;
 /// The content key of the creation time ([`NodeContent::created_ms`]).
 const CREATED: &str = "ct";
+/// The content key of the Finder tags ([`NodeContent::tags`]).
+const TAGS: &str = "tags";
 /// The content key of a removal ([`NodeContent::removal`]).
 pub const REMOVAL_KEY: &str = "rm";
 /// `appData.archivalStatus` of a node in Recently deleted (0 is a live one).
@@ -104,6 +106,26 @@ impl NodeContent {
         };
     }
 
+    /// The Finder tags `tags`, kept with the unknown keys like `ct`. A malformed entry (from
+    /// some other writer) is left out; none means no tags.
+    pub fn tags(&self) -> Tags {
+        Self::tags_in(&self.unknown)
+    }
+
+    /// [`NodeContent::tags`] of the unknown keys alone (as a client stores them).
+    pub fn tags_in(unknown: &Map<String, Value>) -> Tags {
+        unknown.get(TAGS).map(tags_from_value).unwrap_or_default()
+    }
+
+    /// Sets the tags; none removes the key.
+    pub fn set_tags(&mut self, tags: &Tags) {
+        if tags.is_empty() {
+            self.unknown.remove(TAGS);
+        } else {
+            self.unknown.insert(TAGS.into(), tags_value(tags));
+        }
+    }
+
     /// The removal `rm` of a node in Recently deleted (`archivalStatus` 2), kept with the
     /// unknown keys like `ct`; one that doesn't read (another writer's) is none.
     pub fn removal(&self) -> Option<Removal> {
@@ -133,6 +155,53 @@ impl NodeContent {
     pub fn is_writable(&self) -> bool {
         self.v <= VERSION
     }
+}
+
+/// Tags as JSON: `[{"n": "Work", "c": 4}, …]`, `c` left out when 0.
+pub fn tags_value(tags: &Tags) -> Value {
+    tags.iter()
+        .map(|t| match t.colour {
+            0 => json!({"n": t.name}),
+            c => json!({"n": t.name, "c": c}),
+        })
+        .collect()
+}
+
+/// Reads [`tags_value`] leniently: entries without a string name are skipped, and a colour
+/// that isn't one of Finder's reads as none.
+pub fn tags_from_value(value: &Value) -> Tags {
+    let Some(list) = value.as_array() else {
+        return Tags::default();
+    };
+    Tags::new(list.iter().filter_map(|t| {
+        let colour = t["c"].as_u64().and_then(|c| u8::try_from(c).ok());
+        Some(Tag::new(
+            t["n"].as_str()?,
+            colour.filter(|c| *c <= 7).unwrap_or(0),
+        ))
+    }))
+}
+
+/// The tags among content keys kept as a JSON object (a client's unknown keys).
+pub fn tags_in_keys(keys: &str) -> Tags {
+    if !keys.contains("\"tags\"") {
+        return Tags::default();
+    }
+    serde_json::from_str::<Value>(keys)
+        .map(|keys| tags_from_value(&keys[TAGS]))
+        .unwrap_or_default()
+}
+
+/// Tags as a JSON string (how the state DB keeps them).
+pub fn tags_to_string(tags: &Tags) -> String {
+    tags_value(tags).to_string()
+}
+
+/// Reads [`tags_to_string`]; anything else reads as no tags.
+pub fn tags_from_str(s: &str) -> Tags {
+    serde_json::from_str(s)
+        .map(|v| tags_from_value(&v))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -179,6 +248,28 @@ mod tests {
         let odd = NodeContent::from_json(r#"{"v":1,"name":"a","ct":"yesterday"}"#)?;
         assert_eq!(odd.created_ms(), None);
         assert!(odd.to_json().contains(r#""ct":"yesterday""#));
+        Ok(())
+    }
+
+    #[test]
+    fn tags_ride_with_the_unknown_keys() -> Result<(), serde_json::Error> {
+        let mut c = NodeContent::folder("a");
+        let tags = Tags::new([Tag::new("Work", 0), Tag::new("Red", 6)]);
+        c.set_tags(&tags);
+        let json = c.to_json();
+        assert_eq!(
+            json,
+            r#"{"v":1,"name":"a","tags":[{"c":6,"n":"Red"},{"n":"Work"}]}"#
+        );
+        assert_eq!(NodeContent::from_json(&json)?.tags(), tags);
+        c.set_tags(&Tags::default());
+        assert_eq!(c.to_json(), r#"{"v":1,"name":"a"}"#);
+        // Another writer's odd entries: skipped, and an unknown colour reads as none.
+        let odd = NodeContent::from_json(
+            r#"{"v":1,"name":"a","tags":[{"n":"x","c":42},{"c":1},"y",{"n":"z","c":2}]}"#,
+        )?;
+        assert_eq!(odd.tags(), Tags::new([Tag::new("x", 0), Tag::new("z", 2)]));
+        assert_eq!(tags_from_str(&tags_to_string(&tags)), tags);
         Ok(())
     }
 

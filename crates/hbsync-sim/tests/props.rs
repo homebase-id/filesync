@@ -13,6 +13,8 @@ fn action() -> impl Strategy<Value = Action> {
         1 => Just(Action::ToggleIgnore),
         1 => i().prop_map(|node| Action::Restore { node }),
         1 => Just(Action::Purge),
+        2 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
+        1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),
     ]
 }
 
@@ -884,4 +886,87 @@ fn restore_and_purge_converge() {
     run(2, &events)
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Tags meet on every device: a Mac's tag and colour change, a Linux tag (Linux keeps no
+/// colours, and keeps the Mac's), and a Windows device, which has no tags, keeps them through
+/// its own edit and rename. A tag removed anywhere goes everywhere.
+#[test]
+fn tags_meet_across_macos_linux_and_windows() {
+    use Action::*;
+    let mut sim = Sim::new(3); // c0 macOS, c1 Linux, c2 Windows
+    let act = |client, action| Event::Act { client, action };
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    assert!(sim.quiesce(10));
+    sim.run(&[
+        act(0, Tag { node: 0, tag: 0 }), // Red, on the Mac
+        act(1, Tag { node: 0, tag: 1 }), // Work, on Linux at the same time
+    ]);
+    assert!(sim.quiesce(10));
+    assert_eq!(
+        sim.server_tags("a"),
+        Some(vec!["Red:6".into(), "Work:0".into()])
+    );
+    sim.run(&[
+        act(0, Colour { node: 0, tag: 0 }),
+        act(2, Edit { file: 0 }),
+        act(
+            2,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 1,
+            },
+        ),
+    ]);
+    assert!(sim.quiesce(10));
+    assert_eq!(
+        sim.server_tags("b"),
+        Some(vec!["Red:7".into(), "Work:0".into()])
+    );
+    sim.run(&[act(1, Tag { node: 0, tag: 0 })]); // Linux removes Red
+    assert!(sim.quiesce(10));
+    assert_eq!(sim.server_tags("b"), Some(vec!["Work:0".into()]));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// A tag change is not an edit: against a delete elsewhere the delete wins (the item is in
+/// Recently deleted), and against an edit or a move both go through.
+#[test]
+fn a_tag_change_loses_to_a_delete_and_meets_an_edit_or_move() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let sync = |client| {
+        [
+            Event::Plan { client },
+            Event::Step { client },
+            Event::Step { client },
+        ]
+    };
+    let mut sim = Sim::new(2);
+    sim.run(&[
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 1 }),
+    ]);
+    assert!(sim.quiesce(10));
+    // `a`: tagged here, deleted there first. `b`: tagged here, edited and renamed there.
+    sim.run(&[
+        act(0, Tag { node: 0, tag: 0 }),
+        act(0, Tag { node: 1, tag: 1 }),
+        act(1, Delete { node: 0 }),
+        act(1, Edit { file: 1 }),
+        act(
+            1,
+            Move {
+                node: 1,
+                parent: 0,
+                name: 3,
+            },
+        ),
+    ]);
+    sim.run(&sync(1));
+    assert!(sim.quiesce(10));
+    assert_eq!(sim.server_tags("a"), None);
+    assert_eq!(sim.server_tags("c.txt"), Some(vec!["Work:0".into()]));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
 }

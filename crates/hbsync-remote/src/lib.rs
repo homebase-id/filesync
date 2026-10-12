@@ -85,11 +85,11 @@ impl RemoteHeader {
         if content.removal().is_some() {
             return None;
         }
-        match self.kind {
-            NodeKind::Folder => Some(NodeState::folder(self.parent, content.name.clone())),
+        let state = match self.kind {
+            NodeKind::Folder => NodeState::folder(self.parent, content.name.clone()),
             NodeKind::File => {
                 let payload = payload.as_ref()?;
-                Some(NodeState::file(
+                NodeState::file(
                     self.parent,
                     content.name.clone(),
                     FileContent {
@@ -98,9 +98,13 @@ impl RemoteHeader {
                         mtime_ms: content.mtime.unwrap_or(0),
                         executable: content.x,
                     },
-                ))
+                )
             }
-        }
+        };
+        Some(NodeState {
+            tags: content.tags(),
+            ..state
+        })
     }
 }
 

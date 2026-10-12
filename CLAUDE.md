@@ -15,7 +15,8 @@ WebSocket; two folders converge through a live identity. Facts and server bugs:
 64-bit payload ranges): a server without it holds each read in memory and can't read past 2 GiB
 (**[verified]**, odin-core #1892, #1893). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
-syntax, picked up within a minute of an edit); an ignored item is kept on its device only. The
+syntax, picked up within a minute of an edit); an ignored item is kept on its device only.
+Finder tags and colours sync too (sync semantics §11: macOS, KDE on Linux; Windows keeps them). The
 product runs as a per-user daemon (`hbsyncd`) shown and controlled by the tray app
 (`hbsync-tray`, program `homebase-filesync`: status, recently synced, Recently deleted, pause, logging in through the browser) and by `hbsync`
 (`docs/spec/daemon.md`): `cargo run -p hbsync --bin hbsync -- setup <identity>`,
@@ -87,7 +88,7 @@ ID and notarized, its Windows packages signed by Azure Trusted Signing (keys fro
 
 | Crate | Role |
 |---|---|
-| `hbsync-platform` | OS differences: names and comparison keys, `RelPath`, file ids, no-clobber rename, bulk directory listing, USN/FSEvents journals, fs kind |
+| `hbsync-platform` | OS differences: names and comparison keys, `RelPath`, file ids, no-clobber rename, bulk directory listing, USN/FSEvents journals, fs kind, Finder tags (macOS and KDE attributes) |
 | `hbsync-fileio` | BLAKE3/SHA-256 streaming hashes, resumable verified partial files, guarded atomic swap |
 | `hbsync-namemap` | local spelling of remote names (Windows SFM escapes) |
 | `hbsync-types` | node ids, node state, node-schema-v1 content JSON |
