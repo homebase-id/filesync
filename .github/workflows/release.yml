@@ -222,6 +222,15 @@ jobs:
             printf '%s' "$APPLE_SIGNING_KEY" | base64 -d > "$keys/developerid.p12"
             printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
             export APPLE_P12_PATH="$keys/developerid.p12"
+            # Conveyor's `certificate` takes the Developer ID certificate alone; the .p12 also
+            # holds Apple's G2 intermediate.
+            export APPLE_CERT_PATH="$keys/developerid.cer"
+            openssl pkcs12 -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS -clcerts -nokeys \
+              2> /dev/null > "$keys/leaf.pem" \
+              || openssl pkcs12 -legacy -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS \
+                -clcerts -nokeys > "$keys/leaf.pem"
+            openssl x509 -in "$keys/leaf.pem" -outform der -out "$APPLE_CERT_PATH"
+            openssl x509 -in "$APPLE_CERT_PATH" -inform der -noout -subject
             export APPLE_NOTARIZATION_KEY_PATH="$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
             echo 'include required("conveyor-apple.conf")' >> signed.conf
           else
