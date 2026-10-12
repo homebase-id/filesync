@@ -1364,3 +1364,27 @@ fn an_edit_restores_what_another_client_deleted() -> R {
     assert_eq!((srv.live().count(), srv.removed().count()), (1, 0));
     Ok(())
 }
+
+#[test]
+fn an_edit_keeps_a_deleted_version_it_never_had() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("keep.txt", "k")?;
+    a.write("notes.txt", "1")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("notes.txt", "1, a's")?;
+    a.sync()?;
+    fs::remove_file(a.root.join("notes.txt"))?;
+    a.sync()?; // a's version, removed
+    b.write("notes.txt", "1, b's")?; // b edits the version before, never having a's
+    b.sync()?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read("notes.txt")?, "1, b's");
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let kept: Vec<_> = srv.removed().filter_map(|h| h.node()).collect();
+    assert_eq!(kept.len(), 1, "a's version stays in Recently deleted");
+    Ok(())
+}

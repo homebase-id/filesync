@@ -11,6 +11,8 @@ fn action() -> impl Strategy<Value = Action> {
         1 => i().prop_map(|node| Action::Delete { node }),
         1 => i().prop_map(|parent| Action::CreateJunk { parent }),
         1 => Just(Action::ToggleIgnore),
+        1 => i().prop_map(|node| Action::Restore { node }),
+        1 => Just(Action::Purge),
     ]
 }
 
@@ -826,4 +828,60 @@ fn regression_confirmed_trash_of_a_folder_moved_into_an_ignored_name() {
     if let Err(e) = run_with(2, Some(1), &events) {
         panic!("{e}");
     }
+}
+
+/// One client edits a file and deletes it; the other edits the version before. The edit
+/// wins, but over a version Recently deleted holds that the editor never had: that one stays
+/// there, and the edit becomes a new item.
+#[test]
+fn regression_edit_over_a_version_deleted_elsewhere() {
+    use Action::*;
+    let (c0, c1) = (|| 0, || 1);
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(c1(), CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(c0(), Edit { file: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(c0(), Delete { node: 0 }),
+        act(c1(), Edit { file: 0 }),
+    ];
+    run(2, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Deleted on one client, restored (onto a name taken meanwhile), then purged: the clients
+/// converge at each step.
+#[test]
+fn restore_and_purge_converge() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let sync = |client| {
+        [
+            Event::Plan { client },
+            Event::Step { client },
+            Event::Step { client },
+        ]
+    };
+    let mut events = vec![act(0, CreateFile { parent: 0, name: 0 })];
+    events.extend(sync(0));
+    events.extend(sync(1));
+    events.push(act(1, Delete { node: 0 }));
+    events.extend(sync(1));
+    events.push(act(0, CreateFile { parent: 0, name: 0 })); // the name, taken again
+    events.extend(sync(0));
+    events.push(act(0, Restore { node: 0 }));
+    events.extend(sync(0));
+    events.extend(sync(1));
+    events.push(act(1, Delete { node: 0 }));
+    events.extend(sync(1));
+    events.push(act(1, Purge));
+    run(2, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
 }
