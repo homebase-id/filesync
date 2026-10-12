@@ -8,6 +8,7 @@
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{MirrorFile, MirrorRow, REMOTE_CURSOR_KEY, StateDb, StateError, Store};
 use hbsync_types::NodeKind;
+use hbsync_types::schema::NodeContent;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -124,16 +125,20 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
         name: content.name.clone(),
         kind: header.kind,
         file,
-        // Read back by `carried_keys`.
-        content_extra: Some(content.carried())
-            .filter(|keys| !keys.is_empty())
-            .map(|keys| serde_json::Value::Object(keys).to_string()),
+        content_extra: content_extra(content),
     })
 }
 
-/// The content keys of `row` that sync carries along (`NodeContent::carried`, stored by
+/// What a mirror row keeps of `content` beyond its columns: the keys sync carries without
+/// acting on them (unknown ones, and the creation time), read back by [`unknown_keys`].
+pub(crate) fn content_extra(content: &NodeContent) -> Option<String> {
+    (!content.unknown.is_empty())
+        .then(|| serde_json::Value::Object(content.unknown.clone()).to_string())
+}
+
+/// The content keys of `row` this client carries without acting on them (stored by
 /// [`mirror_row`]), to be written back unchanged.
-pub(crate) fn carried_keys(row: &MirrorRow) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn unknown_keys(row: &MirrorRow) -> serde_json::Map<String, serde_json::Value> {
     row.content_extra
         .as_deref()
         .and_then(|extra| serde_json::from_str(extra).ok())
@@ -142,7 +147,7 @@ pub(crate) fn carried_keys(row: &MirrorRow) -> serde_json::Map<String, serde_jso
 
 /// The creation time `row`'s node carries, Unix ms.
 pub(crate) fn created_ms(row: &MirrorRow) -> Option<i64> {
-    carried_keys(row).get("ct").and_then(|ct| ct.as_i64())
+    NodeContent::created_ms_in(&unknown_keys(row))
 }
 
 #[cfg(test)]

@@ -56,53 +56,101 @@ pub fn set_mtime(path: &Path, mtime_ns: i64) -> io::Result<()> {
     )
 }
 
-/// The creation ("birth") time of a file or directory, Unix ms; `None` where the system or
-/// file system doesn't record one.
+/// Whether [`set_created`] can set a creation time here (Windows, macOS). Where it can't,
+/// callers needn't look one up to apply.
+pub const CAN_SET_CREATED: bool = cfg!(any(windows, target_os = "macos"));
+
+/// The creation ("birth") time of a file or directory (not followed if a link), Unix ms;
+/// `None` where the system or file system doesn't record one.
 pub fn created_ms(path: &Path) -> Option<i64> {
-    let created = fs::symlink_metadata(path).ok()?.created().ok()?;
-    let ms = match created.duration_since(std::time::UNIX_EPOCH) {
-        Ok(after) => i64::try_from(after.as_millis()).ok()?,
-        Err(before) => -i64::try_from(before.duration().as_millis()).ok()?,
-    };
-    Some(ms)
+    #[cfg(target_os = "linux")]
+    let ns = linux::birth_time_ns(path)?;
+    #[cfg(not(target_os = "linux"))]
+    let ns = meta::system_time_ns(fs::symlink_metadata(path).ok()?.created().ok()?);
+    Some(ns.div_euclid(1_000_000))
 }
 
-/// Sets the creation time of a file or directory, Unix ms, where the system allows it (Windows,
-/// macOS); elsewhere (Linux has no way to) it does nothing. Call it after [`set_mtime`]: on
-/// macOS a modification time earlier than the creation time moves the creation time back.
+/// Sets the creation time of a file or directory (not followed if a link), Unix ms, where the
+/// system allows it ([`CAN_SET_CREATED`]); elsewhere (Linux has no way to) it does nothing.
+/// Call it after [`set_mtime`]: on macOS a modification time earlier than the creation time
+/// moves the creation time back.
 pub fn set_created(path: &Path, created_ms: i64) -> io::Result<()> {
     #[cfg(any(windows, target_os = "macos"))]
     {
         #[cfg(target_os = "macos")]
         use std::os::macos::fs::FileTimesExt;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
         #[cfg(windows)]
         use std::os::windows::fs::{FileTimesExt, OpenOptionsExt};
         use std::time::{Duration, UNIX_EPOCH};
 
+        // It comes from other clients: a value out of the system's range is refused, not a
+        // panic.
+        let offset = Duration::from_millis(created_ms.unsigned_abs());
         let at = if created_ms >= 0 {
-            UNIX_EPOCH + Duration::from_millis(created_ms.unsigned_abs())
+            UNIX_EPOCH.checked_add(offset)
         } else {
-            UNIX_EPOCH - Duration::from_millis(created_ms.unsigned_abs())
-        };
-        // Opened only to set its times; a directory too (Windows needs backup semantics).
+            UNIX_EPOCH.checked_sub(offset)
+        }
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "creation time out of range"))?;
+        // Opened only to set its times, a directory too, and a link itself, not its target.
         #[cfg(windows)]
         let file = {
             use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES,
             };
             fs::OpenOptions::new()
                 .access_mode(FILE_WRITE_ATTRIBUTES)
-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
                 .open(path)?
         };
         #[cfg(target_os = "macos")]
-        let file = fs::File::open(path)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_SYMLINK)
+            .open(path)?;
         file.set_times(fs::FileTimes::new().set_created(at))
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (path, created_ms);
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::*;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    /// statx's birth time. std's `created()` gets it only through glibc: on musl, which the
+    /// released Linux programs are built with, it's always "unsupported".
+    pub(super) fn birth_time_ns(path: &Path) -> Option<i64> {
+        let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: a plain C struct, filled in by the kernel.
+        let mut st: libc::statx = unsafe { std::mem::zeroed() };
+        // SAFETY: a NUL-terminated path and a buffer of the right type, both live for the call.
+        let r = unsafe {
+            libc::statx(
+                libc::AT_FDCWD,
+                path.as_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+                libc::STATX_BTIME,
+                &mut st,
+            )
+        };
+        if r != 0 || st.stx_mask & libc::STATX_BTIME == 0 {
+            return None;
+        }
+        let ns = i64::from(st.stx_btime.tv_nsec);
+        Some(
+            st.stx_btime
+                .tv_sec
+                .saturating_mul(1_000_000_000)
+                .saturating_add(ns),
+        )
     }
 }
 
@@ -325,6 +373,23 @@ mod tests {
                 assert_eq!(meta::stat(path)?.mtime_ns, modified * 1_000_000);
             }
         }
+        Ok(())
+    }
+
+    /// Linux reads it through statx itself: std's `created()` gets nothing on musl, which the
+    /// released programs are built with. (ext4, btrfs, xfs and tmpfs record it.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_reads_the_creation_time_on_glibc_and_musl() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("f");
+        let before = meta::system_time_ns(std::time::SystemTime::now()).div_euclid(1_000_000);
+        fs::write(&file, b"x")?;
+        let created = created_ms(&file).expect("this file system records a birth time");
+        assert!(
+            (before - 1_000..=before + 60_000).contains(&created),
+            "{created} vs {before}"
+        );
         Ok(())
     }
 

@@ -12,6 +12,8 @@ pub const FILE_TYPE_FILE: i32 = 7102;
 pub const PAYLOAD_KEY: &str = "sync_data";
 /// The current schema version.
 pub const VERSION: u32 = 1;
+/// The content key of the creation time ([`NodeContent::created_ms`]).
+const CREATED: &str = "ct";
 
 /// The `appData.content` JSON of a node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,10 +26,6 @@ pub struct NodeContent {
     pub size: Option<u64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub x: bool,
-    /// Creation time, Unix ms: the item's own when it was first uploaded, then never changed
-    /// (an editor that saves by replacing the file would otherwise reset it every time).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ct: Option<i64>,
     /// Keys from newer writers, kept so a rewrite doesn't drop them.
     #[serde(flatten)]
     pub unknown: Map<String, Value>,
@@ -41,7 +39,6 @@ impl NodeContent {
             mtime: None,
             size: None,
             x: false,
-            ct: None,
             unknown: Map::new(),
         }
     }
@@ -53,7 +50,6 @@ impl NodeContent {
             mtime: Some(mtime_ms),
             size: Some(size),
             x: executable,
-            ct: None,
             unknown: Map::new(),
         }
     }
@@ -67,20 +63,30 @@ impl NodeContent {
         serde_json::from_str(json)
     }
 
-    /// The keys sync carries along without acting on them: `ct` and the unknown ones. Every
-    /// rewrite of the node puts them back ([`NodeContent::carry`]).
-    pub fn carried(&self) -> Map<String, Value> {
-        let mut keys = self.unknown.clone();
-        if let Some(ct) = self.ct {
-            keys.insert("ct".into(), ct.into());
-        }
-        keys
+    /// The creation time `ct`, Unix ms: the item's own when the node was created, then never
+    /// changed (an editor that saves by replacing the file would otherwise reset it each time).
+    /// It lives with the unknown keys, which every rewrite keeps; a value that isn't a number
+    /// (from some other writer) reads as none and is kept as it is.
+    pub fn created_ms(&self) -> Option<i64> {
+        Self::created_ms_in(&self.unknown)
     }
 
-    /// Puts back what [`NodeContent::carried`] gave.
-    pub fn carry(&mut self, mut keys: Map<String, Value>) {
-        self.ct = keys.remove("ct").and_then(|ct| ct.as_i64());
-        self.unknown = keys;
+    /// [`NodeContent::created_ms`] of the unknown keys alone (as a client stores them).
+    pub fn created_ms_in(unknown: &Map<String, Value>) -> Option<i64> {
+        let ct = unknown.get(CREATED)?;
+        // An integer, or a JavaScript-style fractional ms count.
+        ct.as_i64().or_else(|| {
+            ct.as_f64()
+                .filter(|f| f.is_finite())
+                .map(|f| f.round() as i64)
+        })
+    }
+
+    pub fn set_created_ms(&mut self, created_ms: Option<i64>) {
+        match created_ms {
+            Some(ms) => self.unknown.insert(CREATED.into(), ms.into()),
+            None => self.unknown.remove(CREATED),
+        };
     }
 
     /// A reader that finds a newer version treats the node as read-only.
@@ -119,17 +125,20 @@ mod tests {
     }
 
     #[test]
-    fn creation_time_is_carried_with_the_unknown_keys() -> Result<(), serde_json::Error> {
-        let json = r#"{"v":1,"name":"a","mtime":5,"size":1,"ct":1451606400123,"future":7}"#;
-        let read = NodeContent::from_json(json)?;
-        assert_eq!(read.ct, Some(1_451_606_400_123));
-        // A rewrite (new bytes, a rename) starts from scratch and gets them back.
-        let mut rewritten = NodeContent::file("b", 6, 2, false);
-        rewritten.carry(read.carried());
+    fn creation_time_reads_leniently_and_rides_with_the_unknown_keys()
+    -> Result<(), serde_json::Error> {
+        let mut c = NodeContent::file("a", 5, 1, false);
+        c.set_created_ms(Some(1_451_606_400_123));
         assert_eq!(
-            rewritten.to_json(),
-            r#"{"v":1,"name":"b","mtime":6,"size":2,"ct":1451606400123,"future":7}"#
+            c.to_json(),
+            r#"{"v":1,"name":"a","mtime":5,"size":1,"ct":1451606400123}"#
         );
+        // Another writer's fractional ms, and one that isn't a number: the node still reads.
+        let float = NodeContent::from_json(r#"{"v":1,"name":"a","ct":1451606400123.6}"#)?;
+        assert_eq!(float.created_ms(), Some(1_451_606_400_124));
+        let odd = NodeContent::from_json(r#"{"v":1,"name":"a","ct":"yesterday"}"#)?;
+        assert_eq!(odd.created_ms(), None);
+        assert!(odd.to_json().contains(r#""ct":"yesterday""#));
         Ok(())
     }
 

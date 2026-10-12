@@ -49,7 +49,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 | `mtime` | int | files | local modification time, Unix ms |
 | `size` | int | files | plaintext size in bytes |
 | `x` | bool | no | executable bit; omitted when false |
-| `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime` |
+| `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime`. Readers round a fractional value and take anything else as none (and keep it) |
 
 - Readers ignore unknown keys. Writers keep unknown keys they read (forward compatibility).
 - `ct` is kept the same way through every rewrite (new bytes, a rename, a move): editors that

@@ -34,7 +34,7 @@ use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef};
 
 use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
-use crate::transfer::{Job, JobError, JobResult, TransferConfig, run_jobs_while};
+use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::{feed, view};
 
 /// Where the executor works.
@@ -797,6 +797,14 @@ impl<'a> Executor<'a> {
         }
         let target = self.target_path(parent, name)?;
         let abs = self.abs(&target);
+        let created_ms = if ops::CAN_SET_CREATED {
+            self.db
+                .read(|s| s.get_mirror(node))?
+                .as_ref()
+                .and_then(feed::created_ms)
+        } else {
+            None
+        };
         // Idempotent: a folder left by an interrupted run, unknown to the DB (under any case),
         // is adopted. One the DB tracks for another node is never taken over.
         let adopt = self.occupant(&target)?.is_none()
@@ -808,15 +816,10 @@ impl<'a> Executor<'a> {
             if let Err(e) = fs::create_dir(&abs) {
                 return Ok(io_outcome(e));
             }
-            // Only shown, never synced on: a file system that won't take it is no failure.
-            if let Some(ct) = self
-                .db
-                .read(|s| s.get_mirror(node))?
-                .as_ref()
-                .and_then(feed::created_ms)
-            {
-                let _ = ops::set_created(&abs, ct);
-            }
+        }
+        // Only shown, never synced on: a file system that won't take it is no failure.
+        if let Some(ct) = created_ms {
+            let _ = ops::set_created(&abs, ct);
         }
         let meta = match hbsync_platform::stat(&abs) {
             Ok(m) => m,
@@ -931,13 +934,17 @@ impl<'a> Executor<'a> {
         }
         let target = self.target_path(parent, name)?;
         // The node's creation time; a node from a client that sends none keeps the replaced
-        // file's own.
-        let created_ms = feed::created_ms(&mirror).or_else(|| {
-            current
-                .as_ref()
-                .and_then(|row| ops::created_ms(&self.abs(&row.path)))
-        });
-        let job = Job::Download {
+        // file's own. Only where it can be set.
+        let created_ms = ops::CAN_SET_CREATED
+            .then(|| {
+                feed::created_ms(&mirror).or_else(|| {
+                    current
+                        .as_ref()
+                        .and_then(|row| ops::created_ms(&self.abs(&row.path)))
+                })
+            })
+            .flatten();
+        let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
             expected,
@@ -948,7 +955,7 @@ impl<'a> Executor<'a> {
             tmp_dir: self.cfg.state_dir().join(TMP_DIR),
             key: download_key(node, &expected),
             local_algorithm: self.cfg.algorithm,
-        };
+        });
         Ok((
             job,
             Ctx::Download {
@@ -989,14 +996,14 @@ impl<'a> Executor<'a> {
         let target = match existing {
             // A new node: the file's own creation time, kept from then on.
             None => {
-                content.ct = ops::created_ms(&path);
+                content.set_created_ms(ops::created_ms(&path));
                 None
             }
             Some((file_id, version)) => {
                 let Some(mirror) = &mirror else {
                     return Err(Outcome::Skip("gone remotely".into()));
                 };
-                content.carry(feed::carried_keys(mirror));
+                content.unknown = feed::unknown_keys(mirror);
                 Some(RemoteRef { file_id, version })
             }
         };
@@ -1285,7 +1292,7 @@ impl<'a> Executor<'a> {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let mut content = NodeContent::folder(name);
-        content.ct = ops::created_ms(&self.abs(&row.path));
+        content.set_created_ms(ops::created_ms(&self.abs(&row.path)));
         let new = NodeMeta {
             node,
             parent,
@@ -1318,7 +1325,7 @@ impl<'a> Executor<'a> {
             (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
             _ => NodeContent::folder(name),
         };
-        content.carry(feed::carried_keys(&mirror));
+        content.unknown = feed::unknown_keys(&mirror);
         let meta = NodeMeta {
             node,
             parent,
@@ -1431,9 +1438,7 @@ fn mirror_from(
             mtime_ms: content.mtime.unwrap_or(0),
             executable: content.x,
         }),
-        content_extra: Some(content.carried())
-            .filter(|keys| !keys.is_empty())
-            .map(|keys| serde_json::Value::Object(keys).to_string()),
+        content_extra: feed::content_extra(content),
     }
 }
 

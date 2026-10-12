@@ -132,6 +132,7 @@ impl PartialFile {
             path: self.path,
             hash: actual,
             size: self.written,
+            created_ms: None,
         })
     }
 }
@@ -157,6 +158,8 @@ pub struct CompletedFile {
     path: PathBuf,
     pub hash: ContentHash,
     pub size: u64,
+    /// Applied again once in place: see [`CompletedFile::persist_over`].
+    created_ms: Option<i64>,
 }
 
 impl CompletedFile {
@@ -164,9 +167,9 @@ impl CompletedFile {
         &self.path
     }
 
-    /// Sets mtime and executable bit before the file becomes visible.
+    /// Sets mtime, creation time and executable bit before the file becomes visible.
     pub fn set_attributes(
-        &self,
+        &mut self,
         mtime_ns: Option<i64>,
         created_ms: Option<i64>,
         executable: Option<bool>,
@@ -182,6 +185,7 @@ impl CompletedFile {
         if let Some(t) = created_ms {
             let _ = ops::set_created(&self.path, t);
         }
+        self.created_ms = created_ms;
         Ok(())
     }
 
@@ -208,6 +212,11 @@ impl CompletedFile {
             return Err(FileIoError::TargetChanged);
         }
         ops::replace(&self.path, target)?;
+        // NTFS "tunneling" gives a name that's removed and created again within seconds the
+        // removed file's creation time: the replaced one's, not this one's.
+        if let Some(t) = self.created_ms {
+            let _ = ops::set_created(target, t);
+        }
         sync_parent(target)?;
         Ok(hbsync_platform::stat(target)?)
     }
@@ -262,6 +271,7 @@ mod tests {
         assert_eq!(done.hash, expected);
 
         let target = dir.path().join("out.bin");
+        let mut done = done;
         done.set_attributes(Some(1_700_000_000_000_000_000), None, None)?;
         let meta = done.persist_new(&target)?;
         assert_eq!(fs::read(&target)?, data);
