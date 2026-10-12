@@ -547,6 +547,12 @@ jobs:
           $p = Get-AppxPackage HomebaseFilesync
           if (-not $p) { throw "not installed" }
           Write-Output "installed $($p.PackageFullName), publisher $($p.Publisher)"
+          # The package starts through Conveyor's updatecheck.exe, which looks at the update site
+          # first: with an older version there (a draft is newer than what's published), it tries
+          # to update from the feed, which runners can't (0x80D05011), and the tray never starts.
+          # This test is about installing and running: keep the update site out of it.
+          Add-Content "$env:SystemRoot\System32\drivers\etc\hosts" "`n127.0.0.1 github.com`n127.0.0.1 objects.githubusercontent.com`n127.0.0.1 release-assets.githubusercontent.com"
+          ipconfig /flushdns | Out-Null
           Start-Process "shell:AppsFolder\$($p.PackageFamilyName)!HomebaseFilesync"
           # A first start can take a while (a new binary scanned on a slow runner): up to 90 s.
           $waited = 0
