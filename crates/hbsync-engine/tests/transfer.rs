@@ -167,7 +167,6 @@ fn interrupted_download_resumes_without_refetching() -> R {
         expected: hash,
         size: data.len() as u64,
         mtime_ms: 1_700_000_000_000,
-        created_ms: None,
         executable: None,
         tmp_dir: dir.path().join("tmp"),
         key: "big".into(),

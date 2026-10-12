@@ -608,7 +608,6 @@ fn creation_times_travel_and_stay() -> R {
     use hbsync_platform::ops;
     use hbsync_remote::RemoteBody;
 
-    let settable = ops::CAN_SET_CREATED;
     let (y2016, y2018, y2020) = (1_451_606_400_123, 1_514_764_800_789, 1_577_836_800_456);
     let server = server();
     let mut a = Client::new(&server, "a")?;
@@ -621,7 +620,7 @@ fn creation_times_travel_and_stay() -> R {
     }
     let sent = ops::created_ms(&a.root.join("Folder/doc.txt"));
     assert!(sent.is_some(), "every test file system records one");
-    if settable {
+    if ops::CAN_SET_CREATED {
         assert_eq!(sent, Some(y2016));
     }
     let on_server = |name: &str| -> Result<Option<i64>, Box<dyn std::error::Error>> {
@@ -634,7 +633,7 @@ fn creation_times_travel_and_stay() -> R {
     };
     settle_all(&mut a, &mut b)?;
     assert_eq!(on_server("doc.txt")?, sent);
-    if settable {
+    if ops::CAN_SET_CREATED {
         assert_eq!(on_server("Folder")?, Some(y2016));
         assert_eq!(ops::created_ms(&b.root.join("Folder/doc.txt")), Some(y2016));
         assert_eq!(ops::created_ms(&b.root.join("Folder")), Some(y2016));
@@ -650,7 +649,7 @@ fn creation_times_travel_and_stay() -> R {
     settle_all(&mut a, &mut b)?;
     assert_eq!(on_server("doc.txt")?, sent, "the node keeps its time");
     assert_eq!(a.read("Folder/doc.txt")?, "second");
-    if settable {
+    if ops::CAN_SET_CREATED {
         assert_eq!(ops::created_ms(&a.root.join("Folder/doc.txt")), Some(y2016));
     }
 
@@ -660,7 +659,7 @@ fn creation_times_travel_and_stay() -> R {
     )?;
     settle_all(&mut a, &mut b)?;
     assert_eq!(on_server("renamed.txt")?, sent);
-    if settable {
+    if ops::CAN_SET_CREATED {
         assert_eq!(
             ops::created_ms(&a.root.join("Folder/renamed.txt")),
             Some(y2016)

@@ -131,7 +131,6 @@ pub struct Download {
     pub size: u64,
     /// Applied to the temp file before it becomes visible.
     pub mtime_ms: i64,
-    pub created_ms: Option<i64>,
     pub executable: Option<bool>,
     pub tmp_dir: PathBuf,
     /// Identifies the exact content, so a partial file is only resumed for the same bytes.
@@ -335,12 +334,8 @@ fn download(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<JobR
         };
         remote.read(d.file_id, range, &mut sink)?;
     }
-    let mut file = partial.finish(Some(d.expected), Some(d.size))?;
-    file.set_attributes(
-        Some(d.mtime_ms.saturating_mul(1_000_000)),
-        d.created_ms,
-        d.executable,
-    )?;
+    let file = partial.finish(Some(d.expected), Some(d.size))?;
+    file.set_attributes(Some(d.mtime_ms.saturating_mul(1_000_000)), d.executable)?;
     let local_hash = if d.expected.algorithm == d.local_algorithm {
         d.expected
     } else {

@@ -180,6 +180,8 @@ enum Ctx {
         node: NodeId,
         target: RelPath,
         current: Option<LocalRow>,
+        /// The node's, given to the file once in place.
+        created_ms: Option<i64>,
     },
     Upload {
         node: NodeId,
@@ -933,24 +935,13 @@ impl<'a> Executor<'a> {
             return Err(rescan(&mut self.report, &row.path));
         }
         let target = self.target_path(parent, name)?;
-        // The node's creation time; a node from a client that sends none keeps the replaced
-        // file's own. Only where it can be set.
-        let created_ms = ops::CAN_SET_CREATED
-            .then(|| {
-                feed::created_ms(&mirror).or_else(|| {
-                    current
-                        .as_ref()
-                        .and_then(|row| ops::created_ms(&self.abs(&row.path)))
-                })
-            })
-            .flatten();
+        let created_ms = feed::created_ms(&mirror);
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
             expected,
             size: file.size,
             mtime_ms: file.mtime_ms,
-            created_ms,
             executable: (self.cfg.os != Os::Windows).then_some(file.executable),
             tmp_dir: self.cfg.state_dir().join(TMP_DIR),
             key: download_key(node, &expected),
@@ -962,6 +953,7 @@ impl<'a> Executor<'a> {
                 node,
                 target,
                 current,
+                created_ms,
             },
         ))
     }
@@ -1004,6 +996,10 @@ impl<'a> Executor<'a> {
                     return Err(Outcome::Skip("gone remotely".into()));
                 };
                 content.unknown = feed::unknown_keys(mirror);
+                // A node from before creation times, or from a client that sends none.
+                if content.created_ms().is_none() {
+                    content.set_created_ms(ops::created_ms(&path));
+                }
                 Some(RemoteRef { file_id, version })
             }
         };
@@ -1044,9 +1040,10 @@ impl<'a> Executor<'a> {
                     node,
                     target,
                     current,
+                    created_ms,
                 },
                 JobResult::Downloaded { file, local_hash },
-            ) => self.place_download(node, &target, current, file, local_hash),
+            ) => self.place_download(node, &target, current, created_ms, file, local_hash),
             (
                 Ctx::Upload {
                     node,
@@ -1072,6 +1069,7 @@ impl<'a> Executor<'a> {
         node: NodeId,
         target: &RelPath,
         current: Option<LocalRow>,
+        created_ms: Option<i64>,
         done: hbsync_fileio::CompletedFile,
         local_hash: hbsync_types::ContentHash,
     ) -> Step {
@@ -1085,7 +1083,7 @@ impl<'a> Executor<'a> {
         }
         let placed = match &current {
             Some(row) if &row.path == target => {
-                done.persist_over(&self.abs(target), &row.fingerprint)
+                done.persist_over(&self.abs(target), &row.fingerprint, created_ms)
             }
             Some(row) => {
                 if !self.on_disk_unchanged(row) || !self.free_target(target, Some(node))? {
@@ -1093,7 +1091,7 @@ impl<'a> Executor<'a> {
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
                 match self.move_to_trash(&row.path, node) {
-                    Ok(()) => done.persist_new(&self.abs(target)),
+                    Ok(()) => done.persist_new(&self.abs(target), created_ms),
                     Err(e) => {
                         done.keep_for_retry();
                         return Ok(io_outcome(e));
@@ -1105,7 +1103,7 @@ impl<'a> Executor<'a> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
-                done.persist_new(&self.abs(target))
+                done.persist_new(&self.abs(target), created_ms)
             }
         };
         let meta = match placed {
@@ -1326,6 +1324,12 @@ impl<'a> Executor<'a> {
             _ => NodeContent::folder(name),
         };
         content.unknown = feed::unknown_keys(&mirror);
+        // A node from before creation times, or from a client that sends none.
+        if content.created_ms().is_none()
+            && let Some(row) = self.db.read(|s| s.local_by_node(node))?
+        {
+            content.set_created_ms(ops::created_ms(&self.abs(&row.path)));
+        }
         let meta = NodeMeta {
             node,
             parent,

@@ -132,7 +132,6 @@ impl PartialFile {
             path: self.path,
             hash: actual,
             size: self.written,
-            created_ms: None,
         })
     }
 }
@@ -158,8 +157,6 @@ pub struct CompletedFile {
     path: PathBuf,
     pub hash: ContentHash,
     pub size: u64,
-    /// Applied again once in place: see [`CompletedFile::persist_over`].
-    created_ms: Option<i64>,
 }
 
 impl CompletedFile {
@@ -167,11 +164,10 @@ impl CompletedFile {
         &self.path
     }
 
-    /// Sets mtime, creation time and executable bit before the file becomes visible.
+    /// Sets mtime and executable bit before the file becomes visible.
     pub fn set_attributes(
-        &mut self,
+        &self,
         mtime_ns: Option<i64>,
-        created_ms: Option<i64>,
         executable: Option<bool>,
     ) -> io::Result<()> {
         if let Some(x) = executable {
@@ -180,21 +176,19 @@ impl CompletedFile {
         if let Some(t) = mtime_ns {
             ops::set_mtime(&self.path, t)?;
         }
-        // After the mtime (see `set_created`). Only shown, never synced on: a file system that
-        // won't take it doesn't fail the download.
-        if let Some(t) = created_ms {
-            let _ = ops::set_created(&self.path, t);
-        }
-        self.created_ms = created_ms;
         Ok(())
     }
 
-    /// Moves the file to `target`, which must not exist. Returns the metadata at the target.
-    /// On failure the file stays in the temp folder (see [`CompletedFile::keep_for_retry`]).
-    pub fn persist_new(self, target: &Path) -> Result<LocalMeta, FileIoError> {
+    /// Moves the file to `target`, which must not exist, with creation time `created_ms`.
+    /// Returns the metadata at the target. On failure the file stays in the temp folder (see
+    /// [`CompletedFile::keep_for_retry`]).
+    pub fn persist_new(
+        self,
+        target: &Path,
+        created_ms: Option<i64>,
+    ) -> Result<LocalMeta, FileIoError> {
         ops::rename_noreplace(&self.path, target)?;
-        sync_parent(target)?;
-        Ok(hbsync_platform::stat(target)?)
+        placed(target, created_ms)
     }
 
     /// Atomically replaces `target`, but only if it still has the `expected` fingerprint (the
@@ -206,24 +200,31 @@ impl CompletedFile {
         self,
         target: &Path,
         expected: &Fingerprint,
+        created_ms: Option<i64>,
     ) -> Result<LocalMeta, FileIoError> {
         let current = hbsync_platform::stat(target)?;
         if current.fingerprint() != *expected {
             return Err(FileIoError::TargetChanged);
         }
         ops::replace(&self.path, target)?;
-        // NTFS "tunneling" gives a name that's removed and created again within seconds the
-        // removed file's creation time: the replaced one's, not this one's.
-        if let Some(t) = self.created_ms {
-            let _ = ops::set_created(target, t);
-        }
-        sync_parent(target)?;
-        Ok(hbsync_platform::stat(target)?)
+        placed(target, created_ms)
     }
 
     /// Leaves the verified file in the temp folder: reopening its [`PartialFile`] finds it
     /// complete, so a retry needs no transfer. The caller cleans up files nobody resumes.
     pub fn keep_for_retry(self) {}
+}
+
+/// The file just put at `target`: its creation time set (once in place, after the mtime: NTFS
+/// "tunneling" gives a name removed and made again within seconds the old file's), its folder
+/// flushed, its metadata read.
+fn placed(target: &Path, created_ms: Option<i64>) -> Result<LocalMeta, FileIoError> {
+    // Only shown, never synced on: a file system that won't take it fails nothing.
+    if let Some(t) = created_ms {
+        let _ = ops::set_created(target, t);
+    }
+    sync_parent(target)?;
+    Ok(hbsync_platform::stat(target)?)
 }
 
 fn sync_parent(path: &Path) -> io::Result<()> {
@@ -271,9 +272,8 @@ mod tests {
         assert_eq!(done.hash, expected);
 
         let target = dir.path().join("out.bin");
-        let mut done = done;
-        done.set_attributes(Some(1_700_000_000_000_000_000), None, None)?;
-        let meta = done.persist_new(&target)?;
+        done.set_attributes(Some(1_700_000_000_000_000_000), None)?;
+        let meta = done.persist_new(&target, None)?;
         assert_eq!(fs::read(&target)?, data);
         assert_eq!(meta.mtime_ns, 1_700_000_000_000_000_000);
         assert_eq!(
@@ -306,7 +306,7 @@ mod tests {
         let mut partial = PartialFile::open(dir.path(), "k", ALG)?;
         partial.write_all(b"download")?;
         let done = partial.finish(None, None)?;
-        let err = done.persist_new(&target).expect_err("target exists");
+        let err = done.persist_new(&target, None).expect_err("target exists");
         assert!(matches!(err, FileIoError::Io(e) if e.kind() == io::ErrorKind::AlreadyExists));
         assert_eq!(fs::read(&target)?, b"user data");
         Ok(())
@@ -326,7 +326,7 @@ mod tests {
         let done = partial.finish(None, None)?;
         let tmp_path = done.path().to_owned();
         let err = done
-            .persist_over(&target, &planned)
+            .persist_over(&target, &planned, None)
             .expect_err("fingerprint changed");
         assert!(matches!(err, FileIoError::TargetChanged));
         assert_eq!(fs::read(&target)?, b"v1 edited by user");
@@ -338,7 +338,7 @@ mod tests {
         partial.write_all(b"v2 from remote")?;
         partial
             .finish(None, None)?
-            .persist_over(&target, &current)?;
+            .persist_over(&target, &current, None)?;
         assert_eq!(fs::read(&target)?, b"v2 from remote");
         Ok(())
     }

@@ -79,10 +79,10 @@ pub fn set_created(path: &Path, created_ms: i64) -> io::Result<()> {
     {
         #[cfg(target_os = "macos")]
         use std::os::macos::fs::FileTimesExt;
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         use std::os::unix::fs::OpenOptionsExt;
         #[cfg(windows)]
-        use std::os::windows::fs::{FileTimesExt, OpenOptionsExt};
+        use std::os::windows::fs::FileTimesExt;
         use std::time::{Duration, UNIX_EPOCH};
 
         // It comes from other clients: a value out of the system's range is refused, not a
@@ -96,15 +96,10 @@ pub fn set_created(path: &Path, created_ms: i64) -> io::Result<()> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "creation time out of range"))?;
         // Opened only to set its times, a directory too, and a link itself, not its target.
         #[cfg(windows)]
-        let file = {
-            use windows_sys::Win32::Storage::FileSystem::{
-                FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_WRITE_ATTRIBUTES,
-            };
-            fs::OpenOptions::new()
-                .access_mode(FILE_WRITE_ATTRIBUTES)
-                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-                .open(path)?
-        };
+        let file = meta::open_attributes_with(
+            path,
+            windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES,
+        )?;
         #[cfg(target_os = "macos")]
         let file = fs::OpenOptions::new()
             .read(true)
@@ -366,9 +361,8 @@ mod tests {
             for path in [file.as_path(), dir.path()] {
                 set_mtime(path, modified * 1_000_000)?;
                 set_created(path, created)?;
-                let expected = cfg!(any(windows, target_os = "macos")).then_some(created);
-                if expected.is_some() {
-                    assert_eq!(created_ms(path), expected, "{}", path.display());
+                if CAN_SET_CREATED {
+                    assert_eq!(created_ms(path), Some(created), "{}", path.display());
                 }
                 assert_eq!(meta::stat(path)?.mtime_ns, modified * 1_000_000);
             }
