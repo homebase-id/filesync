@@ -222,15 +222,22 @@ jobs:
             printf '%s' "$APPLE_SIGNING_KEY" | base64 -d > "$keys/developerid.p12"
             printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
             export APPLE_P12_PATH="$keys/developerid.p12"
-            # Conveyor's `certificate` takes the Developer ID certificate alone; the .p12 also
-            # holds Apple's G2 intermediate.
+            # Conveyor wants the Developer ID certificate alone, in `certificate` and in the
+            # .p12 it signs with; DevOps' .p12 also holds Apple's G2 intermediate (kept for
+            # sign-dmg's keychain). So: the certificate as DER, and a .p12 of it and the key.
+            legacy=()
+            openssl pkcs12 -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS -noout 2> /dev/null \
+              || legacy=(-legacy)
+            openssl pkcs12 "${legacy[@]}" -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS \
+              -clcerts -nokeys > "$keys/leaf.pem"
             export APPLE_CERT_PATH="$keys/developerid.cer"
-            openssl pkcs12 -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS -clcerts -nokeys \
-              2> /dev/null > "$keys/leaf.pem" \
-              || openssl pkcs12 -legacy -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS \
-                -clcerts -nokeys > "$keys/leaf.pem"
             openssl x509 -in "$keys/leaf.pem" -outform der -out "$APPLE_CERT_PATH"
             openssl x509 -in "$APPLE_CERT_PATH" -inform der -noout -subject
+            openssl pkcs12 "${legacy[@]}" -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS \
+              -nocerts -nodes \
+              | openssl pkcs12 -export -inkey /dev/stdin -in "$keys/leaf.pem" -name developerid \
+                  -passout env:APPLE_SIGNING_KEY_PASS -out "$keys/developerid-only.p12"
+            export APPLE_P12_PATH="$keys/developerid-only.p12"
             export APPLE_NOTARIZATION_KEY_PATH="$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
             echo 'include required("conveyor-apple.conf")' >> signed.conf
           else
