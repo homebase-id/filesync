@@ -230,24 +230,32 @@ fn run(command: Command) -> Res<ExitCode> {
             println!("Restoring; the next sync brings it back.");
         }
         Command::EmptyDeleted { items, yes } => {
-            let nodes = if items.is_empty() {
-                None
+            let (control_, what) = if items.is_empty() {
+                // Everything listed now; nothing deleted after this look.
+                let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+                    return Ok(not_running());
+                };
+                let Some(newest) = list.first() else {
+                    println!("Recently deleted is empty.");
+                    return Ok(ExitCode::SUCCESS);
+                };
+                (
+                    Control::EmptyDeletedUntil {
+                        at_ms: newest.removed_at_ms,
+                    },
+                    format!("the {} items in Recently deleted", list.len()),
+                )
             } else {
                 let Some(nodes) = pick(&paths, &items)? else {
                     return Ok(not_running());
                 };
-                Some(nodes)
-            };
-            let what = if items.is_empty() {
-                "everything in Recently deleted".to_owned()
-            } else {
-                items.join(", ")
+                (Control::EmptyDeleted { nodes }, items.join(", "))
             };
             if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
-            control(&paths, Control::EmptyDeleted { nodes })?;
+            control(&paths, control_)?;
             println!("Deleting for good.");
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,

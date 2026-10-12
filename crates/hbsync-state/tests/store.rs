@@ -323,7 +323,7 @@ mod mirror {
             removal: Removal { at_ms, root },
         };
         let (rf, rd, ra) = (
-            with(&file, 10, folder.node),
+            with(&file, 8, folder.node),
             with(&folder, 10, folder.node),
             with(&alone, 20, alone.node),
         );
@@ -334,7 +334,7 @@ mod mirror {
         })?;
         db.read(|s| {
             assert_eq!(s.removed_by_node(file.node)?, Some(rf.clone()));
-            assert_eq!(s.removed_with(folder.node)?.len(), 2);
+            assert_eq!(s.removed_children(folder.node)?, std::slice::from_ref(&rf));
             let newest: Vec<_> = s
                 .list_removed(10)?
                 .into_iter()
@@ -348,6 +348,8 @@ mod mirror {
                 .map(|r| r.row.name)
                 .collect();
             assert_eq!(expired, ["f", "d"]);
+            // The file went before its folder, but goes when the folder's delete does.
+            assert!(s.removed_before(9)?.is_empty());
             Ok(())
         })?;
         db.write(|s| {

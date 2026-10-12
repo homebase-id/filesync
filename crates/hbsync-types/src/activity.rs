@@ -72,6 +72,8 @@ pub struct Progress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deleted {
     pub node: NodeId,
+    /// The folder it was in.
+    pub parent: NodeId,
     /// Where it was, `/`-separated, for people.
     pub path: String,
     pub kind: NodeKind,

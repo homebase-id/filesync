@@ -291,10 +291,16 @@ impl Engine {
         Ok(restored)
     }
 
-    /// Deletes these items of Recently deleted for good (all of them with `None`).
-    pub fn empty_deleted(&mut self, nodes: Option<&[NodeId]>) -> Result<usize, EngineError> {
+    /// Deletes these items of Recently deleted for good, each with what was deleted with it.
+    pub fn empty_deleted(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         deleted::empty(&mut self.db, self.remote.as_ref(), nodes)
+    }
+
+    /// Deletes for good everything removed until `at_ms` (Unix ms): what the user was shown.
+    pub fn empty_deleted_until(&mut self, at_ms: i64) -> Result<usize, EngineError> {
+        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        deleted::empty_until(&mut self.db, self.remote.as_ref(), at_ms)
     }
 
     /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted and

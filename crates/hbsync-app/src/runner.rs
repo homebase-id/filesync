@@ -193,9 +193,14 @@ pub enum Control {
     Restore {
         nodes: Vec<NodeId>,
     },
-    /// Delete these items of Recently deleted for good; all of them with `None`.
+    /// Delete these items of Recently deleted for good, each with what was deleted with it.
     EmptyDeleted {
-        nodes: Option<Vec<NodeId>>,
+        nodes: Vec<NodeId>,
+    },
+    /// Delete everything in Recently deleted removed until then (Unix ms) for good: what the
+    /// user saw, nothing removed since.
+    EmptyDeletedUntil {
+        at_ms: i64,
     },
     /// Stop the runner (between operations).
     Stop,
@@ -546,9 +551,9 @@ impl Runner {
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
         // Restores and empties of Recently deleted asked for, run when the engine is open.
-        // `empty`: `Some(None)` empties all of it.
         let mut restore: Vec<NodeId> = Vec::new();
-        let mut empty: Option<Option<Vec<NodeId>>> = None;
+        let mut empty: Vec<NodeId> = Vec::new();
+        let mut empty_until: Option<i64> = None;
         // Changes announced on the drive: synced once they stop coming (a burst of deletes is
         // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
         // (the first announcement, quiet from then on)
@@ -640,14 +645,12 @@ impl Runner {
                         not_before = Instant::now();
                     }
                     Ok(Control::EmptyDeleted { nodes }) => {
-                        empty = match (empty, nodes) {
-                            (Some(Some(mut asked)), Some(nodes)) => {
-                                asked.extend(nodes);
-                                Some(Some(asked))
-                            }
-                            (None, nodes) => Some(nodes),
-                            _ => Some(None), // all of it
-                        };
+                        empty.extend(nodes);
+                        wanted = true;
+                        not_before = Instant::now();
+                    }
+                    Ok(Control::EmptyDeletedUntil { at_ms }) => {
+                        empty_until = Some(empty_until.map_or(at_ms, |t| t.max(at_ms)));
                         wanted = true;
                         not_before = Instant::now();
                     }
@@ -776,8 +779,15 @@ impl Runner {
                     Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
                 }
             }
-            if let Some(nodes) = empty.take() {
-                match p.engine.empty_deleted(nodes.as_deref()) {
+            let nodes = std::mem::take(&mut empty);
+            let emptied = [
+                empty_until
+                    .take()
+                    .map(|at| p.engine.empty_deleted_until(at)),
+                (!nodes.is_empty()).then(|| p.engine.empty_deleted(&nodes)),
+            ];
+            for result in emptied.into_iter().flatten() {
+                match result {
                     Ok(n) => tracing::info!("{n} items deleted for good"),
                     Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
                 }

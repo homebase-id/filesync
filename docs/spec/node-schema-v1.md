@@ -106,11 +106,14 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   keeping the payload, `groupId` and name. A removed node is out of the folder tree for every
   client, and restorable.
 - Restore is the update back: `archivalStatus` `0`, no `rm` (and new bytes, when an edit
-  restores it). Restoring a folder restores the removed nodes whose `rm.root` is that folder; a
-  node whose parent is removed brings the parent back first. A name a live sibling took
-  meanwhile gets ` (restored)`.
+  restores it). Restoring a folder also restores the removed nodes below it whose `rm.root` is
+  its own (deleted with it, not before); a node whose parent is removed brings the parent back
+  first, and one whose parent is gone for good comes back at the top. If a folder doesn't come
+  back (changed meanwhile), what is in it stays removed. A name a live sibling took meanwhile
+  gets ` (restored)`.
 - After 30 days (the client's `keep_deleted_days`) any client deletes a removed node for good,
-  files before their folders: that leaves the tombstone below.
+  counted from its `rm.root`'s removal while that is removed too (a folder's delete goes as a
+  whole), files before their folders: that leaves the tombstone below.
 - Homebase gives `archivalStatus` no meaning: each app picks its values. `2` is odin-js mail's
   trash and the `Removed` of odin-js's and chat-kmp's types. It is replaced, like the whole
   header, on every update: a write that leaves it out sets it to `0` **[verified]**

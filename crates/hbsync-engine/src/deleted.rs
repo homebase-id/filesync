@@ -27,6 +27,7 @@ pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> 
                 let folder = folder_path(s, r.row.parent, &mut folders)?;
                 Ok(Deleted {
                     node: r.row.node,
+                    parent: r.row.parent,
                     path: join(&folder, &r.row.name),
                     kind: r.row.kind,
                     size: r.row.file.map(|f| f.size),
@@ -91,12 +92,16 @@ pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<us
         mut live,
         mut taken,
     } = plan;
+    let in_plan: HashSet<NodeId> = rows.iter().map(|r| r.row.node).collect();
     let mut restored = 0;
     for r in &rows {
         let row = &r.row;
-        // Its folder is back (or never left); else it comes back at the top.
+        // Its folder is back (or never left). One that was to come back and didn't keeps it in
+        // Recently deleted; one deleted for good, the top takes it.
         let parent = if live.contains(&row.parent) {
             row.parent
+        } else if in_plan.contains(&row.parent) {
+            continue;
         } else {
             NodeId::ROOT
         };
@@ -146,6 +151,22 @@ struct RestorePlan {
     taken: HashMap<NodeId, HashSet<String>>,
 }
 
+/// `top` and what its delete took along below it: the removed items in it, level by level,
+/// whose delete is the same (`rm.root`). What was deleted from it before stays out.
+fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
+    let root = top.removal.root;
+    let mut rows = vec![top];
+    let mut next = 0;
+    while next < rows.len() {
+        if rows[next].row.kind == NodeKind::Folder {
+            let below = s.removed_children(rows[next].row.node)?;
+            rows.extend(below.into_iter().filter(|r| r.removal.root == root));
+        }
+        next += 1;
+    }
+    Ok(rows)
+}
+
 fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, StateError> {
     let Some(top) = s.removed_by_node(node)? else {
         return Ok(None);
@@ -163,26 +184,8 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
         }
     }
     chain.reverse();
-    // What was deleted with it, each after its folder (depth below the node).
-    let mut group = s.removed_with(node)?;
-    if !group.iter().any(|r| r.row.node == node) {
-        group.push(top);
-    }
-    let parent_of: HashMap<NodeId, NodeId> =
-        group.iter().map(|r| (r.row.node, r.row.parent)).collect();
-    let depth = |mut n: NodeId| {
-        let mut d = 0;
-        while let Some(&p) = parent_of.get(&n) {
-            if d > 256 {
-                break;
-            }
-            d += 1;
-            n = p;
-        }
-        d
-    };
-    group.sort_by_key(|r| depth(r.row.node));
-    let rows: Vec<RemovedRow> = chain.into_iter().chain(group).collect();
+    // Then the node and what was deleted with it, each after its folder.
+    let rows: Vec<RemovedRow> = chain.into_iter().chain(group(s, top)?).collect();
     // The folders in the tree the rows may go into, and their names.
     let mut live = HashSet::from([NodeId::ROOT]);
     let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
@@ -214,30 +217,49 @@ pub fn purge(
 ) -> Result<usize, EngineError> {
     let expired = db.read(|s| s.removed_before(before_ms))?;
     let gone = delete_for_good(db, remote, &expired)?;
-    empty_trash(&trash_dir(state_dir), before_ms);
+    // Only what went there since the purge has been emptying it: older entries (from before
+    // Recently deleted) may be the only copy left, and stay.
+    let since = db.write(|s| match s.get_kv(TRASH_SINCE_KEY)? {
+        Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
+        None => {
+            let now = hbsync_types::unix_now();
+            s.set_kv(TRASH_SINCE_KEY, &now.to_string())?;
+            Ok(now)
+        }
+    })?;
+    empty_trash(&trash_dir(state_dir), since, before_ms);
     Ok(gone)
 }
 
-/// Deletes for good the items `nodes` name, each with what was deleted with it; all of
-/// Recently deleted with `None`. Returns how many items went.
+/// Deletes for good the items `nodes` name, each with what was deleted with it. Returns how
+/// many items went.
 pub fn empty(
     db: &mut StateDb,
     remote: &dyn Remote,
-    nodes: Option<&[NodeId]>,
+    nodes: &[NodeId],
 ) -> Result<usize, EngineError> {
-    let mut rows = match nodes {
-        None => db.read(|s| s.removed_before(i64::MAX))?,
-        Some(nodes) => db.read(|s| {
-            let mut rows = Vec::new();
-            for &node in nodes {
-                rows.extend(s.removed_with(node)?);
-                rows.extend(s.removed_by_node(node)?);
+    let mut rows = db.read(|s| {
+        let mut rows = Vec::new();
+        for &node in nodes {
+            if let Some(top) = s.removed_by_node(node)? {
+                rows.extend(group(s, top)?);
             }
-            Ok(rows)
-        })?,
-    };
+        }
+        Ok(rows)
+    })?;
     rows.sort_by_key(|r| (r.row.kind == NodeKind::Folder, r.row.node));
     rows.dedup_by_key(|r| r.row.node);
+    delete_for_good(db, remote, &rows)
+}
+
+/// Deletes for good everything removed until `at_ms` (Unix ms): what the user saw when they
+/// asked, nothing removed since. Returns how many items went.
+pub fn empty_until(
+    db: &mut StateDb,
+    remote: &dyn Remote,
+    at_ms: i64,
+) -> Result<usize, EngineError> {
+    let rows = db.read(|s| s.removed_before(at_ms.saturating_add(1)))?;
     delete_for_good(db, remote, &rows)
 }
 
@@ -260,15 +282,18 @@ fn delete_for_good(
     Ok(gone)
 }
 
-/// Deletes the trash entries (`<Unix s>-<node>`) from before `before_ms`. Best effort: one
-/// that can't go now goes at the next purge.
-fn empty_trash(trash: &Path, before_ms: i64) {
+/// The state DB key of when the purge started emptying the local trash (Unix s).
+const TRASH_SINCE_KEY: &str = "trash.purged_since";
+
+/// Deletes the trash entries (`<Unix s>-<node>`) that went there from `since` (Unix s) until
+/// before `before_ms`. Best effort: one that can't go now goes at the next purge.
+fn empty_trash(trash: &Path, since: u64, before_ms: i64) {
     let Ok(entries) = fs::read_dir(trash) else {
         return;
     };
     for entry in entries.flatten() {
         let at = entry.file_name().to_str().and_then(trashed_at);
-        if at.is_some_and(|s| (s as i64).saturating_mul(1000) < before_ms) {
+        if at.is_some_and(|s| s >= since && (s as i64).saturating_mul(1000) < before_ms) {
             let _ = remove_all(&entry.path());
         }
     }

@@ -144,6 +144,7 @@ const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;
     CREATE INDEX removed_at ON removed(removed_at);
     CREATE INDEX removed_root ON removed(root);
+    CREATE INDEX removed_parent ON removed(parent);
     "#,
 ];
 

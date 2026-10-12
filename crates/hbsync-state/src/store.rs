@@ -849,11 +849,11 @@ impl<'a> Store<'a> {
         )
     }
 
-    /// The nodes whose delete `root` took along (`root` itself included).
-    pub fn removed_with(&self, root: NodeId) -> Result<Vec<RemovedRow>> {
+    /// The removed nodes in folder `parent`.
+    pub fn removed_children(&self, parent: NodeId) -> Result<Vec<RemovedRow>> {
         self.many(
-            &format!("{REMOVED_SELECT} WHERE root = ?1"),
-            [root.0.as_bytes()],
+            &format!("{REMOVED_SELECT} WHERE parent = ?1"),
+            [parent.0.as_bytes()],
             removed_row,
         )
     }
@@ -867,10 +867,15 @@ impl<'a> Store<'a> {
         )
     }
 
-    /// What was removed before `at_ms` (Unix ms), files before folders.
+    /// What was removed before `at_ms` (Unix ms), with the delete that took it along (its
+    /// root, if still removed): a folder's delete goes as a whole. Files before folders.
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.many(
-            &format!("{REMOVED_SELECT} WHERE removed_at < ?1 ORDER BY kind, removed_at"),
+            &format!(
+                "{REMOVED_SELECT} WHERE removed_at < ?1 AND NOT EXISTS \
+                 (SELECT 1 FROM removed r WHERE r.node = removed.root AND r.removed_at >= ?1) \
+                 ORDER BY kind, removed_at"
+            ),
             [at_ms],
             removed_row,
         )

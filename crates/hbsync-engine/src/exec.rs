@@ -1175,23 +1175,7 @@ impl<'a> Executor<'a> {
             return Ok(rescan(&mut self.report, &row.path));
         };
         if holding.is_empty() {
-            // What Recently deleted holds on Homebase needs no second copy here.
-            let held = !forget
-                && self.db.read(|s| {
-                    for r in &rows {
-                        if s.removed_by_node(r.node)?.is_none() {
-                            return Ok(false);
-                        }
-                    }
-                    Ok(true)
-                })?;
-            // A delete that fails (a read-only file on Windows) falls back to the trash.
-            let gone = if held {
-                remove_all(&self.abs(&row.path)).or_else(|_| self.move_to_trash(&row.path, node))
-            } else {
-                self.move_to_trash(&row.path, node)
-            };
-            if let Err(e) = gone {
+            if let Err(e) = self.move_to_trash(&row.path, node) {
                 return Ok(io_outcome(e));
             }
         } else {

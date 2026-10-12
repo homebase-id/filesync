@@ -103,9 +103,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   keeps its bytes for `keep_deleted_days` (30): "Recently deleted" lists them, and a restore
   brings them back on every device (node schema, "Recently deleted"). The daily purge deletes
   older ones for good. The reconciler sees a removed node as deleted.
-- **Local deletes.** Removing a local file or folder because of a remote removal deletes it when
-  every file in it is held in Recently deleted; otherwise (a tombstone, a filter) it moves into
-  the sync root's internal trash (`.hbsync/trash/`), emptied after `keep_deleted_days`.
+- **Local deletes go to trash.** Removing a local file or folder because of a remote delete
+  moves it into the sync root's internal trash (`.hbsync/trash/`), never `unlink` (one rename:
+  junk and anything that appears meanwhile go along). The daily purge empties entries older
+  than `keep_deleted_days`, of those made since it began.
 - **Fingerprint guard.** Before deleting, overwriting or moving a local item, the executor
   checks that the local fingerprint still equals the one the plan was made from. On mismatch
   the operation is skipped and the node is re-planned.

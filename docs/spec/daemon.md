@@ -115,9 +115,12 @@ a failure (service managers restart it then).
 
 - **Recently deleted:** the folder's removed nodes (node schema, "Recently deleted"), kept in
   its state DB (table `removed`), listed newest first with their path. Restore and Empty go
-  through the runner. Once a day (the time is kept in the state DB) the runner deletes for
-  good what was removed more than `keep_deleted_days` ago, and empties `.hbsync/trash` of the
-  same age.
+  through the runner, at its next sync (kept in memory until then). Empty takes what the user
+  was shown: the items named, or everything removed until the newest one listed. Once a day
+  (the time is kept in the state DB) the runner deletes for good what was removed more than
+  `keep_deleted_days` ago (a folder's delete as a whole), and empties `.hbsync/trash` of
+  entries that old, from those made since the purge began (older ones, from before Recently
+  deleted, may be the only copy and stay).
 
 ### States
 
@@ -136,7 +139,8 @@ version (now 3); a daemon refuses another one with the reason (after an update: 
 {"protocol":3,"ask":{"control":{"pause":{"until":1800000000}}}}   // "until":null: until resumed
 {"protocol":3,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
 {"protocol":3,"ask":{"control":{"restore":{"nodes":["<node id>"]}}}}
-{"protocol":3,"ask":{"control":{"empty_deleted":{"nodes":null}}}}   // null: all of them
+{"protocol":3,"ask":{"control":{"empty_deleted":{"nodes":["<node id>"]}}}}
+{"protocol":3,"ask":{"control":{"empty_deleted_until":{"at_ms":1800000000000}}}}  // all removed until then
 {"protocol":3,"ask":{"recent":{"limit":10}}}
 {"protocol":3,"ask":{"deleted":{"limit":100}}}
 ```
@@ -174,7 +178,8 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   24 h, until resumed) or Resume, Sync now, Start at login, Open logs, Log out, Quit.
 - **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the
   OS's picker, merging a folder with files only when ticked), reviewing held deletes and
-  Recently deleted (each item's path, size and date, Restore, Empty now) are
+  Recently deleted (the topmost items: path, size, date, how many items their restore brings
+  back, Restore; Empty now, after a confirmation) are
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a

@@ -390,8 +390,8 @@ mod tests {
             r#"{"protocol":3,"ask":{"control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}"#
         );
         assert_eq!(
-            json(Ask::Control(Control::EmptyDeleted { nodes: None }))?,
-            r#"{"protocol":3,"ask":{"control":{"empty_deleted":{"nodes":null}}}}"#
+            json(Ask::Control(Control::EmptyDeletedUntil { at_ms: 7 }))?,
+            r#"{"protocol":3,"ask":{"control":{"empty_deleted_until":{"at_ms":7}}}}"#
         );
         assert_eq!(
             json(Ask::Deleted { limit: 100 })?,

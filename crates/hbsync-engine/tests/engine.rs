@@ -62,8 +62,7 @@ fn edits_moves_and_deletes_propagate() -> R {
         b.read("y/three.txt").is_err(),
         "the untouched file stays deleted"
     );
-    // b's delete of three.txt went to Recently deleted on the drive, not into the void: a
-    // needs no copy of its own.
+    // b's delete of three.txt went to Recently deleted on the drive, not into the void.
     let removed: Vec<_> = server
         .lock()
         .map_err(|_| "poisoned")?
@@ -71,7 +70,8 @@ fn edits_moves_and_deletes_propagate() -> R {
         .filter_map(|h| h.removal().map(|r| (h.node(), r.root)))
         .collect();
     assert_eq!(removed.len(), 1, "{removed:?}");
-    assert!(!a.root.join(".hbsync/trash").exists());
+    // And here, the local copy went to the trash (emptied by the purge).
+    assert!(fs::read_dir(a.root.join(".hbsync/trash"))?.count() >= 1);
     Ok(())
 }
 
@@ -1440,5 +1440,46 @@ fn a_restored_item_is_guarded_again() -> R {
     let report = b.sync()?;
     assert!(!report.held.is_empty(), "b holds it too: {report:?}");
     assert!(b.root.join("d/f3.txt").exists());
+    Ok(())
+}
+
+#[test]
+fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("P/E/x.txt", "x")?;
+    a.write("P/y.txt", "y")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("P"))?;
+    a.sync()?;
+    let find = |a: &mut common::Client, path: &str| -> Result<_, Box<dyn std::error::Error>> {
+        Ok(a.engine
+            .recently_deleted(10)?
+            .into_iter()
+            .find(|i| i.path == path)
+            .ok_or(format!("{path} not listed"))?)
+    };
+    // P/E was taken along by P's delete: restoring it brings back P (alone) and E's content.
+    let e = find(&mut a, "P/E")?.node;
+    assert_eq!(a.engine.restore(&[e])?, 3);
+    a.sync()?;
+    assert_eq!(a.read("P/E/x.txt")?, "x");
+    assert!(a.read("P/y.txt").is_err(), "the rest of P stays deleted");
+
+    // Empty until a moment: what was deleted after it stays.
+    let until = find(&mut a, "P/y.txt")?.removed_at_ms;
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    fs::remove_file(a.root.join("keep.txt"))?;
+    a.write("other.txt", "o")?; // not every file deleted (the guard)
+    a.sync()?;
+    assert_eq!(a.engine.empty_deleted_until(until)?, 1);
+    let left: Vec<_> = a
+        .engine
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert_eq!(left, ["keep.txt"]);
     Ok(())
 }
