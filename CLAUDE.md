@@ -48,6 +48,8 @@ Ground rules:
   code or inferred.
 - A change to sync behavior gets a simulator property or regression test (`hbsync-sim`), not
   only an example test.
+- A change to what a node carries updates `docs/spec/node-schema-v1.md` (with a line under
+  Changes) in the same PR: other clients (chat-kmp's Filesync mini-app) follow it.
 
 ## Build and test
 

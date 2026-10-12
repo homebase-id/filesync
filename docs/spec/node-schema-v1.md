@@ -4,6 +4,10 @@ How one sync node is stored as one Homebase drive file. Every client that reads 
 "Files" drive (this client, odin-js, chat-kmp) follows this schema. Fixtures live in
 [fixtures/](fixtures/).
 
+This is the living schema: every change to what a node carries lands here, in the same PR, with
+a line under [Changes](#changes). Other clients follow the copy on `main`:
+https://github.com/homebase-id/filesync/blob/main/docs/spec/node-schema-v1.md
+
 Markers: **[verified]** = checked in `../odin-core` code; **[provisional]** = our choice, not yet
 reserved in odin-core.
 
@@ -88,3 +92,21 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 
 ## Rename and move
 One metadata-only update of `groupId` and/or `content.name`, guarded by `versionTag`.
+
+## Rules for other clients
+What a client that isn't this one (the mobile Filesync mini-app in chat-kmp, odin-js) must do to
+write nodes this client syncs:
+- **Create:** `v`, `name`, and for a file `mtime` and `size`, plus one `sync_data` payload with its
+  hash. Every optional key may be left out; send `ct` only if the platform knows the item's real
+  creation time (a photo's capture date counts), never the upload time.
+- **Update** (rename, move, new bytes): read the node's content, change only the keys the update
+  is about and write the rest back as read, unknown keys included. Never rebuild content from a
+  model that knows only some keys: that drops `ct` and `x` (and any later key) for every device.
+  If a client can't keep unknown keys, it doesn't update nodes.
+- **Read:** ignore keys you don't use. Showing `ct` is optional.
+
+## Changes
+- 2026-10-12: `ct`, the creation time (optional, files and folders).
+- 2026-10-11: every file's `sync_data` carries its hash; a file without one isn't a node.
+- 2026-10-10: every node encrypted.
+- 2026-10-08: v1.
