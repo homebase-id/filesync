@@ -54,7 +54,10 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
   isn't tied to its feed; users install through Conveyor's installer, which uses the feed.
   Installing from the feed doesn't work on the CI runners (Windows Server: `0x80D05011` fetching
   the package from a local server), so **the Windows update is still to confirm on a real PC**;
-  it's the same mechanism chat-kmp ships with. The macOS update (Sparkle) likewise waits for a
+  it's the same mechanism chat-kmp ships with. The packages start through Conveyor's `updatecheck.exe`, which
+  looks at the update site first: a draft's package, newer than what is published, tries to
+  update from the feed there and doesn't start (found with v0.2.0's signed ARM package), so the
+  install test blocks the update site. The macOS update (Sparkle) likewise waits for a
   real Mac and a properly signed app.
 
 ## The release workflow
