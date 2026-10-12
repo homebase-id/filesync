@@ -9,13 +9,17 @@ How installers are made: `docs/spec/packaging.md`. The workflow: `.github/workfl
 2. Optionally, run the Release workflow by hand first: it builds and tests everything without
    releasing. To test the signed packages too, tag a release candidate (`v0.1.0-rc.1`): it makes
    a draft marked pre-release, which publishing never puts on the update site.
-3. Tag and push: `git tag v0.1.0 && git push origin v0.1.0`. The workflow builds, packages and
-   tests, signs (`sign`, in the `release-signing` environment, which only `v*` tags reach), and
-   makes a **draft** GitHub release with every file, `SHA256SUMS` and build provenance
-   attestations.
-4. Check the draft, then publish it by hand: the one human step of a release. Publishing runs
+3. Tag and push: `git tag -m "v0.1.0" v0.1.0 && git push origin v0.1.0`. The tag is signed
+   (`tag.gpgsign`), so it needs a message: without `-m`, git stops with "no tag message?".
+   The workflow builds, packages and tests, signs (`sign` and `sign-dmg`, in the
+   `release-signing` environment, which only `v*` tags reach), and makes a **draft** GitHub
+   release with every file, `SHA256SUMS` and build provenance attestations.
+4. Check the draft, then publish it: the one human step of a release. Publishing runs
    `publish.yml`, which puts exactly those files on the update site: from then on, installed
-   copies update to it.
+   copies update to it. The user may publish with the button or ask a Claude session to,
+   which runs `gh release edit <tag> --draft=false` (it triggers `publish.yml` the same way),
+   but only on the user's explicit go for that release, given after the session's checks of the
+   draft. A passing build is not a go.
 
 ## What runs where (DevOps' rules)
 
