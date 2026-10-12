@@ -68,7 +68,7 @@ MSIX's unvirtualized folders as the code does.
 
 ## Still to do
 
-- The Apple and Azure signing secrets (RELEASING.md): the Mac app and the Windows packages are
-  self-signed until then; then the `.dmg` files signed and notarized too.
-- Confirm the Windows and Mac updates on real machines once signed.
+- A first signed release, checked by hand: the Mac app and `.dmg` signed, notarized and
+  stapled, the MSIX and EXEs signed by Azure (RELEASING.md; the jobs exist, 2026-10-12).
+- Confirm the Windows and Mac updates on real machines with signed releases.
 - An update repository for the `.rpm` (dnf), which needs a signing key of its own.

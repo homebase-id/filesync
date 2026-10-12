@@ -78,7 +78,8 @@ Linux tarball and a Windows zip, all with `hbsync`, `hbsyncd` and the tray `home
 (built with the `dist` profile, smoke-tested, installed and removed on fresh runners). Build
 jobs hold no secrets; a tag `vX.Y.Z` equal to the workspace version makes a draft GitHub
 release from the `release-signing` environment (`v*` tags only), to publish by hand; running the
-workflow by hand only builds and tests. Signing waits for DevOps' keys.
+workflow by hand only builds and tests. A tag's Mac app and `.dmg` are signed with the Developer
+ID and notarized, its Windows packages signed by Azure Trusted Signing (keys from DevOps).
 
 ## Crates
 
