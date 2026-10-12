@@ -505,6 +505,17 @@ impl<'a> Store<'a> {
         Ok(())
     }
 
+    /// Marks dirty every node whose drive copy carries tags (once, after the upgrade that brought
+    /// tags: the feed passed them while this client didn't read them).
+    pub fn mark_remote_tagged_dirty(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO dirty (id) \
+             SELECT id FROM remote WHERE content_extra LIKE '%\"tags\"%'",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Records the tags of `node`'s local item, as read (the rest of its row stays).
     pub fn set_local_tags(&self, node: NodeId, tags: &Tags) -> Result<bool> {
         let n = self

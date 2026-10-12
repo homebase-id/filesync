@@ -75,8 +75,9 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 - `tags` is kept the same way through every write that isn't about tags. Where they live on
   each system: macOS `com.apple.metadata:_kMDItemUserTags` (what Finder and Spotlight use),
   Linux `user.xdg.tags` (KDE; names only, so a Linux device keeps the colours as they are on
-  the drive), Windows nowhere (a Windows device keeps them all as they are). This client syncs
-  at most about 2,000 characters of tags per item; an item with more keeps what the drive has.
+  the drive), Windows nowhere (a Windows device keeps them all as they are). Readers take names
+  in NFC. This client syncs at most about 2,000 bytes of tags per item; an item with more
+  keeps what the drive has.
 - A reader that finds `v > 1` treats the node as read-only.
 - Content is capped by the server at 10,240 characters **[verified]**; with names capped at 255
   UTF-8 bytes by this client, v1 content stays far below it.

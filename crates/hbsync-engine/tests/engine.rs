@@ -1562,6 +1562,19 @@ fn tags_sync_between_folders() -> R {
     assert_eq!(b.read("Docs/report.txt")?, "quarterly, revised");
     assert_eq!(names(&b, "Docs/report.txt"), ["Red", "Todo"]);
 
+    // A folder gets a new child and a tag in one go: the tag lands though the folder changed.
+    tick();
+    a.write("Docs/new.txt", "new")?;
+    tags::write(
+        &a.root.join("Docs"),
+        &Tags::new([Tag::new("Work", 0), Tag::new("Q3", 0)]),
+    )?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(names(&b, "Docs"), ["Q3", "Work"]);
+    assert_eq!(b.read("Docs/new.txt")?, "new");
+
     // Removed on b, removed on a.
     tick();
     tags::write(
@@ -1574,6 +1587,48 @@ fn tags_sync_between_folders() -> R {
     assert_eq!(drive_tags("report.txt")?, ["Todo:0"]);
     // Nothing left to do on either side.
     assert!(a.engine.sync_once("2026-10-08")?.is_idle());
+    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
+/// A copy proven equal only across hash algorithms gets its base though the tags differ (the
+/// drive's are tagged, the local copy isn't): no conflict copy, and the tags come down.
+#[test]
+fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
+    use hbsync_platform::tags::{self, Tag, Tags};
+    let server = server();
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let (node, written) = srv.seed_file(
+            hbsync_types::NodeId::ROOT,
+            "photo.jpg",
+            b"photo bytes",
+            hbsync_fileio::HashAlgorithm::Sha256,
+        )?;
+        let mut content =
+            hbsync_types::schema::NodeContent::file("photo.jpg", 1_700_000_000_000, 11, false);
+        content.set_tags(&Tags::new([Tag::new("Blue", 4)]));
+        let meta = NodeMeta {
+            node,
+            parent: hbsync_types::NodeId::ROOT,
+            kind: hbsync_types::NodeKind::File,
+            content,
+        };
+        srv.update(written.file_id, written.version, &meta, None)?;
+    }
+    let mut b = Client::new(&server, "b")?;
+    b.write("photo.jpg", "photo bytes")?;
+    let report = b.sync()?;
+    assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
+    assert_eq!(b.tree_text(), ["photo.jpg = photo bytes"]);
+    if tags::CAN_TAG && tags::read(&b.root.join("photo.jpg")).is_some() {
+        let names: Vec<String> = tags::read(&b.root.join("photo.jpg"))
+            .unwrap_or_default()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert_eq!(names, ["Blue"]);
+    }
     assert!(b.engine.sync_once("2026-10-08")?.is_idle());
     Ok(())
 }

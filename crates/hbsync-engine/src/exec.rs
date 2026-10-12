@@ -836,10 +836,7 @@ impl<'a> Executor<'a> {
                 return Ok(io_outcome(e));
             }
         }
-        let tags = match tags::write(&abs, tags) {
-            Ok(read) => read,
-            Err(e) => return Ok(io_outcome(e)),
-        };
+        let tags = write_tags(&abs, tags);
         // Only shown, never synced on: a file system that won't take it is no failure.
         if let Some(ct) = created_ms {
             let _ = ops::set_created(&abs, ct);
@@ -866,22 +863,23 @@ impl<'a> Executor<'a> {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Skip("gone".into()));
         };
-        if !self.on_disk_unchanged(&row) {
+        let abs = self.abs(&row.path);
+        // A folder's guard is its file id only: its tags must still be what was read.
+        if !self.on_disk_unchanged(&row) || row.tags.is_some() && tags::read(&abs) != row.tags {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let abs = self.abs(&row.path);
-        let read = match tags::write(&abs, tags) {
-            Ok(read) => read,
-            Err(e) => return Ok(io_outcome(e)),
-        };
-        // Writing tags moves the change time only. If anything else moved, the item changed
-        // meanwhile: the old row stays, and the rescan looks at it.
+        let read = write_tags(&abs, tags);
+        // Writing tags moves the change time only (a folder's mtime moves with its children).
+        // If anything else moved, the item changed meanwhile: the old row stays, and the
+        // rescan looks at it.
         let meta = match hbsync_platform::stat(&abs) {
             Ok(m) => m,
             Err(e) => return Ok(io_outcome(e)),
         };
         let fp = row.fingerprint;
-        if meta.fingerprint().file_id != fp.file_id || !fp.same_after_rename(&meta) {
+        let same = meta.file_id == fp.file_id
+            && (row.kind == NodeKind::Folder || fp.same_after_rename(&meta));
+        if !same {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let row = LocalRow {
@@ -1175,13 +1173,7 @@ impl<'a> Executor<'a> {
         }
         // The tags go on before the file is in place: a scan in between would read none, and
         // take that for the user removing them.
-        let tags = match tags::write(done.path(), tags) {
-            Ok(read) => read,
-            Err(e) => {
-                done.keep_for_retry();
-                return Ok(io_outcome(e));
-            }
-        };
+        let tags = write_tags(done.path(), tags);
         let placed = match &current {
             Some(row) if &row.path == target => {
                 done.persist_over(&self.abs(target), &row.fingerprint, created_ms)
@@ -1546,7 +1538,7 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
         return Ok(());
     };
     let agreed = Agreement::of(&l, &r, content_hint);
-    let Some(state) = agreed.settle(base.as_ref().map(|b| b.state.clone()), &r) else {
+    let Some(state) = agreed.settle(base.as_ref().map(|b| b.state.clone()), &l, &r) else {
         return Ok(());
     };
     let mut row = base.unwrap_or(BaseRow {
@@ -1607,6 +1599,13 @@ pub(crate) fn content_of(row: &MirrorRow, name: &str) -> NodeContent {
     };
     content.unknown = feed::unknown_keys(row);
     content
+}
+
+/// Gives the item at `path` these tags and returns what it holds now. Tags are no reason to
+/// fail an operation: where they can't be written (a read-only item, a full attribute block),
+/// they read as not known, and the drive's stand (§11).
+fn write_tags(path: &Path, tags: &Tags) -> Option<Tags> {
+    tags::write(path, tags).ok().flatten()
 }
 
 /// The tags of a node this device restores from Recently deleted: `ours` merged with the

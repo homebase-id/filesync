@@ -306,10 +306,20 @@ impl Agreement {
     }
 
     /// The base after settling: the agreed attributes are taken from `remote`. A node without a
-    /// base gets one only when both sides agree on everything.
-    pub fn settle(self, base: Option<NodeState>, remote: &NodeState) -> Option<NodeState> {
+    /// base gets one when both sides agree on place and content (bytes proven equal across
+    /// hash algorithms can't be proven again later), with the tags both sides have: the merge
+    /// then brings each side the other's (§11).
+    pub fn settle(
+        self,
+        base: Option<NodeState>,
+        local: &NodeState,
+        remote: &NodeState,
+    ) -> Option<NodeState> {
         let Some(mut b) = base else {
-            return (self.place && self.content && self.tags).then(|| remote.clone());
+            return (self.place && self.content).then(|| NodeState {
+                tags: local.tags.intersection(&remote.tags),
+                ..remote.clone()
+            });
         };
         if self.place {
             b.parent = remote.parent;

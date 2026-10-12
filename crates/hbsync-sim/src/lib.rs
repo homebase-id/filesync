@@ -1200,7 +1200,7 @@ impl Sim {
             }
             (Some(l), Some(r)) => {
                 let agreed = Agreement::of(&l, &r, false);
-                if let Some(b) = agreed.settle(client.base.get(node).cloned(), &r) {
+                if let Some(b) = agreed.settle(client.base.get(node).cloned(), &l, &r) {
                     if agreed.content {
                         client.extra.insert(node, extra(&l, version));
                     }

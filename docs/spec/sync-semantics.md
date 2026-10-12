@@ -301,5 +301,17 @@ tags in (it may hold tags this device never saw).
 **Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
 then reads the tags. Rows from before tags were synced get theirs read once at start-up.
 Downloads write the tags onto the temp file before it is put in place: a file without them
-would read as the user removing them. An item with more than about 2,000 characters of tags
-isn't tag-synced: it reads as "can't tell", and keeps what the drive has.
+would read as the user removing them. An item with more than about 2,000 bytes of tags
+isn't tag-synced: it reads as "can't tell", and keeps what the drive has; so do tags that can't
+be read or written for a moment (a failed tag write never fails the operation). A node with no
+base gets one when place and content agree, with the tags both sides have: the merge then
+brings each side the other's (a copy proven equal only across hash algorithms can't be proven
+again later). After the upgrade that brought tags, nodes the drive has tags for are planned
+once, so tags pushed by devices that upgraded earlier come down.
+
+**Limits.** Tag changes are seen through the change time: on a volume that keeps attributes
+elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go unnoticed until
+the item changes again. A tag change makes the scan read the file again (the change time is
+part of the fingerprint, to catch writes that keep the modification time). An item that becomes
+a new node on a device that can't hold all its tags (detached on Windows, §10) goes up with
+the tags that device has.

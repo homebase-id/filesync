@@ -28,13 +28,16 @@ impl Tag {
     }
 }
 
-/// An item's tags: sorted by name, one per name, none with an empty name.
+/// An item's tags: sorted by name, one per name, none with an empty name; names in NFC and
+/// colours among Finder's (anything else is none), whoever wrote them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Tags(Vec<Tag>);
 
-/// Tags taking more characters than this (names plus a little per tag) aren't synced: the item
-/// keeps what the drive has (`appData.content` is capped at 10,240 characters).
-pub const MAX_CHARS: usize = 2000;
+/// Tags taking more bytes than this (UTF-8 names plus a little per tag) aren't synced: the item
+/// keeps what the drive has. The server caps `appData.content` at 10,240 UTF-16 units of the
+/// encrypted, base64 text (**[verified]**, homebase-api-notes), about 7,600 bytes of JSON: room
+/// for a 255-byte name, the other keys and two devices' worth of tags merged.
+pub const MAX_BYTES: usize = 2000;
 
 impl Tags {
     /// Sorted by name; of two with one name, the first is kept.
@@ -42,7 +45,8 @@ impl Tags {
         let mut by_name: BTreeMap<String, u8> = BTreeMap::new();
         for t in tags {
             if !t.name.is_empty() {
-                by_name.entry(t.name).or_insert(t.colour);
+                let colour = if t.colour <= 7 { t.colour } else { 0 };
+                by_name.entry(crate::nfc(&t.name)).or_insert(colour);
             }
         }
         Tags(
@@ -68,13 +72,20 @@ impl Tags {
             .map(|i| &self.0[i])
     }
 
-    /// Whether they are small enough to sync ([`MAX_CHARS`]).
+    /// Whether they are small enough to sync ([`MAX_BYTES`]).
     pub fn fits(&self) -> bool {
-        self.0
-            .iter()
-            .map(|t| t.name.chars().count() + 16)
-            .sum::<usize>()
-            <= MAX_CHARS
+        self.0.iter().map(|t| t.name.len() + 16).sum::<usize>() <= MAX_BYTES
+    }
+
+    /// The tags both have, as in `self`.
+    pub fn intersection(&self, other: &Tags) -> Tags {
+        Tags(
+            self.0
+                .iter()
+                .filter(|t| other.get(&t.name) == Some(t))
+                .cloned()
+                .collect(),
+        )
     }
 
     /// The three-way merge of a node's tags (sync-semantics §11): what either side added is
@@ -166,10 +177,10 @@ pub fn decode_finder(bytes: &[u8]) -> Option<Tags> {
         let s = v.as_string()?;
         let tag = match s.rsplit_once('\n') {
             Some((name, colour)) => match colour.parse::<u8>() {
-                Ok(c) => Tag::new(crate::nfc(name), c),
-                Err(_) => Tag::new(crate::nfc(s), 0),
+                Ok(c) => Tag::new(name, c),
+                Err(_) => Tag::new(s, 0),
             },
-            None => Tag::new(crate::nfc(s), 0),
+            None => Tag::new(s, 0),
         };
         Some(tag)
     })))
@@ -196,7 +207,7 @@ pub fn encode_finder(tags: &Tags) -> Vec<u8> {
 
 pub fn decode_xdg(bytes: &[u8]) -> Tags {
     let text = String::from_utf8_lossy(bytes);
-    Tags::new(text.split(',').map(|n| Tag::new(crate::nfc(n), 0)))
+    Tags::new(text.split(',').map(|n| Tag::new(n, 0)))
 }
 
 /// The Linux attribute for `tags`, of those it can hold.
@@ -408,6 +419,13 @@ mod tests {
         assert_eq!(t, Tags(vec![Tag::new("a", 0), Tag::new("b", 1)]));
         assert_eq!(t.get("b").map(|t| t.colour), Some(1));
         assert!(t.get("c").is_none());
+        // Whoever wrote them: names in NFC, and a colour Finder doesn't have is none.
+        let odd = tags(&[("e\u{301}", 9)]);
+        assert_eq!(odd, tags(&[("\u{e9}", 0)]));
+        assert_eq!(
+            t.intersection(&tags(&[("a", 0), ("b", 2)])),
+            tags(&[("a", 0)])
+        );
     }
 
     #[test]

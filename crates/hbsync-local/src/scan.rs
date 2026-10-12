@@ -387,6 +387,7 @@ fn resolve(
             continue;
         }
         let mut new = row_from(&row.path, row.node, &meta, row.hash);
+        keep_known_tags(&mut new, &row);
         let mut content_changed = false;
         if row.kind == NodeKind::File
             && (row.fingerprint != meta.fingerprint() || row.hash.is_none())
@@ -429,6 +430,7 @@ fn resolve(
         };
         let old = &removed[i];
         let mut new = row_from(&path, old.node, &meta, old.hash);
+        keep_known_tags(&mut new, old);
         if tags_changed(&old.tags, &new.tags) {
             plan.dirty.push(old.node);
         }
@@ -579,6 +581,14 @@ fn parent_node(
         return Ok(Some(*node));
     }
     db.read(|s| s.local_node_at(&parent))
+}
+
+/// Tags that can't be read now (unreadable for a moment, too many) leave the ones known before:
+/// otherwise removing every tag later would look like no change.
+fn keep_known_tags(new: &mut LocalRow, old: &LocalRow) {
+    if new.tags.is_none() {
+        new.tags.clone_from(&old.tags);
+    }
 }
 
 /// Whether tags read as `new` differ from `old`. Tags that can't be told now aren't a change,
