@@ -5,7 +5,8 @@ menu bar on macOS), a per-user daemon that syncs (`hbsyncd`) and a command line 
 
 | | Download | Updates |
 |---|---|---|
-| **Windows** 10/11 | `homebase-filesync-*.x64.msix` (Intel/AMD) or `…arm64.msix` (ARM) | by themselves (the package's update feed) |
+| **Windows** 10/11 | `homebase-filesync.exe`: it installs the package for your PC (Intel/AMD or ARM) | by themselves (the package's update feed) |
+| **Windows, by hand** | `homebase-filesync-*.x64.msix` (or `…arm64.msix`): double-click to install | none: installed this way, it doesn't update (use the `.exe`) |
 | **macOS** 11+ | `Homebase-Filesync-*-mac-aarch64.dmg` (Apple Silicon) or `…-mac-amd64.dmg` (Intel): drag the app to Applications | by themselves (Sparkle) |
 | **Ubuntu, Debian** | `homebase-filesync_*_amd64.deb` (or `_arm64`): `sudo apt install ./homebase-filesync_*.deb` | with `apt upgrade` (the package adds its repository) |
 | **Fedora, openSUSE** | `homebase-filesync-*.x86_64.rpm` (or `.aarch64`): `sudo dnf install ./homebase-filesync-*.rpm` | by hand, for now |

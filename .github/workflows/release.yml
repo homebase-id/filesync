@@ -30,6 +30,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - run: rustup toolchain install
       - id: version
         run: |
@@ -42,6 +43,14 @@ jobs:
                 && "$GITHUB_REF_NAME" != "v$version"-* ]]; then
             echo "::error::the tag $GITHUB_REF_NAME doesn't match the workspace version $version"
             exit 1
+          fi
+          # Only reviewed code is signed: a tag must be on main (anyone with write access may
+          # tag, RELEASING.md).
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            git fetch --quiet --no-tags origin main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+              echo "::error::the tag $GITHUB_REF_NAME is on a commit that isn't on main"; exit 1
+            fi
           fi
 
   # The three programs per platform, staged as Conveyor takes them: `tray` and `cli` are the
@@ -171,9 +180,9 @@ jobs:
           path: site
           if-no-files-found: error
 
-  # A tag's site, signed (RELEASING.md): the feeds with the root key; the Mac app and the
-  # Windows packages as well once their secrets exist (self-signed until then). The secrets are
-  # in this step's env only.
+  # A tag's site, signed (RELEASING.md): the feeds with the root key, the Mac app with the
+  # Developer ID (and notarized), the Windows packages by Azure Trusted Signing. The secrets
+  # are in this step's env only.
   sign:
     if: github.ref_type == 'tag'
     needs: [version, build]
@@ -212,62 +221,52 @@ jobs:
           AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
           AZURE_SIGNING_PROFILE: ${{ vars.AZURE_SIGNING_PROFILE }}
         run: |
-          if [[ -z "$CONVEYOR_SIGNING_KEY" ]]; then
-            echo "::error::no CONVEYOR_SIGNING_KEY in release-signing"; exit 1
+          # Every input first: a tag is only ever signed for real (no self-signed fallback,
+          # which sign-dmg and test-signed-msix would refuse much later).
+          missing=()
+          for name in CONVEYOR_SIGNING_KEY APPLE_SIGNING_KEY APPLE_SIGNING_KEY_PASS \
+              APPLE_NOTARIZATION_KEY APPSTORE_API_KEY_ID APPSTORE_API_ISSUER_ID AZURE_CLIENT_ID \
+              AZURE_TENANT_ID AZURE_SIGNING_ENDPOINT AZURE_SIGNING_ACCOUNT AZURE_SIGNING_PROFILE; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} )); then
+            echo "::error::not set in release-signing: ${missing[*]}"; exit 1
           fi
-          echo 'include required("conveyor-production.conf")' > signed.conf
-          if [[ -n "$APPLE_SIGNING_KEY" ]]; then
-            keys="$RUNNER_TEMP/apple"
-            mkdir -m 700 "$keys"
-            printf '%s' "$APPLE_SIGNING_KEY" | base64 -d > "$keys/developerid.p12"
-            printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
-            export APPLE_P12_PATH="$keys/developerid.p12"
-            # Conveyor wants the Developer ID certificate alone, in `certificate` and in the
-            # .p12 it signs with; DevOps' .p12 also holds Apple's G2 intermediate (kept for
-            # sign-dmg's keychain). So: the certificate as DER, and a .p12 of it and the key.
-            legacy=()
-            openssl pkcs12 -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS -noout 2> /dev/null \
-              || legacy=(-legacy)
-            openssl pkcs12 "${legacy[@]}" -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS \
-              -clcerts -nokeys > "$keys/leaf.pem"
-            export APPLE_CERT_PATH="$keys/developerid.cer"
-            openssl x509 -in "$keys/leaf.pem" -outform der -out "$APPLE_CERT_PATH"
-            openssl x509 -in "$APPLE_CERT_PATH" -inform der -noout -subject
-            openssl pkcs12 "${legacy[@]}" -in "$APPLE_P12_PATH" -passin env:APPLE_SIGNING_KEY_PASS \
-              -nocerts -nodes \
-              | openssl pkcs12 -export -inkey /dev/stdin -in "$keys/leaf.pem" -name developerid \
-                  -passout env:APPLE_SIGNING_KEY_PASS -out "$keys/developerid-only.p12"
-            export APPLE_P12_PATH="$keys/developerid-only.p12"
-            export APPLE_NOTARIZATION_KEY_PATH="$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
-            echo 'include required("conveyor-apple.conf")' >> signed.conf
-          else
-            echo "::warning::no Apple secrets yet: the Mac app is self-signed"
+          keys="$RUNNER_TEMP/apple"
+          mkdir -m 700 "$keys"
+          printf '%s' "$APPLE_SIGNING_KEY" | base64 -d > "$keys/developerid.p12"
+          printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
+          ./apple-p12.sh conveyor "$keys/developerid.p12" "$keys"
+          export APPLE_CERT_PATH="$keys/developerid.cer"
+          export APPLE_P12_PATH="$keys/developerid-only.p12"
+          export APPLE_NOTARIZATION_KEY_PATH="$keys/AuthKey_$APPSTORE_API_KEY_ID.p8"
+          # azure/login isn't an allowed action: GitHub's OIDC token exchanged by hand. The
+          # tokens are masked before anything is printed; Azure's error, if any, is shown.
+          oidc=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
+          echo "::add-mask::$oidc"
+          answer=$(curl -sS "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+            --data-urlencode "client_id=$AZURE_CLIENT_ID" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            --data-urlencode "client_assertion=$oidc" \
+            --data-urlencode "scope=https://codesigning.azure.net/.default")
+          AZURE_ACCESS_TOKEN=$(jq -r '.access_token // empty' <<< "$answer" 2> /dev/null || true)
+          if [[ -z "$AZURE_ACCESS_TOKEN" ]]; then
+            # A JSON error says what's wrong; anything else (an HTML error page) is cut short.
+            why=$(jq -c '{error, error_description}' <<< "$answer" 2> /dev/null || head -c 300 <<< "$answer")
+            echo "::error::Azure gave no token: $why"
+            exit 1
           fi
-          if [[ -n "$AZURE_CLIENT_ID" ]]; then
-            # azure/login isn't an allowed action: GitHub's OIDC token exchanged by hand. The
-            # tokens are masked before anything is printed; Azure's error, if any, is shown.
-            oidc=$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -r .value)
-            echo "::add-mask::$oidc"
-            answer=$(curl -sS "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
-              --data-urlencode "client_id=$AZURE_CLIENT_ID" \
-              --data-urlencode "grant_type=client_credentials" \
-              --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-              --data-urlencode "client_assertion=$oidc" \
-              --data-urlencode "scope=https://codesigning.azure.net/.default")
-            AZURE_ACCESS_TOKEN=$(jq -r '.access_token // empty' <<< "$answer")
-            if [[ -z "$AZURE_ACCESS_TOKEN" ]]; then
-              echo "::error::Azure gave no token: $(jq -c '{error, error_description}' <<< "$answer")"
-              exit 1
-            fi
-            echo "::add-mask::$AZURE_ACCESS_TOKEN"
-            export AZURE_ACCESS_TOKEN
-            AZURE_SIGNING_ENDPOINT=${AZURE_SIGNING_ENDPOINT#https://}
-            export AZURE_SIGNING_ENDPOINT=${AZURE_SIGNING_ENDPOINT%/}
-            echo 'include required("conveyor-azure.conf")' >> signed.conf
-          else
-            echo "::warning::no Azure signing yet: the Windows packages are self-signed"
-          fi
+          echo "::add-mask::$AZURE_ACCESS_TOKEN"
+          export AZURE_ACCESS_TOKEN
+          AZURE_SIGNING_ENDPOINT=${AZURE_SIGNING_ENDPOINT#https://}
+          export AZURE_SIGNING_ENDPOINT=${AZURE_SIGNING_ENDPOINT%/}
+          cat > signed.conf <<EOF
+          include required("conveyor-production.conf")
+          include required("conveyor-apple.conf")
+          include required("conveyor-azure.conf")
+          EOF
           conveyor -f signed.conf -Kapp.version="$VERSION" --console=plain make site
           mv output ../signed-site
       - if: always()
@@ -325,15 +324,17 @@ jobs:
   # only; the keychain lives in $RUNNER_TEMP and is deleted at the end.
   sign-dmg:
     if: github.ref_type == 'tag'
-    needs: [version, dmg]
+    needs: dmg
     runs-on: macos-latest
-    timeout-minutes: 45
+    # Two notarizations, one after the other, each waiting up to 30 minutes.
+    timeout-minutes: 75
     environment: release-signing
     permissions:
       contents: read
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dmg
@@ -346,47 +347,34 @@ jobs:
           if [[ -z "$APPLE_SIGNING_KEY" ]]; then
             echo "::error::no APPLE_SIGNING_KEY in release-signing"; exit 1
           fi
-          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
-          original="$RUNNER_TEMP/developerid.p12"
-          printf '%s' "$APPLE_SIGNING_KEY" | base64 --decode > "$original"
-          # macOS's `security import` reads only the older PKCS#12 format (3DES, SHA-1 MAC):
-          # one made with OpenSSL 3's defaults (AES, SHA-256 MAC) fails with "MAC verification
-          # failed". So it is written again in that format, the key and the certificates (the
-          # intermediate too) from two pipes, never in the clear on disk. Homebrew's OpenSSL 3:
-          # macOS's own is LibreSSL.
-          openssl="$(brew --prefix openssl@3)/bin/openssl"
-          legacy=()
-          "$openssl" pkcs12 -in "$original" -passin env:APPLE_SIGNING_KEY_PASS -noout 2> /dev/null \
-            || legacy=(-legacy)
-          "$openssl" pkcs12 "${legacy[@]}" -in "$original" -passin env:APPLE_SIGNING_KEY_PASS \
-            -info -noout 2>&1 | grep -E '^(MAC:|PKCS7 Encrypted data:|Shrouded Keybag:)' || true
-          p12="$RUNNER_TEMP/developerid-mac.p12"
-          "$openssl" pkcs12 -export \
-            -inkey <("$openssl" pkcs12 "${legacy[@]}" -in "$original" \
-              -passin env:APPLE_SIGNING_KEY_PASS -nocerts -nodes) \
-            -in <("$openssl" pkcs12 "${legacy[@]}" -in "$original" \
-              -passin env:APPLE_SIGNING_KEY_PASS -nokeys) \
-            -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
-            -passout env:APPLE_SIGNING_KEY_PASS -out "$p12"
-          rm "$original"
-          password=$("$openssl" rand -hex 24)
-          security create-keychain -p "$password" "$KEYCHAIN"
-          security set-keychain-settings -lut 3600 "$KEYCHAIN"
-          security unlock-keychain -p "$password" "$KEYCHAIN"
-          security import "$p12" -k "$KEYCHAIN" -P "$APPLE_SIGNING_KEY_PASS" -T /usr/bin/codesign
-          rm "$p12"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$KEYCHAIN" > /dev/null
+          keys="$RUNNER_TEMP/apple"
+          mkdir -m 700 "$keys"
+          printf '%s' "$APPLE_SIGNING_KEY" | base64 --decode > "$keys/developerid.p12"
+          OPENSSL="$(brew --prefix openssl@3)/bin/openssl" \
+            packaging/apple-p12.sh keychain "$keys/developerid.p12" "$keys/developerid-mac.p12"
+          keychain="$keys/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$keys/developerid-mac.p12" -k "$keychain" -P "$APPLE_SIGNING_KEY_PASS" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
           # codesign finds identities only in keychains on the search list, --keychain or not
-          # (as GitHub's guide to signing on macOS runners does).
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
-          security list-keychains -d user
-          identity=$(security find-identity -v -p codesigning "$KEYCHAIN" \
+          # (as in GitHub's guide to signing on macOS runners). The list's paths are quoted.
+          keychains=()
+          while IFS= read -r line; do
+            line=${line#*\"}
+            keychains+=("${line%\"}")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${keychains[@]}"
+          identity=$(security find-identity -v -p codesigning "$keychain" \
             | awk '/Developer ID Application/ { print $2; exit }')
           if [[ -z "$identity" ]]; then
             echo "::error::no Developer ID Application identity in the .p12"; exit 1
           fi
           for dmg in dmg/*.dmg; do
-            codesign --force --timestamp --keychain "$KEYCHAIN" --sign "$identity" "$dmg"
+            codesign --force --timestamp --keychain "$keychain" --sign "$identity" "$dmg"
             codesign --verify --strict "$dmg"
           done
       - name: Notarize and staple
@@ -395,24 +383,26 @@ jobs:
           APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
           APPSTORE_API_ISSUER_ID: ${{ secrets.APPSTORE_API_ISSUER_ID }}
         run: |
-          key="$RUNNER_TEMP/AuthKey_$APPSTORE_API_KEY_ID.p8"
+          key="$RUNNER_TEMP/apple/AuthKey_$APPSTORE_API_KEY_ID.p8"
           printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$key"
+          auth=(--key "$key" --key-id "$APPSTORE_API_KEY_ID" --issuer "$APPSTORE_API_ISSUER_ID")
           for dmg in dmg/*.dmg; do
-            answer=$(xcrun notarytool submit "$dmg" --key "$key" --key-id "$APPSTORE_API_KEY_ID" \
-              --issuer "$APPSTORE_API_ISSUER_ID" --wait --timeout 30m --output-format json)
-            if [[ $(jq -r .status <<< "$answer") != Accepted ]]; then
+            # notarytool exits non-zero when it gives up waiting or fails to talk to Apple: its
+            # answer (with the submission's id, to look it up by hand) is shown either way.
+            answer=$(xcrun notarytool submit "$dmg" "${auth[@]}" --wait --timeout 30m \
+              --output-format json) || true
+            if [[ $(jq -r '.status // empty' <<< "$answer" 2> /dev/null) != Accepted ]]; then
               echo "::error::$dmg wasn't notarized: $answer"
-              xcrun notarytool log "$(jq -r .id <<< "$answer")" --key "$key" \
-                --key-id "$APPSTORE_API_KEY_ID" --issuer "$APPSTORE_API_ISSUER_ID" || true
+              id=$(jq -r '.id // empty' <<< "$answer" 2> /dev/null || true)
+              if [[ -n "$id" ]]; then xcrun notarytool log "$id" "${auth[@]}" || true; fi
               exit 1
             fi
             xcrun stapler staple "$dmg"
           done
-          rm "$key"
       - if: always()
         run: |
-          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2> /dev/null || true
-          rm -f "$RUNNER_TEMP"/developerid.p12 "$RUNNER_TEMP"/developerid-mac.p12 "$RUNNER_TEMP"/AuthKey_*.p8
+          security delete-keychain "$RUNNER_TEMP/apple/signing.keychain-db" 2> /dev/null || true
+          rm -rf "$RUNNER_TEMP/apple"
       # What a Mac does with a download: the disk image and the app inside both pass Gatekeeper,
       # notarized, with the ticket stapled (so it opens offline too).
       - name: Check them as Gatekeeper does
@@ -423,7 +413,8 @@ jobs:
             mount=$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | cut -f3)
             app="$mount/Homebase Filesync.app"
             codesign --verify --deep --strict "$app"
-            verdict=$(spctl --assess --type execute -vv "$app" 2>&1)
+            # Shown before it's judged, so a refusal says why.
+            verdict=$(spctl --assess --type execute -vv "$app" 2>&1) || true
             echo "$verdict"
             grep -q "Notarized Developer ID" <<< "$verdict"
             xcrun stapler validate "$app"
@@ -440,9 +431,16 @@ jobs:
   test-signed-msix:
     if: github.ref_type == 'tag'
     needs: sign
-    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - { arch: x64, os: windows-latest }
+          - { arch: arm64, os: windows-11-arm }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions: {}
+    env:
+      ARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -452,13 +450,15 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+          $sdk = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$sdk\signtool.exe" |
             Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool) { throw "no signtool.exe for $sdk" }
           foreach ($f in Get-ChildItem site/*.msix, site/*.exe) {
             & $signtool.FullName verify /pa /v $f.FullName
             if ($LASTEXITCODE -ne 0) { throw "$($f.Name) isn't validly signed" }
           }
-          Add-AppxPackage -Path (Get-ChildItem "site/*.x64.msix").FullName
+          Add-AppxPackage -Path (Get-ChildItem "site/*.$env:ARCH.msix").FullName
           $p = Get-AppxPackage HomebaseFilesync
           if (-not $p) { throw "not installed" }
           Write-Output "installed $($p.PackageFullName), publisher $($p.Publisher)"
@@ -605,7 +605,11 @@ jobs:
             cp "Homebase-Filesync-$VERSION-mac-$arch.dmg" "Homebase-Filesync-mac-$arch.dmg"
           done
           for arch in amd64 arm64; do
-            cp "homebase-filesync_${VERSION}_$arch.deb" "homebase-filesync_$arch.deb"
+            debs=(homebase-filesync_*_"$arch".deb)
+            if [[ ${#debs[@]} -ne 1 || ! -f "${debs[0]}" ]]; then
+              echo "::error::not one $arch .deb: ${debs[*]}"; exit 1
+            fi
+            cp "${debs[0]}" "homebase-filesync_$arch.deb"
           done
           test -f homebase-filesync.exe
       - run: cd assets && sha256sum * > SHA256SUMS

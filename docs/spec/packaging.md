@@ -68,7 +68,7 @@ MSIX's unvirtualized folders as the code does.
 
 ## Still to do
 
-- A first signed release, checked by hand: the Mac app and `.dmg` signed, notarized and
-  stapled, the MSIX and EXEs signed by Azure (RELEASING.md; the jobs exist, 2026-10-12).
+- Try `homebase-filesync.exe` (Conveyor's installer, the release notes' Windows download) on a
+  real PC: it is signed (v0.1.0-rc.6), but no runner has run it.
 - Confirm the Windows and Mac updates on real machines with signed releases.
 - An update repository for the `.rpm` (dnf), which needs a signing key of its own.
