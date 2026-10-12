@@ -317,7 +317,6 @@ jobs:
       contents: read
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      KEYCHAIN: ${{ runner.temp }}/signing.keychain-db
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -331,6 +330,7 @@ jobs:
           if [[ -z "$APPLE_SIGNING_KEY" ]]; then
             echo "::error::no APPLE_SIGNING_KEY in release-signing"; exit 1
           fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
           p12="$RUNNER_TEMP/developerid.p12"
           printf '%s' "$APPLE_SIGNING_KEY" | base64 --decode > "$p12"
           password=$(openssl rand -hex 24)
@@ -371,7 +371,7 @@ jobs:
           rm "$key"
       - if: always()
         run: |
-          security delete-keychain "$KEYCHAIN" 2> /dev/null || true
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2> /dev/null || true
           rm -f "$RUNNER_TEMP"/developerid.p12 "$RUNNER_TEMP"/AuthKey_*.p8
       # What a Mac does with a download: the disk image and the app inside both pass Gatekeeper,
       # notarized, with the ticket stapled (so it opens offline too).
