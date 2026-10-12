@@ -1388,3 +1388,57 @@ fn an_edit_keeps_a_deleted_version_it_never_had() -> R {
     assert_eq!(kept.len(), 1, "a's version stays in Recently deleted");
     Ok(())
 }
+
+/// A restore brings nodes back under their old ids: a confirmation of their earlier deletes
+/// must not let a later delete of them through unasked.
+#[test]
+fn a_restored_item_is_guarded_again() -> R {
+    let server = server();
+    let guard = |cfg: &mut hbsync_engine::EngineConfig| cfg.mass_delete_min = 2;
+    let mut a = Client::with_config(&server, "a", guard)?;
+    let mut b = Client::with_config(&server, "b", guard)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), "x")?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(b.root.join("d"))?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    b.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    b.sync()?;
+    let report = a.sync()?;
+    assert!(!report.held.is_empty(), "a holds b's delete: {report:?}");
+    a.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    a.sync()?;
+    assert!(!a.root.join("d").exists());
+
+    let d = a
+        .engine
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "d")
+        .ok_or("d")?
+        .node;
+    assert_eq!(a.engine.restore(&[d])?, 5);
+    a.sync()?;
+    b.sync()?;
+    assert!(b.root.join("d/f3.txt").exists());
+
+    fs::remove_dir_all(a.root.join("d"))?;
+    let report = a.sync()?;
+    assert!(
+        !report.held.is_empty(),
+        "a holds the second delete: {report:?}"
+    );
+    a.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "b holds it too: {report:?}");
+    assert!(b.root.join("d/f3.txt").exists());
+    Ok(())
+}

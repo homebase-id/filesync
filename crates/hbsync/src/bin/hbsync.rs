@@ -11,6 +11,8 @@ use hbsync_app::{
     Config, Control, Paths, State, Status, autostart, control as daemon, setup, words,
 };
 use hbsync_local::STATE_DIR;
+use hbsync_types::NodeId;
+use hbsync_types::activity::Deleted;
 
 type Res<T> = hbsync_app::control::Result<T>;
 
@@ -81,8 +83,11 @@ enum Command {
         #[arg(required = true)]
         items: Vec<String>,
     },
-    /// Deletes everything in Recently deleted for good.
+    /// Deletes items of Recently deleted for good (each with what was deleted with it), or
+    /// everything in it.
     EmptyDeleted {
+        /// Paths as `hbsync deleted` shows them, or node ids [default: everything].
+        items: Vec<String>,
         /// Don't ask.
         #[arg(long)]
         yes: bool,
@@ -222,21 +227,11 @@ fn run(command: Command) -> Res<ExitCode> {
             let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
                 return Ok(not_running());
             };
-            let mut nodes = Vec::new();
-            for item in &items {
-                // Newest first: a path deleted twice restores its latest.
-                let found = list.iter().find(|d| {
-                    d.path == item.trim_end_matches('/') || d.node.0.to_string() == *item
-                });
-                let Some(d) = found else {
-                    return Err(format!("{item} isn't in Recently deleted").into());
-                };
-                nodes.push(d.node);
-            }
+            let nodes = pick(&list, &items)?;
             control(&paths, Control::Restore { nodes })?;
             println!("Restoring; the next sync brings it back.");
         }
-        Command::EmptyDeleted { yes } => {
+        Command::EmptyDeleted { items, yes } => {
             let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
                 return Ok(not_running());
             };
@@ -244,11 +239,17 @@ fn run(command: Command) -> Res<ExitCode> {
                 println!("Recently deleted is empty.");
                 return Ok(ExitCode::SUCCESS);
             }
+            let nodes = if items.is_empty() {
+                None
+            } else {
+                Some(pick(&list, &items)?)
+            };
             if !yes {
-                print!(
-                    "Delete the {} items in Recently deleted for good? [y/N] ",
-                    list.len()
-                );
+                let what = match &nodes {
+                    None => format!("the {} items in Recently deleted", list.len()),
+                    Some(_) => items.join(", "),
+                };
+                print!("Delete {what} for good? [y/N] ");
                 std::io::stdout().flush()?;
                 let mut answer = String::new();
                 std::io::stdin().lock().read_line(&mut answer)?;
@@ -257,8 +258,8 @@ fn run(command: Command) -> Res<ExitCode> {
                     return Ok(ExitCode::SUCCESS);
                 }
             }
-            control(&paths, Control::EmptyDeleted { nodes: None })?;
-            println!("Emptying Recently deleted.");
+            control(&paths, Control::EmptyDeleted { nodes })?;
+            println!("Deleting for good.");
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
         Command::Start => {
@@ -330,6 +331,20 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Log => println!("{}", paths.logs.display()),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The items of Recently deleted that `items` name, by path or node id; a path deleted twice
+/// names its latest.
+fn pick(list: &[Deleted], items: &[String]) -> Res<Vec<NodeId>> {
+    items
+        .iter()
+        .map(|item| {
+            list.iter()
+                .find(|d| d.path == item.trim_end_matches('/') || d.node.0.to_string() == *item)
+                .map(|d| d.node)
+                .ok_or_else(|| format!("{item} isn't in Recently deleted").into())
+        })
+        .collect()
 }
 
 fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {

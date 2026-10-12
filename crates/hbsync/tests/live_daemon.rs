@@ -95,7 +95,11 @@ impl Computer {
         while !done(self)? {
             if Instant::now() > until {
                 let status = self.ok(&["status"]).unwrap_or_default();
-                return Err(format!("timed out waiting until {what}\n{status}").into());
+                return Err(format!(
+                    "timed out waiting until {what}\n{status}\nits log:\n{}",
+                    tail(&self.log())
+                )
+                .into());
             }
             std::thread::sleep(Duration::from_millis(250));
         }
@@ -113,6 +117,12 @@ impl Drop for Computer {
     fn drop(&mut self) {
         let _ = self.hbsync(&["stop"]);
     }
+}
+
+/// The last lines of a log.
+fn tail(log: &str) -> String {
+    let lines: Vec<&str> = log.lines().collect();
+    lines[lines.len().saturating_sub(40)..].join("\n")
 }
 
 fn text(out: &Output) -> String {
@@ -191,6 +201,26 @@ fn two_computers_sync_through_the_daemon() -> Res<()> {
         Ok(!a.path(&rel("many")).exists())
     })?;
 
+    // Recently deleted has the folder, and restoring it brings it back on both.
+    let many = rel("many");
+    a.wait("a lists many/ in Recently deleted", |a| {
+        Ok(a.ok(&["deleted", "-n", "500"])?
+            .contains(&format!(" {many}/,")))
+    })?;
+    let out = a.ok(&["restore", &many])?;
+    assert!(out.contains("Restoring"), "{out}");
+    for c in [&a, &b] {
+        let back = c.wait("many/ is back", |c| {
+            Ok(std::fs::read_dir(c.path(&many))
+                .map(|d| d.count() == 60)
+                .unwrap_or(false))
+        });
+        if let Err(e) = back {
+            return Err(format!("{e}\nits log:\n{}", c.log()).into());
+        }
+    }
+    assert_eq!(std::fs::read_to_string(b.path(&rel("many/f07.txt")))?, "7");
+
     // Clean up: the test's folder leaves the drive (all of a's synced files: confirmed too).
     a.wait("a settled", |a| a.settled())?;
     std::fs::remove_dir_all(a.path(&run))?;
@@ -199,12 +229,31 @@ fn two_computers_sync_through_the_daemon() -> Res<()> {
     })?;
     a.ok(&["confirm-deletes", "--yes"])?;
     // For b that is every file it syncs: held there too, as it should be.
-    b.wait("b holds losing everything", |b| {
+    let held = b.wait("b holds losing everything", |b| {
         Ok(b.status()?["held_deletes"].is_object())
-    })?;
+    });
+    if let Err(e) = held {
+        return Err(format!(
+            "{e}\na's log:\n{}\nb's log:\n{}",
+            tail(&a.log()),
+            tail(&b.log())
+        )
+        .into());
+    }
     assert!(b.path(&rel("hello.txt")).exists());
     b.ok(&["confirm-deletes", "--yes"])?;
     b.wait("b lost the test folder", |b| Ok(!b.path(&run).exists()))?;
+    // And off Recently deleted (the test's folder, with everything in it).
+    a.wait("a lists the test folder in Recently deleted", |a| {
+        Ok(a.ok(&["deleted", "-n", "500"])?
+            .contains(&format!(" {run}/,")))
+    })?;
+    a.ok(&["empty-deleted", "--yes", &run])?;
+    a.wait("the test folder left Recently deleted", |a| {
+        Ok(!a
+            .ok(&["deleted", "-n", "500"])?
+            .contains(&format!(" {run}")))
+    })?;
     a.ok(&["stop"])?;
     b.ok(&["stop"])?;
     Ok(())

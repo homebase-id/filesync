@@ -14,6 +14,7 @@ hbsync-homebase.workspace = true
 hbsync-local.workspace = true
 hbsync-platform.workspace = true
 hbsync-state.workspace = true
+hbsync-types.workspace = true
 serde_json.workspace = true
 tracing = "0.1.44"
 

@@ -131,6 +131,11 @@ impl RunnerConfig {
     }
 }
 
+/// A sync announced by the drive waits until its changes have stopped coming this long...
+const REMOTE_QUIET: Duration = Duration::from_millis(1000);
+/// ...but no longer than this after the first.
+const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
+
 /// The state DB key of the last purge of Recently deleted (Unix seconds).
 const PURGED_KEY: &str = "deleted.purged_at";
 
@@ -542,6 +547,10 @@ impl Runner {
         let mut confirmed = None;
         // Restores and empties of Recently deleted, run when the engine is open.
         let mut deleted_requests: Vec<Control> = Vec::new();
+        // Changes announced on the drive: synced once they stop coming (a burst of deletes is
+        // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
+        let mut remote_burst: Option<Instant> = None;
+        let mut remote_quiet = Instant::now();
         let db_path = state_db_path(&self.cfg.folder);
         let mut pause = self.cfg.paused;
         let mut started = false;
@@ -652,6 +661,9 @@ impl Runner {
                     }
                     Event::Changed => {
                         wanted = true;
+                        let now = Instant::now();
+                        remote_burst.get_or_insert(now);
+                        remote_quiet = now + REMOTE_QUIET;
                         continue;
                     }
                     Event::Lost(why) => {
@@ -699,6 +711,11 @@ impl Runner {
             if pause.is_some() || !wanted || now < not_before {
                 continue;
             }
+            if remote_burst.is_some_and(|start| now < remote_quiet && now < start + REMOTE_MAX_WAIT)
+            {
+                continue;
+            }
+            remote_burst = None;
             if !self.cfg.folder.join(STATE_DIR).is_dir() {
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.

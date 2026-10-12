@@ -500,7 +500,8 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
         "a rewrite restored it"
     );
     // Restore: the update back, here with new bytes (an edit that wins over the delete).
-    b.update(gone, &f, Some(b"edited"))?;
+    let edited = with(&f, NodeContent::file("f", 1_700_000_000_124, 6, false));
+    b.update(gone, &edited, Some(b"edited"))?;
     let back = b.remote.header(w.file_id)?;
     ensure!(
         back.removal().is_none() && back.state().is_some(),

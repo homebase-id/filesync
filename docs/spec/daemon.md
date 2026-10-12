@@ -83,7 +83,9 @@ a failure (service managers restart it then).
 ### The sync loop
 
 - Syncs when the folder changes (live watcher), when the identity announces a change on the
-  drive (notification socket), at least once a minute, and on request. After a failure it
+  drive (notification socket; once its announcements have stopped for 1 s, at most 10 s
+  after the first, so a burst of deletes from another device reaches the mass-delete guard
+  whole), at least once a minute, and on request. After a failure it
   waits 5 s, doubling to 5 min.
 - **Pause** stops a running sync between operations and before the next transfer (transfers
   in flight finish); nothing syncs until resume. The watcher keeps recording changes. A pause
