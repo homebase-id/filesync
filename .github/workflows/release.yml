@@ -548,8 +548,22 @@ jobs:
           if (-not $p) { throw "not installed" }
           Write-Output "installed $($p.PackageFullName), publisher $($p.Publisher)"
           Start-Process "shell:AppsFolder\$($p.PackageFamilyName)!HomebaseFilesync"
-          Start-Sleep -Seconds 15
-          if (-not (Get-Process homebase-filesync -ErrorAction SilentlyContinue)) { throw "the tray isn't running" }
+          # A first start can take a while (a new binary scanned on a slow runner): up to 90 s.
+          $waited = 0
+          while (-not (Get-Process homebase-filesync -ErrorAction SilentlyContinue) -and $waited -lt 90) {
+            Start-Sleep -Seconds 1
+            $waited++
+          }
+          if (-not (Get-Process homebase-filesync -ErrorAction SilentlyContinue)) {
+            # Why: its log, and Windows' crash reports.
+            Get-ChildItem "$env:LOCALAPPDATA\Homebase Filesync\logs" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Output "== $($_.Name)"; Get-Content $_.FullName -Tail 60 }
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; StartTime = (Get-Date).AddMinutes(-10) } -ErrorAction SilentlyContinue |
+              Where-Object { $_.Message -match 'homebase|hbsync' } |
+              Format-List TimeCreated, Id, ProviderName, Message | Out-String -Width 300 | Write-Output
+            throw "the tray isn't running"
+          }
+          Write-Output "the tray runs ($waited s)"
           # Its files go to the real LocalAppData (excluded from the package's virtualization).
           if (-not (Test-Path "$env:LOCALAPPDATA\Homebase Filesync\logs")) { throw "no log in LocalAppData" }
           Get-Process homebase-filesync, hbsyncd -ErrorAction SilentlyContinue | Stop-Process -Force
