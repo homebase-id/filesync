@@ -38,7 +38,7 @@ DevOps (their PR #227). In the `release-signing` environment:
 | What | For | Secrets (`secrets.*`) and variables (`vars.*`) |
 |---|---|---|
 | A Conveyor root key, made off GitHub (backup in the DevOps vault) | the update feeds (Sparkle, the apt repository, the `.appinstaller`) | `CONVEYOR_SIGNING_KEY` |
-| An Apple Developer ID Application certificate (.p12 with the G2 intermediate; "Developer ID Application: Vidence, LLC (Apps) (JNJ85M8JM6)", until 2031-09-17) | the Mac app (`sign`) and the `.dmg` files (`sign-dmg`) | `APPLE_SIGNING_KEY` (base64: decoded to `$RUNNER_TEMP`, `APPLE_P12_PATH`), `APPLE_SIGNING_KEY_PASS` |
+| An Apple Developer ID Application certificate (.p12 with the G2 intermediate, from which `sign` takes the certificate alone for Conveyor; "Developer ID Application: Vidence, LLC (Apps) (JNJ85M8JM6)", until 2031-09-17) | the Mac app (`sign`) and the `.dmg` files (`sign-dmg`) | `APPLE_SIGNING_KEY` (base64: decoded to `$RUNNER_TEMP`, `APPLE_P12_PATH`), `APPLE_SIGNING_KEY_PASS` |
 | An App Store Connect API key (lowest role that notarizes) | notarization | `APPLE_NOTARIZATION_KEY` (the .p8), `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID` |
 | An Azure Trusted Signing certificate profile | the MSIX and the EXEs | vars `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` (Conveyor's alias is `<account>/<profile>`); the token by OIDC in the job |
 
