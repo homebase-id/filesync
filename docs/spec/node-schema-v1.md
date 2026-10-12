@@ -14,13 +14,14 @@ reserved in odin-core.
 ## Drive
 - One Homebase drive per sync root, of the "Files" drive type.
 - The Filesync app's drive: slug `filesync`, type slug `filesync`, drive type GUID
-  `5da48122-e946-487a-8b9d-589642f3c91d` (`crates/hbsync-homebase/src/app.rs`). Clients find it
-  by slug (`GET /api/v2/apps/filesync/drives/filesync`), not by GUID. The GUIDs are
+  `5da48122-e946-487a-8b9d-589642f3c91d` (`crates/hbsync-homebase/src/app.rs`). The GUIDs are
   **[provisional]** until odin-core reserves a drive kind (foundations §5 item 5).
-- The drive alias `cfceb937-b868-496b-91cb-3402f18320f8` is fixed in the Filesync app's drive
-  request, so it's the same on every identity. A client that can't use the slug route (another
-  app's token: the route names the Filesync app) may address the drive by that alias. If it ever
-  changes, a line under [Changes](#changes) says so.
+- Every client, other apps' too, finds it by slug (`GET /api/v2/apps/filesync/drives/filesync`):
+  the route names the app that owns the drive, not the caller, and returns it to any app or owner
+  allowed to see it **[verified]** `V2AppDriveController.GetAppDrive`,
+  `DriveManager.GetDriveBySlugAsync`. The alias `cfceb937-b868-496b-91cb-3402f18320f8`, fixed in
+  the Filesync app's drive request, also works; if it ever changes, a line under
+  [Changes](#changes) says so.
 - The drive should have `requirePayloadHashes = true` (owner setting; apps can't set it
   **[verified]** `OwnerDriveManagementController.cs`).
 
@@ -113,8 +114,8 @@ write nodes this client syncs:
 - **Read:** ignore keys you don't use. Showing `ct` is optional.
 
 ## Changes
-- 2026-10-12: the drive alias may be used by clients that can't use the slug route; readers keep
-  a file without `mtime`.
+- 2026-10-12: other apps find the drive by slug too (the alias also works); readers keep a file
+  without `mtime`.
 - 2026-10-12: `ct`, the creation time (optional, files and folders).
 - 2026-10-11: every file's `sync_data` carries its hash; a file without one isn't a node.
 - 2026-10-10: every node encrypted.
