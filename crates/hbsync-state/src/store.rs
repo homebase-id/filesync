@@ -986,6 +986,20 @@ impl<'a> Store<'a> {
         Ok((nodes, last))
     }
 
+    /// Up to `limit` local rows whose tags aren't known, after the one with id `after` (start
+    /// at 0), and the id to continue after: a sweep that reads each row once.
+    pub fn untagged_local_page(&self, after: i64, limit: usize) -> Result<(Vec<LocalRow>, i64)> {
+        let raw = self.raw_local(
+            &format!(
+                "SELECT {LOCAL_COLS} {LOCAL_FROM} \
+                 WHERE l.tags IS NULL AND l.id > ?1 ORDER BY l.id LIMIT ?2"
+            ),
+            params![after, limit as i64],
+        )?;
+        let next = raw.last().map_or(after, |r| r.id);
+        Ok((self.with_paths(raw)?, next))
+    }
+
     /// Local rows of dirty nodes that have neither a base nor a mirror row: what adoption may
     /// match against remote nodes.
     pub fn unpaired_local(&self) -> Result<Vec<LocalRow>> {

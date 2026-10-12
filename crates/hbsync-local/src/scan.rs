@@ -616,27 +616,35 @@ fn row_from(
 }
 
 /// Reads the tags of every item whose tags aren't known yet (rows from before tags were
-/// synced): done once, after the upgrade. Items with tags are marked dirty. Returns how many.
+/// synced): done once, after the upgrade, a page at a time. Items with tags are marked dirty.
+/// Returns how many.
 pub fn read_unknown_tags(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+    const PAGE: usize = 2000;
     if !tags::CAN_TAG {
         return Ok(0);
     }
-    let rows = db.read(|s| s.local_subtree(&RelPath::root()))?;
-    let read: Vec<(NodeId, Tags)> = rows
-        .into_iter()
-        .filter(|r| r.tags.is_none())
-        .filter_map(|r| Some((r.node, tags::read(&r.path.to_native(root))?)))
-        .collect();
-    db.write(|s| {
-        for (node, tags) in &read {
-            s.set_local_tags(*node, tags)?;
-            if !tags.is_empty() {
-                s.mark_dirty(*node)?;
+    let (mut after, mut tagged) = (0, 0);
+    loop {
+        let (rows, next) = db.read(|s| s.untagged_local_page(after, PAGE))?;
+        let read: Vec<(NodeId, Tags)> = rows
+            .iter()
+            .filter_map(|r| Some((r.node, tags::read(&r.path.to_native(root))?)))
+            .collect();
+        db.write(|s| {
+            for (node, tags) in &read {
+                s.set_local_tags(*node, tags)?;
+                if !tags.is_empty() {
+                    s.mark_dirty(*node)?;
+                }
             }
+            Ok(())
+        })?;
+        tagged += read.iter().filter(|(_, t)| !t.is_empty()).count();
+        if rows.len() < PAGE {
+            return Ok(tagged);
         }
-        Ok(())
-    })?;
-    Ok(read.iter().filter(|(_, t)| !t.is_empty()).count())
+        after = next;
+    }
 }
 
 fn apply(db: &mut StateDb, mut plan: Plan, report: &mut ScanReport) -> Result<(), StateError> {
