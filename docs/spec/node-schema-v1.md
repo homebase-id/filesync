@@ -17,6 +17,10 @@ reserved in odin-core.
   `5da48122-e946-487a-8b9d-589642f3c91d` (`crates/hbsync-homebase/src/app.rs`). Clients find it
   by slug (`GET /api/v2/apps/filesync/drives/filesync`), not by GUID. The GUIDs are
   **[provisional]** until odin-core reserves a drive kind (foundations §5 item 5).
+- The drive alias `cfceb937-b868-496b-91cb-3402f18320f8` is fixed in the Filesync app's drive
+  request, so it's the same on every identity. A client that can't use the slug route (another
+  app's token: the route names the Filesync app) may address the drive by that alias. If it ever
+  changes, a line under [Changes](#changes) says so.
 - The drive should have `requirePayloadHashes = true` (owner setting; apps can't set it
   **[verified]** `OwnerDriveManagementController.cs`).
 
@@ -55,6 +59,9 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 | `x` | bool | no | executable bit; omitted when false |
 | `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime`. Readers round a fractional value and take anything else as none (and keep it) |
 
+- "Required" is for writers. A reader skips a file without `size` (an encrypted payload's stored
+  size is padded, `encryption.md`) but keeps one without `mtime`, as a file with no date (this
+  client reads it as 0).
 - Readers ignore unknown keys. Writers keep unknown keys they read (forward compatibility).
 - `ct` is kept the same way through every rewrite (new bytes, a rename, a move): editors that
   save by writing a new file and renaming it over the old one would otherwise reset it. A
@@ -106,6 +113,8 @@ write nodes this client syncs:
 - **Read:** ignore keys you don't use. Showing `ct` is optional.
 
 ## Changes
+- 2026-10-12: the drive alias may be used by clients that can't use the slug route; readers keep
+  a file without `mtime`.
 - 2026-10-12: `ct`, the creation time (optional, files and folders).
 - 2026-10-11: every file's `sync_data` carries its hash; a file without one isn't a node.
 - 2026-10-10: every node encrypted.
