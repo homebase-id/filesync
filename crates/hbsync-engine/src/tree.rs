@@ -235,6 +235,21 @@ pub fn numbered_conflict_name(name: &str, n: usize) -> String {
     with_tag(name, &format!(" (conflict {n})"))
 }
 
+/// The names a restored item tries, in order: its own, then the restored variants; a hundred
+/// at most.
+pub fn restored_names(name: &str) -> impl Iterator<Item = String> + '_ {
+    std::iter::once(name.to_owned()).chain((1..100).map(move |n| restored_name(name, n)))
+}
+
+/// `"report (restored).pdf"`, then `"report (restored 2).pdf"`: a restored item whose name
+/// was taken meanwhile.
+pub fn restored_name(name: &str, n: usize) -> String {
+    match n {
+        0 | 1 => with_tag(name, " (restored)"),
+        n => with_tag(name, &format!(" (restored {n})")),
+    }
+}
+
 /// `"report (conflict laptop 2026-10-08).pdf"`: the name of a conflict copy of an edit.
 pub fn conflict_copy_name(name: &str, device: &str, date: &str) -> String {
     // The device name is configured; keep it from crowding out the file's own name.

@@ -202,6 +202,16 @@ impl Server {
                     format!("<h1>Deletions</h1><p>{}</p>", escape(&said)),
                 )
             }
+            ("GET", "deleted") => self.html(&mut stream, self.deleted_page()),
+            ("POST", "deleted/restore") => {
+                let said = self.restore(&request.form);
+                self.html(&mut stream, self.deleted_said(&said))
+            }
+            ("POST", "deleted/empty") => self.html(&mut stream, self.empty_page(&request.form)),
+            ("POST", "deleted/empty/yes") => {
+                let said = self.empty(&request.form);
+                self.html(&mut stream, self.deleted_said(&said))
+            }
             _ => respond(&mut stream, 404, "text/plain", b"not here"),
         }
     }
@@ -416,6 +426,146 @@ impl Server {
         )
     }
 
+    /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
+    /// newest first.
+    fn deleted_page(&self) -> String {
+        let list = match control::deleted(&self.paths, usize::MAX) {
+            Ok(Some(list)) => list,
+            Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
+            Err(e) => {
+                return format!(
+                    "<h1>Recently deleted</h1><p class=error>{}</p>",
+                    escape(&e.to_string())
+                );
+            }
+        };
+        if list.is_empty() {
+            return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
+        }
+        let now = words::now();
+        // Shown: the items whose folder isn't in Recently deleted too; each with how many items
+        // below it its restore brings back (those deleted with it).
+        let by_node: HashMap<_, _> = list.iter().map(|d| (d.node, d)).collect();
+        let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
+        for d in &list {
+            let mut up = d.parent;
+            for _ in 0..256 {
+                let Some(folder) = by_node.get(&up) else {
+                    break;
+                };
+                if !by_node.contains_key(&folder.parent) {
+                    if folder.root == d.root {
+                        *along.entry(folder.node).or_default() += 1;
+                    }
+                    break;
+                }
+                up = folder.parent;
+            }
+        }
+        let rows: String = list
+            .iter()
+            .filter(|d| !by_node.contains_key(&d.parent))
+            .take(MAX_DELETED)
+            .map(|d| {
+                let along = match along.get(&d.node).copied().unwrap_or(0) {
+                    0 => String::new(),
+                    n => format!(" <span class=small>with {n} items in it</span>"),
+                };
+                format!(
+                    "<li><form method=post action=\"{url}\">\
+                     <input type=hidden name=node value=\"{node}\">{what}{along} \
+                     <button class=secondary>Restore</button></form></li>",
+                    url = self.pages.url("deleted/restore"),
+                    node = d.node.0,
+                    what = escape(&words::deleted(d, now)),
+                )
+            })
+            .collect();
+        format!(
+            "<h1>Recently deleted</h1>\
+             <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
+             A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>\
+             <form method=post action=\"{empty}\"><input type=hidden name=count value={count}>\
+             <input type=hidden name=until value={until}>\
+             <button class=secondary>Empty now…</button></form>",
+            days = self.keep_days(),
+            empty = self.pages.url("deleted/empty"),
+            count = list.len(),
+            // Newest first: what the user sees, nothing deleted after this look.
+            until = list[0].removed_at_ms,
+        )
+    }
+
+    fn empty_page(&self, form: &HashMap<String, String>) -> String {
+        let field = |name| escape(form.get(name).map_or("", String::as_str));
+        format!(
+            "<h1>Empty Recently deleted?</h1>\
+             <p>The {count} items in it are deleted for good, from your Homebase and every \
+             device. This can't be undone.</p>\
+             <form method=post action=\"{url}\"><input type=hidden name=until value=\"{until}\">\
+             <button>Delete them for good</button></form>\
+             <p class=small>Changed your mind? Leave this page: nothing is deleted.</p>",
+            count = field("count"),
+            until = field("until"),
+            url = self.pages.url("deleted/empty/yes"),
+        )
+    }
+
+    /// Restores the item the form names.
+    fn restore(&self, form: &HashMap<String, String>) -> String {
+        let Some(node) = form
+            .get("node")
+            .and_then(|n| n.parse().ok())
+            .map(hbsync_types::NodeId)
+        else {
+            return "Nothing was restored.".into();
+        };
+        self.ask_daemon(
+            Control::Restore { nodes: vec![node] },
+            "Restoring: it comes back with the next sync, on every device.",
+        )
+    }
+
+    /// Empties Recently deleted of what the page showed (deleted until then).
+    fn empty(&self, form: &HashMap<String, String>) -> String {
+        let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
+            return "Nothing was deleted.".into();
+        };
+        self.ask_daemon(
+            Control::EmptyDeletedUntil { at_ms },
+            "Emptying Recently deleted.",
+        )
+    }
+
+    /// Sends `control` to the daemon; `done` if it took it, else why not.
+    fn ask_daemon(&self, control: Control, done: &str) -> String {
+        match control::control(&self.paths, control) {
+            Ok(()) => {
+                (self.send)(Event::Wake);
+                done.into()
+            }
+            Err(e) => format!("That didn't work: {e}"),
+        }
+    }
+
+    fn deleted_said(&self, said: &str) -> String {
+        format!(
+            "<h1>Recently deleted</h1><p>{}</p><p><a href=\"{}\">Back to Recently deleted</a></p>",
+            escape(said),
+            self.pages.url("deleted"),
+        )
+    }
+
+    /// How long Recently deleted keeps items, from the config.
+    fn keep_days(&self) -> u32 {
+        Config::load(&self.paths.config_file())
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .keep_deleted_days
+            .0
+    }
+
     fn confirm_deletes(&self, form: &HashMap<String, String>) -> String {
         let Some(token) = form.get("token") else {
             return "Nothing was confirmed.".into();
@@ -510,6 +660,9 @@ fn frame(mark: &str, body: &str) -> String {
     )
 }
 
+/// At most this many items of Recently deleted on its page.
+const MAX_DELETED: usize = 1000;
+
 const STYLE: &str = "\
 :root{--purple:#603e90;--blue:#425985;--ink:#1d1d1b;--magenta:#eb00eb}\
 *{box-sizing:border-box}\
@@ -531,7 +684,10 @@ button{margin-top:24px;padding:10px 24px;font:inherit;font-weight:600;color:#fff
 border-radius:999px;background:var(--purple);cursor:pointer}\
 button.secondary{margin:0;color:var(--purple);background:#fff;border:1px solid var(--purple)}\
 .error{color:#a0006e;background:#fde7f8;padding:10px 12px;border-radius:8px}\
-.small{color:#666;font-size:14px}";
+.small{color:#666;font-size:14px}\
+ul.deleted{padding:0;list-style:none}\
+ul.deleted li{padding:8px 0;border-bottom:1px solid #eee;overflow-wrap:anywhere}\
+ul.deleted button{margin-left:8px;padding:4px 14px}";
 
 #[cfg(test)]
 mod tests {

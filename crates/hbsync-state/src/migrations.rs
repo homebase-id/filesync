@@ -124,6 +124,28 @@ const MIGRATIONS: &[&str] = &[
         bytes INTEGER NOT NULL
     );
     "#,
+    // 3: Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
+    // until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
+    r#"
+    CREATE TABLE removed (
+        node          BLOB PRIMARY KEY,
+        file_id       BLOB NOT NULL UNIQUE,
+        version_tag   BLOB NOT NULL,
+        parent        BLOB NOT NULL,
+        kind          INTEGER NOT NULL,
+        name          TEXT NOT NULL,
+        hash          BLOB,                           -- files only
+        size          INTEGER,
+        mtime_ms      INTEGER,
+        executable    INTEGER NOT NULL DEFAULT 0,
+        content_extra TEXT,                           -- as in remote, without rm
+        removed_at    INTEGER NOT NULL,               -- Unix ms
+        root          BLOB NOT NULL                   -- the node whose delete took this one
+    ) WITHOUT ROWID;
+    CREATE INDEX removed_at ON removed(removed_at);
+    CREATE INDEX removed_root ON removed(root);
+    CREATE INDEX removed_parent ON removed(parent);
+    "#,
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {

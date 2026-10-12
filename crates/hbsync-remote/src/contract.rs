@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
-use hbsync_types::schema::NodeContent;
+use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef};
 
 use crate::{NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
@@ -50,6 +50,14 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
     ("content_round_trips", content_round_trips),
     ("deletes", deletes),
     ("tombstone_in_the_feed", tombstone_in_the_feed),
+    (
+        "removal_keeps_the_bytes_and_restores",
+        removal_keeps_the_bytes_and_restores,
+    ),
+    (
+        "a_removed_node_deleted_for_good",
+        a_removed_node_deleted_for_good,
+    ),
     ("hash_mismatch_stores_nothing", hash_mismatch_stores_nothing),
     ("feed_pages_and_resumes", feed_pages_and_resumes),
     (
@@ -453,6 +461,67 @@ fn tombstone_in_the_feed(b: &Bench) -> Outcome {
         tomb.body == RemoteBody::Deleted && tomb.node().is_none(),
         "{tomb:?}"
     );
+    Ok(())
+}
+
+/// `meta` removed to Recently deleted (node schema: `archivalStatus` 2 and `rm`).
+pub fn removed(meta: &NodeMeta) -> NodeMeta {
+    let mut content = meta.content.clone();
+    content.set_removal(Some(Removal {
+        at_ms: 1_700_000_000_456,
+        root: meta.node,
+    }));
+    with(meta, content)
+}
+
+fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
+    let (f, w) = b.file("f", b"kept")?;
+    let cursor = b.cursor_now()?;
+    let gone = b.update(w, &removed(&f), None)?;
+    let header = b.remote.header(w.file_id)?;
+    ensure!(
+        header.removal() == removed(&f).content.removal() && header.state().is_none(),
+        "not removed: {header:?}"
+    );
+    ensure!(b.read(w.file_id, None)? == b"kept", "the bytes went");
+    // The node id stays taken: a create of it is a retry that landed.
+    ensure_err!(b.create(&f, Some(b"kept")), RemoteError::AlreadyExists);
+    let feed = b.changes_to(&cursor, &[w.file_id])?;
+    ensure!(
+        feed.last()
+            .is_some_and(|h| h.node() == Some(f.node) && h.removal().is_some()),
+        "the feed shows no removal: {feed:?}"
+    );
+    // A write that keeps the removal keeps it (every write sends the status).
+    let renamed = removed(&with(&f, NodeContent::file("f2", 1, 4, false)));
+    let gone = b.update(gone, &renamed, None)?;
+    ensure!(
+        b.remote.header(w.file_id)?.removal().is_some(),
+        "a rewrite restored it"
+    );
+    // Restore: the update back, here with new bytes (an edit that wins over the delete).
+    let edited = with(&f, NodeContent::file("f", 1_700_000_000_124, 6, false));
+    b.update(gone, &edited, Some(b"edited"))?;
+    let back = b.remote.header(w.file_id)?;
+    ensure!(
+        back.removal().is_none() && back.state().is_some(),
+        "not restored: {back:?}"
+    );
+    ensure!(b.read(w.file_id, None)? == b"edited", "the restore's bytes");
+    Ok(())
+}
+
+fn a_removed_node_deleted_for_good(b: &Bench) -> Outcome {
+    let (f, w) = b.file("f", b"1")?;
+    let gone = b.update(w, &removed(&f), None)?;
+    let cursor = b.cursor_now()?;
+    b.remote.delete(gone.file_id, gone.version)?;
+    let feed = b.changes_to(&cursor, &[w.file_id])?;
+    ensure!(
+        feed.last().is_some_and(RemoteHeader::is_deleted),
+        "no tombstone in the feed: {feed:?}"
+    );
+    ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
     Ok(())
 }
 

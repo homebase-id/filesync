@@ -47,8 +47,22 @@ pub struct Config {
     pub paused_until: Option<u64>,
     #[serde(default)]
     pub mass_delete: MassDelete,
+    /// Recently deleted keeps an item this long, then deletes it for good.
+    #[serde(default)]
+    pub keep_deleted_days: KeepDays,
     #[serde(default)]
     pub roots: Vec<Root>,
+}
+
+/// Days Recently deleted keeps an item (sync semantics §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeepDays(pub u32);
+
+impl Default for KeepDays {
+    fn default() -> Self {
+        KeepDays(30)
+    }
 }
 
 /// A local folder synced with an identity's Filesync drive.
@@ -151,6 +165,7 @@ mod tests {
                 min_files: 10,
                 fraction: 0.5,
             },
+            keep_deleted_days: KeepDays(7),
             roots: vec![Root {
                 identity: "anna.example.com".into(),
                 folder: "/home/anna/Homebase".into(),
@@ -172,6 +187,7 @@ mod tests {
         let config: Config = toml::from_str("").expect("ok");
         assert_eq!(config, Config::default());
         assert_eq!(config.mass_delete, MassDelete::default());
+        assert_eq!(config.keep_deleted_days, KeepDays(30));
         assert_eq!(config.root().expect("ok"), None);
         assert!(!config.device_name().is_empty());
     }

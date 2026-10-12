@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod adopt;
+pub mod deleted;
 pub mod engine;
 pub mod exec;
 pub mod feed;

@@ -70,6 +70,7 @@ pub enum Action {
     Resume,
     SyncNow,
     ReviewDeletions,
+    RecentlyDeleted,
     StartAtLogin,
     LogOut,
     OpenLogs,
@@ -195,6 +196,10 @@ pub fn menu(view: &View) -> Vec<Item> {
                 format!("Review {} deletions…", h.total()),
             ));
         }
+        items.push(Item::Action(
+            Action::RecentlyDeleted,
+            "Recently deleted…".into(),
+        ));
         if s.state == State::Denied {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
@@ -462,6 +467,13 @@ mod tests {
         let d = Daemon::Running(Box::new(status(State::Idle)));
         let v = view(&d, &recent);
         let m = menu(&v);
+        assert!(
+            m.contains(&Item::Action(
+                Action::RecentlyDeleted,
+                "Recently deleted…".into()
+            )),
+            "{m:?}"
+        );
         let Some(Item::Submenu(_, entries)) = m
             .iter()
             .find(|i| matches!(i, Item::Submenu(t, _) if t == "Recently synced"))

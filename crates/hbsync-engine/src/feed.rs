@@ -6,9 +6,11 @@
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
-use hbsync_state::{MirrorFile, MirrorRow, REMOTE_CURSOR_KEY, StateDb, StateError, Store};
+use hbsync_state::{
+    MirrorFile, MirrorRow, REMOTE_CURSOR_KEY, RemovedRow, StateDb, StateError, Store,
+};
 use hbsync_types::NodeKind;
-use hbsync_types::schema::NodeContent;
+use hbsync_types::schema::{NodeContent, REMOVAL_KEY};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -75,26 +77,43 @@ pub fn with_retries<T>(mut f: impl FnMut() -> Result<T, RemoteError>) -> Result<
     f()
 }
 
-/// Applies one header to the mirror. Returns `true` for a live node, `false` for a tombstone.
+/// Applies one header to the mirror. Returns `true` for a node in the tree, `false` for one
+/// that left it (deleted, or removed to Recently deleted).
 pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     if header.is_deleted() {
-        // A tombstone has no node id: find the node by file id.
-        if let Some(row) = s.delete_mirror(header.file_id)? {
-            s.mark_dirty(row.node)?;
-        } else if let Some(base) = s.base_by_remote_file(header.file_id)? {
-            s.mark_dirty(base.node)?;
-        }
+        s.delete_removed_file(header.file_id)?;
+        gone(s, header)?;
         return Ok(false);
     }
     // A live file without its payload changes nothing: it must never read as a delete.
-    if let Some(row) = mirror_row(header) {
-        s.put_mirror(&row)?;
-        s.mark_dirty(row.node)?;
+    let Some(row) = mirror_row(header) else {
+        return Ok(true);
+    };
+    if let Some(removal) = header.removal() {
+        // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
+        gone(s, header)?;
+        s.put_removed(&RemovedRow { row, removal })?;
+        return Ok(false);
     }
+    s.delete_removed(row.node)?;
+    s.put_mirror(&row)?;
+    s.mark_dirty(row.node)?;
     Ok(true)
 }
 
-/// The mirror row of a live header; `None` for tombstones and for files without a payload.
+/// The mirror without the file of `header`, its node marked to plan again. A tombstone has
+/// no node id: the node is found by file id.
+fn gone(s: &Store<'_>, header: &RemoteHeader) -> Result<(), StateError> {
+    if let Some(row) = s.delete_mirror(header.file_id)? {
+        s.mark_dirty(row.node)?;
+    } else if let Some(base) = s.base_by_remote_file(header.file_id)? {
+        s.mark_dirty(base.node)?;
+    }
+    Ok(())
+}
+
+/// The mirror row of a live header (removed or not); `None` for tombstones and for files
+/// without a payload.
 pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     let RemoteBody::Live {
         node,
@@ -130,10 +149,12 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
 }
 
 /// What a mirror row keeps of `content` beyond its columns: the keys sync carries without
-/// acting on them (unknown ones, and the creation time), read back by [`unknown_keys`].
+/// acting on them (unknown ones, and the creation time), read back by [`unknown_keys`]. Not
+/// the removal: the `removed` table has it in columns.
 pub(crate) fn content_extra(content: &NodeContent) -> Option<String> {
-    (!content.unknown.is_empty())
-        .then(|| serde_json::Value::Object(content.unknown.clone()).to_string())
+    let mut unknown = content.unknown.clone();
+    unknown.remove(REMOVAL_KEY);
+    (!unknown.is_empty()).then(|| serde_json::Value::Object(unknown).to_string())
 }
 
 /// The content keys of `row` this client carries without acting on them (stored by
@@ -188,5 +209,48 @@ mod tests {
             "the mirror keeps the file"
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_removal_leaves_the_tree_and_a_restore_returns() -> Result<(), StateError> {
+        use hbsync_types::schema::Removal;
+        let mut db = StateDb::open_in_memory()?;
+        let node = NodeId::new();
+        let live = |content: NodeContent| RemoteHeader {
+            file_id: RemoteFileId(Uuid::from_u128(1)),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            body: RemoteBody::Live {
+                node,
+                content,
+                payload: None,
+            },
+        };
+        let mut gone = NodeContent::folder("d");
+        let removal = Removal {
+            at_ms: 9,
+            root: node,
+        };
+        gone.set_removal(Some(removal));
+        assert!(db.write(|s| apply(s, &live(NodeContent::folder("d"))))?);
+        assert!(!db.write(|s| apply(s, &live(gone)))?);
+        db.read(|s| {
+            assert_eq!(s.get_mirror(node)?, None);
+            let removed = s
+                .removed_by_node(node)?
+                .map(|r| (r.removal, r.row.content_extra));
+            assert_eq!(
+                removed,
+                Some((removal, None)),
+                "kept, without rm in the extra keys"
+            );
+            Ok(())
+        })?;
+        assert!(db.write(|s| apply(s, &live(NodeContent::folder("d"))))?);
+        db.read(|s| {
+            assert!(s.get_mirror(node)?.is_some() && s.removed_by_node(node)?.is_none());
+            Ok(())
+        })
     }
 }

@@ -1535,6 +1535,7 @@ dependencies = [
  "hbsync-local",
  "hbsync-platform",
  "hbsync-state",
+ "hbsync-types",
  "serde_json",
  "signal-hook",
  "tempfile",

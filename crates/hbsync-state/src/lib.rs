@@ -20,7 +20,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, TransactionBehavior};
 
-pub use store::{BaseRow, DirtyCursor, LocalRow, MirrorFile, MirrorRow, Store};
+pub use store::{BaseRow, DirtyCursor, LocalRow, MirrorFile, MirrorRow, RemovedRow, Store};
 
 /// The state DB key of the remote change-feed cursor.
 pub const REMOTE_CURSOR_KEY: &str = "remote.cursor";

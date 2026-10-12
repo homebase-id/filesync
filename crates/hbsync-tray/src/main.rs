@@ -295,6 +295,7 @@ impl App {
             Action::Resume => self.send_control(Control::Resume),
             Action::SyncNow => self.send_control(Control::SyncNow),
             Action::ReviewDeletions => os::open(self.pages.url("deletions")),
+            Action::RecentlyDeleted => os::open(self.pages.url("deleted")),
             Action::StartAtLogin => {
                 let (on, send) = (!self.start_at_login, self.send.clone());
                 std::thread::spawn(move || {

@@ -66,7 +66,7 @@ Per node, after classifying both sides:
 | moved | moved | same destination → no-op. Different → **remote wins**; the local move is reverted |
 | edited | moved | apply both: the content goes up, the move comes down (and vice versa) |
 | deleted | edited / moved | **edit wins**: the node is restored locally from the remote |
-| edited / moved | deleted | **edit wins**: the node is re-created remotely with the same node id (a tombstone frees its UniqueId) |
+| edited / moved | deleted | **edit wins**: the removed node is restored remotely with the local version (an update at its file id: node schema "Recently deleted"). If Recently deleted holds a version of the file this device never had (edited elsewhere, then deleted), that one stays there and the local version goes up as a new node (detached in place) |
 | created | created | impossible for one node id; same-name clashes are handled by section 6 |
 
 A `moved` that only reverts a delete case is applied to the restored node.
@@ -90,7 +90,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 2. **No cycles.** If merged moves form a cycle, revert the local moves taking part in it (the
    remote side has already published its moves). Revert one at a time until no cycle remains.
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
-   - remote-deleted parent → re-created remotely with the same node id and its base name;
+   - remote-deleted parent → restored remotely (still removed) or re-created with the same
+     node id and its base name (deleted for good);
    - local-deleted parent → re-created locally.
    Any live child keeps its folder alive. Deleting clients delete bottom-up, so a completed
    delete never leaves live children, and a child that survives was added concurrently.
@@ -98,8 +99,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
 ## 7. Delete safety
 
+- **Deletes are removals.** A remote delete sets the node's `archivalStatus` to removed and
+  keeps its bytes for `keep_deleted_days` (30): "Recently deleted" lists them, and a restore
+  brings them back on every device (node schema, "Recently deleted"). The daily purge deletes
+  older ones for good. The reconciler sees a removed node as deleted.
 - **Local deletes go to trash.** Removing a local file or folder because of a remote delete
-  moves it into the sync root's internal trash (`.hbsync/trash/`), never `unlink`.
+  moves it into the sync root's internal trash (`.hbsync/trash/`), never `unlink` (one rename:
+  junk and anything that appears meanwhile go along). The daily purge empties entries older
+  than `keep_deleted_days`, of those made since it began.
 - **Fingerprint guard.** Before deleting, overwriting or moving a local item, the executor
   checks that the local fingerprint still equals the one the plan was made from. On mismatch
   the operation is skipped and the node is re-planned.
@@ -124,7 +131,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `trash`,
 `rename-for-conflict`, and for filters (section 10) `detach` (a new node id in place) and
 `forget` (trash plus dropping the base). Remote: `create-folder`, `upload` (create by node id),
-`update-content`, `move`, `delete`.
+`update-content`, `move`, `remove` (to Recently deleted; a create of a removed node restores
+it). Outside plans: `restore` and `purge` (Recently deleted).
 
 Ordering within one plan: folder creates top-down, then moves, then content, then deletes
 bottom-up. A move whose target name is occupied by a node that is itself moving away goes

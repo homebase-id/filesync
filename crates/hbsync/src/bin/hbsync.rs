@@ -11,6 +11,7 @@ use hbsync_app::{
     Config, Control, Paths, State, Status, autostart, control as daemon, setup, words,
 };
 use hbsync_local::STATE_DIR;
+use hbsync_types::NodeId;
 
 type Res<T> = hbsync_app::control::Result<T>;
 
@@ -68,6 +69,27 @@ enum Command {
         /// How many entries.
         #[arg(short = 'n', default_value_t = 20)]
         limit: usize,
+    },
+    /// Shows Recently deleted, newest first: what can still be restored.
+    Deleted {
+        /// How many items.
+        #[arg(short = 'n', default_value_t = 50)]
+        limit: usize,
+    },
+    /// Restores items of Recently deleted (a folder with what was deleted with it).
+    Restore {
+        /// Paths as `hbsync deleted` shows them, or node ids.
+        #[arg(required = true)]
+        items: Vec<String>,
+    },
+    /// Deletes items of Recently deleted for good (each with what was deleted with it), or
+    /// everything in it.
+    EmptyDeleted {
+        /// Paths as `hbsync deleted` shows them, or node ids [default: everything].
+        items: Vec<String>,
+        /// Don't ask.
+        #[arg(long)]
+        yes: bool,
     },
     /// Lets through the deletes held for confirmation.
     ConfirmDeletes {
@@ -190,6 +212,52 @@ fn run(command: Command) -> Res<ExitCode> {
             control(&paths, Control::Resume)?;
             println!("Resumed.");
         }
+        Command::Deleted { limit } => match daemon::deleted(&paths, limit)? {
+            Some(list) if list.is_empty() => println!("Recently deleted is empty."),
+            Some(list) => {
+                let now = words::now();
+                for d in &list {
+                    println!("{}  {}", d.node.0, words::deleted(d, now));
+                }
+            }
+            None => return Ok(not_running()),
+        },
+        Command::Restore { items } => {
+            let Some(nodes) = pick(&paths, &items)? else {
+                return Ok(not_running());
+            };
+            control(&paths, Control::Restore { nodes })?;
+            println!("Restoring; the next sync brings it back.");
+        }
+        Command::EmptyDeleted { items, yes } => {
+            let (control_, what) = if items.is_empty() {
+                // Everything listed now; nothing deleted after this look.
+                let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+                    return Ok(not_running());
+                };
+                let Some(newest) = list.first() else {
+                    println!("Recently deleted is empty.");
+                    return Ok(ExitCode::SUCCESS);
+                };
+                (
+                    Control::EmptyDeletedUntil {
+                        at_ms: newest.removed_at_ms,
+                    },
+                    format!("the {} items in Recently deleted", list.len()),
+                )
+            } else {
+                let Some(nodes) = pick(&paths, &items)? else {
+                    return Ok(not_running());
+                };
+                (Control::EmptyDeleted { nodes }, items.join(", "))
+            };
+            if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
+                println!("Nothing deleted.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            control(&paths, control_)?;
+            println!("Deleting for good.");
+        }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
         Command::Start => {
             if running(&paths)? {
@@ -262,6 +330,38 @@ fn run(command: Command) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The items of Recently deleted that `items` name, by node id or path (a path deleted twice
+/// names its latest); `None` when the daemon isn't running.
+fn pick(paths: &Paths, items: &[String]) -> Res<Option<Vec<NodeId>>> {
+    let ids: Option<Vec<NodeId>> = items.iter().map(|i| i.parse().ok().map(NodeId)).collect();
+    if let Some(ids) = ids {
+        return Ok(Some(ids)); // ids alone need no list
+    }
+    let Some(list) = daemon::deleted(paths, usize::MAX)? else {
+        return Ok(None);
+    };
+    items
+        .iter()
+        .map(|item| {
+            let id = item.parse().ok().map(NodeId);
+            list.iter()
+                .find(|d| Some(d.node) == id || d.path == item.trim_end_matches('/'))
+                .map(|d| d.node)
+                .ok_or_else(|| format!("{item} isn't in Recently deleted").into())
+        })
+        .collect::<Res<_>>()
+        .map(Some)
+}
+
+/// Asks `question` with [y/N]; whether the answer is yes.
+fn ask_yes(question: &str) -> Res<bool> {
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
+}
+
 fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
         return Err("the daemon isn't running (`hbsync start` starts it)".into());
@@ -279,15 +379,9 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
     if held.more_than_shown() {
         println!("  ...");
     }
-    if !yes {
-        print!("Go ahead? [y/N] ");
-        std::io::stdout().flush()?;
-        let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer)?;
-        if !matches!(answer.trim(), "y" | "Y" | "yes") {
-            println!("Nothing deleted; they stay held.");
-            return Ok(());
-        }
+    if !yes && !ask_yes("Go ahead?")? {
+        println!("Nothing deleted; they stay held.");
+        return Ok(());
     }
     // Exactly these: any delete since is held again, for another look.
     control(paths, Control::ConfirmDeletes { token: held.token })?;

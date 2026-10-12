@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hbsync_types::activity::Synced;
+use hbsync_types::activity::{Deleted, Synced};
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream};
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,7 @@ use crate::Paths;
 use crate::runner::{Control, Status};
 
 /// The protocol version this build speaks.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 
 /// How long either side waits for the other's line.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -55,6 +55,10 @@ pub enum Ask {
     Recent {
         limit: usize,
     },
+    /// The newest items of Recently deleted.
+    Deleted {
+        limit: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,6 +67,8 @@ pub enum Reply {
     Status(Box<Status>),
     /// Newest first.
     Recent(Vec<Synced>),
+    /// Newest first.
+    Deleted(Vec<Deleted>),
     Done,
     Refused(String),
 }
@@ -314,6 +320,7 @@ mod tests {
                     let _ = tx.lock().map(|tx| tx.send(c));
                     Reply::Done
                 }
+                Ask::Deleted { .. } => Reply::Deleted(Vec::new()),
                 Ask::Recent { limit } => Reply::Recent(
                     (0..limit as u64)
                         .map(|i| Synced {
@@ -354,28 +361,41 @@ mod tests {
         Ok(())
     }
 
-    /// The wire format docs/spec/daemon.md documents for protocol 2.
+    /// The wire format docs/spec/daemon.md documents for protocol 3.
     #[test]
     fn requests_look_as_documented() -> Result<(), serde_json::Error> {
         let json = |ask| serde_json::to_string(&Request::new(ask));
-        assert_eq!(json(Ask::Status)?, r#"{"protocol":2,"ask":"status"}"#);
+        assert_eq!(json(Ask::Status)?, r#"{"protocol":3,"ask":"status"}"#);
         assert_eq!(
             json(Ask::Control(Control::SyncNow))?,
-            r#"{"protocol":2,"ask":{"control":"sync_now"}}"#
+            r#"{"protocol":3,"ask":{"control":"sync_now"}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::ConfirmDeletes { token: "t".into() }))?,
-            r#"{"protocol":2,"ask":{"control":{"confirm_deletes":{"token":"t"}}}}"#
+            r#"{"protocol":3,"ask":{"control":{"confirm_deletes":{"token":"t"}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Pause {
                 until: Some(1_800_000_000)
             }))?,
-            r#"{"protocol":2,"ask":{"control":{"pause":{"until":1800000000}}}}"#
+            r#"{"protocol":3,"ask":{"control":{"pause":{"until":1800000000}}}}"#
         );
         assert_eq!(
             json(Ask::Recent { limit: 10 })?,
-            r#"{"protocol":2,"ask":{"recent":{"limit":10}}}"#
+            r#"{"protocol":3,"ask":{"recent":{"limit":10}}}"#
+        );
+        let node = hbsync_types::NodeId(hbsync_types::Uuid::from_u128(1));
+        assert_eq!(
+            json(Ask::Control(Control::Restore { nodes: vec![node] }))?,
+            r#"{"protocol":3,"ask":{"control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}"#
+        );
+        assert_eq!(
+            json(Ask::Control(Control::EmptyDeletedUntil { at_ms: 7 }))?,
+            r#"{"protocol":3,"ask":{"control":{"empty_deleted_until":{"at_ms":7}}}}"#
+        );
+        assert_eq!(
+            json(Ask::Deleted { limit: 100 })?,
+            r#"{"protocol":3,"ask":{"deleted":{"limit":100}}}"#
         );
         assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);
         Ok(())

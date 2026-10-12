@@ -27,9 +27,11 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{BaseRow, LocalRow, MirrorFile, MirrorRow, StateDb, StateError, Store};
+use hbsync_state::{
+    BaseRow, LocalRow, MirrorFile, MirrorRow, RemovedRow, StateDb, StateError, Store,
+};
 use hbsync_types::activity::Synced;
-use hbsync_types::schema::NodeContent;
+use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef};
 
 use crate::activity::{self, Counters};
@@ -610,7 +612,7 @@ impl<'a> Executor<'a> {
                 node,
                 file_id,
                 expected,
-            } => self.delete(*node, *file_id, *expected),
+            } => self.remove(*node, *file_id, *expected),
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
             Op::Forget { node, subtree } if subtree.is_empty() => self.forget_base(*node),
@@ -985,7 +987,25 @@ impl<'a> Executor<'a> {
         let mut content = NodeContent::file(name, file.mtime_ms, file.size, file.executable);
         let (hash, size) = (file.hash, file.size);
         let path = self.abs(&row.path);
+        let removed = match existing {
+            None => self.db.read(|s| s.removed_by_node(node))?,
+            Some(_) => None,
+        };
+        // Recently deleted holds a version this device never had (edited elsewhere, then
+        // deleted): restoring over it would lose it. It stays there, and this version goes up
+        // as a new item.
+        if let Some(r) = &removed
+            && r.row.file.map(|f| f.hash)
+                != base.as_ref().and_then(|b| b.state.content).map(|c| c.hash)
+        {
+            return Err(self.detach(node, NodeId::new()).unwrap_or_else(|o| o));
+        }
         let target = match existing {
+            // In Recently deleted: restored with these bytes (an edit wins over the delete).
+            None if let Some(r) = &removed => {
+                content.unknown = feed::unknown_keys(&r.row);
+                Some(r.row.remote_ref())
+            }
             // A new node: the file's own creation time, kept from then on.
             None => {
                 content.set_created_ms(ops::created_ms(&path));
@@ -1056,7 +1076,10 @@ impl<'a> Executor<'a> {
             ) => {
                 let row = mirror_from(node, parent, kind, &content, Some(hash), written);
                 // The bytes were just sent: equal even if the hashes use other algorithms.
-                self.finish(&[(node, true)], |s| s.put_mirror(&row))
+                self.finish(&[(node, true)], |s| {
+                    s.delete_removed(node)?;
+                    s.put_mirror(&row)
+                })
             }
             _ => Ok(Outcome::Skip("mismatched transfer result".into())),
         }
@@ -1269,11 +1292,7 @@ impl<'a> Executor<'a> {
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
     fn move_to_trash(&self, path: &RelPath, node: NodeId) -> io::Result<()> {
         let stamp = hbsync_types::unix_now();
-        let dir = self
-            .cfg
-            .state_dir()
-            .join("trash")
-            .join(format!("{stamp}-{}", node.0.simple()));
+        let dir = trash_dir(&self.cfg.state_dir()).join(format!("{stamp}-{}", node.0.simple()));
         fs::create_dir_all(&dir)?;
         let name = path.name().unwrap_or("item");
         ops::rename_noreplace(&self.abs(path), &dir.join(name))
@@ -1289,20 +1308,30 @@ impl<'a> Executor<'a> {
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
+        let removed = self.db.read(|s| s.removed_by_node(node))?;
         let mut content = NodeContent::folder(name);
-        content.set_created_ms(ops::created_ms(&self.abs(&row.path)));
+        match &removed {
+            // In Recently deleted: restored, keeping its keys (`ct`).
+            Some(r) => content.unknown = feed::unknown_keys(&r.row),
+            None => content.set_created_ms(ops::created_ms(&self.abs(&row.path))),
+        }
         let new = NodeMeta {
             node,
             parent,
             kind,
             content: content.clone(),
         };
-        let written = match self.remote.create(&new, None) {
+        let result = match &removed {
+            Some(r) => self.remote.update(r.row.file_id, r.row.version, &new, None),
+            None => self.remote.create(&new, None),
+        };
+        let written = match result {
             Ok(w) => w,
             Err(RemoteError::AlreadyExists) => return Ok(Outcome::Done),
             Err(e) => return Ok(remote_outcome(e)),
         };
         self.finish(&[(node, false)], |s| {
+            s.delete_removed(node)?;
             s.put_mirror(&mirror_from(node, parent, kind, &content, None, written))
         })
     }
@@ -1319,11 +1348,7 @@ impl<'a> Executor<'a> {
         let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
             return Ok(Outcome::Skip("gone remotely".into()));
         };
-        let mut content = match (&mirror.kind, &mirror.file) {
-            (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
-            _ => NodeContent::folder(name),
-        };
-        content.unknown = feed::unknown_keys(&mirror);
+        let mut content = content_of(&mirror, name);
         // A node from before creation times, or from a client that sends none.
         if content.created_ms().is_none()
             && let Some(row) = self.db.read(|s| s.local_by_node(node))?
@@ -1345,18 +1370,50 @@ impl<'a> Executor<'a> {
         self.finish(&[(node, false)], |s| s.put_mirror(&row))
     }
 
-    fn delete(
+    /// A delete: the node goes to Recently deleted (a metadata-only update setting its
+    /// removal), its bytes kept there until the purge.
+    fn remove(
         &mut self,
         node: NodeId,
         file_id: hbsync_types::RemoteFileId,
         expected: hbsync_types::VersionTag,
     ) -> Step {
-        match self.remote.delete(file_id, expected) {
-            Ok(()) | Err(RemoteError::NotFound) => {}
+        let Some(mirror) = self
+            .db
+            .read(|s| s.mirror_by_file(file_id))?
+            .filter(|m| m.node == node)
+        else {
+            return Ok(Outcome::Done); // already out of the tree
+        };
+        let removal = Removal {
+            at_ms: hbsync_types::unix_now_ms(),
+            root: self.db.read(|s| removal_root(s, node))?,
+        };
+        let mut content = content_of(&mirror, &mirror.name);
+        content.set_removal(Some(removal));
+        let meta = NodeMeta {
+            node,
+            parent: mirror.parent,
+            kind: mirror.kind,
+            content,
+        };
+        let removed = match self.remote.update(file_id, expected, &meta, None) {
+            Ok(written) => Some(RemovedRow {
+                row: MirrorRow {
+                    file_id: written.file_id,
+                    version: written.version,
+                    ..mirror
+                },
+                removal,
+            }),
+            Err(RemoteError::NotFound) => None, // deleted for good meanwhile
             Err(e) => return Ok(remote_outcome(e)),
-        }
+        };
         self.finish(&[(node, false)], |s| {
             s.delete_mirror(file_id)?;
+            if let Some(removed) = &removed {
+                s.put_removed(removed)?;
+            }
             s.mark_dirty(node)
         })
     }
@@ -1443,6 +1500,49 @@ fn mirror_from(
             executable: content.x,
         }),
         content_extra: feed::content_extra(content),
+    }
+}
+
+/// The content of a node as `row` has it, under `name`, with the keys sync carries along.
+pub(crate) fn content_of(row: &MirrorRow, name: &str) -> NodeContent {
+    let mut content = match (&row.kind, &row.file) {
+        (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
+        _ => NodeContent::folder(name),
+    };
+    content.unknown = feed::unknown_keys(row);
+    content
+}
+
+/// The node whose delete takes `node` along: its topmost synced ancestor that is gone here
+/// too (a folder deleted with everything in it), or `node` itself.
+fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
+    let mut root = node;
+    while let Some(base) = s.get_base(root)?
+        && !base.state.parent.is_root()
+        && s.local_by_node(base.state.parent)?.is_none()
+        && s.get_base(base.state.parent)?.is_some()
+    {
+        root = base.state.parent;
+    }
+    Ok(root)
+}
+
+/// The local trash: `<state dir>/trash/<Unix s>-<node>/<name>`.
+pub(crate) fn trash_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("trash")
+}
+
+/// When a trash entry (named by `move_to_trash`) went there, Unix s.
+pub(crate) fn trashed_at(entry: &str) -> Option<u64> {
+    entry.split_once('-')?.0.parse().ok()
+}
+
+/// Deletes a file or a folder with everything in it (a link, not what it points to).
+pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
     }
 }
 

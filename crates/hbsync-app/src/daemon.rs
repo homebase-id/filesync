@@ -164,6 +164,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
     };
     let mut cfg = RunnerConfig::new(&root.folder, &root.identity, &config.device_name());
     cfg.mass_delete = config.mass_delete;
+    cfg.keep_deleted_days = config.keep_deleted_days.0;
     cfg.credentials_warning = warning;
     let (handle, thread) = {
         // Under the lock: no pause gets lost between the two phases.
@@ -203,9 +204,16 @@ fn answer(
                 .unwrap_or_default(),
         );
     }
+    if let Ask::Deleted { limit } = request.ask {
+        return Reply::Deleted(
+            StateDb::open(&state_db_path(&root.folder))
+                .and_then(|mut db| hbsync_engine::deleted::list(&mut db, limit))
+                .unwrap_or_default(),
+        );
+    }
     let mut phase = lock(phase);
     match (request.ask, &mut *phase) {
-        (Ask::Recent { .. }, _) => unreachable!("answered above"),
+        (Ask::Recent { .. } | Ask::Deleted { .. }, _) => unreachable!("answered above"),
         (Ask::Status, Phase::Running(h)) => Reply::Status(Box::new(h.status())),
         (
             Ask::Status,

@@ -34,6 +34,7 @@ use hbsync_types::unix_now;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
+use crate::config::KeepDays;
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
@@ -99,6 +100,8 @@ pub struct RunnerConfig {
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
+    /// Recently deleted keeps an item this many days.
+    pub keep_deleted_days: u32,
     /// Start paused: until then, or until resumed (`Some(None)`).
     pub paused: Option<Until>,
     /// A sync at least this often.
@@ -118,12 +121,52 @@ impl RunnerConfig {
             identity: identity.to_owned(),
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
+            keep_deleted_days: KeepDays::default().0,
             paused: None,
             poll: Duration::from_secs(60),
             once: false,
             credentials_warning: None,
             tweak: None,
         }
+    }
+}
+
+/// A sync announced by the drive waits until its changes have stopped coming this long...
+const REMOTE_QUIET: Duration = Duration::from_millis(1000);
+/// ...but no longer than this after the first.
+const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
+
+/// The state DB key of the last purge of Recently deleted (Unix seconds).
+const PURGED_KEY: &str = "deleted.purged_at";
+
+/// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the local
+/// trash of the same age). A failure waits for the next sync.
+fn purge_when_due(engine: &mut Engine, keep_days: u32) {
+    const DAY: u64 = 24 * 60 * 60;
+    let now = unix_now();
+    let last = engine
+        .db()
+        .read(|s| s.get_kv(PURGED_KEY))
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok());
+    if last.is_some_and(|last| now < last + DAY) {
+        return;
+    }
+    let before_ms = now.saturating_sub(u64::from(keep_days) * DAY) as i64 * 1000;
+    match engine.purge(before_ms) {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!("{n} items deleted for good after {keep_days} days");
+            }
+            if let Err(e) = engine
+                .db()
+                .write(|s| s.set_kv(PURGED_KEY, &now.to_string()))
+            {
+                tracing::warn!("couldn't note the purge: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
     }
 }
 
@@ -145,6 +188,19 @@ pub enum Control {
     /// [`HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
     ConfirmDeletes {
         token: String,
+    },
+    /// Restore these items of Recently deleted, each with what was deleted with it.
+    Restore {
+        nodes: Vec<NodeId>,
+    },
+    /// Delete these items of Recently deleted for good, each with what was deleted with it.
+    EmptyDeleted {
+        nodes: Vec<NodeId>,
+    },
+    /// Delete everything in Recently deleted removed until then (Unix ms) for good: what the
+    /// user saw, nothing removed since.
+    EmptyDeletedUntil {
+        at_ms: i64,
     },
     /// Stop the runner (between operations).
     Stop,
@@ -494,6 +550,14 @@ impl Runner {
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
+        // Restores and empties of Recently deleted asked for, run when the engine is open.
+        let mut restore: Vec<NodeId> = Vec::new();
+        let mut empty: Vec<NodeId> = Vec::new();
+        let mut empty_until: Option<i64> = None;
+        // Changes announced on the drive: synced once they stop coming (a burst of deletes is
+        // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
+        // (the first announcement, quiet from then on)
+        let mut announced: Option<(Instant, Instant)> = None;
         let db_path = state_db_path(&self.cfg.folder);
         let mut pause = self.cfg.paused;
         let mut started = false;
@@ -575,6 +639,21 @@ impl Runner {
                         wanted = true;
                         not_before = Instant::now();
                     }
+                    Ok(Control::Restore { nodes }) => {
+                        restore.extend(nodes);
+                        wanted = true;
+                        not_before = Instant::now();
+                    }
+                    Ok(Control::EmptyDeleted { nodes }) => {
+                        empty.extend(nodes);
+                        wanted = true;
+                        not_before = Instant::now();
+                    }
+                    Ok(Control::EmptyDeletedUntil { at_ms }) => {
+                        empty_until = Some(empty_until.map_or(at_ms, |t| t.max(at_ms)));
+                        wanted = true;
+                        not_before = Instant::now();
+                    }
                     Ok(Control::Stop) | Err(TryRecvError::Disconnected) => {
                         tracing::info!("stopped");
                         return Ok(());
@@ -599,6 +678,9 @@ impl Runner {
                     }
                     Event::Changed => {
                         wanted = true;
+                        let now = Instant::now();
+                        let first = announced.map_or(now, |(first, _)| first);
+                        announced = Some((first, now + REMOTE_QUIET));
                         continue;
                     }
                     Event::Lost(why) => {
@@ -646,6 +728,11 @@ impl Runner {
             if pause.is_some() || !wanted || now < not_before {
                 continue;
             }
+            if announced.is_some_and(|(first, quiet)| now < quiet && now < first + REMOTE_MAX_WAIT)
+            {
+                continue;
+            }
+            announced = None;
             if !self.cfg.folder.join(STATE_DIR).is_dir() {
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
@@ -686,6 +773,26 @@ impl Runner {
             if let Some(seen) = confirmed.take() {
                 p.engine.confirm_deletes(seen);
             }
+            if !restore.is_empty() {
+                match p.engine.restore(&std::mem::take(&mut restore)) {
+                    Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
+                    Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
+                }
+            }
+            let nodes = std::mem::take(&mut empty);
+            let emptied = [
+                empty_until
+                    .take()
+                    .map(|at| p.engine.empty_deleted_until(at)),
+                (!nodes.is_empty()).then(|| p.engine.empty_deleted(&nodes)),
+            ];
+            for result in emptied.into_iter().flatten() {
+                match result {
+                    Ok(n) => tracing::info!("{n} items deleted for good"),
+                    Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
+                }
+            }
+            purge_when_due(&mut p.engine, self.cfg.keep_deleted_days);
 
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.

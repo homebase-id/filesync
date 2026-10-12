@@ -25,7 +25,7 @@ use std::sync::Arc;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile};
-use hbsync_engine::tree::{Tree, numbered_names};
+use hbsync_engine::tree::{Tree, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::name::check_remote_name;
@@ -63,6 +63,15 @@ pub enum Action {
     },
     /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
     ToggleIgnore,
+    /// The user restores one item of Recently deleted, on the server at once: back in its
+    /// folder, or at the top if that is gone, under a free name. (The engine's restore also
+    /// brings back what was deleted with it and the folders above: each such step is one of
+    /// these.)
+    Restore {
+        node: usize,
+    },
+    /// The purge: everything in Recently deleted is deleted for good.
+    Purge,
 }
 
 /// The junk name [`Action::CreateJunk`] uses.
@@ -112,6 +121,8 @@ struct ServerNode {
 #[derive(Debug, Default)]
 struct Server {
     live: BTreeMap<NodeId, ServerNode>,
+    /// Recently deleted: out of the tree, with their bytes, until restored or purged.
+    removed: BTreeMap<NodeId, ServerNode>,
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     ever: BTreeSet<NodeId>,
@@ -285,6 +296,12 @@ impl Sim {
             t.child_named(parent, name, except).is_none()
         };
         match action {
+            Action::Restore { node } => self.restore(node),
+            Action::Purge => {
+                for (_, n) in std::mem::take(&mut self.server.removed) {
+                    self.supersede(n.state.content);
+                }
+            }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];
                 client.filter = Arc::new(if client.filter.rule_count() == 0 {
@@ -344,14 +361,50 @@ impl Sim {
                 }
                 let node = all[node % all.len()];
                 for n in local.subtree(node) {
+                    // What the server has goes to Recently deleted, and must be found there.
                     let content = self.clients[c].local.get(n).and_then(|s| s.content);
-                    self.supersede(content);
+                    let on_server = self
+                        .server
+                        .live
+                        .get(&n)
+                        .is_some_and(|s| s.state.content == content);
+                    if !on_server {
+                        self.supersede(content);
+                    }
                 }
                 for n in self.clients[c].local.subtree(node) {
                     self.clients[c].local.remove(n);
                 }
             }
         }
+    }
+
+    fn restore(&mut self, pick: usize) {
+        let Some(node) = self
+            .server
+            .removed
+            .keys()
+            .nth(pick % self.server.removed.len().max(1))
+            .copied()
+        else {
+            return;
+        };
+        let Some(mut n) = self.server.removed.remove(&node) else {
+            return;
+        };
+        if !n.state.parent.is_root() && !self.server.live.contains_key(&n.state.parent) {
+            n.state.parent = NodeId::ROOT;
+        }
+        let tree = self.server.tree();
+        let Some(name) = restored_names(&n.state.name)
+            .find(|name| tree.child_named(n.state.parent, name, None).is_none())
+        else {
+            self.server.removed.insert(node, n); // no free name: it stays deleted
+            return;
+        };
+        n.state.name = name;
+        n.remote.version = VersionTag(self.server.uuid());
+        self.server.live.insert(node, n);
     }
 
     fn supersede(&mut self, content: Option<FileContent>) {
@@ -667,6 +720,26 @@ impl Sim {
                 if self.server.live.contains_key(&node) {
                     return Done; // 4105: an earlier attempt landed
                 }
+                // In Recently deleted: restored at its file id (an edit wins over the delete),
+                // unless it holds a version this client never had: that one stays, and this
+                // version becomes a new item (as the executor detaches it).
+                let file_id = self.server.removed.get(&node).map(|n| n.remote.file_id);
+                if let Some(r) = self.server.removed.get(&node)
+                    && kind == NodeKind::File
+                    && r.state.content.map(|c| c.hash)
+                        != self.clients[c]
+                            .base
+                            .get(node)
+                            .and_then(|b| b.content)
+                            .map(|c| c.hash)
+                {
+                    let client = &self.clients[c];
+                    if !client.local.contains(node) || !unchanged(client, node) {
+                        return Skip;
+                    }
+                    let new_node = NodeId::new();
+                    return self.execute(c, &Op::LocalDetach { node, new_node });
+                }
                 let client = &self.clients[c];
                 // The local node must still be there, as planned (the executor reads it).
                 let Some(local) = client.local.get(node) else {
@@ -686,9 +759,10 @@ impl Sim {
                     content,
                 };
                 let remote = RemoteRef {
-                    file_id: RemoteFileId(self.server.uuid()),
+                    file_id: file_id.unwrap_or_else(|| RemoteFileId(self.server.uuid())),
                     version: VersionTag(self.server.uuid()),
                 };
+                self.server.removed.remove(&node);
                 self.server.ever.insert(node);
                 self.clients[c].planned_remote.insert(node, state.clone());
                 self.server.live.insert(node, ServerNode { state, remote });
@@ -725,10 +799,12 @@ impl Sim {
             }
             Op::RemoteDelete { node, expected, .. } => match self.server.live.get(&node) {
                 Some(server) if server.remote.version != expected => Skip, // changed meanwhile
-                // Deleted now, or already: a delete of a tombstone succeeds, as on the fake and
-                // Homebase.
+                // Removed to Recently deleted now, or already gone: done either way.
                 _ => {
-                    self.server.live.remove(&node);
+                    if let Some(mut n) = self.server.live.remove(&node) {
+                        n.remote.version = VersionTag(self.server.uuid());
+                        self.server.removed.insert(node, n);
+                    }
                     self.clients[c].planned_remote.remove(node);
                     Done
                 }
@@ -1062,6 +1138,12 @@ impl Sim {
             .iter()
             .filter_map(|(_, s)| s.content.and_then(|c| self.blobs.get(&c.hash).copied()))
             .collect();
+        // Recently deleted keeps what was deleted, until the purge.
+        present.extend(self.server.removed.values().filter_map(|n| {
+            n.state
+                .content
+                .and_then(|c| self.blobs.get(&c.hash).copied())
+        }));
         // Filtered items are kept on their client only.
         present.extend(kept_here);
         let lost: Vec<u64> = self

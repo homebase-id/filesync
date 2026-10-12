@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{NodeId, NodeKind};
+
 /// One thing synced, or several of one kind in one folder taken together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Synced {
@@ -37,7 +39,7 @@ pub enum SyncedKind {
     MovedLocally,
     /// Deleted here; deleted from Homebase.
     DeletedRemotely,
-    /// Deleted on another device; moved to this computer's trash.
+    /// Deleted on another device; deleted here too (kept in Recently deleted).
     TrashedLocally,
 }
 
@@ -64,4 +66,23 @@ pub struct Progress {
     pub files_total: u64,
     pub bytes_done: u64,
     pub bytes_total: u64,
+}
+
+/// One item in Recently deleted (node schema): out of the tree, restorable until the purge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deleted {
+    pub node: NodeId,
+    /// The folder it was in.
+    pub parent: NodeId,
+    /// Where it was, `/`-separated, for people.
+    pub path: String,
+    pub kind: NodeKind,
+    /// Files only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// Unix ms.
+    pub removed_at_ms: i64,
+    /// The node whose delete took it along (itself, or a folder it was in): restoring that
+    /// one restores this one.
+    pub root: NodeId,
 }
