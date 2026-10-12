@@ -32,6 +32,7 @@ with one identity is never synced with another.
 ```toml
 device_name = "Anna's laptop"   # optional; the computer's name otherwise
 paused = false                  # hbsync pause / resume
+keep_deleted_days = 30          # Recently deleted: removed items are deleted for good after this
 
 [mass_delete]                   # sync semantics, the mass-delete guard
 min_files = 50
@@ -110,6 +111,12 @@ a failure (service managers restart it then).
   more than 10 of one kind in one folder in one sync become one entry for the folder. The
   newest 500 are kept in the folder's state DB (table `synced`), so the list survives a restart.
 
+- **Recently deleted:** the folder's removed nodes (node schema, "Recently deleted"), kept in
+  its state DB (table `removed`), listed newest first with their path. Restore and Empty go
+  through the runner. Once a day (the time is kept in the state DB) the runner deletes for
+  good what was removed more than `keep_deleted_days` ago, and empties `.hbsync/trash` of the
+  same age.
+
 ### States
 
 `starting` (catching up), `syncing`, `idle`, `paused`, `offline` (can't reach the identity),
@@ -119,19 +126,22 @@ a failure (service managers restart it then).
 ## Control socket
 
 One request line, one reply line (JSON), then the connection closes. Requests carry the protocol
-version (now 2); a daemon refuses another one with the reason (after an update: restart it).
+version (now 3); a daemon refuses another one with the reason (after an update: restart it).
 
 ```json
-{"protocol":2,"ask":"status"}
-{"protocol":2,"ask":{"control":"sync_now"}}            // resume, stop
-{"protocol":2,"ask":{"control":{"pause":{"until":1800000000}}}}   // "until":null: until resumed
-{"protocol":2,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
-{"protocol":2,"ask":{"recent":{"limit":10}}}
+{"protocol":3,"ask":"status"}
+{"protocol":3,"ask":{"control":"sync_now"}}            // resume, stop
+{"protocol":3,"ask":{"control":{"pause":{"until":1800000000}}}}   // "until":null: until resumed
+{"protocol":3,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
+{"protocol":3,"ask":{"control":{"restore":{"nodes":["<node id>"]}}}}
+{"protocol":3,"ask":{"control":{"empty_deleted":{"nodes":null}}}}   // null: all of them
+{"protocol":3,"ask":{"recent":{"limit":10}}}
+{"protocol":3,"ask":{"deleted":{"limit":100}}}
 ```
 
 Replies: `{"status":{...}}` (with the daemon's `version`, `progress`, `paused_until`, and the
 counts `notes_added` and `synced_added` that tell a client what is new),
-`{"recent":[...]}` (newest first), `"done"`, `{"refused":"why"}`.
+`{"recent":[...]}` and `{"deleted":[...]}` (newest first), `"done"`, `{"refused":"why"}`.
 
 Only the user can connect:
 
@@ -158,10 +168,11 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   refused login).
 - **Menu:** version, identity, a status line (with progress while syncing), Open Homebase
   folder, Recently synced (the last 10; clicking one shows it in the file manager), Problems
-  (the status notes), Review N deletions…, Log in again… (refused), Pause syncing (1 h, 8 h,
+  (the status notes), Review N deletions…, Recently deleted…, Log in again… (refused), Pause syncing (1 h, 8 h,
   24 h, until resumed) or Resume, Sync now, Start at login, Open logs, Log out, Quit.
 - **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the
-  OS's picker, merging a folder with files only when ticked) and reviewing held deletes are
+  OS's picker, merging a folder with files only when ticked), reviewing held deletes and
+  Recently deleted (each item's path, size and date, Restore, Empty now) are
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a
@@ -225,6 +236,9 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync autostart [on\|off]` | |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files and `.hbsync` stay, so setting it up again resumes |
+| `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |
+| `hbsync restore <path or node id>…` | restores removed items (a folder with what was deleted with it) |
+| `hbsync empty-deleted [--yes]` | deletes everything in Recently deleted for good, after asking |
 | `hbsync log` | the log folder (a daily file, a week kept) |
 
 ## Not yet

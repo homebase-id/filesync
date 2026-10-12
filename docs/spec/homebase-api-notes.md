@@ -77,7 +77,14 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 | Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206. With odin-core PR #1921 (merged 2026-10-11) **[verified]**: offsets are 64-bit, reads stream, an end past the payload is cut short there, a start at or past it → 416. Before it: an end past the payload → 416, offsets `int` (#1893), every read buffered whole in server memory (#1892) |
 | Notify | `wss://{id}/api/v2/notify/ws-token` | see below |
 
-The client only soft-deletes: the tombstone is how the other clients learn of a delete
+`appData.archivalStatus` (an int Homebase gives no meaning) is how the client removes a node
+to Recently deleted (node schema): **[verified]** an update copies it from the request
+(`StandardFileUpdateWriter.cs:69`) and sets it to `0` when the request leaves it out (`int` in
+`UploadAppFileMetaData.cs:21`); headers return it (`AppFileMetaData.cs:32`); query-batch filters
+on it only when `archivalStatus` lists values (`QueryBatch.cs:130`), so the feed returns removed
+nodes. odin-js mail uses `1` archived and `2` trash, chat `2` deleted and `3` archived.
+
+The client only soft-deletes (a removed node, once its days in Recently deleted are over): the tombstone is how the other clients learn of a delete
 through the feed. A hard delete (`.../hard-delete`) leaves no trace in the feed and is never
 used **[verified]** (`DriveStorageServiceBase.cs`, tried on frodo). Only the Filesync app
 writes to its drive (other apps need a grant), so no hard deletes come from elsewhere either:

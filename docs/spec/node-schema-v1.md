@@ -38,6 +38,7 @@ reserved in odin-core.
 | `appData.uniqueId` | node id | node id |
 | `appData.groupId` | parent node id | parent node id |
 | `appData.content` | JSON, see below | JSON, see below |
+| `appData.archivalStatus` | `0` live, `2` removed | `0` live, `2` removed |
 | `appData.tags` | none | none |
 | `isEncrypted` | `true` (`encryption.md`) | `true` (`encryption.md`) |
 | payloads | none | exactly one, key `sync_data` |
@@ -58,6 +59,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 | `mtime` | int | files | local modification time, Unix ms |
 | `size` | int | files | plaintext size in bytes |
 | `x` | bool | no | executable bit; omitted when false |
+| `rm` | object | removed nodes | `{"at": <Unix ms>, "root": "<node id>"}`: when the node was removed, and the topmost node of what was deleted with it (the node itself for a single delete, the folder for a folder's). Present exactly while `archivalStatus` is `2` |
 | `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime`. Readers round a fractional value and take anything else as none (and keep it) |
 
 - "Required" is for writers. A reader skips a file without `size` (an encrypted payload's stored
@@ -92,11 +94,29 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 ## Identity and tombstones
 - `uniqueId` is the node id. Creates are idempotent: a retry that gets `ExistingFileWithUniqueId`
   (4105) means the create already landed **[verified]** `FileSystemStreamWriterBase.cs:269-283`.
+- Tombstones come only from deleting a removed node for good (above).
 - A tombstone keeps `fileId`, `groupId`, `fileType` and nulls `uniqueId`, `content` and payloads
   **[verified]** `DriveStorageServiceBase.cs:1923-1965`. Clients therefore map
   `fileId → node id` themselves.
 - Tombstoned UniqueIds are free again (the duplicate check skips tombstones **[verified]**), so
   a deleted node can be re-created under the same node id; it gets a new `fileId`.
+
+## Recently deleted
+- A delete removes: one metadata-only update that sets `archivalStatus` to `2` and adds `rm`,
+  keeping the payload, `groupId` and name. A removed node is out of the folder tree for every
+  client, and restorable.
+- Restore is the update back: `archivalStatus` `0`, no `rm` (and new bytes, when an edit
+  restores it). Restoring a folder restores the removed nodes whose `rm.root` is that folder; a
+  node whose parent is removed brings the parent back first. A name a live sibling took
+  meanwhile gets ` (restored)`.
+- After 30 days (the client's `keep_deleted_days`) any client deletes a removed node for good,
+  files before their folders: that leaves the tombstone below.
+- Homebase gives `archivalStatus` no meaning: each app picks its values. `2` is odin-js mail's
+  trash and the `Removed` of odin-js's and chat-kmp's types. It is replaced, like the whole
+  header, on every update: a write that leaves it out sets it to `0` **[verified]**
+  `StandardFileUpdateWriter.cs:69`, `UploadAppFileMetaData.cs:21`. Every write sends it.
+- A node with `archivalStatus` `2` and no `rm` (another app removed it) counts as removed at the
+  header's `updated` time, as its own root.
 
 ## Rename and move
 One metadata-only update of `groupId` and/or `content.name`, guarded by `versionTag`.
@@ -111,9 +131,14 @@ write nodes this client syncs:
   is about and write the rest back as read, unknown keys included. Never rebuild content from a
   model that knows only some keys: that drops `ct` and `x` (and any later key) for every device.
   If a client can't keep unknown keys, it doesn't update nodes.
-- **Read:** ignore keys you don't use. Showing `ct` is optional.
+- **Read:** ignore keys you don't use. Showing `ct` is optional. Leave nodes with
+  `archivalStatus` `2` out of the folder tree (a "Recently deleted" view may show them).
+- **Delete:** remove (set `archivalStatus` `2` and `rm`), never delete a live node outright.
+  Don't write to a removed node except to restore it.
+- **Every write** sends `archivalStatus`: Homebase sets a missing one to `0`.
 
 ## Changes
+- 2026-10-12: Recently deleted: a delete sets `archivalStatus` `2` and `rm`, kept 30 days.
 - 2026-10-12: other apps find the drive by slug too (the alias also works); readers keep a file
   without `mtime`.
 - 2026-10-12: `ct`, the creation time (optional, files and folders).
