@@ -1,6 +1,7 @@
 //! How the client words things for people, shared by the CLI and the tray.
 
-use hbsync_types::activity::{Progress, Synced, SyncedKind};
+use hbsync_types::NodeKind;
+use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
 use crate::runner::HeldDeletes;
 
@@ -55,7 +56,7 @@ pub fn bytes(n: u64) -> String {
     }
 }
 
-/// What happened, as a verb phrase: "uploaded", "moved to the trash (deleted elsewhere)".
+/// What happened, as a verb phrase: "uploaded", "deleted on another device".
 pub fn verb(kind: SyncedKind) -> &'static str {
     match kind {
         SyncedKind::Uploaded => "uploaded",
@@ -63,7 +64,7 @@ pub fn verb(kind: SyncedKind) -> &'static str {
         SyncedKind::MovedRemotely => "moved",
         SyncedKind::MovedLocally => "moved on another device",
         SyncedKind::DeletedRemotely => "deleted",
-        SyncedKind::TrashedLocally => "deleted on another device (in the trash here)",
+        SyncedKind::TrashedLocally => "deleted on another device",
     }
 }
 
@@ -95,18 +96,30 @@ pub fn synced(s: &Synced) -> String {
 
 /// What held deletes would do, a sentence for each side: "100 items deleted on this computer
 /// will be deleted from your Homebase and your other devices."
+/// An item of Recently deleted, for a list: "photos/a.jpg (2.1 MB), deleted 3 h ago".
+pub fn deleted(d: &Deleted, now: u64) -> String {
+    let size = d
+        .size
+        .map(|n| format!(" ({})", bytes(n)))
+        .unwrap_or_default();
+    let folder = if d.kind == NodeKind::Folder { "/" } else { "" };
+    let at = u64::try_from(d.removed_at_ms / 1000).unwrap_or(0);
+    format!("{}{folder}{size}, deleted {}", d.path, when(at, now))
+}
+
 pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
     let mut out = Vec::new();
     if held.here > 0 {
         out.push(format!(
-            "{} items deleted on this computer will be deleted from your Homebase and your \
-             other devices.",
+            "{} items deleted on this computer will be deleted from your other devices (and kept \
+             in Recently deleted).",
             held.here
         ));
     }
     if held.remotely > 0 {
         out.push(format!(
-            "{} items deleted on another device will be moved to this computer's trash.",
+            "{} items deleted on another device will be deleted here too (and kept in Recently \
+             deleted).",
             held.remotely
         ));
     }

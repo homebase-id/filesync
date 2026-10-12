@@ -732,14 +732,12 @@ impl Sim {
                             .and_then(|b| b.content)
                             .map(|c| c.hash)
                 {
-                    let client = &mut self.clients[c];
+                    let client = &self.clients[c];
                     if !client.local.contains(node) || !unchanged(client, node) {
                         return Skip;
                     }
-                    rekey_client(client, node, NodeId::new());
-                    client.base.remove(node);
-                    client.extra.remove(&node);
-                    return Done;
+                    let new_node = NodeId::new();
+                    return self.execute(c, &Op::LocalDetach { node, new_node });
                 }
                 let client = &self.clients[c];
                 // The local node must still be there, as planned (the executor reads it).

@@ -4,7 +4,7 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use hbsync_types::activity::Synced;
+use hbsync_types::activity::{Deleted, Synced};
 
 use crate::ipc::{self, Ask, IpcError, Reply, Request};
 use crate::{Config, Control, CredentialStore, Paths, Root, Status, autostart};
@@ -32,6 +32,16 @@ pub fn status(paths: &Paths) -> Result<Option<Status>> {
 pub fn recent(paths: &Paths, limit: usize) -> Result<Option<Vec<Synced>>> {
     match ask(paths, Ask::Recent { limit }) {
         Ok(Reply::Recent(list)) => Ok(Some(list)),
+        Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
+        Err(IpcError::NotRunning) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Recently deleted, newest first; `None` when the daemon isn't running.
+pub fn deleted(paths: &Paths, limit: usize) -> Result<Option<Vec<Deleted>>> {
+    match ask(paths, Ask::Deleted { limit }) {
+        Ok(Reply::Deleted(list)) => Ok(Some(list)),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
         Err(IpcError::NotRunning) => Ok(None),
         Err(e) => Err(e.into()),

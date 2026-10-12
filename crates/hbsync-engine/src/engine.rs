@@ -8,11 +8,11 @@ use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs,
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
-use hbsync_types::activity::Synced;
+use hbsync_types::activity::{Deleted, Synced};
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
-use crate::deleted::{self, Deleted};
+use crate::deleted;
 use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};

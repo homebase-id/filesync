@@ -69,6 +69,24 @@ enum Command {
         #[arg(short = 'n', default_value_t = 20)]
         limit: usize,
     },
+    /// Shows Recently deleted, newest first: what can still be restored.
+    Deleted {
+        /// How many items.
+        #[arg(short = 'n', default_value_t = 50)]
+        limit: usize,
+    },
+    /// Restores items of Recently deleted (a folder with what was deleted with it).
+    Restore {
+        /// Paths as `hbsync deleted` shows them, or node ids.
+        #[arg(required = true)]
+        items: Vec<String>,
+    },
+    /// Deletes everything in Recently deleted for good.
+    EmptyDeleted {
+        /// Don't ask.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Lets through the deletes held for confirmation.
     ConfirmDeletes {
         /// Don't ask.
@@ -189,6 +207,58 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Resume => {
             control(&paths, Control::Resume)?;
             println!("Resumed.");
+        }
+        Command::Deleted { limit } => match daemon::deleted(&paths, limit)? {
+            Some(list) if list.is_empty() => println!("Recently deleted is empty."),
+            Some(list) => {
+                let now = words::now();
+                for d in &list {
+                    println!("{}  {}", d.node.0, words::deleted(d, now));
+                }
+            }
+            None => return Ok(not_running()),
+        },
+        Command::Restore { items } => {
+            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+                return Ok(not_running());
+            };
+            let mut nodes = Vec::new();
+            for item in &items {
+                // Newest first: a path deleted twice restores its latest.
+                let found = list.iter().find(|d| {
+                    d.path == item.trim_end_matches('/') || d.node.0.to_string() == *item
+                });
+                let Some(d) = found else {
+                    return Err(format!("{item} isn't in Recently deleted").into());
+                };
+                nodes.push(d.node);
+            }
+            control(&paths, Control::Restore { nodes })?;
+            println!("Restoring; the next sync brings it back.");
+        }
+        Command::EmptyDeleted { yes } => {
+            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+                return Ok(not_running());
+            };
+            if list.is_empty() {
+                println!("Recently deleted is empty.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            if !yes {
+                print!(
+                    "Delete the {} items in Recently deleted for good? [y/N] ",
+                    list.len()
+                );
+                std::io::stdout().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().lock().read_line(&mut answer)?;
+                if !matches!(answer.trim(), "y" | "Y" | "yes") {
+                    println!("Nothing deleted.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            control(&paths, Control::EmptyDeleted { nodes: None })?;
+            println!("Emptying Recently deleted.");
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
         Command::Start => {

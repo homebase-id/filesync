@@ -8,26 +8,12 @@ use std::path::Path;
 use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store};
+use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::engine::EngineError;
 use crate::exec::{content_of, remove_all};
 use crate::tree::restored_name;
-
-/// One item in Recently deleted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Deleted {
-    pub node: NodeId,
-    /// Where it was, for people.
-    pub path: String,
-    pub kind: NodeKind,
-    /// Files only.
-    pub size: Option<u64>,
-    /// Unix ms.
-    pub removed_at_ms: i64,
-    /// The node whose delete took it along (itself, or a folder it was in).
-    pub root: NodeId,
-}
 
 /// Recently deleted, newest first.
 pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> {

@@ -202,6 +202,16 @@ impl Server {
                     format!("<h1>Deletions</h1><p>{}</p>", escape(&said)),
                 )
             }
+            ("GET", "deleted") => self.html(&mut stream, self.deleted_page()),
+            ("POST", "deleted/restore") => {
+                let said = self.deleted_request(&request.form, true);
+                self.html(&mut stream, self.deleted_said(&said))
+            }
+            ("POST", "deleted/empty") => self.html(&mut stream, self.empty_page()),
+            ("POST", "deleted/empty/yes") => {
+                let said = self.deleted_request(&request.form, false);
+                self.html(&mut stream, self.deleted_said(&said))
+            }
             _ => respond(&mut stream, 404, "text/plain", b"not here"),
         }
     }
@@ -416,6 +426,115 @@ impl Server {
         )
     }
 
+    /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
+    /// newest first.
+    fn deleted_page(&self) -> String {
+        let list = match control::deleted(&self.paths, MAX_DELETED) {
+            Ok(Some(list)) => list,
+            Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
+            Err(e) => {
+                return format!(
+                    "<h1>Recently deleted</h1><p class=error>{}</p>",
+                    escape(&e.to_string())
+                );
+            }
+        };
+        if list.is_empty() {
+            return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
+        }
+        let now = words::now();
+        let rows: String = list
+            .iter()
+            .filter(|d| d.root == d.node)
+            .map(|d| {
+                let along = list
+                    .iter()
+                    .filter(|o| o.root == d.node && o.node != d.node)
+                    .count();
+                let along = match along {
+                    0 => String::new(),
+                    n => format!(" <span class=small>with {n} items in it</span>"),
+                };
+                format!(
+                    "<li><form method=post action=\"{url}\">\
+                     <input type=hidden name=node value=\"{node}\">{what}{along} \
+                     <button class=secondary>Restore</button></form></li>",
+                    url = self.pages.url("deleted/restore"),
+                    node = d.node.0,
+                    what = escape(&words::deleted(d, now)),
+                )
+            })
+            .collect();
+        format!(
+            "<h1>Recently deleted</h1>\
+             <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
+             A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>\
+             <form method=post action=\"{empty}\"><button class=secondary>Empty now…</button></form>",
+            days = self.keep_days(),
+            empty = self.pages.url("deleted/empty"),
+        )
+    }
+
+    fn empty_page(&self) -> String {
+        let count = control::deleted(&self.paths, MAX_DELETED)
+            .ok()
+            .flatten()
+            .map_or(0, |l| l.len());
+        format!(
+            "<h1>Empty Recently deleted?</h1>\
+             <p>The {count} items in it are deleted for good, from your Homebase and every \
+             device. This can't be undone.</p>\
+             <form method=post action=\"{url}\"><button>Delete them for good</button></form>\
+             <p class=small>Changed your mind? Leave this page: nothing is deleted.</p>",
+            url = self.pages.url("deleted/empty/yes"),
+        )
+    }
+
+    /// Restores the item the form names, or empties Recently deleted.
+    fn deleted_request(&self, form: &HashMap<String, String>, restore: bool) -> String {
+        let control = if restore {
+            let Some(node) = form
+                .get("node")
+                .and_then(|n| n.parse().ok())
+                .map(hbsync_types::NodeId)
+            else {
+                return "Nothing was restored.".into();
+            };
+            Control::Restore { nodes: vec![node] }
+        } else {
+            Control::EmptyDeleted { nodes: None }
+        };
+        match control::control(&self.paths, control) {
+            Ok(()) => {
+                (self.send)(Event::Wake);
+                if restore {
+                    "Restoring: it comes back with the next sync, on every device.".into()
+                } else {
+                    "Emptying Recently deleted.".into()
+                }
+            }
+            Err(e) => format!("That didn't work: {e}"),
+        }
+    }
+
+    fn deleted_said(&self, said: &str) -> String {
+        format!(
+            "<h1>Recently deleted</h1><p>{}</p><p><a href=\"{}\">Back to Recently deleted</a></p>",
+            escape(said),
+            self.pages.url("deleted"),
+        )
+    }
+
+    /// How long Recently deleted keeps items, from the config.
+    fn keep_days(&self) -> u32 {
+        Config::load(&self.paths.config)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .keep_deleted_days
+            .0
+    }
+
     fn confirm_deletes(&self, form: &HashMap<String, String>) -> String {
         let Some(token) = form.get("token") else {
             return "Nothing was confirmed.".into();
@@ -510,6 +629,9 @@ fn frame(mark: &str, body: &str) -> String {
     )
 }
 
+/// At most this many items of Recently deleted on its page.
+const MAX_DELETED: usize = 1000;
+
 const STYLE: &str = "\
 :root{--purple:#603e90;--blue:#425985;--ink:#1d1d1b;--magenta:#eb00eb}\
 *{box-sizing:border-box}\
@@ -531,7 +653,10 @@ button{margin-top:24px;padding:10px 24px;font:inherit;font-weight:600;color:#fff
 border-radius:999px;background:var(--purple);cursor:pointer}\
 button.secondary{margin:0;color:var(--purple);background:#fff;border:1px solid var(--purple)}\
 .error{color:#a0006e;background:#fde7f8;padding:10px 12px;border-radius:8px}\
-.small{color:#666;font-size:14px}";
+.small{color:#666;font-size:14px}\
+ul.deleted{padding:0;list-style:none}\
+ul.deleted li{padding:8px 0;border-bottom:1px solid #eee;overflow-wrap:anywhere}\
+ul.deleted button{margin-left:8px;padding:4px 14px}";
 
 #[cfg(test)]
 mod tests {

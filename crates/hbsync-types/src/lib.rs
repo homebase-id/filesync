@@ -18,7 +18,10 @@ pub fn unix_now() -> u64 {
 
 /// A node's identity: a client-generated UUID, stable across rename and move. Stored remotely
 /// as the Homebase `UniqueId`.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
 pub struct NodeId(pub Uuid);
 
 impl NodeId {
@@ -90,7 +93,8 @@ fn short(id: Uuid) -> String {
     id.simple().to_string()[24..].to_owned()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NodeKind {
     File,
     Folder,

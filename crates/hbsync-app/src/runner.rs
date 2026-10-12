@@ -34,6 +34,7 @@ use hbsync_types::unix_now;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
+use crate::config::KeepDays;
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
@@ -99,6 +100,8 @@ pub struct RunnerConfig {
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
+    /// Recently deleted keeps an item this many days.
+    pub keep_deleted_days: u32,
     /// Start paused: until then, or until resumed (`Some(None)`).
     pub paused: Option<Until>,
     /// A sync at least this often.
@@ -118,12 +121,47 @@ impl RunnerConfig {
             identity: identity.to_owned(),
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
+            keep_deleted_days: KeepDays::default().0,
             paused: None,
             poll: Duration::from_secs(60),
             once: false,
             credentials_warning: None,
             tweak: None,
         }
+    }
+}
+
+/// The state DB key of the last purge of Recently deleted (Unix seconds).
+const PURGED_KEY: &str = "deleted.purged_at";
+
+/// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the local
+/// trash of the same age). A failure waits for the next sync.
+fn purge_when_due(engine: &mut Engine, keep_days: u32) {
+    const DAY: u64 = 24 * 60 * 60;
+    let now = unix_now();
+    let last = engine
+        .db()
+        .read(|s| s.get_kv(PURGED_KEY))
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok());
+    if last.is_some_and(|last| now < last + DAY) {
+        return;
+    }
+    let before_ms = now.saturating_sub(u64::from(keep_days) * DAY) as i64 * 1000;
+    match engine.purge(before_ms) {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!("{n} items deleted for good after {keep_days} days");
+            }
+            if let Err(e) = engine
+                .db()
+                .write(|s| s.set_kv(PURGED_KEY, &now.to_string()))
+            {
+                tracing::warn!("couldn't note the purge: {e}");
+            }
+        }
+        Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
     }
 }
 
@@ -145,6 +183,14 @@ pub enum Control {
     /// [`HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
     ConfirmDeletes {
         token: String,
+    },
+    /// Restore these items of Recently deleted, each with what was deleted with it.
+    Restore {
+        nodes: Vec<NodeId>,
+    },
+    /// Delete these items of Recently deleted for good; all of them with `None`.
+    EmptyDeleted {
+        nodes: Option<Vec<NodeId>>,
     },
     /// Stop the runner (between operations).
     Stop,
@@ -494,6 +540,8 @@ impl Runner {
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
+        // Restores and empties of Recently deleted, run when the engine is open.
+        let mut deleted_requests: Vec<Control> = Vec::new();
         let db_path = state_db_path(&self.cfg.folder);
         let mut pause = self.cfg.paused;
         let mut started = false;
@@ -572,6 +620,11 @@ impl Runner {
                         }
                         tracing::info!("{} held deletes confirmed", self.held.len());
                         confirmed = Some(self.held.clone());
+                        wanted = true;
+                        not_before = Instant::now();
+                    }
+                    Ok(c @ (Control::Restore { .. } | Control::EmptyDeleted { .. })) => {
+                        deleted_requests.push(c);
                         wanted = true;
                         not_before = Instant::now();
                     }
@@ -686,6 +739,23 @@ impl Runner {
             if let Some(seen) = confirmed.take() {
                 p.engine.confirm_deletes(seen);
             }
+            for request in std::mem::take(&mut deleted_requests) {
+                let done = match request {
+                    Control::Restore { nodes } => p.engine.restore(&nodes).map(|n| {
+                        tracing::info!("{n} items restored from Recently deleted");
+                    }),
+                    Control::EmptyDeleted { nodes } => {
+                        p.engine.empty_deleted(nodes.as_deref()).map(|n| {
+                            tracing::info!("{n} items deleted for good");
+                        })
+                    }
+                    _ => Ok(()),
+                };
+                if let Err(e) = done {
+                    tracing::warn!("Recently deleted: {e}");
+                }
+            }
+            purge_when_due(&mut p.engine, self.cfg.keep_deleted_days);
 
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.
