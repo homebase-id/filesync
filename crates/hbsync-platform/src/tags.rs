@@ -5,7 +5,7 @@
 //! `user.xdg.tags` (comma-separated names, what KDE uses), without colours. Windows has none.
 //! What an OS can't hold is left to the drive (sync-semantics §11): [`Tags::fill`].
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
@@ -46,7 +46,12 @@ impl Tags {
         for t in tags {
             if !t.name.is_empty() {
                 let colour = if t.colour <= 7 { t.colour } else { 0 };
-                by_name.entry(crate::nfc(&t.name)).or_insert(colour);
+                let name = if crate::name::is_nfc(&t.name) {
+                    t.name
+                } else {
+                    crate::nfc(&t.name)
+                };
+                by_name.entry(name).or_insert(colour);
             }
         }
         Tags(
@@ -129,24 +134,16 @@ impl Tags {
         let Some(read) = read else {
             return reference.clone();
         };
-        let mut seen: HashSet<&str> = HashSet::new();
-        let mut out: Vec<Tag> = Vec::new();
-        for r in reference.iter() {
-            match express(r, os) {
-                None => out.push(r.clone()),
-                Some(e) if read.get(&e.name) == Some(&e) => {
-                    seen.insert(r.name.as_str());
-                    out.push(r.clone());
-                }
-                Some(_) => {}
-            }
-        }
-        out.extend(
-            read.iter()
-                .filter(|t| !seen.contains(t.name.as_str()))
-                .cloned(),
-        );
-        Tags::new(out)
+        // The reference's tags first: of two with one name, `new` keeps the first.
+        let kept = reference
+            .iter()
+            .filter(|r| express(r, os).is_none_or(|e| read.get(&e.name) == Some(&e)));
+        Tags::new(kept.chain(read.iter()).cloned())
+    }
+
+    /// The tags `os` can hold, as it holds them ([`express`]).
+    pub fn held_by(&self, os: Os) -> Tags {
+        Tags(self.0.iter().filter_map(|t| express(t, os)).collect())
     }
 }
 
@@ -189,8 +186,9 @@ pub fn decode_finder(bytes: &[u8]) -> Option<Tags> {
 /// Finder's attribute for `tags`, of those it can hold.
 pub fn encode_finder(tags: &Tags) -> Vec<u8> {
     let items = tags
-        .iter()
-        .filter_map(|t| express(t, Os::MacOs))
+        .held_by(Os::MacOs)
+        .0
+        .into_iter()
         .map(|t| {
             plist::Value::String(if t.colour == 0 {
                 t.name
@@ -212,9 +210,9 @@ pub fn decode_xdg(bytes: &[u8]) -> Tags {
 
 /// The Linux attribute for `tags`, of those it can hold.
 pub fn encode_xdg(tags: &Tags) -> Vec<u8> {
-    tags.iter()
-        .filter_map(|t| express(t, Os::Linux))
-        .map(|t| t.name)
+    tags.held_by(Os::Linux)
+        .iter()
+        .map(|t| t.name.as_str())
         .collect::<Vec<_>>()
         .join(",")
         .into_bytes()
@@ -254,8 +252,7 @@ pub fn write(path: &Path, tags: &Tags) -> io::Result<Option<Tags>> {
         let (attr, value) = (FINDER_ATTR, encode_finder(tags));
         #[cfg(target_os = "linux")]
         let (attr, value) = (XDG_ATTR, encode_xdg(tags));
-        let held = tags.iter().any(|t| express(t, Os::current()).is_some());
-        let done = if held {
+        let done = if !tags.held_by(Os::current()).is_empty() {
             xattr::set(path, attr, &value)
         } else {
             xattr::remove(path, attr)

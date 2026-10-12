@@ -512,13 +512,7 @@ impl Sim {
             local_view.remove(n);
         }
         // What the client can't hold of the tags is the drive's, as the engine's view has it.
-        let ids: Vec<NodeId> = local_view.ids().collect();
-        for n in ids {
-            if let Some(mut state) = local_view.get(n).cloned() {
-                state.tags = held_tags(client, remote.get(n), n, &state.tags);
-                local_view.insert(n, state);
-            }
-        }
+        see_held_tags(client, &mut local_view, &remote);
         let mut input = Input {
             base: client.base.clone(),
             local: local_view,
@@ -755,7 +749,7 @@ impl Sim {
                 if !client.local.exists(parent) || !park_occupant(client, parent, &name, None) {
                     return Retry;
                 }
-                let tags = on_disk(client.os, &tags);
+                let tags = tags.held_by(client.os);
                 client.local.insert(
                     node,
                     NodeState {
@@ -773,7 +767,7 @@ impl Sim {
                 if !unchanged(client, node) {
                     return Skip;
                 }
-                let tags = on_disk(client.os, &tags);
+                let tags = tags.held_by(client.os);
                 client.local.insert(node, NodeState { tags, ..state });
                 Done
             }
@@ -802,7 +796,7 @@ impl Sim {
                 {
                     return Retry;
                 }
-                let tags = on_disk(client.os, &tags);
+                let tags = tags.held_by(client.os);
                 client.local.insert(
                     node,
                     NodeState {
@@ -1248,13 +1242,7 @@ impl Sim {
         let (_, state) = tree
             .iter()
             .find(|(id, _)| tree.path(*id).is_some_and(|p| p.join("/") == path))?;
-        Some(
-            state
-                .tags
-                .iter()
-                .map(|t| format!("{}:{}", t.name, t.colour))
-                .collect(),
-        )
+        Some(tag_names(&state.tags))
     }
 
     /// Checks convergence, invariants and no data loss. Returns a description of the first
@@ -1285,13 +1273,7 @@ impl Sim {
                 synced.remove(n);
             }
             // The tags as the client sees them.
-            let ids: Vec<NodeId> = visible.ids().collect();
-            for n in ids {
-                if let Some(mut state) = visible.get(n).cloned() {
-                    state.tags = held_tags(client, server.get(n), n, &state.tags);
-                    visible.insert(n, state);
-                }
-            }
+            see_held_tags(client, &mut visible, &server);
             let server_view = view(&synced);
             let local_view = view(&visible);
             if local_view != server_view {
@@ -1495,9 +1477,33 @@ fn held_tags(client: &Client, remote: Option<&NodeState>, node: NodeId, read: &T
     Tags::fill(read, &reference, client.os)
 }
 
-/// What a client's disk holds after writing `tags`.
-fn on_disk(os: Os, tags: &Tags) -> Tags {
-    Tags::new(tags.iter().filter_map(|t| express(t, os)))
+/// Gives each item of `view` (a client's local tree) the tags the client sees on it.
+fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
+    let changed: Vec<(NodeId, NodeState)> = view
+        .iter()
+        .filter_map(|(n, state)| {
+            let tags = held_tags(client, remote.get(n), n, &state.tags);
+            (tags != state.tags).then(|| {
+                (
+                    n,
+                    NodeState {
+                        tags,
+                        ..state.clone()
+                    },
+                )
+            })
+        })
+        .collect();
+    for (n, state) in changed {
+        view.insert(n, state);
+    }
+}
+
+/// Tags as `name:colour`.
+fn tag_names(tags: &Tags) -> Vec<String> {
+    tags.iter()
+        .map(|t| format!("{}:{}", t.name, t.colour))
+        .collect()
 }
 
 /// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
@@ -1552,11 +1558,7 @@ fn view_with(tree: &Tree, blobs: &HashMap<ContentHash, u64>) -> Vec<String> {
                     None => c.hash.to_hex()[..8].to_owned(),
                 })
                 .unwrap_or_default();
-            let tags: Vec<String> = s
-                .tags
-                .iter()
-                .map(|t| format!("{}:{}", t.name, t.colour))
-                .collect();
+            let tags = tag_names(&s.tags);
             format!(
                 "{path} {:?} {content} {} {tags:?}",
                 s.kind,

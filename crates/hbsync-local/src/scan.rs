@@ -373,8 +373,22 @@ fn resolve(
             }
         };
 
-    let row_from = |path: &RelPath, node: NodeId, meta: &LocalMeta, hash: Option<ContentHash>| {
-        row_from(path, node, meta, hash, tags::read(&path.to_native(root)))
+    // A row for what the walk found at `path`, with its tags (carried over from `old` when
+    // they can't have changed or can't be read now), and whether its tags changed.
+    let row_from = |path: &RelPath,
+                    meta: &LocalMeta,
+                    hash: Option<ContentHash>,
+                    node: NodeId,
+                    old: Option<&LocalRow>| {
+        let tags = match old {
+            // A tag write moves the change time; inside a moved folder, nothing does.
+            Some(o) if o.tags.is_some() && o.fingerprint.ctime_ns == meta.ctime_ns => {
+                o.tags.clone()
+            }
+            _ => tags::read(&path.to_native(root)).or_else(|| old.and_then(|o| o.tags.clone())),
+        };
+        let changed = old.is_some_and(|o| tags_changed(&o.tags, &tags));
+        (row_from(path, node, meta, hash, tags), changed)
     };
 
     // Changed in place. A kind change (file ↔ folder) is a delete plus a create.
@@ -386,8 +400,7 @@ fn resolve(
             removed.push(row);
             continue;
         }
-        let mut new = row_from(&row.path, row.node, &meta, row.hash);
-        keep_known_tags(&mut new, &row);
+        let (mut new, tags_changed) = row_from(&row.path, &meta, row.hash, row.node, Some(&row));
         let mut content_changed = false;
         if row.kind == NodeKind::File
             && (row.fingerprint != meta.fingerprint() || row.hash.is_none())
@@ -398,7 +411,7 @@ fn resolve(
         let x_changed = row.kind == NodeKind::File
             && meta.executable.is_some()
             && meta.executable != row.executable;
-        if content_changed || x_changed || tags_changed(&row.tags, &new.tags) {
+        if content_changed || x_changed || tags_changed {
             report.modified += 1;
             plan.dirty.push(row.node);
         }
@@ -429,9 +442,8 @@ fn resolve(
             continue;
         };
         let old = &removed[i];
-        let mut new = row_from(&path, old.node, &meta, old.hash);
-        keep_known_tags(&mut new, old);
-        if tags_changed(&old.tags, &new.tags) {
+        let (mut new, tags_changed) = row_from(&path, &meta, old.hash, old.node, Some(old));
+        if tags_changed {
             plan.dirty.push(old.node);
         }
         if old.kind == NodeKind::File {
@@ -516,11 +528,8 @@ fn resolve(
             matched[i] = true;
             let old = &removed[i];
             moved.push((old.clone(), path.clone()));
-            let new = LocalRow {
-                hash,
-                ..row_from(&path, old.node, &meta, None)
-            };
-            if tags_changed(&old.tags, &new.tags) {
+            let (new, tags_changed) = row_from(&path, &meta, hash, old.node, Some(old));
+            if tags_changed {
                 plan.dirty.push(old.node);
             }
             plan.put_rows.push(new);
@@ -533,10 +542,8 @@ fn resolve(
         }
         plan.dirty.push(node);
         new_nodes.push((path.clone(), node));
-        plan.put_rows.push(LocalRow {
-            hash,
-            ..row_from(&path, node, &meta, None)
-        });
+        plan.put_rows
+            .push(row_from(&path, &meta, hash, node, None).0);
     }
 
     // Unmatched vanished rows are local deletes.
@@ -583,21 +590,13 @@ fn parent_node(
     db.read(|s| s.local_node_at(&parent))
 }
 
-/// Tags that can't be read now (unreadable for a moment, too many) leave the ones known before:
-/// otherwise removing every tag later would look like no change.
-fn keep_known_tags(new: &mut LocalRow, old: &LocalRow) {
-    if new.tags.is_none() {
-        new.tags.clone_from(&old.tags);
-    }
-}
-
-/// Whether tags read as `new` differ from `old`. Tags that can't be told now aren't a change,
-/// and no tags where none were known yet (a row from before tags) aren't either.
+/// Whether tags read as `new` differ from `old`. No tags where none were known yet (a row from
+/// before tags) aren't a change. Tags that can't be read now are the ones known before, so
+/// that removing every tag later is still seen.
 fn tags_changed(old: &Option<Tags>, new: &Option<Tags>) -> bool {
     match (old, new) {
-        (_, None) => false,
-        (None, Some(new)) => !new.is_empty(),
-        (Some(old), Some(new)) => old != new,
+        (None, new) => new.as_ref().is_some_and(|t| !t.is_empty()),
+        (Some(old), new) => new.as_ref() != Some(old),
     }
 }
 

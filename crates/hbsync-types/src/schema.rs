@@ -17,7 +17,7 @@ pub const VERSION: u32 = 1;
 /// The content key of the creation time ([`NodeContent::created_ms`]).
 const CREATED: &str = "ct";
 /// The content key of the Finder tags ([`NodeContent::tags`]).
-const TAGS: &str = "tags";
+pub const TAGS_KEY: &str = "tags";
 /// The content key of a removal ([`NodeContent::removal`]).
 pub const REMOVAL_KEY: &str = "rm";
 /// `appData.archivalStatus` of a node in Recently deleted (0 is a live one).
@@ -109,20 +109,18 @@ impl NodeContent {
     /// The Finder tags `tags`, kept with the unknown keys like `ct`. A malformed entry (from
     /// some other writer) is left out; none means no tags.
     pub fn tags(&self) -> Tags {
-        Self::tags_in(&self.unknown)
-    }
-
-    /// [`NodeContent::tags`] of the unknown keys alone (as a client stores them).
-    pub fn tags_in(unknown: &Map<String, Value>) -> Tags {
-        unknown.get(TAGS).map(tags_from_value).unwrap_or_default()
+        self.unknown
+            .get(TAGS_KEY)
+            .map(tags_from_value)
+            .unwrap_or_default()
     }
 
     /// Sets the tags; none removes the key.
     pub fn set_tags(&mut self, tags: &Tags) {
         if tags.is_empty() {
-            self.unknown.remove(TAGS);
+            self.unknown.remove(TAGS_KEY);
         } else {
-            self.unknown.insert(TAGS.into(), tags_value(tags));
+            self.unknown.insert(TAGS_KEY.into(), tags_value(tags));
         }
     }
 
@@ -158,7 +156,7 @@ impl NodeContent {
 }
 
 /// Tags as JSON: `[{"n": "Work", "c": 4}, …]`, `c` left out when 0.
-pub fn tags_value(tags: &Tags) -> Value {
+fn tags_value(tags: &Tags) -> Value {
     tags.iter()
         .map(|t| match t.colour {
             0 => json!({"n": t.name}),
@@ -167,29 +165,24 @@ pub fn tags_value(tags: &Tags) -> Value {
         .collect()
 }
 
-/// Reads [`tags_value`] leniently: entries without a string name are skipped, and a colour
-/// that isn't one of Finder's reads as none.
-pub fn tags_from_value(value: &Value) -> Tags {
+/// Reads [`tags_value`] leniently: entries without a string name are skipped (and [`Tags::new`]
+/// reads a colour that isn't one of Finder's as none).
+fn tags_from_value(value: &Value) -> Tags {
     let Some(list) = value.as_array() else {
         return Tags::default();
     };
     Tags::new(list.iter().filter_map(|t| {
         let colour = t["c"].as_u64().and_then(|c| u8::try_from(c).ok());
-        Some(Tag::new(
-            t["n"].as_str()?,
-            colour.filter(|c| *c <= 7).unwrap_or(0),
-        ))
+        Some(Tag::new(t["n"].as_str()?, colour.unwrap_or(0)))
     }))
 }
 
 /// The tags among content keys kept as a JSON object (a client's unknown keys).
 pub fn tags_in_keys(keys: &str) -> Tags {
-    if !keys.contains("\"tags\"") {
+    if !keys.contains(&format!("\"{TAGS_KEY}\"")) {
         return Tags::default();
     }
-    serde_json::from_str::<Value>(keys)
-        .map(|keys| tags_from_value(&keys[TAGS]))
-        .unwrap_or_default()
+    tags_from_json(keys, |keys| &keys[TAGS_KEY])
 }
 
 /// Tags as a JSON string (how the state DB keeps them).
@@ -199,8 +192,15 @@ pub fn tags_to_string(tags: &Tags) -> String {
 
 /// Reads [`tags_to_string`]; anything else reads as no tags.
 pub fn tags_from_str(s: &str) -> Tags {
-    serde_json::from_str(s)
-        .map(|v| tags_from_value(&v))
+    if s == "[]" {
+        return Tags::default(); // most rows
+    }
+    tags_from_json(s, |v| v)
+}
+
+fn tags_from_json(json: &str, at: impl Fn(&Value) -> &Value) -> Tags {
+    serde_json::from_str::<Value>(json)
+        .map(|v| tags_from_value(at(&v)))
         .unwrap_or_default()
 }
 

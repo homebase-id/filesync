@@ -414,7 +414,6 @@ struct Reconciler<'a> {
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
     plan: Plan,
-    no_tags: Tags,
 }
 
 impl<'a> Reconciler<'a> {
@@ -429,7 +428,6 @@ impl<'a> Reconciler<'a> {
             forks: BTreeMap::new(),
             deferred: BTreeSet::new(),
             plan: Plan::default(),
-            no_tags: Tags::default(),
         }
     }
 
@@ -617,12 +615,18 @@ impl<'a> Reconciler<'a> {
             }
             (target, _) => (target, origin),
         };
-        // Tags merge on their own, whatever else changed (§11).
+        // Tags merge on their own, whatever else changed (§11); a merge too large for the
+        // drive leaves the drive's.
         if let (Some(t), Some(l), Some(r)) = (&mut target, &l, r)
             && !self.masks.masked.contains(&node)
         {
-            let base = b.map(|b| &b.tags).unwrap_or(&self.no_tags);
-            t.tags = Tags::merge(base, &l.tags, &r.tags);
+            let none = Tags::default();
+            let merged = Tags::merge(b.map_or(&none, |b| &b.tags), &l.tags, &r.tags);
+            t.tags = if merged.fits() {
+                merged
+            } else {
+                r.tags.clone()
+            };
         }
         self.scope.insert(node);
         self.origin.insert(node, origin);

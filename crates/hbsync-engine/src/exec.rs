@@ -864,8 +864,11 @@ impl<'a> Executor<'a> {
             return Ok(Outcome::Skip("gone".into()));
         };
         let abs = self.abs(&row.path);
-        // A folder's guard is its file id only: its tags must still be what was read.
-        if !self.on_disk_unchanged(&row) || row.tags.is_some() && tags::read(&abs) != row.tags {
+        // A file's guard takes in the change time a tag write moves; a folder's is its file id
+        // only, so its tags must still be what was read.
+        let folder_retagged =
+            row.kind == NodeKind::Folder && row.tags.is_some() && tags::read(&abs) != row.tags;
+        if !self.on_disk_unchanged(&row) || folder_retagged {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let read = write_tags(&abs, tags);
@@ -1123,14 +1126,7 @@ impl<'a> Executor<'a> {
                     tags,
                 },
                 JobResult::Downloaded { file, local_hash },
-            ) => self.place_download(
-                node,
-                &target,
-                current,
-                (created_ms, &tags),
-                file,
-                local_hash,
-            ),
+            ) => self.place_download(node, &target, current, created_ms, &tags, file, local_hash),
             (
                 Ctx::Upload {
                     node,
@@ -1154,12 +1150,14 @@ impl<'a> Executor<'a> {
 
     /// Puts a verified download into place: over the old version (if it's still what the plan
     /// saw) or as a new file; an old version at another path goes to the trash first.
+    #[allow(clippy::too_many_arguments)]
     fn place_download(
         &mut self,
         node: NodeId,
         target: &RelPath,
         current: Option<LocalRow>,
-        (created_ms, tags): (Option<i64>, &Tags),
+        created_ms: Option<i64>,
+        tags: &Tags,
         done: hbsync_fileio::CompletedFile,
         local_hash: hbsync_types::ContentHash,
     ) -> Step {
@@ -1511,8 +1509,8 @@ impl<'a> Executor<'a> {
 /// a value when both sides hold it). `content_hint`: the operation just made the local and
 /// remote bytes equal (a transfer), even if their hashes use other algorithms.
 pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result<(), StateError> {
-    let local = view::local_node(s, node, os)?;
     let mirror = s.get_mirror(node)?;
+    let local = view::local_node(s, node, os, mirror.as_ref().map(|m| m.tags()).as_ref())?;
     let base = s.get_base(node)?;
     let online_only = base
         .as_ref()
