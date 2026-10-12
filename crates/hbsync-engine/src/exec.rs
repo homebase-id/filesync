@@ -1178,9 +1178,12 @@ impl<'a> Executor<'a> {
             // What Recently deleted holds on Homebase needs no second copy here.
             let held = !forget
                 && self.db.read(|s| {
-                    rows.iter().try_fold(true, |all, r| {
-                        Ok(all && s.removed_by_node(r.node)?.is_some())
-                    })
+                    for r in &rows {
+                        if s.removed_by_node(r.node)?.is_none() {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
                 })?;
             // A delete that fails (a read-only file on Windows) falls back to the trash.
             let gone = if held {
@@ -1305,11 +1308,7 @@ impl<'a> Executor<'a> {
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
     fn move_to_trash(&self, path: &RelPath, node: NodeId) -> io::Result<()> {
         let stamp = hbsync_types::unix_now();
-        let dir = self
-            .cfg
-            .state_dir()
-            .join("trash")
-            .join(format!("{stamp}-{}", node.0.simple()));
+        let dir = trash_dir(&self.cfg.state_dir()).join(format!("{stamp}-{}", node.0.simple()));
         fs::create_dir_all(&dir)?;
         let name = path.name().unwrap_or("item");
         ops::rename_noreplace(&self.abs(path), &dir.join(name))
@@ -1403,7 +1402,7 @@ impl<'a> Executor<'a> {
             return Ok(Outcome::Done); // already out of the tree
         };
         let removal = Removal {
-            at_ms: unix_now_ms(),
+            at_ms: hbsync_types::unix_now_ms(),
             root: self.db.read(|s| removal_root(s, node))?,
         };
         let mut content = content_of(&mirror, &mirror.name);
@@ -1544,6 +1543,16 @@ fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
     Ok(root)
 }
 
+/// The local trash: `<state dir>/trash/<Unix s>-<node>/<name>`.
+pub(crate) fn trash_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("trash")
+}
+
+/// When a trash entry (named by `move_to_trash`) went there, Unix s.
+pub(crate) fn trashed_at(entry: &str) -> Option<u64> {
+    entry.split_once('-')?.0.parse().ok()
+}
+
 /// Deletes a file or a folder with everything in it (a link, not what it points to).
 pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path)?.is_dir() {
@@ -1551,13 +1560,6 @@ pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
     } else {
         fs::remove_file(path)
     }
-}
-
-/// Now, in Unix ms.
-fn unix_now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// The tracked item that holds `target` on disk: the row at that exact path, or, on a

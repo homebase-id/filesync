@@ -25,7 +25,7 @@ use std::sync::Arc;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile};
-use hbsync_engine::tree::{Tree, numbered_names, restored_name};
+use hbsync_engine::tree::{Tree, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::name::check_remote_name;
@@ -63,8 +63,10 @@ pub enum Action {
     },
     /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
     ToggleIgnore,
-    /// The user restores an item of Recently deleted (on the server at once, as the engine's
-    /// restore does): back in its folder, or at the top if that is gone, under a free name.
+    /// The user restores one item of Recently deleted, on the server at once: back in its
+    /// folder, or at the top if that is gone, under a free name. (The engine's restore also
+    /// brings back what was deleted with it and the folders above: each such step is one of
+    /// these.)
     Restore {
         node: usize,
     },
@@ -394,14 +396,13 @@ impl Sim {
             n.state.parent = NodeId::ROOT;
         }
         let tree = self.server.tree();
-        let original = n.state.name.clone();
-        n.state.name = (0..)
-            .map(|i| match i {
-                0 => original.clone(),
-                i => restored_name(&original, i),
-            })
+        let Some(name) = restored_names(&n.state.name)
             .find(|name| tree.child_named(n.state.parent, name, None).is_none())
-            .unwrap_or(original);
+        else {
+            self.server.removed.insert(node, n); // no free name: it stays deleted
+            return;
+        };
+        n.state.name = name;
         n.remote.version = VersionTag(self.server.uuid());
         self.server.live.insert(node, n);
     }

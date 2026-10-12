@@ -2,6 +2,7 @@
 //! its bytes until the purge. A restore puts it back in the tree, where the next sync brings it
 //! to every device; the purge deletes it for good.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -12,18 +13,21 @@ use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::engine::EngineError;
-use crate::exec::{content_of, remove_all};
-use crate::tree::restored_name;
+use crate::exec::{content_of, remove_all, trash_dir, trashed_at};
+use crate::tree::restored_names;
 
 /// Recently deleted, newest first.
 pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> {
     db.read(|s| {
+        // Folder paths, each worked out once.
+        let mut folders: HashMap<NodeId, String> = HashMap::new();
         s.list_removed(limit)?
             .into_iter()
             .map(|r| {
+                let folder = folder_path(s, r.row.parent, &mut folders)?;
                 Ok(Deleted {
                     node: r.row.node,
-                    path: path_of(s, &r.row)?,
+                    path: join(&folder, &r.row.name),
                     kind: r.row.kind,
                     size: r.row.file.map(|f| f.size),
                     removed_at_ms: r.removal.at_ms,
@@ -34,119 +38,169 @@ pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> 
     })
 }
 
-/// The path `row` had: its folders from the tree or from Recently deleted.
-fn path_of(s: &Store<'_>, row: &MirrorRow) -> Result<String, StateError> {
-    let mut names = vec![row.name.clone()];
-    let mut at = row.parent;
-    // Bounded: a damaged DB must not hang the list.
-    while !at.is_root() && names.len() < 256 {
-        let Some(folder) = s.get_mirror(at)?.or(s.removed_by_node(at)?.map(|r| r.row)) else {
-            break; // a folder deleted for good: the path starts below it
-        };
-        names.push(folder.name);
-        at = folder.parent;
+/// The path of folder `at` (empty for the top), from the tree or from Recently deleted; a
+/// folder deleted for good ends it (the path starts below it).
+fn folder_path(
+    s: &Store<'_>,
+    at: NodeId,
+    known: &mut HashMap<NodeId, String>,
+) -> Result<String, StateError> {
+    if let Some(path) = known.get(&at) {
+        return Ok(path.clone());
     }
-    names.reverse();
-    Ok(names.join("/"))
+    let mut names = Vec::new();
+    let mut up = at;
+    let mut base = String::new();
+    // Bounded: a damaged DB must not hang the list.
+    while !up.is_root() && names.len() < 256 {
+        if let Some(path) = known.get(&up) {
+            base = path.clone();
+            break;
+        }
+        let Some(folder) = s.get_mirror(up)?.or(s.removed_by_node(up)?.map(|r| r.row)) else {
+            break;
+        };
+        names.push((up, folder.name));
+        up = folder.parent;
+    }
+    // Top-down, remembering each folder's path on the way.
+    for (id, name) in names.into_iter().rev() {
+        base = join(&base, &name);
+        known.insert(id, base.clone());
+    }
+    Ok(base)
+}
+
+fn join(folder: &str, name: &str) -> String {
+    if folder.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{folder}/{name}")
+    }
 }
 
 /// Restores `node` with what was deleted with it, and the folders it was in that are in
 /// Recently deleted too (just those, not their other contents). Returns how many items came
 /// back; 0 when `node` isn't in Recently deleted (any more).
 pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<usize, EngineError> {
-    let Some(top) = db.read(|s| s.removed_by_node(node))? else {
+    let Some(plan) = db.read(|s| plan_restore(s, node))? else {
         return Ok(0);
     };
+    let RestorePlan {
+        rows,
+        mut live,
+        mut taken,
+    } = plan;
     let mut restored = 0;
-    // Its folders first, top-down, each alone.
-    let mut chain = Vec::new();
-    let mut at = top.row.parent;
-    while !at.is_root() && chain.len() < 256 {
-        if db.read(|s| s.get_mirror(at))?.is_some() {
-            break;
-        }
-        let Some(folder) = db.read(|s| s.removed_by_node(at))? else {
-            break; // deleted for good: restored at the top instead (below)
+    for r in &rows {
+        let row = &r.row;
+        // Its folder is back (or never left); else it comes back at the top.
+        let parent = if live.contains(&row.parent) {
+            row.parent
+        } else {
+            NodeId::ROOT
         };
-        at = folder.row.parent;
-        chain.push(folder);
-    }
-    for folder in chain.into_iter().rev() {
-        restored += usize::from(restore_one(db, remote, &folder)?);
-    }
-    // Then the item and what its delete took along, each once its folder is back.
-    let mut group = db.read(|s| s.removed_with(node))?;
-    if !group.iter().any(|r| r.row.node == node) {
-        group.push(top);
-    }
-    while !group.is_empty() {
-        let before = group.len();
-        let mut later = Vec::new();
-        for r in group {
-            let parent_back = r.row.parent.is_root()
-                || db.read(|s| s.get_mirror(r.row.parent))?.is_some()
-                || db.read(|s| s.removed_by_node(r.row.parent))?.is_none();
-            if parent_back {
-                restored += usize::from(restore_one(db, remote, &r)?);
-            } else {
-                later.push(r);
-            }
-        }
-        if later.len() == before {
-            break; // folders that didn't come back: their items stay where they are
-        }
-        group = later;
+        let names = taken.entry(parent).or_default();
+        let Some(name) = restored_names(&row.name).find(|n| !names.contains(&name_key(n))) else {
+            continue; // no free name: it stays in Recently deleted
+        };
+        let meta = NodeMeta {
+            node: row.node,
+            parent,
+            kind: row.kind,
+            content: content_of(row, &name),
+        };
+        let written = match remote.update(row.file_id, row.version, &meta, None) {
+            Ok(written) => written,
+            // Changed or deleted for good meanwhile: the feed tells what it is now.
+            Err(RemoteError::VersionMismatch | RemoteError::NotFound) => continue,
+            Err(e) => return Err(EngineError::Remote(e)),
+        };
+        names.insert(name_key(&name));
+        live.insert(row.node);
+        let back = MirrorRow {
+            file_id: written.file_id,
+            version: written.version,
+            parent,
+            name,
+            ..row.clone()
+        };
+        db.write(|s| {
+            s.delete_removed(row.node)?;
+            s.put_mirror(&back)?;
+            s.mark_dirty(row.node)
+        })?;
+        restored += 1;
     }
     Ok(restored)
 }
 
-/// Puts one removed node back in the tree, under a free name in its folder (or at the top,
-/// if its folder is gone for good). Whether it came back.
-fn restore_one(db: &mut StateDb, remote: &dyn Remote, r: &RemovedRow) -> Result<bool, EngineError> {
-    let row = &r.row;
-    let parent = if row.parent.is_root() || db.read(|s| s.get_mirror(row.parent))?.is_some() {
-        row.parent
-    } else {
-        NodeId::ROOT
+/// What a restore of a node does, worked out in one read.
+struct RestorePlan {
+    /// In order: the folders above that are in Recently deleted (top-down), then the node and
+    /// what was deleted with it (each after its folder).
+    rows: Vec<RemovedRow>,
+    /// Folders in the tree that the rows may go into (the top included).
+    live: HashSet<NodeId>,
+    /// The name keys taken in each of those folders.
+    taken: HashMap<NodeId, HashSet<String>>,
+}
+
+fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, StateError> {
+    let Some(top) = s.removed_by_node(node)? else {
+        return Ok(None);
     };
-    let taken: Vec<String> = db.read(|s| {
-        Ok(s.mirror_children(parent)?
-            .into_iter()
+    // The folders above, as far as they are in Recently deleted.
+    let mut chain = Vec::new();
+    let mut at = top.row.parent;
+    while !at.is_root() && chain.len() < 256 {
+        match s.removed_by_node(at)? {
+            Some(folder) => {
+                at = folder.row.parent;
+                chain.push(folder);
+            }
+            None => break, // in the tree, or deleted for good (then the top it is)
+        }
+    }
+    chain.reverse();
+    // What was deleted with it, each after its folder (depth below the node).
+    let mut group = s.removed_with(node)?;
+    if !group.iter().any(|r| r.row.node == node) {
+        group.push(top);
+    }
+    let parent_of: HashMap<NodeId, NodeId> =
+        group.iter().map(|r| (r.row.node, r.row.parent)).collect();
+    let depth = |mut n: NodeId| {
+        let mut d = 0;
+        while let Some(&p) = parent_of.get(&n) {
+            if d > 256 {
+                break;
+            }
+            d += 1;
+            n = p;
+        }
+        d
+    };
+    group.sort_by_key(|r| depth(r.row.node));
+    let rows: Vec<RemovedRow> = chain.into_iter().chain(group).collect();
+    // The folders in the tree the rows may go into, and their names.
+    let mut live = HashSet::from([NodeId::ROOT]);
+    let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
+    for parent in rows.iter().map(|r| r.row.parent).chain([NodeId::ROOT]) {
+        if taken.contains_key(&parent) {
+            continue;
+        }
+        if !parent.is_root() && s.get_mirror(parent)?.is_some() {
+            live.insert(parent);
+        }
+        let names = s
+            .mirror_children(parent)?
+            .iter()
             .map(|m| name_key(&m.name))
-            .collect())
-    })?;
-    let name = (0..)
-        .map(|n| match n {
-            0 => row.name.clone(),
-            n => restored_name(&row.name, n),
-        })
-        .find(|name| !taken.contains(&name_key(name)))
-        .unwrap_or_else(|| row.name.clone());
-    let meta = NodeMeta {
-        node: row.node,
-        parent,
-        kind: row.kind,
-        content: content_of(row, &name),
-    };
-    let written = match remote.update(row.file_id, row.version, &meta, None) {
-        Ok(written) => written,
-        // Changed or deleted for good meanwhile: the feed tells what it is now.
-        Err(RemoteError::VersionMismatch | RemoteError::NotFound) => return Ok(false),
-        Err(e) => return Err(EngineError::Remote(e)),
-    };
-    let back = MirrorRow {
-        file_id: written.file_id,
-        version: written.version,
-        parent,
-        name,
-        ..row.clone()
-    };
-    db.write(|s| {
-        s.delete_removed(row.node)?;
-        s.put_mirror(&back)?;
-        s.mark_dirty(row.node)
-    })?;
-    Ok(true)
+            .collect();
+        taken.insert(parent, names);
+    }
+    Ok(Some(RestorePlan { rows, live, taken }))
 }
 
 /// Deletes for good what was removed before `before_ms` (Unix ms), files before their
@@ -160,7 +214,7 @@ pub fn purge(
 ) -> Result<usize, EngineError> {
     let expired = db.read(|s| s.removed_before(before_ms))?;
     let gone = delete_for_good(db, remote, &expired)?;
-    empty_trash(&state_dir.join("trash"), before_ms);
+    empty_trash(&trash_dir(state_dir), before_ms);
     Ok(gone)
 }
 
@@ -213,12 +267,8 @@ fn empty_trash(trash: &Path, before_ms: i64) {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let stamp = name
-            .to_str()
-            .and_then(|n| n.split_once('-'))
-            .and_then(|(s, _)| s.parse::<i64>().ok());
-        if stamp.is_some_and(|s| s.saturating_mul(1000) < before_ms) {
+        let at = entry.file_name().to_str().and_then(trashed_at);
+        if at.is_some_and(|s| (s as i64).saturating_mul(1000) < before_ms) {
             let _ = remove_all(&entry.path());
         }
     }

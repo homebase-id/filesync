@@ -12,7 +12,6 @@ use hbsync_app::{
 };
 use hbsync_local::STATE_DIR;
 use hbsync_types::NodeId;
-use hbsync_types::activity::Deleted;
 
 type Res<T> = hbsync_app::control::Result<T>;
 
@@ -224,39 +223,29 @@ fn run(command: Command) -> Res<ExitCode> {
             None => return Ok(not_running()),
         },
         Command::Restore { items } => {
-            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+            let Some(nodes) = pick(&paths, &items)? else {
                 return Ok(not_running());
             };
-            let nodes = pick(&list, &items)?;
             control(&paths, Control::Restore { nodes })?;
             println!("Restoring; the next sync brings it back.");
         }
         Command::EmptyDeleted { items, yes } => {
-            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
-                return Ok(not_running());
-            };
-            if list.is_empty() {
-                println!("Recently deleted is empty.");
-                return Ok(ExitCode::SUCCESS);
-            }
             let nodes = if items.is_empty() {
                 None
             } else {
-                Some(pick(&list, &items)?)
-            };
-            if !yes {
-                let what = match &nodes {
-                    None => format!("the {} items in Recently deleted", list.len()),
-                    Some(_) => items.join(", "),
+                let Some(nodes) = pick(&paths, &items)? else {
+                    return Ok(not_running());
                 };
-                print!("Delete {what} for good? [y/N] ");
-                std::io::stdout().flush()?;
-                let mut answer = String::new();
-                std::io::stdin().lock().read_line(&mut answer)?;
-                if !matches!(answer.trim(), "y" | "Y" | "yes") {
-                    println!("Nothing deleted.");
-                    return Ok(ExitCode::SUCCESS);
-                }
+                Some(nodes)
+            };
+            let what = if items.is_empty() {
+                "everything in Recently deleted".to_owned()
+            } else {
+                items.join(", ")
+            };
+            if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
+                println!("Nothing deleted.");
+                return Ok(ExitCode::SUCCESS);
             }
             control(&paths, Control::EmptyDeleted { nodes })?;
             println!("Deleting for good.");
@@ -333,18 +322,36 @@ fn run(command: Command) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The items of Recently deleted that `items` name, by path or node id; a path deleted twice
-/// names its latest.
-fn pick(list: &[Deleted], items: &[String]) -> Res<Vec<NodeId>> {
+/// The items of Recently deleted that `items` name, by node id or path (a path deleted twice
+/// names its latest); `None` when the daemon isn't running.
+fn pick(paths: &Paths, items: &[String]) -> Res<Option<Vec<NodeId>>> {
+    let ids: Option<Vec<NodeId>> = items.iter().map(|i| i.parse().ok().map(NodeId)).collect();
+    if let Some(ids) = ids {
+        return Ok(Some(ids)); // ids alone need no list
+    }
+    let Some(list) = daemon::deleted(paths, usize::MAX)? else {
+        return Ok(None);
+    };
     items
         .iter()
         .map(|item| {
+            let id = item.parse().ok().map(NodeId);
             list.iter()
-                .find(|d| d.path == item.trim_end_matches('/') || d.node.0.to_string() == *item)
+                .find(|d| Some(d.node) == id || d.path == item.trim_end_matches('/'))
                 .map(|d| d.node)
                 .ok_or_else(|| format!("{item} isn't in Recently deleted").into())
         })
-        .collect()
+        .collect::<Res<_>>()
+        .map(Some)
+}
+
+/// Asks `question` with [y/N]; whether the answer is yes.
+fn ask_yes(question: &str) -> Res<bool> {
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
 fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
@@ -364,15 +371,9 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
     if held.more_than_shown() {
         println!("  ...");
     }
-    if !yes {
-        print!("Go ahead? [y/N] ");
-        std::io::stdout().flush()?;
-        let mut answer = String::new();
-        std::io::stdin().lock().read_line(&mut answer)?;
-        if !matches!(answer.trim(), "y" | "Y" | "yes") {
-            println!("Nothing deleted; they stay held.");
-            return Ok(());
-        }
+    if !yes && !ask_yes("Go ahead?")? {
+        println!("Nothing deleted; they stay held.");
+        return Ok(());
     }
     // Exactly these: any delete since is held again, for another look.
     control(paths, Control::ConfirmDeletes { token: held.token })?;

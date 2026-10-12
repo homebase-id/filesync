@@ -545,12 +545,14 @@ impl Runner {
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
-        // Restores and empties of Recently deleted, run when the engine is open.
-        let mut deleted_requests: Vec<Control> = Vec::new();
+        // Restores and empties of Recently deleted asked for, run when the engine is open.
+        // `empty`: `Some(None)` empties all of it.
+        let mut restore: Vec<NodeId> = Vec::new();
+        let mut empty: Option<Option<Vec<NodeId>>> = None;
         // Changes announced on the drive: synced once they stop coming (a burst of deletes is
         // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
-        let mut remote_burst: Option<Instant> = None;
-        let mut remote_quiet = Instant::now();
+        // (the first announcement, quiet from then on)
+        let mut announced: Option<(Instant, Instant)> = None;
         let db_path = state_db_path(&self.cfg.folder);
         let mut pause = self.cfg.paused;
         let mut started = false;
@@ -632,8 +634,20 @@ impl Runner {
                         wanted = true;
                         not_before = Instant::now();
                     }
-                    Ok(c @ (Control::Restore { .. } | Control::EmptyDeleted { .. })) => {
-                        deleted_requests.push(c);
+                    Ok(Control::Restore { nodes }) => {
+                        restore.extend(nodes);
+                        wanted = true;
+                        not_before = Instant::now();
+                    }
+                    Ok(Control::EmptyDeleted { nodes }) => {
+                        empty = match (empty, nodes) {
+                            (Some(Some(mut asked)), Some(nodes)) => {
+                                asked.extend(nodes);
+                                Some(Some(asked))
+                            }
+                            (None, nodes) => Some(nodes),
+                            _ => Some(None), // all of it
+                        };
                         wanted = true;
                         not_before = Instant::now();
                     }
@@ -662,8 +676,8 @@ impl Runner {
                     Event::Changed => {
                         wanted = true;
                         let now = Instant::now();
-                        remote_burst.get_or_insert(now);
-                        remote_quiet = now + REMOTE_QUIET;
+                        let first = announced.map_or(now, |(first, _)| first);
+                        announced = Some((first, now + REMOTE_QUIET));
                         continue;
                     }
                     Event::Lost(why) => {
@@ -711,11 +725,11 @@ impl Runner {
             if pause.is_some() || !wanted || now < not_before {
                 continue;
             }
-            if remote_burst.is_some_and(|start| now < remote_quiet && now < start + REMOTE_MAX_WAIT)
+            if announced.is_some_and(|(first, quiet)| now < quiet && now < first + REMOTE_MAX_WAIT)
             {
                 continue;
             }
-            remote_burst = None;
+            announced = None;
             if !self.cfg.folder.join(STATE_DIR).is_dir() {
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
@@ -756,20 +770,16 @@ impl Runner {
             if let Some(seen) = confirmed.take() {
                 p.engine.confirm_deletes(seen);
             }
-            for request in std::mem::take(&mut deleted_requests) {
-                let done = match request {
-                    Control::Restore { nodes } => p.engine.restore(&nodes).map(|n| {
-                        tracing::info!("{n} items restored from Recently deleted");
-                    }),
-                    Control::EmptyDeleted { nodes } => {
-                        p.engine.empty_deleted(nodes.as_deref()).map(|n| {
-                            tracing::info!("{n} items deleted for good");
-                        })
-                    }
-                    _ => Ok(()),
-                };
-                if let Err(e) = done {
-                    tracing::warn!("Recently deleted: {e}");
+            if !restore.is_empty() {
+                match p.engine.restore(&std::mem::take(&mut restore)) {
+                    Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
+                    Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
+                }
+            }
+            if let Some(nodes) = empty.take() {
+                match p.engine.empty_deleted(nodes.as_deref()) {
+                    Ok(n) => tracing::info!("{n} items deleted for good"),
+                    Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
                 }
             }
             purge_when_due(&mut p.engine, self.cfg.keep_deleted_days);

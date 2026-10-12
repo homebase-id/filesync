@@ -235,6 +235,12 @@ pub fn numbered_conflict_name(name: &str, n: usize) -> String {
     with_tag(name, &format!(" (conflict {n})"))
 }
 
+/// The names a restored item tries, in order: its own, then the restored variants; a hundred
+/// at most.
+pub fn restored_names(name: &str) -> impl Iterator<Item = String> + '_ {
+    std::iter::once(name.to_owned()).chain((1..100).map(move |n| restored_name(name, n)))
+}
+
 /// `"report (restored).pdf"`, then `"report (restored 2).pdf"`: a restored item whose name
 /// was taken meanwhile.
 pub fn restored_name(name: &str, n: usize) -> String {

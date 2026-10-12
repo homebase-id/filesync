@@ -9,6 +9,13 @@ pub use uuid::Uuid;
 pub mod activity;
 pub mod schema;
 
+/// Now, in Unix milliseconds.
+pub fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
 /// Now, in Unix seconds.
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()

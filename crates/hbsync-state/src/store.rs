@@ -862,7 +862,7 @@ impl<'a> Store<'a> {
     pub fn list_removed(&self, limit: usize) -> Result<Vec<RemovedRow>> {
         self.many(
             &format!("{REMOVED_SELECT} ORDER BY removed_at DESC, name LIMIT ?1"),
-            [limit as i64],
+            [i64::try_from(limit).unwrap_or(i64::MAX)],
             removed_row,
         )
     }

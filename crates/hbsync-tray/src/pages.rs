@@ -204,12 +204,12 @@ impl Server {
             }
             ("GET", "deleted") => self.html(&mut stream, self.deleted_page()),
             ("POST", "deleted/restore") => {
-                let said = self.deleted_request(&request.form, true);
+                let said = self.restore(&request.form);
                 self.html(&mut stream, self.deleted_said(&said))
             }
-            ("POST", "deleted/empty") => self.html(&mut stream, self.empty_page()),
+            ("POST", "deleted/empty") => self.html(&mut stream, self.empty_page(&request.form)),
             ("POST", "deleted/empty/yes") => {
-                let said = self.deleted_request(&request.form, false);
+                let said = self.empty();
                 self.html(&mut stream, self.deleted_said(&said))
             }
             _ => respond(&mut stream, 404, "text/plain", b"not here"),
@@ -443,15 +443,16 @@ impl Server {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
         let now = words::now();
+        // What each delete took along.
+        let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
+        for d in list.iter().filter(|d| d.root != d.node) {
+            *along.entry(d.root).or_default() += 1;
+        }
         let rows: String = list
             .iter()
             .filter(|d| d.root == d.node)
             .map(|d| {
-                let along = list
-                    .iter()
-                    .filter(|o| o.root == d.node && o.node != d.node)
-                    .count();
-                let along = match along {
+                let along = match along.get(&d.node).copied().unwrap_or(0) {
                     0 => String::new(),
                     n => format!(" <span class=small>with {n} items in it</span>"),
                 };
@@ -469,17 +470,16 @@ impl Server {
             "<h1>Recently deleted</h1>\
              <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
              A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>\
-             <form method=post action=\"{empty}\"><button class=secondary>Empty now…</button></form>",
+             <form method=post action=\"{empty}\"><input type=hidden name=count value={count}>\
+             <button class=secondary>Empty now…</button></form>",
             days = self.keep_days(),
             empty = self.pages.url("deleted/empty"),
+            count = list.len(),
         )
     }
 
-    fn empty_page(&self) -> String {
-        let count = control::deleted(&self.paths, MAX_DELETED)
-            .ok()
-            .flatten()
-            .map_or(0, |l| l.len());
+    fn empty_page(&self, form: &HashMap<String, String>) -> String {
+        let count = escape(form.get("count").map_or("all the", String::as_str));
         format!(
             "<h1>Empty Recently deleted?</h1>\
              <p>The {count} items in it are deleted for good, from your Homebase and every \
@@ -490,28 +490,34 @@ impl Server {
         )
     }
 
-    /// Restores the item the form names, or empties Recently deleted.
-    fn deleted_request(&self, form: &HashMap<String, String>, restore: bool) -> String {
-        let control = if restore {
-            let Some(node) = form
-                .get("node")
-                .and_then(|n| n.parse().ok())
-                .map(hbsync_types::NodeId)
-            else {
-                return "Nothing was restored.".into();
-            };
-            Control::Restore { nodes: vec![node] }
-        } else {
-            Control::EmptyDeleted { nodes: None }
+    /// Restores the item the form names.
+    fn restore(&self, form: &HashMap<String, String>) -> String {
+        let Some(node) = form
+            .get("node")
+            .and_then(|n| n.parse().ok())
+            .map(hbsync_types::NodeId)
+        else {
+            return "Nothing was restored.".into();
         };
+        self.ask_daemon(
+            Control::Restore { nodes: vec![node] },
+            "Restoring: it comes back with the next sync, on every device.",
+        )
+    }
+
+    fn empty(&self) -> String {
+        self.ask_daemon(
+            Control::EmptyDeleted { nodes: None },
+            "Emptying Recently deleted.",
+        )
+    }
+
+    /// Sends `control` to the daemon; `done` if it took it, else why not.
+    fn ask_daemon(&self, control: Control, done: &str) -> String {
         match control::control(&self.paths, control) {
             Ok(()) => {
                 (self.send)(Event::Wake);
-                if restore {
-                    "Restoring: it comes back with the next sync, on every device.".into()
-                } else {
-                    "Emptying Recently deleted.".into()
-                }
+                done.into()
             }
             Err(e) => format!("That didn't work: {e}"),
         }
@@ -527,7 +533,7 @@ impl Server {
 
     /// How long Recently deleted keeps items, from the config.
     fn keep_days(&self) -> u32 {
-        Config::load(&self.paths.config)
+        Config::load(&self.paths.config_file())
             .ok()
             .flatten()
             .unwrap_or_default()
