@@ -6,9 +6,10 @@
 
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::activity::Synced;
-use hbsync_types::schema::Removal;
+use hbsync_types::schema::{Removal, TAGS_KEY, tags_from_str, tags_in_keys, tags_to_string};
 use hbsync_types::{
-    ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
+    ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Tags,
+    VersionTag,
 };
 use std::collections::HashMap;
 
@@ -41,6 +42,8 @@ pub struct LocalRow {
     pub executable: Option<bool>,
     /// `None` until hashed; always `None` for folders.
     pub hash: Option<hbsync_types::ContentHash>,
+    /// `None` if not known: no tags on this system or file system, or not read yet.
+    pub tags: Option<Tags>,
 }
 
 /// The client's copy of one live remote node.
@@ -54,8 +57,8 @@ pub struct MirrorRow {
     pub kind: NodeKind,
     /// Files only.
     pub file: Option<MirrorFile>,
-    /// Content keys sync carries without acting on them (JSON object: unknown keys and the
-    /// creation time `ct`), written back unchanged.
+    /// Content keys sync carries without acting on them (JSON object: unknown keys, the
+    /// creation time `ct` and the tags), written back unchanged.
     pub content_extra: Option<String>,
 }
 
@@ -103,7 +106,16 @@ impl MirrorRow {
             name: self.name.clone(),
             kind: self.kind,
             content,
+            tags: self.tags(),
         })
+    }
+
+    /// The tags, from the content keys.
+    pub fn tags(&self) -> Tags {
+        self.content_extra
+            .as_deref()
+            .map(tags_in_keys)
+            .unwrap_or_default()
     }
 }
 
@@ -114,8 +126,8 @@ pub struct Store<'a> {
 }
 
 const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size, b.mtime_ms, \
-     b.executable, b.remote_file_id, b.version_tag, b.content_state, b.local_name, b.local_hash \
-     FROM base b JOIN nodes n ON n.id = b.id JOIN nodes p ON p.id = b.parent";
+     b.executable, b.remote_file_id, b.version_tag, b.content_state, b.local_name, b.local_hash, \
+     b.tags FROM base b JOIN nodes n ON n.id = b.id JOIN nodes p ON p.id = b.parent";
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
      mtime_ms, executable, content_extra, removed_at, root FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
@@ -123,9 +135,9 @@ const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
 /// The columns [`RawLocal`] reads, from `local l JOIN nodes n`.
 const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, l.volume, \
-     l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name";
+     l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name, l.tags";
 /// Columns in [`LOCAL_COLS`].
-const LOCAL_COL_COUNT: usize = 13;
+const LOCAL_COL_COUNT: usize = 14;
 /// Deeper than any real tree (Windows' 32k-character paths hold about 16k levels); reaching it
 /// means a broken parent chain.
 const MAX_DEPTH: usize = 16_384;
@@ -237,11 +249,13 @@ impl<'a> Store<'a> {
         self.conn
             .prepare_cached(
                 "INSERT INTO base (id, parent, name, kind, hash, size, mtime_ms, \
-                 executable, remote_file_id, version_tag, content_state, local_name, local_hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                 executable, remote_file_id, version_tag, content_state, local_name, local_hash, \
+                 tags) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                  ON CONFLICT (id) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, hash = ?5, \
                  size = ?6, mtime_ms = ?7, executable = ?8, remote_file_id = ?9, \
-                 version_tag = ?10, content_state = ?11, local_name = ?12, local_hash = ?13",
+                 version_tag = ?10, content_state = ?11, local_name = ?12, local_hash = ?13, \
+                 tags = ?14",
             )?
             .execute(params![
                 id,
@@ -257,6 +271,7 @@ impl<'a> Store<'a> {
                 codec::content_state_to(row.content_state),
                 row.local_name,
                 row.local_hash.as_ref().map(codec::hash_to),
+                (!row.state.tags.is_empty()).then(|| tags_to_string(&row.state.tags)),
             ])?;
         Ok(())
     }
@@ -466,11 +481,11 @@ impl<'a> Store<'a> {
         self.conn
             .prepare_cached(
                 "INSERT INTO local (id, parent, name, kind, size, mtime_ns, ctime_ns, \
-                 volume, file_id, file_id_hi, executable, hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 volume, file_id, file_id_hi, executable, hash, tags) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
                  ON CONFLICT (id) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, size = ?5, \
                  mtime_ns = ?6, ctime_ns = ?7, volume = ?8, file_id = ?9, file_id_hi = ?10, \
-                 executable = ?11, hash = ?12",
+                 executable = ?11, hash = ?12, tags = ?13",
             )?
             .execute(params![
                 id,
@@ -485,7 +500,27 @@ impl<'a> Store<'a> {
                 hi,
                 row.executable,
                 row.hash.as_ref().map(codec::hash_to),
+                row.tags.as_ref().map(tags_to_string),
             ])?;
+        Ok(())
+    }
+
+    /// Marks dirty every node whose drive copy carries tags (once, after the upgrade that brought
+    /// tags: the feed passed them while this client didn't read them).
+    pub fn mark_remote_tagged_dirty(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO dirty (id) \
+             SELECT id FROM remote WHERE content_extra LIKE ?1",
+            [format!("%\"{TAGS_KEY}\"%")],
+        )?;
+        Ok(())
+    }
+
+    /// Records the tags of `node`'s local item, as read (the rest of its row stays).
+    pub fn set_local_tags(&self, node: NodeId, tags: &Tags) -> Result<()> {
+        self.conn
+            .prepare_cached(&format!("UPDATE local SET tags = ?2 WHERE id = {ID_OF}"))?
+            .execute(params![node.0.as_bytes(), tags_to_string(tags)])?;
         Ok(())
     }
 
@@ -961,6 +996,20 @@ impl<'a> Store<'a> {
         Ok((nodes, last))
     }
 
+    /// Up to `limit` local rows whose tags aren't known, after the one with id `after` (start
+    /// at 0), and the id to continue after: a sweep that reads each row once.
+    pub fn untagged_local_page(&self, after: i64, limit: usize) -> Result<(Vec<LocalRow>, i64)> {
+        let raw = self.raw_local(
+            &format!(
+                "SELECT {LOCAL_COLS} {LOCAL_FROM} \
+                 WHERE l.tags IS NULL AND l.id > ?1 ORDER BY l.id LIMIT ?2"
+            ),
+            params![after, limit as i64],
+        )?;
+        let next = raw.last().map_or(after, |r| r.id);
+        Ok((self.with_paths(raw)?, next))
+    }
+
     /// Local rows of dirty nodes that have neither a base nor a mirror row: what adoption may
     /// match against remote nodes.
     pub fn unpaired_local(&self) -> Result<Vec<LocalRow>> {
@@ -1168,6 +1217,7 @@ struct RawLocal {
     hash: Option<Vec<u8>>,
     parent: i64,
     name: String,
+    tags: Option<String>,
 }
 
 impl RawLocal {
@@ -1187,6 +1237,7 @@ impl RawLocal {
             hash: r.get(at + 10)?,
             parent: r.get(at + 11)?,
             name: r.get(at + 12)?,
+            tags: r.get(at + 13)?,
         })
     }
 
@@ -1205,6 +1256,7 @@ impl RawLocal {
             ),
             executable: self.executable,
             hash: self.hash.as_deref().map(codec::hash_from).transpose()?,
+            tags: self.tags.as_deref().map(tags_from_str),
         })
     }
 }
@@ -1232,6 +1284,11 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
             name: r.get(2)?,
             kind,
             content,
+            tags: r
+                .get::<_, Option<String>>(13)?
+                .as_deref()
+                .map(tags_from_str)
+                .unwrap_or_default(),
         },
         remote: RemoteRef {
             file_id: codec::remote_file(&r.get::<_, Vec<u8>>(8)?)?,

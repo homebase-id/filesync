@@ -146,6 +146,12 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX removed_root ON removed(root);
     CREATE INDEX removed_parent ON removed(parent);
     "#,
+    // 4: Finder tags (JSON, node schema `tags`). Base: NULL is none. Local: NULL is not known
+    // (no tags on this system, or not read yet).
+    r#"
+    ALTER TABLE base ADD COLUMN tags TEXT;
+    ALTER TABLE local ADD COLUMN tags TEXT;
+    "#,
 ];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {

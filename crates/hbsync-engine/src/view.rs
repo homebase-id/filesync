@@ -15,7 +15,7 @@ use hbsync_local::Filter;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
-use hbsync_types::{FileContent, NodeId, NodeKind, NodeState};
+use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
 
 use crate::exec::parked_name;
 use crate::reconcile::{BaseExtra, Input};
@@ -28,16 +28,27 @@ pub struct LocalNode {
     pub state: Option<NodeState>,
 }
 
-/// Reads one node's local state.
-pub fn local_node(s: &Store<'_>, node: NodeId, os: Os) -> Result<Option<LocalNode>, StateError> {
+/// Reads one node's local state. `remote_tags`: the drive's tags of the node, if it is there
+/// (what this device can't hold of them stands).
+pub fn local_node(
+    s: &Store<'_>,
+    node: NodeId,
+    os: Os,
+    remote_tags: Option<&Tags>,
+) -> Result<Option<LocalNode>, StateError> {
     let Some(row) = s.local_by_node(node)? else {
         return Ok(None);
     };
-    let state = local_state(s, &row, os)?;
+    let state = local_state(s, &row, os, remote_tags)?;
     Ok(Some(LocalNode { row, state }))
 }
 
-fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState>, StateError> {
+fn local_state(
+    s: &Store<'_>,
+    row: &LocalRow,
+    os: Os,
+    remote_tags: Option<&Tags>,
+) -> Result<Option<NodeState>, StateError> {
     let base = s.get_base(row.node)?;
     // A parked node counts as being at its original place.
     let path = parked_place(s, row)?.unwrap_or_else(|| row.path.clone());
@@ -55,12 +66,21 @@ fn local_state(s: &Store<'_>, row: &LocalRow, os: Os) -> Result<Option<NodeState
             Err(_) => return Ok(None),
         },
     };
+    // What this device can't hold of the tags is the drive's (else the agreed) (§11).
+    let reference = match remote_tags {
+        Some(t) => t.clone(),
+        None => base
+            .as_ref()
+            .map(|b| b.state.tags.clone())
+            .unwrap_or_default(),
+    };
     Ok(Some(NodeState {
         parent,
         name,
         kind: row.kind,
         // An unhashed file is reported without content; the caller defers it.
         content: local_content(row, base.as_ref()),
+        tags: Tags::fill(row.tags.as_ref(), &reference, os),
     }))
 }
 
@@ -266,7 +286,14 @@ impl Builder<'_, '_> {
 
     fn add_local(&mut self, row: LocalRow) -> Result<(), StateError> {
         let node = row.node;
-        match local_state(self.s, &row, self.os)? {
+        // The drive's tags, from the mirror row loaded already, or else read for them alone
+        // (loading it here would skip its ancestors).
+        let remote_tags = match self.input.remote.get(node) {
+            Some(r) => Some(r.tags.clone()),
+            None if self.mirror_done.contains(&node) => None,
+            None => self.s.get_mirror(node)?.map(|m| m.tags()),
+        };
+        match local_state(self.s, &row, self.os, remote_tags.as_ref())? {
             Some(state) => {
                 if state.kind == NodeKind::File && state.content.is_none() {
                     self.input.local_unhashed.insert(node);

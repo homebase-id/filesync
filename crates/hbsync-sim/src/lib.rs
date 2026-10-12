@@ -14,6 +14,10 @@
 //! [`Sim::check`] then verifies convergence, invariants, and that no file version was lost
 //! unless some client overwrote or deleted it after seeing it.
 //!
+//! Clients tag like their OS (sync semantics §11): client 0 like macOS (names and colours),
+//! 1 like Linux (names only), 2 like Windows (no tags); each client sees the tags it can't hold
+//! as the drive has them, as the engine's view does.
+//!
 //! Clients filter (sync semantics §10): every client has the built-in junk list, and odd
 //! clients start out also ignoring the name `d` (any client can toggle that). A client's filtered items are invisible to its sync, as
 //! the scanner leaves them out; convergence is judged on what each client syncs, and an
@@ -28,10 +32,12 @@ use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Require
 use hbsync_engine::tree::{Tree, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
+use hbsync_platform::Os;
 use hbsync_platform::name::check_remote_name;
+use hbsync_platform::tags::express;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Uuid, VersionTag,
+    Tag, Tags, Uuid, VersionTag,
 };
 
 /// A user action on one client's local tree. Indices pick among existing items modulo their
@@ -72,7 +78,22 @@ pub enum Action {
     },
     /// The purge: everything in Recently deleted is deleted for good.
     Purge,
+    /// The user adds a tag of [`TAGS`] to an item, or removes it, as far as the client's OS
+    /// lets them.
+    Tag {
+        node: usize,
+        tag: usize,
+    },
+    /// The user gives a tag of an item another colour (macOS).
+    Colour {
+        node: usize,
+        tag: usize,
+    },
 }
+
+/// Tags the users pick from: one no Linux client can hold, one with a newline no macOS client
+/// can hold.
+const TAGS: &[(&str, u8)] = &[("Red", 6), ("Work", 0), ("a,b", 4), ("x\ny", 2)];
 
 /// The junk name [`Action::CreateJunk`] uses.
 const JUNK: &str = "Thumbs.db";
@@ -165,6 +186,8 @@ struct Client {
     held: Vec<NodeId>,
     /// The nodes whose deletes the user confirmed, until no delete is pending for them.
     confirmed: HashSet<NodeId>,
+    /// How the client holds tags.
+    os: Os,
 }
 
 /// The simulation.
@@ -191,6 +214,12 @@ pub struct Sim {
     pub guard: Option<usize>,
     /// The first plan that deleted more than the guard allows without a confirmation.
     unguarded: Option<String>,
+    /// Tags users added (on which client, to which node), and removed, per node; and nodes
+    /// some user deleted. A tag added and never removed must be on its node in the end, unless
+    /// the node was deleted. An item that gets a new id on its client takes its tags along.
+    tags_added: BTreeSet<(usize, NodeId, String)>,
+    tags_removed: BTreeSet<(NodeId, String)>,
+    deleted: BTreeSet<NodeId>,
 }
 
 impl Sim {
@@ -214,6 +243,7 @@ impl Sim {
                     }),
                     held: Vec::new(),
                     confirmed: HashSet::new(),
+                    os: [Os::MacOs, Os::Linux, Os::Windows][i % 3],
                 })
                 .collect(),
             next_blob: 0,
@@ -227,6 +257,9 @@ impl Sim {
             trace: Vec::new(),
             guard: None,
             unguarded: None,
+            tags_added: BTreeSet::new(),
+            tags_removed: BTreeSet::new(),
+            deleted: BTreeSet::new(),
         }
     }
 
@@ -296,6 +329,38 @@ impl Sim {
             t.child_named(parent, name, except).is_none()
         };
         match action {
+            Action::Tag { node, tag } | Action::Colour { node, tag } => {
+                if all.is_empty() {
+                    return;
+                }
+                let node = all[node % all.len()];
+                let (name, colour) = TAGS[tag % TAGS.len()];
+                let os = self.clients[c].os;
+                let Some(mut state) = local.get(node).cloned() else {
+                    return;
+                };
+                let mut tags: Vec<Tag> = state.tags.iter().cloned().collect();
+                let had = tags.iter().position(|t| t.name == name);
+                match (action, had) {
+                    (Action::Colour { .. }, Some(i)) if os == Os::MacOs => {
+                        tags[i].colour = (tags[i].colour + 1) % 8;
+                    }
+                    (Action::Tag { .. }, Some(i)) => {
+                        tags.remove(i);
+                        self.tags_removed.insert((node, name.to_owned()));
+                    }
+                    (Action::Tag { .. }, None) => {
+                        let Some(tag) = express(&Tag::new(name, colour), os) else {
+                            return; // this OS can't hold it
+                        };
+                        tags.push(tag);
+                        self.tags_added.insert((c, node, name.to_owned()));
+                    }
+                    _ => return,
+                }
+                state.tags = Tags::new(tags);
+                self.clients[c].local.insert(node, state);
+            }
             Action::Restore { node } => self.restore(node),
             Action::Purge => {
                 for (_, n) in std::mem::take(&mut self.server.removed) {
@@ -374,6 +439,9 @@ impl Sim {
                 }
                 for n in self.clients[c].local.subtree(node) {
                     self.clients[c].local.remove(n);
+                    self.deleted.insert(n);
+                    self.tags_added
+                        .retain(|(at, node, _)| (*at, *node) != (c, n));
                 }
             }
         }
@@ -443,6 +511,8 @@ impl Sim {
         for n in masked(&client.local, &client.filter) {
             local_view.remove(n);
         }
+        // What the client can't hold of the tags is the drive's, as the engine's view has it.
+        see_held_tags(client, &mut local_view, &remote);
         let mut input = Input {
             base: client.base.clone(),
             local: local_view,
@@ -561,6 +631,31 @@ impl Sim {
             let client = &mut self.clients[c];
             client.parked.remove(&n);
             rekey_client(client, n, new);
+            self.retrack(c, n, new);
+        }
+    }
+
+    /// Item `node` of client `c` is `new` from now on: the tags added to it there go along.
+    fn retrack(&mut self, c: usize, node: NodeId, new: NodeId) {
+        let moved: Vec<String> = self
+            .tags_added
+            .iter()
+            .filter(|(at, n, _)| *at == c && *n == node)
+            .map(|(_, _, name)| name.clone())
+            .collect();
+        for name in moved {
+            self.tags_added.remove(&(c, node, name.clone()));
+            self.tags_added.insert((c, new, name));
+        }
+        // A removal on the item before counts for it after.
+        let removed: Vec<String> = self
+            .tags_removed
+            .iter()
+            .filter(|(n, _)| *n == node)
+            .map(|(_, name)| name.clone())
+            .collect();
+        for name in removed {
+            self.tags_removed.insert((new, name));
         }
     }
 
@@ -638,9 +733,15 @@ impl Sim {
                 }
                 client.local.remove(node);
                 client.local.insert(new_node, NodeState { name, ..state });
+                self.retrack(c, node, new_node);
                 Done
             }
-            Op::LocalMkdir { node, parent, name } => {
+            Op::LocalMkdir {
+                node,
+                parent,
+                name,
+                tags,
+            } => {
                 let client = &mut self.clients[c];
                 if client.local.contains(node) {
                     return Skip;
@@ -648,7 +749,26 @@ impl Sim {
                 if !client.local.exists(parent) || !park_occupant(client, parent, &name, None) {
                     return Retry;
                 }
-                client.local.insert(node, NodeState::folder(parent, name));
+                let tags = tags.held_by(client.os);
+                client.local.insert(
+                    node,
+                    NodeState {
+                        tags,
+                        ..NodeState::folder(parent, name)
+                    },
+                );
+                Done
+            }
+            Op::LocalTags { node, tags } => {
+                let client = &mut self.clients[c];
+                let Some(state) = client.local.get(node).cloned() else {
+                    return Skip;
+                };
+                if !unchanged(client, node) {
+                    return Skip;
+                }
+                let tags = tags.held_by(client.os);
+                client.local.insert(node, NodeState { tags, ..state });
                 Done
             }
             Op::LocalDownload {
@@ -656,6 +776,7 @@ impl Sim {
                 parent,
                 name,
                 replace,
+                tags,
             } => {
                 // The bytes fetched are the server's current ones; they must be what was planned.
                 let Some(server) = self.server.live.get(&node) else {
@@ -675,6 +796,7 @@ impl Sim {
                 {
                     return Retry;
                 }
+                let tags = tags.held_by(client.os);
                 client.local.insert(
                     node,
                     NodeState {
@@ -682,6 +804,7 @@ impl Sim {
                         name,
                         kind: NodeKind::File,
                         content,
+                        tags,
                     },
                 );
                 Done
@@ -716,6 +839,7 @@ impl Sim {
                 parent,
                 name,
                 kind,
+                tags,
             } => {
                 if self.server.live.contains_key(&node) {
                     return Done; // 4105: an earlier attempt landed
@@ -752,11 +876,20 @@ impl Sim {
                     NodeKind::Folder => None,
                     NodeKind::File => local.content,
                 };
+                // A restore keeps the tags the removed version has (the executor merges them).
+                let tags = match self.server.removed.get(&node) {
+                    Some(r) => {
+                        let base = client.base.get(node).map(|b| b.tags.clone());
+                        Tags::merge(&base.unwrap_or_default(), &tags, &r.state.tags)
+                    }
+                    None => tags,
+                };
                 let state = NodeState {
                     parent,
                     name,
                     kind,
                     content,
+                    tags,
                 };
                 let remote = RemoteRef {
                     file_id: file_id.unwrap_or_else(|| RemoteFileId(self.server.uuid())),
@@ -774,6 +907,7 @@ impl Sim {
                 parent,
                 name,
                 upload,
+                tags,
                 ..
             } => {
                 let local_content = self.clients[c].local.get(node).and_then(|s| s.content);
@@ -792,6 +926,26 @@ impl Sim {
                 }
                 server.state.parent = parent;
                 server.state.name = name;
+                server.state.tags = tags;
+                server.remote.version = version;
+                let state = server.state.clone();
+                self.clients[c].planned_remote.insert(node, state);
+                Done
+            }
+            Op::RemoteTags {
+                node,
+                expected,
+                tags,
+                ..
+            } => {
+                let version = VersionTag(self.server.uuid());
+                let Some(server) = self.server.live.get_mut(&node) else {
+                    return Skip;
+                };
+                if server.remote.version != expected {
+                    return Skip; // 4160
+                }
+                server.state.tags = tags;
                 server.remote.version = version;
                 let state = server.state.clone();
                 self.clients[c].planned_remote.insert(node, state);
@@ -843,6 +997,7 @@ impl Sim {
                 // Not synced here any more; see the executor.
                 client.base.remove(node);
                 client.extra.remove(&node);
+                self.retrack(c, node, new_node);
                 Done
             }
             Op::Forget { node, subtree } => {
@@ -958,12 +1113,16 @@ impl Sim {
             let client = &mut self.clients[c];
             client.local.remove(n);
             client.parked.remove(&n);
+            // Tags added here and not synced yet went to the trash with the item.
+            self.tags_added
+                .retain(|(at, node, _)| (*at, *node) != (c, n));
         }
         for r in released {
             let new = self.release_id();
             let client = &mut self.clients[c];
             client.parked.remove(&r);
             rekey_client(client, r, new);
+            self.retrack(c, r, new);
         }
         Done
     }
@@ -1019,7 +1178,15 @@ impl Sim {
             .local
             .get(node)
             .filter(|_| verdict(client, node).is_sync())
-            .cloned();
+            .map(|l| NodeState {
+                tags: held_tags(
+                    client,
+                    self.server.live.get(&node).map(|n| &n.state),
+                    node,
+                    &l.tags,
+                ),
+                ..l.clone()
+            });
         match (local, remote) {
             (None, None) => {
                 client.base.remove(node);
@@ -1027,7 +1194,7 @@ impl Sim {
             }
             (Some(l), Some(r)) => {
                 let agreed = Agreement::of(&l, &r, false);
-                if let Some(b) = agreed.settle(client.base.get(node).cloned(), &r) {
+                if let Some(b) = agreed.settle(client.base.get(node).cloned(), &l, &r) {
                     if agreed.content {
                         client.extra.insert(node, extra(&l, version));
                     }
@@ -1069,6 +1236,15 @@ impl Sim {
         })
     }
 
+    /// The tags (`name:colour`) of the server's item at `path` (`/`-separated), if it has one.
+    pub fn server_tags(&self, path: &str) -> Option<Vec<String>> {
+        let tree = self.server.tree();
+        let (_, state) = tree
+            .iter()
+            .find(|(id, _)| tree.path(*id).is_some_and(|p| p.join("/") == path))?;
+        Some(tag_names(&state.tags))
+    }
+
     /// Checks convergence, invariants and no data loss. Returns a description of the first
     /// failure.
     pub fn check(&self) -> Result<(), String> {
@@ -1096,6 +1272,8 @@ impl Sim {
             for n in masked(&server, &client.filter) {
                 synced.remove(n);
             }
+            // The tags as the client sees them.
+            see_held_tags(client, &mut visible, &server);
             let server_view = view(&synced);
             let local_view = view(&visible);
             if local_view != server_view {
@@ -1154,6 +1332,15 @@ impl Sim {
             .collect();
         if !lost.is_empty() {
             return Err(format!("lost blobs {lost:?}; present {present:?}"));
+        }
+        for (_, node, name) in &self.tags_added {
+            if let Some(s) = server.get(*node)
+                && !self.tags_removed.contains(&(*node, name.clone()))
+                && !self.deleted.contains(node)
+                && s.tags.get(name).is_none()
+            {
+                return Err(format!("lost tag {name:?} of {node:?}: {:?}", s.tags));
+            }
         }
         Ok(())
     }
@@ -1279,6 +1466,46 @@ fn rekey(tree: &mut Tree, node: NodeId, new: NodeId) {
     }
 }
 
+/// The tags a client sees on its item `node` that holds `read` on disk: what its OS can't hold
+/// comes from the drive (`remote`), else the base (the engine's view does the same).
+fn held_tags(client: &Client, remote: Option<&NodeState>, node: NodeId, read: &Tags) -> Tags {
+    let reference = remote
+        .or(client.base.get(node))
+        .map(|s| s.tags.clone())
+        .unwrap_or_default();
+    let read = (client.os != Os::Windows).then_some(read);
+    Tags::fill(read, &reference, client.os)
+}
+
+/// Gives each item of `view` (a client's local tree) the tags the client sees on it.
+fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
+    let changed: Vec<(NodeId, NodeState)> = view
+        .iter()
+        .filter_map(|(n, state)| {
+            let tags = held_tags(client, remote.get(n), n, &state.tags);
+            (tags != state.tags).then(|| {
+                (
+                    n,
+                    NodeState {
+                        tags,
+                        ..state.clone()
+                    },
+                )
+            })
+        })
+        .collect();
+    for (n, state) in changed {
+        view.insert(n, state);
+    }
+}
+
+/// Tags as `name:colour`.
+fn tag_names(tags: &Tags) -> Vec<String> {
+    tags.iter()
+        .map(|t| format!("{}:{}", t.name, t.colour))
+        .collect()
+}
+
 /// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
 /// from, plus its own writes since), as the executor checks them.
 fn ready(client: &Client, op: &Op) -> bool {
@@ -1331,8 +1558,9 @@ fn view_with(tree: &Tree, blobs: &HashMap<ContentHash, u64>) -> Vec<String> {
                     None => c.hash.to_hex()[..8].to_owned(),
                 })
                 .unwrap_or_default();
+            let tags = tag_names(&s.tags);
             format!(
-                "{path} {:?} {content} {}",
+                "{path} {:?} {content} {} {tags:?}",
                 s.kind,
                 &id.0.simple().to_string()[24..]
             )

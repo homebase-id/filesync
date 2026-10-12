@@ -4,7 +4,7 @@ use hbsync_engine::{BaseExtra, Conflict, Input, Op, Options, reconcile};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Uuid, VersionTag,
+    Tags, Uuid, VersionTag,
 };
 
 fn h(data: &str) -> ContentHash {
@@ -124,10 +124,12 @@ fn kinds(ops: &[Op]) -> Vec<&'static str> {
             Op::LocalMove { .. } => "move",
             Op::LocalDownload { replace: false, .. } => "download",
             Op::LocalDownload { replace: true, .. } => "download-replace",
+            Op::LocalTags { .. } => "local-tags",
             Op::LocalTrash { .. } => "trash",
             Op::RemoteCreate { .. } => "create",
             Op::RemoteUpdate { upload: true, .. } => "upload",
             Op::RemoteUpdate { upload: false, .. } => "rename",
+            Op::RemoteTags { .. } => "remote-tags",
             Op::RemoteDelete { .. } => "delete",
             Op::Settle { .. } => "settle",
             Op::LocalDetach { .. } => "detach",
@@ -178,13 +180,15 @@ fn edits_and_moves_propagate() {
         expected: w.version(a),
         parent: ROOT,
         name: "a".into(),
-        upload: true
+        upload: true,
+        tags: Tags::default(),
     }));
     assert!(plan.ops.contains(&Op::LocalDownload {
         node: b,
         parent: ROOT,
         name: "b".into(),
-        replace: true
+        replace: true,
+        tags: Tags::default(),
     }));
     assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, upload: false, name, .. } if *node == c && name == "c-renamed")));
     assert!(plan.ops.contains(&Op::LocalMove {
@@ -245,7 +249,8 @@ fn edit_edit_keeps_both_versions() {
         node: *new_node,
         parent: ROOT,
         name: name.clone(),
-        kind: NodeKind::File
+        kind: NodeKind::File,
+        tags: Tags::default(),
     }));
     assert_eq!(
         plan.conflicts,
@@ -308,13 +313,15 @@ fn edit_beats_delete_both_ways() {
         node: x,
         parent: ROOT,
         name: "x".into(),
-        replace: false
+        replace: false,
+        tags: Tags::default(),
     }));
     assert!(plan.ops.contains(&Op::RemoteCreate {
         node: y,
         parent: ROOT,
         name: "y".into(),
-        kind: NodeKind::File
+        kind: NodeKind::File,
+        tags: Tags::default(),
     }));
     assert!(!plan.ops.iter().any(Op::is_delete));
 }
@@ -334,13 +341,15 @@ fn live_child_resurrects_a_deleted_folder() {
     assert!(plan.ops.contains(&Op::LocalMkdir {
         node: d,
         parent: ROOT,
-        name: "d".into()
+        name: "d".into(),
+        tags: Tags::default(),
     }));
     assert!(plan.ops.contains(&Op::LocalDownload {
         node: new,
         parent: d,
         name: "new".into(),
-        replace: false
+        replace: false,
+        tags: Tags::default(),
     }));
     // The other child's delete still goes through.
     assert!(
@@ -413,14 +422,16 @@ fn name_clash_lower_id_keeps_the_name() {
                 node: high,
                 parent: ROOT,
                 name: "X (conflict 1).TXT".into(),
-                replace: false
+                replace: false,
+                tags: Tags::default(),
             }));
         } else {
             assert!(plan.ops.contains(&Op::RemoteCreate {
                 node: high,
                 parent: ROOT,
                 name: "x (conflict 1).txt".into(),
-                kind: NodeKind::File
+                kind: NodeKind::File,
+                tags: Tags::default(),
             }));
             assert!(plan.ops.contains(&Op::LocalMove {
                 node: high,
@@ -557,7 +568,8 @@ fn orphan_with_unknown_parent_moves_to_root_when_mirror_is_complete() {
     assert!(plan.ops.contains(&Op::LocalMkdir {
         node: child,
         parent: ROOT,
-        name: "kept".into()
+        name: "kept".into(),
+        tags: Tags::default(),
     }));
     assert_eq!(plan.conflicts, [Conflict::Orphan { node: child }]);
 }
@@ -616,7 +628,8 @@ fn a_file_still_being_written_keeps_its_name() {
         node: first,
         parent: ROOT,
         name: "Report (conflict 1).txt".into(),
-        replace: false
+        replace: false,
+        tags: Tags::default(),
     }));
 }
 
@@ -720,6 +733,7 @@ fn a_local_edit_of_a_file_moved_into_an_ignored_folder_stays_as_a_new_file() {
         parent: ROOT,
         name: "a.txt".into(),
         kind: NodeKind::File,
+        tags: Tags::default(),
     }));
 }
 
@@ -767,6 +781,7 @@ fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
         parent: new_node,
         name: "new.txt".into(),
         kind: NodeKind::File,
+        tags: Tags::default(),
     }));
     assert!(
         plan.ops

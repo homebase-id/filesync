@@ -25,14 +25,14 @@ use std::time::{Duration, Instant};
 use hbsync_fileio::{FileIoError, HashAlgorithm};
 use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
-use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops};
+use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{
     BaseRow, LocalRow, MirrorFile, MirrorRow, RemovedRow, StateDb, StateError, Store,
 };
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::{NodeContent, Removal};
-use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef};
+use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
 
 use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
@@ -184,6 +184,7 @@ enum Ctx {
         current: Option<LocalRow>,
         /// The node's, given to the file once in place.
         created_ms: Option<i64>,
+        tags: Tags,
     },
     Upload {
         node: NodeId,
@@ -587,16 +588,23 @@ impl<'a> Executor<'a> {
                 new_node,
                 name,
             } => self.fork(*node, *new_node, name),
-            Op::LocalMkdir { node, parent, name } => self.mkdir(*node, *parent, name),
+            Op::LocalMkdir {
+                node,
+                parent,
+                name,
+                tags,
+            } => self.mkdir(*node, *parent, name, tags),
             Op::LocalMove { node, parent, name } => self.local_move(*node, *parent, name),
             Op::LocalDownload { .. } => unreachable!("transfers run through flush"),
+            Op::LocalTags { node, tags } => self.local_tags(*node, tags),
             Op::LocalTrash { node, subtree } => self.trash(*node, subtree, false),
             Op::RemoteCreate {
                 node,
                 parent,
                 name,
                 kind,
-            } => self.create_folder(*node, *parent, name, *kind),
+                tags,
+            } => self.create_folder(*node, *parent, name, *kind, tags),
             Op::RemoteUpdate {
                 node,
                 file_id,
@@ -604,10 +612,17 @@ impl<'a> Executor<'a> {
                 parent,
                 name,
                 upload,
+                tags,
             } => {
                 debug_assert!(!upload, "uploads run through flush");
-                self.rename_remote(*node, *file_id, *expected, *parent, name)
+                self.rename_remote(*node, *file_id, *expected, Some((*parent, name)), tags)
             }
+            Op::RemoteTags {
+                node,
+                file_id,
+                expected,
+                tags,
+            } => self.rename_remote(*node, *file_id, *expected, None, tags),
             Op::RemoteDelete {
                 node,
                 file_id,
@@ -795,7 +810,7 @@ impl<'a> Executor<'a> {
         })
     }
 
-    fn mkdir(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
+    fn mkdir(&mut self, node: NodeId, parent: NodeId, name: &str, tags: &Tags) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
             return Ok(Outcome::Skip("already local".into()));
         }
@@ -821,6 +836,7 @@ impl<'a> Executor<'a> {
                 return Ok(io_outcome(e));
             }
         }
+        let tags = write_tags(&abs, tags);
         // Only shown, never synced on: a file system that won't take it is no failure.
         if let Some(ct) = created_ms {
             let _ = ops::set_created(&abs, ct);
@@ -837,8 +853,44 @@ impl<'a> Executor<'a> {
                 fingerprint: meta.fingerprint(),
                 executable: None,
                 hash: None,
+                tags,
             })
         })
+    }
+
+    /// Gives the local item of `node` these tags, if it is still what the plan saw.
+    fn local_tags(&mut self, node: NodeId, tags: &Tags) -> Step {
+        let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
+            return Ok(Outcome::Skip("gone".into()));
+        };
+        let abs = self.abs(&row.path);
+        // A file's guard takes in the change time a tag write moves; a folder's is its file id
+        // only, so its tags must still be what was read.
+        let folder_retagged =
+            row.kind == NodeKind::Folder && row.tags.is_some() && tags::read(&abs) != row.tags;
+        if !self.on_disk_unchanged(&row) || folder_retagged {
+            return Ok(rescan(&mut self.report, &row.path));
+        }
+        let read = write_tags(&abs, tags);
+        // Writing tags moves the change time only (a folder's mtime moves with its children).
+        // If anything else moved, the item changed meanwhile: the old row stays, and the
+        // rescan looks at it.
+        let meta = match hbsync_platform::stat(&abs) {
+            Ok(m) => m,
+            Err(e) => return Ok(io_outcome(e)),
+        };
+        let fp = row.fingerprint;
+        let same = meta.file_id == fp.file_id
+            && (row.kind == NodeKind::Folder || fp.same_after_rename(&meta));
+        if !same {
+            return Ok(rescan(&mut self.report, &row.path));
+        }
+        let row = LocalRow {
+            fingerprint: meta.fingerprint(),
+            tags: read,
+            ..row
+        };
+        self.finish(&[(node, false)], |s| s.put_local(&row))
     }
 
     fn local_move(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
@@ -886,19 +938,22 @@ impl<'a> Executor<'a> {
                 parent,
                 name,
                 replace,
-            } => self.prepare_download(*node, *parent, name, *replace),
+                tags,
+            } => self.prepare_download(*node, *parent, name, *replace, tags),
             Op::RemoteCreate {
                 node,
                 parent,
                 name,
                 kind,
-            } => self.prepare_upload(*node, None, *parent, name, *kind),
+                tags,
+            } => self.prepare_upload(*node, None, *parent, name, *kind, tags),
             Op::RemoteUpdate {
                 node,
                 file_id,
                 expected,
                 parent,
                 name,
+                tags,
                 ..
             } => self.prepare_upload(
                 *node,
@@ -906,6 +961,7 @@ impl<'a> Executor<'a> {
                 *parent,
                 name,
                 NodeKind::File,
+                tags,
             ),
             _ => Err(Outcome::Skip("not a transfer".into())),
         }
@@ -917,6 +973,7 @@ impl<'a> Executor<'a> {
         parent: NodeId,
         name: &str,
         replace: bool,
+        tags: &Tags,
     ) -> Step<(Job, Ctx)> {
         let (mirror, current) = self
             .db
@@ -956,6 +1013,7 @@ impl<'a> Executor<'a> {
                 target,
                 current,
                 created_ms,
+                tags: tags.clone(),
             },
         ))
     }
@@ -967,6 +1025,7 @@ impl<'a> Executor<'a> {
         parent: NodeId,
         name: &str,
         kind: NodeKind,
+        tags: &Tags,
     ) -> Step<(Job, Ctx)> {
         let (row, mirror, base) = self.db.read(|s| {
             Ok((
@@ -1000,10 +1059,12 @@ impl<'a> Executor<'a> {
         {
             return Err(self.detach(node, NodeId::new()).unwrap_or_else(|o| o));
         }
+        let mut tags = tags.clone();
         let target = match existing {
             // In Recently deleted: restored with these bytes (an edit wins over the delete).
             None if let Some(r) = &removed => {
                 content.unknown = feed::unknown_keys(&r.row);
+                tags = restored_tags(base.as_ref(), &tags, r);
                 Some(r.row.remote_ref())
             }
             // A new node: the file's own creation time, kept from then on.
@@ -1023,6 +1084,7 @@ impl<'a> Executor<'a> {
                 Some(RemoteRef { file_id, version })
             }
         };
+        content.set_tags(&tags);
         let job = Job::Upload {
             meta: NodeMeta {
                 node,
@@ -1061,9 +1123,10 @@ impl<'a> Executor<'a> {
                     target,
                     current,
                     created_ms,
+                    tags,
                 },
                 JobResult::Downloaded { file, local_hash },
-            ) => self.place_download(node, &target, current, created_ms, file, local_hash),
+            ) => self.place_download(node, &target, current, created_ms, &tags, file, local_hash),
             (
                 Ctx::Upload {
                     node,
@@ -1087,12 +1150,14 @@ impl<'a> Executor<'a> {
 
     /// Puts a verified download into place: over the old version (if it's still what the plan
     /// saw) or as a new file; an old version at another path goes to the trash first.
+    #[allow(clippy::too_many_arguments)]
     fn place_download(
         &mut self,
         node: NodeId,
         target: &RelPath,
         current: Option<LocalRow>,
         created_ms: Option<i64>,
+        tags: &Tags,
         done: hbsync_fileio::CompletedFile,
         local_hash: hbsync_types::ContentHash,
     ) -> Step {
@@ -1104,6 +1169,9 @@ impl<'a> Executor<'a> {
                 "local item changed during the transfer".into(),
             ));
         }
+        // The tags go on before the file is in place: a scan in between would read none, and
+        // take that for the user removing them.
+        let tags = write_tags(done.path(), tags);
         let placed = match &current {
             Some(row) if &row.path == target => {
                 done.persist_over(&self.abs(target), &row.fingerprint, created_ms)
@@ -1149,6 +1217,7 @@ impl<'a> Executor<'a> {
                 fingerprint: meta.fingerprint(),
                 executable: meta.executable,
                 hash: Some(local_hash),
+                tags,
             })
         })
     }
@@ -1300,7 +1369,14 @@ impl<'a> Executor<'a> {
 
     // ---- remote operations ----
 
-    fn create_folder(&mut self, node: NodeId, parent: NodeId, name: &str, kind: NodeKind) -> Step {
+    fn create_folder(
+        &mut self,
+        node: NodeId,
+        parent: NodeId,
+        name: &str,
+        kind: NodeKind,
+        tags: &Tags,
+    ) -> Step {
         debug_assert_eq!(kind, NodeKind::Folder, "file creates run through flush");
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::Skip("gone locally".into()));
@@ -1312,8 +1388,15 @@ impl<'a> Executor<'a> {
         let mut content = NodeContent::folder(name);
         match &removed {
             // In Recently deleted: restored, keeping its keys (`ct`).
-            Some(r) => content.unknown = feed::unknown_keys(&r.row),
-            None => content.set_created_ms(ops::created_ms(&self.abs(&row.path))),
+            Some(r) => {
+                content.unknown = feed::unknown_keys(&r.row);
+                let base = self.db.read(|s| s.get_base(node))?;
+                content.set_tags(&restored_tags(base.as_ref(), tags, r));
+            }
+            None => {
+                content.set_created_ms(ops::created_ms(&self.abs(&row.path)));
+                content.set_tags(tags);
+            }
         }
         let new = NodeMeta {
             node,
@@ -1336,19 +1419,22 @@ impl<'a> Executor<'a> {
         })
     }
 
-    /// A metadata-only update: move or rename, keeping the payload.
+    /// A metadata-only update: move or rename (to `place`; `None` keeps it) and the tags,
+    /// keeping the payload.
     fn rename_remote(
         &mut self,
         node: NodeId,
         file_id: hbsync_types::RemoteFileId,
         expected: hbsync_types::VersionTag,
-        parent: NodeId,
-        name: &str,
+        place: Option<(NodeId, &str)>,
+        tags: &Tags,
     ) -> Step {
         let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
             return Ok(Outcome::Skip("gone remotely".into()));
         };
+        let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
         let mut content = content_of(&mirror, name);
+        content.set_tags(tags);
         // A node from before creation times, or from a client that sends none.
         if content.created_ms().is_none()
             && let Some(row) = self.db.read(|s| s.local_by_node(node))?
@@ -1423,8 +1509,8 @@ impl<'a> Executor<'a> {
 /// a value when both sides hold it). `content_hint`: the operation just made the local and
 /// remote bytes equal (a transfer), even if their hashes use other algorithms.
 pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result<(), StateError> {
-    let local = view::local_node(s, node, os)?;
     let mirror = s.get_mirror(node)?;
+    let local = view::local_node(s, node, os, mirror.as_ref().map(|m| m.tags()).as_ref())?;
     let base = s.get_base(node)?;
     let online_only = base
         .as_ref()
@@ -1450,7 +1536,7 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
         return Ok(());
     };
     let agreed = Agreement::of(&l, &r, content_hint);
-    let Some(state) = agreed.settle(base.as_ref().map(|b| b.state.clone()), &r) else {
+    let Some(state) = agreed.settle(base.as_ref().map(|b| b.state.clone()), &l, &r) else {
         return Ok(());
     };
     let mut row = base.unwrap_or(BaseRow {
@@ -1511,6 +1597,20 @@ pub(crate) fn content_of(row: &MirrorRow, name: &str) -> NodeContent {
     };
     content.unknown = feed::unknown_keys(row);
     content
+}
+
+/// Gives the item at `path` these tags and returns what it holds now. Tags are no reason to
+/// fail an operation: where they can't be written (a read-only item, a full attribute block),
+/// they read as not known, and the drive's stand (§11).
+fn write_tags(path: &Path, tags: &Tags) -> Option<Tags> {
+    tags::write(path, tags).ok().flatten()
+}
+
+/// The tags of a node this device restores from Recently deleted: `ours` merged with the
+/// removed version's, which may hold tags this device never saw (§11).
+fn restored_tags(base: Option<&BaseRow>, ours: &Tags, removed: &RemovedRow) -> Tags {
+    let base = base.map(|b| b.state.tags.clone()).unwrap_or_default();
+    Tags::merge(&base, ours, &removed.row.tags())
 }
 
 /// The node whose delete takes `node` along: its topmost synced ancestor that is gone here

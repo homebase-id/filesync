@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::schema::{NodeContent, Removal};
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef};
+use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags};
 
 use crate::{NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
 
@@ -401,6 +401,7 @@ fn guarded_updates(b: &Bench) -> Outcome {
 fn content_round_trips(b: &Bench) -> Outcome {
     let mut content = NodeContent::file("Résumé – 履歴書 🗂.txt", -1_000, 4, false);
     content.set_created_ms(Some(-2_000));
+    content.set_tags(&Tags::new([Tag::new("Red", 6), Tag::new("Работа 🗂", 0)]));
     content
         .unknown
         .insert("future".into(), serde_json::json!({"k": [1, 2]}));
@@ -413,6 +414,11 @@ fn content_round_trips(b: &Bench) -> Outcome {
         return Err("not live".into());
     };
     ensure!(back == content, "content came back as {back:?}");
+    ensure!(
+        back.tags() == content.tags(),
+        "tags came back as {:?}",
+        back.tags()
+    );
     Ok(())
 }
 

@@ -2,7 +2,8 @@
 //!
 //! Spec: `docs/spec/sync-semantics.md`. Steps:
 //! 1. classify each node's local and remote change against the base (§2);
-//! 2. merge per node into a target state (§4), forking a conflict copy for edit/edit (§5);
+//! 2. merge per node into a target state (§4), forking a conflict copy for edit/edit (§5),
+//!    and the tags three-way on their own (§11);
 //! 3. repair the merged tree: orphans, cycles, duplicate names (§6);
 //! 4. diff the merged tree against each side into operations, ordered so parents exist
 //!    before children and deletes run bottom-up (§8);
@@ -21,7 +22,8 @@ use hbsync_local::Filter;
 
 use hbsync_platform::name::name_key;
 use hbsync_types::{
-    ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
+    ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Tags,
+    VersionTag,
 };
 
 use crate::mask::Masks;
@@ -114,6 +116,7 @@ pub enum Op {
         node: NodeId,
         parent: NodeId,
         name: String,
+        tags: Tags,
     },
     LocalMove {
         node: NodeId,
@@ -127,7 +130,10 @@ pub enum Op {
         parent: NodeId,
         name: String,
         replace: bool,
+        tags: Tags,
     },
+    /// Give the local item of `node` these tags (only the tags changed).
+    LocalTags { node: NodeId, tags: Tags },
     /// Move the local item and everything below it to the sync root's trash. `subtree` is
     /// every node the plan expects there (sorted, `node` included): if the folder holds
     /// anything else by the time this runs, it is not trashed.
@@ -138,8 +144,10 @@ pub enum Op {
         parent: NodeId,
         name: String,
         kind: NodeKind,
+        tags: Tags,
     },
-    /// Rewrite location and, with `upload`, the content, if the remote is still at `expected`.
+    /// Rewrite location, tags and, with `upload`, the content, if the remote is still at
+    /// `expected`.
     RemoteUpdate {
         node: NodeId,
         file_id: RemoteFileId,
@@ -147,6 +155,14 @@ pub enum Op {
         parent: NodeId,
         name: String,
         upload: bool,
+        tags: Tags,
+    },
+    /// Rewrite only the tags, if the remote is still at `expected`.
+    RemoteTags {
+        node: NodeId,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+        tags: Tags,
     },
     RemoteDelete {
         node: NodeId,
@@ -173,9 +189,11 @@ impl Op {
             | Op::LocalMkdir { node, .. }
             | Op::LocalMove { node, .. }
             | Op::LocalDownload { node, .. }
+            | Op::LocalTags { node, .. }
             | Op::LocalTrash { node, .. }
             | Op::RemoteCreate { node, .. }
             | Op::RemoteUpdate { node, .. }
+            | Op::RemoteTags { node, .. }
             | Op::RemoteDelete { node, .. }
             | Op::Settle { node }
             | Op::LocalDetach { node, .. }
@@ -209,7 +227,10 @@ impl Op {
     pub fn touches_remote(&self) -> bool {
         matches!(
             self,
-            Op::RemoteCreate { .. } | Op::RemoteUpdate { .. } | Op::RemoteDelete { .. }
+            Op::RemoteCreate { .. }
+                | Op::RemoteUpdate { .. }
+                | Op::RemoteTags { .. }
+                | Op::RemoteDelete { .. }
         )
     }
 
@@ -265,6 +286,7 @@ pub enum Requirement {
 pub struct Agreement {
     pub place: bool,
     pub content: bool,
+    pub tags: bool,
 }
 
 impl Agreement {
@@ -279,14 +301,25 @@ impl Agreement {
         Agreement {
             place: local.same_place(remote),
             content,
+            tags: local.tags == remote.tags,
         }
     }
 
     /// The base after settling: the agreed attributes are taken from `remote`. A node without a
-    /// base gets one only when both sides agree on everything.
-    pub fn settle(self, base: Option<NodeState>, remote: &NodeState) -> Option<NodeState> {
+    /// base gets one when both sides agree on place and content (bytes proven equal across
+    /// hash algorithms can't be proven again later), with the tags both sides have: the merge
+    /// then brings each side the other's (§11).
+    pub fn settle(
+        self,
+        base: Option<NodeState>,
+        local: &NodeState,
+        remote: &NodeState,
+    ) -> Option<NodeState> {
         let Some(mut b) = base else {
-            return (self.place && self.content).then(|| remote.clone());
+            return (self.place && self.content).then(|| NodeState {
+                tags: local.tags.intersection(&remote.tags),
+                ..remote.clone()
+            });
         };
         if self.place {
             b.parent = remote.parent;
@@ -294,6 +327,9 @@ impl Agreement {
         }
         if self.content {
             b.content = remote.content;
+        }
+        if self.tags {
+            b.tags = remote.tags.clone();
         }
         Some(b)
     }
@@ -573,12 +609,25 @@ impl<'a> Reconciler<'a> {
             }
         };
         // A masked live child keeps its folder (§10): never delete what this device can't see.
-        let (target, origin) = match (target, r) {
+        let (mut target, origin) = match (target, r) {
             (None, Some(r)) if self.masks.keep_alive.contains(&node) => {
                 (Some(r.clone()), Origin::Base)
             }
             (target, _) => (target, origin),
         };
+        // Tags merge on their own, whatever else changed (§11); a merge too large for the
+        // drive leaves the drive's.
+        if let (Some(t), Some(l), Some(r)) = (&mut target, &l, r)
+            && !self.masks.masked.contains(&node)
+        {
+            let none = Tags::default();
+            let merged = Tags::merge(b.map_or(&none, |b| &b.tags), &l.tags, &r.tags);
+            t.tags = if merged.fits() {
+                merged
+            } else {
+                r.tags.clone()
+            };
+        }
         self.scope.insert(node);
         self.origin.insert(node, origin);
         match target {
@@ -634,6 +683,7 @@ impl<'a> Reconciler<'a> {
                     name: conflict_copy_name(&l.name, &self.opts.device, &self.opts.date),
                     kind: NodeKind::File,
                     content: l.content,
+                    tags: l.tags.clone(),
                 };
                 self.merged.insert(copy, copy_state);
                 self.scope.insert(copy);
@@ -888,6 +938,7 @@ impl<'a> Reconciler<'a> {
                                 parent: t.parent,
                                 name: t.name.clone(),
                                 kind: t.kind,
+                                tags: t.tags.clone(),
                             },
                         ));
                         remote_ops = true;
@@ -899,23 +950,33 @@ impl<'a> Reconciler<'a> {
                     let upload = self.origin.get(&node) == Some(&Origin::Local)
                         && t.kind == NodeKind::File
                         && !self.remote_has(r, t);
-                    if (!t.same_place(r) || upload)
-                        && let Some(rr) = i.remote_refs.get(&node)
-                    {
-                        let op = Op::RemoteUpdate {
-                            node,
-                            file_id: rr.file_id,
-                            expected: rr.version,
-                            parent: t.parent,
-                            name: t.name.clone(),
-                            upload,
-                        };
-                        if upload {
-                            content.push(op)
-                        } else {
-                            moves.push(op)
+                    let retag = t.tags != r.tags;
+                    if let Some(rr) = i.remote_refs.get(&node) {
+                        if !t.same_place(r) || upload {
+                            let op = Op::RemoteUpdate {
+                                node,
+                                file_id: rr.file_id,
+                                expected: rr.version,
+                                parent: t.parent,
+                                name: t.name.clone(),
+                                upload,
+                                tags: t.tags.clone(),
+                            };
+                            if upload {
+                                content.push(op)
+                            } else {
+                                moves.push(op)
+                            }
+                            remote_ops = true;
+                        } else if retag {
+                            content.push(Op::RemoteTags {
+                                node,
+                                file_id: rr.file_id,
+                                expected: rr.version,
+                                tags: t.tags.clone(),
+                            });
+                            remote_ops = true;
                         }
-                        remote_ops = true;
                     }
                 }
                 (None, None) => {}
@@ -944,6 +1005,7 @@ impl<'a> Reconciler<'a> {
                                     node,
                                     parent: t.parent,
                                     name: t.name.clone(),
+                                    tags: t.tags.clone(),
                                 },
                             ));
                             local_ops = true;
@@ -953,6 +1015,7 @@ impl<'a> Reconciler<'a> {
                                 parent: t.parent,
                                 name: t.name.clone(),
                                 replace: false,
+                                tags: t.tags.clone(),
                             });
                             local_ops = true;
                         }
@@ -968,15 +1031,25 @@ impl<'a> Reconciler<'a> {
                                 parent: t.parent,
                                 name: t.name.clone(),
                                 replace: true,
+                                tags: t.tags.clone(),
                             });
                             local_ops = true;
-                        } else if !t.same_place(l) {
-                            moves.push(Op::LocalMove {
-                                node,
-                                parent: t.parent,
-                                name: t.name.clone(),
-                            });
-                            local_ops = true;
+                        } else {
+                            if !t.same_place(l) {
+                                moves.push(Op::LocalMove {
+                                    node,
+                                    parent: t.parent,
+                                    name: t.name.clone(),
+                                });
+                                local_ops = true;
+                            }
+                            if t.tags != l.tags {
+                                content.push(Op::LocalTags {
+                                    node,
+                                    tags: t.tags.clone(),
+                                });
+                                local_ops = true;
+                            }
                         }
                     }
                     (None, None) => {}

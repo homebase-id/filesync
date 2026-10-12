@@ -7,7 +7,9 @@
 //!    hash shows up at a new path is a move and keeps its node id; everything else new gets a
 //!    fresh node id.
 //! 3. **Hashing** only for files whose fingerprint changed (never at start for unchanged files).
-//! 4. **One transaction** updates the `local` rows and marks every node whose local state changed
+//! 4. **Tags** are read with the metadata of every new or changed item (a tag change moves the
+//!    change time).
+//! 5. **One transaction** updates the `local` rows and marks every node whose local state changed
 //!    as dirty.
 
 use std::collections::HashMap;
@@ -15,9 +17,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hbsync_fileio::{FileIoError, HashAlgorithm, hash_file};
-use hbsync_platform::{EntryKind, FileId, FsFamily, LocalMeta, RelPath};
+use hbsync_platform::{EntryKind, FileId, FsFamily, LocalMeta, RelPath, tags};
 use hbsync_state::{LocalRow, StateDb, StateError};
-use hbsync_types::{ContentHash, NodeId, NodeKind};
+use hbsync_types::{ContentHash, NodeId, NodeKind, Tags};
 
 use crate::filter::Filter;
 use crate::walk::{SkipReason, WalkEvent, Walker};
@@ -371,6 +373,24 @@ fn resolve(
             }
         };
 
+    // A row for what the walk found at `path`, with its tags (carried over from `old` when
+    // they can't have changed or can't be read now), and whether its tags changed.
+    let row_from = |path: &RelPath,
+                    meta: &LocalMeta,
+                    hash: Option<ContentHash>,
+                    node: NodeId,
+                    old: Option<&LocalRow>| {
+        let tags = match old {
+            // A tag write moves the change time; inside a moved folder, nothing does.
+            Some(o) if o.tags.is_some() && o.fingerprint.ctime_ns == meta.ctime_ns => {
+                o.tags.clone()
+            }
+            _ => tags::read(&path.to_native(root)).or_else(|| old.and_then(|o| o.tags.clone())),
+        };
+        let changed = old.is_some_and(|o| tags_changed(&o.tags, &tags));
+        (row_from(path, node, meta, hash, tags), changed)
+    };
+
     // Changed in place. A kind change (file ↔ folder) is a delete plus a create.
     let mut removed = diff.removed;
     let mut added = diff.added;
@@ -380,7 +400,7 @@ fn resolve(
             removed.push(row);
             continue;
         }
-        let mut new = row_from(&row.path, row.node, &meta, row.hash);
+        let (mut new, tags_changed) = row_from(&row.path, &meta, row.hash, row.node, Some(&row));
         let mut content_changed = false;
         if row.kind == NodeKind::File
             && (row.fingerprint != meta.fingerprint() || row.hash.is_none())
@@ -391,7 +411,7 @@ fn resolve(
         let x_changed = row.kind == NodeKind::File
             && meta.executable.is_some()
             && meta.executable != row.executable;
-        if content_changed || x_changed {
+        if content_changed || x_changed || tags_changed {
             report.modified += 1;
             plan.dirty.push(row.node);
         }
@@ -422,7 +442,10 @@ fn resolve(
             continue;
         };
         let old = &removed[i];
-        let mut new = row_from(&path, old.node, &meta, old.hash);
+        let (mut new, tags_changed) = row_from(&path, &meta, old.hash, old.node, Some(old));
+        if tags_changed {
+            plan.dirty.push(old.node);
+        }
         if old.kind == NodeKind::File {
             let same = old.fingerprint.same_after_rename(&meta);
             // Where inode numbers get recycled, a matching id plus size and mtime is still not
@@ -505,10 +528,11 @@ fn resolve(
             matched[i] = true;
             let old = &removed[i];
             moved.push((old.clone(), path.clone()));
-            plan.put_rows.push(LocalRow {
-                hash,
-                ..row_from(&path, old.node, &meta, None)
-            });
+            let (new, tags_changed) = row_from(&path, &meta, hash, old.node, Some(old));
+            if tags_changed {
+                plan.dirty.push(old.node);
+            }
+            plan.put_rows.push(new);
             continue;
         }
         let node = NodeId::new();
@@ -518,10 +542,8 @@ fn resolve(
         }
         plan.dirty.push(node);
         new_nodes.push((path.clone(), node));
-        plan.put_rows.push(LocalRow {
-            hash,
-            ..row_from(&path, node, &meta, None)
-        });
+        plan.put_rows
+            .push(row_from(&path, &meta, hash, node, None).0);
     }
 
     // Unmatched vanished rows are local deletes.
@@ -568,7 +590,23 @@ fn parent_node(
     db.read(|s| s.local_node_at(&parent))
 }
 
-fn row_from(path: &RelPath, node: NodeId, meta: &LocalMeta, hash: Option<ContentHash>) -> LocalRow {
+/// Whether tags read as `new` differ from `old`. No tags where none were known yet (a row from
+/// before tags) aren't a change. Tags that can't be read now are the ones known before, so
+/// that removing every tag later is still seen.
+fn tags_changed(old: &Option<Tags>, new: &Option<Tags>) -> bool {
+    match (old, new) {
+        (None, new) => new.as_ref().is_some_and(|t| !t.is_empty()),
+        (Some(old), new) => new.as_ref() != Some(old),
+    }
+}
+
+fn row_from(
+    path: &RelPath,
+    node: NodeId,
+    meta: &LocalMeta,
+    hash: Option<ContentHash>,
+    tags: Option<Tags>,
+) -> LocalRow {
     let kind = kind_of(meta);
     LocalRow {
         path: path.clone(),
@@ -582,6 +620,39 @@ fn row_from(path: &RelPath, node: NodeId, meta: &LocalMeta, hash: Option<Content
             None
         },
         hash: if kind == NodeKind::File { hash } else { None },
+        tags,
+    }
+}
+
+/// Reads the tags of every item whose tags aren't known yet (rows from before tags were
+/// synced): done once, after the upgrade, a page at a time. Items with tags are marked dirty.
+/// Returns how many.
+pub fn read_unknown_tags(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+    const PAGE: usize = 2000;
+    if !tags::CAN_TAG {
+        return Ok(0);
+    }
+    let (mut after, mut tagged) = (0, 0);
+    loop {
+        let (rows, next) = db.read(|s| s.untagged_local_page(after, PAGE))?;
+        let read: Vec<(NodeId, Tags)> = rows
+            .iter()
+            .filter_map(|r| Some((r.node, tags::read(&r.path.to_native(root))?)))
+            .collect();
+        db.write(|s| {
+            for (node, tags) in &read {
+                s.set_local_tags(*node, tags)?;
+                if !tags.is_empty() {
+                    s.mark_dirty(*node)?;
+                }
+            }
+            Ok(())
+        })?;
+        tagged += read.iter().filter(|(_, t)| !t.is_empty()).count();
+        if rows.len() < PAGE {
+            return Ok(tagged);
+        }
+        after = next;
     }
 }
 

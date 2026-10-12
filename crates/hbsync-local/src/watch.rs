@@ -629,6 +629,54 @@ mod tests {
         Ok(())
     }
 
+    /// Tagging a file (in Finder, in Dolphin) changes nothing but an attribute: the watcher
+    /// still reports it, and the rescan reads the new tags and marks the node dirty.
+    #[test]
+    fn observer_picks_up_a_tag_change() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_platform::tags::{self, Tag, Tags};
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        fs::create_dir_all(root.join("a"))?;
+        fs::write(root.join("a/doc.txt"), b"hello")?;
+        if !tags::CAN_TAG || tags::write(&root.join("a"), &Tags::default())?.is_none() {
+            eprintln!("no tags here; skipped");
+            return Ok(());
+        }
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        let mut db = StateDb::open_in_memory()?;
+        let mut observer = LocalObserver::start(&root, opts);
+        assert!(observer.has_watcher(), "{:?}", observer.watcher_error);
+        observer.catch_up(&mut db)?;
+        let path = rp("a/doc.txt");
+        let node = db
+            .read(|s| s.get_local(&path))?
+            .map(|r| r.node)
+            .ok_or("not scanned")?;
+        db.write(|s| s.clear_dirty(node))?;
+
+        std::thread::sleep(Duration::from_millis(20)); // past a coarse clock tick
+        let red = Tags::new([Tag::new("Red", 6)]);
+        tags::write(&root.join("a/doc.txt"), &red)?;
+        let debounce = Debounce {
+            quiet: Duration::from_millis(200),
+            max_delay: Duration::from_secs(2),
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !db.read(|s| s.is_dirty(node))? && Instant::now() < deadline {
+            observer.poll(&mut db, Duration::from_secs(2), debounce)?;
+        }
+        assert!(
+            db.read(|s| s.is_dirty(node))?,
+            "the tag change went unnoticed"
+        );
+        let read = db.read(|s| s.get_local(&path))?.and_then(|r| r.tags);
+        assert_eq!(
+            read.map(|t| t.iter().map(|t| t.name.clone()).collect::<Vec<_>>()),
+            Some(vec!["Red".to_owned()])
+        );
+        Ok(())
+    }
+
     /// A journal whose position is the time since the test started.
     #[derive(Debug)]
     struct ClockJournal(Instant);

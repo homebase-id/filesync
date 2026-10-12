@@ -12,6 +12,7 @@ pub mod meta;
 pub mod name;
 pub mod ops;
 pub mod relpath;
+pub mod tags;
 pub mod winpath;
 
 pub use errors::{IoClass, classify};
