@@ -11,6 +11,7 @@ use std::time::Duration;
 use hbsync_engine::{Engine, EngineConfig, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_local::{Filter, IGNORE_FILE, STATE_DIR, state_db_path};
+use hbsync_platform::tags::{self, Tag, Tags};
 use hbsync_remote::Remote;
 use hbsync_state::StateDb;
 
@@ -226,6 +227,35 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.sync()?;
     assert_eq!(a.read(&at("Résumé 履歴書.txt"))?, b"edited while deleted");
     assert_eq!(a.tree(run), b.tree(run));
+
+    // Finder tags (Linux's here, names only) go both ways, on a file and a folder.
+    if tags::CAN_TAG && tags::write(&a.root.join(run), &Tags::default())?.is_some() {
+        let names = |c: &Client, rel: &str| -> Vec<String> {
+            tags::read(&c.root.join(rel))
+                .unwrap_or_default()
+                .iter()
+                .map(|t| t.name.clone())
+                .collect()
+        };
+        std::thread::sleep(Duration::from_millis(20)); // past a coarse clock tick
+        tags::write(
+            &a.root.join(at("doc.txt")),
+            &Tags::new([Tag::new("Red", 6)]),
+        )?;
+        tags::write(&a.root.join(at("empty")), &Tags::new([Tag::new("Work", 0)]))?;
+        a.sync()?;
+        b.sync()?;
+        assert_eq!(names(b, &at("doc.txt")), ["Red"]);
+        assert_eq!(names(b, &at("empty")), ["Work"]);
+        std::thread::sleep(Duration::from_millis(20));
+        tags::write(&b.root.join(at("doc.txt")), &Tags::default())?;
+        b.sync()?;
+        a.sync()?;
+        assert!(
+            names(a, &at("doc.txt")).is_empty(),
+            "the removal came back to a"
+        );
+    }
 
     // A restart picks up what changed while it was down.
     b.restart()?;
