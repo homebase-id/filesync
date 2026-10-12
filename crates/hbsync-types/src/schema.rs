@@ -12,6 +12,8 @@ pub const FILE_TYPE_FILE: i32 = 7102;
 pub const PAYLOAD_KEY: &str = "sync_data";
 /// The current schema version.
 pub const VERSION: u32 = 1;
+/// The content key of the creation time ([`NodeContent::created_ms`]).
+const CREATED: &str = "ct";
 
 /// The `appData.content` JSON of a node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +63,32 @@ impl NodeContent {
         serde_json::from_str(json)
     }
 
+    /// The creation time `ct`, Unix ms: the item's own when the node was created, then never
+    /// changed (an editor that saves by replacing the file would otherwise reset it each time).
+    /// It lives with the unknown keys, which every rewrite keeps; a value that isn't a number
+    /// (from some other writer) reads as none and is kept as it is.
+    pub fn created_ms(&self) -> Option<i64> {
+        Self::created_ms_in(&self.unknown)
+    }
+
+    /// [`NodeContent::created_ms`] of the unknown keys alone (as a client stores them).
+    pub fn created_ms_in(unknown: &Map<String, Value>) -> Option<i64> {
+        let ct = unknown.get(CREATED)?;
+        // An integer, or a JavaScript-style fractional ms count.
+        ct.as_i64().or_else(|| {
+            ct.as_f64()
+                .filter(|f| f.is_finite())
+                .map(|f| f.round() as i64)
+        })
+    }
+
+    pub fn set_created_ms(&mut self, created_ms: Option<i64>) {
+        match created_ms {
+            Some(ms) => self.unknown.insert(CREATED.into(), ms.into()),
+            None => self.unknown.remove(CREATED),
+        };
+    }
+
     /// A reader that finds a newer version treats the node as read-only.
     pub fn is_writable(&self) -> bool {
         self.v <= VERSION
@@ -94,6 +122,24 @@ mod tests {
                 .to_json()
                 .contains(r#""x":true"#)
         );
+    }
+
+    #[test]
+    fn creation_time_reads_leniently_and_rides_with_the_unknown_keys()
+    -> Result<(), serde_json::Error> {
+        let mut c = NodeContent::file("a", 5, 1, false);
+        c.set_created_ms(Some(1_451_606_400_123));
+        assert_eq!(
+            c.to_json(),
+            r#"{"v":1,"name":"a","mtime":5,"size":1,"ct":1451606400123}"#
+        );
+        // Another writer's fractional ms, and one that isn't a number: the node still reads.
+        let float = NodeContent::from_json(r#"{"v":1,"name":"a","ct":1451606400123.6}"#)?;
+        assert_eq!(float.created_ms(), Some(1_451_606_400_124));
+        let odd = NodeContent::from_json(r#"{"v":1,"name":"a","ct":"yesterday"}"#)?;
+        assert_eq!(odd.created_ms(), None);
+        assert!(odd.to_json().contains(r#""ct":"yesterday""#));
+        Ok(())
     }
 
     #[test]

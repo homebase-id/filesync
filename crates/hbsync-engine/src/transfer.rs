@@ -122,23 +122,27 @@ impl<W: Write> Write for MeteredWrite<'_, W> {
     }
 }
 
+/// A download: the payload of `file_id`, verified against `expected`, into the temp folder.
+#[derive(Debug, Clone)]
+pub struct Download {
+    pub node: NodeId,
+    pub file_id: RemoteFileId,
+    pub expected: ContentHash,
+    pub size: u64,
+    /// Applied to the temp file before it becomes visible.
+    pub mtime_ms: i64,
+    pub executable: Option<bool>,
+    pub tmp_dir: PathBuf,
+    /// Identifies the exact content, so a partial file is only resumed for the same bytes.
+    pub key: String,
+    /// The hash the `local` rows keep (computed too if the remote uses another algorithm).
+    pub local_algorithm: HashAlgorithm,
+}
+
 /// The byte-moving half of a transfer.
 #[derive(Debug, Clone)]
 pub enum Job {
-    Download {
-        node: NodeId,
-        file_id: RemoteFileId,
-        expected: ContentHash,
-        size: u64,
-        /// Applied to the temp file before it becomes visible.
-        mtime_ms: i64,
-        executable: Option<bool>,
-        tmp_dir: PathBuf,
-        /// Identifies the exact content, so a partial file is only resumed for the same bytes.
-        key: String,
-        /// The hash the `local` rows keep (computed too if the remote uses another algorithm).
-        local_algorithm: HashAlgorithm,
-    },
+    Download(Download),
     /// Uploads the file at `path` as `meta`: a create, or with `target` an update of that
     /// file at that version.
     Upload {
@@ -153,14 +157,14 @@ pub enum Job {
 impl Job {
     pub fn node(&self) -> NodeId {
         match self {
-            Job::Download { node, .. } => *node,
+            Job::Download(d) => d.node,
             Job::Upload { meta, .. } => meta.node,
         }
     }
 
     pub fn size(&self) -> u64 {
         match self {
-            Job::Download { size, .. } | Job::Upload { size, .. } => *size,
+            Job::Download(Download { size, .. }) | Job::Upload { size, .. } => *size,
         }
     }
 }
@@ -293,28 +297,7 @@ impl Queue {
 
 fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
     let result = match job {
-        Job::Download {
-            file_id,
-            expected,
-            size,
-            mtime_ms,
-            executable,
-            tmp_dir,
-            key,
-            local_algorithm,
-            ..
-        } => download(
-            remote,
-            *file_id,
-            *expected,
-            *size,
-            *mtime_ms,
-            *executable,
-            tmp_dir,
-            key,
-            *local_algorithm,
-            meter,
-        ),
+        Job::Download(d) => download(remote, d, meter),
         Job::Upload {
             meta,
             target,
@@ -338,37 +321,25 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
     result.unwrap_or_else(JobResult::Failed)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn download(
-    remote: &dyn Remote,
-    file_id: RemoteFileId,
-    expected: ContentHash,
-    size: u64,
-    mtime_ms: i64,
-    executable: Option<bool>,
-    tmp_dir: &std::path::Path,
-    key: &str,
-    local_algorithm: HashAlgorithm,
-    meter: &Meter<'_>,
-) -> Result<JobResult, JobError> {
-    let mut partial = PartialFile::open(tmp_dir, key, expected.algorithm)?;
+fn download(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<JobResult, JobError> {
+    let mut partial = PartialFile::open(&d.tmp_dir, &d.key, d.expected.algorithm)?;
     let offset = partial.offset();
     // Resume where an earlier attempt stopped. The size is known, so always name the range:
     // a remote needn't look it up first.
-    if offset < size {
-        let range = Some(offset..size);
+    if offset < d.size {
+        let range = Some(offset..d.size);
         let mut sink = MeteredWrite {
             inner: &mut partial,
             meter,
         };
-        remote.read(file_id, range, &mut sink)?;
+        remote.read(d.file_id, range, &mut sink)?;
     }
-    let file = partial.finish(Some(expected), Some(size))?;
-    file.set_attributes(Some(mtime_ms.saturating_mul(1_000_000)), executable)?;
-    let local_hash = if expected.algorithm == local_algorithm {
-        expected
+    let file = partial.finish(Some(d.expected), Some(d.size))?;
+    file.set_attributes(Some(d.mtime_ms.saturating_mul(1_000_000)), d.executable)?;
+    let local_hash = if d.expected.algorithm == d.local_algorithm {
+        d.expected
     } else {
-        hash_file(file.path(), local_algorithm)?.hash
+        hash_file(file.path(), d.local_algorithm)?.hash
     };
     Ok(JobResult::Downloaded { file, local_hash })
 }

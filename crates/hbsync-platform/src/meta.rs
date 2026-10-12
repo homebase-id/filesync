@@ -147,8 +147,13 @@ mod imp {
     /// Opens `path` for attribute reads only, sharing everything, without following reparse
     /// points. Works for directories too.
     pub fn open_attributes(path: &Path) -> io::Result<fs::File> {
+        open_attributes_with(path, FILE_READ_ATTRIBUTES)
+    }
+
+    /// [`open_attributes`] with another access (`FILE_WRITE_ATTRIBUTES`, to set times).
+    pub fn open_attributes_with(path: &Path, access: u32) -> io::Result<fs::File> {
         fs::OpenOptions::new()
-            .access_mode(FILE_READ_ATTRIBUTES)
+            .access_mode(access)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
@@ -202,7 +207,7 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{filetime_to_unix_ns, open_attributes};
+pub use imp::{filetime_to_unix_ns, open_attributes, open_attributes_with};
 
 #[cfg(test)]
 mod tests {

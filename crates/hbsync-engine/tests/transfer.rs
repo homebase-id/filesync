@@ -1,7 +1,7 @@
 use std::fs;
 use std::time::{Duration, Instant};
 
-use hbsync_engine::transfer::{Job, JobResult, TransferConfig, run_jobs};
+use hbsync_engine::transfer::{Download, Job, JobResult, TransferConfig, run_jobs};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_remote::{NodeMeta, Remote, Upload};
@@ -161,7 +161,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
             pace: None,
         }),
     )?;
-    let job = Job::Download {
+    let job = Job::Download(Download {
         node,
         file_id: written.file_id,
         expected: hash,
@@ -171,7 +171,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
         tmp_dir: dir.path().join("tmp"),
         key: "big".into(),
         local_algorithm: HashAlgorithm::Blake3,
-    };
+    });
     let cfg = TransferConfig {
         workers: 1,
         ..TransferConfig::default()

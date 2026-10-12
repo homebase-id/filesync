@@ -53,7 +53,8 @@ pub struct MirrorRow {
     pub kind: NodeKind,
     /// Files only.
     pub file: Option<MirrorFile>,
-    /// Content keys this client doesn't know (JSON object), written back unchanged.
+    /// Content keys sync carries without acting on them (JSON object: unknown keys and the
+    /// creation time `ct`), written back unchanged.
     pub content_extra: Option<String>,
 }
 
