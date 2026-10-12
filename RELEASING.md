@@ -87,6 +87,19 @@ The update sites are `homebase-id/filesync-release-production` and `-bleeding` (
 off). DevOps may move signing off GitHub later (their own host, `rcodesign` and `jsign`); the
 build jobs stay the same.
 
+## Links that always get the newest release
+
+Every release also carries copies without the version in their names (the `release` job), so
+these links keep working from one release to the next (chat's setup screen uses them). They
+start working with the first published final release, since pre-releases never reach the update site:
+
+| OS | https://github.com/homebase-id/filesync-release-production/releases/latest/download/… |
+|---|---|
+| macOS | `Homebase-Filesync-mac-aarch64.dmg`, `Homebase-Filesync-mac-amd64.dmg` |
+| Windows | `homebase-filesync.exe` (Conveyor's installer: it picks the MSIX; needs the signed package) |
+| Ubuntu, Debian | `homebase-filesync_amd64.deb`, `homebase-filesync_arm64.deb` |
+| Others | the releases page: https://github.com/homebase-id/filesync-release-production/releases/latest |
+
 ## Checking a release
 
 - `sha256sum -c SHA256SUMS`

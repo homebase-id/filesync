@@ -425,6 +425,20 @@ jobs:
           pattern: "{signed-site,dmg,rpm-*}"
           path: assets
           merge-multiple: true
+      # Copies without the version, so a link to releases/latest/download/<name> always finds
+      # the newest (chat's setup screen links them). The Windows installer's name has none.
+      - name: Fixed names
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        working-directory: assets
+        run: |
+          for arch in aarch64 amd64; do
+            cp "Homebase-Filesync-$VERSION-mac-$arch.dmg" "Homebase-Filesync-mac-$arch.dmg"
+          done
+          for arch in amd64 arm64; do
+            cp "homebase-filesync_${VERSION}_$arch.deb" "homebase-filesync_$arch.deb"
+          done
+          test -f homebase-filesync.exe
       - run: cd assets && sha256sum * > SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
