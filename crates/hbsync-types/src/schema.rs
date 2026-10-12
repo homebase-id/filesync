@@ -2,7 +2,9 @@
 //! Spec: `docs/spec/node-schema-v1.md`.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+
+use crate::NodeId;
 
 /// `appData.fileType` of a folder node (provisional, see the spec).
 pub const FILE_TYPE_FOLDER: i32 = 7101;
@@ -14,6 +16,19 @@ pub const PAYLOAD_KEY: &str = "sync_data";
 pub const VERSION: u32 = 1;
 /// The content key of the creation time ([`NodeContent::created_ms`]).
 const CREATED: &str = "ct";
+/// The content key of a removal ([`NodeContent::removal`]).
+pub const REMOVAL_KEY: &str = "rm";
+/// `appData.archivalStatus` of a node in Recently deleted (0 is a live one).
+pub const ARCHIVAL_REMOVED: i32 = 2;
+
+/// When a node went to Recently deleted, and the topmost node deleted with it (the node
+/// itself, or the folder whose delete took it along): restoring that one restores this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Removal {
+    /// Unix ms.
+    pub at_ms: i64,
+    pub root: NodeId,
+}
 
 /// The `appData.content` JSON of a node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +104,31 @@ impl NodeContent {
         };
     }
 
+    /// The removal `rm` of a node in Recently deleted (`archivalStatus` 2), kept with the
+    /// unknown keys like `ct`; one that doesn't read (another writer's) is none.
+    pub fn removal(&self) -> Option<Removal> {
+        let rm = self.unknown.get(REMOVAL_KEY)?;
+        let at = &rm["at"];
+        Some(Removal {
+            at_ms: at.as_i64().or_else(|| {
+                at.as_f64()
+                    .filter(|f| f.is_finite())
+                    .map(|f| f.round() as i64)
+            })?,
+            root: NodeId(rm["root"].as_str()?.parse().ok()?),
+        })
+    }
+
+    pub fn set_removal(&mut self, removal: Option<Removal>) {
+        match removal {
+            Some(r) => self.unknown.insert(
+                REMOVAL_KEY.into(),
+                json!({"at": r.at_ms, "root": r.root.0.to_string()}),
+            ),
+            None => self.unknown.remove(REMOVAL_KEY),
+        };
+    }
+
     /// A reader that finds a newer version treats the node as read-only.
     pub fn is_writable(&self) -> bool {
         self.v <= VERSION
@@ -139,6 +179,28 @@ mod tests {
         let odd = NodeContent::from_json(r#"{"v":1,"name":"a","ct":"yesterday"}"#)?;
         assert_eq!(odd.created_ms(), None);
         assert!(odd.to_json().contains(r#""ct":"yesterday""#));
+        Ok(())
+    }
+
+    #[test]
+    fn a_removal_rides_with_the_unknown_keys() -> Result<(), serde_json::Error> {
+        let mut c = NodeContent::file("a", 5, 1, false);
+        let root = NodeId::ROOT;
+        c.set_removal(Some(Removal { at_ms: 7, root }));
+        let json = c.to_json();
+        assert_eq!(
+            json,
+            r#"{"v":1,"name":"a","mtime":5,"size":1,"rm":{"at":7,"root":"2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e"}}"#
+        );
+        assert_eq!(
+            NodeContent::from_json(&json)?.removal(),
+            Some(Removal { at_ms: 7, root })
+        );
+        c.set_removal(None);
+        assert_eq!(c.removal(), None);
+        // Another writer's odd one: the node still reads, with no removal.
+        let odd = NodeContent::from_json(r#"{"v":1,"name":"a","rm":{"at":"x"}}"#)?;
+        assert_eq!(odd.removal(), None);
         Ok(())
     }
 

@@ -12,6 +12,7 @@ use hbsync_types::activity::Synced;
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
+use crate::deleted::{self, Deleted};
 use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
@@ -71,6 +72,9 @@ pub enum EngineError {
     /// The executor stopped early: access denied, or the remote unreachable.
     #[error(transparent)]
     Stopped(#[from] Stopped),
+    /// A remote call outside a sync (Recently deleted) failed.
+    #[error(transparent)]
+    Remote(#[from] RemoteError),
 }
 
 impl EngineError {
@@ -80,6 +84,7 @@ impl EngineError {
             self,
             EngineError::Stopped(Stopped::Denied(_))
                 | EngineError::Feed(FeedError::Remote(RemoteError::Denied(_)))
+                | EngineError::Remote(RemoteError::Denied(_))
         )
     }
 }
@@ -268,6 +273,36 @@ impl Engine {
     /// (a node deleted here). `None` for a node this device never had.
     pub fn path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
         self.db.read(|s| activity::path_of(s, node))
+    }
+
+    /// Recently deleted, newest first.
+    pub fn recently_deleted(&mut self, limit: usize) -> Result<Vec<Deleted>, StateError> {
+        deleted::list(&mut self.db, limit)
+    }
+
+    /// Restores these items of Recently deleted (each with what was deleted with it); the
+    /// next sync brings them to this folder. Returns how many items came back.
+    pub fn restore(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        let mut restored = 0;
+        for &node in nodes {
+            restored += deleted::restore(&mut self.db, self.remote.as_ref(), node)?;
+        }
+        Ok(restored)
+    }
+
+    /// Deletes these items of Recently deleted for good (all of them with `None`).
+    pub fn empty_deleted(&mut self, nodes: Option<&[NodeId]>) -> Result<usize, EngineError> {
+        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        deleted::empty(&mut self.db, self.remote.as_ref(), nodes)
+    }
+
+    /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted and
+    /// the local trash.
+    pub fn purge(&mut self, before_ms: i64) -> Result<usize, EngineError> {
+        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        let state_dir = self.cfg.exec.state_dir();
+        deleted::purge(&mut self.db, self.remote.as_ref(), before_ms, &state_dir)
     }
 
     /// A full local scan (tier C). The live observer does this incrementally in production.

@@ -231,7 +231,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 2);
+    assert_eq!(db.schema_version()?, 3);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -296,6 +296,67 @@ mod mirror {
         let removed = db.write(|s| s.delete_mirror(file.file_id))?;
         assert_eq!(removed, Some(file.clone()));
         assert_eq!(db.read(|s| s.get_mirror(file.node))?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn recently_deleted_lists_finds_and_forgets() -> R {
+        use hbsync_state::RemovedRow;
+        use hbsync_types::schema::Removal;
+        let mut db = StateDb::open_in_memory()?;
+        let folder = row(NodeId::new(), NodeId::ROOT, "d", None);
+        let c = content(b"x");
+        let file = row(
+            NodeId::new(),
+            folder.node,
+            "f",
+            Some(MirrorFile {
+                hash: c.hash,
+                size: c.size,
+                mtime_ms: c.mtime_ms,
+                executable: false,
+            }),
+        );
+        let alone = row(NodeId::new(), NodeId::ROOT, "g", None);
+        let with = |row: &MirrorRow, at_ms, root| RemovedRow {
+            row: row.clone(),
+            removal: Removal { at_ms, root },
+        };
+        let (rf, rd, ra) = (
+            with(&file, 10, folder.node),
+            with(&folder, 10, folder.node),
+            with(&alone, 20, alone.node),
+        );
+        db.write(|s| {
+            s.put_removed(&rf)?;
+            s.put_removed(&rd)?;
+            s.put_removed(&ra)
+        })?;
+        db.read(|s| {
+            assert_eq!(s.removed_by_node(file.node)?, Some(rf.clone()));
+            assert_eq!(s.removed_with(folder.node)?.len(), 2);
+            let newest: Vec<_> = s
+                .list_removed(10)?
+                .into_iter()
+                .map(|r| r.row.name)
+                .collect();
+            assert_eq!(newest, ["g", "d", "f"]);
+            // Expired ones, files before folders.
+            let expired: Vec<_> = s
+                .removed_before(15)?
+                .into_iter()
+                .map(|r| r.row.name)
+                .collect();
+            assert_eq!(expired, ["f", "d"]);
+            Ok(())
+        })?;
+        db.write(|s| {
+            assert!(s.delete_removed(alone.node)?);
+            assert!(s.delete_removed_file(file.file_id)?);
+            assert!(!s.delete_removed(file.node)?);
+            Ok(())
+        })?;
+        assert_eq!(db.read(|s| s.list_removed(10))?, [rd]);
         Ok(())
     }
 

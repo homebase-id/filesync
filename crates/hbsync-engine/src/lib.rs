@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod adopt;
+pub mod deleted;
 pub mod engine;
 pub mod exec;
 pub mod feed;
@@ -12,6 +13,7 @@ pub mod transfer;
 pub mod tree;
 pub mod view;
 
+pub use deleted::Deleted;
 pub use engine::{Engine, EngineConfig, EngineError, StartupReport, SyncReport};
 pub use reconcile::{
     Agreement, BaseExtra, Conflict, Input, Op, Options, Plan, Requirement, reconcile,

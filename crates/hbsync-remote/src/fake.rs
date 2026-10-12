@@ -65,7 +65,7 @@ impl Default for ServerConfig {
 pub struct FakeServer {
     config: ServerConfig,
     files: HashMap<RemoteFileId, StoredFile>,
-    /// Live files only.
+    /// Live files only, removed ones included: their node id stays taken, as on Homebase.
     by_node: HashMap<NodeId, RemoteFileId>,
     /// Feed index: (modified, row) → file.
     feed: BTreeMap<(i64, u64), RemoteFileId>,
@@ -324,12 +324,12 @@ impl FakeServer {
         Ok((node, self.create(&new, Some(upload))?))
     }
 
-    /// The content names of all live files, straight from their headers, for test assertions.
+    /// The content names of the files in the tree, straight from their headers, for test
+    /// assertions.
     pub fn live_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
-            .files
-            .values()
-            .filter_map(|f| match &f.header.body {
+            .live()
+            .filter_map(|h| match &h.body {
                 RemoteBody::Live { content, .. } => Some(content.name.clone()),
                 RemoteBody::Deleted => None,
             })
@@ -338,12 +338,20 @@ impl FakeServer {
         names
     }
 
-    /// Live files, for test assertions.
+    /// The files in the tree (neither deleted nor removed), for test assertions.
     pub fn live(&self) -> impl Iterator<Item = &RemoteHeader> {
         self.files
             .values()
             .map(|f| &f.header)
-            .filter(|h| !h.is_deleted())
+            .filter(|h| !h.is_deleted() && h.removal().is_none())
+    }
+
+    /// The files in Recently deleted, for test assertions.
+    pub fn removed(&self) -> impl Iterator<Item = &RemoteHeader> {
+        self.files
+            .values()
+            .map(|f| &f.header)
+            .filter(|h| h.removal().is_some())
     }
 
     pub fn file_id_of(&self, node: NodeId) -> Option<RemoteFileId> {

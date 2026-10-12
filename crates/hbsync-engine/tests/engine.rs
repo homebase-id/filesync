@@ -62,9 +62,16 @@ fn edits_moves_and_deletes_propagate() -> R {
         b.read("y/three.txt").is_err(),
         "the untouched file stays deleted"
     );
-    // b's delete of three.txt went to a's trash, not into the void.
-    let trash = fs::read_dir(a.root.join(".hbsync/trash"))?.count();
-    assert!(trash >= 1);
+    // b's delete of three.txt went to Recently deleted on the drive, not into the void: a
+    // needs no copy of its own.
+    let removed: Vec<_> = server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .removed()
+        .filter_map(|h| h.removal().map(|r| (h.node(), r.root)))
+        .collect();
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert!(!a.root.join(".hbsync/trash").exists());
     Ok(())
 }
 
@@ -1271,5 +1278,89 @@ fn what_was_synced_is_listed_and_kept() -> R {
     let recent = StateDb::open(&b.db_path())?.read(|s| s.recent_synced(3))?;
     assert_eq!(recent[0].path, "Photos");
     assert_eq!(recent.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn recently_deleted_restores_and_purges() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("d/x.txt", "x")?;
+    a.write("d/sub/y.txt", "y")?;
+    a.write("z.txt", "z")?;
+    a.write("keep.txt", "k")?; // deleting every file would be held (the mass-delete guard)
+    a.sync()?;
+    b.sync()?;
+
+    // a deletes a folder (with everything in it) and a file: gone on b too, kept on the drive.
+    fs::remove_dir_all(a.root.join("d"))?;
+    fs::remove_file(a.root.join("z.txt"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(), ["keep.txt = k"]);
+    let listed = b.engine.recently_deleted(10)?;
+    let mut paths: Vec<_> = listed.iter().map(|d| d.path.as_str()).collect();
+    paths.sort();
+    assert_eq!(paths, ["d", "d/sub", "d/sub/y.txt", "d/x.txt", "z.txt"]);
+    let d = listed.iter().find(|i| i.path == "d").ok_or("d")?.node;
+    assert!(
+        listed
+            .iter()
+            .filter(|i| i.path.starts_with("d"))
+            .all(|i| i.root == d),
+        "the folder's delete took its contents along: {listed:?}"
+    );
+
+    // b restores the folder: it comes back whole, on both; z.txt stays deleted.
+    assert_eq!(b.engine.restore(&[d])?, 4);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(a.read("d/sub/y.txt")?, "y");
+    assert!(a.read("z.txt").is_err());
+
+    // A restore onto a name taken meanwhile gets another.
+    a.write("z.txt", "new z")?;
+    a.sync()?;
+    let z = a
+        .engine
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "z.txt")
+        .ok_or("z")?
+        .node;
+    assert_eq!(a.engine.restore(&[z])?, 1);
+    a.sync()?;
+    assert_eq!(a.read("z (restored).txt")?, "z");
+    assert_eq!(a.read("z.txt")?, "new z");
+
+    // The purge leaves nothing restorable.
+    fs::remove_file(a.root.join("z.txt"))?;
+    a.sync()?;
+    assert_eq!(a.engine.purge(i64::MAX)?, 1);
+    b.sync()?;
+    assert!(b.engine.recently_deleted(10)?.is_empty());
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
+    Ok(())
+}
+
+#[test]
+fn an_edit_restores_what_another_client_deleted() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("notes.txt", "1")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("notes.txt"))?;
+    b.write("notes.txt", "1 and 2")?;
+    a.sync()?; // removed
+    b.sync()?; // the edit wins: restored with b's bytes
+    a.sync()?;
+    assert_eq!(a.read("notes.txt")?, "1 and 2");
+    assert!(a.engine.recently_deleted(10)?.is_empty());
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!((srv.live().count(), srv.removed().count()), (1, 0));
     Ok(())
 }

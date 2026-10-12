@@ -6,6 +6,7 @@
 
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::activity::Synced;
+use hbsync_types::schema::Removal;
 use hbsync_types::{
     ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
@@ -58,6 +59,13 @@ pub struct MirrorRow {
     pub content_extra: Option<String>,
 }
 
+/// A remote node in Recently deleted: its row as it was, and its removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedRow {
+    pub row: MirrorRow,
+    pub removal: Removal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MirrorFile {
     pub hash: hbsync_types::ContentHash,
@@ -108,6 +116,8 @@ pub struct Store<'a> {
 const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size, b.mtime_ms, \
      b.executable, b.remote_file_id, b.version_tag, b.content_state, b.local_name, b.local_hash \
      FROM base b JOIN nodes n ON n.id = b.id JOIN nodes p ON p.id = b.parent";
+const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
+     mtime_ms, executable, content_extra, removed_at, root FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
      m.hash, m.size, m.mtime_ms, m.executable, m.content_extra \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
@@ -802,6 +812,83 @@ impl<'a> Store<'a> {
         Ok(row)
     }
 
+    // ---- Recently deleted ----
+
+    /// Records a removed node (replacing an older record of it).
+    pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
+        let (row, f) = (&removed.row, removed.row.file.as_ref());
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
+                 hash, size, mtime_ms, executable, content_extra, removed_at, root) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )?
+            .execute(params![
+                row.node.0.as_bytes(),
+                row.file_id.0.as_bytes(),
+                row.version.0.as_bytes(),
+                row.parent.0.as_bytes(),
+                codec::kind_to(row.kind),
+                row.name,
+                f.map(|f| codec::hash_to(&f.hash)),
+                f.map(|f| f.size as i64),
+                f.map(|f| f.mtime_ms),
+                f.is_some_and(|f| f.executable),
+                row.content_extra,
+                removed.removal.at_ms,
+                removed.removal.root.0.as_bytes(),
+            ])?;
+        Ok(())
+    }
+
+    pub fn removed_by_node(&self, node: NodeId) -> Result<Option<RemovedRow>> {
+        self.one(
+            &format!("{REMOVED_SELECT} WHERE node = ?1"),
+            node.0.as_bytes(),
+            removed_row,
+        )
+    }
+
+    /// The nodes whose delete `root` took along (`root` itself included).
+    pub fn removed_with(&self, root: NodeId) -> Result<Vec<RemovedRow>> {
+        self.many(
+            &format!("{REMOVED_SELECT} WHERE root = ?1"),
+            [root.0.as_bytes()],
+            removed_row,
+        )
+    }
+
+    /// Recently deleted, newest first.
+    pub fn list_removed(&self, limit: usize) -> Result<Vec<RemovedRow>> {
+        self.many(
+            &format!("{REMOVED_SELECT} ORDER BY removed_at DESC, name LIMIT ?1"),
+            [limit as i64],
+            removed_row,
+        )
+    }
+
+    /// What was removed before `at_ms` (Unix ms), files before folders.
+    pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
+        self.many(
+            &format!("{REMOVED_SELECT} WHERE removed_at < ?1 ORDER BY kind, removed_at"),
+            [at_ms],
+            removed_row,
+        )
+    }
+
+    /// Forgets a node's removal (it was restored, or deleted for good); whether it had one.
+    pub fn delete_removed(&self, node: NodeId) -> Result<bool> {
+        self.change("DELETE FROM removed WHERE node = ?1", node.0.as_bytes())
+    }
+
+    /// [`Store::delete_removed`] by file id (a tombstone carries no node id).
+    pub fn delete_removed_file(&self, file_id: RemoteFileId) -> Result<bool> {
+        self.change(
+            "DELETE FROM removed WHERE file_id = ?1",
+            file_id.0.as_bytes(),
+        )
+    }
+
     pub fn mirror_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM remote")
     }
@@ -1152,6 +1239,16 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
             .as_deref()
             .map(codec::hash_from)
             .transpose()?,
+    })
+}
+
+fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
+    Ok(RemovedRow {
+        row: mirror_row(r)?,
+        removal: Removal {
+            at_ms: r.get(11)?,
+            root: codec::node(&r.get::<_, Vec<u8>>(12)?)?,
+        },
     })
 }
 

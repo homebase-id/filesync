@@ -9,7 +9,7 @@
 
 use std::io::{Read, Seek, Write};
 
-use hbsync_types::schema::NodeContent;
+use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{
     ContentHash, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
 };
@@ -31,6 +31,8 @@ pub struct RemoteHeader {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemoteBody {
+    /// A node, in the tree or, with a removal in its content (`archivalStatus` 2 on
+    /// Homebase), in Recently deleted.
     Live {
         /// `UniqueId`.
         node: NodeId,
@@ -64,7 +66,15 @@ impl RemoteHeader {
         matches!(self.body, RemoteBody::Deleted)
     }
 
-    /// The node state, if the header is live (and, for a file, has its payload).
+    /// In Recently deleted: out of the tree, restorable.
+    pub fn removal(&self) -> Option<Removal> {
+        match &self.body {
+            RemoteBody::Live { content, .. } => content.removal(),
+            RemoteBody::Deleted => None,
+        }
+    }
+
+    /// The node state, if the header is in the tree (and, for a file, has its payload).
     pub fn state(&self) -> Option<NodeState> {
         let RemoteBody::Live {
             content, payload, ..
@@ -72,6 +82,9 @@ impl RemoteHeader {
         else {
             return None;
         };
+        if content.removal().is_some() {
+            return None;
+        }
         match self.kind {
             NodeKind::Folder => Some(NodeState::folder(self.parent, content.name.clone())),
             NodeKind::File => {
