@@ -37,31 +37,34 @@ DevOps (their PR #227). In the `release-signing` environment:
 
 | What | For | Secrets (`secrets.*`) and variables (`vars.*`) |
 |---|---|---|
-| A Conveyor root key, made off GitHub (backup in the DevOps vault): **set** | the update feeds (Sparkle, the apt repository, the `.appinstaller`), and the self-signed certificates until the ones below exist | `CONVEYOR_SIGNING_KEY` |
-| An Apple Developer ID Application certificate (.p12 with the G2 intermediate) | the Mac app and the `.dmg` | `APPLE_SIGNING_KEY` (base64: decoded to `$RUNNER_TEMP`, `APPLE_P12_PATH`), `APPLE_SIGNING_KEY_PASS` |
+| A Conveyor root key, made off GitHub (backup in the DevOps vault) | the update feeds (Sparkle, the apt repository, the `.appinstaller`) | `CONVEYOR_SIGNING_KEY` |
+| An Apple Developer ID Application certificate (.p12 with the G2 intermediate; "Developer ID Application: Vidence, LLC (Apps) (JNJ85M8JM6)", until 2031-09-17) | the Mac app (`sign`) and the `.dmg` files (`sign-dmg`) | `APPLE_SIGNING_KEY` (base64: decoded to `$RUNNER_TEMP`, `APPLE_P12_PATH`), `APPLE_SIGNING_KEY_PASS` |
 | An App Store Connect API key (lowest role that notarizes) | notarization | `APPLE_NOTARIZATION_KEY` (the .p8), `APPSTORE_API_KEY_ID`, `APPSTORE_API_ISSUER_ID` |
-| An Azure Trusted Signing certificate profile | the MSIX and the EXEs | vars `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SIGNING_PROFILE`; the token by OIDC in the job |
+| An Azure Trusted Signing certificate profile | the MSIX and the EXEs | vars `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_SIGNING_PROFILE` (Conveyor's alias is `<account>/<profile>`); the token by OIDC in the job |
 
-The Apple and Azure ones aren't set yet (2026-10-11): until they are, the Mac app and the
-Windows packages are self-signed (the release notes say how to open them), and each joins by
-itself once its secrets exist: the `sign` job adds `packaging/conveyor-apple.conf` and
-`conveyor-azure.conf` to `conveyor-production.conf` when it finds them. To do then: sign and
-notarize the `.dmg` files themselves too (the app inside is signed by Conveyor). Packages
-signed by the self-signed certificates can't update to ones signed by the real ones (another
-publisher): those installs are reinstalled once.
+All are set (2026-10-12). The `sign` job adds `packaging/conveyor-apple.conf` and
+`conveyor-azure.conf` to `conveyor-production.conf` when it finds their secrets (without them,
+the packages would be self-signed, as v0.1.0-rc.1's were). `sign-dmg` signs, notarizes and
+staples the disk images on a Mac, then checks them and the app inside as Gatekeeper does;
+`test-signed-msix` installs the signed MSIX on a fresh Windows runner without trusting any
+certificate first and runs `signtool verify` on every package. Installs from self-signed
+packages can't update to signed ones (another publisher): they are reinstalled once.
 
 The Azure token: there is no `azure/login` (not an allowed action), so the job asks GitHub for an
 OIDC token
 (`ACTIONS_ID_TOKEN_REQUEST_URL`, audience `api://AzureADTokenExchange`), exchanges it with `curl`
 at `https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token` (client credentials,
 a JWT-bearer client assertion, scope `https://codesigning.azure.net/.default`), and masks it
-(`::add-mask::`) first thing. The federated subject is
-`repo:homebase-id/filesync:environment:release-signing`.
+(`::add-mask::`) first thing; Azure's error, if it refuses, is shown. The repository uses
+immutable OIDC subjects (`use_immutable_subject`, don't change it), so the federated subject
+is `repo:homebase-id@80376795/filesync@1410799080:environment:release-signing`. The Azure app's
+only role is Trusted Signing Certificate Profile Signer on the profile: it sees no
+subscription, so nothing here may need one.
 
 The secrets go in the signing step's own `env:` (not the job's, where the other steps would see
-them); the `.p12` is staged in `$RUNNER_TEMP` and removed in an `if: always()` step. A repository
-ruleset for `v*` tags (only maintainers create, move or delete them) would back the environment's
-tag rule, which checks only the name.
+them); the `.p12` is staged in `$RUNNER_TEMP` (`sign-dmg`: imported into a keychain of its
+own there) and removed in an `if: always()` step. Anyone with write access may push a `v*` tag,
+with no reviewer (the user's decision, 2026-10-12).
 
 As DevOps proposed:
 

@@ -19,15 +19,6 @@ asks you to approve this computer. Or from a terminal: `hbsync setup <identity>`
 On Linux the tray icon shows in KDE, Xfce, Cinnamon and most panels; GNOME needs the
 AppIndicator extension (Ubuntu has it).
 
-## Not signed yet
-
-Until signing is in place (RELEASING.md):
-- **Windows:** the package is self-signed: install `homebase-filesync.crt` into "Trusted People"
-  first (an administrator PowerShell: `Import-Certificate -FilePath homebase-filesync.crt
-  -CertStoreLocation Cert:\LocalMachine\TrustedPeople`).
-- **macOS:** the first start is refused: open System Settings > Privacy & Security and choose
-  "Open Anyway".
-
 ## Check a download
 
 `SHA256SUMS` lists every file's checksum, and each file carries a build provenance attestation:
