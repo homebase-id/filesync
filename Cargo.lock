@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "hbsync-app",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "apple-native-keyring-store",
  "hbsync-engine",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-dev"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-app",
  "hbsync-engine",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-fileio",
  "hbsync-local",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-fileio"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "blake3",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-homebase"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes",
  "base64",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-local"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-fileio",
  "hbsync-platform",
@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-namemap"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-platform",
  "proptest",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-platform"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "caseless",
  "filetime",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-remote"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-fileio",
  "hbsync-types",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-sim"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-engine",
  "hbsync-fileio",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-state"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-fileio",
  "hbsync-platform",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-tray"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "form_urlencoded",
  "hbsync-app",
@@ -1741,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-types"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "hbsync-fileio",
  "serde",
