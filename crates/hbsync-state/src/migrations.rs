@@ -1,13 +1,17 @@
-//! Schema migrations. `PRAGMA user_version` holds the number of migrations applied. Migrations
-//! are append-only once released: never edit one that has shipped.
+//! The state DB's schema. `PRAGMA user_version` holds its version: [`SCHEMA`] is version
+//! [`BASE`], and each migration after it adds one. Migrations are append-only once released:
+//! never edit one that has shipped. A DB older than `BASE` (made before 0.3) isn't upgraded: its
+//! folder is set up again.
 
 use rusqlite::Connection;
 
 use crate::{Result, StateError};
 
-const MIGRATIONS: &[&str] = &[
-    // 1: the whole schema.
-    r#"
+/// The version [`SCHEMA`] creates: 0.3.0's.
+const BASE: u32 = 4;
+
+/// The whole schema, as of [`BASE`].
+const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
     -- even after its node is forgotten.
@@ -30,7 +34,8 @@ const MIGRATIONS: &[&str] = &[
         version_tag    BLOB NOT NULL,                 -- the version agreed on (conflict ids)
         content_state  INTEGER NOT NULL DEFAULT 0,    -- 0 local, 1 pinned, 2 online-only
         local_name     TEXT,                          -- recorded local spelling, if any
-        local_hash     BLOB                           -- hash of the local bytes then
+        local_hash     BLOB,                          -- hash of the local bytes then
+        tags           TEXT                           -- Finder tags (JSON, node schema `tags`); NULL: none
     );
     CREATE INDEX base_parent ON base(parent);
 
@@ -49,7 +54,9 @@ const MIGRATIONS: &[&str] = &[
         file_id    INTEGER NOT NULL,                  -- low 64 bits
         file_id_hi INTEGER,                           -- high 64 bits, only when not zero
         executable INTEGER,                           -- NULL where the OS has no x bit
-        hash       BLOB                               -- NULL until hashed (files)
+        hash       BLOB,                              -- NULL until hashed (files)
+        tags       TEXT                               -- Finder tags (JSON); NULL: not known (none on
+                                                      -- this system, or the read failed)
     );
     CREATE UNIQUE INDEX local_child ON local(parent, name);
     CREATE INDEX local_file_id ON local(file_id);
@@ -112,9 +119,8 @@ const MIGRATIONS: &[&str] = &[
 
     -- Cursors and small settings.
     CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
-    "#,
-    // 2: what was synced, for people to see (the writer keeps the newest few hundred).
-    r#"
+
+    -- What was synced, for people to see (the writer keeps the newest few hundred).
     CREATE TABLE synced (
         id    INTEGER PRIMARY KEY AUTOINCREMENT,
         at    INTEGER NOT NULL,                       -- Unix seconds
@@ -123,10 +129,9 @@ const MIGRATIONS: &[&str] = &[
         files INTEGER NOT NULL,
         bytes INTEGER NOT NULL
     );
-    "#,
-    // 3: Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
-    // until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
-    r#"
+
+    -- Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
+    -- until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
     CREATE TABLE removed (
         node          BLOB PRIMARY KEY,
         file_id       BLOB NOT NULL UNIQUE,
@@ -145,28 +150,37 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX removed_at ON removed(removed_at);
     CREATE INDEX removed_root ON removed(root);
     CREATE INDEX removed_parent ON removed(parent);
-    "#,
-    // 4: Finder tags (JSON, node schema `tags`). Base: NULL is none. Local: NULL is not known
-    // (no tags on this system, or not read yet).
-    r#"
-    ALTER TABLE base ADD COLUMN tags TEXT;
-    ALTER TABLE local ADD COLUMN tags TEXT;
-    "#,
-];
+"#;
+
+/// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
+const MIGRATIONS: &[&str] = &[];
 
 pub fn apply(conn: &mut Connection) -> Result<()> {
-    let current: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let supported = MIGRATIONS.len() as u32;
+    let mut current: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let supported = BASE + MIGRATIONS.len() as u32;
     if current > supported {
         return Err(StateError::TooNew {
             found: current,
             supported,
         });
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+    if current == 0 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA)?;
+        tx.pragma_update(None, "user_version", BASE)?;
+        tx.commit()?;
+        current = BASE;
+    } else if current < BASE {
+        return Err(StateError::TooOld { found: current });
+    }
+    for (sql, version) in MIGRATIONS
+        .iter()
+        .zip(BASE + 1..)
+        .skip((current - BASE) as usize)
+    {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", i as u32 + 1)?;
+        tx.pragma_update(None, "user_version", version)?;
         tx.commit()?;
     }
     Ok(())
@@ -183,10 +197,21 @@ mod tests {
         conn.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", [])?;
         apply(&mut conn)?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        assert_eq!(version, MIGRATIONS.len() as u32);
+        assert_eq!(version, BASE + MIGRATIONS.len() as u32);
         let value: String =
             conn.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))?;
         assert_eq!(value, "v");
+        Ok(())
+    }
+
+    #[test]
+    fn a_db_from_before_0_3_is_refused() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "user_version", 3)?;
+        assert!(matches!(
+            apply(&mut conn),
+            Err(StateError::TooOld { found: 3 })
+        ));
         Ok(())
     }
 }

@@ -17,7 +17,7 @@ pub const VERSION: u32 = 1;
 /// The content key of the creation time ([`NodeContent::created_ms`]).
 const CREATED: &str = "ct";
 /// The content key of the Finder tags ([`NodeContent::tags`]).
-pub const TAGS_KEY: &str = "tags";
+const TAGS_KEY: &str = "tags";
 /// The content key of a removal ([`NodeContent::removal`]).
 pub const REMOVAL_KEY: &str = "rm";
 /// `appData.archivalStatus` of a node in Recently deleted (0 is a live one).

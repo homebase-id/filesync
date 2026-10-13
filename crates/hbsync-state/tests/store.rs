@@ -312,17 +312,6 @@ mod mirror {
         let red = Tags::new([Tag::new("Red", 6)]);
         assert_eq!(tagged.state().map(|st| st.tags), Some(red));
         assert_eq!(folder.state().map(|st| st.tags), Some(Tags::default()));
-        // After the upgrade, nodes the drive has tags for are planned once.
-        let tagged = MirrorRow {
-            node: NodeId::new(),
-            file_id: RemoteFileId(Uuid::new_v4()),
-            ..tagged
-        };
-        db.write(|s| {
-            s.put_mirror(&tagged)?;
-            s.mark_remote_tagged_dirty()
-        })?;
-        assert_eq!(db.read(|s| s.dirty_nodes(10))?, [tagged.node]);
         let removed = db.write(|s| s.delete_mirror(file.file_id))?;
         assert_eq!(removed, Some(file.clone()));
         assert_eq!(db.read(|s| s.get_mirror(file.node))?, None);

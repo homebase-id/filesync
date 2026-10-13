@@ -20,8 +20,6 @@ use crate::view;
 
 /// The state DB key of the fingerprint of the filter the DB was last synced with.
 const FILTER_KEY: &str = "filter.fingerprint";
-/// Set once every local item's tags were read (after the upgrade that brought tags).
-const TAGS_READ_KEY: &str = "tags.read";
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -250,15 +248,6 @@ impl Engine {
         });
         let local = local.map_err(|_| EngineError::Panic("local catch-up"))??;
         let feed = feed?;
-        // Once, after the upgrade that brought tags: what was tagged here before goes up, and
-        // what the drive's copies carry already comes down.
-        if self.db.read(|s| s.get_kv(TAGS_READ_KEY))?.is_none() {
-            hbsync_local::read_unknown_tags(&mut self.db, &self.cfg.exec.root)?;
-            self.db.write(|s| {
-                s.mark_remote_tagged_dirty()?;
-                s.set_kv(TAGS_READ_KEY, "1")
-            })?;
-        }
         let sync = self.sync_once(date)?;
         Ok(StartupReport { local, feed, sync })
     }

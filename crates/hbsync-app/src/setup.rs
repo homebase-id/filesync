@@ -10,7 +10,7 @@ use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, HomebaseError, app};
 use hbsync_local::{STATE_DIR, state_db_path};
 use hbsync_remote::Remote;
-use hbsync_state::StateDb;
+use hbsync_state::{StateDb, StateError};
 
 use crate::control;
 use crate::paths::home;
@@ -207,9 +207,12 @@ fn folder_state(config: &Config, identity: &str, folder: &Path) -> Result<Folder
         ));
     }
     if folder.join(STATE_DIR).is_dir() {
-        let theirs = StateDb::open(&state_db_path(folder))
-            .and_then(|mut db| db.read(|s| s.get_kv(IDENTITY_KEY)))
-            .map_err(|e| e.to_string())?;
+        let theirs = match StateDb::open(&state_db_path(folder)) {
+            // From before 0.3: set up again, its files merged with the drive (`drop_old_state`).
+            Err(StateError::TooOld { .. }) => return Ok(FolderState::HasFiles),
+            db => db.and_then(|mut db| db.read(|s| s.get_kv(IDENTITY_KEY))),
+        }
+        .map_err(|e| e.to_string())?;
         return match theirs.filter(|t| t != identity) {
             Some(theirs) => Err(format!("{} is synced with {theirs}", folder.display())),
             None => Ok(FolderState::Ours),
@@ -223,6 +226,24 @@ fn folder_state(config: &Config, identity: &str, folder: &Path) -> Result<Folder
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FolderState::Fresh),
         Err(e) => Err(format!("{}: {e}", folder.display())),
     }
+}
+
+/// Deletes a state DB from before 0.3, which isn't upgraded ([`StateError::TooOld`]): the
+/// folder starts over, merged with the drive.
+fn drop_old_state(folder: &Path) -> std::io::Result<()> {
+    let db = state_db_path(folder);
+    if !matches!(StateDb::open(&db), Err(StateError::TooOld { .. })) {
+        return Ok(());
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = db.clone().into_os_string();
+        path.push(suffix);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// `anna.example.com`, `frodo.dotyou.cloud:8443`: letters, digits, dots, hyphens, a port.
@@ -371,6 +392,7 @@ pub fn set_up(
     }
 
     std::fs::create_dir_all(folder.join(STATE_DIR))?;
+    drop_old_state(&folder)?;
     StateDb::open(&state_db_path(&folder))?.write(|s| s.set_kv(IDENTITY_KEY, identity))?;
     config.roots = vec![Root {
         identity: identity.to_owned(),
@@ -515,6 +537,18 @@ mod tests {
             plan("b.example", &full, false, &none),
             "is synced with a.example",
         );
+        // Synced by a version before 0.3: set up again, merged, and its DB starts over.
+        let old = home.join("Old");
+        std::fs::create_dir_all(old.join(STATE_DIR))?;
+        let conn = rusqlite::Connection::open(state_db_path(&old))?;
+        conn.pragma_update(None, "user_version", 3)?;
+        drop(conn);
+        assert_eq!(
+            plan("b.example", &old, false, &none),
+            Err(Refusal::NeedsMerge(old.clone()))
+        );
+        drop_old_state(&old)?;
+        StateDb::open(&state_db_path(&old))?;
         // Another folder or identity already set up.
         let set = Config {
             roots: vec![Root {

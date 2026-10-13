@@ -25,7 +25,9 @@ Otherwise:
 
 The sync folder keeps its own state in `<folder>/.hbsync` (state DB, temp files, trash, ignore
 rules). Its state DB records the identity it syncs with (`account.identity`): a folder synced
-with one identity is never synced with another.
+with one identity is never synced with another. A state DB from before 0.3 isn't upgraded: the
+daemon stops with "set this folder up again", and `hbsync setup` (or logging in from the tray)
+starts it over, the folder's files merged with the drive.
 
 ## `config.toml`
 

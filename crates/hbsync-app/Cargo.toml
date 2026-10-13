@@ -48,5 +48,8 @@ libc = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 
+[dev-dependencies]
+rusqlite.workspace = true
+
 [lints]
 workspace = true
