@@ -72,13 +72,14 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 
 ### Writing
 - **A new node**, file or folder, is always encrypted, with a new key header.
-- **An upload reads its source twice.** The stored hash goes in the instructions, which come
-  before the payload. So the first pass encrypts and hashes the ciphertext, and checks that the
-  plaintext still has the hash the upload was planned with. The server can't tell from
-  ciphertext that a file changed after it was hashed, so a mismatch fails the upload as a hash
-  mismatch, and the engine plans again. The second pass encrypts again and sends: the same key
-  and IV give the same bytes, with no temp copy. A file changed between the two passes fails
-  the server's stored-hash check.
+- **An upload reads its source once.** It hashes the plaintext, encrypts it, hashes the
+  ciphertext and sends it, in one pass. The hashes follow the payload (odin-core #1935): the
+  instructions carry the algorithm and the deferred sentinel, and a `payloadHash` part after the
+  payload carries the stored hash and the sealed content hash. The server can't tell from
+  ciphertext that a file changed after it was hashed, so a plaintext that no longer has the hash
+  the upload was planned with gets values no bytes hash to: the server refuses the payload
+  (`payloadHashMismatch`), stores nothing, and the engine plans again. A source that ends early
+  fails the same way.
 - **An update** reads the file's header first. It sends the file's own key with a new header
   IV, and the content encrypted with those: the server requires a strong key, keeps the file's
   key, and takes only the IV. New bytes get a new payload IV. The header read also finds a file

@@ -24,6 +24,7 @@ const KNOWN_CODES: &[(u32, &str)] = &[
     (4175, "payloadHashMismatch"),
     (4176, "invalidPayloadHash"),
     (4177, "payloadHashRequired"),
+    (4178, "payloadHashMissing"),
 ];
 
 #[derive(Deserialize)]
