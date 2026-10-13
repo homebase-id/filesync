@@ -133,7 +133,7 @@ pub struct Upload<'a> {
     pub size: u64,
     /// Read once, by the remote that sends it.
     pub reader: &'a mut dyn Read,
-    /// Paces the bytes sent (a bandwidth cap); not those a remote reads for itself.
+    /// Paces the bytes sent (a bandwidth cap).
     pub pace: Option<&'a dyn Pace>,
 }
 
@@ -191,7 +191,8 @@ pub enum RemoteError {
     VersionMismatch,
     #[error("not found")]
     NotFound,
-    /// The received bytes don't match the declared hash (Homebase 4175).
+    /// The bytes don't match the declared hash: the source changed since it was hashed, or
+    /// the server received other bytes (Homebase 4175, 4178).
     #[error("payload hash mismatch")]
     HashMismatch,
     /// Hash incomplete or malformed (Homebase 4176).

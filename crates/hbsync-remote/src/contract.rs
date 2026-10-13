@@ -533,24 +533,15 @@ fn a_removed_node_deleted_for_good(b: &Bench) -> Outcome {
 
 fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     let f = file("f", b.scratch, b"real");
-    let mut reader = Cursor::new(&b"fake"[..]);
-    let lying = Upload {
-        hash: hash_bytes(b"real", HashAlgorithm::Blake3),
-        size: 4,
-        reader: &mut reader,
-        pace: None,
-    };
-    ensure_err!(b.remote.create(&f, Some(lying)), RemoteError::HashMismatch);
-    // A source that shrank or grew since it was hashed is refused the same way.
-    for changed in [&b"rea"[..], b"real, and more"] {
+    // A source that isn't what was hashed (other bytes, fewer, more) is refused.
+    for changed in [&b"fake"[..], b"rea", b"real, and more"] {
         let mut reader = Cursor::new(changed);
-        let upload = Upload {
+        let lying = Upload {
             hash: hash_bytes(b"real", HashAlgorithm::Blake3),
             size: 4,
-            reader: &mut reader,
-            pace: None,
+            ..upload(&mut reader)
         };
-        ensure_err!(b.remote.create(&f, Some(upload)), RemoteError::HashMismatch);
+        ensure_err!(b.remote.create(&f, Some(lying)), RemoteError::HashMismatch);
     }
     // Nothing was stored: the node id is still free.
     let at = b.create(&f, Some(b"real"))?;
@@ -558,9 +549,7 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     let mut reader = Cursor::new(&b"fake"[..]);
     let lying = Upload {
         hash: hash_bytes(b"new!", HashAlgorithm::Blake3),
-        size: 4,
-        reader: &mut reader,
-        pace: None,
+        ..upload(&mut reader)
     };
     ensure_err!(
         b.remote.update(at.file_id, at.version, &f, Some(lying)),

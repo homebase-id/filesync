@@ -79,10 +79,11 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   ciphertext that a file changed after it was hashed, so a plaintext that no longer has the hash
   the upload was planned with gets values no bytes hash to: the server refuses the payload
   (`payloadHashMismatch`) and stores nothing **[verified]** (odin-core PR #1936,
-  `DeferredPayloadHashes.cs`; live), and the engine plans again. A source that ends early, or
-  grows past its planned size (reading stops there), ends the request before its hash part:
-  nothing is stored **[verified]** (live contract), and it counts as the same mismatch. A source
-  that can't be read is a local error, not the server's.
+  `DeferredPayloadHashes.cs`; live), and the engine plans again. A source that grew is sent only
+  up to its planned size and refused the same way; one that ends early ends the request before
+  its hash part: nothing is stored **[verified]** (live contract), and it counts as the same
+  mismatch. A file whose size changed since it was hashed isn't sent at all, and one that can't
+  be read is a local error, not the server's.
 - **An update** reads the file's header first. It sends the file's own key with a new header
   IV, and the content encrypted with those: the server requires a strong key, keeps the file's
   key, and takes only the IV. New bytes get a new payload IV. The header read also finds a file

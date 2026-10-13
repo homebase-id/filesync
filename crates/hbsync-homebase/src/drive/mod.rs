@@ -24,7 +24,7 @@ use crate::client::{Client, Fetched, UploadMethod};
 use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
-use crate::multipart::{Multipart, Part};
+use crate::multipart::{Multipart, Part, SourceEnded};
 use crate::{HomebaseError, app};
 
 pub mod sealed;
@@ -143,12 +143,9 @@ impl HomebaseRemote {
                     )));
                 }
                 let iv = sealed::strong().map_err(remote_error)?;
-                let (plain, sent) = (Tally::new(p.hash.algorithm), Tally::new(p.hash.algorithm));
+                let (plain, sent) = (tally(p.hash.algorithm), tally(p.hash.algorithm));
                 let reader = Paced {
-                    inner: sent.tap(
-                        Encrypting::new(plain.tap(p.reader, Some(p.size)), &key.key, &iv),
-                        None,
-                    ),
+                    inner: tap(Encrypting::new(tap(p.reader, &plain), &key.key, &iv), &sent),
                     pace: p.pace,
                 };
                 Some(Sending {
@@ -157,7 +154,6 @@ impl HomebaseRemote {
                         iv,
                     },
                     reader,
-                    size,
                     planned: (p.hash, p.size),
                     plain,
                     sent,
@@ -180,29 +176,20 @@ impl HomebaseRemote {
             Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
         ];
         if let Some(s) = &mut sending {
+            let hash_part = s.hash_part(&key);
             parts.push(Part::reader(
                 "payload",
                 PAYLOAD_KEY,
                 wire::CONTENT_TYPE,
                 &mut s.reader,
-                s.size,
+                sealed_len(s.planned.1),
             ));
-            let (plain, sent) = (s.plain.clone(), s.sent.clone());
-            let ((planned, plain_size), iv, key) = (s.planned, s.descriptor.iv, &key);
             parts.push(Part::later(
                 "payloadHash",
                 PAYLOAD_KEY,
                 "application/json",
                 wire::PAYLOAD_HASH_LEN as u64,
-                move || {
-                    let (content, len) = plain.finish();
-                    // The server can't tell from ciphertext that the file changed since it was
-                    // hashed: values no bytes hash to make it refuse the payload.
-                    if (content, len) != (planned, plain_size) {
-                        return wire::refused_payload_hash();
-                    }
-                    wire::payload_hash(key, &iv, &content, &sent.finish().0)
-                },
+                hash_part,
             ));
         }
         let (method, path) = match target {
@@ -221,14 +208,6 @@ impl HomebaseRemote {
                 file_id: RemoteFileId(file_id),
                 version: VersionTag(new_version_tag),
             }),
-            // The source couldn't be read, or it changed since it was hashed: not the server.
-            Err(_)
-                if let Some(e) = sending
-                    .as_ref()
-                    .and_then(|s| s.plain.source_error(s.planned.1)) =>
-            {
-                Err(e)
-            }
             // odin-core answers a content update of a file deleted since `update_key` looked
             // with 500 (a null payload list in `ProcessAppendOrOverwrite`, odin-core #1904)
             // instead of 4002: look again before retrying.
@@ -290,95 +269,65 @@ impl HomebaseRemote {
 struct Sending<'a> {
     descriptor: wire::PayloadDescriptor,
     reader: Paced<'a, Tap<Encrypting<Tap<&'a mut dyn Read>>>>,
-    /// The bytes sent (ciphertext).
-    size: u64,
     /// The plaintext's hash and size the upload was planned with.
     planned: (ContentHash, u64),
     plain: Tally,
     sent: Tally,
 }
 
-/// What passed through a [`Tap`], shared: the body still holds the reader when its hash part
-/// is made.
-#[derive(Clone)]
-struct Tally(Rc<RefCell<Seen>>);
-
-struct Seen {
-    hasher: Hasher,
-    len: u64,
-    /// The source ended (a read of none).
-    ended: bool,
-    /// It had more than it was planned with: reading stopped there.
-    grew: bool,
-    /// Its read failed.
-    failed: Option<std::io::Error>,
-}
-
-impl Tally {
-    fn new(algorithm: HashAlgorithm) -> Self {
-        Tally(Rc::new(RefCell::new(Seen {
-            hasher: Hasher::new(algorithm),
-            len: 0,
-            ended: false,
-            grew: false,
-            failed: None,
-        })))
-    }
-
-    /// `inner`, counted into this; with `limit`, a read past that many bytes fails.
-    fn tap<R>(&self, inner: R, limit: Option<u64>) -> Tap<R> {
-        Tap {
-            inner,
-            tally: self.clone(),
-            limit,
+impl Sending<'_> {
+    /// Makes the `payloadHash` part once the payload is sent. The server can't tell from
+    /// ciphertext that the file changed since it was hashed: if the plaintext isn't what was
+    /// planned, values no bytes hash to make it refuse the payload.
+    fn hash_part<'k>(&self, key: &'k KeyHeader) -> impl FnOnce() -> Vec<u8> + 'k {
+        let (plain, sent, planned, iv) = (
+            self.plain.clone(),
+            self.sent.clone(),
+            self.planned,
+            self.descriptor.iv,
+        );
+        move || {
+            let (content, len) = finish(&plain);
+            if (content, len) != planned {
+                return wire::refused_payload_hash();
+            }
+            wire::payload_hash(key, &iv, &content, &finish(&sent).0)
         }
-    }
-
-    /// Why a source of `size` bytes made the upload fail, if it did: its read failed, or it
-    /// changed since it was hashed (it ended early or grew).
-    fn source_error(&self, size: u64) -> Option<RemoteError> {
-        let mut seen = self.0.borrow_mut();
-        if let Some(e) = seen.failed.take() {
-            return Some(RemoteError::Io(e));
-        }
-        (seen.grew || seen.ended && seen.len < size).then_some(RemoteError::HashMismatch)
-    }
-
-    /// The hash and count of everything so far.
-    fn finish(&self) -> (ContentHash, u64) {
-        let seen = self.0.borrow();
-        (seen.hasher.clone().finalize(), seen.len)
     }
 }
 
-/// `inner`, counted into a [`Tally`] as it is read.
+/// The hash and length of what passed through a [`Tap`], shared: the body still holds the
+/// reader when its hash part is made.
+type Tally = Rc<RefCell<(Hasher, u64)>>;
+
+fn tally(algorithm: HashAlgorithm) -> Tally {
+    Rc::new(RefCell::new((Hasher::new(algorithm), 0)))
+}
+
+fn finish(tally: &Tally) -> (ContentHash, u64) {
+    let (hasher, len) = &*tally.borrow();
+    (hasher.clone().finalize(), *len)
+}
+
+/// `inner`, hashed and counted into `tally` as it is read.
+fn tap<R>(inner: R, tally: &Tally) -> Tap<R> {
+    Tap {
+        inner,
+        tally: Rc::clone(tally),
+    }
+}
+
 struct Tap<R> {
     inner: R,
     tally: Tally,
-    limit: Option<u64>,
 }
 
 impl<R: Read> Read for Tap<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf);
-        let mut seen = self.tally.0.borrow_mut();
-        let n = match n {
-            Ok(n) => n,
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::Interrupted {
-                    seen.failed = Some(std::io::Error::new(e.kind(), e.to_string()));
-                }
-                return Err(e);
-            }
-        };
-        seen.hasher.update(&buf[..n]);
-        seen.len += n as u64;
-        seen.ended |= n == 0 && !buf.is_empty();
-        if self.limit.is_some_and(|limit| seen.len > limit) {
-            // It grew since it was hashed: no use sending the rest.
-            seen.grew = true;
-            return Err(std::io::Error::other("the source grew since it was hashed"));
-        }
+        let n = self.inner.read(buf)?;
+        let (hasher, len) = &mut *self.tally.borrow_mut();
+        hasher.update(&buf[..n]);
+        *len += n as u64;
         Ok(n)
     }
 }
@@ -525,6 +474,10 @@ fn remote_error(e: HomebaseError) -> RemoteError {
     match e {
         HomebaseError::Network(why) => RemoteError::Transient(why),
         HomebaseError::Denied(why) => RemoteError::Denied(why),
+        // A source that ended early changed since it was hashed.
+        HomebaseError::Io(e) if e.get_ref().is_some_and(|e| e.is::<SourceEnded>()) => {
+            RemoteError::HashMismatch
+        }
         HomebaseError::Io(e) => RemoteError::Io(e),
         HomebaseError::Api { what, error } => {
             let by_code = [
@@ -589,6 +542,15 @@ mod tests {
             (api(400, Some("invalidUpload")), "Fatal"),
             (HomebaseError::Network("reset".into()), "Transient"),
             (HomebaseError::Denied("401".into()), "Denied"),
+            // The upload source: one that ended early changed; one that can't be read is local.
+            (
+                HomebaseError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    SourceEnded { missing: 1 },
+                )),
+                "HashMismatch",
+            ),
+            (HomebaseError::Io(std::io::Error::other("locked")), "Io"),
         ];
         for (error, expected) in cases {
             let mapped = format!("{:?}", remote_error(error));

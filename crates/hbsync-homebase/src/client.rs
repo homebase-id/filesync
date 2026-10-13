@@ -233,12 +233,21 @@ impl Client {
             UploadMethod::Patch => self.agent.patch(&url),
         };
         let (content_type, len) = (form.content_type(), form.content_length());
-        let mut body = form.into_reader();
+        let mut body = Recording {
+            inner: form.into_reader(),
+            failed: None,
+        };
         let response = request
             .header("Authorization", &self.bearer())
             .header("Content-Type", &content_type)
             .header("Content-Length", &len.to_string())
             .send(ureq::SendBody::from_reader(&mut body));
+        // The body's own read failed (the upload source): a local error, not the network's.
+        if response.is_err()
+            && let Some(e) = body.failed
+        {
+            return Err(HomebaseError::Io(e));
+        }
         self.decode(response, path)
     }
 
@@ -378,6 +387,24 @@ pub(crate) fn http_json<T: DeserializeOwned>(
 }
 
 /// The response if it is a success; otherwise the error it carries.
+/// `inner`, keeping its first error (ureq gets a copy and reports only its own).
+struct Recording<R> {
+    inner: R,
+    failed: Option<std::io::Error>,
+}
+
+impl<R: Read> Read for Recording<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf).map_err(|e| {
+            let copy = std::io::Error::new(e.kind(), e.to_string());
+            if e.kind() != std::io::ErrorKind::Interrupted {
+                self.failed.get_or_insert(e);
+            }
+            copy
+        })
+    }
+}
+
 fn checked(
     response: Result<Response<ureq::Body>, ureq::Error>,
     what: &str,

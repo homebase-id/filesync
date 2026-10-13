@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::HomebaseError;
 use crate::crypto::{Key, aes_cbc_encrypt};
-use crate::drive::sealed::{KeyHeader, SealedKeyHeader};
+use crate::drive::sealed::{KeyHeader, SealedKeyHeader, sealed_len};
 
 pub const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -255,8 +255,11 @@ pub(crate) struct PayloadDescriptor {
 /// has.
 const DEFERRED: u8 = 0x11;
 
-/// A sealed content hash's length: 32 bytes, AES-CBC with its padding.
-const SEALED_HASH_LEN: usize = 48;
+/// A hash's length.
+const HASH_LEN: usize = 32;
+
+/// A sealed content hash's length: a hash, AES-CBC with its padding.
+const SEALED_HASH_LEN: usize = sealed_len(HASH_LEN as u64) as usize;
 
 /// The `payloadHash` part: the values of a deferred descriptor, for a payload encrypted with
 /// `key` under `iv` whose plaintext hashes to `content` and ciphertext to `stored`.
@@ -273,7 +276,7 @@ pub(crate) fn payload_hash(
 /// (`payloadHashMismatch`).
 pub(crate) fn refused_payload_hash() -> Vec<u8> {
     hash_part(
-        &STANDARD.encode([0; 32]),
+        &STANDARD.encode([0; HASH_LEN]),
         &STANDARD.encode([0; SEALED_HASH_LEN]),
     )
 }
@@ -286,7 +289,7 @@ fn hash_part(stored: &str, content: &str) -> Vec<u8> {
 
 /// Every `payloadHash` part's length: base64 of values of fixed length.
 pub(crate) const PAYLOAD_HASH_LEN: usize = r#"{"storedHash":"","contentHash":""}"#.len()
-    + 32_usize.div_ceil(3) * 4
+    + HASH_LEN.div_ceil(3) * 4
     + SEALED_HASH_LEN.div_ceil(3) * 4;
 
 /// The `instructions` part of a create (`update: false`) or update. With `payload`, the
@@ -305,7 +308,7 @@ pub(crate) fn instructions(
                 // Deferred: the values follow the payload.
                 "hash": {
                     "algorithm": p.algorithm.as_str(),
-                    "storedHash": STANDARD.encode([DEFERRED; 32]),
+                    "storedHash": STANDARD.encode([DEFERRED; HASH_LEN]),
                     "contentHash": STANDARD.encode([DEFERRED; SEALED_HASH_LEN]),
                 },
             });
@@ -599,6 +602,7 @@ mod tests {
         // Deferred: the sentinel, as long as each value.
         assert_eq!(d["hash"]["storedHash"], STANDARD.encode([0x11; 32]));
         assert_eq!(d["hash"]["contentHash"], STANDARD.encode([0x11; 48]));
+        assert_eq!((HASH_LEN, SEALED_HASH_LEN), (32, 48));
         // The values follow, in a part of a length known up front.
         let part: Value =
             serde_json::from_slice(&payload_hash(&kh, &payload_iv, &content, &stored))?;

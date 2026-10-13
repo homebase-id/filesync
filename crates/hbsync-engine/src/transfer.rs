@@ -306,6 +306,10 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             size,
         } => (|| {
             let mut file = std::fs::File::open(path)?;
+            // Changed size since it was hashed: no use sending it to be refused.
+            if file.metadata()?.len() != *size {
+                return Err(JobError::Remote(RemoteError::HashMismatch));
+            }
             let upload = Some(Upload {
                 hash: *hash,
                 size: *size,

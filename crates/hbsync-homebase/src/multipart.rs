@@ -131,9 +131,8 @@ impl<'a> Multipart<'a> {
         format!("--{}--\r\n", self.boundary).into_bytes()
     }
 
-    /// The body as one reader. A streamed part that ends early is an error; one that has more
-    /// is cut at its size. Nothing here checks what was sent: with a deferred hash the server
-    /// stores whatever the hash part says, so its maker must refuse a source that changed.
+    /// The body as one reader. A streamed part that ends early is an error ([`SourceEnded`]);
+    /// one that has more is cut at its size.
     pub fn into_reader(self) -> impl Read + 'a {
         let tail = Cursor::new(self.tail());
         let mut body: Box<dyn Read + 'a> = Box::new(io::empty());
@@ -184,6 +183,20 @@ impl Read for Later<'_> {
     }
 }
 
+/// A streamed part's source ended before its announced size: it changed since then.
+#[derive(Debug)]
+pub struct SourceEnded {
+    pub missing: u64,
+}
+
+impl std::fmt::Display for SourceEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "upload source ended {} bytes early", self.missing)
+    }
+}
+
+impl std::error::Error for SourceEnded {}
+
 /// Exactly `remaining` bytes of `inner`.
 struct Exact<'a> {
     inner: &'a mut dyn Read,
@@ -202,7 +215,9 @@ impl Read for Exact<'_> {
         if n == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("upload source ended {} bytes early", self.remaining),
+                SourceEnded {
+                    missing: self.remaining,
+                },
             ));
         }
         self.remaining -= n as u64;

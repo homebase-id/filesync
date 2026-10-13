@@ -191,7 +191,7 @@ fn crypto(why: impl Into<String>) -> HomebaseError {
 }
 
 /// The size of `plain` bytes encrypted: PKCS#7 always adds 1 to 16 bytes.
-pub fn sealed_len(plain: u64) -> u64 {
+pub const fn sealed_len(plain: u64) -> u64 {
     (plain / BLOCK as u64 + 1) * BLOCK as u64
 }
 
