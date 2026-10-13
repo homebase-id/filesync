@@ -55,15 +55,21 @@ They update themselves.
 - **Careful with your data.** Losing nothing is the first rule:
   - When two computers edit the same file, both versions are kept as a conflict copy.
   - A sync that would delete many files at once waits for you to confirm.
+  - Whatever you delete, on any of your computers, waits in **Recently deleted** on your
+    Homebase for 30 days. Restore it from the tray menu or with `hbsync restore`, and it comes
+    back on every computer, a folder with everything that was in it.
   - Files are swapped into place atomically, never half-written.
   - The sync logic is a pure function, tested with property tests over hundreds of thousands
     of random multi-computer histories.
 - **Made for each OS.** It uses the NTFS change journal on Windows, FSEvents on macOS and
   inotify on Linux. It handles names each OS treats differently: case, Unicode forms, and
   characters Windows doesn't allow. Your folder gets its own icon and a place in the sidebar.
+  Finder tags and their colours sync between Macs and with KDE on Linux. A Windows PC
+  can't show them, but keeps them intact. Creation dates are kept too, even when an editor saves by
+  replacing the file.
 - **Yours to tune.** `.hbsync/ignore` takes gitignore-style rules per computer, and well-known
   junk (`.DS_Store`, `Thumbs.db`, editor temp files) is left out on its own. `hbsync` gives you
-  status, recent changes, pause and resume, and the logs from a terminal.
+  status, recent changes, pause and resume, Recently deleted, and the logs from a terminal.
 
 ## Getting started
 
