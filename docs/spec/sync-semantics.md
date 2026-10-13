@@ -227,7 +227,9 @@ on its own.
   `ehthumbs.db`, `desktop.ini`, `$RECYCLE.BIN`, `System Volume Information`; KDE `.directory`;
   Office `~$*` and
   `~*.tmp`; LibreOffice `.~lock.*#`; vim `.*.swp`, `.*.swx`; downloads in progress
-  `*.crdownload`, `*.part`. Junk is disposable.
+  `*.crdownload`, `*.part`; other sync apps' own files, left in a folder moved over from them:
+  Dropbox `.dropbox`, `.dropbox.cache`, OneDrive `.849C9593-D756-4E56-8D6E-42412F2A707B`,
+  Google Drive `.tmp.drivedownload`, `.tmp.driveupload`. Junk is disposable.
 - **Ignored**: the user's rules in `.hbsync/ignore` (gitignore syntax, per device, never
   synced), matched case-insensitively on case-insensitive volumes. Ignored items are the user's
   data, kept on this device only. A rule that doesn't parse stops the client: skipping it would

@@ -174,6 +174,20 @@ pub fn set_executable(path: &Path, executable: bool) -> io::Result<()> {
     }
 }
 
+/// Hides `path` from the file manager: sets the hidden attribute on Windows, where a leading
+/// dot hides nothing. No-op elsewhere (the dot does it).
+pub fn set_hidden(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        imp::set_hidden(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::*;
@@ -244,7 +258,10 @@ mod imp {
 mod imp {
     use super::*;
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH,
+        MoveFileExW, SetFileAttributesW,
+    };
 
     fn wide(path: &Path) -> Vec<u16> {
         crate::winpath::extended(path)
@@ -265,6 +282,23 @@ mod imp {
             Ok(())
         }
     }
+
+    pub fn set_hidden(path: &Path) -> io::Result<()> {
+        let w = wide(path);
+        // SAFETY: a NUL-terminated wide string.
+        let now = unsafe { GetFileAttributesW(w.as_ptr()) };
+        if now == INVALID_FILE_ATTRIBUTES {
+            return Err(io::Error::last_os_error());
+        }
+        if now & FILE_ATTRIBUTE_HIDDEN != 0 {
+            return Ok(());
+        }
+        // SAFETY: a NUL-terminated wide string.
+        if unsafe { SetFileAttributesW(w.as_ptr(), now | FILE_ATTRIBUTE_HIDDEN) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
 }
 
 /// Fallback with a small race window, for file systems without an atomic no-replace rename.
@@ -283,6 +317,23 @@ fn check_then_rename(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_hidden_hides_a_folder_and_can_repeat() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let state = dir.path().join(".hbsync");
+        fs::create_dir(&state)?;
+        set_hidden(&state)?;
+        set_hidden(&state)?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const HIDDEN: u32 = 0x2;
+            assert_ne!(fs::metadata(&state)?.file_attributes() & HIDDEN, 0);
+        }
+        assert!(state.is_dir());
+        Ok(())
+    }
 
     #[test]
     fn noreplace_refuses_existing_target() -> io::Result<()> {

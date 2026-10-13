@@ -24,10 +24,11 @@ Otherwise:
 | control socket | `$XDG_RUNTIME_DIR/hbsync`, else `<state>` | same as config | a named pipe |
 
 The sync folder keeps its own state in `<folder>/.hbsync` (state DB, temp files, trash, ignore
-rules). Its state DB records the identity it syncs with (`account.identity`): a folder synced
-with one identity is never synced with another. A state DB from before 0.3 isn't upgraded: the
-daemon stops (and isn't restarted); deleting `.hbsync/state.db` with its `-wal` and `-shm` files
-and setting the folder up again starts over (the trash and the ignore rules stay).
+rules), hidden on Windows too (the hidden attribute, set at every start). Its state DB records
+the identity it syncs with (`account.identity`): a folder synced with one identity is never
+synced with another. A state DB from before 0.3 isn't upgraded: the daemon stops (and isn't
+restarted); deleting `.hbsync/state.db` with its `-wal` and `-shm` files and setting the folder
+up again starts over (the trash and the ignore rules stay).
 
 ## `config.toml`
 
