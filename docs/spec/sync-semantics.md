@@ -299,7 +299,7 @@ the local file's tags, and an edit that restores a removed node merges the remov
 tags in (it may hold tags this device never saw).
 
 **Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
-then reads the tags.
+then reads the tags. Tags that couldn't be read are tried again at the next scan.
 Downloads write the tags onto the temp file before it is put in place: a file without them
 would read as the user removing them. An item with more than about 2,000 bytes of tags
 isn't tag-synced: it reads as "can't tell", and keeps what the drive has; so do tags that can't

@@ -26,7 +26,8 @@ Otherwise:
 The sync folder keeps its own state in `<folder>/.hbsync` (state DB, temp files, trash, ignore
 rules). Its state DB records the identity it syncs with (`account.identity`): a folder synced
 with one identity is never synced with another. A state DB from before 0.3 isn't upgraded: the
-daemon stops with an error; deleting the folder's `.hbsync` and setting it up again starts over.
+daemon stops (and isn't restarted); deleting `.hbsync/state.db` with its `-wal` and `-shm` files
+and setting the folder up again starts over (the trash and the ignore rules stay).
 
 ## `config.toml`
 

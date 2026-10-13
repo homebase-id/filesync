@@ -252,8 +252,9 @@ fn differs(row: &LocalRow, meta: &LocalMeta) -> bool {
     kind_of(meta) != row.kind
         || row.fingerprint != meta.fingerprint()
         || (row.kind == NodeKind::File && meta.executable.is_some() && meta.executable != row.executable)
-        // A file that couldn't be hashed last time gets another try.
+        // A file that couldn't be hashed last time gets another try, and so do tags.
         || (row.kind == NodeKind::File && row.hash.is_none())
+        || (tags::CAN_TAG && row.tags.is_none())
 }
 
 fn kind_of(meta: &LocalMeta) -> NodeKind {
@@ -415,7 +416,10 @@ fn resolve(
             report.modified += 1;
             plan.dirty.push(row.node);
         }
-        plan.put_rows.push(new);
+        // Tags that still can't be read leave the row as it was.
+        if new != row {
+            plan.put_rows.push(new);
+        }
     }
 
     // Moves by file id.
@@ -590,9 +594,9 @@ fn parent_node(
     db.read(|s| s.local_node_at(&parent))
 }
 
-/// Whether tags read as `new` differ from `old`. No tags where none were known (no tags on
-/// this system, or the read failed) aren't a change. Tags that can't be read now are the ones known before, so
-/// that removing every tag later is still seen.
+/// Whether tags read as `new` differ from `old`. No tags where none were known (no tags on this
+/// system, or the read failed) aren't a change. Tags that can't be read now are the ones known
+/// before, so that removing every tag later is still seen.
 fn tags_changed(old: &Option<Tags>, new: &Option<Tags>) -> bool {
     match (old, new) {
         (None, new) => new.as_ref().is_some_and(|t| !t.is_empty()),

@@ -588,7 +588,7 @@ fn filtered_items_never_reach_the_db_and_a_newly_ignored_one_looks_deleted() -> 
 }
 
 /// A tag change is a change of its own: the scan reads the tags and marks the node dirty,
-/// without the bytes having changed.
+/// without the bytes having changed. Tags that couldn't be read are read again.
 #[test]
 fn tags_are_read_and_a_tag_change_is_a_change() -> R {
     use hbsync_platform::tags::{self, Tag, Tags};
@@ -611,7 +611,16 @@ fn tags_are_read_and_a_tag_change_is_a_change() -> R {
     assert_eq!(dirty, [node]);
     assert_eq!(report.modified, 1);
     let row = f.db.read(|s| s.get_local(&path))?.ok_or("no row")?;
-    assert_eq!((row.tags, row.hash.is_some()), (Some(red), true));
+    assert_eq!(
+        (row.tags.clone(), row.hash.is_some()),
+        (Some(red.clone()), true)
+    );
     assert!(f.scan()?.1.is_empty(), "nothing changed since");
+
+    // Tags that couldn't be read are tried again at the next scan, nothing else changing.
+    f.db.write(|s| s.put_local(&hbsync_state::LocalRow { tags: None, ..row }))?;
+    assert_eq!(f.scan()?.1, [node]);
+    let read = f.db.read(|s| s.get_local(&path))?.and_then(|r| r.tags);
+    assert_eq!(read, Some(red));
     Ok(())
 }
