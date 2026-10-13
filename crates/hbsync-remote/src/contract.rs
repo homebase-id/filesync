@@ -533,16 +533,30 @@ fn a_removed_node_deleted_for_good(b: &Bench) -> Outcome {
 
 fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     let f = file("f", b.scratch, b"real");
+    // A source that isn't what was hashed (other bytes, fewer, more) is refused.
+    for changed in [&b"fake"[..], b"rea", b"real, and more"] {
+        let mut reader = Cursor::new(changed);
+        let lying = Upload {
+            hash: hash_bytes(b"real", HashAlgorithm::Blake3),
+            size: 4,
+            ..upload(&mut reader)
+        };
+        ensure_err!(b.remote.create(&f, Some(lying)), RemoteError::HashMismatch);
+    }
+    // Nothing was stored: the node id is still free.
+    let at = b.create(&f, Some(b"real"))?;
+    // An update whose source changed keeps the version it would have replaced.
     let mut reader = Cursor::new(&b"fake"[..]);
     let lying = Upload {
-        hash: hash_bytes(b"real", HashAlgorithm::Blake3),
-        size: 4,
-        reader: &mut reader,
-        pace: None,
+        hash: hash_bytes(b"new!", HashAlgorithm::Blake3),
+        ..upload(&mut reader)
     };
-    ensure_err!(b.remote.create(&f, Some(lying)), RemoteError::HashMismatch);
-    // Nothing was stored: the node id is still free.
-    b.create(&f, Some(b"real"))?;
+    ensure_err!(
+        b.remote.update(at.file_id, at.version, &f, Some(lying)),
+        RemoteError::HashMismatch
+    );
+    ensure!(b.read(at.file_id, None)? == b"real", "the old bytes stay");
+    b.update(at, &f, Some(b"new!"))?;
     Ok(())
 }
 

@@ -41,7 +41,7 @@ Explored 2026-10-08: `../odin-core` server model and `../chat-kmp` `HomebaseFile
 - **Stored hash**: over the bytes as uploaded and stored. That is the ciphertext for encrypted payloads, and the plaintext otherwise.
 - **Content hash**: over the original plaintext.
 
-An encrypting client hashes the plaintext going in and the ciphertext coming out. The stored hash travels in the upload's instructions, before the payload, so this client makes that pass before sending and encrypts again while sending (`spec/encryption.md`).
+An encrypting client hashes the plaintext going in and the ciphertext coming out, in the pass that sends it. The descriptor before the payload names the algorithm, and the values follow the payload (the deferred hash, odin-core #1935), so this client reads each source once (`spec/encryption.md`).
 
 **Rules:**
 - **Algorithm:** the client picks **SHA-256 or BLAKE3**. The set is closed at those two. The choice is recorded once per payload, and both hashes use it.
@@ -171,7 +171,7 @@ With #1892, #1893 and #1895 filed, the Homebase side of the design is settled. T
 design work is on the client.
 
 ## Decisions (2026-10-08)
-- **Hashes:** client-computed stored + content hash; SHA-256 or BLAKE3; optional on the server but required by the sync client; both or none; the server (and a receiving peer server) checks the stored hash; the content hash is encrypted on encrypted payloads with IV = payloadIv XOR 0xAA…AA; base64 on `PayloadDescriptor` (#1895). The sync client writes BLAKE3.
+- **Hashes:** client-computed stored + content hash; SHA-256 or BLAKE3; optional on the server but required by the sync client; both or none; the server (and a receiving peer server) checks the stored hash; the content hash is encrypted on encrypted payloads with IV = payloadIv XOR 0xAA…AA; base64 on `PayloadDescriptor` (#1895), or deferred to a `payloadHash` part after the payload (#1935, how this client sends them). The sync client writes BLAKE3.
 - **Folders:** id tree (`UniqueId` = node id, `GroupId` = parent id).
 - **Large files:** fix the server first (#1892, #1893; resumable upload still to file).
 - **Linux offline:** selective sync in v1, FUSE later.

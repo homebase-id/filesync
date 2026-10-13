@@ -183,38 +183,6 @@ pub fn hash_bytes(data: &[u8], algorithm: HashAlgorithm) -> ContentHash {
     hasher.finalize()
 }
 
-/// A reader that hashes the bytes passing through it (used when streaming an upload).
-#[derive(Debug)]
-pub struct HashingReader<R> {
-    inner: R,
-    hasher: Hasher,
-    count: u64,
-}
-
-impl<R: Read> HashingReader<R> {
-    pub fn new(inner: R, algorithm: HashAlgorithm) -> Self {
-        HashingReader {
-            inner,
-            hasher: Hasher::new(algorithm),
-            count: 0,
-        }
-    }
-
-    /// The hash and length of everything read so far.
-    pub fn finish(self) -> (ContentHash, u64) {
-        (self.hasher.finalize(), self.count)
-    }
-}
-
-impl<R: Read> Read for HashingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        self.hasher.update(&buf[..n]);
-        self.count += n as u64;
-        Ok(n)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,9 +216,6 @@ mod tests {
             let (h, n) = hash_reader(data.as_slice(), alg)?;
             assert_eq!(h, hash_bytes(&data, alg));
             assert_eq!(n, data.len() as u64);
-            let mut reader = HashingReader::new(data.as_slice(), alg);
-            io::copy(&mut reader, &mut io::sink())?;
-            assert_eq!(reader.finish(), (h, n));
         }
         Ok(())
     }

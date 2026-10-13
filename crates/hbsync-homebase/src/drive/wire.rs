@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::HomebaseError;
 use crate::crypto::{Key, aes_cbc_encrypt};
-use crate::drive::sealed::{KeyHeader, SealedKeyHeader};
+use crate::drive::sealed::{KeyHeader, SealedKeyHeader, sealed_len};
 
 pub const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -242,34 +242,55 @@ fn payload_info(p: &Payload, key: &KeyHeader) -> Result<PayloadInfo, String> {
     })
 }
 
-/// What an upload says about the `sync_data` payload it sends.
+/// What an upload says about the `sync_data` payload it sends: its hashes follow it, in its
+/// `payloadHash` part (odin-core #1935).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PayloadDescriptor {
     pub algorithm: HashAlgorithm,
-    /// Base64, over the bytes sent.
-    pub stored_hash: String,
-    /// Base64: the plaintext hash, sealed.
-    pub content_hash: String,
     /// The payload IV.
     pub iv: [u8; 16],
 }
 
-impl PayloadDescriptor {
-    /// A payload encrypted with `key` under `iv`, whose ciphertext hashes to `stored`.
-    pub fn sealed(
-        key: &KeyHeader,
-        iv: [u8; 16],
-        content: &ContentHash,
-        stored: &ContentHash,
-    ) -> Self {
-        PayloadDescriptor {
-            algorithm: content.algorithm,
-            stored_hash: stored.to_base64(),
-            content_hash: key.seal_hash(&iv, content),
-            iv,
-        }
-    }
+/// What a deferred hash's values are in the descriptor: every byte this, as many as the value
+/// has.
+const DEFERRED: u8 = 0x11;
+
+/// A hash's length.
+const HASH_LEN: usize = 32;
+
+/// A sealed content hash's length: a hash, AES-CBC with its padding.
+const SEALED_HASH_LEN: usize = sealed_len(HASH_LEN as u64) as usize;
+
+/// The `payloadHash` part: the values of a deferred descriptor, for a payload encrypted with
+/// `key` under `iv` whose plaintext hashes to `content` and ciphertext to `stored`.
+pub(crate) fn payload_hash(
+    key: &KeyHeader,
+    iv: &[u8; 16],
+    content: &ContentHash,
+    stored: &ContentHash,
+) -> Vec<u8> {
+    hash_part(&stored.to_base64(), &key.seal_hash(iv, content))
 }
+
+/// A `payloadHash` part no bytes hash to: the server refuses the payload and stores nothing
+/// (`payloadHashMismatch`).
+pub(crate) fn refused_payload_hash() -> Vec<u8> {
+    hash_part(
+        &STANDARD.encode([0; HASH_LEN]),
+        &STANDARD.encode([0; SEALED_HASH_LEN]),
+    )
+}
+
+fn hash_part(stored: &str, content: &str) -> Vec<u8> {
+    json!({ "storedHash": stored, "contentHash": content })
+        .to_string()
+        .into_bytes()
+}
+
+/// Every `payloadHash` part's length: base64 of values of fixed length.
+pub(crate) const PAYLOAD_HASH_LEN: usize = r#"{"storedHash":"","contentHash":""}"#.len()
+    + HASH_LEN.div_ceil(3) * 4
+    + SEALED_HASH_LEN.div_ceil(3) * 4;
 
 /// The `instructions` part of a create (`update: false`) or update. With `payload`, the
 /// `sync_data` payload is (over)written.
@@ -284,10 +305,11 @@ pub(crate) fn instructions(
                 "payloadKey": PAYLOAD_KEY,
                 "contentType": CONTENT_TYPE,
                 "iv": STANDARD.encode(p.iv),
+                // Deferred: the values follow the payload.
                 "hash": {
                     "algorithm": p.algorithm.as_str(),
-                    "storedHash": p.stored_hash,
-                    "contentHash": p.content_hash,
+                    "storedHash": STANDARD.encode([DEFERRED; HASH_LEN]),
+                    "contentHash": STANDARD.encode([DEFERRED; SEALED_HASH_LEN]),
                 },
             });
             if update {
@@ -564,7 +586,10 @@ mod tests {
         let (payload_iv, transfer_iv) = (sealed::strong()?, sealed::strong()?);
         let content = hbsync_fileio::hash_bytes(b"x", HashAlgorithm::Blake3);
         let stored = hbsync_fileio::hash_bytes(b"ciphertext", HashAlgorithm::Blake3);
-        let p = PayloadDescriptor::sealed(&kh, payload_iv, &content, &stored);
+        let p = PayloadDescriptor {
+            algorithm: HashAlgorithm::Blake3,
+            iv: payload_iv,
+        };
         let create = instructions(&transfer_iv, Some(&p), false);
         assert_eq!(create["transferIv"], STANDARD.encode(transfer_iv));
         let d = &create["manifest"]["payloadDescriptors"][0];
@@ -574,12 +599,21 @@ mod tests {
         );
         assert!(create.get("locale").is_none() && d.get("payloadUpdateOperationType").is_none());
         assert_eq!(d["iv"], STANDARD.encode(payload_iv));
-        assert_eq!(d["hash"]["storedHash"], stored.to_base64());
-        let sealed_hash = d["hash"]["contentHash"].as_str().ok_or("hash")?;
+        // Deferred: the sentinel, as long as each value.
+        assert_eq!(d["hash"]["storedHash"], STANDARD.encode([0x11; 32]));
+        assert_eq!(d["hash"]["contentHash"], STANDARD.encode([0x11; 48]));
+        assert_eq!((HASH_LEN, SEALED_HASH_LEN), (32, 48));
+        // The values follow, in a part of a length known up front.
+        let part: Value =
+            serde_json::from_slice(&payload_hash(&kh, &payload_iv, &content, &stored))?;
+        assert_eq!(part["storedHash"], stored.to_base64());
+        let sealed_hash = part["contentHash"].as_str().ok_or("hash")?;
         assert_eq!(
             kh.open_hash(&payload_iv, HashAlgorithm::Blake3, sealed_hash)?,
             content
         );
+        assert_eq!(part.to_string().len(), PAYLOAD_HASH_LEN);
+        assert_eq!(refused_payload_hash().len(), PAYLOAD_HASH_LEN);
         let update = instructions(&transfer_iv, Some(&p), true);
         let d = &update["manifest"]["payloadDescriptors"][0];
         assert_eq!(update["locale"], "local");

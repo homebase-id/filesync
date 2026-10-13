@@ -129,6 +129,14 @@ Encrypted files **[verified]** on odin-core `main` @ 07657309e (the format: `enc
 - **Hashes:** `storedHash` is over the ciphertext and checked while it streams in;
   `contentHash` is the plaintext hash encrypted with the file key under the payload IV XOR
   `0xAA…` (48 bytes), and the server checks only its length (`PayloadHash.cs`).
+- **Deferred hash** **[verified]** (odin-core PR #1936, #1935; `docs/payload-hashes.md`,
+  "Deferred hash"): the descriptor's `hash` carries the algorithm and a sentinel for both values
+  (every byte `0x11`: 32 bytes, 48 for the sealed `contentHash`); a part `payloadHash` after the
+  payload, file name the payload key, carries `{"storedHash", "contentHash"}`. Values that don't
+  match the bytes give 4175 and nothing is stored; no such part gives 4178. Stored headers hold
+  the real values. This client always defers: it reads and encrypts the source once. It sends
+  an exact `Content-Length`, so it can't leave the part out: a source that changed while it was
+  sent gets values no bytes hash to (4175); one that ended early aborts the request.
 
 **Update replaces the metadata, it doesn't merge** **[verified]**
 `StandardFileUpdateWriter.cs:48-85`: an update that leaves out `uniqueId` clears it, and a
@@ -167,7 +175,7 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 | 4105 | `existingFileWithUniqueId` |
 | 4106 | `fileNotFound` |
 | 4159 / 4160 | `missingVersionTag` / `versionTagMismatch` |
-| 4175 / 4176 / 4177 | `payloadHashMismatch` / `invalidPayloadHash` / `payloadHashRequired` |
+| 4175 / 4176 / 4177 / 4178 | `payloadHashMismatch` / `invalidPayloadHash` / `payloadHashRequired` / `payloadHashMissing` |
 
 ## Notifications (WebSocket)
 **[verified]** `V2NotificationSocketController.cs`, `AppNotificationHandler.cs`,
@@ -185,7 +193,7 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.
 - Errors are RFC 7807 ProblemDetails with `errorCode` as a number **or** a camelCase string.
-- Payload hashes: `../odin-core/docs/payload-hashes.md` (errors 4175–4177).
+- Payload hashes: `../odin-core/docs/payload-hashes.md` (errors 4175–4178).
 
 ## Known gaps
 - **Apps can't sign in by slug** **[verified]**: YouAuth needs the app id GUID
