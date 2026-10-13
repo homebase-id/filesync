@@ -14,7 +14,14 @@ pub struct Part<'a> {
 
 enum PartBody<'a> {
     Bytes(Vec<u8>),
-    Reader { reader: &'a mut dyn Read, size: u64 },
+    Reader {
+        reader: &'a mut dyn Read,
+        size: u64,
+    },
+    Later {
+        make: Box<dyn FnOnce() -> Vec<u8> + 'a>,
+        size: u64,
+    },
 }
 
 impl std::fmt::Debug for Part<'_> {
@@ -53,10 +60,30 @@ impl<'a> Part<'a> {
         }
     }
 
+    /// A part made by `make` when the body reaches it, after the parts before it were read
+    /// (a hash of what they sent). It must make `size` bytes: the length is sent first.
+    pub fn later(
+        name: &'static str,
+        filename: &'static str,
+        content_type: &'static str,
+        size: u64,
+        make: impl FnOnce() -> Vec<u8> + 'a,
+    ) -> Self {
+        Part {
+            name,
+            filename: Some(filename),
+            content_type,
+            body: PartBody::Later {
+                make: Box::new(make),
+                size,
+            },
+        }
+    }
+
     fn body_len(&self) -> u64 {
         match &self.body {
             PartBody::Bytes(b) => b.len() as u64,
-            PartBody::Reader { size, .. } => *size,
+            PartBody::Reader { size, .. } | PartBody::Later { size, .. } => *size,
         }
     }
 
@@ -118,10 +145,42 @@ impl<'a> Multipart<'a> {
                     inner: reader,
                     remaining: size,
                 }),
+                PartBody::Later { make, size } => Box::new(Later {
+                    make: Some(make),
+                    size,
+                    made: Cursor::new(Vec::new()),
+                }),
             };
             body = Box::new(body.chain(head).chain(content).chain(&b"\r\n"[..]));
         }
         body.chain(tail)
+    }
+}
+
+/// The bytes of a [`Part::later`], made at the first read.
+struct Later<'a> {
+    make: Option<Box<dyn FnOnce() -> Vec<u8> + 'a>>,
+    size: u64,
+    made: Cursor<Vec<u8>>,
+}
+
+impl Read for Later<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(make) = self.make.take() {
+            let made = make();
+            if made.len() as u64 != self.size {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "a part of {} bytes was announced as {}",
+                        made.len(),
+                        self.size
+                    ),
+                ));
+            }
+            self.made = Cursor::new(made);
+        }
+        self.made.read(buf)
     }
 }
 
@@ -213,5 +272,47 @@ mod tests {
         assert!(form.into_reader().read_to_end(&mut body).is_ok());
         assert_eq!(body.len() as u64, len);
         assert!(String::from_utf8_lossy(&body).contains("\r\n\r\nab\r\n--b--"));
+    }
+
+    #[test]
+    fn a_later_part_is_made_after_the_parts_before_it_were_read() -> io::Result<()> {
+        let seen = std::cell::Cell::new(0u64);
+        let mut payload = Counted {
+            inner: &b"abc"[..],
+            seen: &seen,
+        };
+        let form = Multipart::new(
+            "b".into(),
+            vec![
+                Part::reader("payload", "k", "x", &mut payload, 3),
+                Part::later("payloadHash", "k", "application/json", 2, || {
+                    seen.get().to_string().into_bytes().repeat(2)
+                }),
+            ],
+        );
+        let len = form.content_length();
+        let mut body = Vec::new();
+        form.into_reader().read_to_end(&mut body)?;
+        assert_eq!(body.len() as u64, len);
+        assert!(String::from_utf8_lossy(&body).contains("\r\n\r\n33\r\n--b--"));
+
+        let wrong = Multipart::new("b".into(), vec![Part::later("h", "k", "x", 5, Vec::new)]);
+        let err = wrong.into_reader().read_to_end(&mut Vec::new());
+        assert_eq!(err.map_err(|e| e.kind()), Err(io::ErrorKind::InvalidData));
+        Ok(())
+    }
+
+    /// Counts the bytes read from `inner`.
+    struct Counted<'a, R> {
+        inner: R,
+        seen: &'a std::cell::Cell<u64>,
+    }
+
+    impl<R: Read> Read for Counted<'_, R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.seen.set(self.seen.get() + n as u64);
+            Ok(n)
+        }
     }
 }

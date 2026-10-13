@@ -228,10 +228,6 @@ impl<R: Read> Encrypting<R> {
         }
     }
 
-    pub fn into_inner(self) -> R {
-        self.inner
-    }
-
     /// Reads the next chunk after the carried bytes and encrypts its whole blocks in place.
     fn refill(&mut self) -> io::Result<()> {
         self.buf.copy_within(self.ready..self.ready + self.carry, 0);

@@ -4,13 +4,16 @@
 //! then take its alias, as own-identity routes by slug don't exist yet (odin-core #1902).
 //! Facts: `docs/spec/homebase-api-notes.md`.
 
-use std::io::{SeekFrom, Write};
+use std::cell::RefCell;
+use std::io::{Read, Write};
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Mutex;
 
-use hbsync_fileio::HashingReader;
+use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    ChangesPage, NodeMeta, Paced, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
+    ChangesPage, NodeMeta, Paced, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Source,
+    Upload,
 };
 use hbsync_types::schema::{NodeContent, PAYLOAD_KEY};
 use hbsync_types::{ContentHash, RemoteFileId, RemoteRef, VersionTag};
@@ -19,7 +22,6 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::client::{Client, Fetched, UploadMethod};
-use crate::crypto::Key;
 use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
@@ -128,10 +130,12 @@ impl HomebaseRemote {
             Some(at) => self.update_key(at)?,
         };
         let transfer_iv = sealed::strong().map_err(remote_error)?;
-        // The payload as sent: encrypted under a new payload IV, and paced.
-        let (descriptor, body) = match payload {
-            None => (None, None),
-            Some(mut p) => {
+        // The payload as sent: read once, hashed, encrypted under a new payload IV, hashed
+        // again and paced. Its hashes follow it (odin-core #1935): the descriptor says only the
+        // algorithm.
+        let mut sending = match payload {
+            None => None,
+            Some(p) => {
                 let size = sealed_len(p.size);
                 if size > MAX_PAYLOAD {
                     return Err(RemoteError::Fatal(format!(
@@ -140,17 +144,27 @@ impl HomebaseRemote {
                     )));
                 }
                 let iv = sealed::strong().map_err(remote_error)?;
-                let stored = sealed_hash(&mut p, &key.key, &iv)?;
-                let descriptor = wire::PayloadDescriptor::sealed(&key, iv, &p.hash, &stored);
+                let (plain, sent) = (Tally::new(p.hash.algorithm), Tally::new(p.hash.algorithm));
                 let reader = Paced {
-                    inner: Encrypting::new(p.reader, &key.key, &iv),
+                    inner: sent.tap(Encrypting::new(plain.tap(p.reader), &key.key, &iv)),
                     pace: p.pace,
                 };
-                (Some(descriptor), Some((reader, size)))
+                Some(Sending {
+                    descriptor: wire::PayloadDescriptor::deferred(p.hash.algorithm, iv),
+                    reader,
+                    size,
+                    planned: (p.hash, p.size),
+                    plain,
+                    sent,
+                })
             }
         };
         let version = target.map(|t| t.version);
-        let instructions = wire::instructions(&transfer_iv, descriptor.as_ref(), target.is_some());
+        let instructions = wire::instructions(
+            &transfer_iv,
+            sending.as_ref().map(|s| &s.descriptor),
+            target.is_some(),
+        );
         let metadata = wire::metadata(meta, version, self.client.key(), &transfer_iv, &key);
         let mut parts = vec![
             Part::bytes(
@@ -160,14 +174,30 @@ impl HomebaseRemote {
             ),
             Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
         ];
-        let mut body = body;
-        if let Some((reader, size)) = &mut body {
+        if let Some(s) = &mut sending {
             parts.push(Part::reader(
                 "payload",
                 PAYLOAD_KEY,
                 wire::CONTENT_TYPE,
-                reader,
-                *size,
+                &mut s.reader,
+                s.size,
+            ));
+            let (plain, sent) = (s.plain.clone(), s.sent.clone());
+            let ((planned, plain_size), iv, key) = (s.planned, s.descriptor.iv, &key);
+            parts.push(Part::later(
+                "payloadHash",
+                PAYLOAD_KEY,
+                "application/json",
+                wire::PAYLOAD_HASH_LEN as u64,
+                move || {
+                    let (content, len) = plain.finish();
+                    // The server can't tell from ciphertext that the file changed since it was
+                    // hashed: values no bytes hash to make it refuse the payload.
+                    if (content, len) != (planned, plain_size) {
+                        return wire::refused_payload_hash();
+                    }
+                    wire::payload_hash(key, &iv, &content, &sent.finish().0)
+                },
             ));
         }
         let (method, path) = match target {
@@ -194,6 +224,14 @@ impl HomebaseRemote {
                     self.current(at)?;
                 }
                 Err(RemoteError::Transient(format!("{path}: {error}")))
+            }
+            // The source ended early: it changed since it was hashed.
+            Err(_)
+                if sending
+                    .as_ref()
+                    .is_some_and(|s| s.plain.ended_before(s.planned.1)) =>
+            {
+                Err(RemoteError::HashMismatch)
             }
             Err(e) => Err(remote_error(e)),
         }
@@ -243,22 +281,63 @@ impl HomebaseRemote {
     }
 }
 
-/// The hash of `upload` encrypted with `key` under `iv`: what the server checks the bytes
-/// against. Reads the source once, then goes back to where it started. Its plaintext must
-/// still hash to `upload.hash`: the server can't tell from ciphertext that the file changed
-/// since it was hashed.
-fn sealed_hash(upload: &mut Upload<'_>, key: &Key, iv: &[u8; 16]) -> Result<ContentHash> {
-    let algorithm = upload.hash.algorithm;
-    let reader = &mut *upload.reader;
-    let start = reader.stream_position()?;
-    let mut sealing = Encrypting::new(HashingReader::new(&mut *reader, algorithm), key, iv);
-    let (stored, _) = hbsync_fileio::hash_reader(&mut sealing, algorithm)?;
-    let (content, len) = sealing.into_inner().finish();
-    if content != upload.hash || len != upload.size {
-        return Err(RemoteError::HashMismatch);
+/// A payload on its way: what `write` sends, and the hashes of what went.
+struct Sending<'a> {
+    descriptor: wire::PayloadDescriptor,
+    reader: Paced<'a, Tap<Encrypting<Tap<&'a mut dyn Source>>>>,
+    /// The bytes sent (ciphertext).
+    size: u64,
+    /// The plaintext's hash and size the upload was planned with.
+    planned: (ContentHash, u64),
+    plain: Tally,
+    sent: Tally,
+}
+
+/// The hash and byte count of what passed through its [`Tap`]s, and whether the source ended,
+/// shared: the body still holds the reader when its hash part is made.
+#[derive(Clone)]
+struct Tally(Rc<RefCell<(Hasher, u64, bool)>>);
+
+impl Tally {
+    fn new(algorithm: HashAlgorithm) -> Self {
+        Tally(Rc::new(RefCell::new((Hasher::new(algorithm), 0, false))))
     }
-    reader.seek(SeekFrom::Start(start))?;
-    Ok(stored)
+
+    fn tap<R>(&self, inner: R) -> Tap<R> {
+        Tap {
+            inner,
+            tally: self.clone(),
+        }
+    }
+
+    /// Whether the source ended before `size` bytes (not merely stopped being read).
+    fn ended_before(&self, size: u64) -> bool {
+        let (_, len, ended) = &*self.0.borrow();
+        *ended && *len < size
+    }
+
+    /// The hash and count of everything so far.
+    fn finish(&self) -> (ContentHash, u64) {
+        let (hasher, len, _) = &*self.0.borrow();
+        (hasher.clone().finalize(), *len)
+    }
+}
+
+/// `inner`, counted into a [`Tally`] as it is read.
+struct Tap<R> {
+    inner: R,
+    tally: Tally,
+}
+
+impl<R: Read> Read for Tap<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let (hasher, len, ended) = &mut *self.tally.0.borrow_mut();
+        hasher.update(&buf[..n]);
+        *len += n as u64;
+        *ended |= n == 0 && !buf.is_empty();
+        Ok(n)
+    }
 }
 
 impl Remote for HomebaseRemote {
