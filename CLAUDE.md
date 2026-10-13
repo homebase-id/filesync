@@ -13,7 +13,7 @@ sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebas
 WebSocket; two folders converge through a live identity. Facts and server bugs:
 `docs/spec/homebase-api-notes.md`. Large files need odin-core with PR #1921 (merged 2026-10-11: streamed,
 64-bit payload ranges): a server without it holds each read in memory and can't read past 2 GiB
-(**[verified]**, odin-core #1892, #1893). Uploads need odin-core with PR #1936 (the deferred
+(**[verified]**, odin-core #1892, #1893). Uploads need odin-core v0.1.954 or newer (PR #1936, the deferred
 payload hash, #1935): the client sends a payload's hashes after it, reading the source once. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up within a minute of an edit); an ignored item is kept on its device only.

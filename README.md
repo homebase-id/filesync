@@ -49,7 +49,7 @@ They update themselves.
   the files are encrypted before they leave your computer, and the keys stay with your own
   Homebase, not with a company. More: [docs/spec/encryption.md](docs/spec/encryption.md).
 - **Fast,** even on a six-year-old desktop (Intel i7-8700K). With a test server on the same
-  machine, it uploads 1 GiB at about 170 MB/s and downloads it at about 600 MB/s. An edit
+  machine, it uploads 1 GiB at about 220 MB/s and downloads it at about 600 MB/s. An edit
   shows up on your other computer in about half a second. Big files are streamed in both
   directions in constant memory, and a broken transfer picks up where it stopped.
 - **Careful with your data.** Losing nothing is the first rule:
@@ -77,7 +77,7 @@ Install it, start **Homebase Filesync**, and choose **Log in to Homebase…** in
 menu-bar menu. Your browser opens so you can approve this computer, and the folder
 `~/Homebase` starts syncing (or pick another). From a terminal: `hbsync setup <your identity>`.
 
-Your Homebase needs odin-core v0.1.950 or newer.
+Your Homebase needs odin-core v0.1.954 or newer.
 
 ## For developers
 
