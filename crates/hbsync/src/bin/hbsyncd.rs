@@ -13,6 +13,8 @@ use std::sync::atomic::AtomicBool;
 use hbsync_app::Paths;
 use hbsync_app::daemon::DaemonError;
 use hbsync_app::lock::LockError;
+use hbsync_app::runner::RunnerError;
+use hbsync_state::StateError;
 
 fn main() -> ExitCode {
     let paths = match Paths::resolve() {
@@ -44,8 +46,11 @@ fn main() -> ExitCode {
         eprintln!("hbsyncd: {e}");
     }
     match e {
-        // Nothing to do is no failure: launchd and systemd restart a daemon that failed.
-        DaemonError::NotSetUp(_) | DaemonError::Lock(LockError::Held { .. }) => {
+        // Nothing to do is no failure: launchd and systemd restart a daemon that failed. Nor
+        // is a state DB from before 0.3: restarting can't help.
+        DaemonError::NotSetUp(_)
+        | DaemonError::Lock(LockError::Held { .. })
+        | DaemonError::Runner(RunnerError::State(StateError::TooOld { .. })) => {
             tracing::warn!("{e}");
             ExitCode::SUCCESS
         }

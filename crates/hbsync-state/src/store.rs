@@ -6,7 +6,7 @@
 
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::activity::Synced;
-use hbsync_types::schema::{Removal, TAGS_KEY, tags_from_str, tags_in_keys, tags_to_string};
+use hbsync_types::schema::{Removal, tags_from_str, tags_in_keys, tags_to_string};
 use hbsync_types::{
     ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Tags,
     VersionTag,
@@ -42,7 +42,7 @@ pub struct LocalRow {
     pub executable: Option<bool>,
     /// `None` until hashed; always `None` for folders.
     pub hash: Option<hbsync_types::ContentHash>,
-    /// `None` if not known: no tags on this system or file system, or not read yet.
+    /// `None` if not known: no tags on this system or file system, or the read failed.
     pub tags: Option<Tags>,
 }
 
@@ -502,25 +502,6 @@ impl<'a> Store<'a> {
                 row.hash.as_ref().map(codec::hash_to),
                 row.tags.as_ref().map(tags_to_string),
             ])?;
-        Ok(())
-    }
-
-    /// Marks dirty every node whose drive copy carries tags (once, after the upgrade that brought
-    /// tags: the feed passed them while this client didn't read them).
-    pub fn mark_remote_tagged_dirty(&self) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO dirty (id) \
-             SELECT id FROM remote WHERE content_extra LIKE ?1",
-            [format!("%\"{TAGS_KEY}\"%")],
-        )?;
-        Ok(())
-    }
-
-    /// Records the tags of `node`'s local item, as read (the rest of its row stays).
-    pub fn set_local_tags(&self, node: NodeId, tags: &Tags) -> Result<()> {
-        self.conn
-            .prepare_cached(&format!("UPDATE local SET tags = ?2 WHERE id = {ID_OF}"))?
-            .execute(params![node.0.as_bytes(), tags_to_string(tags)])?;
         Ok(())
     }
 
@@ -994,20 +975,6 @@ impl<'a> Store<'a> {
             last = Some(DirtyCursor(id));
         }
         Ok((nodes, last))
-    }
-
-    /// Up to `limit` local rows whose tags aren't known, after the one with id `after` (start
-    /// at 0), and the id to continue after: a sweep that reads each row once.
-    pub fn untagged_local_page(&self, after: i64, limit: usize) -> Result<(Vec<LocalRow>, i64)> {
-        let raw = self.raw_local(
-            &format!(
-                "SELECT {LOCAL_COLS} {LOCAL_FROM} \
-                 WHERE l.tags IS NULL AND l.id > ?1 ORDER BY l.id LIMIT ?2"
-            ),
-            params![after, limit as i64],
-        )?;
-        let next = raw.last().map_or(after, |r| r.id);
-        Ok((self.with_paths(raw)?, next))
     }
 
     /// Local rows of dirty nodes that have neither a base nor a mirror row: what adoption may

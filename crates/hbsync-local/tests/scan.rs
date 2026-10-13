@@ -588,7 +588,7 @@ fn filtered_items_never_reach_the_db_and_a_newly_ignored_one_looks_deleted() -> 
 }
 
 /// A tag change is a change of its own: the scan reads the tags and marks the node dirty,
-/// without the bytes having changed. Rows from before tags were synced get theirs read once.
+/// without the bytes having changed. Tags that couldn't be read are read again.
 #[test]
 fn tags_are_read_and_a_tag_change_is_a_change() -> R {
     use hbsync_platform::tags::{self, Tag, Tags};
@@ -617,16 +617,10 @@ fn tags_are_read_and_a_tag_change_is_a_change() -> R {
     );
     assert!(f.scan()?.1.is_empty(), "nothing changed since");
 
-    // A row from before tags: the one-off read finds them and marks the node.
-    f.db.write(|s| {
-        s.put_local(&hbsync_state::LocalRow {
-            tags: None,
-            ..row.clone()
-        })
-    })?;
-    assert_eq!(hbsync_local::read_unknown_tags(&mut f.db, f.dir.path())?, 1);
+    // Tags that couldn't be read are tried again at the next scan, nothing else changing.
+    f.db.write(|s| s.put_local(&hbsync_state::LocalRow { tags: None, ..row }))?;
+    assert_eq!(f.scan()?.1, [node]);
     let read = f.db.read(|s| s.get_local(&path))?.and_then(|r| r.tags);
     assert_eq!(read, Some(red));
-    assert!(f.db.read(|s| s.is_dirty(node))?);
     Ok(())
 }

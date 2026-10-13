@@ -17,6 +17,7 @@ mod migrations;
 mod store;
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, TransactionBehavior};
 
@@ -33,11 +34,32 @@ pub enum StateError {
     Corrupt(String),
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
+    #[error("state DB schema version {found} is from before Filesync 0.3 and isn't upgraded")]
+    TooOld { found: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
 }
 
 pub type Result<T, E = StateError> = std::result::Result<T, E>;
+
+/// How long a connection waits for another one's write.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Puts the DB in WAL mode. Switching a new DB needs it to itself, and SQLite answers busy at
+/// once instead of waiting: tried again while another connection is creating it.
+fn wal(conn: &Connection) -> Result<()> {
+    let until = Instant::now() + BUSY_TIMEOUT;
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::DatabaseBusy && Instant::now() < until =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            done => return Ok(done?),
+        }
+    }
+}
 
 /// An open state DB.
 #[derive(Debug)]
@@ -59,13 +81,13 @@ impl StateDb {
     fn setup(mut conn: Connection) -> Result<Self> {
         // Start-up runs the local catch-up and the feed on two connections; a long scan
         // transaction must not make the other writer give up.
-        conn.busy_timeout(std::time::Duration::from_secs(120))?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         // WAL keeps readers off the writer's back; FULL syncs each commit, so after a power loss
         // the DB is never more than the one step in flight behind the disk. The executor's
         // crash handling (write-ahead records, the scan's identity rules) relies on that, so
         // speed comes from fewer commits (an operation and its settling are one), not from
         // weaker ones.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        wal(&conn)?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
@@ -96,8 +118,6 @@ impl StateDb {
 
     /// The schema version in use.
     pub fn schema_version(&self) -> Result<u32> {
-        Ok(self
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))?)
+        migrations::user_version(&self.conn)
     }
 }

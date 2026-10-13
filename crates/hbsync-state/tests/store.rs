@@ -312,17 +312,6 @@ mod mirror {
         let red = Tags::new([Tag::new("Red", 6)]);
         assert_eq!(tagged.state().map(|st| st.tags), Some(red));
         assert_eq!(folder.state().map(|st| st.tags), Some(Tags::default()));
-        // After the upgrade, nodes the drive has tags for are planned once.
-        let tagged = MirrorRow {
-            node: NodeId::new(),
-            file_id: RemoteFileId(Uuid::new_v4()),
-            ..tagged
-        };
-        db.write(|s| {
-            s.put_mirror(&tagged)?;
-            s.mark_remote_tagged_dirty()
-        })?;
-        assert_eq!(db.read(|s| s.dirty_nodes(10))?, [tagged.node]);
         let removed = db.write(|s| s.delete_mirror(file.file_id))?;
         assert_eq!(removed, Some(file.clone()));
         assert_eq!(db.read(|s| s.get_mirror(file.node))?, None);
@@ -546,5 +535,28 @@ fn synced_keeps_the_newest() -> R {
     // Newest first, the oldest two gone.
     assert_eq!(recent, (2..7).rev().map(entry).collect::<Vec<_>>());
     assert_eq!(db.read(|s| s.recent_synced(2))?, vec![entry(6), entry(5)]);
+    Ok(())
+}
+
+/// Connections opening a new DB at the same time: one creates the schema, the rest find it.
+#[test]
+fn a_new_db_opened_at_once_is_created_once() -> R {
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let path = dir.path().join("state.db");
+    let start = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let opens: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    StateDb::open(&path).map(drop)
+                })
+            })
+            .collect();
+        opens
+            .into_iter()
+            .try_for_each(|o| o.join().expect("no panic"))
+    })?;
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 4);
     Ok(())
 }

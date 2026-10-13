@@ -1,13 +1,18 @@
-//! Schema migrations. `PRAGMA user_version` holds the number of migrations applied. Migrations
-//! are append-only once released: never edit one that has shipped.
+//! The state DB's schema. `PRAGMA user_version` holds its version: [`SCHEMA`] is version
+//! [`BASE`], and each migration after it adds one. Migrations are append-only once released:
+//! never edit one that has shipped. A DB older than `BASE` (made before 0.3) isn't upgraded: its
+//! folder is set up again.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{Result, StateError};
 
-const MIGRATIONS: &[&str] = &[
-    // 1: the whole schema.
-    r#"
+/// The version [`SCHEMA`] creates: 0.3.0's.
+const BASE: u32 = 4;
+
+/// The whole schema, as of [`BASE`]. It has shipped: change it only through [`MIGRATIONS`] (0.3
+/// DBs are at `BASE` and never run it again). `the_schema_is_0_3s` pins it.
+const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
     -- even after its node is forgotten.
@@ -30,7 +35,8 @@ const MIGRATIONS: &[&str] = &[
         version_tag    BLOB NOT NULL,                 -- the version agreed on (conflict ids)
         content_state  INTEGER NOT NULL DEFAULT 0,    -- 0 local, 1 pinned, 2 online-only
         local_name     TEXT,                          -- recorded local spelling, if any
-        local_hash     BLOB                           -- hash of the local bytes then
+        local_hash     BLOB,                          -- hash of the local bytes then
+        tags           TEXT                           -- Finder tags (JSON, node schema `tags`); NULL: none
     );
     CREATE INDEX base_parent ON base(parent);
 
@@ -49,7 +55,9 @@ const MIGRATIONS: &[&str] = &[
         file_id    INTEGER NOT NULL,                  -- low 64 bits
         file_id_hi INTEGER,                           -- high 64 bits, only when not zero
         executable INTEGER,                           -- NULL where the OS has no x bit
-        hash       BLOB                               -- NULL until hashed (files)
+        hash       BLOB,                              -- NULL until hashed (files)
+        tags       TEXT                               -- Finder tags (JSON); NULL: not known (none on
+                                                      -- this system, or the read failed)
     );
     CREATE UNIQUE INDEX local_child ON local(parent, name);
     CREATE INDEX local_file_id ON local(file_id);
@@ -112,9 +120,8 @@ const MIGRATIONS: &[&str] = &[
 
     -- Cursors and small settings.
     CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
-    "#,
-    // 2: what was synced, for people to see (the writer keeps the newest few hundred).
-    r#"
+
+    -- What was synced, for people to see (the writer keeps the newest few hundred).
     CREATE TABLE synced (
         id    INTEGER PRIMARY KEY AUTOINCREMENT,
         at    INTEGER NOT NULL,                       -- Unix seconds
@@ -123,10 +130,9 @@ const MIGRATIONS: &[&str] = &[
         files INTEGER NOT NULL,
         bytes INTEGER NOT NULL
     );
-    "#,
-    // 3: Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
-    // until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
-    r#"
+
+    -- Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
+    -- until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
     CREATE TABLE removed (
         node          BLOB PRIMARY KEY,
         file_id       BLOB NOT NULL UNIQUE,
@@ -145,30 +151,57 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX removed_at ON removed(removed_at);
     CREATE INDEX removed_root ON removed(root);
     CREATE INDEX removed_parent ON removed(parent);
-    "#,
-    // 4: Finder tags (JSON, node schema `tags`). Base: NULL is none. Local: NULL is not known
-    // (no tags on this system, or not read yet).
-    r#"
-    ALTER TABLE base ADD COLUMN tags TEXT;
-    ALTER TABLE local ADD COLUMN tags TEXT;
-    "#,
-];
+"#;
+
+/// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
+const MIGRATIONS: &[&str] = &[];
+
+/// The version this client makes and reads.
+const VERSION: u32 = BASE + MIGRATIONS.len() as u32;
+
+pub(crate) fn user_version(conn: &Connection) -> Result<u32> {
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
+
+/// Refuses a DB this client can't use (0 is a new one).
+fn check(version: u32) -> Result<()> {
+    if version > VERSION {
+        Err(StateError::TooNew {
+            found: version,
+            supported: VERSION,
+        })
+    } else if version != 0 && version < BASE {
+        Err(StateError::TooOld { found: version })
+    } else {
+        Ok(())
+    }
+}
 
 pub fn apply(conn: &mut Connection) -> Result<()> {
-    let current: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    let supported = MIGRATIONS.len() as u32;
-    if current > supported {
-        return Err(StateError::TooNew {
-            found: current,
-            supported,
-        });
+    let seen = user_version(conn)?;
+    check(seen)?;
+    if seen == VERSION {
+        return Ok(());
     }
-    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
-        let tx = conn.transaction()?;
+    // Another connection may be creating or migrating the same DB: decide again under the
+    // write lock.
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let current = user_version(&tx)?;
+    check(current)?;
+    if current == VERSION {
+        return Ok(());
+    }
+    let from = if current == 0 {
+        tx.execute_batch(SCHEMA)?;
+        BASE
+    } else {
+        current
+    };
+    for sql in &MIGRATIONS[(from - BASE) as usize..] {
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", i as u32 + 1)?;
-        tx.commit()?;
     }
+    tx.pragma_update(None, "user_version", VERSION)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -182,11 +215,77 @@ mod tests {
         apply(&mut conn)?;
         conn.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", [])?;
         apply(&mut conn)?;
-        let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        assert_eq!(version, MIGRATIONS.len() as u32);
+        assert_eq!(user_version(&conn)?, VERSION);
         let value: String =
             conn.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))?;
         assert_eq!(value, "v");
         Ok(())
     }
+
+    #[test]
+    fn a_db_from_before_0_3_is_refused() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.pragma_update(None, "user_version", 3)?;
+        assert!(matches!(
+            apply(&mut conn),
+            Err(StateError::TooOld { found: 3 })
+        ));
+        Ok(())
+    }
+
+    /// The SQL of every table, index and trigger [`SCHEMA`] makes, without comments or layout.
+    #[test]
+    fn the_schema_is_0_3s() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let mut objects = conn
+            .prepare("SELECT sql FROM sqlite_master WHERE sql NOT NULL ORDER BY type DESC, name")?;
+        let made: Vec<String> = objects
+            .query_map([], |r| r.get::<_, String>(0))?
+            .map(|sql| {
+                let sql = sql?;
+                let code = sql
+                    .lines()
+                    .map(|l| l.split("--").next().unwrap_or_default());
+                Ok(code
+                    .flat_map(str::split_whitespace)
+                    .collect::<Vec<_>>()
+                    .join(" "))
+            })
+            .collect::<Result<_>>()?;
+        assert_eq!(made.join("\n"), PINNED_0_3);
+        Ok(())
+    }
+
+    /// What [`SCHEMA`] makes: the same tables, columns, constraints, indexes and triggers as
+    /// 0.3.0's four migrations (checked when they were squashed).
+    const PINNED_0_3: &str = "\
+        CREATE TRIGGER base_gone AFTER DELETE ON base BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
+        CREATE TRIGGER base_regone AFTER UPDATE OF parent ON base WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
+        CREATE TRIGGER dirty_gone AFTER DELETE ON dirty BEGIN INSERT INTO gone VALUES (old.id); END\n\
+        CREATE TRIGGER forks_gone AFTER DELETE ON forks BEGIN INSERT INTO gone VALUES (old.id), (old.new_node); END\n\
+        CREATE TRIGGER local_gone AFTER DELETE ON local BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
+        CREATE TRIGGER local_regone AFTER UPDATE OF id, parent ON local WHEN old.id IS NOT new.id OR old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
+        CREATE TRIGGER parked_gone AFTER DELETE ON parked BEGIN INSERT INTO gone VALUES (old.id); END\n\
+        CREATE TRIGGER remote_gone AFTER DELETE ON remote BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
+        CREATE TRIGGER remote_regone AFTER UPDATE OF parent ON remote WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
+        CREATE TABLE base ( id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, content_state INTEGER NOT NULL DEFAULT 0, local_name TEXT, local_hash BLOB, tags TEXT )\n\
+        CREATE TABLE dirty (id INTEGER PRIMARY KEY)\n\
+        CREATE TABLE forks ( id INTEGER PRIMARY KEY, new_node INTEGER NOT NULL, to_name TEXT NOT NULL )\n\
+        CREATE TABLE gone (id INTEGER NOT NULL)\n\
+        CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID\n\
+        CREATE TABLE local ( id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, volume INTEGER NOT NULL, file_id INTEGER NOT NULL, file_id_hi INTEGER, executable INTEGER, hash BLOB, tags TEXT )\n\
+        CREATE TABLE nodes ( id INTEGER PRIMARY KEY AUTOINCREMENT, uuid BLOB NOT NULL UNIQUE )\n\
+        CREATE TABLE parked (id INTEGER PRIMARY KEY, original_name TEXT NOT NULL)\n\
+        CREATE TABLE remote ( id INTEGER PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT )\n\
+        CREATE TABLE removed ( node BLOB PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, removed_at INTEGER NOT NULL, root BLOB NOT NULL ) WITHOUT ROWID\n\
+        CREATE TABLE sqlite_sequence(name,seq)\n\
+        CREATE TABLE synced ( id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL )\n\
+        CREATE INDEX base_parent ON base(parent)\n\
+        CREATE UNIQUE INDEX local_child ON local(parent, name)\n\
+        CREATE INDEX local_file_id ON local(file_id)\n\
+        CREATE INDEX remote_parent ON remote(parent)\n\
+        CREATE INDEX removed_at ON removed(removed_at)\n\
+        CREATE INDEX removed_parent ON removed(parent)\n\
+        CREATE INDEX removed_root ON removed(root)";
 }
