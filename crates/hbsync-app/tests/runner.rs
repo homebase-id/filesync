@@ -351,6 +351,33 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
     Ok(())
 }
 
+/// The first sync runs inside start-up: its progress shows while the state is still `Starting`.
+#[test]
+fn progress_shows_during_the_first_sync() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    std::fs::create_dir_all(root.join(".hbsync"))?;
+    // There before the daemon starts: uploaded by start-up's first sync.
+    std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
+    let mut cfg = RunnerConfig::new(&root, "test.example", "a");
+    cfg.poll = NO_POLL;
+    cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
+    let remote = Arc::new(FakeRemote::new(server.clone()));
+    let (handle, _thread) = Runner::spawn(cfg, remote, HintSource::none())?;
+    let mut seen = None;
+    wait_until("progress shows", || {
+        let status = handle.status();
+        seen = status.progress.map(|p| (status.state, p));
+        seen.is_some_and(|(_, p)| p.bytes_done > 0)
+    })?;
+    let (state, p) = seen.ok_or("no progress")?;
+    assert_eq!((state, p.bytes_total), (State::Starting, 600_000));
+    wait_until("big.bin is up", || on_server(&server, "big.bin"))?;
+    handle.send(Control::Stop);
+    Ok(())
+}
+
 #[test]
 fn progress_shows_while_a_transfer_runs() -> R {
     let server = server();

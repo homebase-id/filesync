@@ -115,8 +115,10 @@ pub fn status_line(view: &View) -> String {
         Daemon::Starting(None) => "Starting…".into(),
         Daemon::Starting(Some(why)) => cut(&format!("Can't start: {why}")),
         Daemon::Running(s) => match s.state {
-            State::Starting => "Catching up…".into(),
-            State::Syncing => match &s.progress {
+            State::Starting if s.progress.is_none() => "Catching up…".into(),
+            // Start-up's first sync shows its progress like any other: on a new install it can
+            // take hours.
+            State::Starting | State::Syncing => match &s.progress {
                 Some(p) => format!("Syncing {}", words::progress(p)),
                 None => "Syncing…".into(),
             },
@@ -393,6 +395,23 @@ mod tests {
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Busy);
         assert_eq!(status_line(&v), "Syncing 3 of 12 files, 1.0 MB of 40 MB");
+
+        // Start-up: catching up until its first sync has a plan, then that sync's progress.
+        let mut s = status(State::Starting);
+        let d = Daemon::Running(Box::new(s.clone()));
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::Busy);
+        assert_eq!(status_line(&v), "Catching up…");
+        s.progress = Some(Progress {
+            files_done: 1_234,
+            files_total: 19_000,
+            bytes_done: 0,
+            bytes_total: 0,
+        });
+        let d = Daemon::Running(Box::new(s));
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::Busy);
+        assert_eq!(status_line(&v), "Syncing 1,234 of 19,000 files");
     }
 
     #[test]

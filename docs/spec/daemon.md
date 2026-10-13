@@ -127,9 +127,9 @@ a failure (service managers restart it then).
 
 ### States
 
-`starting` (catching up), `syncing`, `idle`, `paused`, `offline` (can't reach the identity),
-`failing` (another failure, or the folder gone), `denied` (the identity refused this device:
-`hbsync setup` again), `stopped`.
+`starting` (catching up, then the first sync, with its progress), `syncing`, `idle`, `paused`, `offline` (can't
+reach the identity), `failing` (another failure, or the folder gone), `denied` (the identity
+refused this device: `hbsync setup` again), `stopped`.
 
 ## Control socket
 
@@ -148,7 +148,9 @@ version (now 3); a daemon refuses another one with the reason (after an update: 
 {"protocol":3,"ask":{"deleted":{"limit":100}}}
 ```
 
-Replies: `{"status":{...}}` (with the daemon's `version`, `progress`, `paused_until`, and the
+Replies: `{"status":{...}}` (with the daemon's `version`, `progress` (while `starting` or
+`syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
+planned), `paused_until`, and the
 counts `notes_added` and `synced_added` that tell a client what is new),
 `{"recent":[...]}` and `{"deleted":[...]}` (newest first), `"done"`, `{"refused":"why"}`.
 
@@ -175,10 +177,11 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
 - **Icon:** the Homebase mark with a dot: green up to date, blue syncing, grey paused or
   offline or not set up, magenta when something needs the user (a failure, held deletes, a
   refused login).
-- **Menu:** version, identity, a status line (with progress while syncing), Open Homebase
-  folder, Recently synced (the last 10; clicking one shows it in the file manager), Problems
-  (the status notes), Review N deletions…, Recently deleted…, Log in again… (refused), Pause syncing (1 h, 8 h,
-  24 h, until resumed) or Resume, Sync now, Start at login, Open logs, Log out, Quit.
+- **Menu:** version, identity, a status line (with progress while syncing, the first sync after
+  starting included), Open Homebase folder, Recently synced (the last 10; clicking one shows it
+  in the file manager), Problems (the status notes), Review N deletions…, Recently deleted…, Log
+  in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
+  at login, Open logs, Log out, Quit.
 - **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the
   OS's picker, merging a folder with files only when ticked), reviewing held deletes and
   Recently deleted (the topmost items: path, size, date, how many items their restore brings
