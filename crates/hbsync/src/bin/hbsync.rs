@@ -391,7 +391,9 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
 
 fn print_status(s: &Status) {
     let state = match s.state {
-        State::Starting => "starting",
+        // As the tray says it: start-up's first sync shows as syncing once it has a plan.
+        State::Starting if s.progress.is_none() => "catching up",
+        State::Starting => "syncing",
         State::Syncing => "syncing",
         State::Idle if s.pending == 0 => "up to date",
         State::Idle => "idle",

@@ -127,7 +127,7 @@ a failure (service managers restart it then).
 
 ### States
 
-`starting` (catching up, then the first sync), `syncing`, `idle`, `paused`, `offline` (can't
+`starting` (catching up, then the first sync, with its progress), `syncing`, `idle`, `paused`, `offline` (can't
 reach the identity), `failing` (another failure, or the folder gone), `denied` (the identity
 refused this device: `hbsync setup` again), `stopped`.
 
@@ -148,7 +148,9 @@ version (now 3); a daemon refuses another one with the reason (after an update: 
 {"protocol":3,"ask":{"deleted":{"limit":100}}}
 ```
 
-Replies: `{"status":{...}}` (with the daemon's `version`, `progress`, `paused_until`, and the
+Replies: `{"status":{...}}` (with the daemon's `version`, `progress` (while `starting` or
+`syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
+planned), `paused_until`, and the
 counts `notes_added` and `synced_added` that tell a client what is new),
 `{"recent":[...]}` and `{"deleted":[...]}` (newest first), `"done"`, `{"refused":"why"}`.
 

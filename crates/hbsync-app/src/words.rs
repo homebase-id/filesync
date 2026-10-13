@@ -38,6 +38,19 @@ pub fn when_roughly(at: u64, now: u64) -> String {
 }
 
 /// A size: "512 bytes", "40 kB", "2.1 MB", "1.2 GB" (decimal units, as file managers show).
+/// A count with its thousands grouped: `127,000`.
+pub fn count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(d);
+    }
+    out
+}
+
 pub fn bytes(n: u64) -> String {
     const UNITS: [&str; 4] = ["kB", "MB", "GB", "TB"];
     if n < 1000 {
@@ -138,8 +151,8 @@ pub fn escape_xml(s: &str) -> String {
 pub fn progress(p: &Progress) -> String {
     let files = format!(
         "{} of {} files",
-        p.files_done.min(p.files_total),
-        p.files_total
+        count(p.files_done.min(p.files_total)),
+        count(p.files_total)
     );
     if p.bytes_total == 0 {
         return files;
@@ -154,6 +167,20 @@ pub fn progress(p: &Progress) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_are_grouped() {
+        let cases = [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1,000"),
+            (127_000, "127,000"),
+        ];
+        for (n, said) in cases {
+            assert_eq!(count(n), said);
+        }
+        assert_eq!(count(1_234_567), "1,234,567");
+    }
 
     #[test]
     fn sizes() {
