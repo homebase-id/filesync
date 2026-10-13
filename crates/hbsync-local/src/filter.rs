@@ -15,7 +15,7 @@ use hbsync_platform::RelPath;
 pub const IGNORE_FILE: &str = "ignore";
 
 /// Bumped whenever the built-in junk list changes, so a changed list counts as a rule change.
-const JUNK_VERSION: u32 = 1;
+const JUNK_VERSION: u32 = 2;
 
 /// How the built-in list matches a name (ASCII case-insensitively).
 #[derive(Debug, Clone, Copy)]
@@ -56,6 +56,13 @@ const JUNK: &[Pat] = &[
     // vim swap files.
     Pat::Both(".", ".swp"),
     Pat::Both(".", ".swx"),
+    // Other sync apps' own files, left behind in a folder moved over from them: Dropbox's
+    // folder marker and cache, OneDrive's folder marker, Google Drive's transfers in progress.
+    Pat::Name(".dropbox"),
+    Pat::Name(".dropbox.cache"),
+    Pat::Name(".849C9593-D756-4E56-8D6E-42412F2A707B"),
+    Pat::Name(".tmp.drivedownload"),
+    Pat::Name(".tmp.driveupload"),
     // Downloads in progress (Chrome, Firefox): they get their real name when done.
     Pat::Suffix(".crdownload"),
     Pat::Suffix(".part"),
@@ -271,6 +278,10 @@ mod tests {
             ".notes.txt.swp",
             "film.mkv.part",
             "setup.exe.crdownload",
+            ".dropbox",
+            ".Dropbox.Cache",
+            ".849c9593-d756-4e56-8d6e-42412f2a707b",
+            ".tmp.driveupload",
         ] {
             assert!(is_junk(name), "{name:?}");
         }
@@ -285,6 +296,9 @@ mod tests {
             "part",
             "lock#",
             "desktop.ini.txt",
+            "Dropbox",
+            ".dropbox.txt",
+            ".tmp",
         ] {
             assert!(!is_junk(name), "{name:?}");
         }
