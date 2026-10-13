@@ -156,31 +156,51 @@ const SCHEMA: &str = r#"
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
 const MIGRATIONS: &[&str] = &[];
 
+/// The version this client makes and reads.
+const VERSION: u32 = BASE + MIGRATIONS.len() as u32;
+
+pub(crate) fn user_version(conn: &Connection) -> Result<u32> {
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
+
+/// Refuses a DB this client can't use (0 is a new one).
+fn check(version: u32) -> Result<()> {
+    if version > VERSION {
+        Err(StateError::TooNew {
+            found: version,
+            supported: VERSION,
+        })
+    } else if version != 0 && version < BASE {
+        Err(StateError::TooOld { found: version })
+    } else {
+        Ok(())
+    }
+}
+
 pub fn apply(conn: &mut Connection) -> Result<()> {
-    let supported = BASE + MIGRATIONS.len() as u32;
-    let version =
-        |c: &Connection| c.pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0));
-    if version(conn)? == supported {
+    let seen = user_version(conn)?;
+    check(seen)?;
+    if seen == VERSION {
         return Ok(());
     }
-    // Another connection may be creating or migrating the same DB: decide under the write lock.
+    // Another connection may be creating or migrating the same DB: decide again under the
+    // write lock.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let current = version(&tx)?;
-    if current > supported {
-        return Err(StateError::TooNew {
-            found: current,
-            supported,
-        });
+    let current = user_version(&tx)?;
+    check(current)?;
+    if current == VERSION {
+        return Ok(());
     }
-    if current == 0 {
+    let from = if current == 0 {
         tx.execute_batch(SCHEMA)?;
-    } else if current < BASE {
-        return Err(StateError::TooOld { found: current });
-    }
-    for sql in &MIGRATIONS[(current.max(BASE) - BASE) as usize..] {
+        BASE
+    } else {
+        current
+    };
+    for sql in &MIGRATIONS[(from - BASE) as usize..] {
         tx.execute_batch(sql)?;
     }
-    tx.pragma_update(None, "user_version", supported)?;
+    tx.pragma_update(None, "user_version", VERSION)?;
     tx.commit()?;
     Ok(())
 }
@@ -195,8 +215,7 @@ mod tests {
         apply(&mut conn)?;
         conn.execute("INSERT INTO kv (key, value) VALUES ('k', 'v')", [])?;
         apply(&mut conn)?;
-        let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        assert_eq!(version, BASE + MIGRATIONS.len() as u32);
+        assert_eq!(user_version(&conn)?, VERSION);
         let value: String =
             conn.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))?;
         assert_eq!(value, "v");
@@ -214,69 +233,32 @@ mod tests {
         Ok(())
     }
 
-    /// Triggers and indexes by their SQL, tables by their columns (type, NOT NULL, default,
-    /// key position) and UNIQUE constraints: what the code relies on, not comments or layout.
-    fn describe(conn: &Connection) -> Result<String> {
-        let mut out = String::new();
-        let mut objects = conn.prepare(
-            "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' \
-             ORDER BY type DESC, name",
-        )?;
-        let objects: Vec<(String, String, Option<String>)> = objects
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (kind, name, sql) in objects {
-            if kind == "table" {
-                let mut cols = conn.prepare(&format!("PRAGMA table_info({name})"))?;
-                let cols: Vec<String> = cols
-                    .query_map([], |r| {
-                        let (col, ty, not_null, default, pk): (
-                            String,
-                            String,
-                            bool,
-                            Option<String>,
-                            u32,
-                        ) = (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?);
-                        let mut c = format!("{col} {ty}");
-                        if not_null {
-                            c += " NOT NULL";
-                        }
-                        if let Some(d) = default {
-                            c += &format!(" DEFAULT {d}");
-                        }
-                        if pk > 0 {
-                            c += &format!(" PK{pk}");
-                        }
-                        Ok(c)
-                    })?
-                    .collect::<rusqlite::Result<_>>()?;
-                let mut uniques = conn.prepare(&format!(
-                    "SELECT group_concat(c.name, ', ') FROM pragma_index_list('{name}') l, \
-                     pragma_index_info(l.name) c WHERE l.origin = 'u' GROUP BY l.name ORDER BY l.name"
-                ))?;
-                let uniques: Vec<String> = uniques
-                    .query_map([], |r| Ok(format!("UNIQUE({})", r.get::<_, String>(0)?)))?
-                    .collect::<rusqlite::Result<_>>()?;
-                let all: Vec<String> = cols.into_iter().chain(uniques).collect();
-                out += &format!("{name}: {}\n", all.join(", "));
-            } else {
-                let sql = sql.unwrap_or_default();
-                out += &format!("{}\n", sql.split_whitespace().collect::<Vec<_>>().join(" "));
-            }
-        }
-        Ok(out)
-    }
-
+    /// The SQL of every table, index and trigger [`SCHEMA`] makes, without comments or layout.
     #[test]
     fn the_schema_is_0_3s() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        apply(&mut conn)?;
-        assert_eq!(describe(&conn)?, PINNED_0_3);
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        let mut objects = conn
+            .prepare("SELECT sql FROM sqlite_master WHERE sql NOT NULL ORDER BY type DESC, name")?;
+        let made: Vec<String> = objects
+            .query_map([], |r| r.get::<_, String>(0))?
+            .map(|sql| {
+                let sql = sql?;
+                let code = sql
+                    .lines()
+                    .map(|l| l.split("--").next().unwrap_or_default());
+                Ok(code
+                    .flat_map(str::split_whitespace)
+                    .collect::<Vec<_>>()
+                    .join(" "))
+            })
+            .collect::<Result<_>>()?;
+        assert_eq!(made.join("\n"), PINNED_0_3);
         Ok(())
     }
 
-    /// What 0.3.0's four migrations made (version 4), checked against them when the schema was
-    /// squashed.
+    /// What [`SCHEMA`] makes: the same tables, columns, constraints, indexes and triggers as
+    /// 0.3.0's four migrations (checked when they were squashed).
     const PINNED_0_3: &str = "\
         CREATE TRIGGER base_gone AFTER DELETE ON base BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
         CREATE TRIGGER base_regone AFTER UPDATE OF parent ON base WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
@@ -287,23 +269,23 @@ mod tests {
         CREATE TRIGGER parked_gone AFTER DELETE ON parked BEGIN INSERT INTO gone VALUES (old.id); END\n\
         CREATE TRIGGER remote_gone AFTER DELETE ON remote BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
         CREATE TRIGGER remote_regone AFTER UPDATE OF parent ON remote WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
-        base: id INTEGER PK1, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL, version_tag BLOB NOT NULL, content_state INTEGER NOT NULL DEFAULT 0, local_name TEXT, local_hash BLOB, tags TEXT, UNIQUE(remote_file_id)\n\
-        dirty: id INTEGER PK1\n\
-        forks: id INTEGER PK1, new_node INTEGER NOT NULL, to_name TEXT NOT NULL\n\
-        gone: id INTEGER NOT NULL\n\
-        kv: key TEXT NOT NULL PK1, value TEXT NOT NULL\n\
-        local: id INTEGER PK1, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, volume INTEGER NOT NULL, file_id INTEGER NOT NULL, file_id_hi INTEGER, executable INTEGER, hash BLOB, tags TEXT\n\
-        nodes: id INTEGER PK1, uuid BLOB NOT NULL, UNIQUE(uuid)\n\
-        parked: id INTEGER PK1, original_name TEXT NOT NULL\n\
-        remote: id INTEGER PK1, file_id BLOB NOT NULL, version_tag BLOB NOT NULL, parent INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, UNIQUE(file_id)\n\
-        removed: node BLOB NOT NULL PK1, file_id BLOB NOT NULL, version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, removed_at INTEGER NOT NULL, root BLOB NOT NULL, UNIQUE(file_id)\n\
-        synced: id INTEGER PK1, at INTEGER NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL\n\
+        CREATE TABLE base ( id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, content_state INTEGER NOT NULL DEFAULT 0, local_name TEXT, local_hash BLOB, tags TEXT )\n\
+        CREATE TABLE dirty (id INTEGER PRIMARY KEY)\n\
+        CREATE TABLE forks ( id INTEGER PRIMARY KEY, new_node INTEGER NOT NULL, to_name TEXT NOT NULL )\n\
+        CREATE TABLE gone (id INTEGER NOT NULL)\n\
+        CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID\n\
+        CREATE TABLE local ( id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, volume INTEGER NOT NULL, file_id INTEGER NOT NULL, file_id_hi INTEGER, executable INTEGER, hash BLOB, tags TEXT )\n\
+        CREATE TABLE nodes ( id INTEGER PRIMARY KEY AUTOINCREMENT, uuid BLOB NOT NULL UNIQUE )\n\
+        CREATE TABLE parked (id INTEGER PRIMARY KEY, original_name TEXT NOT NULL)\n\
+        CREATE TABLE remote ( id INTEGER PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT )\n\
+        CREATE TABLE removed ( node BLOB PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, removed_at INTEGER NOT NULL, root BLOB NOT NULL ) WITHOUT ROWID\n\
+        CREATE TABLE sqlite_sequence(name,seq)\n\
+        CREATE TABLE synced ( id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL )\n\
         CREATE INDEX base_parent ON base(parent)\n\
         CREATE UNIQUE INDEX local_child ON local(parent, name)\n\
         CREATE INDEX local_file_id ON local(file_id)\n\
         CREATE INDEX remote_parent ON remote(parent)\n\
         CREATE INDEX removed_at ON removed(removed_at)\n\
         CREATE INDEX removed_parent ON removed(parent)\n\
-        CREATE INDEX removed_root ON removed(root)\n\
-    ";
+        CREATE INDEX removed_root ON removed(root)";
 }

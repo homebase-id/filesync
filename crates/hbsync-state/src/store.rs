@@ -42,7 +42,7 @@ pub struct LocalRow {
     pub executable: Option<bool>,
     /// `None` until hashed; always `None` for folders.
     pub hash: Option<hbsync_types::ContentHash>,
-    /// `None` if not known: no tags on this system or file system, or not read yet.
+    /// `None` if not known: no tags on this system or file system, or the read failed.
     pub tags: Option<Tags>,
 }
 

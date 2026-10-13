@@ -33,10 +33,7 @@ pub enum StateError {
     Corrupt(String),
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
-    #[error(
-        "state DB schema version {found} is from before Filesync 0.3, which isn't upgraded: \
-         delete the folder's .hbsync and set it up again"
-    )]
+    #[error("state DB schema version {found} is from before Filesync 0.3 and isn't upgraded")]
     TooOld { found: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
@@ -101,8 +98,6 @@ impl StateDb {
 
     /// The schema version in use.
     pub fn schema_version(&self) -> Result<u32> {
-        Ok(self
-            .conn
-            .pragma_query_value(None, "user_version", |r| r.get(0))?)
+        migrations::user_version(&self.conn)
     }
 }
