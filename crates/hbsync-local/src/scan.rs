@@ -590,8 +590,8 @@ fn parent_node(
     db.read(|s| s.local_node_at(&parent))
 }
 
-/// Whether tags read as `new` differ from `old`. No tags where none were known yet (a row from
-/// before tags) aren't a change. Tags that can't be read now are the ones known before, so
+/// Whether tags read as `new` differ from `old`. No tags where none were known (no tags on
+/// this system, or the read failed) aren't a change. Tags that can't be read now are the ones known before, so
 /// that removing every tag later is still seen.
 fn tags_changed(old: &Option<Tags>, new: &Option<Tags>) -> bool {
     match (old, new) {

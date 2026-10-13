@@ -505,14 +505,6 @@ impl<'a> Store<'a> {
         Ok(())
     }
 
-    /// Records the tags of `node`'s local item, as read (the rest of its row stays).
-    pub fn set_local_tags(&self, node: NodeId, tags: &Tags) -> Result<()> {
-        self.conn
-            .prepare_cached(&format!("UPDATE local SET tags = ?2 WHERE id = {ID_OF}"))?
-            .execute(params![node.0.as_bytes(), tags_to_string(tags)])?;
-        Ok(())
-    }
-
     /// Deletes the row of `node`. A folder's contents must go first (or use
     /// [`Store::delete_local_subtree`]): rows below a deleted folder would have no path.
     pub fn delete_local(&self, node: NodeId) -> Result<bool> {

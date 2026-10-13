@@ -34,8 +34,8 @@ pub enum StateError {
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
     #[error(
-        "state DB schema version {found} is from before Filesync 0.3: set this folder up again \
-         (hbsync setup)"
+        "state DB schema version {found} is from before Filesync 0.3, which isn't upgraded: \
+         delete the folder's .hbsync and set it up again"
     )]
     TooOld { found: u32 },
     #[error("conflict: {0}")]
