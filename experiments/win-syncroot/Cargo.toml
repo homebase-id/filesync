@@ -1,0 +1,12 @@
+# An experiment, not part of Filesync or its workspace (see src/main.rs).
+[package]
+name = "homebase-syncroot-test"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Storage", "Storage_Provider", "Storage_Search", "Storage_Streams"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_CloudFilters", "Win32_System_IO", "Win32_System_Threading"] }
