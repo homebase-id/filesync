@@ -541,8 +541,33 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
         pace: None,
     };
     ensure_err!(b.remote.create(&f, Some(lying)), RemoteError::HashMismatch);
+    // A source that shrank or grew since it was hashed is refused the same way.
+    for changed in [&b"rea"[..], b"real, and more"] {
+        let mut reader = Cursor::new(changed);
+        let upload = Upload {
+            hash: hash_bytes(b"real", HashAlgorithm::Blake3),
+            size: 4,
+            reader: &mut reader,
+            pace: None,
+        };
+        ensure_err!(b.remote.create(&f, Some(upload)), RemoteError::HashMismatch);
+    }
     // Nothing was stored: the node id is still free.
-    b.create(&f, Some(b"real"))?;
+    let at = b.create(&f, Some(b"real"))?;
+    // An update whose source changed keeps the version it would have replaced.
+    let mut reader = Cursor::new(&b"fake"[..]);
+    let lying = Upload {
+        hash: hash_bytes(b"new!", HashAlgorithm::Blake3),
+        size: 4,
+        reader: &mut reader,
+        pace: None,
+    };
+    ensure_err!(
+        b.remote.update(at.file_id, at.version, &f, Some(lying)),
+        RemoteError::HashMismatch
+    );
+    ensure!(b.read(at.file_id, None)? == b"real", "the old bytes stay");
+    b.update(at, &f, Some(b"new!"))?;
     Ok(())
 }
 

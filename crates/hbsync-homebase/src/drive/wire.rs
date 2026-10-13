@@ -242,36 +242,21 @@ fn payload_info(p: &Payload, key: &KeyHeader) -> Result<PayloadInfo, String> {
     })
 }
 
-/// What an upload says about the `sync_data` payload it sends.
+/// What an upload says about the `sync_data` payload it sends: its hashes follow it, in its
+/// `payloadHash` part (odin-core #1935).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PayloadDescriptor {
     pub algorithm: HashAlgorithm,
-    /// Base64, over the bytes sent.
-    pub stored_hash: String,
-    /// Base64: the plaintext hash, sealed.
-    pub content_hash: String,
     /// The payload IV.
     pub iv: [u8; 16],
 }
 
-/// What a deferred hash's values are in the descriptor (odin-core #1935): every byte this, as
-/// many as the value has. The values follow the payload, in its `payloadHash` part.
+/// What a deferred hash's values are in the descriptor: every byte this, as many as the value
+/// has.
 const DEFERRED: u8 = 0x11;
 
 /// A sealed content hash's length: 32 bytes, AES-CBC with its padding.
 const SEALED_HASH_LEN: usize = 48;
-
-impl PayloadDescriptor {
-    /// A payload encrypted under `iv` whose hashes follow it ([`payload_hash`]).
-    pub fn deferred(algorithm: HashAlgorithm, iv: [u8; 16]) -> Self {
-        PayloadDescriptor {
-            algorithm,
-            stored_hash: STANDARD.encode([DEFERRED; 32]),
-            content_hash: STANDARD.encode([DEFERRED; SEALED_HASH_LEN]),
-            iv,
-        }
-    }
-}
 
 /// The `payloadHash` part: the values of a deferred descriptor, for a payload encrypted with
 /// `key` under `iv` whose plaintext hashes to `content` and ciphertext to `stored`.
@@ -302,7 +287,7 @@ fn hash_part(stored: &str, content: &str) -> Vec<u8> {
 /// Every `payloadHash` part's length: base64 of values of fixed length.
 pub(crate) const PAYLOAD_HASH_LEN: usize = r#"{"storedHash":"","contentHash":""}"#.len()
     + 32_usize.div_ceil(3) * 4
-    + SEALED_HASH_LEN / 3 * 4;
+    + SEALED_HASH_LEN.div_ceil(3) * 4;
 
 /// The `instructions` part of a create (`update: false`) or update. With `payload`, the
 /// `sync_data` payload is (over)written.
@@ -317,10 +302,11 @@ pub(crate) fn instructions(
                 "payloadKey": PAYLOAD_KEY,
                 "contentType": CONTENT_TYPE,
                 "iv": STANDARD.encode(p.iv),
+                // Deferred: the values follow the payload.
                 "hash": {
                     "algorithm": p.algorithm.as_str(),
-                    "storedHash": p.stored_hash,
-                    "contentHash": p.content_hash,
+                    "storedHash": STANDARD.encode([DEFERRED; 32]),
+                    "contentHash": STANDARD.encode([DEFERRED; SEALED_HASH_LEN]),
                 },
             });
             if update {
@@ -597,7 +583,10 @@ mod tests {
         let (payload_iv, transfer_iv) = (sealed::strong()?, sealed::strong()?);
         let content = hbsync_fileio::hash_bytes(b"x", HashAlgorithm::Blake3);
         let stored = hbsync_fileio::hash_bytes(b"ciphertext", HashAlgorithm::Blake3);
-        let p = PayloadDescriptor::deferred(HashAlgorithm::Blake3, payload_iv);
+        let p = PayloadDescriptor {
+            algorithm: HashAlgorithm::Blake3,
+            iv: payload_iv,
+        };
         let create = instructions(&transfer_iv, Some(&p), false);
         assert_eq!(create["transferIv"], STANDARD.encode(transfer_iv));
         let d = &create["manifest"]["payloadDescriptors"][0];

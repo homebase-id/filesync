@@ -131,9 +131,9 @@ impl<'a> Multipart<'a> {
         format!("--{}--\r\n", self.boundary).into_bytes()
     }
 
-    /// The body as one reader. A streamed part that ends early is an error (the file shrank
-    /// since it was hashed); one that has more is cut at its size (the server's hash check
-    /// then refuses it).
+    /// The body as one reader. A streamed part that ends early is an error; one that has more
+    /// is cut at its size. Nothing here checks what was sent: with a deferred hash the server
+    /// stores whatever the hash part says, so its maker must refuse a source that changed.
     pub fn into_reader(self) -> impl Read + 'a {
         let tail = Cursor::new(self.tail());
         let mut body: Box<dyn Read + 'a> = Box::new(io::empty());

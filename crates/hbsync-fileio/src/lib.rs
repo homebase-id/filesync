@@ -5,4 +5,4 @@ pub mod file;
 pub mod hash;
 
 pub use file::{CompletedFile, FileIoError, HashedFile, PartialFile, hash_file};
-pub use hash::{ContentHash, HashAlgorithm, Hasher, HashingReader, hash_bytes, hash_reader};
+pub use hash::{ContentHash, HashAlgorithm, Hasher, hash_bytes, hash_reader};

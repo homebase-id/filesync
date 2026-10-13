@@ -78,8 +78,11 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   payload carries the stored hash and the sealed content hash. The server can't tell from
   ciphertext that a file changed after it was hashed, so a plaintext that no longer has the hash
   the upload was planned with gets values no bytes hash to: the server refuses the payload
-  (`payloadHashMismatch`), stores nothing, and the engine plans again. A source that ends early
-  fails the same way.
+  (`payloadHashMismatch`) and stores nothing **[verified]** (odin-core PR #1936,
+  `DeferredPayloadHashes.cs`; live), and the engine plans again. A source that ends early, or
+  grows past its planned size (reading stops there), ends the request before its hash part:
+  nothing is stored **[verified]** (live contract), and it counts as the same mismatch. A source
+  that can't be read is a local error, not the server's.
 - **An update** reads the file's header first. It sends the file's own key with a new header
   IV, and the content encrypted with those: the server requires a strong key, keeps the file's
   key, and takes only the IV. New bytes get a new payload IV. The header read also finds a file
@@ -131,8 +134,9 @@ the client had then for comparison, and 8 MiB read pieces:
 | create / read / update a small file | 2.5 / 6.7 / 5.0 ms | 2.5 / 6.1 / 3.7 ms |
 
 (An unencrypted small read took a second request then.) Since reads are one streamed request
-(odin-core #1921, 2026-10-11), the same 1 GiB downloads at about 600 MB/s; uploads are
-unchanged at 155–175 MB/s, the first upload after the test starts being the slowest of a run. The cipher alone: encrypting 970 MB/s,
-decrypting 2.8 GB/s, where OpenSSL reaches 1.6 and 6.6 GB/s. The upload's first pass, about 1.3 s per GB here, is the cost that shows. It is small
-next to any internet link. A faster AES (aws-lc-rs) would bring a C build on three OSes, and
+(odin-core #1921, 2026-10-11), the same 1 GiB downloads at about 600 MB/s. Uploads ran at
+155–175 MB/s while they read and encrypted the source twice; in one pass (the deferred hash,
+odin-core #1936, 2026-10-13) they reach about 210 MB/s. The cipher alone: encrypting 970 MB/s,
+decrypting 2.8 GB/s, where OpenSSL reaches 1.6 and 6.6 GB/s. All of it is far above any
+internet link. A faster AES (aws-lc-rs) would bring a C build on three OSes, and
 isn't worth it until a measurement shows uploads bound by the CPU.

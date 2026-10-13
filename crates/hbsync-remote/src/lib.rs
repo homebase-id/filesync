@@ -7,7 +7,7 @@
 //! Implementations: [`fake::FakeServer`] / [`fake::FakeRemote`] (in memory, Homebase
 //! semantics) and, later, the Homebase adapter.
 
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Write};
 
 use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{
@@ -131,7 +131,8 @@ pub struct NodeMeta {
 pub struct Upload<'a> {
     pub hash: ContentHash,
     pub size: u64,
-    pub reader: &'a mut dyn Source,
+    /// Read once, by the remote that sends it.
+    pub reader: &'a mut dyn Read,
     /// Paces the bytes sent (a bandwidth cap); not those a remote reads for itself.
     pub pace: Option<&'a dyn Pace>,
 }
@@ -166,12 +167,6 @@ impl<R: Read> Read for Paced<'_, R> {
         Ok(n)
     }
 }
-
-/// Where an upload's bytes come from. A remote may read it more than once: an encrypting one
-/// reads it first to hash the ciphertext it will send.
-pub trait Source: Read + Seek {}
-
-impl<T: Read + Seek> Source for T {}
 
 impl std::fmt::Debug for Upload<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

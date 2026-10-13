@@ -134,7 +134,9 @@ Encrypted files **[verified]** on odin-core `main` @ 07657309e (the format: `enc
   (every byte `0x11`: 32 bytes, 48 for the sealed `contentHash`); a part `payloadHash` after the
   payload, file name the payload key, carries `{"storedHash", "contentHash"}`. Values that don't
   match the bytes give 4175 and nothing is stored; no such part gives 4178. Stored headers hold
-  the real values. This client always defers: it reads and encrypts the source once.
+  the real values. This client always defers: it reads and encrypts the source once. It sends
+  an exact `Content-Length`, so it can't leave the part out: a source that changed while it was
+  sent gets values no bytes hash to (4175); one that ended early or grew aborts the request.
 
 **Update replaces the metadata, it doesn't merge** **[verified]**
 `StandardFileUpdateWriter.cs:48-85`: an update that leaves out `uniqueId` clears it, and a
