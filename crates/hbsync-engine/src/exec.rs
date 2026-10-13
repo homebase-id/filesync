@@ -72,11 +72,21 @@ pub enum CrashPoint {
     AfterForkRename,
 }
 
+/// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
+/// (a leading dot hides it elsewhere). Done at every start, so folders from before are hidden
+/// too.
+pub fn ensure_state_dir(root: &Path) -> PathBuf {
+    let dir = root.join(hbsync_local::STATE_DIR);
+    let _ = fs::create_dir_all(&dir);
+    // Only looks: a folder that can't be hidden still works.
+    let _ = hbsync_platform::ops::set_hidden(&dir);
+    dir
+}
+
 /// Probes the volume of the sync root, inside the client's own state folder so nothing shows
 /// up in the user's tree. Falls back to the OS default.
 pub fn probe_case_insensitive(root: &Path) -> bool {
-    let dir = root.join(hbsync_local::STATE_DIR);
-    let _ = fs::create_dir_all(&dir);
+    let dir = ensure_state_dir(root);
     match hbsync_platform::fskind::probe_case_sensitive(&dir) {
         Ok(sensitive) => !sensitive,
         Err(_) => cfg!(any(windows, target_os = "macos")),
