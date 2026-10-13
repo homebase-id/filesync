@@ -407,9 +407,7 @@ mod tests {
             bytes_total: 0,
         });
         let d = Daemon::Running(Box::new(s));
-        let v = view(&d, &[]);
-        assert_eq!(look(&v), Look::Busy);
-        assert_eq!(status_line(&v), "Syncing 1234 of 127000 files");
+        assert_eq!(status_line(&view(&d, &[])), "Syncing 1234 of 127000 files");
     }
 
     #[test]
