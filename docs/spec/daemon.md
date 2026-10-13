@@ -24,7 +24,7 @@ Otherwise:
 | control socket | `$XDG_RUNTIME_DIR/hbsync`, else `<state>` | same as config | a named pipe |
 
 The sync folder keeps its own state in `<folder>/.hbsync` (state DB, temp files, trash, ignore
-rules). Its state DB records the identity it syncs with (`account.identity`): a folder synced
+rules), hidden on Windows too (the hidden attribute, set at every start). Its state DB records the identity it syncs with (`account.identity`): a folder synced
 with one identity is never synced with another.
 
 ## `config.toml`
