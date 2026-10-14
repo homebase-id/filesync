@@ -325,11 +325,15 @@ the tags that device has.
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where
 they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"). Each
-local folder has an engine and a state DB of its own, scoped to a part of the drive:
+local folder has an engine of its own, scoped to a part of the drive; they share the account's
+state DB (one mirror, one feed) and keep their own base and local rows:
 - the main folder's scope is the drive's top **without the role folders**, on every device,
   whether it syncs them or not: a role folder appears only where it is synced in place, never
   inside `~/Homebase`;
-- a role folder's scope is that folder (to come: the engine syncing it).
+- a role folder's scope is what lies in that folder. Its engine sees the folder as its root
+  and the rest of the drive as one folder at its top that it leaves out; what it writes at its
+  root goes into the role folder. A node whose place isn't known (its folder gone from the
+  drive, a cycle) isn't a role folder's: the main folder repairs it (§6).
 
 What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
