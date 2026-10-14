@@ -29,6 +29,8 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_SystemInformation",
   "Win32_System_Ioctl",
   "Win32_System_WindowsProgramming",
+  "Win32_System_Com",
+  "Win32_UI_Shell",
 ] }
 
 [dev-dependencies]

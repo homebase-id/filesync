@@ -13,6 +13,7 @@ pub mod name;
 pub mod ops;
 pub mod relpath;
 pub mod tags;
+pub mod user_dirs;
 pub mod winpath;
 
 pub use errors::{IoClass, classify};

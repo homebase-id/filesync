@@ -173,3 +173,28 @@ fn logout_and_unlink_keep_the_files() -> R {
     assert!(!config.contains(IDENTITY), "{config}");
     Ok(())
 }
+
+#[test]
+fn a_role_folder_is_added_and_removed_without_a_daemon() -> R {
+    let home = Home::new()?;
+    let main = home.set_up()?;
+    let docs = home.path().join("My documents");
+    std::fs::create_dir_all(&docs)?;
+    let docs_arg = docs.to_string_lossy().into_owned();
+    let said = home.ok(&["add", "documents", "--folder", &docs_arg])?;
+    assert!(said.contains("hbsync start"), "{said}");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(config.contains("documents"), "{config}");
+    let out = home.hbsync(&["add", "pictures", "--folder", &main.to_string_lossy()])?;
+    assert!(!out.status.success(), "the main folder is synced already");
+    let out = home.hbsync(&["add", "papers"])?;
+    assert!(!out.status.success());
+    assert!(text(&out).contains("documents"), "{}", text(&out));
+
+    let said = home.ok(&["remove", "documents"])?;
+    assert!(said.contains("no longer synced"), "{said}");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(!config.contains("documents"), "{config}");
+    assert!(home.ok(&["remove", "documents"])?.contains("isn't synced"));
+    Ok(())
+}

@@ -159,6 +159,16 @@ pub fn add_folder(
     ))
 }
 
+/// Has the daemon stop syncing the folder at `path`; its files and state stay.
+pub fn remove_folder(paths: &Paths, path: &std::path::Path) -> Result<()> {
+    done(ask(
+        paths,
+        Ask::RemoveFolder {
+            path: path.to_path_buf(),
+        },
+    ))
+}
+
 /// Whether a daemon answers.
 pub fn running(paths: &Paths) -> std::result::Result<bool, IpcError> {
     match ask(paths, Ask::Status) {

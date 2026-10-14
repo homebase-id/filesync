@@ -12,7 +12,7 @@ use hbsync_app::protocol::{
 };
 use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
-use hbsync_types::NodeId;
+use hbsync_types::{NodeId, Role};
 
 type Res<T> = hbsync_app::control::Result<T>;
 
@@ -49,6 +49,28 @@ enum Command {
         /// Don't start the daemon at logon.
         #[arg(long)]
         no_autostart: bool,
+    },
+    /// Syncs one of your own folders where this computer keeps it (documents, pictures,
+    /// music, videos, downloads) with the drive's folder of that kind: joined if another device
+    /// syncs it already (identical files are adopted, not copied), made if not.
+    Add {
+        #[arg(value_parser = parse_role)]
+        role: Role,
+        /// The identity to sync it with [default: the one set up].
+        #[arg(long)]
+        identity: Option<String>,
+        /// Where this computer keeps it, if not where the OS says.
+        #[arg(long)]
+        folder: Option<PathBuf>,
+    },
+    /// Stops syncing one of your own folders. Its files stay; adding it again picks up where it
+    /// was.
+    Remove {
+        #[arg(value_parser = parse_role)]
+        role: Role,
+        /// The identity it syncs with [default: the one set up].
+        #[arg(long)]
+        identity: Option<String>,
     },
     /// Shows what the daemon is doing.
     Status {
@@ -203,9 +225,20 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(list) if list.is_empty() => println!("Nothing synced yet."),
             Some(list) => {
                 let now = words::now();
+                let main = daemon::configured(&paths)?.map(|r| r.folder);
                 for item in &list {
                     let s = &item.synced;
-                    println!("{:>12}  {}", words::when(s.at, now), words::synced(s));
+                    // Items of another folder than the main one say which.
+                    let folder = if main.as_ref() == Some(&item.folder) {
+                        String::new()
+                    } else {
+                        format!(" (in {})", item.folder.display())
+                    };
+                    println!(
+                        "{:>12}  {}{folder}",
+                        words::when(s.at, now),
+                        words::synced(s)
+                    );
                 }
             }
             None => return Ok(not_running()),
@@ -306,6 +339,61 @@ fn run(command: Command) -> Res<ExitCode> {
                 root.identity
             );
         }
+        Command::Add {
+            role,
+            identity,
+            folder,
+        } => {
+            let config = Config::load(&paths.config_file())?.unwrap_or_default();
+            let identity = one_identity(&config, identity)?;
+            let folder = match folder {
+                Some(f) => setup::resolve(&f),
+                None => setup::role_folder(role)?,
+            };
+            if let Some(why) = setup::refuse_folder(&folder, hbsync_app::paths::home().as_deref()) {
+                return Err(why.into());
+            }
+            match daemon::add_folder(&paths, &identity, &folder, Some(role)) {
+                // Set up now; the daemon syncs it once started.
+                Err(_) if !running(&paths).unwrap_or(true) => {
+                    hbsync_app::folders::add(&paths, &identity, &folder, Some(role))?;
+                    println!(
+                        "{} is set up to sync with {identity}'s {}; `hbsync start` starts syncing.",
+                        folder.display(),
+                        role.name()
+                    );
+                }
+                result => {
+                    result?;
+                    println!(
+                        "{} syncs with {identity}'s {}.",
+                        folder.display(),
+                        role.name()
+                    );
+                }
+            }
+        }
+        Command::Remove { role, identity } => {
+            let config = Config::load(&paths.config_file())?.unwrap_or_default();
+            let identity = one_identity(&config, identity)?;
+            let Some(root) = config
+                .roots
+                .iter()
+                .find(|r| r.identity == identity && r.role == Some(role))
+            else {
+                println!("{identity}'s {} isn't synced here.", role.name());
+                return Ok(ExitCode::SUCCESS);
+            };
+            if running(&paths)? {
+                daemon::remove_folder(&paths, &root.folder)?;
+            } else {
+                hbsync_app::folders::remove(&paths, &root.folder)?;
+            }
+            println!(
+                "{} is no longer synced with {identity}. Its files stay.",
+                root.folder.display()
+            );
+        }
         Command::Unlink => {
             let Some(out) = daemon::unlink(&paths)? else {
                 println!("Not set up.");
@@ -337,6 +425,29 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Log => println!("{}", paths.logs.display()),
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The identity a command is for: `given`, or the only one set up.
+fn one_identity(config: &Config, given: Option<String>) -> Res<String> {
+    if let Some(identity) = given {
+        return Ok(setup::normalize_identity(&identity));
+    }
+    let mut set_up: Vec<&str> = config.roots.iter().map(|r| r.identity.as_str()).collect();
+    set_up.sort_unstable();
+    set_up.dedup();
+    match set_up[..] {
+        [one] => Ok(one.to_owned()),
+        [] => Err("not set up: `hbsync setup <identity>` first".into()),
+        _ => Err(format!(
+            "set up with {}: pick one with --identity",
+            set_up.join(", ")
+        )
+        .into()),
+    }
+}
+
+fn parse_role(s: &str) -> Result<Role, String> {
+    s.parse()
 }
 
 /// The items of `list` (Recently deleted) that `items` name, by node id or as `hbsync deleted`
@@ -431,7 +542,15 @@ fn print_status(status: &DaemonStatus) {
 
 fn print_folder(s: &FolderStatus) {
     println!("Homebase Filesync: {}", words::status_line(s, words::now()));
-    println!("  {} <-> {}", s.identity, s.path.display());
+    match s.role {
+        Some(role) => println!(
+            "  {}'s {} <-> {}",
+            s.identity,
+            role.name(),
+            s.path.display()
+        ),
+        None => println!("  {} <-> {}", s.identity, s.path.display()),
+    }
     // The status line has the progress, the pause, the next try and a failure's problem.
     if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {
         println!("  problem: {e}");
