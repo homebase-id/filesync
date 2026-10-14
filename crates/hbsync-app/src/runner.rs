@@ -725,6 +725,12 @@ impl Runner {
             }
             announced = None;
             if !matches!(Marker::read(&self.cfg.folder), Ok(Some(_))) {
+                // An older Filesync's folder (its DB in .hbsync): set up again, not gone.
+                if let Err(e @ crate::accounts::FolderError::Older(_)) =
+                    crate::accounts::open_folder(&self.cfg.db, &self.cfg.identity, &self.cfg.folder)
+                {
+                    return Err(e.into());
+                }
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
                 const GONE: &str = "the folder is gone (moved, deleted or not mounted)";

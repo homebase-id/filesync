@@ -11,6 +11,9 @@ use hbsync_types::NodeId;
 use crate::Paths;
 use crate::runner::IDENTITY_KEY;
 
+/// The state DB an older Filesync kept in a folder's `.hbsync`.
+const OLDER_DB: &str = "state.db";
+
 #[derive(Debug, thiserror::Error)]
 pub enum FolderError {
     /// No marker: the folder is gone, not mounted, or was never set up.
@@ -25,6 +28,11 @@ pub enum FolderError {
     /// Its marker names a folder the account's DB doesn't have (the state folder was wiped).
     #[error("{0} isn't known to this computer's state: set it up again")]
     Unknown(PathBuf),
+    /// A folder of an older Filesync: its state DB in `.hbsync`, no marker.
+    #[error(
+        "{0} was synced by an older Filesync: set it up again (its files are merged, not copied twice)"
+    )]
+    Older(PathBuf),
     #[error(transparent)]
     State(#[from] StateError),
     #[error(transparent)]
@@ -43,23 +51,33 @@ pub fn open_account(db: &Path, identity: &str) -> Result<StateDb, FolderError> {
         std::fs::create_dir_all(dir)?;
     }
     let mut account = StateDb::open_account(db)?;
-    account
-        .write(|s| match s.account_kv(IDENTITY_KEY)? {
-            Some(theirs) if theirs != identity => Ok(Err(theirs)),
-            Some(_) => Ok(Ok(())),
-            None => s.set_account_kv(IDENTITY_KEY, identity).map(Ok),
-        })?
-        .map_err(|theirs| FolderError::OtherIdentity {
+    // Read first: a DB that has its identity is opened without writing.
+    let theirs = match account.read(|s| s.account_kv(IDENTITY_KEY))? {
+        Some(theirs) => theirs,
+        None => {
+            account.write(|s| s.set_account_kv(IDENTITY_KEY, identity))?;
+            identity.to_owned()
+        }
+    };
+    if theirs != identity {
+        return Err(FolderError::OtherIdentity {
             folder: db.to_path_buf(),
             theirs,
             ours: identity.to_owned(),
-        })?;
+        });
+    }
     Ok(account)
 }
 
 /// The account DB at `db` seen as the folder at `root`, which its marker must name.
 pub fn open_folder(db: &Path, identity: &str, root: &Path) -> Result<StateDb, FolderError> {
-    let marker = Marker::read(root)?.ok_or_else(|| FolderError::NoMarker(root.to_path_buf()))?;
+    let Some(marker) = Marker::read(root)? else {
+        return Err(if root.join(STATE_DIR).join(OLDER_DB).exists() {
+            FolderError::Older(root.to_path_buf())
+        } else {
+            FolderError::NoMarker(root.to_path_buf())
+        });
+    };
     if marker.identity != identity {
         return Err(FolderError::OtherIdentity {
             folder: root.to_path_buf(),
@@ -73,7 +91,24 @@ pub fn open_folder(db: &Path, identity: &str, root: &Path) -> Result<StateDb, Fo
         .into_iter()
         .find(|f| f.marker == marker.id)
         .ok_or_else(|| FolderError::Unknown(root.to_path_buf()))?;
+    // Found through its marker wherever it is: a moved folder's new place is recorded.
+    let path = root.to_string_lossy();
+    if folder.path != path {
+        account.write(|s| s.set_folder_path(folder.id, &path))?;
+    }
     Ok(account.with_folder(folder.id))
+}
+
+/// Whether `identity`'s DB at `db` has a folder at `root` (whatever its marker says).
+pub fn knows_path(db: &Path, identity: &str, root: &Path) -> Result<bool, FolderError> {
+    if !db.exists() {
+        return Ok(false);
+    }
+    let path = root.to_string_lossy();
+    Ok(open_account(db, identity)?
+        .read(|s| s.folders())?
+        .iter()
+        .any(|f| f.path == path))
 }
 
 /// Sets the folder at `root` up in `identity`'s DB at `db`, holding the drive's root: it
@@ -91,7 +126,7 @@ pub fn add_folder(db: &Path, identity: &str, root: &Path) -> Result<StateDb, Fol
     })?;
     let state = root.join(STATE_DIR);
     std::fs::create_dir_all(&state)?;
-    for old in ["state.db", "state.db-wal", "state.db-shm"] {
+    for old in [OLDER_DB, "state.db-wal", "state.db-shm"] {
         crate::paths::remove_if_exists(&state.join(old))?;
     }
     marker.write(root)?;

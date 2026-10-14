@@ -383,9 +383,28 @@ pub fn set_up(
 
     // The folder in the account's state DB, and its marker: kept if set up before.
     let db = accounts::db_path(paths, identity);
+    let has_files = std::fs::read_dir(&folder)?
+        .flatten()
+        .any(|e| e.file_name() != STATE_DIR);
     match accounts::open_folder(&db, identity, &folder) {
         Ok(_) => {}
-        Err(FolderError::NoMarker(_) | FolderError::Unknown(_)) => {
+        // Synced here before, its marker gone: an empty mount point, most likely. Setting it
+        // up would start it over; only when asked to merge.
+        Err(FolderError::NoMarker(_))
+            if !checked.existing && accounts::knows_path(&db, identity, &folder)? =>
+        {
+            return Err(Refusal::No(format!(
+                "{} was synced here, but its .hbsync is gone: if it is on a disk, plug it in; \
+                 to start it over, set it up again merging its files",
+                folder.display()
+            ))
+            .into());
+        }
+        // Its state is gone (or it was copied here): its files are merged, when asked to.
+        Err(FolderError::Unknown(_) | FolderError::Older(_)) if has_files && !checked.existing => {
+            return Err(Refusal::NeedsMerge(folder).into());
+        }
+        Err(FolderError::NoMarker(_) | FolderError::Unknown(_) | FolderError::Older(_)) => {
             accounts::add_folder(&db, identity, &folder)?;
         }
         Err(e) => return Err(e.into()),

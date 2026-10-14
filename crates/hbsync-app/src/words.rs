@@ -1,5 +1,7 @@
 //! How the client words things for people, shared by the CLI and the tray.
 
+use std::path::Path;
+
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
@@ -110,14 +112,26 @@ pub fn synced(s: &Synced) -> String {
 /// What held deletes would do, a sentence for each side: "100 items deleted on this computer
 /// will be deleted from your Homebase and your other devices."
 /// An item of Recently deleted, for a list: "photos/a.jpg (2.1 MB), deleted 3 h ago".
-pub fn deleted(d: &Deleted, now: u64) -> String {
+pub fn deleted(d: &Deleted, main: Option<&Path>, now: u64) -> String {
     let size = d
         .size
         .map(|n| format!(" ({})", bytes(n)))
         .unwrap_or_default();
     let folder = if d.kind == NodeKind::Folder { "/" } else { "" };
     let at = u64::try_from(d.removed_at_ms / 1000).unwrap_or(0);
-    format!("{}{folder}{size}, deleted {}", d.path, when(at, now))
+    let place = deleted_place(d, main);
+    format!("{place}{folder}{size}, deleted {}", when(at, now))
+}
+
+/// Where a deleted item was, as people name it (and `hbsync restore` takes it): its path in
+/// the main folder (`main`), the folder's path before it in another folder of this computer,
+/// `(on the drive) ` before it in a part of the drive no folder here syncs.
+pub fn deleted_place(d: &Deleted, main: Option<&Path>) -> String {
+    match d.folder.as_deref() {
+        Some(f) if f.is_empty() || main.is_some_and(|m| m == Path::new(f)) => d.path.clone(),
+        Some(f) => format!("{}/{}", f.trim_end_matches(['/', '\\']), d.path),
+        None => format!("(on the drive) {}", d.path),
+    }
 }
 
 pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
@@ -192,6 +206,35 @@ pub fn status_line(s: &Status, now: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deleted item is named by its place: in the main folder by its path, in another
+    /// folder of this computer under that folder, elsewhere as on the drive only.
+    #[test]
+    fn deleted_places() {
+        let item = |folder: Option<&str>| Deleted {
+            node: hbsync_types::NodeId::new(),
+            parent: hbsync_types::NodeId::ROOT,
+            path: "Work/cv.txt".into(),
+            kind: NodeKind::File,
+            size: None,
+            removed_at_ms: 0,
+            root: hbsync_types::NodeId::ROOT,
+            folder: folder.map(Into::into),
+        };
+        let main = Some(Path::new("/home/a/Homebase"));
+        assert_eq!(
+            deleted_place(&item(Some("/home/a/Homebase")), main),
+            "Work/cv.txt"
+        );
+        assert_eq!(
+            deleted_place(&item(Some("/home/a/Documents")), main),
+            "/home/a/Documents/Work/cv.txt"
+        );
+        assert_eq!(
+            deleted_place(&item(None), main),
+            "(on the drive) Work/cv.txt"
+        );
+    }
 
     /// The CLI and the tray say the same: waiting items, a refusal, a failure.
     #[test]

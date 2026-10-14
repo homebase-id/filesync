@@ -173,8 +173,19 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
-    /// The engine of the folder `db` sees, on the account's `drive`.
-    pub fn new(db: StateDb, drive: Arc<Drive>, cfg: EngineConfig) -> Self {
+    /// The engine of the folder `db` sees, on the account's `drive`. The folder's top (the
+    /// state DB's) decides which part of the drive it syncs: `cfg`'s scope is kept only when
+    /// it has that top.
+    pub fn new(mut db: StateDb, drive: Arc<Drive>, mut cfg: EngineConfig) -> Self {
+        let top = db
+            .read(|s| Ok(s.coords()?.top))
+            .unwrap_or(hbsync_types::NodeId::ROOT);
+        if cfg.scope.top != top {
+            cfg.scope = Arc::new(match top {
+                t if t.is_root() => Scope::main(),
+                t => Scope::below(t),
+            });
+        }
         let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
         scan_opts.filter = Arc::clone(&cfg.exec.filter);
         let remote = cfg.scope.remote(drive.shared_remote());

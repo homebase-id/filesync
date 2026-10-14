@@ -185,6 +185,9 @@ pub struct Store<'a> {
     folders: std::cell::RefCell<Option<Vec<FolderRow>>>,
     /// How this folder sees the drive, once known.
     coords: std::cell::Cell<Option<Coords>>,
+    /// [`Store::fan_out`]: the folder whose part of the drive a drive node is in (`None`: not
+    /// known, every folder), for the nodes walked through in this transaction.
+    places: std::cell::RefCell<HashMap<NodeId, Option<i64>>>,
 }
 
 /// A folder this account syncs here.
@@ -211,6 +214,8 @@ const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, 
      l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name, l.tags";
 /// Columns in [`LOCAL_COLS`].
 const LOCAL_COL_COUNT: usize = 14;
+/// [`Store::fan_out`]: a place no folder here holds (`folders.id` starts at 1).
+const UNHELD: i64 = 0;
 /// Deeper than any real tree (Windows' 32k-character paths hold about 16k levels); reaching it
 /// means a broken parent chain.
 pub const MAX_DEPTH: usize = 16_384;
@@ -231,6 +236,7 @@ impl<'a> Store<'a> {
             folder,
             folders: Default::default(),
             coords: Default::default(),
+            places: Default::default(),
         }
     }
 
@@ -286,20 +292,24 @@ impl<'a> Store<'a> {
         Ok(Some(r))
     }
 
-    /// `row` as the drive has it: the folder's root is its top. The root and the rest of the
-    /// drive ([`NodeId::OUTSIDE`]) aren't nodes to write.
-    fn on_drive(&self, row: &MirrorRow) -> Result<MirrorRow> {
+    /// `row` as the drive has it: the folder's root is its top. `None` for a row claiming the
+    /// root's id (another client's mistake: never stored, as the feed must go on past it); the
+    /// rest of the drive ([`NodeId::OUTSIDE`]) is never written.
+    fn on_drive(&self, row: &MirrorRow) -> Result<Option<MirrorRow>> {
         let c = self.coords()?;
-        if row.node.is_root() || c.is_outside(row.node) {
+        if row.node.is_root() {
+            return Ok(None);
+        }
+        if c.is_outside(row.node) {
             return Err(StateError::Conflict(format!(
                 "{:?} isn't a node of the drive",
                 row.node
             )));
         }
-        Ok(MirrorRow {
+        Ok(Some(MirrorRow {
             parent: c.to_drive(row.parent),
             ..row.clone()
-        })
+        }))
     }
 
     /// Registers a folder holding the drive's node `top`; its id.
@@ -336,6 +346,14 @@ impl<'a> Store<'a> {
         })
         .collect::<Result<Vec<_>>>()
         .inspect(|all| *self.folders.borrow_mut() = Some(all.clone()))
+    }
+
+    /// Records that folder `id` is at `path` now (it was moved).
+    pub fn set_folder_path(&self, id: i64, path: &str) -> Result<()> {
+        self.folders.take();
+        self.prep("UPDATE folders SET path = ?2 WHERE id = ?1")?
+            .execute(params![id, path])?;
+        Ok(())
     }
 
     /// Forgets folder `id` and every row it has (the account's stay).
@@ -1007,7 +1025,10 @@ impl<'a> Store<'a> {
         if self.has_version(row.remote_ref(), false)? {
             return Ok(());
         }
-        let row = &self.on_drive(row)?;
+        let Some(row) = &self.on_drive(row)? else {
+            return Ok(());
+        };
+        self.moved_folder(row.kind);
         let (id, parent) = (
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.parent)?,
@@ -1049,6 +1070,7 @@ impl<'a> Store<'a> {
             return Ok(None);
         };
         self.fan_out(row.node, row.parent)?;
+        self.moved_folder(row.kind);
         self.change(
             "DELETE FROM remote WHERE file_id = ?1",
             file_id.0.as_bytes(),
@@ -1079,27 +1101,56 @@ impl<'a> Store<'a> {
             )?
             .execute([id])?;
         }
+        match self.place_of(place, &folders)? {
+            Some(UNHELD) => Ok(()),
+            Some(folder) => mark(folder),
+            // A gap or a cycle: whose it is isn't known.
+            None => folders.iter().try_for_each(|f| mark(f.id)),
+        }
+    }
+
+    /// The folder whose part of the drive the drive's folder `place` is in (the one with the
+    /// nearest top above it; [`UNHELD`] at the drive's top when no folder here holds it); `None`
+    /// if the mirror doesn't connect `place` to the top. Remembered for every folder on the
+    /// way, until a folder of the mirror changes ([`Store::moved_folder`]).
+    fn place_of(&self, place: NodeId, folders: &[FolderRow]) -> Result<Option<i64>> {
         let tops: HashMap<NodeId, i64> = folders.iter().map(|f| (f.top, f.id)).collect();
         let mut parent = self.prep(&format!(
             "SELECT p.uuid FROM remote m JOIN nodes p ON p.id = m.parent WHERE m.id = {ID_OF}"
         ))?;
+        let mut chain = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut at = place;
-        loop {
+        let found = loop {
+            if let Some(&known) = self.places.borrow().get(&at) {
+                break known;
+            }
             if let Some(&folder) = tops.get(&at) {
-                return mark(folder);
+                break Some(folder);
             }
             if at.is_root() {
-                return Ok(()); // no folder holds the drive's top here
+                break Some(UNHELD);
             }
+            chain.push(at);
             let up: Option<Vec<u8>> = parent
                 .query_row([at.0.as_bytes()], |r| r.get(0))
                 .optional()?;
             match up {
                 Some(up) if seen.insert(at) && seen.len() <= MAX_DEPTH => at = codec::node(&up)?,
-                // A gap or a cycle: whose it is isn't known.
-                _ => return folders.iter().try_for_each(|f| mark(f.id)),
+                _ => break None,
             }
+        };
+        let mut places = self.places.borrow_mut();
+        for n in chain {
+            places.insert(n, found);
+        }
+        Ok(found)
+    }
+
+    /// A folder of the mirror changed (moved, gone): the places remembered may be stale.
+    fn moved_folder(&self, kind: NodeKind) {
+        if kind == NodeKind::Folder {
+            self.places.borrow_mut().clear();
         }
     }
 
@@ -1111,7 +1162,10 @@ impl<'a> Store<'a> {
         if self.has_version(removed.row.remote_ref(), true)? {
             return Ok(());
         }
-        let row = &self.on_drive(&removed.row)?;
+        let Some(row) = &self.on_drive(&removed.row)? else {
+            return Ok(());
+        };
+        self.moved_folder(row.kind);
         let f = row.file.as_ref();
         let root = self.coords()?.to_drive(removed.removal.root);
         self.prep(
@@ -1214,12 +1268,26 @@ impl<'a> Store<'a> {
     }
 
     /// Marks every node with a base or a remote row dirty: all of them are planned again.
+    /// Marks every node of this folder dirty: its base rows, and the mirror's nodes in its part
+    /// of the drive (below its top; the whole drive for the main folder).
     pub fn mark_synced_dirty(&self) -> Result<()> {
+        let top = self.coords()?.top;
         self.prep(
-            "INSERT OR IGNORE INTO dirty (folder, id) \
-                 SELECT $F, id FROM base WHERE folder = $F UNION SELECT $F, id FROM remote",
+            "INSERT OR IGNORE INTO dirty (folder, id) SELECT $F, id FROM base WHERE folder = $F",
         )?
         .execute([])?;
+        if top.is_root() {
+            self.prep("INSERT OR IGNORE INTO dirty (folder, id) SELECT $F, id FROM remote")?
+                .execute([])?;
+        } else {
+            self.prep(&format!(
+                "WITH RECURSIVE sub(id) AS (SELECT id FROM nodes WHERE uuid = ?1 \
+                 UNION SELECT r.id FROM remote r JOIN sub ON r.parent = sub.id) \
+                 INSERT OR IGNORE INTO dirty (folder, id) \
+                 SELECT $F, id FROM sub WHERE id != {ID_OF}"
+            ))?
+            .execute([top.0.as_bytes()])?;
+        }
         Ok(())
     }
 
