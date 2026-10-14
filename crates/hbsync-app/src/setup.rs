@@ -159,6 +159,12 @@ fn within(path: &Path, folder: &Path) -> bool {
     }
 }
 
+/// `canonicalize`, without the `\\?\` it puts on Windows paths: kept in the config and shown
+/// to people, they must be paths the shell and file managers take.
+fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    Ok(hbsync_platform::winpath::plain(&path.canonicalize()?))
+}
+
 /// `path` as it really is: absolute, its longest existing part with symlinks resolved, and
 /// `..` in the rest taken away. What [`plan`] looks at.
 pub fn resolve(path: &Path) -> PathBuf {
@@ -166,7 +172,7 @@ pub fn resolve(path: &Path) -> PathBuf {
     let path = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let parts: Vec<Component> = path.components().collect();
     for exists in (1..=parts.len()).rev() {
-        let Ok(mut out) = parts[..exists].iter().collect::<PathBuf>().canonicalize() else {
+        let Ok(mut out) = canonical(&parts[..exists].iter().collect::<PathBuf>()) else {
             continue;
         };
         for part in &parts[exists..] {
@@ -329,7 +335,7 @@ pub fn set_up(
     )?;
     let identity = checked.identity.as_str();
     std::fs::create_dir_all(&checked.folder)?;
-    let folder = checked.folder.canonicalize()?;
+    let folder = canonical(&checked.folder)?;
 
     // This computer, authorized on the identity. New credentials are kept at once: an
     // approval lost to a later failure would have to be given again.
@@ -425,7 +431,7 @@ mod tests {
     #[test]
     fn folders_are_resolved_before_they_are_judged() -> control::Result<()> {
         let dir = tempfile::tempdir()?;
-        let home = dir.path().canonicalize()?.join("anna");
+        let home = canonical(dir.path())?.join("anna");
         std::fs::create_dir_all(home.join("Docs"))?;
         // `..` and a symlink can't make a folder look like something else.
         assert_eq!(
@@ -455,7 +461,7 @@ mod tests {
     #[test]
     fn plans_are_checked() -> R {
         let dir = tempfile::tempdir()?;
-        let home = dir.path().canonicalize()?.join("anna");
+        let home = canonical(dir.path())?.join("anna");
         let fresh = home.join("Homebase");
         let full = home.join("Mine");
         std::fs::create_dir_all(&full)?;

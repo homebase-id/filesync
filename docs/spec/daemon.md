@@ -191,9 +191,21 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
 - **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a
   minute.
 - **The folder:** once per folder the tray gives it the Homebase icon (`desktop.ini` on
-  Windows, Finder's custom icon on macOS, `.directory` and GIO metadata on Linux) and a
-  shortcut (Quick access; GTK bookmarks and KDE places; Finder's sidebar has no public
-  interface). Log out takes them off again.
+  Windows, Finder's custom icon on macOS, `.directory` and GIO metadata on Linux) and, on
+  Linux, a shortcut (GTK bookmarks and KDE places; Finder's sidebar has no public interface).
+  Unlinking (also the tray's Log out, which unlinks) takes them off again; `hbsync logout`
+  keeps them.
+- **Explorer's navigation pane (Windows):** at every start the tray registers the folder as a
+  Cloud Files sync root named "Homebase" (`HomebaseFilesync!<user SID>!<identity>~<hash of the
+  folder>`), at the top of the pane as OneDrive's and Dropbox's are. Only the registration, no
+  placeholders: the files stay ordinary files.
+  - Already registered, it is left alone; ours that are stale go (the same id at another
+    folder, an earlier identity's at this one).
+  - A Quick access pin (older versions made one) comes off when the root is registered.
+    Where Explorer refuses a root (not NTFS, a share, inside another provider's root), the
+    folder is pinned to Quick access instead.
+  - Unlinking unregisters it, found by its id, also when the folder was moved or deleted.
+    Uninstalling without unlinking leaves the entry (for the MSIX, untested).
 
 ## Autostart
 

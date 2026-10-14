@@ -100,9 +100,13 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(ConfigError::Io(path.to_owned(), e)),
         };
-        toml::from_str(&text)
-            .map(Some)
-            .map_err(|e| ConfigError::Parse(path.to_owned(), e))
+        let mut config: Config =
+            toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_owned(), e))?;
+        // Earlier versions kept Windows folders with `\\?\` (setup's `canonicalize`).
+        for root in &mut config.roots {
+            root.folder = hbsync_platform::winpath::plain(&root.folder);
+        }
+        Ok(Some(config))
     }
 
     /// Writes the config to `path` in one step: a crash leaves the old file or the new one.
@@ -180,6 +184,20 @@ mod tests {
         let empty = Config::default();
         empty.save(&path).expect("ok");
         assert_eq!(Config::load(&path).expect("ok"), Some(empty));
+    }
+
+    #[test]
+    fn a_windows_folder_loads_without_the_extended_prefix() -> Result<(), ConfigError> {
+        let dir = tempfile::tempdir().expect("ok");
+        let path = dir.path().join("config.toml");
+        let old = "[[roots]]\nidentity = \"anna.example.com\"\nfolder = '\\\\?\\C:\\Users\\anna\\Homebase'\n";
+        std::fs::write(&path, old).expect("ok");
+        let config = Config::load(&path)?.expect("a config");
+        assert_eq!(
+            config.roots[0].folder,
+            PathBuf::from(r"C:\Users\anna\Homebase")
+        );
+        Ok(())
     }
 
     #[test]

@@ -63,7 +63,8 @@ They update themselves.
     of random multi-computer histories.
 - **Made for each OS.** It uses the NTFS change journal on Windows, FSEvents on macOS and
   inotify on Linux. It handles names each OS treats differently: case, Unicode forms, and
-  characters Windows doesn't allow. Your folder gets its own icon and a place in the sidebar.
+  characters Windows doesn't allow. Your folder gets its own icon and a place in the sidebar,
+  on Windows at the top of Explorer's, beside OneDrive and Dropbox.
   Finder tags and their colours sync between Macs and with KDE on Linux. A Windows PC
   can't show them, but keeps them intact. Creation dates are kept too, even when an editor saves by
   replacing the file.
