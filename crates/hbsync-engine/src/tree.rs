@@ -226,8 +226,7 @@ impl Tree {
 }
 
 /// The first of `candidates` that `is_free`, preferring one `syncs` says this device syncs
-/// (§10); `None` if none is free. The one name policy of the reconciler, the executor and
-/// the simulator.
+/// (§10); `None` if none is free. How the executor and the simulator pick a numbered name.
 pub fn first_free<E>(
     candidates: impl IntoIterator<Item = String>,
     mut is_free: impl FnMut(&str) -> Result<bool, E>,

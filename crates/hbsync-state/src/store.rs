@@ -84,16 +84,15 @@ pub struct MirrorFile {
 pub struct DirtyCursor(i64);
 
 impl MirrorRow {
-    /// The row of a node written as `content`, now at `at`. A file has its payload's hash and
-    /// plaintext size (the size counts when the content has none); a file without one has no
-    /// [`MirrorFile`].
+    /// The row of a node written as `content`, now at `at`. A file has its payload's content
+    /// hash; a file without one has no [`MirrorFile`].
     pub fn from_content(
         at: RemoteRef,
         node: NodeId,
         parent: NodeId,
         kind: NodeKind,
         content: &NodeContent,
-        payload: Option<(ContentHash, u64)>,
+        hash: Option<ContentHash>,
     ) -> MirrorRow {
         MirrorRow {
             file_id: at.file_id,
@@ -102,11 +101,11 @@ impl MirrorRow {
             parent,
             name: content.name.clone(),
             kind,
-            file: payload
+            file: hash
                 .filter(|_| kind == NodeKind::File)
-                .map(|(hash, size)| MirrorFile {
+                .map(|hash| MirrorFile {
                     hash,
-                    size: content.size.unwrap_or(size),
+                    size: content.size.unwrap_or(0),
                     mtime_ms: content.mtime.unwrap_or(0),
                     executable: content.x,
                 }),
@@ -122,11 +121,6 @@ impl MirrorRow {
         };
         content.unknown = self.carried_keys();
         content
-    }
-
-    /// Its payload as [`MirrorRow::from_content`] takes it.
-    pub fn payload(&self) -> Option<(ContentHash, u64)> {
-        self.file.map(|f| (f.hash, f.size))
     }
 
     /// The content keys this client carries without acting on them, to write back unchanged.
@@ -830,6 +824,18 @@ impl<'a> Store<'a> {
             node.0.as_bytes(),
             mirror_row,
         )
+    }
+
+    /// Whether the mirror has file `at` at that version (the node is the file's), or, with
+    /// `removed`, Recently deleted has.
+    pub fn has_version(&self, at: RemoteRef, removed: bool) -> Result<bool> {
+        let table = if removed { "removed" } else { "remote" };
+        Ok(self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT 1 FROM {table} WHERE file_id = ?1 AND version_tag = ?2"
+            ))?
+            .exists([at.file_id.0.as_bytes(), at.version.0.as_bytes()])?)
     }
 
     pub fn mirror_by_file(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {

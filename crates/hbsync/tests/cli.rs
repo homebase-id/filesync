@@ -12,13 +12,7 @@ mod common;
 
 use common::{Home, text};
 
-/// What a set-up home has.
-trait SetUp {
-    fn set_up(&self) -> Result<PathBuf, Box<dyn std::error::Error>>;
-    fn credentials(&self) -> PathBuf;
-}
-
-impl SetUp for Home {
+impl Home {
     /// A config and credentials as `hbsync setup` leaves them, for an identity that can't be
     /// reached.
     fn set_up(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {

@@ -282,30 +282,13 @@ mod mirror {
             NodeId::ROOT,
             NodeKind::File,
             &removed,
-            Some((c.hash, 99)),
+            Some(c.hash),
         );
         assert_eq!(row.remote_ref(), at);
         assert_eq!(row.content("f"), file);
-        assert_eq!(
-            row.payload(),
-            Some((c.hash, c.size)),
-            "the content's size counts"
-        );
+        assert_eq!(row.file.map(|f| (f.hash, f.size)), Some((c.hash, c.size)));
         assert_eq!(row.created_ms(), Some(1_451_606_400_123));
         assert_eq!(row.tags(), file.tags());
-
-        // A content without a size has the payload's.
-        let mut sizeless = file.clone();
-        sizeless.size = None;
-        let row = MirrorRow::from_content(
-            at,
-            node,
-            NodeId::ROOT,
-            NodeKind::File,
-            &sizeless,
-            Some((c.hash, 99)),
-        );
-        assert_eq!(row.payload(), Some((c.hash, 99)));
 
         // A folder has no payload, whatever it's given.
         let folder = NodeContent::folder("d");
@@ -315,7 +298,7 @@ mod mirror {
             NodeId::ROOT,
             NodeKind::Folder,
             &folder,
-            Some((c.hash, 1)),
+            Some(c.hash),
         );
         assert_eq!((row.file, row.content_extra.clone()), (None, None));
         assert_eq!(row.content("d"), folder);

@@ -16,7 +16,6 @@
 //! it keeps both versions).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_local::Filter;
@@ -29,7 +28,7 @@ use hbsync_types::{
 
 use crate::mask::Masks;
 use crate::scope::Scope;
-use crate::tree::{Tree, conflict_copy_name, first_free, numbered_conflict_name};
+use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
 
 /// Per-node facts about the base that aren't part of [`NodeState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +206,19 @@ impl Op {
             | Op::LocalDetach { node, .. }
             | Op::Forget { node, .. } => *node,
         }
+    }
+
+    /// Whether it moves file bytes: the executor runs these together on its worker pool.
+    pub fn is_transfer(&self) -> bool {
+        matches!(
+            self,
+            Op::LocalDownload { .. }
+                | Op::RemoteCreate {
+                    kind: NodeKind::File,
+                    ..
+                }
+                | Op::RemoteUpdate { upload: true, .. }
+        )
     }
 
     pub fn is_delete(&self) -> bool {
@@ -856,15 +868,14 @@ impl<'a> Reconciler<'a> {
                     let Some(mut state) = self.merged.get(loser).cloned() else {
                         continue;
                     };
-                    // Unbounded: some numbered name is always free.
-                    let candidates = (1..).map(|n| numbered_conflict_name(&state.name, n));
-                    let free = |c: &str| {
-                        Ok::<_, Infallible>(
+                    // Unbounded, and syncing or not: some numbered name is always free.
+                    let Some(new_name) = (1..)
+                        .map(|n| numbered_conflict_name(&state.name, n))
+                        .find(|c| {
                             self.merged.child_named(parent, c, Some(loser)).is_none()
-                                && !taken(&name_key(c)),
-                        )
-                    };
-                    let Ok(Some(new_name)) = first_free(candidates, free, |_| true) else {
+                                && !taken(&name_key(c))
+                        })
+                    else {
                         continue;
                     };
                     state.name = new_name;
@@ -1087,16 +1098,7 @@ impl<'a> Reconciler<'a> {
         // Parents before children for creates, all folders before the files (which the executor
         // uploads together on its pool, until a folder create stops it); children before parents
         // for deletes; only the topmost local trash of a subtree is needed.
-        let uploads = |op: &Op| {
-            matches!(
-                op,
-                Op::RemoteCreate {
-                    kind: NodeKind::File,
-                    ..
-                }
-            )
-        };
-        creates.sort_by_key(|(d, op)| (uploads(op), *d, op.node()));
+        creates.sort_by_key(|(d, op)| (op.is_transfer(), *d, op.node()));
         deletes.sort_by_key(|(d, op)| (std::cmp::Reverse(*d), op.node()));
         let trashed: HashSet<NodeId> = deletes.iter().filter_map(|(_, op)| op.trashes()).collect();
         let deletes: Vec<Op> = deletes

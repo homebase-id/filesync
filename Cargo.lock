@@ -1730,7 +1730,6 @@ name = "hbsync-tray"
 version = "0.5.3"
 dependencies = [
  "hbsync-app",
- "hbsync-homebase",
  "hbsync-types",
  "notify-rust",
  "png",

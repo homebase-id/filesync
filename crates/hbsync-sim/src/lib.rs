@@ -189,18 +189,13 @@ impl Server {
     /// Whether `node` is the role folder or lies in it.
     fn in_role_folder(&self, node: NodeId) -> bool {
         let docs = Role::Documents.node();
-        let mut up = node;
-        // Bounded: a cycle ends it.
-        for _ in 0..=self.live.len() {
-            if up == docs {
-                return true;
-            }
-            match self.live.get(&up) {
-                Some(n) => up = n.state.parent,
-                None => return false,
-            }
-        }
-        false
+        // Up to the role folder, if it's above.
+        let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(node, |at| {
+            Ok((at != docs)
+                .then(|| self.live.get(&at).map(|n| ((), n.state.parent)))
+                .flatten())
+        });
+        up.end == hbsync_engine::walk::End::At(docs)
     }
 }
 

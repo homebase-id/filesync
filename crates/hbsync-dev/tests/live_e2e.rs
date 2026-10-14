@@ -35,11 +35,11 @@ impl Client {
         let remote = Arc::new(HomebaseRemote::connect(hbsync_dev::saved_client(
             identity,
         )?)?);
-        let configure = Box::new(|cfg: &mut EngineConfig| -> Res<()> {
+        let configure = |cfg: &mut EngineConfig| -> Res<()> {
             cfg.allow_mass_delete = true; // the test deletes its whole folder at the end
             cfg.exec.filter = Arc::new(Filter::load(&cfg.exec.root, cfg.exec.case_insensitive)?);
             Ok(())
-        });
+        };
         Ok(Client(TestClient::new(remote, name, configure)?))
     }
 
@@ -70,20 +70,6 @@ impl Client {
             self.name
         );
         Ok(total)
-    }
-
-    /// The tree under `folder`: `path = content` for small files, `path = <n bytes>` for
-    /// large ones, `path/` for folders, sorted.
-    fn tree(&self, folder: &str) -> Vec<String> {
-        self.0
-            .tree(folder)
-            .into_iter()
-            .map(|(path, data)| match data.len() {
-                _ if path.ends_with('/') => path,
-                n if n > 100 => format!("{path} = <{n} bytes>"),
-                _ => format!("{path} = {}", String::from_utf8_lossy(&data)),
-            })
-            .collect()
     }
 }
 
@@ -123,7 +109,7 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     fs::create_dir_all(a.root.join(at("empty")))?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.tree(run), a.tree(run));
+    assert_eq!(b.tree_text(run), a.tree_text(run));
     assert!(
         b.read(&at("big.bin"))? == big,
         "the large file arrived intact"
@@ -139,7 +125,7 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.sync()?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree(run), b.tree(run));
+    assert_eq!(a.tree_text(run), b.tree_text(run));
     assert_eq!(b.read(&at("doc.txt"))?, b"v2");
     assert!(a.root.join(at("x-moved.txt")).is_file());
 
@@ -159,9 +145,9 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     let report = b.sync()?;
     assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
     a.sync()?;
-    assert_eq!(a.tree(run), b.tree(run));
+    assert_eq!(a.tree_text(run), b.tree_text(run));
     let versions: Vec<String> = a
-        .tree(run)
+        .tree_text(run)
         .into_iter()
         .filter(|l| l.starts_with("doc"))
         .collect();
@@ -176,7 +162,7 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     b.sync()?;
     a.sync()?;
     assert_eq!(a.read(&at("Résumé 履歴書.txt"))?, b"edited while deleted");
-    assert_eq!(a.tree(run), b.tree(run));
+    assert_eq!(a.tree_text(run), b.tree_text(run));
 
     // Finder tags (Linux's here, names only) go both ways, on a file and a folder.
     if tags::CAN_TAG && tags::write(&a.root.join(run), &Tags::default())?.is_some() {
@@ -212,7 +198,7 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.write(&at("while-b-was-down.txt"), "hi")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(a.tree(run), b.tree(run));
+    assert_eq!(a.tree_text(run), b.tree_text(run));
 
     filters(run, a, b)
 }
@@ -227,7 +213,7 @@ fn filters(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.sync()?;
     b.sync()?;
     assert_eq!(
-        b.tree(&proj),
+        b.tree_text(&proj),
         ["build/", "build/out.o = obj", "main.c = int main"]
     );
 
@@ -236,9 +222,12 @@ fn filters(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     b.write(&at("build/local.o"), "b only")?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree(&proj), [".DS_Store = finder", "main.c = int main"]);
     assert_eq!(
-        b.tree(&proj),
+        a.tree_text(&proj),
+        [".DS_Store = finder", "main.c = int main"]
+    );
+    assert_eq!(
+        b.tree_text(&proj),
         [
             "build/",
             "build/local.o = b only",
@@ -254,10 +243,10 @@ fn filters(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     b.sync()?;
     a.sync()?;
     assert_eq!(
-        b.tree(&proj),
+        b.tree_text(&proj),
         ["build/", "build/local.o = b only", "build/out.o = obj"]
     );
-    assert!(a.root.join(&proj).is_dir() && a.tree(&proj).is_empty());
+    assert!(a.root.join(&proj).is_dir() && a.tree_text(&proj).is_empty());
 
     // Clean up b's own files; the empty folder goes everywhere.
     fs::remove_dir_all(b.root.join(&proj))?;

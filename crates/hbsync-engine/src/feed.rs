@@ -83,24 +83,25 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         gone(s, header)?;
         return Ok(false);
     }
+    let removal = header.removal();
+    // A version the mirror has already: the echo of this device's own write (the executor
+    // stored the row it wrote), or a page applied again. Nothing to plan.
+    let at = RemoteRef {
+        file_id: header.file_id,
+        version: header.version,
+    };
+    if s.has_version(at, removal.is_some())? {
+        return Ok(removal.is_none());
+    }
     // A live file without its payload changes nothing: it must never read as a delete.
     let Some(row) = mirror_row(header) else {
         return Ok(true);
     };
-    // A version the mirror has already: the echo of this device's own write (the executor
-    // stored the row it wrote), or a page applied again. Nothing to plan.
-    let known = |r: &MirrorRow| r.file_id == row.file_id && r.version == row.version;
-    if let Some(removal) = header.removal() {
-        if s.removed_by_node(row.node)?.is_some_and(|r| known(&r.row)) {
-            return Ok(false);
-        }
+    if let Some(removal) = removal {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
         gone(s, header)?;
         s.put_removed(&RemovedRow { row, removal })?;
         return Ok(false);
-    }
-    if s.get_mirror(row.node)?.is_some_and(|r| known(&r)) {
-        return Ok(true);
     }
     s.delete_removed(row.node)?;
     s.put_mirror(&row)?;
@@ -133,19 +134,19 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     let payload = match header.kind {
         NodeKind::Folder => None,
         // `Remote`s refuse such rows.
-        NodeKind::File => Some(payload.as_ref().map(|p| (p.hash, p.bytes))?),
+        NodeKind::File => Some(payload.as_ref()?),
     };
-    Some(MirrorRow::from_content(
-        RemoteRef {
-            file_id: header.file_id,
-            version: header.version,
-        },
-        *node,
-        header.parent,
-        header.kind,
-        content,
-        payload,
-    ))
+    let at = RemoteRef {
+        file_id: header.file_id,
+        version: header.version,
+    };
+    let hash = payload.map(|p| p.hash);
+    let mut row = MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash);
+    // A content without its size (another client's) has the payload's.
+    if let (Some(file), Some(p), None) = (&mut row.file, payload, content.size) {
+        file.size = p.bytes;
+    }
+    Some(row)
 }
 
 #[cfg(test)]
@@ -186,6 +187,29 @@ mod tests {
             "the mirror keeps the file"
         );
         Ok(())
+    }
+
+    /// Another client's file without `size` in its content has its payload's.
+    #[test]
+    fn a_file_without_a_size_has_its_payloads() {
+        let mut content = NodeContent::file("f", 0, 1, false);
+        content.size = None;
+        let header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            body: RemoteBody::Live {
+                node: NodeId::new(),
+                content,
+                payload: Some(PayloadInfo {
+                    hash: hash_bytes(b"xyz", HashAlgorithm::Blake3),
+                    bytes: 3,
+                }),
+            },
+        };
+        let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
+        assert_eq!(size, Some(3));
     }
 
     /// The feed brings this device's own writes back: a version the mirror has is no change.

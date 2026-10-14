@@ -11,11 +11,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hbsync_app::control;
+use hbsync_app::local_http::{escape, read_request, redirect, respond};
 use hbsync_app::runner::Status;
 use hbsync_app::setup::{self, Refusal};
 use hbsync_app::words;
 use hbsync_app::{Config, Control, Paths};
-use hbsync_homebase::local_http::{escape, read_request, redirect, respond};
 
 use crate::{Event, Sender};
 

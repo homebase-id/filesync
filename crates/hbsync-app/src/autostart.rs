@@ -80,7 +80,7 @@ pub fn launchd_plist(program: &Program, env: &[(String, String)]) -> String {
         Program::Tray(_) => (program.label(), "Interactive"),
         Program::Daemon(_) => (program.label(), "Background"),
     };
-    let esc = crate::words::escape_xml;
+    let esc = crate::local_http::escape;
     let mut env_xml = String::new();
     if !env.is_empty() {
         env_xml.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
@@ -275,10 +275,7 @@ mod os {
     pub fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
         let path = plist(&program.label())?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, launchd_plist(program, &passed_env()))?;
+        hbsync_fileio::write_atomic(&path, launchd_plist(program, &passed_env()).as_bytes())?;
         // The tray asks for this itself, running: launchd loads the agent at the next logon.
         if matches!(program, Program::Tray(_)) {
             return Ok(());
@@ -354,19 +351,13 @@ mod os {
         uninstall()?;
         let daemon = match program {
             Program::Tray(tray) => {
-                let path = desktop()?;
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                return std::fs::write(&path, desktop_entry(tray, &passed_env()));
+                let entry = desktop_entry(tray, &passed_env());
+                return hbsync_fileio::write_atomic(&desktop()?, entry.as_bytes());
             }
             Program::Daemon(daemon) => daemon,
         };
         let path = unit()?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, systemd_unit(daemon, &passed_env()))?;
+        hbsync_fileio::write_atomic(&path, systemd_unit(daemon, &passed_env()).as_bytes())?;
         systemctl(&["daemon-reload"])
             .and_then(|()| systemctl(&["enable", UNIT]))
             // A unit systemd didn't take mustn't look installed.

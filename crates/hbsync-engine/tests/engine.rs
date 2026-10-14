@@ -4,7 +4,6 @@ use std::fs;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use hbsync_engine::Engine;
 use hbsync_engine::exec::CrashPoint;
 use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
@@ -32,8 +31,8 @@ fn upload_then_download() -> R {
     assert!(a.engine.sync_once("2026-10-08")?.is_idle());
 
     b.sync()?;
-    assert_eq!(b.tree_text(), a.tree_text());
-    assert_eq!(b.read("Docs/deep/nested.bin")?, "bytes");
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    assert_eq!(b.read_text("Docs/deep/nested.bin")?, "bytes");
     Ok(())
 }
 
@@ -54,12 +53,12 @@ fn edits_moves_and_deletes_propagate() -> R {
     a.sync()?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     // two-moved.txt went into y, which b deleted: the live file kept y alive (edit/move wins).
-    assert_eq!(b.read("y/two-moved.txt")?, "2");
-    assert_eq!(b.read("x/one.txt")?, "1 edited");
+    assert_eq!(b.read_text("y/two-moved.txt")?, "2");
+    assert_eq!(b.read_text("x/one.txt")?, "1 edited");
     assert!(
-        b.read("y/three.txt").is_err(),
+        b.read_text("y/three.txt").is_err(),
         "the untouched file stays deleted"
     );
     // b's delete of three.txt went to Recently deleted on the drive, not into the void.
@@ -89,8 +88,8 @@ fn concurrent_edits_keep_both_versions() -> R {
     let report = b.sync()?;
     assert!(!report.conflicts.is_empty());
     a.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
-    let tree = b.tree_text();
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    let tree = b.tree_text("");
     assert!(
         tree.contains(&"notes.txt = from laptop".to_owned()),
         "{tree:?}"
@@ -117,9 +116,9 @@ fn name_swap_uses_a_parked_name() -> R {
     fs::rename(a.root.join("tmp"), a.root.join("right"))?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.read("left")?, "R");
-    assert_eq!(b.read("right")?, "L");
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(b.read_text("left")?, "R");
+    assert_eq!(b.read_text("right")?, "L");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
 
@@ -133,7 +132,7 @@ fn transient_failures_are_retried() -> R {
     a.sync()?;
     b.remote.faults().cut_download_after = Some(2);
     b.sync()?;
-    assert_eq!(b.read("f.txt")?, "data");
+    assert_eq!(b.read_text("f.txt")?, "data");
     Ok(())
 }
 
@@ -160,8 +159,8 @@ fn a_denied_remote_stops_the_sync_and_loses_nothing() -> R {
         requests <= 2,
         "stopped at the first refusal, made {requests} requests"
     );
-    assert_eq!(a.read("kept.txt")?, "v2");
-    assert_eq!(a.read("new/one.txt")?, "one");
+    assert_eq!(a.read_text("kept.txt")?, "v2");
+    assert_eq!(a.read_text("new/one.txt")?, "one");
 
     // Reads work again but writes are refused: the executor stops at the first write.
     a.remote.faults().denied = false;
@@ -179,8 +178,8 @@ fn a_denied_remote_stops_the_sync_and_loses_nothing() -> R {
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
-    assert_eq!(b.tree_text(), a.tree_text());
-    assert_eq!(b.read("kept.txt")?, "v2");
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    assert_eq!(b.read_text("kept.txt")?, "v2");
     Ok(())
 }
 
@@ -246,11 +245,7 @@ fn a_stopped_sync_keeps_what_it_did_and_the_next_one_finishes() -> R {
         after: 3,
         stop: Arc::clone(&stop),
     };
-    a.engine = Engine::new(
-        StateDb::open(&a.db_path())?,
-        Box::new(remote),
-        common::config(&a.root, "a"),
-    );
+    a.restart_with(Box::new(remote), |_| {})?;
     a.engine.set_stop(Arc::clone(&stop));
     a.engine.scan_local()?;
     let report = a.engine.sync_once("2026-10-09")?;
@@ -271,7 +266,7 @@ fn a_stopped_sync_keeps_what_it_did_and_the_next_one_finishes() -> R {
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 15);
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
-    assert_eq!(b.tree_text(), a.tree_text());
+    assert_eq!(b.tree_text(""), a.tree_text(""));
     Ok(())
 }
 
@@ -291,11 +286,7 @@ fn progress_knows_the_whole_plan_up_front() -> R {
         after: 2,
         stop: Arc::clone(&stop),
     };
-    a.engine = Engine::new(
-        StateDb::open(&a.db_path())?,
-        Box::new(remote),
-        common::config(&a.root, "a"),
-    );
+    a.restart_with(Box::new(remote), |_| {})?;
     a.engine.set_stop(Arc::clone(&stop));
     a.engine.scan_local()?;
     let report = a.engine.sync_once("2026-10-11")?;
@@ -344,8 +335,8 @@ fn a_dead_remote_ends_the_run_early_and_loses_nothing() -> R {
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
-    assert_eq!(b.tree_text(), a.tree_text());
-    assert_eq!(b.tree_text().len(), 60);
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    assert_eq!(b.tree_text("").len(), 60);
     Ok(())
 }
 
@@ -365,12 +356,12 @@ fn restart_after_an_interrupted_sync_converges() -> R {
     a.remote.faults().script.clear();
 
     // Restart: a new engine on the same state DB.
-    restart(&mut a, "a")?;
+    a.restart()?;
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
-    assert_eq!(b.tree_text().len(), 13);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.tree_text("").len(), 13);
     Ok(())
 }
 
@@ -403,8 +394,8 @@ fn parked_item_from_a_crash_is_put_back() -> R {
         s.put_parked(node, &from)
     })?;
     a.sync()?;
-    assert_eq!(a.read("doc.txt")?, "keep me");
-    assert_eq!(a.tree_text().len(), 1);
+    assert_eq!(a.read_text("doc.txt")?, "keep me");
+    assert_eq!(a.tree_text("").len(), 1);
     let names: Vec<String> = server
         .lock()
         .map_err(|_| "poisoned")?
@@ -415,16 +406,6 @@ fn parked_item_from_a_crash_is_put_back() -> R {
         names,
         ["doc.txt"],
         "the temporary name never reached the remote"
-    );
-    Ok(())
-}
-
-/// A fresh engine for `c` on its state DB, as after a restart.
-fn restart(c: &mut Client, name: &str) -> R {
-    c.engine = Engine::new(
-        StateDb::open(&c.db_path())?,
-        Box::new(c.remote.clone()),
-        common::config(&c.root, name),
     );
     Ok(())
 }
@@ -453,11 +434,12 @@ fn crash_right_after_parking_leaks_no_temporary_name() -> R {
             .any(|e| e.file_name().to_string_lossy().starts_with(".hbsync-move-")),
         "the crash left a parked file behind"
     );
-    restart(&mut b, "b")?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.crash_at = None)?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(b.read("x/inside")?, "new");
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(b.read_text("x/inside")?, "new");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
     names.sort();
     assert_eq!(
@@ -484,13 +466,14 @@ fn crash_right_after_a_fork_rename_survives_a_folder_rename() -> R {
     assert!(b.sync().is_err(), "b stops right after the conflict rename");
     // The user renames the folder before b runs again.
     fs::rename(b.root.join("docs"), b.root.join("papers"))?;
-    restart(&mut b, "b")?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.crash_at = None)?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
-    assert_eq!(b.read("papers/notes.txt")?, "a's edit");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.read_text("papers/notes.txt")?, "a's edit");
     assert_eq!(
-        b.read("papers/notes (conflict b 2026-10-08).txt")?,
+        b.read_text("papers/notes (conflict b 2026-10-08).txt")?,
         "b's edit"
     );
     let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
@@ -524,7 +507,7 @@ fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
     })?;
     fs::rename(a.root.join("A"), a.root.join("B"))?;
     a.sync()?;
-    assert_eq!(a.read("B/doc.txt")?, "keep me");
+    assert_eq!(a.read_text("B/doc.txt")?, "keep me");
     let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
     names.sort();
     assert_eq!(
@@ -560,7 +543,7 @@ fn first_run_adopts_an_existing_copy_without_downloading() -> R {
     let report = b.sync()?;
     assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
     assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
-    assert_eq!(b.tree_text(), a.tree_text());
+    assert_eq!(b.tree_text(""), a.tree_text(""));
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.live().count(),
         5,
@@ -579,9 +562,9 @@ fn a_differing_copy_keeps_both_versions() -> R {
     b.write("doc.txt", "local version")?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     let contents: Vec<String> = b
-        .tree_text()
+        .tree_text("")
         .into_iter()
         .map(|e| e.split(" = ").nth(1).unwrap_or_default().to_owned())
         .collect();
@@ -589,7 +572,7 @@ fn a_differing_copy_keeps_both_versions() -> R {
         contents.contains(&"remote version".to_owned())
             && contents.contains(&"local version".to_owned()),
         "{:?}",
-        b.tree_text()
+        b.tree_text("")
     );
     Ok(())
 }
@@ -610,8 +593,8 @@ fn start_up_catches_up_both_sides_in_parallel() -> R {
     assert_eq!(report.local.report.added, 2);
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
-    assert_eq!(a.read("from-b/two.txt")?, "2");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(a.read_text("from-b/two.txt")?, "2");
     Ok(())
 }
 
@@ -642,9 +625,9 @@ fn crossing_moves_park_the_occupant_in_one_pass() -> R {
         "the parked file's own move must not trip on its ctime: {:?}",
         pass.skipped
     );
-    assert_eq!(b.read("b")?, "A");
-    assert_eq!(b.read("sub/b")?, "B");
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(b.read_text("b")?, "A");
+    assert_eq!(b.read_text("sub/b")?, "B");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
 
@@ -663,10 +646,10 @@ fn case_only_rename_converges() -> R {
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         ["Photos/", "Photos/p.jpg = p", "Report.pdf = r"]
     );
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
 
@@ -686,7 +669,7 @@ fn new_folder_differing_only_in_case_from_a_leaving_one() -> R {
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         [
             "Photos/",
             "Photos/new.jpg = new",
@@ -694,7 +677,7 @@ fn new_folder_differing_only_in_case_from_a_leaving_one() -> R {
             "archive/old.jpg = old"
         ]
     );
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
 
@@ -727,9 +710,9 @@ fn crash_right_after_a_fork_rename_is_completed_not_published() -> R {
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     a.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
-    assert_eq!(b.read("notes.txt")?, "a's edit");
-    assert_eq!(b.read(to.as_str())?, "b's edit");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.read_text("notes.txt")?, "a's edit");
+    assert_eq!(b.read_text(to.as_str())?, "b's edit");
     let srv = server.lock().map_err(|_| "poisoned")?;
     let original = srv.file_id_of(node).ok_or("original node is still live")?;
     assert_eq!(
@@ -758,14 +741,14 @@ fn a_second_conflict_with_the_same_bytes_gets_its_own_copy() -> R {
         );
         a.sync()?;
     }
-    assert_eq!(a.tree_text(), b.tree_text());
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     let copies = b
-        .tree_text()
+        .tree_text("")
         .iter()
         .filter(|e| e.ends_with("= same local bytes"))
         .count();
-    assert_eq!(copies, 2, "{:?}", b.tree_text());
-    assert_eq!(b.read("f.txt")?, "a2");
+    assert_eq!(copies, 2, "{:?}", b.tree_text(""));
+    assert_eq!(b.read_text("f.txt")?, "a2");
     Ok(())
 }
 
@@ -786,7 +769,7 @@ fn adopting_a_copy_of_a_sha256_file_downloads_nothing() -> R {
     let report = b.sync()?;
     assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
     assert_eq!(b.remote.faults().served, 0, "nothing was downloaded");
-    assert_eq!(b.tree_text(), ["photo.jpg = photo bytes"]);
+    assert_eq!(b.tree_text(""), ["photo.jpg = photo bytes"]);
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.live().count(),
         1,
@@ -866,7 +849,7 @@ fn temp_files_no_download_wants_are_swept() -> R {
     a.write("doc.txt", "v2")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.read("doc.txt")?, "v2");
+    assert_eq!(b.read_text("doc.txt")?, "v2");
     let left: Vec<_> = fs::read_dir(&tmp)?
         .flatten()
         .map(|e| e.file_name())
@@ -896,7 +879,7 @@ fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     let mut b = Client::new(&server, "b")?;
     let report = b.sync()?;
     assert!(report.conflicts.is_empty(), "{report:?}");
-    assert_eq!(b.tree_text(), a.tree_text());
+    assert_eq!(b.tree_text(""), a.tree_text(""));
     Ok(())
 }
 
@@ -951,7 +934,7 @@ fn junk_never_syncs_and_goes_to_the_trash_with_its_folder() -> R {
     a.write("~$doc.docx", "lock")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.tree_text(), ["proj/", "proj/doc.txt = v1"]);
+    assert_eq!(b.tree_text(""), ["proj/", "proj/doc.txt = v1"]);
 
     // b's own junk in the folder doesn't hold up a's delete of it.
     b.write("proj/Thumbs.db", "thumbs")?;
@@ -960,8 +943,8 @@ fn junk_never_syncs_and_goes_to_the_trash_with_its_folder() -> R {
     a.sync()?;
     let report = b.sync()?;
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
-    assert!(b.tree_text().is_empty(), "{:?}", b.tree_text());
-    assert_eq!(a.tree_text(), ["~$doc.docx = lock"]);
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
+    assert_eq!(a.tree_text(""), ["~$doc.docx = lock"]);
     Ok(())
 }
 
@@ -976,7 +959,7 @@ fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
     a.sync()?;
     b.sync()?;
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         ["proj/", "proj/main.js = m", "readme.txt = r"]
     );
 
@@ -985,7 +968,7 @@ fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
     b.sync()?;
     a.sync()?;
     assert_eq!(
-        a.tree_text(),
+        a.tree_text(""),
         [
             "proj/",
             "proj/main.js = m",
@@ -1000,7 +983,7 @@ fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
     a.sync()?;
     b.sync()?;
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         [
             "proj/",
             "proj/debug.log = b's log",
@@ -1011,7 +994,7 @@ fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
         ]
     );
     a.sync()?;
-    assert_eq!(a.tree_text(), ["proj/", "readme.txt = r"]);
+    assert_eq!(a.tree_text(""), ["proj/", "readme.txt = r"]);
     Ok(())
 }
 
@@ -1032,10 +1015,10 @@ fn a_file_moved_into_a_folder_one_device_ignores_leaves_that_device_only() -> R 
     a.sync()?;
     b.sync()?;
     // The unchanged file went with the move; b's edit stays, as a new file everyone gets.
-    assert_eq!(b.tree_text(), ["draft.txt = d2 from b"]);
+    assert_eq!(b.tree_text(""), ["draft.txt = d2 from b"]);
     a.sync()?;
     assert_eq!(
-        a.tree_text(),
+        a.tree_text(""),
         [
             "build/",
             "build/draft.txt = d1",
@@ -1050,25 +1033,16 @@ fn a_file_moved_into_a_folder_one_device_ignores_leaves_that_device_only() -> R 
 /// filter changed.
 fn restart_with(
     c: &mut Client,
-    name: &str,
     tweak: impl FnOnce(&mut hbsync_engine::EngineConfig),
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut cfg = common::config(&c.root, name);
-    tweak(&mut cfg);
-    c.engine = Engine::new(
-        StateDb::open(&c.db_path())?,
-        Box::new(c.remote.clone()),
-        cfg,
-    );
+    let remote = Box::new(c.remote.clone());
+    c.restart_with(remote, tweak)?;
     Ok(c.engine.apply_filter_change()?)
 }
 
 /// `c` restarted with the ignore rules `rules`.
-fn restart_ignoring(c: &mut Client, name: &str, rules: &'static str) -> R {
-    assert!(
-        restart_with(c, name, ignoring(rules))?,
-        "the filter changed"
-    );
+fn restart_ignoring(c: &mut Client, rules: &'static str) -> R {
+    assert!(restart_with(c, ignoring(rules))?, "the filter changed");
     assert!(!c.engine.apply_filter_change()?, "and is recorded");
     Ok(())
 }
@@ -1083,12 +1057,12 @@ fn a_folder_no_longer_ignored_comes_with_everything_in_it() -> R {
     a.write("build/deep/more.txt", "m")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.tree_text(), ["readme.txt = r"]);
+    assert_eq!(b.tree_text(""), ["readme.txt = r"]);
 
-    restart_ignoring(&mut b, "b", "")?;
+    restart_ignoring(&mut b, "")?;
     b.sync()?;
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         [
             "build/",
             "build/deep/",
@@ -1110,13 +1084,13 @@ fn a_folder_moved_out_of_an_ignored_one_comes_with_everything_in_it() -> R {
     a.write("build/sub/deep/more.txt", "m")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.tree_text(), ["readme.txt = r"]);
+    assert_eq!(b.tree_text(""), ["readme.txt = r"]);
 
     fs::rename(a.root.join("build/sub"), a.root.join("sub"))?;
     a.sync()?;
     b.sync()?;
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         [
             "readme.txt = r",
             "sub/",
@@ -1138,23 +1112,23 @@ fn a_new_ignore_rule_takes_files_off_the_drive_but_not_off_the_disk() -> R {
     a.write("readme", "r")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.read("build/out.o")?, "obj");
+    assert_eq!(b.read_text("build/out.o")?, "obj");
 
     // a starts ignoring build/: it leaves the drive and b (for b's trash), and stays on a.
-    restart_ignoring(&mut a, "a", "build/\n")?;
+    restart_ignoring(&mut a, "build/\n")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(a.read("build/out.o")?, "obj");
+    assert_eq!(a.read_text("build/out.o")?, "obj");
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         ["readme = r", "src/", "src/main.rs = fn main"]
     );
 
     // The rule goes: build/ is new on a again, and goes back up.
-    restart_ignoring(&mut a, "a", "")?;
+    restart_ignoring(&mut a, "")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.read("build/out.o")?, "obj");
+    assert_eq!(b.read_text("build/out.o")?, "obj");
     Ok(())
 }
 
@@ -1180,7 +1154,7 @@ fn a_parked_folder_kept_for_what_it_ignores_gets_a_real_name() -> R {
     b.sync()?;
     a.sync()?;
     assert_eq!(
-        b.tree_text(),
+        b.tree_text(""),
         [
             "proj (conflict 1)/",
             "proj (conflict 1)/node_modules/",
@@ -1191,7 +1165,7 @@ fn a_parked_folder_kept_for_what_it_ignores_gets_a_real_name() -> R {
         ]
     );
     assert_eq!(
-        a.tree_text(),
+        a.tree_text(""),
         [
             "proj (conflict 1)/",
             "proj/",
@@ -1225,11 +1199,11 @@ fn a_parked_file_whose_name_became_ignored_and_taken_moves_to_a_numbered_one() -
         s.put_parked(node, &from)
     })?;
     a.write("app.log", "new log")?;
-    restart_ignoring(&mut a, "a", "*.log\n")?;
+    restart_ignoring(&mut a, "*.log\n")?;
     a.sync()?;
     a.sync()?;
     assert_eq!(
-        a.tree_text(),
+        a.tree_text(""),
         [
             "app (conflict 1).log = keep me",
             "app.log = new log",
@@ -1271,7 +1245,7 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
         .confirm_deletes(report.held.iter().map(|op| op.node()));
     let report = b.sync()?;
     assert!(report.held.is_empty(), "{report:?}");
-    assert_eq!(b.tree_text(), ["keep.txt = k"]);
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 6);
     Ok(())
 }
@@ -1371,7 +1345,7 @@ fn recently_deleted_restores_and_purges() -> R {
     fs::remove_file(a.root.join("z.txt"))?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.tree_text(), ["keep.txt = k"]);
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
     let listed = b.engine.recently_deleted(10)?;
     let mut paths: Vec<_> = listed.iter().map(|d| d.path.as_str()).collect();
     paths.sort();
@@ -1389,9 +1363,9 @@ fn recently_deleted_restores_and_purges() -> R {
     assert_eq!(b.engine.restore(&[d])?, 4);
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree_text(), b.tree_text());
-    assert_eq!(a.read("d/sub/y.txt")?, "y");
-    assert!(a.read("z.txt").is_err());
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(a.read_text("d/sub/y.txt")?, "y");
+    assert!(a.read_text("z.txt").is_err());
 
     // A restore onto a name taken meanwhile gets another.
     a.write("z.txt", "new z")?;
@@ -1405,8 +1379,8 @@ fn recently_deleted_restores_and_purges() -> R {
         .node;
     assert_eq!(a.engine.restore(&[z])?, 1);
     a.sync()?;
-    assert_eq!(a.read("z (restored).txt")?, "z");
-    assert_eq!(a.read("z.txt")?, "new z");
+    assert_eq!(a.read_text("z (restored).txt")?, "z");
+    assert_eq!(a.read_text("z.txt")?, "new z");
 
     // The purge leaves nothing restorable.
     fs::remove_file(a.root.join("z.txt"))?;
@@ -1431,7 +1405,7 @@ fn an_edit_restores_what_another_client_deleted() -> R {
     a.sync()?; // removed
     b.sync()?; // the edit wins: restored with b's bytes
     a.sync()?;
-    assert_eq!(a.read("notes.txt")?, "1 and 2");
+    assert_eq!(a.read_text("notes.txt")?, "1 and 2");
     assert!(a.engine.recently_deleted(10)?.is_empty());
     let srv = server.lock().map_err(|_| "poisoned")?;
     assert_eq!((srv.live().count(), srv.removed().count()), (1, 0));
@@ -1455,7 +1429,7 @@ fn an_edit_keeps_a_deleted_version_it_never_had() -> R {
     b.sync()?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.read("notes.txt")?, "1, b's");
+    assert_eq!(a.read_text("notes.txt")?, "1, b's");
     let srv = server.lock().map_err(|_| "poisoned")?;
     let kept: Vec<_> = srv.removed().filter_map(|h| h.node()).collect();
     assert_eq!(kept.len(), 1, "a's version stays in Recently deleted");
@@ -1537,8 +1511,11 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     let e = find(&mut a, "P/E")?.node;
     assert_eq!(a.engine.restore(&[e])?, 3);
     a.sync()?;
-    assert_eq!(a.read("P/E/x.txt")?, "x");
-    assert!(a.read("P/y.txt").is_err(), "the rest of P stays deleted");
+    assert_eq!(a.read_text("P/E/x.txt")?, "x");
+    assert!(
+        a.read_text("P/y.txt").is_err(),
+        "the rest of P stays deleted"
+    );
 
     // Empty until a moment: what was deleted after it stays.
     let until = find(&mut a, "P/y.txt")?.removed_at_ms;
@@ -1632,7 +1609,7 @@ fn tags_sync_between_folders() -> R {
     a.write("Docs/report.txt", "quarterly, revised")?;
     a.sync()?;
     b.sync()?;
-    assert_eq!(b.read("Docs/report.txt")?, "quarterly, revised");
+    assert_eq!(b.read_text("Docs/report.txt")?, "quarterly, revised");
     assert_eq!(names(&b, "Docs/report.txt"), ["Red", "Todo"]);
 
     // A folder gets a new child and a tag in one go: the tag lands though the folder changed.
@@ -1646,7 +1623,7 @@ fn tags_sync_between_folders() -> R {
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{report:?}");
     assert_eq!(names(&b, "Docs"), ["Q3", "Work"]);
-    assert_eq!(b.read("Docs/new.txt")?, "new");
+    assert_eq!(b.read_text("Docs/new.txt")?, "new");
 
     // Removed on b, removed on a.
     tick();
@@ -1693,7 +1670,7 @@ fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
     b.write("photo.jpg", "photo bytes")?;
     let report = b.sync()?;
     assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
-    assert_eq!(b.tree_text(), ["photo.jpg = photo bytes"]);
+    assert_eq!(b.tree_text(""), ["photo.jpg = photo bytes"]);
     if tags::CAN_TAG && tags::read(&b.root.join("photo.jpg")).is_some() {
         let names: Vec<String> = tags::read(&b.root.join("photo.jpg"))
             .unwrap_or_default()
@@ -1743,7 +1720,7 @@ fn role_folders_stay_out_of_the_main_folder() -> R {
     let mut a = Client::new(&server, "a")?;
     a.write("readme.txt", "r")?;
     a.sync()?;
-    assert_eq!(a.tree_text(), ["readme.txt = r"]);
+    assert_eq!(a.tree_text(""), ["readme.txt = r"]);
     let names = server.lock().map_err(|_| "poisoned")?.live_names();
     assert_eq!(names, ["Documents", "cv.txt", "readme.txt"]);
     Ok(())
@@ -1760,8 +1737,8 @@ fn a_plain_documents_folder_beside_the_role_folder_keeps_its_name() -> R {
     b.sync()?;
     // A role folder holds no name for the main folder: two at the top, told apart by id.
     let plain = ["Documents/", "Documents/mine.txt = plain"];
-    assert_eq!(a.tree_text(), plain);
-    assert_eq!(b.tree_text(), plain);
+    assert_eq!(a.tree_text(""), plain);
+    assert_eq!(b.tree_text(""), plain);
     let names = server.lock().map_err(|_| "poisoned")?.live_names();
     assert_eq!(names, ["Documents", "Documents", "cv.txt", "mine.txt"]);
     Ok(())
@@ -1780,8 +1757,8 @@ fn a_plain_documents_folder_keeps_its_name_when_the_role_folder_comes() -> R {
     a.sync()?;
     b.sync()?;
     let mine = ["Documents/", "Documents/mine.txt = plain", "other.txt = o"];
-    assert_eq!(a.tree_text(), mine);
-    assert_eq!(b.tree_text(), mine);
+    assert_eq!(a.tree_text(""), mine);
+    assert_eq!(b.tree_text(""), mine);
     Ok(())
 }
 
@@ -1792,12 +1769,12 @@ fn a_role_folder_no_longer_left_out_comes_with_everything_in_it() -> R {
     let mut a = Client::new(&server, "a")?;
     a.write("readme.txt", "r")?;
     a.sync()?;
-    assert_eq!(a.tree_text(), ["readme.txt = r"]);
+    assert_eq!(a.tree_text(""), ["readme.txt = r"]);
 
-    restart_with(&mut a, "a", unscoped)?;
+    restart_with(&mut a, unscoped)?;
     a.sync()?;
     assert_eq!(
-        a.tree_text(),
+        a.tree_text(""),
         ["Documents/", "Documents/cv.txt = role", "readme.txt = r"]
     );
     Ok(())
@@ -1890,7 +1867,7 @@ fn a_role_folder_moved_into_a_folder_keeps_it_alive() -> R {
     fs::remove_dir_all(a.root.join("Archive"))?;
     a.sync()?;
     // Archive holds what this device doesn't see: it stays on the drive, and comes back here.
-    assert_eq!(a.tree_text(), ["Archive/", "readme.txt = r"]);
+    assert_eq!(a.tree_text(""), ["Archive/", "readme.txt = r"]);
     let names = server.lock().map_err(|_| "poisoned")?.live_names();
     assert_eq!(names, ["Archive", "Documents", "cv.txt", "readme.txt"]);
     Ok(())

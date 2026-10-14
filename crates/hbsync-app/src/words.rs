@@ -139,9 +139,6 @@ pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
     out
 }
 
-/// `s` safe in HTML and XML text and attribute values.
-pub use hbsync_homebase::local_http::escape as escape_xml;
-
 /// A sync in progress: "12 of 40 files, 3.1 MB of 40 MB".
 pub fn progress(p: &Progress) -> String {
     let files = format!(

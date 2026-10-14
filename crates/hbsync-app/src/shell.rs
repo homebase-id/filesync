@@ -44,7 +44,7 @@ fn icon_bytes(icons: Icons<'_>) -> &[u8] {
 /// with other names go (one Explorer still holds stays, until a later start).
 #[cfg(not(target_os = "macos"))]
 fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
-    let name = format!("homebase-{:016x}.{ext}", crate::ipc::fnv1a(bytes));
+    let name = format!("homebase-{:016x}.{ext}", hbsync_fileio::fnv1a64(bytes));
     let path = paths.state.join(&name);
     if !path.exists() {
         hbsync_fileio::write_atomic(&path, bytes)?;
@@ -70,7 +70,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
         return;
     }
     let done = note(paths);
-    let key = format!("{:016x}", crate::ipc::fnv1a(icon_bytes(icons)));
+    let key = format!("{:016x}", hbsync_fileio::fnv1a64(icon_bytes(icons)));
     let (first, icon) = to_do(
         &std::fs::read_to_string(&done).unwrap_or_default(),
         folder,
@@ -163,7 +163,7 @@ pub fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
         " <bookmark href=\"{uri}\">\n  <title>{title}</title>\n  <info>\n   \
          <metadata owner=\"http://freedesktop.org\">\n    \
          <bookmark:icon name=\"folder-cloud\"/>\n   </metadata>\n  </info>\n </bookmark>\n",
-        title = crate::words::escape_xml(title),
+        title = crate::local_http::escape(title),
     );
     Some(format!("{}{bookmark}{}", &xbel[..end], &xbel[end..]))
 }

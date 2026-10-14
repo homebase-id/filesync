@@ -14,7 +14,14 @@ use crate::{Engine, EngineConfig, SyncReport};
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// Sets up a client's engine config; run again on every [`TestClient::restart`].
-pub type Configure = Box<dyn Fn(&mut EngineConfig) -> Res<()>>;
+type Configure = Box<dyn Fn(&mut EngineConfig) -> Res<()>>;
+
+/// The engine config of a test: no real pause between transient retries.
+pub fn config(root: &Path, name: &str) -> EngineConfig {
+    let mut cfg = EngineConfig::new(root, name);
+    cfg.exec.retry_pause = std::time::Duration::from_millis(1);
+    cfg
+}
 
 pub struct TestClient<R> {
     _dir: tempfile::TempDir,
@@ -35,13 +42,18 @@ impl<R> std::fmt::Debug for TestClient<R> {
 }
 
 impl<R: Remote + Clone + 'static> TestClient<R> {
-    /// A client called `name` (its conflict copies say so) on `remote`. Transient retries don't
-    /// pause; `configure` sets the rest.
-    pub fn new(remote: R, name: &str, configure: Configure) -> Res<Self> {
+    /// A client called `name` (its conflict copies say so) on `remote`, its [`config`] set up
+    /// further by `configure`.
+    pub fn new(
+        remote: R,
+        name: &str,
+        configure: impl Fn(&mut EngineConfig) -> Res<()> + 'static,
+    ) -> Res<Self> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
         fs::create_dir_all(root.join(STATE_DIR))?;
-        let engine = Self::engine(&root, name, &remote, &configure)?;
+        let configure: Configure = Box::new(configure);
+        let engine = Self::engine(&root, name, Box::new(remote.clone()), &configure, |_| {})?;
         Ok(TestClient {
             _dir: dir,
             root,
@@ -52,17 +64,33 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         })
     }
 
-    fn engine(root: &Path, name: &str, remote: &R, configure: &Configure) -> Res<Engine> {
-        let mut cfg = EngineConfig::new(root, name);
-        cfg.exec.retry_pause = std::time::Duration::from_millis(1);
+    fn engine(
+        root: &Path,
+        name: &str,
+        remote: Box<dyn Remote>,
+        configure: &Configure,
+        tweak: impl FnOnce(&mut EngineConfig),
+    ) -> Res<Engine> {
+        let mut cfg = config(root, name);
         configure(&mut cfg)?;
+        tweak(&mut cfg);
         let db = StateDb::open(&hbsync_local::state_db_path(root))?;
-        Ok(Engine::new(db, Box::new(remote.clone()), cfg))
+        Ok(Engine::new(db, remote, cfg))
     }
 
     /// A new engine on the same state DB, as after a restart.
     pub fn restart(&mut self) -> Res<()> {
-        self.engine = Self::engine(&self.root, &self.name, &self.remote, &self.configure)?;
+        self.restart_with(Box::new(self.remote.clone()), |_| {})
+    }
+
+    /// [`TestClient::restart`] on `remote` (one wrapping [`TestClient::remote`], say), its
+    /// config changed by `tweak` too.
+    pub fn restart_with(
+        &mut self,
+        remote: Box<dyn Remote>,
+        tweak: impl FnOnce(&mut EngineConfig),
+    ) -> Res<()> {
+        self.engine = Self::engine(&self.root, &self.name, remote, &self.configure, tweak)?;
         Ok(())
     }
 
@@ -100,14 +128,31 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         fs::read(self.root.join(rel))
     }
 
+    pub fn read_text(&self, rel: &str) -> io::Result<String> {
+        Ok(String::from_utf8_lossy(&self.read(rel)?).into_owned())
+    }
+
     /// `(path, content)` for files, `(path/, [])` for folders, under `folder` ("" for the
     /// whole root, the state folder left out), sorted.
-    pub fn tree(&self, folder: &str) -> Vec<(String, Vec<u8>)> {
+    pub fn entries(&self, folder: &str) -> Vec<(String, Vec<u8>)> {
         let base = self.root.join(folder);
         let mut out = Vec::new();
         walk(&base, &base, &mut out);
         out.sort();
         out
+    }
+
+    /// [`TestClient::entries`] as text: `path = content` for files (`path = <n bytes>` past
+    /// 100 bytes), `path/` for folders.
+    pub fn tree_text(&self, folder: &str) -> Vec<String> {
+        self.entries(folder)
+            .into_iter()
+            .map(|(path, data)| match data.len() {
+                _ if path.ends_with('/') => path,
+                n if n > 100 => format!("{path} = <{n} bytes>"),
+                _ => format!("{path} = {}", String::from_utf8_lossy(&data)),
+            })
+            .collect()
     }
 }
 

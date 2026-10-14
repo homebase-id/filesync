@@ -19,6 +19,7 @@ use crate::engine::EngineError;
 use crate::exec::{remove_all, trash_dir, trashed_at, update_meta};
 use crate::scope::Scope;
 use crate::tree::restored_names;
+use crate::walk::End;
 
 /// Recently deleted in this DB's scope, newest first.
 pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> {
@@ -84,31 +85,26 @@ fn folder(
     at: NodeId,
     known: &mut HashMap<NodeId, (String, bool)>,
 ) -> Result<(String, bool), StateError> {
-    let mut names = Vec::new();
-    let mut up = at;
-    // Bounded: a damaged DB must not hang the list.
-    let (mut path, outside) = loop {
-        if let Some(k) = known.get(&up) {
-            break k.clone();
+    // Up to a folder already worked out or one outside the scope.
+    let up = crate::walk::up::<_, StateError>(at, |n| {
+        if known.contains_key(&n) || scope.outside.contains(&n) {
+            return Ok(None);
         }
-        if scope.outside.contains(&up) {
-            break (String::new(), true);
-        }
-        if up.is_root() || names.len() >= 256 {
-            break (String::new(), false);
-        }
-        let row = match s.get_mirror(up)? {
+        let row = match s.get_mirror(n)? {
             Some(row) => Some(row),
-            None => s.removed_by_node(up)?.map(|r| r.row),
+            None => s.removed_by_node(n)?.map(|r| r.row),
         };
-        let Some(row) = row else {
-            break (String::new(), false);
-        };
-        names.push((up, row.name));
-        up = row.parent;
+        Ok(row.map(|r| ((n, r.name), r.parent)))
+    })?;
+    let (mut path, outside) = match up.end {
+        End::At(n) => match known.get(&n) {
+            Some(k) => k.clone(),
+            None => (String::new(), scope.outside.contains(&n)),
+        },
+        End::Top | End::Cycle => (String::new(), false),
     };
     // Top-down, remembering each folder on the way.
-    for (id, name) in names.into_iter().rev() {
+    for (id, name) in up.items.into_iter().rev() {
         path = join(&path, &name);
         known.insert(id, (path.clone(), outside));
     }
@@ -165,7 +161,13 @@ pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<us
             kind: row.kind,
             content: row.content(&name),
         };
-        let back = match update_meta(remote, row.file_id, row.version, &meta, row.payload()) {
+        let back = match update_meta(
+            remote,
+            row.file_id,
+            row.version,
+            &meta,
+            row.file.map(|f| f.hash),
+        ) {
             Ok(back) => back,
             // Changed or deleted for good meanwhile: the feed tells what it is now.
             Err(RemoteError::VersionMismatch | RemoteError::NotFound) => continue,
@@ -222,7 +224,7 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
             (f, parent)
         }))
     })?
-    .items();
+    .items;
     chain.reverse();
     // Then the node and what was deleted with it, each after its folder.
     let rows: Vec<RemovedRow> = chain.into_iter().chain(group(s, top)?).collect();
