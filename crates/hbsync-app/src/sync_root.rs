@@ -18,87 +18,76 @@ use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-/// The provider part of our sync roots' ids, `HomebaseFilesync!<user SID>!<account>` (the form
-/// Windows asks for); the account is the identity and a hash of the folder, so each folder of
-/// each identity (and each private instance's) has its own.
 const PROVIDER: &str = "HomebaseFilesync";
 /// The name in the navigation pane.
 const NAME: &str = "Homebase";
 
 fn io(e: windows::core::Error) -> std::io::Error {
-    std::io::Error::other(e)
+    std::io::Error::other(e.message())
 }
 
 /// Makes `folder` (a plain path: no `\\?\`) the one sync root of `identity` there, shown with
-/// `icon` (an ICO file, written by `write_icon` only when it registers). Ours that are stale
-/// go: this one's id at another folder, or another of ours at this folder (an earlier
-/// identity). True when it registered, false when it already was.
-pub fn register(
-    folder: &Path,
-    identity: &str,
-    icon: &Path,
-    write_icon: impl FnOnce() -> std::io::Result<()>,
-) -> std::io::Result<bool> {
+/// `icon` (an ICO file). Ours that are stale go: this one's id at another folder, or another of
+/// ours at this folder (an earlier identity). True when it registered, false when it already
+/// was.
+pub fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<bool> {
     if !StorageProviderSyncRootManager::IsSupported().map_err(io)? {
         return Err(std::io::Error::other(
             "Windows doesn't support Cloud Files here",
         ));
     }
-    let id = id(folder, identity)?;
+    let prefix = prefix()?;
+    let id = id(&prefix, folder, identity);
+    let key = key(folder);
     let mut present = false;
-    for (other, path) in ours()? {
-        let here = same_path(&path, folder);
+    for (other, path) in ours(&prefix)? {
+        let here = path.is_some_and(|p| p.to_lowercase() == key);
         if other == id && here {
             present = true;
         } else if other == id || here {
             unregister_id(&other)?;
         }
     }
-    if present {
-        return Ok(false);
+    if !present {
+        root_info(folder, &id, icon)
+            .and_then(|info| StorageProviderSyncRootManager::Register(&info))
+            .map_err(io)?;
     }
-    // An icon Explorer holds open can't be written again; the one there does.
-    if let Err(e) = write_icon()
-        && !icon.exists()
-    {
-        return Err(e);
-    }
-    let info = StorageProviderSyncRootInfo::new().map_err(io)?;
-    info.SetId(&HSTRING::from(id)).map_err(io)?;
-    let path = StorageFolder::GetFolderFromPathAsync(&HSTRING::from(folder.as_os_str()))
-        .and_then(|f| f.join())
-        .map_err(io)?;
-    info.SetPath(&path).map_err(io)?;
-    info.SetDisplayNameResource(&HSTRING::from(NAME))
-        .map_err(io)?;
-    info.SetIconResource(&HSTRING::from(format!("{},0", icon.display())))
-        .map_err(io)?;
+    Ok(!present)
+}
+
+fn root_info(
+    folder: &Path,
+    id: &str,
+    icon: &Path,
+) -> windows::core::Result<StorageProviderSyncRootInfo> {
+    let info = StorageProviderSyncRootInfo::new()?;
+    info.SetId(&HSTRING::from(id))?;
+    info.SetPath(
+        &StorageFolder::GetFolderFromPathAsync(&HSTRING::from(folder.as_os_str()))?.join()?,
+    )?;
+    info.SetDisplayNameResource(&HSTRING::from(NAME))?;
+    info.SetIconResource(&HSTRING::from(format!("{},0", icon.display())))?;
     // The files are always all there: Windows never asks us for content.
-    info.SetHydrationPolicy(StorageProviderHydrationPolicy::Full)
-        .map_err(io)?;
-    info.SetHydrationPolicyModifier(StorageProviderHydrationPolicyModifier::None)
-        .map_err(io)?;
-    info.SetPopulationPolicy(StorageProviderPopulationPolicy::AlwaysFull)
-        .map_err(io)?;
-    info.SetInSyncPolicy(StorageProviderInSyncPolicy::Default)
-        .map_err(io)?;
-    info.SetHardlinkPolicy(StorageProviderHardlinkPolicy::None)
-        .map_err(io)?;
-    info.SetShowSiblingsAsGroup(false).map_err(io)?;
-    info.SetVersion(&HSTRING::from("1")).map_err(io)?;
-    let context = DataWriter::new().map_err(io)?;
-    context.WriteBytes(PROVIDER.as_bytes()).map_err(io)?;
-    info.SetContext(&context.DetachBuffer().map_err(io)?)
-        .map_err(io)?;
-    StorageProviderSyncRootManager::Register(&info).map_err(io)?;
-    Ok(true)
+    info.SetHydrationPolicy(StorageProviderHydrationPolicy::Full)?;
+    info.SetHydrationPolicyModifier(StorageProviderHydrationPolicyModifier::None)?;
+    info.SetPopulationPolicy(StorageProviderPopulationPolicy::AlwaysFull)?;
+    info.SetInSyncPolicy(StorageProviderInSyncPolicy::Default)?;
+    info.SetHardlinkPolicy(StorageProviderHardlinkPolicy::None)?;
+    info.SetShowSiblingsAsGroup(false)?;
+    info.SetVersion(&HSTRING::from("1"))?;
+    let context = DataWriter::new()?;
+    context.WriteBytes(PROVIDER.as_bytes())?;
+    info.SetContext(&context.DetachBuffer()?)?;
+    Ok(info)
 }
 
 /// Unregisters the sync root of `identity` at `folder`, found by its id: it goes even when the
 /// folder was moved or deleted.
 pub fn unregister(folder: &Path, identity: &str) -> std::io::Result<()> {
-    let id = id(folder, identity)?;
-    if ours()?.iter().any(|(other, _)| *other == id) {
+    let prefix = prefix()?;
+    let id = id(&prefix, folder, identity);
+    if ours(&prefix)?.iter().any(|(other, _)| *other == id) {
         unregister_id(&id)?;
     }
     Ok(())
@@ -108,44 +97,39 @@ fn unregister_id(id: &str) -> std::io::Result<()> {
     StorageProviderSyncRootManager::Unregister(&HSTRING::from(id)).map_err(io)
 }
 
-/// Our sync roots of this user, as (id, folder); a root whose folder is gone has an empty one.
-fn ours() -> std::io::Result<Vec<(String, String)>> {
-    let prefix = format!("{PROVIDER}!{}!", user_sid()?);
+/// Our sync roots of this user, as (id, folder); `None` for a folder that is gone.
+fn ours(prefix: &str) -> std::io::Result<Vec<(String, Option<String>)>> {
     let mut found = Vec::new();
     for root in StorageProviderSyncRootManager::GetCurrentSyncRoots().map_err(io)? {
         let id = root.Id().map_err(io)?.to_string();
-        if id.starts_with(&prefix) {
+        if id.starts_with(prefix) {
             let path = root
                 .Path()
                 .and_then(|p| p.cast::<IStorageItem>())
                 .and_then(|p| p.Path())
-                .map(|p| p.to_string())
-                .unwrap_or_default();
+                .ok()
+                .map(|p| p.to_string());
             found.push((id, path));
         }
     }
     Ok(found)
 }
 
+/// `HomebaseFilesync!<user SID>!`: an id is this and an account, the form Windows asks for.
+fn prefix() -> std::io::Result<String> {
+    Ok(format!("{PROVIDER}!{}!", user_sid()?))
+}
+
+/// The account is the identity and a hash of the folder, so each folder of each identity (and
+/// each private instance's) has its own root.
+fn id(prefix: &str, folder: &Path, identity: &str) -> String {
+    let hash = crate::ipc::fnv1a(key(folder).as_bytes());
+    format!("{prefix}{identity}~{hash:016x}")
+}
+
 /// Windows paths compare without regard to case.
-fn same_path(a: &str, b: &Path) -> bool {
-    !a.is_empty() && a.to_lowercase() == b.display().to_string().to_lowercase()
-}
-
-fn id(folder: &Path, identity: &str) -> std::io::Result<String> {
-    Ok(format!(
-        "{PROVIDER}!{}!{identity}~{:016x}",
-        user_sid()?,
-        fnv1a(folder.display().to_string().to_lowercase().as_bytes())
-    ))
-}
-
-/// FNV-1a, 64 bits: stable across Rust versions, unlike `std`'s hasher (an id must not change
-/// with the compiler).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
-    })
+fn key(folder: &Path) -> String {
+    folder.display().to_string().to_lowercase()
 }
 
 /// This user's SID, `S-1-5-21-…`.
