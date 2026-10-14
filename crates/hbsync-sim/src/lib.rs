@@ -473,6 +473,8 @@ impl Sim {
             (2, Some(file)) => {
                 if let Some(n) = self.server.live.remove(&file) {
                     self.server.removed.insert(file, n);
+                    // A tag change loses to a delete (§11), the phone's too.
+                    self.deleted.insert(file);
                 }
             }
             (_, Some(file)) => {

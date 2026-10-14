@@ -484,7 +484,7 @@ fn remote_error(e: HomebaseError) -> RemoteError {
             let why = format!("{what}: {error}");
             match error.status {
                 404 | 410 | 416 => RemoteError::NotFound,
-                507 => RemoteError::Fatal(format!("out of storage quota: {why}")),
+                507 => RemoteError::Full(why),
                 408 | 429 | 499 | 500..=599 => RemoteError::Transient(why),
                 _ => RemoteError::Fatal(why),
             }
@@ -523,7 +523,7 @@ mod tests {
             (api(400, Some("payloadHashRequired")), "HashRequired"),
             (api(404, None), "NotFound"),
             (api(503, None), "Transient"),
-            (api(507, None), "Fatal"),
+            (api(507, None), "Full"),
             (api(400, Some("invalidUpload")), "Fatal"),
             (HomebaseError::Network("reset".into()), "Transient"),
             (HomebaseError::Denied("401".into()), "Denied"),

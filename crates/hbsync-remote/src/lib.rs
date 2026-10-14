@@ -210,6 +210,9 @@ pub enum RemoteError {
     /// Reading the local upload source or writing the download sink failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// The identity is out of storage (HTTP 507): nothing more goes up until there is room.
+    #[error("out of storage: {0}")]
+    Full(String),
     /// Anything that won't get better by retrying (auth, bad request).
     #[error("fatal: {0}")]
     Fatal(String),
