@@ -23,6 +23,12 @@ pub const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
 pub const APP_NAME: &str = "Homebase Filesync";
 pub const APP_SLUG: &str = "filesync";
 
+/// The identity's files in the browser: chat's web app on the identity, opened on its Filesync
+/// mini-app.
+pub fn files_online(identity: &str) -> String {
+    format!("https://{identity}/apps/chat/#filesync")
+}
+
 /// A drive the app asks for at registration.
 #[derive(Debug, Clone, Copy)]
 pub struct DriveSpec {

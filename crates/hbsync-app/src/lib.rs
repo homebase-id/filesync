@@ -20,7 +20,7 @@ mod sync_root;
 pub mod words;
 
 pub use config::{Config, ConfigError, MassDelete, Root};
-pub use hbsync_homebase::app::APP_NAME;
+pub use hbsync_homebase::app::{APP_NAME, files_online};
 pub use paths::{NoHome, Paths};
 pub use runner::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
 pub use secrets::{CredentialError, CredentialStore, Location};

@@ -288,6 +288,7 @@ impl App {
                     os::open(folder);
                 }
             }
+            Action::OpenOnline(url) => os::open(url),
             Action::Reveal(path) => {
                 std::thread::spawn(move || os::reveal(&path));
             }
