@@ -3,7 +3,7 @@
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
-use crate::runner::HeldDeletes;
+use crate::runner::{HeldDeletes, State, Status};
 
 /// Now, in Unix seconds.
 pub use hbsync_types::unix_now as now;
@@ -164,9 +164,62 @@ pub fn progress(p: &Progress) -> String {
     )
 }
 
+/// What the daemon is doing, in one line: the tray's status line and the head of `hbsync status`.
+pub fn status_line(s: &Status, now: u64) -> String {
+    match s.state {
+        State::Starting if s.progress.is_none() => "Catching up…".into(),
+        // Start-up's first sync shows its progress like any other: on a new install it can take
+        // hours.
+        State::Starting | State::Syncing => match &s.progress {
+            Some(p) => format!("Syncing {}", progress(p)),
+            None => "Syncing…".into(),
+        },
+        State::Idle if s.pending > 0 => format!("{} items waiting", count(s.pending)),
+        State::Idle => match &s.last_sync {
+            Some(last) => format!("Up to date · synced {}", when_roughly(last.at, now)),
+            None => "Up to date".into(),
+        },
+        State::Paused => match s.paused_until {
+            Some(until) => format!("Paused · syncing again {}", when(until, now)),
+            None => "Paused".into(),
+        },
+        State::Offline => match s.retry_at {
+            Some(at) => format!("Offline · trying again {}", when(at, now)),
+            None => "Offline".into(),
+        },
+        State::Failing => format!(
+            "Problem: {}",
+            s.error.as_deref().unwrap_or("syncing failed")
+        ),
+        State::Denied => "Homebase no longer accepts this computer".into(),
+        State::Stopped => "Stopped".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI and the tray say the same: waiting items, a refusal, a failure.
+    #[test]
+    fn status_lines() {
+        let mut s = Status::new(
+            "anna.example.com",
+            std::path::Path::new("/home/anna/Homebase"),
+        );
+        s.state = State::Idle;
+        s.pending = 1234;
+        assert_eq!(status_line(&s, 0), "1,234 items waiting");
+        s.state = State::Denied;
+        assert_eq!(
+            status_line(&s, 0),
+            "Homebase no longer accepts this computer"
+        );
+        s.state = State::Failing;
+        assert_eq!(status_line(&s, 0), "Problem: syncing failed");
+        s.error = Some("disk full".into());
+        assert_eq!(status_line(&s, 0), "Problem: disk full");
+    }
 
     #[test]
     fn counts_are_grouped() {

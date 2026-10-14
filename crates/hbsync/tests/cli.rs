@@ -157,7 +157,7 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     );
     assert!(status["credentials_warning"].is_string(), "{status}");
     let out = home.hbsync(&["status"])?;
-    assert!(text(&out).contains("offline"), "{}", text(&out));
+    assert!(text(&out).contains("Homebase Filesync: Offline"), "{}", text(&out));
     // Syncing needs the identity; pausing doesn't, and is kept for when it starts.
     let out = home.hbsync(&["sync"])?;
     assert!(!out.status.success());
