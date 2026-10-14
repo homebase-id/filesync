@@ -327,24 +327,17 @@ fn folder_path(
 }
 
 /// The new id of a detached item: fixed for the node and the device, so a replan before the
-/// detach ran picks the same one, and two devices detaching the same node don't collide. A hash,
-/// not a mix that undoes itself: an item detached twice must never get its first id back (that
-/// id is still live remotely, maybe where this device doesn't sync).
+/// detach ran picks the same one, and two devices detaching the same node don't collide. A
+/// BLAKE3 hash (stable across versions, unlike Rust's own hasher), never a mix that undoes
+/// itself: an item detached twice must not get its first id back (that id is still live
+/// remotely, maybe where this device doesn't sync).
 fn detach_id(node: NodeId, device: &str) -> NodeId {
+    let mut input = b"hbsync detach id v1\0".to_vec();
+    input.extend_from_slice(node.0.as_bytes());
+    input.extend_from_slice(device.as_bytes());
+    let hash = hbsync_fileio::hash_bytes(&input, hbsync_fileio::HashAlgorithm::Blake3);
     let mut bytes = [0u8; 16];
-    for (half, out) in bytes.chunks_mut(8).enumerate() {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ half as u64;
-        for b in node
-            .0
-            .as_bytes()
-            .iter()
-            .chain(device.as_bytes())
-            .chain(b"detach")
-        {
-            h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
-        }
-        out.copy_from_slice(&h.to_le_bytes());
-    }
+    bytes.copy_from_slice(&hash.bytes[..16]);
     bytes[6] = (bytes[6] & 0x0F) | 0x40; // a well-formed v4 UUID
     bytes[8] = (bytes[8] & 0x3F) | 0x80;
     NodeId(hbsync_types::Uuid::from_bytes(bytes))
