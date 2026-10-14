@@ -29,13 +29,20 @@ fn note(paths: &Paths) -> PathBuf {
 /// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already had them
 /// once.
 pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) {
+    // Not for a folder no longer set up: a late call that lost the race with Log out.
+    let configured = crate::control::configured(paths)
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.folder == folder && r.identity == identity);
+    if !configured {
+        return;
+    }
+    let done = note(paths);
+    let first = !std::fs::read_to_string(&done).is_ok_and(|f| Path::new(f.trim()) == folder);
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
-    os::sync_root(paths, folder, identity, icons);
-    #[cfg(not(windows))]
-    let _ = identity;
-    let done = note(paths);
-    if std::fs::read_to_string(&done).is_ok_and(|f| Path::new(f.trim()) == folder) {
+    os::sync_root(paths, folder, identity, icons, first);
+    if !first {
         return;
     }
     tracing::info!("giving {} its icon and a shortcut", folder.display());
@@ -47,8 +54,12 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
     }
 }
 
-/// Takes the icon and shortcut off `folder` again (unlinking it).
-pub fn undecorate(paths: &Paths, folder: &Path) {
+/// Takes the icon and shortcut off `folder` (synced with `identity`) again (unlinking it).
+pub fn undecorate(paths: &Paths, folder: &Path, identity: &str) {
+    #[cfg(windows)]
+    os::unregister(folder, identity);
+    #[cfg(not(windows))]
+    let _ = identity;
     if let Err(e) = os::undecorate(paths, folder) {
         tracing::info!("removing the folder's icon or shortcut: {e}");
     }
@@ -253,6 +264,7 @@ mod os {
 #[cfg(windows)]
 mod os {
     use super::*;
+    use hbsync_platform::winpath::plain;
     use std::os::windows::ffi::OsStrExt;
     use std::process::Command;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -280,16 +292,21 @@ mod os {
         Ok(())
     }
 
-    /// Takes the folder off Explorer's Quick access, where versions before the sync root
-    /// pinned it, through the shell's verbs.
-    fn unpin_quick_access(folder: &Path) {
+    /// Explorer's Quick access, through the shell's verbs.
+    fn quick_access(folder: &Path, pin: bool) {
         let path = folder.display().to_string().replace('\'', "''");
-        let script = format!(
-            "(New-Object -ComObject Shell.Application).Namespace(\
-             'shell:::{{679f85cb-0220-4080-b29b-5540cc05aab6}}').Items() | \
-             Where-Object {{ $_.Path -eq '{path}' }} | \
-             ForEach-Object {{ $_.InvokeVerb('unpinfromhome') }}"
-        );
+        let script = if pin {
+            format!(
+                "(New-Object -ComObject Shell.Application).Namespace('{path}').Self.InvokeVerb('pintohome')"
+            )
+        } else {
+            format!(
+                "(New-Object -ComObject Shell.Application).Namespace(\
+                 'shell:::{{679f85cb-0220-4080-b29b-5540cc05aab6}}').Items() | \
+                 Where-Object {{ $_.Path -eq '{path}' }} | \
+                 ForEach-Object {{ $_.InvokeVerb('unpinfromhome') }}"
+            )
+        };
         let _ = Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output();
@@ -307,16 +324,30 @@ mod os {
         )
     }
 
-    /// Registers the folder as a sync root; one pinned to Quick access by an older version
-    /// comes off it when the root is new, so it isn't in the navigation pane twice.
-    pub fn sync_root(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) {
+    /// Makes the folder a sync root, at the top of Explorer's navigation pane. Then Quick access
+    /// lets it go (where versions before pinned it), so it isn't in the pane twice. Where
+    /// Explorer won't take it (not NTFS, a share, inside another provider's root), the first
+    /// time pins it to Quick access instead.
+    pub fn sync_root(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>, first: bool) {
+        // The shell and WinRT don't take `\\?\` paths.
+        let folder = plain(folder);
         let icon = icon(paths);
-        let registered = std::fs::write(&icon, icons.ico)
-            .and_then(|()| crate::sync_root::register(folder, identity, &icon));
-        match registered {
-            Ok(true) => unpin_quick_access(folder),
+        let write = || std::fs::write(&icon, icons.ico);
+        match crate::sync_root::register(&folder, identity, &icon, write) {
+            Ok(true) => quick_access(&folder, false),
             Ok(false) => {}
-            Err(e) => tracing::info!("the folder in Explorer's navigation pane: {e}"),
+            Err(e) => {
+                tracing::info!("the folder in Explorer's navigation pane: {e}");
+                if first {
+                    quick_access(&folder, true);
+                }
+            }
+        }
+    }
+
+    pub fn unregister(folder: &Path, identity: &str) {
+        if let Err(e) = crate::sync_root::unregister(&plain(folder), identity) {
+            tracing::info!("the folder in Explorer's navigation pane: {e}");
         }
     }
 
@@ -334,9 +365,6 @@ mod os {
     }
 
     pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
-        if let Err(e) = crate::sync_root::unregister(folder) {
-            tracing::info!("the folder in Explorer's navigation pane: {e}");
-        }
         let ini = folder.join("desktop.ini");
         let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t == desktop_ini(&icon(paths)));
         if ours {
@@ -344,7 +372,7 @@ mod os {
             std::fs::remove_file(&ini)?;
             attributes(folder, FILE_ATTRIBUTE_READONLY, false)?;
         }
-        unpin_quick_access(folder);
+        quick_access(&plain(folder), false);
         Ok(())
     }
 }

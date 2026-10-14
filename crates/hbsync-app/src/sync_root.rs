@@ -10,16 +10,17 @@ use windows::Storage::Provider::{
     StorageProviderHydrationPolicyModifier, StorageProviderInSyncPolicy,
     StorageProviderPopulationPolicy, StorageProviderSyncRootInfo, StorageProviderSyncRootManager,
 };
-use windows::Storage::StorageFolder;
 use windows::Storage::Streams::DataWriter;
-use windows::core::HSTRING;
+use windows::Storage::{IStorageItem, StorageFolder};
+use windows::core::{HSTRING, Interface};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
 use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-/// The provider part of our sync roots' ids: `HomebaseFilesync!<user SID>!<identity>`, the
-/// form Windows asks for.
+/// The provider part of our sync roots' ids, `HomebaseFilesync!<user SID>!<account>` (the form
+/// Windows asks for); the account is the identity and a hash of the folder, so each folder of
+/// each identity (and each private instance's) has its own.
 const PROVIDER: &str = "HomebaseFilesync";
 /// The name in the navigation pane.
 const NAME: &str = "Homebase";
@@ -28,17 +29,42 @@ fn io(e: windows::core::Error) -> std::io::Error {
     std::io::Error::other(e)
 }
 
-/// Registers `folder` as the sync root of `identity`, shown with `icon` (an ICO file). Again
-/// is fine: it updates the registration. True when it wasn't registered before.
-pub fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<bool> {
-    let id = HSTRING::from(format!("{PROVIDER}!{}!{identity}", user_sid()?));
-    let new = StorageProviderSyncRootManager::GetSyncRootInformationForId(&id).is_err();
-    if new {
-        // Ours for another identity (logged in again as someone else) holds the folder.
-        unregister(folder)?;
+/// Makes `folder` (a plain path: no `\\?\`) the one sync root of `identity` there, shown with
+/// `icon` (an ICO file, written by `write_icon` only when it registers). Ours that are stale
+/// go: this one's id at another folder, or another of ours at this folder (an earlier
+/// identity). True when it registered, false when it already was.
+pub fn register(
+    folder: &Path,
+    identity: &str,
+    icon: &Path,
+    write_icon: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<bool> {
+    if !StorageProviderSyncRootManager::IsSupported().map_err(io)? {
+        return Err(std::io::Error::other(
+            "Windows doesn't support Cloud Files here",
+        ));
+    }
+    let id = id(folder, identity)?;
+    let mut present = false;
+    for (other, path) in ours()? {
+        let here = same_path(&path, folder);
+        if other == id && here {
+            present = true;
+        } else if other == id || here {
+            unregister_id(&other)?;
+        }
+    }
+    if present {
+        return Ok(false);
+    }
+    // An icon Explorer holds open can't be written again; the one there does.
+    if let Err(e) = write_icon()
+        && !icon.exists()
+    {
+        return Err(e);
     }
     let info = StorageProviderSyncRootInfo::new().map_err(io)?;
-    info.SetId(&id).map_err(io)?;
+    info.SetId(&HSTRING::from(id)).map_err(io)?;
     let path = StorageFolder::GetFolderFromPathAsync(&HSTRING::from(folder.as_os_str()))
         .and_then(|f| f.join())
         .map_err(io)?;
@@ -65,24 +91,61 @@ pub fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<b
     info.SetContext(&context.DetachBuffer().map_err(io)?)
         .map_err(io)?;
     StorageProviderSyncRootManager::Register(&info).map_err(io)?;
-    Ok(new)
+    Ok(true)
 }
 
-/// Unregisters our sync root at `folder`, if there is one (another provider's stays).
-pub fn unregister(folder: &Path) -> std::io::Result<()> {
-    let Ok(path) = StorageFolder::GetFolderFromPathAsync(&HSTRING::from(folder.as_os_str()))
-        .and_then(|f| f.join())
-    else {
-        return Ok(());
-    };
-    let Ok(info) = StorageProviderSyncRootManager::GetSyncRootInformationForFolder(&path) else {
-        return Ok(());
-    };
-    let id = info.Id().map_err(io)?;
-    if id.to_string().starts_with(&format!("{PROVIDER}!")) {
-        StorageProviderSyncRootManager::Unregister(&id).map_err(io)?;
+/// Unregisters the sync root of `identity` at `folder`, found by its id: it goes even when the
+/// folder was moved or deleted.
+pub fn unregister(folder: &Path, identity: &str) -> std::io::Result<()> {
+    let id = id(folder, identity)?;
+    if ours()?.iter().any(|(other, _)| *other == id) {
+        unregister_id(&id)?;
     }
     Ok(())
+}
+
+fn unregister_id(id: &str) -> std::io::Result<()> {
+    StorageProviderSyncRootManager::Unregister(&HSTRING::from(id)).map_err(io)
+}
+
+/// Our sync roots of this user, as (id, folder); a root whose folder is gone has an empty one.
+fn ours() -> std::io::Result<Vec<(String, String)>> {
+    let prefix = format!("{PROVIDER}!{}!", user_sid()?);
+    let mut found = Vec::new();
+    for root in StorageProviderSyncRootManager::GetCurrentSyncRoots().map_err(io)? {
+        let id = root.Id().map_err(io)?.to_string();
+        if id.starts_with(&prefix) {
+            let path = root
+                .Path()
+                .and_then(|p| p.cast::<IStorageItem>())
+                .and_then(|p| p.Path())
+                .map(|p| p.to_string())
+                .unwrap_or_default();
+            found.push((id, path));
+        }
+    }
+    Ok(found)
+}
+
+/// Windows paths compare without regard to case.
+fn same_path(a: &str, b: &Path) -> bool {
+    !a.is_empty() && a.to_lowercase() == b.display().to_string().to_lowercase()
+}
+
+fn id(folder: &Path, identity: &str) -> std::io::Result<String> {
+    Ok(format!(
+        "{PROVIDER}!{}!{identity}~{:016x}",
+        user_sid()?,
+        fnv1a(folder.display().to_string().to_lowercase().as_bytes())
+    ))
+}
+
+/// FNV-1a, 64 bits: stable across Rust versions, unlike `std`'s hasher (an id must not change
+/// with the compiler).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// This user's SID, `S-1-5-21-…`.
@@ -115,11 +178,7 @@ fn user_sid() -> std::io::Result<String> {
         if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let mut n = 0;
-        while *text.add(n) != 0 {
-            n += 1;
-        }
-        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
+        let sid = widestring::U16CStr::from_ptr_str(text).to_string_lossy();
         LocalFree(text.cast());
         Ok(sid)
     }

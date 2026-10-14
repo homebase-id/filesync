@@ -194,11 +194,15 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   Windows, Finder's custom icon on macOS, `.directory` and GIO metadata on Linux) and, on
   Linux, a shortcut (GTK bookmarks and KDE places; Finder's sidebar has no public interface).
   On Windows, at every start, it registers the folder as a Cloud Files sync root named
-  "Homebase" (`HomebaseFilesync!<user SID>!<identity>`), which puts it at the top of
-  Explorer's navigation pane, as OneDrive's and Dropbox's are: the registration only, no
-  placeholders, so the files stay ordinary files. A Quick access pin from an older version
-  comes off when the root is first registered. Unlinking takes all of it off again; logging
-  out keeps it.
+  "Homebase" (`HomebaseFilesync!<user SID>!<identity>~<hash of the folder>`), which puts it at
+  the top of Explorer's navigation pane, as OneDrive's and Dropbox's are: the registration
+  only, no placeholders, so the files stay ordinary files. Already registered, it is left
+  alone; ours that are stale go (the same id at another folder, an earlier identity's at this
+  one). A Quick access pin from an older version comes off when the root is registered; where
+  Explorer refuses one (not NTFS, a share, inside another provider's root) the folder is
+  pinned to Quick access instead. Unlinking (also the tray's Log out, which unlinks) takes all
+  of it off again; `hbsync logout` keeps it. Uninstalling without unlinking leaves the entry
+  (for the MSIX, untested).
 
 ## Autostart
 

@@ -46,6 +46,27 @@ pub fn extended(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
+/// Takes the `\\?\` prefix off again, for the shell and WinRT, which don't take it (what
+/// `canonicalize` returns on Windows carries it): `\\?\C:\a` → `C:\a`,
+/// `\\?\UNC\server\share\a` → `\\server\share\a`. Other paths are returned unchanged.
+pub fn to_plain(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    match path.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => path.to_owned(),
+    }
+}
+
+/// Returns `path` without the extended-length prefix ([`to_plain`]).
+pub fn plain(path: &std::path::Path) -> std::path::PathBuf {
+    match path.to_str() {
+        Some(s) => std::path::PathBuf::from(to_plain(s)),
+        None => path.to_path_buf(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +88,16 @@ mod tests {
         assert_eq!(to_extended(r"\\.\pipe\x"), r"\\.\pipe\x");
         assert_eq!(to_extended(r"rel\path"), r"rel\path");
         assert_eq!(to_extended("C:"), "C:");
+    }
+
+    #[test]
+    fn plain_paths() {
+        assert_eq!(to_plain(r"\\?\C:\Users\a"), r"C:\Users\a");
+        assert_eq!(to_plain(r"\\?\UNC\srv\share\dir"), r"\\srv\share\dir");
+        assert_eq!(to_plain(r"C:\Users\a"), r"C:\Users\a");
+        assert_eq!(to_plain(r"\\?\Volume{x}\a"), r"\\?\Volume{x}\a");
+        for p in [r"C:\Users\a", r"\\srv\share\dir"] {
+            assert_eq!(to_plain(&to_extended(p)), p);
+        }
     }
 }
