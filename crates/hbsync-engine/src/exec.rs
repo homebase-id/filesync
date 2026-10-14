@@ -864,7 +864,12 @@ impl<'a> Executor<'a> {
                 executable: None,
                 hash: None,
                 tags,
-            })
+            })?;
+            // What's in it may have been put aside unseen (in a folder this device ignores,
+            // which this one was moved out of): it comes along, a level per folder made.
+            s.mirror_children(node)?
+                .iter()
+                .try_for_each(|child| s.mark_dirty(child.node))
         })
     }
 

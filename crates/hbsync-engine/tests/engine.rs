@@ -1056,6 +1056,61 @@ fn restart_ignoring(c: &mut Client, name: &str, rules: &'static str) -> R {
 }
 
 #[test]
+fn a_folder_no_longer_ignored_comes_with_everything_in_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("build/\n"))?;
+    a.write("readme.txt", "r")?;
+    a.write("build/out.txt", "o")?;
+    a.write("build/deep/more.txt", "m")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(), ["readme.txt = r"]);
+
+    restart_ignoring(&mut b, "b", "")?;
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(),
+        [
+            "build/",
+            "build/deep/",
+            "build/deep/more.txt = m",
+            "build/out.txt = o",
+            "readme.txt = r"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_folder_moved_out_of_an_ignored_one_comes_with_everything_in_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("build/\n"))?;
+    a.write("readme.txt", "r")?;
+    a.write("build/sub/out.txt", "o")?;
+    a.write("build/sub/deep/more.txt", "m")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(), ["readme.txt = r"]);
+
+    fs::rename(a.root.join("build/sub"), a.root.join("sub"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(),
+        [
+            "readme.txt = r",
+            "sub/",
+            "sub/deep/",
+            "sub/deep/more.txt = m",
+            "sub/out.txt = o"
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn a_new_ignore_rule_takes_files_off_the_drive_but_not_off_the_disk() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
