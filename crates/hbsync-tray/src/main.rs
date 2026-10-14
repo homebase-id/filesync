@@ -300,6 +300,7 @@ impl App {
             Action::SyncNow => self.send_control(DaemonControl::SyncNow),
             Action::ReviewDeletions => os::open(self.pages.url("deletions")),
             Action::RecentlyDeleted => os::open(self.pages.url("deleted")),
+            Action::Folders => os::open(self.pages.url("folders")),
             Action::StartAtLogin => {
                 let (on, send) = (!self.start_at_login, self.send.clone());
                 std::thread::spawn(move || {

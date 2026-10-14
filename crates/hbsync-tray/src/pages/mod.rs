@@ -21,6 +21,7 @@ use hbsync_app::{Config, Paths};
 use crate::{Event, Sender};
 
 mod deleted;
+mod folders;
 mod login;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,6 +197,15 @@ impl Server {
                     format!("<h1>Deletions</h1><p>{}</p>", escape(&said)),
                 )
             }
+            ("GET", "folders") => self.html(&mut stream, self.folders_page(None)),
+            ("POST", "folders/add") => {
+                let said = self.change_folder(&request.form, true);
+                self.html(&mut stream, self.folders_page(Some(&said)))
+            }
+            ("POST", "folders/remove") => {
+                let said = self.change_folder(&request.form, false);
+                self.html(&mut stream, self.folders_page(Some(&said)))
+            }
             ("GET", "deleted") => self.html(&mut stream, self.deleted_page()),
             ("POST", "deleted/restore") => {
                 let said = self.restore(&request.form);
@@ -311,6 +321,33 @@ mod tests {
         // A new login starts with a clean form.
         pages.prepare_setup("", None);
         assert!(!lock(&pages.shared).merge_asked);
+        Ok(())
+    }
+
+    #[test]
+    fn the_folders_page_lists_the_roles_once_logged_in() -> R {
+        let dir = tempfile::tempdir()?;
+        let send: Sender = Arc::new(|_| {});
+        let paths = Paths::under(&dir.path().join("home"));
+        let pages = Pages::start(paths.clone(), send)?;
+        let page = request(&pages.url("folders"), "GET", "")?;
+        assert!(page.contains("Log in to Homebase first"), "{page}");
+
+        std::fs::create_dir_all(&paths.config)?;
+        Config::update(&paths.config_file(), |c| {
+            c.roots.push(hbsync_app::Root::main(
+                "anna.example.com",
+                &dir.path().join("Homebase"),
+            ))
+        })?;
+        let page = request(&pages.url("folders"), "GET", "")?;
+        for role in hbsync_types::Role::ALL {
+            assert!(page.contains(role.name()), "{role:?}: {page}");
+        }
+        assert!(page.contains("Not recommended"), "Downloads");
+        // Only roles it knows; nothing set up on this computer's real folders here.
+        let page = request(&pages.url("folders/add"), "POST", "role=papers")?;
+        assert!(page.contains("Nothing changed"), "{page}");
         Ok(())
     }
 
