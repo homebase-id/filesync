@@ -95,8 +95,10 @@ says so when it couldn't reach the keychain to remove the credentials there.
       notifications on to every folder's loop, reconnects the socket after a sleep, runs
       Recently deleted's requests and its daily purge (not while paused).
 
-   One folder's loop failing stops its account, and an account failing stops the daemon (it
-   is restarted whole).
+   One folder's loop failing is started again after a pause (from 5 s, doubling up to 5 min,
+   reset after an hour without failing), the folder showing `failing` with its error
+   meanwhile; the account's other folders sync on. A loop that can't start stops its account, and an account
+   failing stops the daemon (it is restarted whole).
 
 Exit status: 0 when stopped or when there is nothing to do (not set up, already running), 1 on
 a failure (service managers restart it then).

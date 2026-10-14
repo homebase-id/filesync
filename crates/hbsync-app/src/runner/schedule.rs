@@ -15,7 +15,7 @@ const REMOTE_QUIET: Duration = Duration::from_millis(1000);
 const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
 
 /// How long to wait after each failure in a row.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Backoff(Duration);
 
 impl Backoff {

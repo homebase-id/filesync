@@ -313,7 +313,11 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
         matches!(err, RunnerError::Folder(RootError::OtherIdentity { .. })),
         "{err}"
     );
-    assert_eq!(handle.status().state, State::Stopped);
+    assert_eq!(
+        handle.status().state,
+        State::Failing,
+        "its account tries again later"
+    );
     assert!(
         handle
             .status()
