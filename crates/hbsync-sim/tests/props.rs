@@ -991,3 +991,38 @@ fn a_tag_change_loses_to_a_delete_and_meets_an_edit_or_move() {
     assert_eq!(sim.server_tags("c.txt"), Some(vec!["Work:0".into()]));
     sim.check().unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// c0 detaches its older copy of the role folder (it made a file in it), c2 renames the
+/// detached folder to `d`, which c0 then ignores: c0 detaches it again. That second id was the
+/// role folder's own (the detach id undid itself), so c0 let go of a file it had never
+/// uploaded.
+#[test]
+fn regression_detached_twice_back_into_the_role_folder() {
+    use hbsync_sim::Action::{CreateFile, Move, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFile { parent: 2, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(
+            2,
+            Move {
+                node: 0,
+                parent: 7,
+                name: 5,
+            },
+        ),
+        act(0, ToggleIgnore),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 2 },
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Step { client: 2 },
+    ];
+    if let Err(e) = run_with(3, None, true, &events) {
+        panic!("{e}");
+    }
+}
