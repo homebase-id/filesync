@@ -259,3 +259,129 @@ fn a_file_moved_across_the_folders_here_is_kept() -> R {
     );
     Ok(())
 }
+
+/// A computer syncing only Documents, as set up on its account's DB, and its observer.
+struct DocsOnly {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    engine: Engine,
+    observer: hbsync_local::LocalObserver,
+}
+
+impl DocsOnly {
+    fn new(
+        server: &Arc<Mutex<FakeServer>>,
+        files: &[(&str, &str)],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?.join("Documents");
+        std::fs::create_dir_all(&root)?;
+        for (name, text) in files {
+            std::fs::write(root.join(name), text)?;
+        }
+        let db = root.with_file_name("state.db");
+        let sync_root = hbsync_engine::root::SyncRoot::create_for(
+            &db,
+            "t.example",
+            &root,
+            Role::Documents.node(),
+        )?;
+        let drive = Drive::new(
+            sync_root.account()?,
+            Arc::new(FakeRemote::new(server.clone())),
+        );
+        let engine = Engine::new(sync_root.state()?, drive, config(&root));
+        let observer = hbsync_local::LocalObserver::start(&root, engine.scan_options().clone());
+        Ok(DocsOnly {
+            _dir: dir,
+            root,
+            engine,
+            observer,
+        })
+    }
+
+    /// Starts as the daemon does, then syncs until idle: what was synced.
+    fn start(&mut self) -> Result<Vec<hbsync_types::activity::Synced>, Box<dyn std::error::Error>> {
+        let first = self.engine.start_up(&mut self.observer, "2026-10-14")?;
+        assert!(first.sync.failed.is_empty(), "{:?}", first.sync.failed);
+        let mut synced = first.sync.synced;
+        synced.extend(sync(&mut self.engine)?.synced);
+        Ok(synced)
+    }
+}
+
+/// The first computer adding Documents makes it on the drive; a second one whose Documents
+/// holds mostly the same files joins it: those are adopted, nothing moves; a file that differs
+/// keeps both versions; a new one goes up (plan E1).
+#[test]
+fn computers_join_documents_merging_what_they_hold() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DocsOnly::new(
+        &server,
+        &[("cv.txt", "cv"), ("notes.txt", "n"), ("letter.txt", "a's")],
+    )?;
+    a.start()?;
+    assert_eq!(
+        parent_on_server(&server, "cv.txt"),
+        Some(Role::Documents.node()),
+        "the role folder was made, its files in it"
+    );
+
+    let mut b = DocsOnly::new(
+        &server,
+        &[
+            ("cv.txt", "cv"),
+            ("notes.txt", "n"),
+            ("letter.txt", "b's"),
+            ("new.txt", "b"),
+        ],
+    )?;
+    let synced = b.start()?;
+    let moved: Vec<&str> = synced.iter().map(|s| s.path.as_str()).collect();
+    assert!(
+        !moved.iter().any(|p| *p == "cv.txt" || *p == "notes.txt"),
+        "the same files are adopted, not transferred: {moved:?}"
+    );
+    assert!(moved.contains(&"new.txt"), "{moved:?}");
+    a.start()?;
+    let (on_a, on_b) = (files(&a.root), files(&b.root));
+    assert_eq!(on_a, on_b);
+    assert_eq!(on_a.len(), 5, "both letters kept: {on_a:?}");
+    assert!(
+        on_a.iter()
+            .any(|f| f.starts_with("letter") && f.contains("conflict"))
+    );
+    Ok(())
+}
+
+/// Documents deleted on the drive (in Recently deleted) comes back, with what was in it, when a
+/// computer adds it again (plan E1).
+#[test]
+fn documents_deleted_on_the_drive_comes_back_when_added_again() -> R {
+    let server = server_with_documents()?;
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let docs = srv
+            .live()
+            .find(|h| matches!(&h.body, RemoteBody::Live { node, .. } if *node == Role::Documents.node()))
+            .cloned()
+            .ok_or("no Documents")?;
+        if let RemoteBody::Live { node, content, .. } = docs.body {
+            let meta = hbsync_remote::contract::removed(&NodeMeta {
+                node,
+                parent: docs.parent,
+                kind: docs.kind,
+                content,
+            });
+            srv.update(docs.file_id, docs.version, &meta, None)?;
+        }
+    }
+    let mut pc = DocsOnly::new(&server, &[])?;
+    pc.start()?;
+    assert_eq!(files(&pc.root), ["cv.txt"], "what was in it came back");
+    assert_eq!(
+        parent_on_server(&server, "cv.txt"),
+        Some(Role::Documents.node())
+    );
+    Ok(())
+}

@@ -251,6 +251,12 @@ impl Engine {
         date: &str,
     ) -> Result<StartupReport, EngineError> {
         self.apply_filter_change()?;
+        // A role folder's top on the drive: joined, restored, or made.
+        let top = self.cfg.scope.top;
+        if !top.is_root() {
+            let name = hbsync_types::Role::of(top).map_or("Folder", hbsync_types::Role::name);
+            self.drive.ensure_top(top, name)?;
+        }
         let (drive, folder) = (Arc::clone(&self.drive), self.db.folder());
         let db = &mut self.db;
         let (local, feed) = std::thread::scope(|scope| {
