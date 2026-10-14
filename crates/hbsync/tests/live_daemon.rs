@@ -37,7 +37,7 @@ impl Computer {
         )?;
         let computer = Computer {
             home,
-            folder: folder.canonicalize()?,
+            folder: hbsync_platform::winpath::plain(&folder.canonicalize()?),
         };
         let path = computer.folder.to_str().ok_or("path")?.to_owned();
         let out = computer.hbsync(&["setup", identity, "--folder", &path])?;

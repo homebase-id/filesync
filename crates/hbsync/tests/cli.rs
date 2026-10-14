@@ -41,7 +41,8 @@ impl Home {
     fn set_up(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let folder = self.path().join("Homebase");
         std::fs::create_dir_all(folder.join(".hbsync"))?;
-        let folder = folder.canonicalize()?;
+        // As the config keeps it: without `\\?\` on Windows.
+        let folder = hbsync_platform::winpath::plain(&folder.canonicalize()?);
         std::fs::write(
             self.path().join("config.toml"),
             format!(
