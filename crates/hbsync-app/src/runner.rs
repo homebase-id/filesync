@@ -647,7 +647,11 @@ impl Runner {
             let result = if started {
                 p.engine.sync_once(&today)
             } else {
-                p.engine.start_up(&mut p.observer, &today).map(|r| r.sync)
+                p.engine.start_up(&mut p.observer, &today).map(|mut r| {
+                    // Its catch-up's feed too: what it skipped is told.
+                    r.sync.feed.skipped.extend(r.feed.skipped);
+                    r.sync
+                })
             };
             match result {
                 Ok(report) => {
@@ -705,7 +709,7 @@ impl Runner {
             notes.push(format!("{path}: {} ({why})", op.kind()));
         }
         // Drive rows the client can't read (not encrypted, another key, not a sync node).
-        for why in self.remote.take_skipped() {
+        for why in &report.feed.skipped {
             notes.push(format!("a file on Homebase can't be synced: {why}"));
         }
         let seen = std::mem::take(&mut self.last_notes);

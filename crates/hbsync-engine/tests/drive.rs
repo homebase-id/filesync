@@ -8,7 +8,7 @@ use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_remote::{NodeMeta, Remote};
 use hbsync_state::StateDb;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_types::{NodeId, NodeKind, Role};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -73,17 +73,39 @@ fn pulls_asked_at_once_are_merged() -> R {
     Ok(())
 }
 
-/// A change pulled by one folder's engine wakes the others, not itself.
+/// A change pulled by one folder's engine wakes the folders it concerns: not itself, and not
+/// one whose part of the drive it isn't in.
 #[test]
-fn a_change_wakes_the_other_folders() -> R {
+fn a_change_wakes_the_folders_it_concerns() -> R {
     let dir = tempfile::tempdir()?;
     let (drive, remote) = drive(dir.path())?;
-    let (main, docs) = (drive.subscribe(1), drive.subscribe(2));
-    remote.create(&folder("Docs"), None)?;
-    drive.pull(Some(1))?;
-    assert!(docs.try_recv().is_ok());
-    assert!(main.try_recv().is_err(), "the puller isn't woken");
-    drive.pull(Some(1))?;
+    let docs_top = Role::Documents.node();
+    let (main_id, docs_id) = StateDb::open_account(&dir.path().join("state.db"))?.write(|s| {
+        Ok((
+            s.add_folder(NodeId::ROOT, "/h/Homebase", "m1")?,
+            s.add_folder(docs_top, "/h/Documents", "m2")?,
+        ))
+    })?;
+    let (main, docs) = (drive.subscribe(main_id), drive.subscribe(docs_id));
+    let documents = NodeMeta {
+        node: docs_top,
+        ..folder("Documents")
+    };
+    remote.create(&documents, None)?;
+    remote.create(&folder("Projects"), None)?;
+    drive.pull(Some(docs_id))?;
+    assert!(main.try_recv().is_ok(), "Projects is the main folder's");
+    assert!(docs.try_recv().is_err(), "the puller isn't woken");
+
+    let letter = NodeMeta {
+        parent: docs_top,
+        ..folder("Letters")
+    };
+    remote.create(&letter, None)?;
+    drive.pull(None)?;
+    assert!(docs.try_recv().is_ok(), "Letters is in Documents");
+    assert!(main.try_recv().is_err(), "nothing for the main folder");
+    drive.pull(None)?;
     assert!(docs.try_recv().is_err(), "nothing new: nobody is woken");
     Ok(())
 }

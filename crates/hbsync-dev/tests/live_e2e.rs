@@ -13,7 +13,6 @@ use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_local::{Filter, IGNORE_FILE, STATE_DIR};
 use hbsync_platform::tags::{self, Tag, Tags};
-use hbsync_remote::Remote;
 
 struct Client(TestClient<Arc<HomebaseRemote>>);
 
@@ -63,11 +62,11 @@ impl Client {
             self.name,
             total.failed
         );
-        let skipped = self.remote.take_skipped();
         assert!(
-            skipped.is_empty(),
-            "{}: feed rows skipped {skipped:?}",
-            self.name
+            total.feed.skipped.is_empty(),
+            "{}: feed rows skipped {:?}",
+            self.name,
+            total.feed.skipped
         );
         Ok(total)
     }

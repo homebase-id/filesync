@@ -399,6 +399,10 @@ impl Engine {
             // Ids of nodes gone everywhere.
             self.db.write(|s| s.collect_nodes())?;
         }
+        // Its writes changed other folders' parts of the drive (a move across them): their
+        // engines look.
+        let touched = self.db.take_touched();
+        self.drive.wake_folders(&touched, Some(self.db.folder()));
         Ok(report)
     }
 
@@ -464,10 +468,6 @@ impl Engine {
         }
         let more = self.drive.pull(Some(self.db.folder()))?;
         report.feed += more;
-        // What this folder wrote to the drive may concern the others.
-        if exec.done > 0 {
-            self.drive.wake(Some(self.db.folder()));
-        }
         Ok(plan.held)
     }
 }

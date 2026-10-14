@@ -17,7 +17,6 @@ use hbsync_app::{HintSource, Runner, RunnerConfig, State};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::Notifier;
 use hbsync_local::{IGNORE_FILE, STATE_DIR};
-use hbsync_remote::Remote;
 
 fn main() {
     if let Err(e) = run() {
@@ -74,9 +73,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (handle, thread) = Runner::spawn(cfg, remote.clone(), hints)?;
     while !thread.is_finished() {
         std::thread::sleep(Duration::from_millis(500));
-        for why in remote.take_skipped() {
-            println!("feed row skipped: {why}");
-        }
         if handle.status().state == State::Denied {
             break;
         }

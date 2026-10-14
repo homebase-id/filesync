@@ -177,6 +177,12 @@ impl<'a> Bench<'a> {
         let mut entries = Vec::new();
         loop {
             let page = self.remote.changes(cursor.as_deref(), 100)?;
+            if !page.skipped.is_empty() {
+                return Err(RemoteError::Fatal(format!(
+                    "feed rows skipped: {:?}",
+                    page.skipped
+                )));
+            }
             entries.extend(page.entries);
             if !page.has_more {
                 return Ok((entries, page.cursor));

@@ -295,6 +295,7 @@ impl FakeServer {
             entries,
             cursor,
             has_more,
+            skipped: Vec::new(),
         })
     }
 

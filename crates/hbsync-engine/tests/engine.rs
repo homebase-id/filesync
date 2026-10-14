@@ -804,7 +804,9 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
         filter: Default::default(),
     };
     hbsync_local::scan(&mut db, dir.path(), &opts)?;
-    hbsync_engine::feed::pull(&mut db, &FakeRemote::new(server.clone()), 500)?;
+    let cell = std::cell::RefCell::new(db);
+    hbsync_engine::feed::pull(|| cell.borrow_mut(), &FakeRemote::new(server.clone()), 500)?;
+    let mut db = cell.into_inner();
     let started = std::time::Instant::now();
     let adopted = hbsync_engine::adopt::adopt(
         &mut db,
