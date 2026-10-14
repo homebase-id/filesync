@@ -13,17 +13,9 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let parent = row.path.parent().unwrap_or_default();
-        let unspellable = |e: NameIssue| {
+        let target = spell(&parent, name, self.cfg.os).map_err(|e| {
             Outcome::unsyncable(format!("the conflict copy's name can't be used here: {e}"))
-        };
-        let local = match to_local(name, self.cfg.os) {
-            Ok(local) => local,
-            Err(e) => return Ok(unspellable(e)),
-        };
-        let target = match parent.join(&local.name) {
-            Ok(target) => target,
-            Err(e) => return Ok(unspellable(e)),
-        };
+        })?;
         // Its id is fixed by the node and the bytes: the next plan picks it again.
         if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
             return Ok(Outcome::unsyncable("its conflict copy's id is in use here"));
@@ -309,14 +301,14 @@ impl Executor<'_> {
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).
     pub(super) fn forget_base(&mut self, node: NodeId) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
-            return Ok(Outcome::stale("still here"));
+            return Ok(Outcome::waiting("its local item goes first"));
         }
         // The base stays a tree: a child's base may still be needed (its delete held or failed),
         // unless the child is forgotten in this run too (children go first; in a cycle of
         // bases, as a remote cycle leaves them, one must go before the others).
         let children = self.db.read(|s| s.base_children(node))?;
         if children.iter().any(|c| !self.forgetting.contains(&c.node)) {
-            return Ok(Outcome::stale("its children first"));
+            return Ok(Outcome::waiting("its children first"));
         }
         self.finish(&[], |s| s.delete_base(node).map(drop))
     }

@@ -168,7 +168,7 @@ pub struct Runner {
     held: Vec<NodeId>,
     /// The conflicts and failures of the last sync, to tell each one only once.
     told: report::Told,
-    /// Skips sync after sync: one that keeps coming back is told after all.
+    /// Stale skips sync after sync: one that keeps coming back is told after all.
     stalled: report::Stalled,
 }
 
@@ -505,7 +505,7 @@ impl Runner {
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), RunnerError> {
-        let skips = self.stalled.told(&report.skipped);
+        let skips = self.stalled.told(&report.skipped, Instant::now());
         let rows = self.drive.take_skipped();
         let notes = self
             .told

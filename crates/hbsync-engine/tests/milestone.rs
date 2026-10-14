@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use hbsync_engine::exec::Skip;
 use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_platform::name::name_key;
 
@@ -331,7 +332,7 @@ fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
         report
             .skipped
             .iter()
-            .any(|(_, why)| why.tells() && why.as_str().starts_with("name can't be used here")),
+            .any(|(_, why)| matches!(why, Skip::Unsyncable(w) if w.starts_with("name can't be used here"))),
         "{report:?}"
     );
     let names: Vec<String> = win.entries("").into_iter().map(|(p, _)| p).collect();

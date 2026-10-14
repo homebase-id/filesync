@@ -146,40 +146,34 @@ impl Outcome {
         Outcome::Skip(Skip::Stale(why.into()))
     }
 
+    fn waiting(why: impl Into<String>) -> Outcome {
+        Outcome::Skip(Skip::Waiting(why.into()))
+    }
+
     fn unsyncable(why: impl Into<String>) -> Outcome {
         Outcome::Skip(Skip::Unsyncable(why.into()))
     }
 }
 
 /// Why an operation was left for the next plan.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Skip {
     /// The world moved on since the plan (an item changed or went, on either side, or what the
-    /// operation needed isn't so any more): the next plan decides again, nothing to tell (unless
-    /// it keeps coming back: the runner tells one skipped sync after sync).
+    /// operation needed isn't so any more): the next plan decides again.
     Stale(String),
-    /// This device can't do it as planned (a name or path it can't hold, access denied, the
-    /// drive refusing it, a fault of its own): the next plans try it again, and the user is
-    /// told.
+    /// Another operation of the plan must go first and didn't (held or failed: that one says
+    /// why).
+    Waiting(String),
+    /// This device can't do it as planned: a name or path it can't hold, access denied, the
+    /// drive refusing it, a fault of its own.
     Unsyncable(String),
 }
 
 impl Skip {
-    /// Whether the user is told: something they may act on.
-    pub fn tells(&self) -> bool {
-        matches!(self, Skip::Unsyncable(_))
-    }
-
     pub fn as_str(&self) -> &str {
         match self {
-            Skip::Stale(why) | Skip::Unsyncable(why) => why,
+            Skip::Stale(why) | Skip::Waiting(why) | Skip::Unsyncable(why) => why,
         }
-    }
-}
-
-impl std::fmt::Display for Skip {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -686,10 +680,8 @@ impl<'a> Executor<'a> {
                 _ => return Err(Outcome::Retry("parent not local yet".into())),
             }
         };
-        let unspellable =
-            |e: NameIssue| Outcome::unsyncable(format!("name can't be used here: {e}"));
-        let local = to_local(name, self.cfg.os).map_err(unspellable)?;
-        parent_path.join(&local.name).map_err(unspellable)
+        spell(&parent_path, name, self.cfg.os)
+            .map_err(|e| Outcome::unsyncable(format!("name can't be used here: {e}")))
     }
 
     /// Whether the item on disk still matches its row.
@@ -850,6 +842,11 @@ fn matches_row(row: &LocalRow, meta: &hbsync_platform::LocalMeta) -> bool {
 fn rescan(report: &mut ExecReport, path: &RelPath) -> Outcome {
     report.rescan.push(path.parent().unwrap_or_default());
     Outcome::stale(format!("{path} changed on disk"))
+}
+
+/// `name` in `parent` as this OS spells it.
+fn spell(parent: &RelPath, name: &str, os: Os) -> Result<RelPath, NameIssue> {
+    parent.join(&to_local(name, os)?.name)
 }
 
 fn io_outcome(e: io::Error) -> Outcome {
