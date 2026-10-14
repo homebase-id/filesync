@@ -39,13 +39,18 @@ pub enum IpcError {
 
 /// Asks the daemon `request` and waits for its reply.
 pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
+    let line = serde_json::to_string(request).map_err(|e| IpcError::Protocol(e.to_string()))?;
+    call_line(paths, &line)
+}
+
+/// Sends the daemon the request `line` (JSON, as it is) and waits for its reply: for a request
+/// of an older protocol ([`crate::control::stop`]).
+pub fn call_line(paths: &Paths, line: &str) -> Result<Reply, IpcError> {
     let name = endpoint(paths, false).map_err(not_running)?;
     let stream = Stream::connect(name).map_err(not_running)?;
     patience(&stream)?;
     let mut stream = BufReader::new(stream);
-    let mut line = serde_json::to_string(request).map_err(|e| IpcError::Protocol(e.to_string()))?;
-    line.push('\n');
-    stream.get_mut().write_all(line.as_bytes())?;
+    stream.get_mut().write_all(format!("{line}\n").as_bytes())?;
     let reply = read_line(&mut stream)?.ok_or(IpcError::Protocol("no answer".into()))?;
     serde_json::from_str(&reply).map_err(|e| IpcError::Protocol(e.to_string()))
 }

@@ -326,7 +326,7 @@ impl<R: Read> Read for Tap<R> {
 }
 
 impl Remote for HomebaseRemote {
-    /// At most a thousand are kept between calls.
+    /// Rows that aren't usable sync nodes come back in [`ChangesPage::skipped`], with why.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let size = limit.max(1);
         let page: wire::QueryBatchResponse = self

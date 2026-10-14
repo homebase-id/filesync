@@ -18,10 +18,31 @@ pub fn ask(paths: &Paths, what: Ask) -> std::result::Result<Reply, IpcError> {
     ipc::call(paths, &Request::new(what))
 }
 
+/// A daemon of an older build is running (the programs were updated while it ran): it speaks
+/// an older protocol, and is stopped in its own words ([`stop`]).
+#[derive(Debug, thiserror::Error)]
+#[error("the daemon running is of an older version: restart it")]
+pub struct OlderDaemon;
+
+/// The protocol of the daemon that refused a request as `why`, when it isn't ours.
+fn older_protocol(why: &str) -> Option<u32> {
+    let version = why
+        .strip_prefix("this daemon speaks protocol ")?
+        .split(',')
+        .next()?
+        .parse()
+        .ok()?;
+    (version != crate::protocol::PROTOCOL).then_some(version)
+}
+
+/// The stop request of protocol 3: what a daemon of the build before protocol 4 understands.
+const STOP_3: &str = r#"{"protocol":3,"ask":{"control":"stop"}}"#;
+
 /// The daemon's status; `None` when it isn't running.
 pub fn status(paths: &Paths) -> Result<Option<DaemonStatus>> {
     match ask(paths, Ask::Status) {
         Ok(Reply::Status(s)) => Ok(Some(*s)),
+        Ok(Reply::Refused(why)) if older_protocol(&why).is_some() => Err(OlderDaemon.into()),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
         Err(IpcError::NotRunning) => Ok(None),
         Err(e) => Err(e.into()),
@@ -65,6 +86,21 @@ fn done(answer: std::result::Result<Reply, IpcError>) -> Result<()> {
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Sends `control` to the account `identity` (its Recently deleted).
+pub fn account(
+    paths: &Paths,
+    identity: &str,
+    control: crate::protocol::AccountControl,
+) -> Result<()> {
+    self::control(
+        paths,
+        Control::Account {
+            identity: identity.to_owned(),
+            control,
+        },
+    )
 }
 
 /// Has the daemon set the folder at `path` up for `identity` and sync it.
@@ -175,7 +211,13 @@ fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> 
 
 /// Stops the daemon and waits until it's gone. False when it wasn't running.
 pub fn stop(paths: &Paths) -> Result<bool> {
-    match ask(paths, Ask::Control(Control::Daemon(DaemonControl::Stop))) {
+    let mut answer = ask(paths, Ask::Control(Control::Daemon(DaemonControl::Stop)));
+    if let Ok(Reply::Refused(why)) = &answer
+        && older_protocol(why) == Some(3)
+    {
+        answer = ipc::call_line(paths, STOP_3);
+    }
+    match answer {
         Err(IpcError::NotRunning) => return Ok(false),
         // The daemon may exit before its answer is out: the connection just ends.
         Err(IpcError::Protocol(_)) => {}
@@ -267,4 +309,18 @@ pub fn unlink(paths: &Paths) -> Result<Option<Unlinked>> {
         roots,
         autostart_was_on,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_older_daemon_is_told_by_its_refusal() {
+        let refusal =
+            |v: u32| format!("this daemon speaks protocol {v}, the request 4: restart the daemon");
+        assert_eq!(older_protocol(&refusal(3)), Some(3));
+        assert_eq!(older_protocol(&refusal(crate::protocol::PROTOCOL)), None);
+        assert_eq!(older_protocol("not a request: eof"), None);
+    }
 }

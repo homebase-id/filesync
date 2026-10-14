@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use hbsync_engine::root::{RootError, SyncRoot};
+use hbsync_engine::root::SyncRoot;
 use hbsync_types::Role;
 
 use crate::{Config, Paths, Root};
@@ -13,44 +13,44 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Sets the folder at `path` up for `identity` (kept as it was if it is already: its marker
 /// names it), and lists it in the config. `hbsync setup` has checked that this is what the
-/// user wants (a folder whose state is gone is merged only when asked).
+/// user wants (a folder whose state is gone is merged only when asked). An identity has one
+/// main folder: another one is refused.
 pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Result<(), Error> {
     if role.is_some() {
         return Err("role folders can't be added yet".into());
     }
-    let db = paths.account_db(identity);
-    match SyncRoot::open(&db, identity, path) {
-        Ok(_) => {}
-        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
-            SyncRoot::create(&db, identity, path)?;
-        }
-        Err(e) => return Err(e.into()),
-    }
     let config_path = paths.config_file();
-    let mut config = Config::load(&config_path)?.unwrap_or_default();
-    if !config.roots.iter().any(|r| r.folder == path) {
-        config.roots.push(Root {
-            role,
-            ..Root::main(identity, path)
-        });
-        config.save(&config_path)?;
+    let config = Config::load(&config_path)?.unwrap_or_default();
+    if let Some(other) = config
+        .roots
+        .iter()
+        .find(|r| r.identity == identity && r.role.is_none() && r.folder != path)
+    {
+        return Err(format!(
+            "{identity} is synced with {} already: unlink it first",
+            other.folder.display()
+        )
+        .into());
     }
+    SyncRoot::open_or_create(&paths.account_db(identity), identity, path)?;
+    Config::update(&config_path, |config| {
+        if !config.roots.iter().any(|r| r.folder == path) {
+            config.roots.push(Root {
+                role,
+                ..Root::main(identity, path)
+            });
+        }
+    })?;
     Ok(())
 }
 
 /// Takes the folder at `path` off the config; its files and its state stay (setting it up again
 /// picks up where it was). The folder it was; `None` if it wasn't listed.
 pub fn remove(paths: &Paths, path: &Path) -> Result<Option<Root>, Error> {
-    let config_path = paths.config_file();
-    let Some(mut config) = Config::load(&config_path)? else {
-        return Ok(None);
-    };
-    let Some(at) = config.roots.iter().position(|r| r.folder == path) else {
-        return Ok(None);
-    };
-    let root = config.roots.remove(at);
-    config.save(&config_path)?;
-    Ok(Some(root))
+    Ok(Config::update(&paths.config_file(), |config| {
+        let at = config.roots.iter().position(|r| r.folder == path)?;
+        Some(config.roots.remove(at))
+    })?)
 }
 
 #[cfg(test)]
@@ -70,6 +70,12 @@ mod tests {
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
         assert_eq!(config.roots, [Root::main("a.example", &folder)]);
         assert!(add(&paths, "a.example", &folder, Some(Role::Documents)).is_err());
+        let other = home.path().join("Other");
+        std::fs::create_dir_all(&other)?;
+        assert!(
+            add(&paths, "a.example", &other, None).is_err(),
+            "one main folder per identity"
+        );
 
         assert_eq!(
             remove(&paths, &folder)?,

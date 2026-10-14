@@ -111,9 +111,13 @@ impl Daemon {
     }
 
     /// Syncs the folder at `path` (set up, in the config) with `identity`: in its account, or
-    /// in a new one.
+    /// in a new one. Under one lock: two requests for a new identity start one account.
     fn add_folder(&self, identity: &str, path: &Path) -> Result<(), DaemonError> {
-        if let Some(account) = self.accounts().into_iter().find(|a| a.identity == identity) {
+        let mut accounts = lock(&self.accounts);
+        if let Some((account, _)) = accounts
+            .iter()
+            .find(|(a, thread)| a.identity == identity && !thread.is_finished())
+        {
             account.add_folder(path);
             return Ok(());
         }
@@ -132,7 +136,7 @@ impl Daemon {
                 .spawn(move || account.run(&paths, &config, &requests, &stop))
                 .map_err(DaemonError::Ipc)?
         };
-        lock(&self.accounts).push((account, thread));
+        accounts.push((account, thread));
         Ok(())
     }
 

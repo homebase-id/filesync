@@ -68,6 +68,8 @@ pub struct RunnerConfig {
     /// The account's state DB ([`crate::Paths::account_db`]).
     pub db: PathBuf,
     pub identity: String,
+    /// The role folder it is; `None` for the main folder.
+    pub role: Option<hbsync_types::Role>,
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
@@ -87,6 +89,7 @@ impl RunnerConfig {
             folder: folder.to_path_buf(),
             db: db.to_path_buf(),
             identity: identity.to_owned(),
+            role: None,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
             paused: None,
@@ -213,6 +216,7 @@ impl Runner {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
+        status.role = cfg.role;
         status.paused_until = cfg.paused.flatten();
         let status = Arc::new(Mutex::new(status));
         let progress = Arc::new(Counters::default());
@@ -469,11 +473,7 @@ impl Runner {
             let result = if started {
                 p.engine.sync_once(&today)
             } else {
-                p.engine.start_up(&mut p.observer, &today).map(|mut r| {
-                    // Its catch-up's feed too: what it skipped is told.
-                    r.sync.feed.skipped.extend(r.feed.skipped);
-                    r.sync
-                })
+                p.engine.start_up(&mut p.observer, &today).map(|r| r.sync)
             };
             match result {
                 Ok(report) => {
@@ -520,7 +520,8 @@ impl Runner {
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), RunnerError> {
-        let notes = self.told.fresh(report::notes(engine, report)?);
+        let skipped = self.drive.take_skipped();
+        let notes = self.told.fresh(report::notes(engine, report, skipped)?);
         let held = report::held(engine, report)?;
         self.held = report.held.iter().map(|op| op.node()).collect();
         if report.ops_done > 0 || !notes.is_empty() {

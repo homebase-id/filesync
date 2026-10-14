@@ -93,9 +93,10 @@ says so when it couldn't reach the keychain to remove the credentials there.
    3. opens the account's `Drive` and the notification socket, and runs a sync loop
       (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the
       notifications on to every folder's loop, reconnects the socket after a sleep, runs
-      Recently deleted's requests and its daily purge.
+      Recently deleted's requests and its daily purge (not while paused).
 
-   One account failing stops the daemon (it is restarted whole).
+   One folder's loop failing stops its account, and an account failing stops the daemon (it
+   is restarted whole).
 
 Exit status: 0 when stopped or when there is nothing to do (not set up, already running), 1 on
 a failure (service managers restart it then).
@@ -293,7 +294,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 
 | | |
 |---|---|
-| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running) |
+| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running; restarting it when it logged in again, so the new credentials are used) |
 | `hbsync status [--json]` | what the daemon does; exit status 3 when it isn't running |
 | `hbsync sync`, `pause [--for 1h]`, `resume` | a pause with `--for` ends by itself |
 | `hbsync recent [-n N]` | what was synced lately, newest first |

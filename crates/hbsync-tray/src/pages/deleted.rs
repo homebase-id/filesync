@@ -46,8 +46,8 @@ impl Server {
     /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
     /// newest first.
     pub(super) fn deleted_page(&self) -> String {
-        let list: Vec<_> = match control::deleted(&self.paths, usize::MAX) {
-            Ok(Some(list)) => list.into_iter().map(|item| item.deleted).collect(),
+        let items = match control::deleted(&self.paths, usize::MAX) {
+            Ok(Some(items)) => items,
             Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
             Err(e) => {
                 return format!(
@@ -56,9 +56,15 @@ impl Server {
                 );
             }
         };
-        if list.is_empty() {
+        if items.is_empty() {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
+        let list: Vec<&hbsync_types::activity::Deleted> =
+            items.iter().map(|i| &i.deleted).collect();
+        let identity: HashMap<_, _> = items
+            .iter()
+            .map(|i| (i.deleted.node, i.identity.as_str()))
+            .collect();
         let now = words::now();
         let main = control::configured(&self.paths)
             .ok()
@@ -66,7 +72,7 @@ impl Server {
             .map(|r| r.folder);
         // Shown: the items whose folder isn't in Recently deleted too; each with how many items
         // below it its restore brings back (those deleted with it).
-        let by_node: HashMap<_, _> = list.iter().map(|d| (d.node, d)).collect();
+        let by_node: HashMap<_, _> = list.iter().map(|d| (d.node, *d)).collect();
         let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
         for d in &list {
             let mut up = d.parent;
@@ -94,10 +100,12 @@ impl Server {
                 };
                 format!(
                     "<li><form method=post action=\"{url}\">\
-                     <input type=hidden name=node value=\"{node}\">{what}{along} \
+                     <input type=hidden name=node value=\"{node}\">\
+                     <input type=hidden name=identity value=\"{identity}\">{what}{along} \
                      <button class=secondary>Restore</button></form></li>",
                     url = self.pages.url("deleted/restore"),
                     node = d.node.0,
+                    identity = escape(identity.get(&d.node).copied().unwrap_or_default()),
                     what = escape(&words::deleted(d, main.as_deref(), now)),
                 )
             })
@@ -134,40 +142,55 @@ impl Server {
 
     /// Restores the item the form names.
     pub(super) fn restore(&self, form: &HashMap<String, String>) -> String {
-        let Some(node) = form
+        let node = form
             .get("node")
             .and_then(|n| n.parse().ok())
-            .map(hbsync_types::NodeId)
-        else {
+            .map(hbsync_types::NodeId);
+        let (Some(node), Some(identity)) = (node, form.get("identity")) else {
             return "Nothing was restored.".into();
         };
         self.ask_account(
+            identity,
             AccountControl::Restore { nodes: vec![node] },
             "Restoring: it comes back with the next sync, on every device.",
         )
     }
 
-    /// Empties Recently deleted of what the page showed (deleted until then).
+    /// Empties Recently deleted of what the page showed (deleted until then): every account's,
+    /// as anything deleted after the look is newer.
     pub(super) fn empty(&self, form: &HashMap<String, String>) -> String {
         let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
             return "Nothing was deleted.".into();
         };
-        self.ask_account(
-            AccountControl::EmptyDeletedUntil { at_ms },
-            "Emptying Recently deleted.",
-        )
+        let mut identities: Vec<String> = Config::load(&self.paths.config_file())
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+            .roots
+            .into_iter()
+            .map(|r| r.identity)
+            .collect();
+        identities.sort();
+        identities.dedup();
+        let mut said = String::from("Nothing was deleted.");
+        for identity in identities {
+            said = self.ask_account(
+                &identity,
+                AccountControl::EmptyDeletedUntil { at_ms },
+                "Emptying Recently deleted.",
+            );
+        }
+        said
     }
 
-    /// Sends `control` to the account set up here; `done` if the daemon took it, else why not.
-    pub(super) fn ask_account(&self, control: AccountControl, done: &str) -> String {
-        let Ok(Some(root)) = control::configured(&self.paths) else {
-            return "That didn't work: Filesync isn't set up.".into();
-        };
-        let control = Control::Account {
-            identity: root.identity,
-            control,
-        };
-        match control::control(&self.paths, control) {
+    /// Sends `control` to the account `identity`; `done` if the daemon took it, else why not.
+    pub(super) fn ask_account(
+        &self,
+        identity: &str,
+        control: AccountControl,
+        done: &str,
+    ) -> String {
+        match control::account(&self.paths, identity, control) {
             Ok(()) => {
                 (self.send)(Event::Wake);
                 done.into()

@@ -247,11 +247,10 @@ impl Account {
                 .map_err(|e| DaemonError::Runner(e.into()))?,
             remote,
         );
-        let mut runners = Runners {
-            drive: Arc::clone(&drive),
-            hints: Vec::new(),
-            threads: Vec::new(),
-        };
+        let mut runners: Vec<Running> = Vec::new();
+        // The first failure (a runner that ended with an error, or didn't start): the account
+        // stops its runners and ends with it, the daemon with it (restarted whole).
+        let mut result: Result<(), DaemonError> = Ok(());
         {
             // Under the lock: no pause or folder gets lost between the two phases.
             let mut phase = lock(&self.phase);
@@ -259,21 +258,27 @@ impl Account {
                 Phase::Waiting { folders, .. } => folders.clone(),
                 Phase::Running(_) => Vec::new(),
             };
-            let mut handles = Vec::new();
             for folder in folders {
-                handles.push((folder.clone(), runners.start(self, config, &folder)?));
+                match self.start(&drive, config, &folder) {
+                    Ok(r) => runners.push(r),
+                    Err(e) => {
+                        result = Err(e.into());
+                        break;
+                    }
+                }
             }
-            *phase = Phase::Running(handles);
+            *phase = Phase::Running(shown(&runners));
         }
 
         let keep_days = config.keep_deleted_days.0;
         let mut next_purge = Instant::now();
-        let mut result = Ok(());
         loop {
             let (wall, mono) = (SystemTime::now(), Instant::now());
             std::thread::sleep(TICK);
-            if stop.load(Ordering::Relaxed) {
-                self.send_all(&Command::Stop);
+            if stop.load(Ordering::Relaxed) || result.is_err() {
+                for r in &runners {
+                    r.handle.send(Command::Stop);
+                }
             }
             if slept(
                 SystemTime::now().duration_since(wall).ok(),
@@ -282,30 +287,36 @@ impl Account {
             ) {
                 notifier.reconnect();
             }
-            self.pass_hints(&events, &mut runners.hints);
+            for hint in self.hints(&events) {
+                for r in &runners {
+                    let _ = r.hint.send(hint);
+                }
+            }
             while let Ok(request) = requests.try_recv() {
                 match request {
                     Request::Deleted(control) => run_request(&drive, control),
                     Request::AddFolder(folder) => {
-                        let mut phase = lock(&self.phase);
-                        if let Phase::Running(handles) = &mut *phase
-                            && !handles.iter().any(|(p, _)| *p == folder)
+                        if result.is_err() || runners.iter().any(|r| r.path == folder && !r.removed)
                         {
-                            let handle = runners.start(self, config, &folder)?;
-                            handles.push((folder, handle));
+                            continue;
+                        }
+                        // The config as it is now: the folder was just added to it.
+                        let now = Config::load(&paths.config_file())?.unwrap_or_default();
+                        match self.start(&drive, &now, &folder) {
+                            Ok(r) => runners.push(r),
+                            Err(e) => result = Err(e.into()),
                         }
                     }
                     Request::RemoveFolder(folder) => {
-                        if let Phase::Running(handles) = &mut *lock(&self.phase) {
-                            for (_, h) in handles.iter().filter(|(p, _)| *p == folder) {
-                                h.send(Command::Stop);
-                            }
-                            handles.retain(|(p, _)| *p != folder);
+                        for r in runners.iter_mut().filter(|r| r.path == folder) {
+                            r.handle.send(Command::Stop);
+                            r.removed = true;
                         }
                     }
                 }
             }
-            if Instant::now() >= next_purge {
+            // Not while paused: no deletes for good, no pulls.
+            if Instant::now() >= next_purge && lock(&self.paused).is_none() {
                 next_purge = Instant::now() + PURGE_LOOK;
                 match drive.purge_when_due(keep_days) {
                     Ok(Some(n)) if n > 0 => {
@@ -316,22 +327,49 @@ impl Account {
                 }
             }
             // A runner that ended takes its folder out; the account ends with the last.
-            let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(&mut runners.threads)
+            let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(&mut runners)
                 .into_iter()
-                .partition(JoinHandle::is_finished);
-            runners.threads = running;
-            for thread in ended {
-                let ended = thread.join().map_err(|_| RunnerError::Panicked);
+                .partition(|r| r.thread.is_finished());
+            runners = running;
+            for r in ended {
+                let ended = r.thread.join().map_err(|_| RunnerError::Panicked);
                 if let Err(e) = ended.and_then(|r| r)
                     && result.is_ok()
                 {
                     result = Err(DaemonError::Runner(e));
                 }
             }
-            if runners.threads.is_empty() {
+            *lock(&self.phase) = Phase::Running(shown(&runners));
+            if runners.is_empty() {
                 return result;
             }
         }
+    }
+
+    /// Starts syncing `folder` (as `config` lists it) on the account's `drive`.
+    fn start(
+        &self,
+        drive: &Arc<Drive>,
+        config: &Config,
+        folder: &Path,
+    ) -> Result<Running, RunnerError> {
+        let mut cfg = RunnerConfig::new(folder, &self.db, &self.identity, &config.device_name());
+        cfg.mass_delete = config.mass_delete;
+        cfg.role = config
+            .roots
+            .iter()
+            .find(|r| r.folder == folder)
+            .and_then(|r| r.role);
+        cfg.paused = *lock(&self.paused);
+        let (hint, hints) = channel();
+        let (handle, thread) = Runner::spawn(cfg, Arc::clone(drive), hints)?;
+        Ok(Running {
+            path: folder.to_path_buf(),
+            handle,
+            hint,
+            thread,
+            removed: false,
+        })
     }
 
     /// The credentials, waiting while the keychain can't be read; `None` when stopped first.
@@ -397,10 +435,11 @@ impl Account {
         }
     }
 
-    /// The notifier's events: the account's status, and hints for each folder's runner.
-    fn pass_hints(&self, events: &Receiver<Event>, runners: &mut Vec<Sender<Hint>>) {
+    /// The notifier's events: the account's status, and the hints for its folders' runners.
+    fn hints(&self, events: &Receiver<Event>) -> Vec<Hint> {
+        let mut hints = Vec::new();
         while let Ok(event) = events.try_recv() {
-            let (hint, hints) = match event {
+            let (hint, status) = match event {
                 Event::Connected => (Some(Hint::Connected), Some(Hints::Connected)),
                 Event::Changed => (Some(Hint::Changed), None),
                 Event::Lost(why) => {
@@ -412,46 +451,33 @@ impl Account {
                     (None, Some(Hints::Refused(why)))
                 }
             };
-            if let Some(hints) = hints {
-                lock(&self.status).hints = hints;
+            if let Some(status) = status {
+                lock(&self.status).hints = status;
             }
-            if let Some(hint) = hint {
-                runners.retain(|tx| tx.send(hint).is_ok());
-            }
+            hints.extend(hint);
         }
+        hints
     }
 }
 
-/// The account's folders' runners.
-struct Runners {
-    drive: Arc<Drive>,
-    /// Where each takes the notifications' hints.
-    hints: Vec<Sender<Hint>>,
-    threads: Vec<JoinHandle<Result<(), RunnerError>>>,
+/// A folder's runner, on the account's thread.
+struct Running {
+    path: PathBuf,
+    handle: Handle,
+    /// Where it takes the notifications' hints.
+    hint: Sender<Hint>,
+    thread: JoinHandle<Result<(), RunnerError>>,
+    /// Asked to stop for good (its folder removed): it no longer shows.
+    removed: bool,
 }
 
-impl Runners {
-    /// Starts syncing `folder` of `account`.
-    fn start(
-        &mut self,
-        account: &Account,
-        config: &Config,
-        folder: &Path,
-    ) -> Result<Handle, RunnerError> {
-        let mut cfg = RunnerConfig::new(
-            folder,
-            &account.db,
-            &account.identity,
-            &config.device_name(),
-        );
-        cfg.mass_delete = config.mass_delete;
-        cfg.paused = *lock(&account.paused);
-        let (tx, rx) = channel();
-        let (handle, thread) = Runner::spawn(cfg, Arc::clone(&self.drive), rx)?;
-        self.hints.push(tx);
-        self.threads.push(thread);
-        Ok(handle)
-    }
+/// The runners the status shows.
+fn shown(runners: &[Running]) -> Vec<(PathBuf, Handle)> {
+    runners
+        .iter()
+        .filter(|r| !r.removed)
+        .map(|r| (r.path.clone(), r.handle.clone()))
+        .collect()
 }
 
 /// Runs a request for Recently deleted; the folders it concerns sync next.

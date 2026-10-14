@@ -99,6 +99,17 @@ impl SyncRoot {
         })
     }
 
+    /// [`SyncRoot::open`], or [`SyncRoot::create`] when it has no marker, isn't known to the
+    /// DB, or is an older Filesync's: the caller has checked that starting it over is wanted.
+    pub fn open_or_create(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
+        match Self::open(db, identity, path) {
+            Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
+                Self::create(db, identity, path)
+            }
+            other => other,
+        }
+    }
+
     /// The marker of the folder at `path`, which must be `identity`'s.
     pub fn check(path: &Path, identity: &str) -> Result<Marker, RootError> {
         let Some(marker) = Marker::read(path)? else {

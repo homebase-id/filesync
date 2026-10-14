@@ -344,9 +344,12 @@ pub fn set_up(
     // approval lost to a later failure would have to be given again.
     let store = CredentialStore::open(paths);
     let device = config.device_name();
+    // New credentials reach a running daemon only when it starts again.
+    let mut authorized = false;
     let mut authorize = || -> control::Result<Credentials> {
         let creds = authorize(identity, &device)?;
         store.save(&creds)?;
+        authorized = true;
         Ok(creds)
     };
     let save = |c: &Credentials| store.save(c).map(drop);
@@ -404,7 +407,11 @@ pub fn set_up(
         Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {}
         Err(e) => return Err(e.into()),
     }
-    let running = control::running(paths)?;
+    let mut running = control::running(paths)?;
+    if running && authorized {
+        control::stop(paths)?;
+        running = false;
+    }
     if running {
         // It sets the folder up and starts syncing it, without a restart.
         control::add_folder(paths, identity, &folder, None)?;

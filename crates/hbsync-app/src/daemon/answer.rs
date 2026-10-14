@@ -179,12 +179,5 @@ fn control(control: Control, accounts: &[Arc<Account>], stop: &AtomicBool, paths
 }
 
 fn remember_paused(paths: &Paths, pause: Option<Until>) -> Result<(), ConfigError> {
-    let path = paths.config_file();
-    let mut config = Config::load(&path)?.unwrap_or_default();
-    let was = (config.paused, config.paused_until);
-    config.set_pause(pause);
-    if (config.paused, config.paused_until) != was {
-        config.save(&path)?;
-    }
-    Ok(())
+    Config::update(&paths.config_file(), |c| c.set_pause(pause))
 }

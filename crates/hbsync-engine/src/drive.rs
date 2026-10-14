@@ -18,6 +18,8 @@ use crate::feed::{self, FeedError, FeedReport};
 
 /// Rows of the change feed read per request.
 pub const FEED_PAGE: usize = 500;
+/// Skipped feed rows kept until a folder's runner reports them, at most.
+const MAX_SKIPPED: usize = 1000;
 
 pub struct Drive {
     /// The account's connection (it sees no folder: a change fans out to those it concerns).
@@ -29,6 +31,8 @@ pub struct Drive {
     answered: Mutex<u64>,
     /// Folders to wake when the drive changed.
     wakes: Mutex<Vec<(i64, Sender<()>)>>,
+    /// Feed rows the client can't read, whoever pulled them, until taken.
+    skipped: Mutex<Vec<String>>,
 }
 
 impl std::fmt::Debug for Drive {
@@ -46,6 +50,7 @@ impl Drive {
             asked: AtomicU64::new(0),
             answered: Mutex::new(0),
             wakes: Mutex::default(),
+            skipped: Mutex::default(),
         })
     }
 
@@ -79,7 +84,16 @@ impl Drive {
         drop(answered);
         let touched = self.account().take_touched();
         self.wake_folders(&touched, from);
+        let mut skipped = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
+        let room = MAX_SKIPPED.saturating_sub(skipped.len());
+        skipped.extend(report.skipped.iter().take(room).cloned());
         Ok(report)
+    }
+
+    /// The feed rows the client couldn't read (not encrypted, another key, not a sync node)
+    /// since the last call, each with why; a thousand at most.
+    pub fn take_skipped(&self) -> Vec<String> {
+        std::mem::take(&mut *self.skipped.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// A channel woken when the drive changed for `folder`'s engine (another engine's pull, or

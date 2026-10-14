@@ -43,14 +43,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::fs::canonicalize(folder)?;
     let name = root.file_name().ok_or("the folder has no name")?;
     let db = root.with_file_name(format!("{}.state.db", name.to_string_lossy()));
-    use hbsync_engine::root::{RootError, SyncRoot};
-    let sync_root = match SyncRoot::open(&db, identity, &root) {
-        Ok(found) => found,
-        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
-            SyncRoot::create(&db, identity, &root)?
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let sync_root = hbsync_engine::root::SyncRoot::open_or_create(&db, identity, &root)?;
     let drive = Drive::new(sync_root.account()?, remote.clone());
     let device = hbsync_platform::host::device_name();
     let mut cfg = RunnerConfig::new(&root, &db, identity, &device);
