@@ -17,9 +17,6 @@ use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Role, VersionTag};
 use crate::tree::Tree;
 use crate::walk::End;
 
-/// The state DB key of the scope's fingerprint: what the last run left out.
-pub(crate) const KEY: &str = "scope.fingerprint";
-
 /// The part of the drive one engine syncs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {

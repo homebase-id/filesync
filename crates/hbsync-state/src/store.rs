@@ -19,6 +19,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::codec;
 use crate::coords::Coords;
+use crate::keys::{AccountKey, FolderKey};
 use crate::{Result, StateError};
 
 /// The agreed state of one node.
@@ -1436,45 +1437,48 @@ impl<'a> Store<'a> {
     // ---- key/value ----
 
     /// This folder's setting `key`.
-    pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
+    pub fn get_kv(&self, key: FolderKey) -> Result<Option<String>> {
         self.folder_kv_of(self.folder, key)
     }
 
-    pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
+    pub fn set_kv(&self, key: FolderKey, value: &str) -> Result<()> {
         self.set_folder_kv_of(self.folder, key, value)
     }
 
     /// Folder `folder`'s setting `key`, from any handle (the account's purging every folder's
     /// trash, say).
-    pub fn folder_kv_of(&self, folder: i64, key: &str) -> Result<Option<String>> {
+    pub fn folder_kv_of(&self, folder: i64, key: FolderKey) -> Result<Option<String>> {
         Ok(self
             .prep("SELECT value FROM folder_kv WHERE folder = ?1 AND key = ?2")?
-            .query_row(params![folder, key], |r| r.get(0))
+            .query_row(params![folder, key.0], |r| r.get(0))
             .optional()?)
     }
 
-    pub fn set_folder_kv_of(&self, folder: i64, key: &str, value: &str) -> Result<()> {
+    pub fn set_folder_kv_of(&self, folder: i64, key: FolderKey, value: &str) -> Result<()> {
         self.prep("INSERT OR REPLACE INTO folder_kv (folder, key, value) VALUES (?1, ?2, ?3)")?
-            .execute(params![folder, key, value])?;
+            .execute(params![folder, key.0, value])?;
         Ok(())
     }
 
-    pub fn delete_kv(&self, key: &str) -> Result<()> {
-        self.change("DELETE FROM folder_kv WHERE folder = $F AND key = ?1", key)?;
+    pub fn delete_kv(&self, key: FolderKey) -> Result<()> {
+        self.change(
+            "DELETE FROM folder_kv WHERE folder = $F AND key = ?1",
+            key.0,
+        )?;
         Ok(())
     }
 
     /// The account's setting `key` (the feed's cursor, the identity).
-    pub fn account_kv(&self, key: &str) -> Result<Option<String>> {
+    pub fn account_kv(&self, key: AccountKey) -> Result<Option<String>> {
         Ok(self
             .prep("SELECT value FROM kv WHERE key = ?1")?
-            .query_row([key], |r| r.get(0))
+            .query_row([key.0], |r| r.get(0))
             .optional()?)
     }
 
-    pub fn set_account_kv(&self, key: &str, value: &str) -> Result<()> {
+    pub fn set_account_kv(&self, key: AccountKey, value: &str) -> Result<()> {
         self.prep("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)")?
-            .execute([key, value])?;
+            .execute([key.0, value])?;
         Ok(())
     }
 

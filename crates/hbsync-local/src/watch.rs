@@ -15,12 +15,12 @@ use std::time::{Duration, Instant};
 
 use hbsync_platform::journal::ChangeJournal;
 use hbsync_platform::{RelPath, journal::open_journal};
-use hbsync_state::{StateDb, StateError};
+use hbsync_state::{StateDb, StateError, keys};
 use notify::event::{AccessKind, AccessMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::filter::Filter;
-use crate::journal::{CURSOR_KEY, CatchUp, catch_up, relpath_prefix};
+use crate::journal::{CatchUp, catch_up, relpath_prefix};
 use crate::scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 
 /// A coalesced set of changes from the watcher.
@@ -298,7 +298,7 @@ impl LocalObserver {
             if self.unsaved
                 && let Some(position) = position
             {
-                db.write(|s| s.set_kv(CURSOR_KEY, &position))?;
+                db.write(|s| s.set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
             }
             return Ok(None);
@@ -311,7 +311,7 @@ impl LocalObserver {
         };
         match position {
             Some(position) if batch.drained => {
-                db.write(|s| s.set_kv(CURSOR_KEY, &position))?;
+                db.write(|s| s.set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
             }
             _ => self.unsaved = true,
@@ -763,7 +763,7 @@ mod tests {
         let late = std::cell::RefCell::new(std::collections::HashSet::new());
         let check = |db: &mut StateDb| -> Result<(), String> {
             let Some(stored) = db
-                .read(|s| s.get_kv(CURSOR_KEY))
+                .read(|s| s.get_kv(keys::JOURNAL_CURSOR))
                 .map_err(|e| e.to_string())?
             else {
                 return Ok(());
@@ -819,7 +819,7 @@ mod tests {
             "every folder and file recorded"
         );
         assert!(
-            db.read(|s| s.get_kv(CURSOR_KEY))?.is_some(),
+            db.read(|s| s.get_kv(keys::JOURNAL_CURSOR))?.is_some(),
             "a position was stored"
         );
         let late = late.borrow().len();

@@ -8,9 +8,12 @@ use std::sync::Arc;
 
 use hbsync_local::STATE_DIR;
 use hbsync_remote::Remote;
-use hbsync_state::StateDb;
 
+use crate::root::SyncRoot;
 use crate::{Drive, Engine, EngineConfig, SyncReport};
+
+/// The identity test clients sync with.
+const IDENTITY: &str = "test.example";
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -47,7 +50,8 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
     ) -> Res<Self> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?.join("root");
-        fs::create_dir_all(root.join(STATE_DIR))?;
+        fs::create_dir_all(&root)?;
+        SyncRoot::create(&db_path(&root), IDENTITY, &root)?;
         let configure: Configure = Box::new(configure);
         let engine = Self::engine(&root, name, Box::new(remote.clone()), &configure, |_| {})?;
         Ok(TestClient {
@@ -70,10 +74,9 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         let mut cfg = EngineConfig::new(root, name);
         configure(&mut cfg)?;
         tweak(&mut cfg);
-        // The account's DB, beside the folder (as the product keeps it with the account).
-        let db = StateDb::open(&db_path(root))?;
-        let drive = Drive::new(StateDb::open_account(&db_path(root))?, Arc::from(remote));
-        Ok(Engine::new(db, drive, cfg))
+        let root = SyncRoot::open(&db_path(root), IDENTITY, root)?;
+        let drive = Drive::new(root.account()?, Arc::from(remote));
+        Ok(Engine::new(root.state()?, drive, cfg))
     }
 
     /// A new engine on the same state DB, as after a restart.
@@ -154,6 +157,7 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
     }
 }
 
+/// The account's DB, beside the folder (as the product keeps it with the account).
 fn db_path(root: &Path) -> PathBuf {
     root.with_file_name("state.db")
 }

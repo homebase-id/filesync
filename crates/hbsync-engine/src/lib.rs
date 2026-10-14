@@ -10,6 +10,7 @@ pub mod exec;
 pub mod feed;
 pub mod mask;
 pub mod reconcile;
+pub mod root;
 pub mod scope;
 #[cfg(feature = "testkit")]
 pub mod testkit;

@@ -11,9 +11,6 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use hbsync_platform::RelPath;
 
-/// The user's ignore rules (gitignore syntax), in the state folder: per device, never synced.
-pub const IGNORE_FILE: &str = "ignore";
-
 /// Bumped whenever the built-in junk list changes, so a changed list counts as a rule change.
 const JUNK_VERSION: u32 = 2;
 
@@ -136,7 +133,7 @@ impl Filter {
     /// otherwise. A rule that doesn't parse is an error: skipping it would sync what the user
     /// meant to keep here.
     pub fn load(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
-        let path = root.join(crate::STATE_DIR).join(IGNORE_FILE);
+        let path = crate::layout::ignore_file(root);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
@@ -383,7 +380,7 @@ mod tests {
         assert_eq!(Filter::load(dir.path(), false)?.rule_count(), 0);
         let state = dir.path().join(crate::STATE_DIR);
         std::fs::create_dir_all(&state)
-            .and_then(|()| std::fs::write(state.join(IGNORE_FILE), "*.log\n"))
+            .and_then(|()| std::fs::write(crate::layout::ignore_file(dir.path()), "*.log\n"))
             .map_err(|source| FilterError::Read {
                 path: state.clone(),
                 source,

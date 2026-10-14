@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 use hbsync_engine::activity::Counters;
 use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
+use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Conflict, Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
@@ -34,7 +35,6 @@ use hbsync_types::unix_now;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
-use crate::accounts::FolderError;
 use crate::config::KeepDays;
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
@@ -84,13 +84,13 @@ pub enum RunnerError {
     #[error("the sync thread panicked")]
     Panicked,
     #[error(transparent)]
-    Folder(#[from] crate::accounts::FolderError),
+    Folder(#[from] RootError),
 }
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     pub folder: PathBuf,
-    /// The account's state DB ([`crate::accounts::db_path`]).
+    /// The account's state DB ([`crate::Paths::account_db`]).
     pub db: PathBuf,
     pub identity: String,
     /// Shown in conflict-copy names.
@@ -483,9 +483,9 @@ impl Runner {
         let rules = cfg.exec.filter.rule_count();
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
-        let db = crate::accounts::open_folder(&self.cfg.db, &self.cfg.identity, root)?;
-        let account = crate::accounts::open_account(&self.cfg.db, &self.cfg.identity)?;
-        let mut engine = Engine::new(db, Drive::new(account, Arc::clone(&self.remote)), cfg);
+        let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
+        let drive = Drive::new(sync_root.account()?, Arc::clone(&self.remote));
+        let mut engine = Engine::new(sync_root.state()?, drive, cfg);
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
         let observer = LocalObserver::start(root, engine.scan_options().clone());
@@ -686,11 +686,11 @@ impl Runner {
                 continue;
             }
             announced = None;
-            match crate::accounts::check_marker(&self.cfg.folder, &self.cfg.identity) {
+            match SyncRoot::check(&self.cfg.folder, &self.cfg.identity) {
                 Ok(_) => {}
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
-                Err(FolderError::NoMarker(_) | FolderError::Io(_)) => {
+                Err(RootError::NoMarker(_) | RootError::Io(_)) => {
                     const GONE: &str = "the folder is gone (moved, deleted or not mounted)";
                     if lock(&self.status).error.as_deref() != Some(GONE) {
                         tracing::warn!("{GONE}: waiting for it to come back");

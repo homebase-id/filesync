@@ -21,6 +21,7 @@ use crate::runner::{
     lock,
 };
 use crate::{Config, ConfigError, CredentialError, CredentialStore, Location, Paths, Root};
+use hbsync_engine::root::SyncRoot;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -160,7 +161,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         notifier: Some(Notifier::spawn(client, remote.drive(), tx)),
         events: rx,
     };
-    let db = crate::accounts::db_path(paths, &root.identity);
+    let db = paths.account_db(&root.identity);
     let mut cfg = RunnerConfig::new(&root.folder, &db, &root.identity, &config.device_name());
     cfg.mass_delete = config.mass_delete;
     cfg.keep_deleted_days = config.keep_deleted_days.0;
@@ -196,10 +197,11 @@ fn answer(
 ) -> Reply {
     // From the account's state DB, in any phase (WAL: a sync writing doesn't block it), and
     // without holding up the other requests.
-    let db = crate::accounts::db_path(paths, &root.identity);
+    let db = paths.account_db(&root.identity);
     if let Ask::Recent { limit } = request.ask {
         return Reply::Recent(
-            crate::accounts::open_folder(&db, &root.identity, &root.folder)
+            SyncRoot::open(&db, &root.identity, &root.folder)
+                .and_then(|r| r.state())
                 .ok()
                 .and_then(|mut db| db.read(|s| s.recent_synced(limit)).ok())
                 .unwrap_or_default(),
@@ -209,7 +211,7 @@ fn answer(
     if let Ask::Deleted { limit } = request.ask {
         return Reply::Deleted(
             db.exists()
-                .then(|| crate::accounts::open_account(&db, &root.identity).ok())
+                .then(|| SyncRoot::open_account(&db, &root.identity).ok())
                 .flatten()
                 .and_then(|mut db| hbsync_engine::deleted::list(&mut db, limit).ok())
                 .unwrap_or_default(),

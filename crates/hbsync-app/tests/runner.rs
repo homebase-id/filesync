@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use hbsync_app::accounts::FolderError;
 use hbsync_app::runner::RunnerError;
 use hbsync_app::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
+use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -217,7 +217,7 @@ fn db_of(root: &Path) -> PathBuf {
 /// What setting the folder at `root` up does: its marker, and its row in the account DB.
 fn set_up(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(root)?;
-    hbsync_app::accounts::add_folder(&db_of(root), "test.example", root)?;
+    SyncRoot::create(&db_of(root), "test.example", root)?;
     Ok(root.to_path_buf())
 }
 
@@ -304,7 +304,7 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
         .map_err(|_| "panicked")?
         .expect_err("the runner refused the folder");
     assert!(
-        matches!(err, RunnerError::Folder(FolderError::OtherIdentity { .. })),
+        matches!(err, RunnerError::Folder(RootError::OtherIdentity { .. })),
         "{err}"
     );
     assert_eq!(handle.status().state, State::Stopped);
@@ -372,7 +372,8 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
     a.write("two.txt", "22")?;
     wait_until("both are listed", || a.status().synced_added == 2)?;
     // The list is the folder's state DB's.
-    let recent = hbsync_app::accounts::open_folder(&db_of(&a.root), "test.example", &a.root)?
+    let recent = SyncRoot::open(&db_of(&a.root), "test.example", &a.root)?
+        .state()?
         .read(|s| s.recent_synced(10))?;
     assert_eq!(recent.len(), 2);
     assert!(

@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use hbsync_remote::Remote;
-use hbsync_state::{StateDb, StateError};
+use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Deleted;
 
@@ -17,9 +17,6 @@ use crate::feed::{self, FeedError, FeedReport};
 
 /// Rows of the change feed read per request.
 pub const FEED_PAGE: usize = 500;
-
-/// The state DB key of the last purge of Recently deleted (Unix seconds).
-const PURGED_KEY: &str = "deleted.purged_at";
 
 pub struct Drive {
     /// The account's connection (it sees no folder: a change fans out to those it concerns).
@@ -148,7 +145,7 @@ impl Drive {
         let now = hbsync_types::unix_now();
         let last = self
             .account()
-            .read(|s| s.account_kv(PURGED_KEY))?
+            .read(|s| s.account_kv(keys::PURGED_AT))?
             .and_then(|v| v.parse::<u64>().ok());
         if last.is_some_and(|last| now < last + DAY) {
             return Ok(None);
@@ -156,7 +153,7 @@ impl Drive {
         let before_ms = now.saturating_sub(u64::from(keep_days) * DAY) as i64 * 1000;
         let gone = self.purge(before_ms)?;
         self.account()
-            .write(|s| s.set_account_kv(PURGED_KEY, &now.to_string()))?;
+            .write(|s| s.set_account_kv(keys::PURGED_AT, &now.to_string()))?;
         Ok(Some(gone))
     }
 }

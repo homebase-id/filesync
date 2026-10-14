@@ -1,5 +1,5 @@
 use hbsync_platform::{FileId, Fingerprint, RelPath};
-use hbsync_state::{BaseRow, LocalRow, StateDb, StateError};
+use hbsync_state::{BaseRow, LocalRow, StateDb, StateError, keys};
 use hbsync_types::RemoteRef;
 use hbsync_types::{
     ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Tag, Tags,
@@ -173,13 +173,13 @@ fn failed_write_rolls_back() -> R {
     let node = NodeId::new();
     let result: Result<(), StateError> = db.write(|s| {
         s.mark_dirty(node)?;
-        s.set_kv("cursor", "abc")?;
+        s.set_kv(keys::JOURNAL_CURSOR, "abc")?;
         Err(StateError::Conflict("abort".into()))
     });
     assert!(result.is_err());
     db.read(|s| {
         assert_eq!(s.dirty_count()?, 0);
-        assert_eq!(s.get_kv("cursor")?, None);
+        assert_eq!(s.get_kv(keys::JOURNAL_CURSOR)?, None);
         Ok(())
     })
 }
@@ -192,12 +192,12 @@ fn dirty_and_kv() -> R {
         s.mark_dirty(a)?;
         s.mark_dirty(a)?;
         s.mark_dirty(b)?;
-        s.set_kv("k", "v1")?;
-        s.set_kv("k", "v2")
+        s.set_kv(keys::FILTER, "v1")?;
+        s.set_kv(keys::FILTER, "v2")
     })?;
     db.read(|s| {
         assert_eq!(s.dirty_count()?, 2);
-        assert_eq!(s.get_kv("k")?.as_deref(), Some("v2"));
+        assert_eq!(s.get_kv(keys::FILTER)?.as_deref(), Some("v2"));
         Ok(())
     })?;
     db.write(|s| s.clear_dirty(a))?;
@@ -630,7 +630,7 @@ fn folders_keep_their_own_rows() -> R {
             s.put_base(&row)?;
             s.put_local(&seen)?;
             s.mark_dirty(row.node)?;
-            s.set_kv("filter.fingerprint", "f")
+            s.set_kv(keys::FILTER, "f")
         })?;
     }
     // A name is taken per folder only.
@@ -644,16 +644,15 @@ fn folders_keep_their_own_rows() -> R {
     assert_eq!(main.read(|s| s.local_count())?, 1);
     assert_eq!(docs_db.read(|s| s.local_count())?, 2);
     // The account's settings are shared; a folder's are its own.
-    main.write(|s| s.set_account_kv("remote.cursor", "c1"))?;
+    main.write(|s| s.set_account_kv(keys::REMOTE_CURSOR, "c1"))?;
     assert_eq!(
-        docs_db.read(|s| s.account_kv("remote.cursor"))?.as_deref(),
+        docs_db
+            .read(|s| s.account_kv(keys::REMOTE_CURSOR))?
+            .as_deref(),
         Some("c1")
     );
-    docs_db.write(|s| s.delete_kv("filter.fingerprint"))?;
-    assert_eq!(
-        main.read(|s| s.get_kv("filter.fingerprint"))?.as_deref(),
-        Some("f")
-    );
+    docs_db.write(|s| s.delete_kv(keys::FILTER))?;
+    assert_eq!(main.read(|s| s.get_kv(keys::FILTER))?.as_deref(), Some("f"));
 
     // Forgetting docs takes its rows; main's keep the node's id.
     assert!(main.write(|s| s.remove_folder(docs))?);

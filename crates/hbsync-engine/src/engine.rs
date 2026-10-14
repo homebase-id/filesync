@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::{Remote, RemoteError};
-use hbsync_state::{DirtyCursor, StateDb, StateError};
+use hbsync_state::{DirtyCursor, StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -18,9 +18,6 @@ use crate::feed::{FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
 use crate::scope::Scope;
 use crate::view;
-
-/// The state DB key of the fingerprint of the filter the DB was last synced with.
-const FILTER_KEY: &str = "filter.fingerprint";
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -279,19 +276,19 @@ impl Engine {
             // A new scope (§12) changes what is in view remotely only: no walk. The folders it
             // or the last one left out are planned again from their tops, which brings what
             // is in them: what this device holds there goes, what comes into view comes.
-            let last = s.get_kv(crate::scope::KEY)?;
+            let last = s.get_kv(keys::SCOPE)?;
             if last.as_deref() != Some(scope.as_str()) {
                 let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
                 last.union(&self.cfg.scope.outside)
                     .try_for_each(|n| s.mark_dirty(*n))?;
-                s.set_kv(crate::scope::KEY, &scope)?;
+                s.set_kv(keys::SCOPE, &scope)?;
             }
-            if s.get_kv(FILTER_KEY)?.as_deref() == Some(fingerprint.as_str()) {
+            if s.get_kv(keys::FILTER)?.as_deref() == Some(fingerprint.as_str()) {
                 return Ok(false);
             }
-            s.delete_kv(hbsync_local::journal::CURSOR_KEY)?;
+            s.delete_kv(keys::JOURNAL_CURSOR)?;
             s.mark_synced_dirty()?;
-            s.set_kv(FILTER_KEY, &fingerprint)?;
+            s.set_kv(keys::FILTER, &fingerprint)?;
             Ok(true)
         })
     }
@@ -315,7 +312,7 @@ impl Engine {
         // After the scan, before planning: see recover_forks.
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec)?;
-        sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;
+        sweep_tmp(&mut self.db, &self.cfg.exec.root)?;
         report.feed = self.drive.pull(Some(self.db.folder()))?;
         report.adopted = adopt(
             &mut self.db,
