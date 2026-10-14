@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_app::Paths;
 use hbsync_app::control;
-use hbsync_types::activity::Synced;
+use hbsync_app::protocol::RecentItem;
 
 use crate::model::{Daemon, RECENT_SHOWN};
 use crate::{Event, Sender};
@@ -30,7 +30,7 @@ pub fn spawn(paths: Paths, send: Sender) -> std::io::Result<mpsc::Sender<()>> {
 
 #[derive(Default)]
 struct Watcher {
-    recent: Vec<Synced>,
+    recent: Vec<RecentItem>,
     /// The daemon's `synced_added` when the recent list was read.
     read_at: Option<u64>,
     next_start: Option<Instant>,
@@ -99,20 +99,14 @@ impl Watcher {
             }
             return Daemon::Starting(None);
         }
-        let Some(folder) = status.main_folder().cloned() else {
-            return Daemon::Starting(None);
-        };
-        if self.read_at != Some(folder.synced_added)
+        let synced_added = status.folders.iter().map(|f| f.synced_added).sum();
+        if self.read_at != Some(synced_added)
             && let Ok(Some(list)) = control::recent(paths, RECENT_SHOWN)
         {
-            self.recent = list
-                .into_iter()
-                .filter(|item| item.folder == folder.path)
-                .map(|item| item.synced)
-                .collect();
-            self.read_at = Some(folder.synced_added);
+            self.recent = list;
+            self.read_at = Some(synced_added);
         }
-        Daemon::Running(Box::new(folder))
+        Daemon::Running(Box::new(status))
     }
 
     fn start(&mut self, paths: &Paths, send: &Sender) -> Daemon {
