@@ -27,9 +27,9 @@ fn io(e: windows::core::Error) -> std::io::Error {
 }
 
 /// Makes `folder` (a plain path: no `\\?\`) the one sync root of `identity` there, shown with
-/// `icon` (an ICO file). Ours that are stale go: this one's id at another folder, or another of
-/// ours at this folder (an earlier identity). True when it registered, false when it already
-/// was.
+/// `icon` (an ICO file). Ours that are stale go: this one's id at another folder or with another
+/// icon, or another of ours at this folder (an earlier identity). True when it registered, false
+/// when it already was.
 pub fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<bool> {
     if !StorageProviderSyncRootManager::IsSupported().map_err(io)? {
         return Err(std::io::Error::other(
@@ -39,10 +39,11 @@ pub fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<b
     let prefix = prefix()?;
     let id = id(&prefix, folder, identity);
     let key = key(folder);
+    let shown = icon_resource(icon).to_lowercase();
     let mut present = false;
-    for (other, path) in ours(&prefix)? {
+    for (other, path, other_icon) in ours(&prefix)? {
         let here = path.is_some_and(|p| p.to_lowercase() == key);
-        if other == id && here {
+        if other == id && here && other_icon.is_some_and(|i| i.to_lowercase() == shown) {
             present = true;
         } else if other == id || here {
             unregister_id(&other)?;
@@ -67,7 +68,7 @@ fn root_info(
         &StorageFolder::GetFolderFromPathAsync(&HSTRING::from(folder.as_os_str()))?.join()?,
     )?;
     info.SetDisplayNameResource(&HSTRING::from(NAME))?;
-    info.SetIconResource(&HSTRING::from(format!("{},0", icon.display())))?;
+    info.SetIconResource(&HSTRING::from(icon_resource(icon)))?;
     // The files are always all there: Windows never asks us for content.
     info.SetHydrationPolicy(StorageProviderHydrationPolicy::Full)?;
     info.SetHydrationPolicyModifier(StorageProviderHydrationPolicyModifier::None)?;
@@ -87,7 +88,7 @@ fn root_info(
 pub fn unregister(folder: &Path, identity: &str) -> std::io::Result<()> {
     let prefix = prefix()?;
     let id = id(&prefix, folder, identity);
-    if ours(&prefix)?.iter().any(|(other, _)| *other == id) {
+    if ours(&prefix)?.iter().any(|(other, ..)| *other == id) {
         unregister_id(&id)?;
     }
     Ok(())
@@ -97,8 +98,14 @@ fn unregister_id(id: &str) -> std::io::Result<()> {
     StorageProviderSyncRootManager::Unregister(&HSTRING::from(id)).map_err(io)
 }
 
-/// Our sync roots of this user, as (id, folder); `None` for a folder that is gone.
-fn ours(prefix: &str) -> std::io::Result<Vec<(String, Option<String>)>> {
+/// The icon as Windows names it: the file and the icon's index in it.
+fn icon_resource(icon: &Path) -> String {
+    format!("{},0", icon.display())
+}
+
+/// Our sync roots of this user, as (id, folder, icon); `None` for a folder that is gone.
+#[allow(clippy::type_complexity)]
+fn ours(prefix: &str) -> std::io::Result<Vec<(String, Option<String>, Option<String>)>> {
     let mut found = Vec::new();
     for root in StorageProviderSyncRootManager::GetCurrentSyncRoots().map_err(io)? {
         let id = root.Id().map_err(io)?.to_string();
@@ -109,7 +116,8 @@ fn ours(prefix: &str) -> std::io::Result<Vec<(String, Option<String>)>> {
                 .and_then(|p| p.Path())
                 .ok()
                 .map(|p| p.to_string());
-            found.push((id, path));
+            let icon = root.IconResource().ok().map(|i| i.to_string());
+            found.push((id, path, icon));
         }
     }
     Ok(found)

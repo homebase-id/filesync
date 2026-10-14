@@ -40,7 +40,7 @@ widestring = "1.0.2"
 # The MSIX startup task and the folder's sync root (WinRT).
 windows = { version = "0.62", features = ["ApplicationModel", "Storage", "Storage_Provider", "Storage_Search", "Storage_Streams"] }
 windows-native-keyring-store = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_System_Console", "Win32_System_Registry", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_System_Console", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

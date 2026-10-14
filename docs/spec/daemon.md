@@ -197,7 +197,10 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   icon on macOS, `.directory` and GIO metadata on Linux) and, on Linux, a shortcut (GTK
   bookmarks and KDE places; Finder's sidebar has no public interface). The shortcut once per
   folder, so one the user removed stays removed; the icon again when a new version brings
-  another (the note `folder-decorated` holds the folder and a hash of its icons). Unlinking
+  another (the note `folder-decorated` holds the folder and a hash of its icon; an icon that
+  failed is tried again at the next start). On Windows and Linux the icon is a file in the state
+  folder named after its content (`homebase-<hash>.ico`, `.png`), so file managers that cache
+  icons by path show a new one; Explorer is told the folder changed. Unlinking
   (also the tray's Log out, which unlinks) takes them off again; `hbsync logout` keeps them.
 - **Explorer's navigation pane (Windows):** at every start the tray registers the folder as a
   Cloud Files sync root named "Homebase" (`HomebaseFilesync!<user SID>!<identity>~<hash of the

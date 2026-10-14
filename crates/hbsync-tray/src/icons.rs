@@ -77,27 +77,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn icons_decode() -> Result<(), png::DecodingError> {
+    fn icons_decode_and_dots_tell_the_state() -> Result<(), png::DecodingError> {
         let at = |img: &Rgba, x: u32, y: u32| {
             let i = ((y * img.width + x) * 4) as usize;
             [img.pixels[i], img.pixels[i + 1], img.pixels[i + 2]]
         };
-        for look in [Look::UpToDate, Look::Busy, Look::Quiet, Look::Attention] {
+        // The dot (upper right) in the state's colour.
+        for (look, colour) in [
+            (Look::UpToDate, [0x00, 0x96, 0x6d]),
+            (Look::Busy, [0x00, 0xeb, 0xeb]),
+            (Look::Quiet, [0x9a, 0xa3, 0xb5]),
+            (Look::Attention, [0xeb, 0x00, 0xeb]),
+        ] {
             let icon = decode(tile(look))?;
             assert_eq!((icon.width, icon.height), (64, 64));
-            assert_eq!(icon.pixels.len(), 64 * 64 * 4);
+            assert_eq!(at(&icon, 48, 18), colour, "{look:?}");
         }
-        // The dot (upper right) tells the state.
-        let problem = decode(tile(Look::Attention))?;
-        assert_eq!(at(&problem, 48, 18), [0xeb, 0x00, 0xeb]);
-        assert_eq!(
-            at(&decode(tile(Look::UpToDate))?, 48, 18),
-            [0x00, 0x96, 0x6d]
-        );
-        assert_eq!(decode(APP_256)?.width, 256);
-        assert_eq!(decode(FOLDER.png)?.width, 256);
-        assert_eq!(decode(MENU_BAR)?.width, 36);
-        assert_eq!(decode(MENU_BAR_PROBLEM)?.width, 36);
+        // Every one as RGBA, as the tray wants it.
+        for (png, size) in [
+            (APP_256, 256),
+            (FOLDER.png, 256),
+            (MENU_BAR, 36),
+            (MENU_BAR_PROBLEM, 36),
+        ] {
+            let icon = decode(png)?;
+            assert_eq!((icon.width, icon.height), (size, size));
+            assert_eq!(icon.pixels.len(), (size * size * 4) as usize);
+        }
         Ok(())
     }
 }

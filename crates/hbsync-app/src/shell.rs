@@ -1,4 +1,4 @@
-//! The synced folder in the file manager: the Homebase icon on it, and a place in the sidebar
+//! The synced folder in the file manager: the Filesync icon on it, and a place in the sidebar
 //! (Windows: Explorer's navigation pane, `sync_root.rs`; Linux: GTK bookmarks and KDE places;
 //! Finder's sidebar has no public interface). The shortcut is made once per folder (a note in
 //! the state folder), so one the user removed stays removed; the icon again when a version
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::Paths;
 
-/// The Homebase icon, as each OS wants it.
+/// The Filesync icon, as each OS wants it.
 #[derive(Debug, Clone, Copy)]
 pub struct Icons<'a> {
     /// A PNG (Linux, macOS).
@@ -25,26 +25,41 @@ fn note(paths: &Paths) -> PathBuf {
     paths.state.join(DONE)
 }
 
-/// What the note says is still to do for `folder` with icons hashed to `key`: (the shortcut
+/// What the note says is still to do for `folder` with the icon hashed to `key`: (the shortcut
 /// too, being a new folder; the icon).
 fn to_do(note: &str, folder: &Path, key: &str) -> (bool, bool) {
     let mut lines = note.lines();
-    let first = !lines.next().is_some_and(|f| Path::new(f.trim()) == folder);
-    let icon = first || lines.next().map(str::trim) != Some(key);
+    let first = !lines.next().is_some_and(|f| Path::new(f) == folder);
+    let icon = first || lines.next() != Some(key);
     (first, icon)
 }
 
-/// Writes `bytes` to `path` when they differ from what is there; a file that can't be written
-/// again (Explorer holds it open) stays as it is.
+/// The icon this OS gives the folder.
+fn icon_bytes(icons: Icons<'_>) -> &[u8] {
+    if cfg!(windows) { icons.ico } else { icons.png }
+}
+
+/// The icon as a file in the state folder, named after its content: another icon gets another
+/// name, so file managers that cache icons by path show it. Written whole or not at all; ours
+/// with other names go (one Explorer still holds stays, until a later start).
 #[cfg(not(target_os = "macos"))]
-fn write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if std::fs::read(path).is_ok_and(|b| b == bytes) {
-        return Ok(());
+fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let name = format!("homebase-{:016x}.{ext}", crate::ipc::fnv1a(bytes));
+    let path = paths.state.join(&name);
+    if !path.exists() {
+        let mut tmp = tempfile::NamedTempFile::new_in(&paths.state)?;
+        tmp.write_all(bytes)?;
+        tmp.persist(&path).map_err(|e| e.error)?;
     }
-    match std::fs::write(path, bytes) {
-        Err(e) if !path.exists() => Err(e),
-        _ => Ok(()),
+    for entry in std::fs::read_dir(&paths.state)?.flatten() {
+        let other = entry.file_name();
+        let other = other.to_string_lossy();
+        if other != name && other.starts_with("homebase") && other.ends_with(&format!(".{ext}")) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
+    Ok(path)
 }
 
 /// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already has them.
@@ -58,10 +73,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
         return;
     }
     let done = note(paths);
-    let key = format!(
-        "{:016x}",
-        crate::ipc::fnv1a(&[icons.png, icons.ico].concat())
-    );
+    let key = format!("{:016x}", crate::ipc::fnv1a(icon_bytes(icons)));
     let (first, icon) = to_do(
         &std::fs::read_to_string(&done).unwrap_or_default(),
         folder,
@@ -70,17 +82,23 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
     os::sync_root(paths, folder, identity, icons, first);
-    if icon {
+    // An icon that failed is tried again at the next start (the note keeps no key).
+    let icon_done = !icon || {
         tracing::info!("giving {} its icon", folder.display());
-        if let Err(e) = os::icon(paths, folder, icons) {
+        let done = os::icon(paths, folder, icons);
+        if let Err(e) = &done {
             tracing::info!("the folder's icon: {e}");
         }
-    }
+        done.is_ok()
+    };
     #[cfg(not(windows))]
     if first {
         os::shortcut(folder);
     }
-    if icon && let Err(e) = std::fs::write(&done, format!("{}\n{key}\n", folder.display())) {
+    let key = if icon_done { key.as_str() } else { "" };
+    if (first || icon)
+        && let Err(e) = std::fs::write(&done, format!("{}\n{key}\n", folder.display()))
+    {
         tracing::warn!("{}: {e}", done.display());
     }
 }
@@ -191,18 +209,20 @@ mod os {
         }
     }
 
-    fn icon_file(paths: &Paths) -> PathBuf {
-        paths.state.join("homebase.png")
-    }
-
     /// Dolphin's folder settings, giving the icon.
     fn dolphin(icon: &Path) -> String {
         format!("[Desktop Entry]\nIcon={}\n", icon.display())
     }
 
+    /// Whether `.directory` is ours: only the icon, one in the state folder.
+    fn our_dolphin(paths: &Paths, text: &str) -> bool {
+        text.strip_prefix("[Desktop Entry]\nIcon=")
+            .and_then(|rest| rest.strip_suffix('\n'))
+            .is_some_and(|icon| Path::new(icon).parent() == Some(&paths.state))
+    }
+
     pub fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
-        let icon = icon_file(paths);
-        write_if_changed(&icon, icons.png)?;
+        let icon = icon_file(paths, icons.png, "png")?;
         // GNOME's Files and others: GIO metadata (outside the folder).
         let _ = Command::new("gio")
             .args(["set", "-t", "string"])
@@ -212,8 +232,9 @@ mod os {
             .output();
         // KDE's Dolphin: `.directory` in the folder (never synced: it is built-in junk).
         let directory = folder.join(".directory");
-        if !directory.exists() {
-            std::fs::write(&directory, dolphin(&icon))?;
+        match std::fs::read_to_string(&directory) {
+            Ok(text) if !our_dolphin(paths, &text) => {}
+            _ => std::fs::write(&directory, dolphin(&icon))?,
         }
         Ok(())
     }
@@ -240,7 +261,7 @@ mod os {
             .arg("metadata::custom-icon")
             .output();
         let directory = folder.join(".directory");
-        if std::fs::read_to_string(&directory).is_ok_and(|t| t == dolphin(&icon_file(paths))) {
+        if std::fs::read_to_string(&directory).is_ok_and(|t| our_dolphin(paths, &t)) {
             std::fs::remove_file(&directory)?;
         }
         let uri = file_uri(folder);
@@ -307,6 +328,7 @@ mod os {
         FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_READONLY, FILE_ATTRIBUTE_SYSTEM, GetFileAttributesW,
         INVALID_FILE_ATTRIBUTES, SetFileAttributesW,
     };
+    use windows_sys::Win32::UI::Shell::{SHCNE_UPDATEITEM, SHCNF_PATHW, SHChangeNotify};
 
     fn wide(path: &Path) -> Vec<u16> {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
@@ -348,16 +370,29 @@ mod os {
             .output();
     }
 
-    fn icon_file(paths: &Paths) -> PathBuf {
-        paths.state.join("homebase.ico")
-    }
-
     /// Explorer's folder settings, giving the icon.
     fn desktop_ini(icon: &Path) -> String {
         format!(
-            "[.ShellClassInfo]\r\nIconResource={},0\r\nInfoTip=Synced with Homebase\r\n",
+            "[.ShellClassInfo]\r\nIconResource={},0\r\n{OURS}\r\n",
             icon.display()
         )
+    }
+
+    /// The line that marks a desktop.ini as ours.
+    const OURS: &str = "InfoTip=Synced with Homebase";
+
+    /// Tells Explorer the item changed, so it shows the new icon.
+    fn changed(path: &Path) {
+        let name = wide(path);
+        // SAFETY: a NUL-terminated path, as SHCNF_PATHW says; the second item is unused.
+        unsafe {
+            SHChangeNotify(
+                SHCNE_UPDATEITEM as i32,
+                SHCNF_PATHW,
+                name.as_ptr().cast(),
+                std::ptr::null(),
+            )
+        };
     }
 
     /// Makes the folder a sync root, at the top of Explorer's navigation pane. A folder decorated
@@ -365,9 +400,8 @@ mod os {
     /// below: it comes off, so it isn't in the pane twice. Where Explorer won't take a root (not
     /// NTFS, a share, inside another provider's root), the first time pins it there instead.
     pub fn sync_root(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>, first: bool) {
-        let icon = icon_file(paths);
-        let registered = write_if_changed(&icon, icons.ico)
-            .and_then(|()| crate::sync_root::register(folder, identity, &icon));
+        let registered = icon_file(paths, icons.ico, "ico")
+            .and_then(|icon| crate::sync_root::register(folder, identity, &icon));
         match registered {
             Ok(true) if !first => quick_access(folder, false),
             Ok(_) => {}
@@ -387,21 +421,28 @@ mod os {
     }
 
     pub fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
-        let icon = icon_file(paths);
-        write_if_changed(&icon, icons.ico)?;
+        let icon = icon_file(paths, icons.ico, "ico")?;
         let ini = folder.join("desktop.ini");
-        if !ini.exists() {
-            std::fs::write(&ini, desktop_ini(&icon))?;
-            attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, true)?;
+        match std::fs::read_to_string(&ini) {
+            Ok(text) if !text.contains(OURS) => {}
+            Ok(text) if text == desktop_ini(&icon) => {}
+            found => {
+                if found.is_ok() {
+                    attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, false)?;
+                }
+                std::fs::write(&ini, desktop_ini(&icon))?;
+                attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, true)?;
+            }
         }
         // Explorer reads desktop.ini of read-only (or system) folders only.
         attributes(folder, FILE_ATTRIBUTE_READONLY, true)?;
+        changed(folder);
         Ok(())
     }
 
-    pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    pub fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let ini = folder.join("desktop.ini");
-        let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t == desktop_ini(&icon_file(paths)));
+        let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t.contains(OURS));
         if ours {
             attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, false)?;
             std::fs::remove_file(&ini)?;
