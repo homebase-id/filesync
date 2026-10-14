@@ -1,7 +1,8 @@
 //! The synced folder as a Cloud Files sync root (Windows), which puts it at the top of
 //! Explorer's navigation pane, as OneDrive's and Dropbox's are. Only the registration: no
 //! placeholders, so the files stay ordinary files and nothing here touches them. It works
-//! unpackaged too (tried on Windows 11, 2026-10-13).
+//! unpackaged too (tried on Windows 11, 2026-10-13); the MSIX declares cloud files for it
+//! (`packaging/conveyor.conf`), without which Windows won't list a packaged app's sync roots.
 
 use std::path::Path;
 
