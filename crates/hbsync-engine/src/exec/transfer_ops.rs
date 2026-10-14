@@ -1,4 +1,5 @@
-//! Transfers: their guards before the worker pool, placing and recording what it brought.
+//! Transfers: their guards before the worker pool, placing and recording what it brought (and
+//! what the remote writes of `remote.rs` did).
 
 use super::*;
 
@@ -197,7 +198,7 @@ impl Executor<'_> {
                 node,
                 parent,
                 kind,
-                content: content.clone(),
+                content,
             },
             target,
             path,
@@ -207,37 +208,29 @@ impl Executor<'_> {
         Ok((
             job,
             Ctx::Upload {
-                node,
-                parent,
-                kind,
-                content,
                 hash,
                 from: existing.and(mirror.map(|m| m.parent)),
             },
         ))
     }
 
-    pub(super) fn commit(&mut self, ctx: Ctx, result: JobResult) -> Step {
-        match (ctx, result) {
+    /// Records what a job did: `job` is the one that ran, given back by the pool.
+    pub(super) fn commit(&mut self, ctx: Ctx, job: Job, result: JobResult) -> Step {
+        match (ctx, job, result) {
+            (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }, JobResult::Written(w)) => {
+                self.commit_meta(meta, hash, after, Some(w))
+            }
+            // Deleted for good meanwhile: out of the tree all the same.
             (
                 Ctx::Meta {
-                    meta, hash, after, ..
+                    hash,
+                    after: after @ remote::After::Removed { .. },
+                    ..
                 },
-                result,
-            ) => {
-                let written = match result {
-                    JobResult::Written(w) => Ok(w),
-                    JobResult::Failed(JobError::Remote(e)) => Err(e),
-                    JobResult::Failed(e) => return Ok(Outcome::Retry(e.to_string())),
-                    JobResult::Downloaded { .. } => {
-                        return Ok(Outcome::unsyncable(
-                            "a transfer result for another operation (a fault of this client)",
-                        ));
-                    }
-                };
-                self.commit_meta(meta, hash, after, written)
-            }
-            (_, JobResult::Failed(e)) => Ok(match e {
+                Job::Meta { meta, .. },
+                JobResult::Failed(JobError::Remote(RemoteError::NotFound)),
+            ) => self.commit_meta(meta, hash, after, None),
+            (_, _, JobResult::Failed(e)) => Ok(match e {
                 JobError::Remote(RemoteError::AlreadyExists) => Outcome::Done, // an earlier try landed
                 JobError::Remote(r) => remote_outcome(r),
                 // Local file errors (locked, changed mid-read, short) are worth another try.
@@ -251,21 +244,12 @@ impl Executor<'_> {
                     created_ms,
                     tags,
                 },
+                _,
                 JobResult::Downloaded { file, local_hash },
             ) => self.place_download(node, &target, current, created_ms, &tags, file, local_hash),
-            (
-                Ctx::Upload {
-                    node,
-                    parent,
-                    kind,
-                    content,
-                    hash,
-                    ..
-                },
-                JobResult::Written(written),
-            ) => {
-                let row =
-                    MirrorRow::from_content(written, node, parent, kind, &content, Some(hash));
+            (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
+                let node = meta.node;
+                let row = written_row(written, &meta, Some(hash));
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 self.finish(&[(node, true)], |s| {
                     s.delete_removed(node)?;

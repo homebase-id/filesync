@@ -14,7 +14,7 @@
 //! takes each attribute both sides now agree on) are one transaction: the base never falls
 //! behind what was done on disk or remotely.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -215,11 +215,10 @@ pub struct Executor<'a> {
     full: bool,
 }
 
-/// A transfer whose guards passed, waiting for a worker.
+/// An operation whose guards passed, its job waiting for a worker.
 struct Prepared {
     op: Op,
     attempts: u8,
-    job: Job,
     ctx: Ctx,
     /// The path of what it removes, taken before it ran.
     gone: Option<String>,
@@ -228,9 +227,11 @@ struct Prepared {
 /// Operations collected for the worker pool, which runs them in any order.
 #[derive(Default)]
 struct Batch {
-    jobs: Vec<Prepared>,
+    jobs: Vec<(Job, Prepared)>,
     /// Their nodes.
     nodes: HashSet<NodeId>,
+    /// The folders they create (or restore).
+    created: HashSet<NodeId>,
     /// The folders on the drive they put a node into or take one from.
     folders: HashSet<NodeId>,
     /// The nodes they move to another folder, and the folders those go into with every folder
@@ -240,18 +241,29 @@ struct Batch {
 }
 
 impl Batch {
-    /// Adds `p`; `target`: where it moves its node to, if it does ([`Executor::move_target`]).
-    fn push(&mut self, p: Prepared, target: Option<Vec<NodeId>>) {
-        self.nodes.insert(p.job.node());
-        if let Job::Upload { meta, .. } | Job::Meta { meta, .. } = &p.job {
+    /// Adds `job`; `target`: where it moves its node to, if it does
+    /// ([`Executor::move_target`]).
+    fn push(&mut self, job: Job, p: Prepared, target: Option<Vec<NodeId>>) {
+        let node = job.node();
+        self.nodes.insert(node);
+        if let Job::Upload { meta, .. } | Job::Meta { meta, .. } = &job {
             self.folders.insert(meta.parent);
-            self.folders.extend(p.ctx.leaves());
+        }
+        match &p.ctx {
+            Ctx::Upload { from, .. } => self.folders.extend(*from),
+            Ctx::Meta { from, after, .. } => {
+                self.folders.extend(*from);
+                if matches!(after, remote::After::Created) {
+                    self.created.insert(node);
+                }
+            }
+            Ctx::Download { .. } => {}
         }
         if let Some(target) = target {
-            self.moved.insert(p.job.node());
+            self.moved.insert(node);
             self.under.extend(target);
         }
-        self.jobs.push(p);
+        self.jobs.push((job, p));
     }
 
     /// Whether moving `node` to `target` (the folder and every one above it) could make a
@@ -268,7 +280,7 @@ impl Batch {
     fn holds_up(&self, op: &Op) -> bool {
         self.nodes.contains(&op.node())
             || match op.requires() {
-                Some(Requirement::RemoteFolder(folder)) => self.nodes.contains(&folder),
+                Some(Requirement::RemoteFolder(folder)) => self.created.contains(&folder),
                 Some(Requirement::NoRemoteChildren(folder)) => self.folders.contains(&folder),
                 None => false,
             }
@@ -285,32 +297,17 @@ enum Ctx {
         created_ms: Option<i64>,
         tags: Tags,
     },
+    /// `from`: the folder on the drive an updated file is in now.
     Upload {
-        node: NodeId,
-        parent: NodeId,
-        kind: NodeKind,
-        content: NodeContent,
         hash: hbsync_types::ContentHash,
-        /// The folder on the drive an updated file is in now.
         from: Option<NodeId>,
     },
     /// A metadata write; `from`: the folder on the drive the node leaves, if any.
     Meta {
-        meta: NodeMeta,
         hash: Option<hbsync_types::ContentHash>,
         from: Option<NodeId>,
         after: remote::After,
     },
-}
-
-impl Ctx {
-    /// The folder on the drive the node is in before the write, if it is there.
-    fn leaves(&self) -> Option<NodeId> {
-        match self {
-            Ctx::Upload { from, .. } | Ctx::Meta { from, .. } => *from,
-            Ctx::Download { .. } => None,
-        }
-    }
 }
 
 impl std::fmt::Debug for Executor<'_> {
@@ -405,7 +402,7 @@ impl<'a> Executor<'a> {
                 continue;
             };
             // Everything else runs on its own, in order: after the batch.
-            let pooled = op.is_transfer() || op.touches_remote();
+            let pooled = op.pooled();
             let mut target = if pooled { self.move_target(&op)? } else { None };
             if !batch.jobs.is_empty()
                 && (!pooled
@@ -444,10 +441,10 @@ impl<'a> Executor<'a> {
                 // pool.
                 match self.prepare(&op) {
                     Ok((job, ctx)) => batch.push(
+                        job,
                         Prepared {
                             op,
                             attempts,
-                            job,
                             ctx,
                             gone,
                         },
@@ -694,13 +691,13 @@ impl<'a> Executor<'a> {
     /// Runs the collected transfers in parallel and commits each as it finishes.
     fn flush(&mut self, batch: &mut Batch) -> Result<(), StateError> {
         self.wait_out_backoff();
-        let mut pending: HashMap<NodeId, Prepared> = HashMap::new();
+        // In node order: what didn't start goes back to the queue in an order that doesn't
+        // change from run to run.
+        let mut pending: BTreeMap<NodeId, Prepared> = BTreeMap::new();
         let mut jobs = Vec::new();
-        let batch = std::mem::take(batch);
-        let order: Vec<NodeId> = batch.jobs.iter().map(|p| p.job.node()).collect();
-        for p in batch.jobs {
-            jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
-            pending.insert(p.job.node(), p);
+        for (job, p) in std::mem::take(batch).jobs {
+            pending.insert(job.node(), p);
+            jobs.push((self.urgent.contains(&job.node()), job));
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -730,7 +727,7 @@ impl<'a> Executor<'a> {
                     return false;
                 }
                 if let Some(p) = pending.remove(&job.node()) {
-                    let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
+                    let outcome = self.commit(p.ctx, job, result).unwrap_or_else(|o| o);
                     if let Err(e) = self.handle(p.op, p.attempts, outcome, p.gone) {
                         first_error = Some(e);
                     }
@@ -742,10 +739,8 @@ impl<'a> Executor<'a> {
             return Err(e);
         }
         if !self.should_stop() {
-            for node in order.into_iter().rev() {
-                if let Some(p) = pending.remove(&node) {
-                    self.queue.push_front((p.op, p.attempts));
-                }
+            for p in pending.into_values().rev() {
+                self.queue.push_front((p.op, p.attempts));
             }
         }
         if self.crashed {

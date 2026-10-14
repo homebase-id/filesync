@@ -142,8 +142,10 @@ node (create, upload, move, download, mkdir) writes its merged tags too; `tags` 
 of tags alone.
 
 Ordering within one plan: folder creates top-down, then moves, then content, then deletes
-bottom-up. A move whose target name is occupied by a node that is itself moving away goes
-through a temporary name.
+bottom-up; in each phase the local operations before the remote ones, for deletes among those
+at one depth (a folder's base is forgotten after its children's deletes), so that the remote
+ones run together (section 8a). A move whose target
+name is occupied by a node that is itself moving away goes through a temporary name.
 
 Every operation is **idempotent**: a remote create that returns `ExistingFileWithUniqueId`
 (4105) is treated as already done; a local move whose source is gone and whose target holds the
@@ -183,7 +185,7 @@ expected fingerprint is treated as done.
 - **Together on the pool.** Transfers and remote writes (folder creates, renames, moves, tags,
   deletes) are collected and run together on the worker pool, in any order. An operation that
   depends on one collected waits until they all ran: a create or move into a folder created
-  in the batch, a move into a folder another move in the batch carries along (the two could
+  (or restored) in the batch, a move into a folder another move in the batch carries along (the two could
   make a cycle on the drive), a folder's delete while the batch moves or deletes a child of
   it, the same node twice. Anything else (local work, settling) runs on its own, after the
   batch. A remote outage starts no further writes; those failing together count as one

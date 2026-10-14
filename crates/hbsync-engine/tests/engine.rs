@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::exec::CrashPoint;
-use hbsync_remote::fake::{FakeRemote, FakeServer};
+use hbsync_engine::walk;
+use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
 use hbsync_types::{NodeId, RemoteFileId, RemoteRef, VersionTag};
@@ -233,7 +234,6 @@ impl Remote for StopAfterCreates {
 /// which the drive held a cycle. Writes ending before `down_until` fail (an outage).
 struct SlowWrites {
     inner: FakeRemote,
-    server: Arc<Mutex<FakeServer>>,
     running: AtomicUsize,
     most: AtomicUsize,
     cycles: AtomicUsize,
@@ -241,10 +241,9 @@ struct SlowWrites {
 }
 
 impl SlowWrites {
-    fn new(inner: FakeRemote, server: &Arc<Mutex<FakeServer>>) -> Arc<Self> {
+    fn new(inner: FakeRemote) -> Arc<Self> {
         Arc::new(SlowWrites {
             inner,
-            server: Arc::clone(server),
             running: AtomicUsize::new(0),
             most: AtomicUsize::new(0),
             cycles: AtomicUsize::new(0),
@@ -275,24 +274,22 @@ impl SlowWrites {
         done
     }
 
-    /// Whether some live node on the drive doesn't lead up to the root.
+    /// Whether some live node on the drive is in a cycle.
     fn has_cycle(&self) -> bool {
-        let Ok(server) = self.server.lock() else {
-            return true;
-        };
+        let server = self.inner.server();
         let parents: HashMap<NodeId, NodeId> = server
             .live()
             .filter_map(|h| Some((h.node()?, h.parent)))
             .collect();
         parents.keys().any(|&start| {
-            let mut at = start;
-            for _ in 0..=parents.len() {
-                match parents.get(&at) {
-                    Some(&up) => at = up,
-                    None => return false,
-                }
-            }
-            true
+            let up = walk::up::<_, ()>(start, |at| Ok(parents.get(&at).map(|&p| ((), p))));
+            matches!(
+                up,
+                Ok(walk::Up {
+                    end: walk::End::Cycle,
+                    ..
+                })
+            )
         })
     }
 }
@@ -335,7 +332,7 @@ impl Remote for SlowWrites {
 fn remote_writes_run_together_in_dependency_order() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
-    let slow = SlowWrites::new(a.remote.clone(), &server);
+    let slow = SlowWrites::new(a.remote.clone());
     a.restart_with(Box::new(Arc::clone(&slow)), |_| {})?;
     a.write("keep.txt", "k")?; // deleting every file would be held (the mass-delete guard)
     for i in 0..12 {
@@ -359,12 +356,10 @@ fn remote_writes_run_together_in_dependency_order() -> R {
     for i in 0..12 {
         fs::rename(a.root.join(format!("d{i}")), a.root.join(format!("e{i}")))?;
     }
-    a.engine.scan_local()?;
     check(&mut a, "renames")?;
     for i in 0..12 {
         fs::remove_dir_all(a.root.join(format!("e{i}")))?;
     }
-    a.engine.scan_local()?;
     check(&mut a, "deletes")?;
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
     Ok(())
@@ -376,14 +371,13 @@ fn remote_writes_run_together_in_dependency_order() -> R {
 fn moves_that_turn_a_nesting_around_never_make_a_cycle() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
-    let slow = SlowWrites::new(a.remote.clone(), &server);
+    let slow = SlowWrites::new(a.remote.clone());
     a.restart_with(Box::new(Arc::clone(&slow)), |_| {})?;
     fs::create_dir_all(a.root.join("A/B/C"))?;
     a.write("keep.txt", "k")?;
     a.sync()?;
     fs::rename(a.root.join("A/B"), a.root.join("B"))?;
     fs::rename(a.root.join("A"), a.root.join("B/C/A"))?;
-    a.engine.scan_local()?;
     let report = a.sync()?;
     assert!(report.failed.is_empty(), "{report:?}");
     assert_eq!(
@@ -427,7 +421,7 @@ fn a_folder_goes_after_an_edited_file_moves_out_of_it() -> R {
 fn a_short_outage_during_many_writes_pauses_and_goes_on() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
-    let slow = SlowWrites::new(a.remote.clone(), &server);
+    let slow = SlowWrites::new(a.remote.clone());
     a.restart_with(Box::new(Arc::clone(&slow)), |_| {})?;
     a.write("keep.txt", "k")?;
     for i in 0..20 {

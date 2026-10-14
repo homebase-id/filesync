@@ -142,41 +142,30 @@ impl Executor<'_> {
         ))
     }
 
-    /// Records a metadata write that landed (`written`), or one the drive no longer needs.
+    /// Records a metadata write that landed (`written`), or a removal the drive no longer
+    /// needed (`None`: deleted for good meanwhile).
     pub(super) fn commit_meta(
         &mut self,
         meta: NodeMeta,
         hash: Option<hbsync_types::ContentHash>,
         after: After,
-        written: Result<RemoteRef, RemoteError>,
+        written: Option<RemoteRef>,
     ) -> Step {
         let node = meta.node;
-        let written = match (written, &after) {
-            (Ok(w), _) => Some(w),
-            // An earlier try landed.
-            (Err(RemoteError::AlreadyExists), After::Created) => return Ok(Outcome::Done),
-            // Deleted for good meanwhile.
-            (Err(RemoteError::NotFound), After::Removed { .. }) => None,
-            (Err(e), _) => return Ok(remote_outcome(e)),
-        };
         let row = written.map(|w| written_row(w, &meta, hash));
-        self.finish(&[(node, false)], |s| match (&after, row) {
-            (After::Created, Some(row)) => {
+        self.finish(&[(node, false)], |s| match after {
+            After::Created => {
                 s.delete_removed(node)?;
-                s.put_mirror(&row)
+                row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
-            (After::Updated, Some(row)) => s.put_mirror(&row),
-            (After::Removed { file_id, removal }, row) => {
-                s.delete_mirror(*file_id)?;
+            After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
+            After::Removed { file_id, removal } => {
+                s.delete_mirror(file_id)?;
                 if let Some(row) = row {
-                    s.put_removed(&RemovedRow {
-                        row,
-                        removal: *removal,
-                    })?;
+                    s.put_removed(&RemovedRow { row, removal })?;
                 }
                 s.mark_dirty(node)
             }
-            (_, None) => Ok(()),
         })
     }
 }
@@ -190,17 +179,5 @@ fn meta_job(
     from: Option<NodeId>,
     after: After,
 ) -> (Job, Ctx) {
-    let job = Job::Meta {
-        meta: meta.clone(),
-        target,
-    };
-    (
-        job,
-        Ctx::Meta {
-            meta,
-            hash,
-            from,
-            after,
-        },
-    )
+    (Job::Meta { meta, target }, Ctx::Meta { hash, from, after })
 }

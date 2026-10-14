@@ -317,6 +317,19 @@ impl Queue {
     }
 }
 
+/// Writes `meta` (and `upload`): a create, or with `target` an update at that version.
+fn write(
+    remote: &dyn Remote,
+    meta: &NodeMeta,
+    target: Option<RemoteRef>,
+    upload: Option<Upload<'_>>,
+) -> Result<RemoteRef, RemoteError> {
+    match target {
+        None => remote.create(meta, upload),
+        Some(at) => remote.update(at.file_id, at.version, meta, upload),
+    }
+}
+
 fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
     let result = match job {
         Job::Download(d) => download(remote, d, meter),
@@ -338,17 +351,11 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
                 reader: &mut file,
                 pace: Some(meter),
             });
-            Ok(JobResult::Written(match target {
-                None => remote.create(meta, upload)?,
-                Some(at) => remote.update(at.file_id, at.version, meta, upload)?,
-            }))
+            Ok(JobResult::Written(write(remote, meta, *target, upload)?))
         })(),
-        Job::Meta { meta, target } => match target {
-            None => remote.create(meta, None),
-            Some(at) => remote.update(at.file_id, at.version, meta, None),
-        }
-        .map(JobResult::Written)
-        .map_err(JobError::Remote),
+        Job::Meta { meta, target } => write(remote, meta, *target, None)
+            .map(JobResult::Written)
+            .map_err(JobError::Remote),
     };
     result.unwrap_or_else(JobResult::Failed)
 }
