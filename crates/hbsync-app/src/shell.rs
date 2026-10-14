@@ -459,6 +459,13 @@ mod tests {
 
     const URI: &str = "file:///home/anna/Homebase";
 
+    /// Without it, Windows won't let the packaged tray register the sync root (`sync_root.rs`).
+    #[test]
+    fn the_msix_declares_cloud_files() {
+        let conf = include_str!("../../../packaging/conveyor.conf");
+        assert!(conf.contains(r#"<desktop3:Extension Category="windows.cloudFiles">"#));
+    }
+
     #[test]
     fn the_note_says_what_is_left_to_do() {
         let home = Path::new("/home/anna/Homebase");

@@ -547,6 +547,9 @@ jobs:
           $p = Get-AppxPackage HomebaseFilesync
           if (-not $p) { throw "not installed" }
           Write-Output "installed $($p.PackageFullName), publisher $($p.Publisher)"
+          # The tray's app declares cloud files, or Windows won't let it register the sync root.
+          $app = (Get-AppxPackageManifest $p).Package.Applications.Application | Where-Object Id -eq HomebaseFilesync
+          if (-not ($app.Extensions.Extension | Where-Object Category -eq windows.cloudFiles)) { throw "no cloud files extension" }
           # The package starts through Conveyor's updatecheck.exe, which looks at the update site
           # first: with an older version there (a draft is newer than what's published), it tries
           # to update from the feed, which runners can't (0x80D05011), and the tray never starts.
