@@ -1,7 +1,7 @@
 //! The synced folder in the file manager: the Filesync icon on it, and a place in the sidebar
 //! (Windows: Explorer's navigation pane, `sync_root.rs`; Linux: GTK bookmarks and KDE places;
 //! Finder's sidebar has no public interface). The shortcut is made once per folder (a note in
-//! the state folder), so one the user removed stays removed; the icon again when a version
+//! the state folder for each), so one the user removed stays removed; the icon again when a version
 //! brings another. Undone when the folder is unlinked. All best effort: a file manager that
 //! doesn't take it is no failure.
 
@@ -18,20 +18,20 @@ pub struct Icons<'a> {
     pub ico: &'a [u8],
 }
 
-/// The note of the folder already decorated, and of the icons it got: `<folder>\n<hash>`.
-const DONE: &str = "folder-decorated";
-
-fn note(paths: &Paths) -> PathBuf {
-    paths.state.join(DONE)
+/// The note that `folder` is decorated, holding the hash of the icon it got (empty when that
+/// failed): `folder-decorated-<hash of the folder's path>`.
+fn note(paths: &Paths, folder: &Path) -> PathBuf {
+    let key = hbsync_fileio::fnv1a64(folder.to_string_lossy().as_bytes());
+    paths.state.join(format!("folder-decorated-{key:016x}"))
 }
 
-/// What the note says is still to do for `folder` with the icon hashed to `key`: (the shortcut
-/// too, being a new folder; the icon).
-fn to_do(note: &str, folder: &Path, key: &str) -> (bool, bool) {
-    let mut lines = note.lines();
-    let first = !lines.next().is_some_and(|f| Path::new(f) == folder);
-    let icon = first || lines.next() != Some(key);
-    (first, icon)
+/// What a folder's note (`None`: none yet) says is still to do with the icon hashed to `key`:
+/// (the shortcut too, being a new folder; the icon).
+fn to_do(note: Option<&str>, key: &str) -> (bool, bool) {
+    match note {
+        None => (true, true),
+        Some(done) => (false, done.trim() != key),
+    }
 }
 
 /// The icon this OS gives the folder.
@@ -62,20 +62,20 @@ fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf>
 /// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already has them.
 pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) {
     // Not for a folder no longer set up: a late call that lost the race with Log out.
-    let configured = crate::control::configured(paths)
+    let configured = crate::Config::load(&paths.config_file())
         .ok()
         .flatten()
-        .is_some_and(|r| r.folder == folder && r.identity == identity);
+        .is_some_and(|c| {
+            c.roots
+                .iter()
+                .any(|r| r.folder == folder && r.identity == identity)
+        });
     if !configured {
         return;
     }
-    let done = note(paths);
+    let done = note(paths, folder);
     let key = format!("{:016x}", hbsync_fileio::fnv1a64(icon_bytes(icons)));
-    let (first, icon) = to_do(
-        &std::fs::read_to_string(&done).unwrap_or_default(),
-        folder,
-        &key,
-    );
+    let (first, icon) = to_do(std::fs::read_to_string(&done).ok().as_deref(), &key);
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
     os::sync_root(paths, folder, identity, icons, first);
@@ -94,7 +94,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
     }
     let key = if icon_done { key.as_str() } else { "" };
     if (first || icon)
-        && let Err(e) = std::fs::write(&done, format!("{}\n{key}\n", folder.display()))
+        && let Err(e) = std::fs::write(&done, format!("{key}\n"))
     {
         tracing::warn!("{}: {e}", done.display());
     }
@@ -109,7 +109,7 @@ pub fn undecorate(paths: &Paths, folder: &Path, identity: &str) {
     if let Err(e) = os::undecorate(paths, folder) {
         tracing::info!("removing the folder's icon or shortcut: {e}");
     }
-    let _ = std::fs::remove_file(note(paths));
+    let _ = std::fs::remove_file(note(paths, folder));
 }
 
 /// `file:///home/anna/My%20Files`, as bookmark files and the file manager interface want it.
@@ -465,19 +465,19 @@ mod tests {
 
     #[test]
     fn the_note_says_what_is_left_to_do() {
-        let home = Path::new("/home/anna/Homebase");
-        assert_eq!(to_do("", home, "k1"), (true, true));
-        assert_eq!(to_do("/home/bob/Homebase\nk1\n", home, "k1"), (true, true));
-        assert_eq!(
-            to_do("/home/anna/Homebase\nk1\n", home, "k1"),
-            (false, false)
-        );
-        // Another version's icons, or a note from before there was a hash: the icon again.
-        assert_eq!(
-            to_do("/home/anna/Homebase\nk0\n", home, "k1"),
-            (false, true)
-        );
-        assert_eq!(to_do("/home/anna/Homebase", home, "k1"), (false, true));
+        assert_eq!(to_do(None, "k1"), (true, true));
+        assert_eq!(to_do(Some("k1\n"), "k1"), (false, false));
+        // Another version's icons, or an icon that failed: the icon again.
+        assert_eq!(to_do(Some("k0\n"), "k1"), (false, true));
+        assert_eq!(to_do(Some("\n"), "k1"), (false, true));
+    }
+
+    #[test]
+    fn each_folder_has_a_note_of_its_own() {
+        let paths = Paths::under(Path::new("/h"));
+        let (a, b) = (Path::new("/h/Homebase"), Path::new("/h/Documents"));
+        assert_ne!(note(&paths, a), note(&paths, b));
+        assert_eq!(note(&paths, a), note(&paths, a));
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod autostart;
 pub mod config;
 pub mod control;
 pub mod daemon;
+pub mod folders;
 pub mod install;
 pub mod ipc;
 pub mod local_http;

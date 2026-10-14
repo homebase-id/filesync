@@ -51,7 +51,12 @@ pub fn deleted(paths: &Paths, limit: usize) -> Result<Option<Vec<DeletedItem>>> 
 
 /// Sends `c`; the daemon's refusal is an error.
 pub fn control(paths: &Paths, c: Control) -> Result<()> {
-    match ask(paths, Ask::Control(c)) {
+    done(ask(paths, Ask::Control(c)))
+}
+
+/// A request's answer: done, or why not.
+fn done(answer: std::result::Result<Reply, IpcError>) -> Result<()> {
+    match answer {
         Ok(Reply::Done) => Ok(()),
         Ok(Reply::Refused(why)) => Err(why.into()),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
@@ -60,6 +65,23 @@ pub fn control(paths: &Paths, c: Control) -> Result<()> {
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Has the daemon set the folder at `path` up for `identity` and sync it.
+pub fn add_folder(
+    paths: &Paths,
+    identity: &str,
+    path: &std::path::Path,
+    role: Option<hbsync_types::Role>,
+) -> Result<()> {
+    done(ask(
+        paths,
+        Ask::AddFolder {
+            identity: identity.to_owned(),
+            path: path.to_path_buf(),
+            role,
+        },
+    ))
 }
 
 /// Whether a daemon answers.

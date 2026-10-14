@@ -50,9 +50,12 @@ fraction = 0.25
 [[roots]]
 identity = "anna.example.com"
 folder = "/home/anna/Homebase"
+# role = "documents"            # a role folder (sync semantics §12); none for the main folder
 ```
 
-Unknown keys are an error. Writes replace the file in one step.
+Unknown keys are an error. Writes replace the file in one step. The daemon writes it as it
+adds and removes folders (and keeps a pause in it); `hbsync setup` writes it only when no
+daemon runs.
 
 ## Credentials
 
@@ -165,7 +168,14 @@ account (its Recently deleted) or to one folder (its held deletes):
 {"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted_until":{"at_ms":1800000000000}}}}}}  // all removed until then
 {"protocol":4,"ask":{"recent":{"limit":10}}}
 {"protocol":4,"ask":{"deleted":{"limit":100}}}
+{"protocol":4,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
+{"protocol":4,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
 ```
+
+`add_folder` sets the folder up in its account's state DB (its marker written; kept as it was if
+it is already), adds it to the config and starts syncing it, in its account (a new one for an
+identity not synced yet), without a restart: `hbsync setup` checks what the user wants first.
+`remove_folder` stops syncing it and takes it off the config; its files and state stay.
 
 Replies:
 - `{"status":{"version":…,"accounts":[…],"folders":[…]}}`. An account has its `identity`, the
@@ -283,7 +293,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 
 | | |
 |---|---|
-| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), saves the config, turns autostart on, (re)starts the daemon |
+| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running) |
 | `hbsync status [--json]` | what the daemon does; exit status 3 when it isn't running |
 | `hbsync sync`, `pause [--for 1h]`, `resume` | a pause with `--for` ends by itself |
 | `hbsync recent [-n N]` | what was synced lately, newest first |

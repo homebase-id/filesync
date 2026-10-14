@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use hbsync_engine::root::SyncRoot;
 
+use super::Daemon;
 use super::account::Account;
 use crate::protocol::{
     Ask, Control, DaemonControl, DaemonStatus, DeletedItem, FolderControl, RecentItem, Reply,
@@ -14,17 +15,39 @@ use crate::protocol::{
 use crate::runner::Command;
 use crate::{Config, ConfigError, Paths};
 
-pub(super) fn answer(
-    request: Request,
-    accounts: &[Arc<Account>],
-    stop: &AtomicBool,
-    paths: &Paths,
-) -> Reply {
+pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
+    let accounts = &daemon.accounts();
     match request.ask {
         Ask::Status => Reply::Status(Box::new(status(accounts))),
         Ask::Recent { limit } => Reply::Recent(recent(accounts, limit)),
         Ask::Deleted { limit } => Reply::Deleted(deleted(accounts, limit)),
-        Ask::Control(control) => self::control(control, accounts, stop, paths),
+        Ask::Control(control) => self::control(control, accounts, &daemon.stop, &daemon.paths),
+        Ask::AddFolder {
+            identity,
+            path,
+            role,
+        } => {
+            let added = crate::folders::add(&daemon.paths, &identity, &path, role)
+                .map_err(|e| e.to_string())
+                .and_then(|()| {
+                    daemon
+                        .add_folder(&identity, &path)
+                        .map_err(|e| e.to_string())
+                });
+            match added {
+                Ok(()) => Reply::Done,
+                Err(why) => Reply::Refused(why),
+            }
+        }
+        Ask::RemoveFolder { path } => match crate::folders::remove(&daemon.paths, &path) {
+            Ok(_) => {
+                for a in accounts {
+                    a.remove_folder(&path);
+                }
+                Reply::Done
+            }
+            Err(e) => Reply::Refused(e.to_string()),
+        },
     }
 }
 
@@ -47,15 +70,15 @@ fn status(accounts: &[Arc<Account>]) -> DaemonStatus {
 fn recent(accounts: &[Arc<Account>], limit: usize) -> Vec<RecentItem> {
     let mut items: Vec<RecentItem> = accounts
         .iter()
-        .flat_map(|a| a.folders.iter().map(move |f| (a, f)))
+        .flat_map(|a| a.folders().into_iter().map(move |f| (a, f)))
         .flat_map(|(a, folder)| {
-            SyncRoot::open(a.db(), &a.identity, folder)
+            SyncRoot::open(a.db(), &a.identity, &folder)
                 .and_then(|r| r.state())
                 .ok()
                 .and_then(|mut db| db.read(|s| s.recent_synced(limit)).ok())
                 .unwrap_or_default()
                 .into_iter()
-                .map(|synced| RecentItem {
+                .map(move |synced| RecentItem {
                     folder: folder.clone(),
                     synced,
                 })
@@ -133,7 +156,7 @@ fn control(control: Control, accounts: &[Arc<Account>], stop: &AtomicBool, paths
             }
         }
         Control::Folder { path, control } => {
-            let Some(account) = accounts.iter().find(|a| a.folders.contains(&path)) else {
+            let Some(account) = accounts.iter().find(|a| a.folders().contains(&path)) else {
                 return Reply::Refused(format!("{} isn't synced here", path.display()));
             };
             let Some(runner) = account.runner(&path) else {
