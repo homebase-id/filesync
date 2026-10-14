@@ -180,6 +180,8 @@ pub struct Store<'a> {
     conn: &'a Connection,
     /// `folders.id`, which `$F` in the SQL stands for.
     folder: i64,
+    /// [`Store::folders`], read once per transaction (a change through this store forgets it).
+    folders: std::cell::RefCell<Option<Vec<FolderRow>>>,
 }
 
 /// A folder this account syncs here.
@@ -221,7 +223,11 @@ const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m W
 
 impl<'a> Store<'a> {
     pub(crate) fn new(conn: &'a Connection, folder: i64) -> Self {
-        Store { conn, folder }
+        Store {
+            conn,
+            folder,
+            folders: Default::default(),
+        }
     }
 
     /// `sql` prepared through the statement cache, `$F` standing for this store's folder.
@@ -243,6 +249,7 @@ impl<'a> Store<'a> {
 
     /// Registers a folder holding the drive's node `top`; its id.
     pub fn add_folder(&self, top: NodeId, path: &str, marker: &str) -> Result<i64> {
+        self.folders.take();
         self.prep(
             "INSERT INTO folders (top, path, marker, added_at) VALUES (?1, ?2, ?3, unixepoch())",
         )?
@@ -251,6 +258,9 @@ impl<'a> Store<'a> {
     }
 
     pub fn folders(&self) -> Result<Vec<FolderRow>> {
+        if let Some(known) = self.folders.borrow().as_ref() {
+            return Ok(known.clone());
+        }
         let mut stmt = self.prep("SELECT id, top, path, marker FROM folders ORDER BY id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -269,11 +279,13 @@ impl<'a> Store<'a> {
                 marker,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()
+        .inspect(|all| *self.folders.borrow_mut() = Some(all.clone()))
     }
 
     /// Forgets folder `id` and every row it has (the account's stay).
     pub fn remove_folder(&self, id: i64) -> Result<bool> {
+        self.folders.take();
         self.change("DELETE FROM folders WHERE id = ?1", id)
     }
 
@@ -351,6 +363,18 @@ impl<'a> Store<'a> {
             file_id.0.as_bytes(),
             base_row,
         )
+    }
+
+    /// The node a base row of any folder records for remote file `file_id`.
+    pub fn node_of_file(&self, file_id: RemoteFileId) -> Result<Option<NodeId>> {
+        let node: Option<Vec<u8>> = self
+            .prep(
+                "SELECT n.uuid FROM base b JOIN nodes n ON n.id = b.id \
+                 WHERE b.remote_file_id = ?1 LIMIT 1",
+            )?
+            .query_row([file_id.0.as_bytes()], |r| r.get(0))
+            .optional()?;
+        node.as_deref().map(codec::node).transpose()
     }
 
     pub fn base_children(&self, parent: NodeId) -> Result<Vec<BaseRow>> {
@@ -898,9 +922,14 @@ impl<'a> Store<'a> {
         )
     }
 
-    /// Records a live remote node. A row for the same node under an older file id (the node
-    /// was deleted and re-created) is replaced.
+    /// Records a live remote node, and marks it dirty in the folders the change concerns
+    /// ([`Store::fan_out`]). A row for the same node under an older file id (the node was
+    /// deleted and re-created) is replaced. A version the mirror has already (this device's own
+    /// write coming back through the feed, or a page applied again) changes nothing.
     pub fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
+        if self.has_version(row.remote_ref(), false)? {
+            return Ok(());
+        }
         let (id, parent) = (
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.parent)?,
@@ -927,13 +956,15 @@ impl<'a> Store<'a> {
             f.is_some_and(|f| f.executable),
             row.content_extra,
         ])?;
-        Ok(())
+        self.fan_out(row.node, row.parent)
     }
 
-    /// Removes the mirror row of a deleted file and returns it.
+    /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
+    /// ([`Store::fan_out`]), and returns the row.
     pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let row = self.mirror_by_file(file_id)?;
-        if row.is_some() {
+        if let Some(row) = &row {
+            self.fan_out(row.node, row.parent)?;
             self.change(
                 "DELETE FROM remote WHERE file_id = ?1",
                 file_id.0.as_bytes(),
@@ -942,11 +973,62 @@ impl<'a> Store<'a> {
         Ok(row)
     }
 
+    /// Marks `node` dirty in the folders a change of it, now in the drive's folder `place`,
+    /// concerns: those holding a base or local row of it, and the one whose part of the drive
+    /// `place` is in (the folder with the nearest top above it). Every folder when `place`
+    /// doesn't reach the drive's top through the mirror (a gap or a cycle): none is left out.
+    pub fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
+        let folders = self.folders()?;
+        let mark = |folder: i64| -> Result<()> {
+            let id = self.key_or_insert(node)?;
+            self.prep("INSERT OR IGNORE INTO dirty (folder, id) VALUES (?1, ?2)")?
+                .execute([folder, id])?;
+            Ok(())
+        };
+        if let [only] = folders.as_slice() {
+            return mark(only.id);
+        }
+        if let Some(id) = self.key(node)? {
+            self.prep(
+                "INSERT OR IGNORE INTO dirty (folder, id) \
+                 SELECT folder, id FROM base WHERE id = ?1 \
+                 UNION SELECT folder, id FROM local WHERE id = ?1",
+            )?
+            .execute([id])?;
+        }
+        let tops: HashMap<NodeId, i64> = folders.iter().map(|f| (f.top, f.id)).collect();
+        let mut parent = self.prep(&format!(
+            "SELECT p.uuid FROM remote m JOIN nodes p ON p.id = m.parent WHERE m.id = {ID_OF}"
+        ))?;
+        let mut seen = std::collections::HashSet::new();
+        let mut at = place;
+        loop {
+            if let Some(&folder) = tops.get(&at) {
+                return mark(folder);
+            }
+            if at.is_root() {
+                return Ok(()); // no folder holds the drive's top here
+            }
+            let up: Option<Vec<u8>> = parent
+                .query_row([at.0.as_bytes()], |r| r.get(0))
+                .optional()?;
+            match up {
+                Some(up) if seen.insert(at) && seen.len() <= MAX_DEPTH => at = codec::node(&up)?,
+                // A gap or a cycle: whose it is isn't known.
+                _ => return folders.iter().try_for_each(|f| mark(f.id)),
+            }
+        }
+    }
+
     // ---- Recently deleted ----
 
-    /// Records a removed node (replacing an older record of it).
+    /// Records a removed node (replacing an older record of it), and marks it dirty where that
+    /// concerns ([`Store::fan_out`]); the same version again changes nothing.
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         let (row, f) = (&removed.row, removed.row.file.as_ref());
+        if self.has_version(row.remote_ref(), true)? {
+            return Ok(());
+        }
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
                  hash, size, mtime_ms, executable, content_extra, removed_at, root) \
@@ -967,7 +1049,7 @@ impl<'a> Store<'a> {
             removed.removal.at_ms,
             removed.removal.root.0.as_bytes(),
         ])?;
-        Ok(())
+        self.fan_out(row.node, row.parent)
     }
 
     pub fn removed_by_node(&self, node: NodeId) -> Result<Option<RemovedRow>> {

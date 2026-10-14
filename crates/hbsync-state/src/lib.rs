@@ -19,7 +19,9 @@ mod codec;
 mod migrations;
 mod store;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, TransactionBehavior};
@@ -75,6 +77,21 @@ pub struct StateDb {
     folder: i64,
     /// `None` in memory.
     path: Option<PathBuf>,
+    /// Shared by every connection of this process to the same file: writes take turns here
+    /// instead of in SQLite's busy wait (which stays for other processes).
+    gate: Arc<Mutex<()>>,
+}
+
+/// The write gate of the DB file at `path`, one per file in this process.
+fn gate(path: Option<&Path>) -> Arc<Mutex<()>> {
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+        LazyLock::new(Default::default);
+    let Some(path) = path else {
+        return Arc::default();
+    };
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut gates = GATES.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(gates.entry(key).or_default())
 }
 
 /// The folder a DB opened with [`StateDb::open`] sees: the first one, made on first use for the
@@ -168,6 +185,7 @@ impl StateDb {
             conn,
             folder: FIRST_FOLDER,
             path: path.map(Path::to_path_buf),
+            gate: gate(path),
         })
     }
 
@@ -183,6 +201,7 @@ impl StateDb {
 
     /// Runs `f` in a write transaction, committed only if `f` succeeds.
     pub fn write<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
+        let _turn = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

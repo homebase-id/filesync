@@ -668,3 +668,69 @@ fn folders_keep_their_own_rows() -> R {
         Ok(())
     })
 }
+
+/// A change of the drive is marked dirty in the folders it concerns: those holding the node,
+/// and the one whose part of the drive it is in; every folder when its place isn't known.
+#[test]
+fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
+    use hbsync_state::MirrorRow;
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let (docs_top, pics_top) = (NodeId::new(), NodeId::new());
+    let (docs, pics) = main.write(|s| {
+        Ok((
+            s.add_folder(docs_top, "/d", "m2")?,
+            s.add_folder(pics_top, "/p", "m3")?,
+        ))
+    })?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    let mut pics_db = StateDb::open_folder(&db_path, pics)?;
+    let folder = |node, parent, name: &str| MirrorRow {
+        file_id: RemoteFileId(Uuid::new_v4()),
+        version: VersionTag(Uuid::new_v4()),
+        node,
+        parent,
+        name: name.into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+    };
+    let dirty = |db: &mut StateDb, node| db.read(|s| s.is_dirty(node));
+    // The role folders' tops, then a folder inside Documents: only docs is concerned.
+    let inside = NodeId::new();
+    main.write(|s| {
+        s.put_mirror(&folder(docs_top, NodeId::ROOT, "Documents"))?;
+        s.put_mirror(&folder(pics_top, NodeId::ROOT, "Pictures"))?;
+        s.put_mirror(&folder(inside, docs_top, "Work"))
+    })?;
+    assert!(dirty(&mut docs_db, inside)?);
+    assert!(!dirty(&mut main, inside)? && !dirty(&mut pics_db, inside)?);
+    // Pictures holds it (moved from there): pics is concerned too, the main folder isn't.
+    let held = base(NodeState::folder(pics_top, "Work"));
+    pics_db.write(|s| {
+        s.put_base(&BaseRow {
+            node: inside,
+            ..held
+        })?;
+        s.clear_dirty(inside)
+    })?;
+    docs_db.write(|s| s.clear_dirty(inside))?;
+    main.write(|s| s.put_mirror(&folder(inside, docs_top, "Work (2)")))?;
+    assert!(dirty(&mut docs_db, inside)? && dirty(&mut pics_db, inside)?);
+    assert!(!dirty(&mut main, inside)?);
+    // The same version again changes nothing.
+    pics_db.write(|s| s.clear_dirty(inside))?;
+    let again = main
+        .read(|s| s.get_mirror(inside))?
+        .ok_or(StateError::Corrupt("gone".into()))?;
+    main.write(|s| s.put_mirror(&again))?;
+    assert!(!dirty(&mut pics_db, inside)?);
+    // A place the mirror doesn't connect to the top: every folder looks.
+    let lost = NodeId::new();
+    main.write(|s| s.put_mirror(&folder(lost, NodeId::new(), "Lost")))?;
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        assert!(dirty(db, lost)?);
+    }
+    Ok(())
+}
