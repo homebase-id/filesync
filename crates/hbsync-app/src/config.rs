@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::runner::Until;
+use crate::protocol::Until;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

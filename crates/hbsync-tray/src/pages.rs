@@ -10,9 +10,10 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use hbsync_app::FolderStatus;
 use hbsync_app::control;
 use hbsync_app::local_http::{escape, read_request, redirect, respond};
-use hbsync_app::runner::Status;
+use hbsync_app::protocol::{AccountControl, FolderControl};
 use hbsync_app::setup::{self, Refusal};
 use hbsync_app::words;
 use hbsync_app::{Config, Control, Paths};
@@ -38,7 +39,7 @@ struct Shared {
     /// Gives up the login in progress (starting over): set, that login's outcome is ignored.
     cancel: Option<Arc<AtomicBool>>,
     /// The daemon's latest status, for the deletes page.
-    status: Option<Status>,
+    status: Option<FolderStatus>,
 }
 
 impl Shared {
@@ -143,7 +144,7 @@ impl Pages {
             .then_some("Waiting for your approval in the browser…")
     }
 
-    pub fn set_status(&self, status: Option<Status>) {
+    pub fn set_status(&self, status: Option<FolderStatus>) {
         lock(&self.shared).status = status;
     }
 }
@@ -419,8 +420,8 @@ impl Server {
     /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
     /// newest first.
     fn deleted_page(&self) -> String {
-        let list = match control::deleted(&self.paths, usize::MAX) {
-            Ok(Some(list)) => list,
+        let list: Vec<_> = match control::deleted(&self.paths, usize::MAX) {
+            Ok(Some(list)) => list.into_iter().map(|item| item.deleted).collect(),
             Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
             Err(e) => {
                 return format!(
@@ -514,8 +515,8 @@ impl Server {
         else {
             return "Nothing was restored.".into();
         };
-        self.ask_daemon(
-            Control::Restore { nodes: vec![node] },
+        self.ask_account(
+            AccountControl::Restore { nodes: vec![node] },
             "Restoring: it comes back with the next sync, on every device.",
         )
     }
@@ -525,14 +526,21 @@ impl Server {
         let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
             return "Nothing was deleted.".into();
         };
-        self.ask_daemon(
-            Control::EmptyDeletedUntil { at_ms },
+        self.ask_account(
+            AccountControl::EmptyDeletedUntil { at_ms },
             "Emptying Recently deleted.",
         )
     }
 
-    /// Sends `control` to the daemon; `done` if it took it, else why not.
-    fn ask_daemon(&self, control: Control, done: &str) -> String {
+    /// Sends `control` to the account set up here; `done` if the daemon took it, else why not.
+    fn ask_account(&self, control: AccountControl, done: &str) -> String {
+        let Ok(Some(root)) = control::configured(&self.paths) else {
+            return "That didn't work: Filesync isn't set up.".into();
+        };
+        let control = Control::Account {
+            identity: root.identity,
+            control,
+        };
         match control::control(&self.paths, control) {
             Ok(()) => {
                 (self.send)(Event::Wake);
@@ -561,13 +569,20 @@ impl Server {
     }
 
     fn confirm_deletes(&self, form: &HashMap<String, String>) -> String {
-        let Some(token) = form.get("token") else {
+        let path = lock(&self.pages.shared)
+            .status
+            .as_ref()
+            .map(|s| s.path.clone());
+        let (Some(token), Some(path)) = (form.get("token"), path) else {
             return "Nothing was confirmed.".into();
         };
         match control::control(
             &self.paths,
-            Control::ConfirmDeletes {
-                token: token.clone(),
+            Control::Folder {
+                path,
+                control: FolderControl::ConfirmDeletes {
+                    token: token.clone(),
+                },
             },
         ) {
             Ok(()) => {

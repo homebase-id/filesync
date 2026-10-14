@@ -59,8 +59,10 @@ impl Computer {
         self.home.ok(args)
     }
 
+    /// The main folder's status.
     fn status(&self) -> Res<serde_json::Value> {
-        Ok(serde_json::from_str(&self.ok(&["status", "--json"])?)?)
+        let status: serde_json::Value = serde_json::from_str(&self.ok(&["status", "--json"])?)?;
+        Ok(status["folders"][0].clone())
     }
 
     /// The daemon's log so far.

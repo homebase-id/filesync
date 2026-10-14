@@ -140,25 +140,32 @@ refused this device: `hbsync setup` again), `stopped`.
 ## Control socket
 
 One request line, one reply line (JSON), then the connection closes. Requests carry the protocol
-version (now 3); a daemon refuses another one with the reason (after an update: restart it).
+version (now 4); a daemon refuses another one with the reason (after an update: restart it). The
+wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
+account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":3,"ask":"status"}
-{"protocol":3,"ask":{"control":"sync_now"}}            // resume, stop
-{"protocol":3,"ask":{"control":{"pause":{"until":1800000000}}}}   // "until":null: until resumed
-{"protocol":3,"ask":{"control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}
-{"protocol":3,"ask":{"control":{"restore":{"nodes":["<node id>"]}}}}
-{"protocol":3,"ask":{"control":{"empty_deleted":{"nodes":["<node id>"]}}}}
-{"protocol":3,"ask":{"control":{"empty_deleted_until":{"at_ms":1800000000000}}}}  // all removed until then
-{"protocol":3,"ask":{"recent":{"limit":10}}}
-{"protocol":3,"ask":{"deleted":{"limit":100}}}
+{"protocol":4,"ask":"status"}
+{"protocol":4,"ask":{"control":{"daemon":"sync_now"}}}            // resume, stop
+{"protocol":4,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":4,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
+{"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted_until":{"at_ms":1800000000000}}}}}}  // all removed until then
+{"protocol":4,"ask":{"recent":{"limit":10}}}
+{"protocol":4,"ask":{"deleted":{"limit":100}}}
 ```
 
-Replies: `{"status":{...}}` (with the daemon's `version`, `progress` (while `starting` or
-`syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
-planned), `paused_until`, and the
-counts `notes_added` and `synced_added` that tell a client what is new),
-`{"recent":[...]}` and `{"deleted":[...]}` (newest first), `"done"`, `{"refused":"why"}`.
+Replies:
+- `{"status":{"version":…,"accounts":[…],"folders":[…]}}`. An account has its `identity`, the
+  notification connection (`hints`) and a `credentials_warning`. A folder has its `identity`,
+  `path`, `role` (`null` for the main folder), `state`, `progress` (while `starting` or
+  `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
+  planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
+  that tell a client what is new.
+- `{"recent":[…]}` (each entry with its `folder`) and `{"deleted":[…]}` (each item with its
+  account's `identity`), newest first.
+- `"done"`, `{"refused":"why"}`.
 
 Only the user can connect:
 

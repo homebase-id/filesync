@@ -99,13 +99,20 @@ impl Watcher {
             }
             return Daemon::Starting(None);
         }
-        if self.read_at != Some(status.synced_added)
+        let Some(folder) = status.main_folder().cloned() else {
+            return Daemon::Starting(None);
+        };
+        if self.read_at != Some(folder.synced_added)
             && let Ok(Some(list)) = control::recent(paths, RECENT_SHOWN)
         {
-            self.recent = list;
-            self.read_at = Some(status.synced_added);
+            self.recent = list
+                .into_iter()
+                .filter(|item| item.folder == folder.path)
+                .map(|item| item.synced)
+                .collect();
+            self.read_at = Some(folder.synced_added);
         }
-        Daemon::Running(Box::new(status))
+        Daemon::Running(Box::new(folder))
     }
 
     fn start(&mut self, paths: &Paths, send: &Sender) -> Daemon {

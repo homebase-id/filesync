@@ -20,8 +20,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
-use hbsync_app::runner::{State, Status};
+use hbsync_app::protocol::DaemonControl;
 use hbsync_app::{APP_NAME, Control, Paths, autostart, control, shell, words};
+use hbsync_app::{FolderStatus, State};
 use hbsync_types::activity::Synced;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -220,16 +221,16 @@ impl App {
             Event::Daemon(daemon, recent, updated) => {
                 self.notices(&daemon);
                 if let Some(s) = daemon.status()
-                    && self.decorated.as_ref() != Some(&s.folder)
-                    && s.folder.is_dir()
+                    && self.decorated.as_ref() != Some(&s.path)
+                    && s.path.is_dir()
                 {
                     // Off this thread: some file managers take their time (PowerShell).
                     let (paths, folder, identity) =
-                        (self.paths.clone(), s.folder.clone(), s.identity.clone());
+                        (self.paths.clone(), s.path.clone(), s.identity.clone());
                     std::thread::spawn(move || {
                         shell::decorate(&paths, &folder, &identity, icons::FOLDER)
                     });
-                    self.decorated = Some(s.folder.clone());
+                    self.decorated = Some(s.path.clone());
                 }
                 self.pages.set_status(daemon.status().cloned());
                 self.updated = updated;
@@ -258,7 +259,7 @@ impl App {
         true
     }
 
-    fn status(&self) -> Option<&Status> {
+    fn status(&self) -> Option<&FolderStatus> {
         self.daemon.status()
     }
 
@@ -271,14 +272,14 @@ impl App {
             }
             Action::LogInAgain => {
                 if let Some(s) = self.status() {
-                    let (identity, folder) = (s.identity.clone(), s.folder.clone());
+                    let (identity, folder) = (s.identity.clone(), s.path.clone());
                     self.pages.prepare_setup(&identity, Some(folder));
                 }
                 os::open(self.pages.url("setup"));
             }
             Action::OpenFolder => {
                 let folder = match self.status() {
-                    Some(s) => Some(s.folder.clone()),
+                    Some(s) => Some(s.path.clone()),
                     None => control::configured(&self.paths)
                         .ok()
                         .flatten()
@@ -292,12 +293,12 @@ impl App {
             Action::Reveal(path) => {
                 std::thread::spawn(move || os::reveal(&path));
             }
-            Action::PauseFor(secs) => self.send_control(Control::Pause {
+            Action::PauseFor(secs) => self.send_control(DaemonControl::Pause {
                 until: Some(words::now() + secs),
             }),
-            Action::Pause => self.send_control(Control::Pause { until: None }),
-            Action::Resume => self.send_control(Control::Resume),
-            Action::SyncNow => self.send_control(Control::SyncNow),
+            Action::Pause => self.send_control(DaemonControl::Pause { until: None }),
+            Action::Resume => self.send_control(DaemonControl::Resume),
+            Action::SyncNow => self.send_control(DaemonControl::SyncNow),
             Action::ReviewDeletions => os::open(self.pages.url("deletions")),
             Action::RecentlyDeleted => os::open(self.pages.url("deleted")),
             Action::StartAtLogin => {
@@ -363,10 +364,10 @@ impl App {
     }
 
     /// Sends `c` to the daemon from a thread (it may take a moment), then looks again.
-    fn send_control(&self, c: Control) {
+    fn send_control(&self, c: DaemonControl) {
         let (paths, send) = (self.paths.clone(), self.send.clone());
         std::thread::spawn(move || {
-            if let Err(e) = control::control(&paths, c) {
+            if let Err(e) = control::control(&paths, Control::Daemon(c)) {
                 os::notify(APP_NAME.into(), e.to_string());
             }
             send(Event::Wake);
@@ -477,7 +478,7 @@ fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, S
         };
         out.push(("problem", "Something needs a look", body));
     }
-    let token = |s: &Status| s.held_deletes.as_ref().map(|h| h.token.clone());
+    let token = |s: &FolderStatus| s.held_deletes.as_ref().map(|h| h.token.clone());
     if let Some(held) = &now.held_deletes
         && token(before) != token(now)
     {

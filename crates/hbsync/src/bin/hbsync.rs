@@ -6,10 +6,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{control, running, start, stop};
-use hbsync_app::runner::Hints;
-use hbsync_app::{
-    Config, Control, Paths, State, Status, autostart, control as daemon, setup, words,
+use hbsync_app::protocol::{
+    AccountControl, DaemonControl, DaemonStatus, FolderControl, FolderStatus, Hints,
 };
+use hbsync_app::{Config, Control, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
 use hbsync_types::NodeId;
 
@@ -183,16 +183,22 @@ fn run(command: Command) -> Res<ExitCode> {
             None => return Ok(not_running()),
         },
         Command::Sync => {
-            control(&paths, Control::SyncNow)?;
+            control(&paths, Control::Daemon(DaemonControl::SyncNow))?;
             println!("Syncing now.");
         }
         Command::Pause { for_: None } => {
-            control(&paths, Control::Pause { until: None })?;
+            control(
+                &paths,
+                Control::Daemon(DaemonControl::Pause { until: None }),
+            )?;
             println!("Paused. `hbsync resume` syncs again.");
         }
         Command::Pause { for_: Some(secs) } => {
             let until = words::now() + secs;
-            control(&paths, Control::Pause { until: Some(until) })?;
+            control(
+                &paths,
+                Control::Daemon(DaemonControl::Pause { until: Some(until) }),
+            )?;
             println!(
                 "Paused; syncing again {}. `hbsync resume` syncs now.",
                 words::when(until, words::now())
@@ -202,14 +208,15 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(list) if list.is_empty() => println!("Nothing synced yet."),
             Some(list) => {
                 let now = words::now();
-                for s in &list {
+                for item in &list {
+                    let s = &item.synced;
                     println!("{:>12}  {}", words::when(s.at, now), words::synced(s));
                 }
             }
             None => return Ok(not_running()),
         },
         Command::Resume => {
-            control(&paths, Control::Resume)?;
+            control(&paths, Control::Daemon(DaemonControl::Resume))?;
             println!("Resumed.");
         }
         Command::Deleted { limit } => match daemon::deleted(&paths, limit)? {
@@ -217,7 +224,8 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(list) => {
                 let now = words::now();
                 let main = daemon::configured(&paths)?.map(|r| r.folder);
-                for d in &list {
+                for item in &list {
+                    let d = &item.deleted;
                     println!("{}  {}", d.node.0, words::deleted(d, main.as_deref(), now));
                 }
             }
@@ -227,7 +235,7 @@ fn run(command: Command) -> Res<ExitCode> {
             let Some(nodes) = pick(&paths, &items)? else {
                 return Ok(not_running());
             };
-            control(&paths, Control::Restore { nodes })?;
+            account(&paths, AccountControl::Restore { nodes })?;
             println!("Restoring; the next sync brings it back.");
         }
         Command::EmptyDeleted { items, yes } => {
@@ -241,8 +249,8 @@ fn run(command: Command) -> Res<ExitCode> {
                     return Ok(ExitCode::SUCCESS);
                 };
                 (
-                    Control::EmptyDeletedUntil {
-                        at_ms: newest.removed_at_ms,
+                    AccountControl::EmptyDeletedUntil {
+                        at_ms: newest.deleted.removed_at_ms,
                     },
                     format!("the {} items in Recently deleted", list.len()),
                 )
@@ -250,13 +258,13 @@ fn run(command: Command) -> Res<ExitCode> {
                 let Some(nodes) = pick(&paths, &items)? else {
                     return Ok(not_running());
                 };
-                (Control::EmptyDeleted { nodes }, items.join(", "))
+                (AccountControl::EmptyDeleted { nodes }, items.join(", "))
             };
             if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
-            control(&paths, control_)?;
+            account(&paths, control_)?;
             println!("Deleting for good.");
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
@@ -349,6 +357,7 @@ fn pick(paths: &Paths, items: &[String]) -> Res<Option<Vec<NodeId>>> {
             let id = item.parse().ok().map(NodeId);
             let item_place = item.trim_end_matches('/');
             list.iter()
+                .map(|i| &i.deleted)
                 .find(|d| {
                     Some(d.node) == id || words::deleted_place(d, main.as_deref()) == item_place
                 })
@@ -357,6 +366,20 @@ fn pick(paths: &Paths, items: &[String]) -> Res<Option<Vec<NodeId>>> {
         })
         .collect::<Res<_>>()
         .map(Some)
+}
+
+/// Sends `control` to the account set up here (its Recently deleted).
+fn account(paths: &Paths, control_: AccountControl) -> Res<()> {
+    let identity = daemon::configured(paths)?
+        .ok_or("not set up (`hbsync setup` sets it up)")?
+        .identity;
+    control(
+        paths,
+        Control::Account {
+            identity,
+            control: control_,
+        },
+    )
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.
@@ -372,32 +395,65 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
         return Err("the daemon isn't running (`hbsync start` starts it)".into());
     };
-    let Some(held) = status.held_deletes else {
+    let held: Vec<_> = status
+        .folders
+        .into_iter()
+        .filter_map(|f| Some((f.path, f.held_deletes?)))
+        .collect();
+    if held.is_empty() {
         println!("No deletes are waiting for confirmation.");
         return Ok(());
-    };
-    for line in words::held_deletes(&held) {
-        println!("{line}");
     }
-    for path in &held.examples {
-        println!("  {path}");
+    for (path, held) in held {
+        println!("{}:", path.display());
+        for line in words::held_deletes(&held) {
+            println!("{line}");
+        }
+        for example in &held.examples {
+            println!("  {example}");
+        }
+        if held.more_than_shown() {
+            println!("  ...");
+        }
+        if !yes && !ask_yes("Go ahead?")? {
+            println!("Nothing deleted; they stay held.");
+            continue;
+        }
+        // Exactly these: any delete since is held again, for another look.
+        control(
+            paths,
+            Control::Folder {
+                path,
+                control: FolderControl::ConfirmDeletes { token: held.token },
+            },
+        )?;
+        println!("Confirmed.");
     }
-    if held.more_than_shown() {
-        println!("  ...");
-    }
-    if !yes && !ask_yes("Go ahead?")? {
-        println!("Nothing deleted; they stay held.");
-        return Ok(());
-    }
-    // Exactly these: any delete since is held again, for another look.
-    control(paths, Control::ConfirmDeletes { token: held.token })?;
-    println!("Confirmed.");
     Ok(())
 }
 
-fn print_status(s: &Status) {
+fn print_status(status: &DaemonStatus) {
+    for s in &status.folders {
+        print_folder(s);
+    }
+    for a in &status.accounts {
+        match &a.hints {
+            Hints::Off | Hints::Connected => {}
+            Hints::Connecting => println!("  notifications: connecting"),
+            Hints::Lost(why) => println!("  notifications: lost ({why}), reconnecting"),
+            Hints::Refused(why) => {
+                println!("  notifications: refused ({why}); syncing every minute")
+            }
+        }
+        if let Some(w) = &a.credentials_warning {
+            println!("  credentials: {w}");
+        }
+    }
+}
+
+fn print_folder(s: &FolderStatus) {
     println!("Homebase Filesync: {}", words::status_line(s, words::now()));
-    println!("  {} <-> {}", s.identity, s.folder.display());
+    println!("  {} <-> {}", s.identity, s.path.display());
     // The status line has the progress, the pause, the next try and a failure's problem.
     if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {
         println!("  problem: {e}");
@@ -429,12 +485,6 @@ fn print_status(s: &Status) {
             h.here, h.remotely
         );
     }
-    match &s.hints {
-        Hints::Off | Hints::Connected => {}
-        Hints::Connecting => println!("  notifications: connecting"),
-        Hints::Lost(why) => println!("  notifications: lost ({why}), reconnecting"),
-        Hints::Refused(why) => println!("  notifications: refused ({why}); syncing every minute"),
-    }
     if let Some(why) = &s.watcher_error {
         println!("  no live watcher ({why}): the folder is rescanned every minute");
     }
@@ -446,9 +496,6 @@ fn print_status(s: &Status) {
             STATE_DIR,
             hbsync_local::IGNORE_FILE
         );
-    }
-    if let Some(w) = &s.credentials_warning {
-        println!("  credentials: {w}");
     }
     if !s.recent.is_empty() {
         println!("  recently:");

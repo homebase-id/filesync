@@ -190,6 +190,25 @@ pub enum Op {
 }
 
 impl Op {
+    /// The operation's kind, as logs and notes name it (`RemoteCreate`).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Op::LocalFork { .. } => "LocalFork",
+            Op::LocalMkdir { .. } => "LocalMkdir",
+            Op::LocalMove { .. } => "LocalMove",
+            Op::LocalDownload { .. } => "LocalDownload",
+            Op::LocalTags { .. } => "LocalTags",
+            Op::LocalTrash { .. } => "LocalTrash",
+            Op::RemoteCreate { .. } => "RemoteCreate",
+            Op::RemoteUpdate { .. } => "RemoteUpdate",
+            Op::RemoteTags { .. } => "RemoteTags",
+            Op::RemoteDelete { .. } => "RemoteDelete",
+            Op::Settle { .. } => "Settle",
+            Op::LocalDetach { .. } => "LocalDetach",
+            Op::Forget { .. } => "Forget",
+        }
+    }
+
     pub fn node(&self) -> NodeId {
         match self {
             Op::LocalFork { node, .. }
