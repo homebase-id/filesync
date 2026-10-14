@@ -1164,3 +1164,35 @@ fn regression_a_role_folder_leaves_a_lost_file_to_the_main_folder() {
         panic!("{e}");
     }
 }
+
+/// In the role folder, the user moves a folder below what was its child: the plan's moves
+/// make a cycle on the drive for a moment, which reaches neither the role folder nor the top.
+/// That is no write outside the role folder.
+#[test]
+fn regression_a_role_folder_untangles_a_cycle_of_its_own() {
+    use hbsync_sim::Action::{CreateFolder, Move};
+    let act = |action| Event::Act { client: 3, action };
+    let events = [
+        act(CreateFolder { parent: 0, name: 3 }),
+        act(CreateFolder { parent: 8, name: 0 }),
+        Event::Plan { client: 3 },
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+        act(Move {
+            node: 4,
+            parent: 2,
+            name: 0,
+        }),
+        act(CreateFolder { parent: 4, name: 0 }),
+        act(Move {
+            node: 4,
+            parent: 2,
+            name: 0,
+        }),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
+        panic!("{e}");
+    }
+}

@@ -387,11 +387,22 @@ impl Sim {
         })
     }
 
-    /// Whether drive node `node` is in client `c`'s folder's part of the drive.
-    fn in_part(&self, c: usize, node: NodeId) -> bool {
+    /// Whether drive node `node` is known to lie outside client `c`'s folder's part of the
+    /// drive: in the role folder for the main folder, under the drive's top elsewhere for the
+    /// role folder. A node whose place isn't known (a gap, or a cycle a sync's moves make for a
+    /// moment) isn't.
+    fn known_outside(&self, c: usize, node: NodeId) -> bool {
+        let docs = Role::Documents.node();
+        let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(node, |at| {
+            Ok((at != docs)
+                .then(|| self.server.live.get(&at).map(|n| ((), n.state.parent)))
+                .flatten())
+        });
+        let in_role = up.end == hbsync_engine::walk::End::At(docs);
+        let in_main = up.end == hbsync_engine::walk::End::Top;
         match self.clients[c].coords.top {
-            top if top.is_root() => !self.server.in_role_folder(node),
-            _ => self.server.in_role_folder(node),
+            top if top.is_root() => in_role,
+            _ => in_main,
         }
     }
 
@@ -977,8 +988,7 @@ impl Sim {
         };
         touched.iter().any(|n| {
             let on_drive = coords.to_drive(*n);
-            coords.is_outside(*n)
-                || self.server.live.contains_key(&on_drive) && !self.in_part(c, on_drive)
+            coords.is_outside(*n) || self.known_outside(c, on_drive)
         })
     }
 
