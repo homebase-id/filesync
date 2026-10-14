@@ -16,6 +16,7 @@ fn action() -> impl Strategy<Value = Action> {
         2 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
         1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),
         1 => (i(), i()).prop_map(|(op, pick)| Action::Phone { op, pick }),
+        1 => Just(Action::DeleteRoleFolder),
         1 => i().prop_map(|file| Action::MoveAcross { file }),
     ]
 }
@@ -1273,6 +1274,28 @@ fn regression_an_undone_move_brings_back_the_folder_deleted_here() {
         act(0, CreateFile { parent: 2, name: 0 }),
     ];
     if let Err(e) = run_with(3, None, Sim::with_role_folder, &events) {
+        panic!("{e}");
+    }
+}
+
+/// A file goes up into Documents as the phone deletes Documents (the upload was planned
+/// before): it sits in a deleted role folder. The main folders leave it alone; the device
+/// syncing Documents brings the folder back, the file in it.
+#[test]
+fn regression_a_file_put_into_a_deleted_role_folder_stays_its() {
+    use hbsync_sim::Action::{CreateFile, DeleteRoleFolder, Purge};
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(4, CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 4 },
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, DeleteRoleFolder),
+        Event::Step { client: 4 },
+        Event::Plan { client: 0 },
+        act(0, Purge),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_new_role_devices, &events) {
         panic!("{e}");
     }
 }

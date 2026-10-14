@@ -83,12 +83,16 @@ impl Scope {
     /// for the main folder to repair.
     pub fn out_of_scope(&self, tree: &Tree) -> HashSet<NodeId> {
         let mut out = HashSet::new();
-        let mut stack: Vec<NodeId> = self
-            .outside
-            .iter()
-            .copied()
-            .filter(|n| tree.contains(*n))
-            .collect();
+        let mut stack: Vec<NodeId> = Vec::new();
+        for &left_out in &self.outside {
+            if tree.contains(left_out) {
+                stack.push(left_out);
+            } else {
+                // A role folder in Recently deleted: what still sits in it (a file another
+                // device put there as it was deleted) is its, never the main folder's.
+                stack.extend(tree.children(left_out));
+            }
+        }
         while let Some(node) = stack.pop() {
             if out.insert(node) {
                 stack.extend(tree.children(node));

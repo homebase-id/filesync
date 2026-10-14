@@ -101,6 +101,9 @@ pub enum Action {
         op: usize,
         pick: usize,
     },
+    /// The phone deletes the role folder itself, with what is in it (to Recently deleted); a
+    /// device syncing it brings it back (as `Drive::ensure_role`).
+    DeleteRoleFolder,
     /// The user moves a file from one folder of the client's computer to the other, at its
     /// top ([`Sim::with_role_device`]): the scan of the other folder finds a new item. Nothing
     /// on a client with one folder.
@@ -294,6 +297,8 @@ pub struct Sim {
     tags_added: BTreeSet<(usize, NodeId, String)>,
     tags_removed: BTreeSet<(NodeId, String)>,
     deleted: BTreeSet<NodeId>,
+    /// What the phone deleted with the role folder, brought back with it.
+    role_folder_deleted_with: Vec<NodeId>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
     /// Clients that are two folders of one computer (the main folder, a role folder).
@@ -328,6 +333,7 @@ impl Sim {
             tags_added: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
             deleted: BTreeSet::new(),
+            role_folder_deleted_with: Vec::new(),
             scope_breach: None,
             computers: Vec::new(),
         }
@@ -436,11 +442,36 @@ impl Sim {
         sim
     }
 
+    /// The phone deletes the role folder with everything in it, to Recently deleted.
+    fn delete_role_folder(&mut self) {
+        let docs = Role::Documents.node();
+        if !self.server.live.contains_key(&docs) {
+            return;
+        }
+        let below: Vec<NodeId> = self
+            .server
+            .live
+            .keys()
+            .copied()
+            .filter(|n| self.server.in_role_folder(*n))
+            .collect();
+        for node in below.iter().copied().chain([docs]) {
+            if let Some(mut n) = self.server.live.remove(&node) {
+                n.remote.version = VersionTag(self.server.uuid());
+                self.server.removed.insert(node, n);
+                // A tag change loses to a delete (§11).
+                self.deleted.insert(node);
+            }
+        }
+        self.role_folder_deleted_with = below;
+    }
+
     /// Another device (the phone) changes a file in the role folder: `op` picks adding, editing,
     /// removing (to Recently deleted) or moving one to the top, under a free name.
     fn phone(&mut self, op: usize, pick: usize) {
         let docs = Role::Documents.node();
-        if !self.server.ever.contains(&docs) {
+        // Only in a live role folder: the file browser doesn't add to a deleted one.
+        if !self.server.live.contains_key(&docs) {
             return;
         }
         let files: Vec<NodeId> = self
@@ -588,6 +619,7 @@ impl Sim {
             }
             Action::Restore { node } => self.restore(node),
             Action::Phone { op, pick } => self.phone(op, pick),
+            Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;
@@ -725,6 +757,12 @@ impl Sim {
         else {
             return;
         };
+        self.restore_node(node);
+    }
+
+    /// Brings `node` back from Recently deleted: into its folder if that is live, else at the
+    /// top, under a free name (it stays deleted if none is).
+    fn restore_node(&mut self, node: NodeId) {
         let Some(mut n) = self.server.removed.remove(&node) else {
             return;
         };
@@ -752,12 +790,33 @@ impl Sim {
     // ---- sync ----
 
     fn plan(&mut self, c: usize) {
-        // A role folder the drive doesn't have yet is made by the first of its devices to sync
-        // (as `Drive::ensure_top`), named like the users' items.
+        // A role folder that isn't on the drive comes back from Recently deleted with what was
+        // deleted with it, or is made, by the first of its devices to sync (as
+        // `Drive::ensure_role`), named like the users' items.
         let top = self.clients[c].coords.top;
-        if !top.is_root() && !self.server.ever.contains(&top) {
-            self.server
-                .put(top, NodeState::folder(NodeId::ROOT, NAMES[0]));
+        if !top.is_root() && !self.server.live.contains_key(&top) {
+            if self.server.removed.contains_key(&top) {
+                self.restore_node(top);
+                // Folders before what is in them; one whose folder didn't come back, at the top.
+                let mut with = std::mem::take(&mut self.role_folder_deleted_with);
+                while !with.is_empty() {
+                    let before = with.len();
+                    for n in with.clone() {
+                        let parent = self.server.removed.get(&n).map(|r| r.state.parent);
+                        if parent.is_none_or(|p| self.server.live.contains_key(&p)) {
+                            self.restore_node(n);
+                            with.retain(|w| *w != n);
+                        }
+                    }
+                    if with.len() == before {
+                        with.iter().for_each(|n| self.restore_node(*n));
+                        break;
+                    }
+                }
+            } else {
+                self.server
+                    .put(top, NodeState::folder(NodeId::ROOT, NAMES[0]));
+            }
         }
         self.unpark(c);
         self.release_filtered(c);
@@ -994,10 +1053,39 @@ impl Sim {
             Op::RemoteTags { node, .. } | Op::RemoteDelete { node, .. } => vec![*node],
             _ => Vec::new(),
         };
+        // Outside now, unless its plan saw it where it may write: another device moved it
+        // since (a race no client can rule out; a decision on what it saw is what counts).
         touched.iter().any(|n| {
             let on_drive = coords.to_drive(*n);
-            coords.is_outside(*n) || self.known_outside(c, on_drive)
+            coords.is_outside(*n)
+                || self.known_outside(c, on_drive) && !self.planned_writable(c, *n)
         })
+    }
+
+    /// Whether client `c`'s plan saw `node` (in its coordinates) where it may write: in its
+    /// part of the drive (a chain of parents reaching its root past no folder it leaves out),
+    /// or, for the main folder, at no known place (it repairs such nodes, §12).
+    fn planned_writable(&self, c: usize, node: NodeId) -> bool {
+        let client = &self.clients[c];
+        let main = client.coords.top.is_root();
+        let left_out = |n: NodeId| match main {
+            true => n == Role::Documents.node(),
+            false => n == NodeId::OUTSIDE,
+        };
+        let mut at = node;
+        for _ in 0..=client.planned_remote.len() {
+            if at.is_root() {
+                return true;
+            }
+            if left_out(at) {
+                return false;
+            }
+            match client.planned_remote.get(at) {
+                Some(state) => at = state.parent,
+                None => return main && at != node,
+            }
+        }
+        main
     }
 
     /// Applies one op if its guards pass.
@@ -1638,12 +1726,13 @@ impl Sim {
                 return Err(format!("{both:?} is in both folders of one computer"));
             }
         }
-        if self.server.ever.contains(&Role::Documents.node())
-            && server
-                .get(Role::Documents.node())
-                .is_none_or(|s| s.parent != NodeId::ROOT)
-        {
+        // Deleted it may be (the phone), moved never; a device syncing it brings it back.
+        let docs = server.get(Role::Documents.node());
+        if docs.is_some_and(|s| s.parent != NodeId::ROOT) {
             return Err("the role folder left the top".into());
+        }
+        if docs.is_none() && self.clients.iter().any(|c| !c.coords.top.is_root()) {
+            return Err("the role folder is gone though a device syncs it".into());
         }
         if let Some((_, bad)) = server
             .iter()

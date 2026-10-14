@@ -334,7 +334,17 @@ state DB (one mirror, one feed) and keep their own base and local rows:
 - a role folder's scope is what lies in that folder. Its engine sees the folder as its root
   and the rest of the drive as one folder at its top that it leaves out; what it writes at its
   root goes into the role folder. A node whose place isn't known (its folder gone from the
-  drive, a cycle) isn't a role folder's: the main folder repairs it (§6).
+  drive, a cycle) isn't a role folder's: the main folder repairs it (§6); one that sits in a
+  role folder in Recently deleted (another device put it there as it was deleted) is that role
+  folder's.
+
+Before every sync of a role folder, after reading the drive, its top must be on the drive: one
+in Recently deleted comes back with what was deleted with it, one not there at all (never made,
+or deleted for good) is made at the drive's top with the role's id. So the first device to add
+a role makes its folder, the others join it, and a role folder deleted on the drive while a
+device syncs it comes back at that device's next sync, nothing trashed there and nothing
+uploaded into Recently deleted. To delete a role folder for good, stop syncing it everywhere
+first.
 
 What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device

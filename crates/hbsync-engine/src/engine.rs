@@ -118,8 +118,8 @@ pub struct SyncReport {
     pub stopped: bool,
     /// What was done, for people, oldest first (also kept in the state DB).
     pub synced: Vec<Synced>,
-    /// The drive is out of storage: uploads wait until there is room (the server's words).
-    pub full: Option<String>,
+    /// The drive is out of storage: uploads wait until there is room.
+    pub full: bool,
 }
 
 impl SyncReport {
@@ -141,7 +141,7 @@ impl SyncReport {
         self.adopted += later.adopted;
         self.stopped = later.stopped;
         self.synced.extend(later.synced);
-        self.full = later.full.or(self.full.take());
+        self.full = later.full;
     }
 }
 
@@ -254,12 +254,6 @@ impl Engine {
         date: &str,
     ) -> Result<StartupReport, EngineError> {
         self.apply_filter_change()?;
-        // A role folder's top on the drive: joined, restored, or made.
-        let top = self.cfg.scope.top;
-        if !top.is_root() {
-            let name = hbsync_types::Role::of(top).map_or("Folder", hbsync_types::Role::name);
-            self.drive.ensure_top(top, name)?;
-        }
         let (drive, folder) = (Arc::clone(&self.drive), self.db.folder());
         let db = &mut self.db;
         let (local, feed) = std::thread::scope(|scope| {
@@ -323,6 +317,10 @@ impl Engine {
         unpark(&mut self.db, &self.cfg.exec)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.root)?;
         report.feed = self.drive.pull(Some(self.db.folder()))?;
+        // A role folder's top on the drive: joined, restored, or made.
+        if let Some(role) = hbsync_types::Role::of(self.cfg.scope.top) {
+            self.drive.ensure_role(role)?;
+        }
         report.adopted = adopt(
             &mut self.db,
             &self.cfg.exec.root,
@@ -417,6 +415,8 @@ impl Engine {
         // engines look.
         let folder = self.db.folder();
         self.drive.wake_touched(&mut self.db, Some(folder));
+        // Also when nothing ran: the drive is still full for this folder.
+        report.full = self.drive.full();
         Ok(report)
     }
 
@@ -455,20 +455,16 @@ impl Engine {
             .with_urgent(self.urgent.clone())
             .with_stop(Arc::clone(&self.stop))
             .with_progress(Arc::clone(&self.progress))
-            .with_full(self.drive.full().is_some())
+            .with_full(self.drive.full())
             .run(plan.ops)?;
-        if let Some(why) = &exec.full {
-            self.drive.set_full(why);
+        if exec.full {
+            self.drive.set_full();
         }
         // What was done counts, and the folders it asks to look at are looked at, however
         // the run ended.
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
-        report.full = exec
-            .full
-            .or_else(|| self.drive.full())
-            .or(report.full.take());
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
         self.db.write(|s| s.add_synced(&synced, activity::KEEP))?;
         report.synced.extend(synced);

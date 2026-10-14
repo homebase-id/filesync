@@ -104,7 +104,7 @@ impl Executor<'_> {
         tags: &Tags,
     ) -> Step<(Job, Ctx)> {
         // Nothing more goes up once the drive is full; the run's other work goes on.
-        if (self.full || self.report.full.is_some()) && kind == NodeKind::File {
+        if self.full && kind == NodeKind::File {
             return Err(Outcome::waiting("the drive is out of storage"));
         }
         let (row, mirror, base) = self.db.read(|s| {

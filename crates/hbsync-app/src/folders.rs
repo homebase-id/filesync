@@ -11,45 +11,57 @@ use crate::{Config, Paths, Root};
 
 pub use crate::control::Error;
 
+/// Why the folder at `path` (resolved) can't be set up for `identity` as `role` (`None`: its
+/// main folder), if it can't: where setup refuses a folder (the home folder, a disk's top, a
+/// system folder); another app syncs it (unless this identity syncs it already); the identity
+/// syncs that folder elsewhere already (one main folder, one of each role); or it holds, or sits
+/// in, another synced folder.
+pub fn refusal(config: &Config, identity: &str, path: &Path, role: Option<Role>) -> Option<String> {
+    let home = crate::paths::home().map(|h| crate::setup::resolve(&h));
+    if let Some(why) = crate::setup::refuse_folder(path, home.as_deref()) {
+        return Some(why);
+    }
+    let ours = hbsync_local::Marker::read(path)
+        .ok()
+        .flatten()
+        .is_some_and(|m| m.identity == identity);
+    if !ours && let Some(why) = crate::setup::other_app(path) {
+        return Some(why);
+    }
+    for other in config.roots.iter().filter(|r| r.folder != path) {
+        if other.identity == identity && other.role == role {
+            let what = role.map_or("its main folder", |r| r.name());
+            return Some(format!(
+                "{identity} syncs {what} with {} already: remove it first",
+                other.folder.display()
+            ));
+        }
+        if path.starts_with(&other.folder) || other.folder.starts_with(path) {
+            return Some(format!(
+                "{} and {} can't both be synced: one holds the other",
+                path.display(),
+                other.folder.display()
+            ));
+        }
+    }
+    None
+}
+
 /// Sets the folder at `path` up for `identity` (kept as it was if it is already: its marker
-/// names it), and lists it in the config. `hbsync setup` has checked that this is what the
-/// user wants (a folder whose state is gone is merged only when asked). With `role`, it syncs
-/// that role folder of the drive (joined if the drive has it, back from Recently deleted, or
-/// made when the folder first syncs). An identity has one main folder and one of each role;
-/// a folder inside another synced folder, or holding one, is refused.
+/// names it), and lists it in the config, unless [`refusal`] says why not. `hbsync setup` has
+/// checked that this is what the user wants (a folder whose state is gone is merged only when
+/// asked). With `role`, it syncs that role folder of the drive (joined if the drive has it,
+/// back from Recently deleted, or made when the folder first syncs). The daemon's half: see
+/// [`add_synced`].
 pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Result<(), Error> {
     // One at a time in this process (the tray's pages serve each request on a thread): two
     // set-ups of one folder would each make it anew, the second undoing the first.
     static ADDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = ADDING.lock().unwrap_or_else(|e| e.into_inner());
-    let home = crate::paths::home().map(|h| crate::setup::resolve(&h));
-    if let Some(why) = crate::setup::refuse_folder(path, home.as_deref()) {
-        return Err(why.into());
-    }
-    // One this identity syncs already stays so.
-    let ours = hbsync_local::Marker::read(path)?.is_some_and(|m| m.identity == identity);
-    if !ours && let Some(why) = crate::setup::other_app(path) {
-        return Err(why.into());
-    }
+    let _one = crate::runner::lock(&ADDING);
     let config_path = paths.config_file();
     let config = Config::load(&config_path)?.unwrap_or_default();
-    for other in config.roots.iter().filter(|r| r.folder != path) {
-        if other.identity == identity && other.role == role {
-            let what = role.map_or("its main folder", |r| r.name());
-            return Err(format!(
-                "{identity} syncs {what} with {} already: remove it first",
-                other.folder.display()
-            )
-            .into());
-        }
-        if path.starts_with(&other.folder) || other.folder.starts_with(path) {
-            return Err(format!(
-                "{} and {} can't both be synced: one holds the other",
-                path.display(),
-                other.folder.display()
-            )
-            .into());
-        }
+    if let Some(why) = refusal(&config, identity, path, role) {
+        return Err(why.into());
     }
     let top = role.map_or(NodeId::ROOT, Role::node);
     SyncRoot::open_or_create_for(&paths.account_db(identity), identity, path, top)?;
@@ -62,6 +74,43 @@ pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Re
         }
     })?;
     Ok(())
+}
+
+/// Who took a folder change: the running daemon (it syncs now), or the config (the daemon
+/// does when it starts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Taken {
+    Now,
+    AtStart,
+}
+
+/// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
+/// the daemon's start when none runs.
+pub fn add_synced(
+    paths: &Paths,
+    identity: &str,
+    path: &Path,
+    role: Option<Role>,
+) -> Result<Taken, Error> {
+    if crate::control::running(paths)? {
+        crate::control::add_folder(paths, identity, path, role)?;
+        Ok(Taken::Now)
+    } else {
+        add(paths, identity, path, role)?;
+        Ok(Taken::AtStart)
+    }
+}
+
+/// Has the running daemon stop syncing the folder at `path` and take it off the config, or
+/// takes it off when none runs ([`remove`]).
+pub fn remove_synced(paths: &Paths, path: &Path) -> Result<Taken, Error> {
+    if crate::control::running(paths)? {
+        crate::control::remove_folder(paths, path)?;
+        Ok(Taken::Now)
+    } else {
+        remove(paths, path)?;
+        Ok(Taken::AtStart)
+    }
 }
 
 /// Takes the folder at `path` off the config; its files and its state stay (setting it up again

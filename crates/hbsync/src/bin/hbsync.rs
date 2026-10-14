@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop};
+use hbsync_app::folders::{self, Taken};
 use hbsync_app::protocol::{
     AccountControl, DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints,
 };
@@ -345,48 +346,30 @@ fn run(command: Command) -> Res<ExitCode> {
             folder,
         } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
-            let identity = one_identity(&config, identity)?;
+            let identity = config.identity(identity.as_deref())?;
             // Refused (where setup refuses a folder, or another app syncs it) by the adding.
             let folder = match folder {
                 Some(f) => setup::resolve(&f),
                 None => setup::role_folder(role)?,
             };
-            match daemon::add_folder(&paths, &identity, &folder, Some(role)) {
-                // Set up now; the daemon syncs it once started.
-                Err(_) if !running(&paths).unwrap_or(true) => {
-                    hbsync_app::folders::add(&paths, &identity, &folder, Some(role))?;
-                    println!(
-                        "{} is set up to sync with {identity}'s {}; `hbsync start` starts syncing.",
-                        folder.display(),
-                        role.name()
-                    );
-                }
-                result => {
-                    result?;
-                    println!(
-                        "{} syncs with {identity}'s {}.",
-                        folder.display(),
-                        role.name()
-                    );
-                }
+            let what = format!(
+                "{} syncs with {identity}'s {}",
+                folder.display(),
+                role.name()
+            );
+            match folders::add_synced(&paths, &identity, &folder, Some(role))? {
+                Taken::Now => println!("{what}."),
+                Taken::AtStart => println!("{what} once Filesync runs (`hbsync start`)."),
             }
         }
         Command::Remove { role, identity } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
-            let identity = one_identity(&config, identity)?;
-            let Some(root) = config
-                .roots
-                .iter()
-                .find(|r| r.identity == identity && r.role == Some(role))
-            else {
+            let identity = config.identity(identity.as_deref())?;
+            let Some(root) = config.folder(&identity, Some(role)) else {
                 println!("{identity}'s {} isn't synced here.", role.name());
                 return Ok(ExitCode::SUCCESS);
             };
-            if running(&paths)? {
-                daemon::remove_folder(&paths, &root.folder)?;
-            } else {
-                hbsync_app::folders::remove(&paths, &root.folder)?;
-            }
+            folders::remove_synced(&paths, &root.folder)?;
             println!(
                 "{} is no longer synced with {identity}. Its files stay.",
                 root.folder.display()
@@ -423,31 +406,6 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Log => println!("{}", paths.logs.display()),
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// The identity a command is for: `given`, or the only one set up.
-fn one_identity(config: &Config, given: Option<String>) -> Res<String> {
-    let mut set_up: Vec<&str> = config.roots.iter().map(|r| r.identity.as_str()).collect();
-    set_up.sort_unstable();
-    set_up.dedup();
-    if let Some(identity) = given {
-        let identity = setup::normalize_identity(&identity);
-        if !set_up.contains(&identity.as_str()) {
-            return Err(
-                format!("{identity} isn't set up here: `hbsync setup {identity}` first").into(),
-            );
-        }
-        return Ok(identity);
-    }
-    match set_up[..] {
-        [one] => Ok(one.to_owned()),
-        [] => Err("not set up: `hbsync setup <identity>` first".into()),
-        _ => Err(format!(
-            "set up with {}: pick one with --identity",
-            set_up.join(", ")
-        )
-        .into()),
-    }
 }
 
 fn parse_role(s: &str) -> Result<Role, String> {
@@ -546,15 +504,11 @@ fn print_status(status: &DaemonStatus) {
 
 fn print_folder(s: &FolderStatus) {
     println!("Homebase Filesync: {}", words::status_line(s, words::now()));
-    match s.role {
-        Some(role) => println!(
-            "  {}'s {} <-> {}",
-            s.identity,
-            role.name(),
-            s.path.display()
-        ),
-        None => println!("  {} <-> {}", s.identity, s.path.display()),
-    }
+    let who = match s.role {
+        Some(role) => format!("{}'s {}", s.identity, role.name()),
+        None => s.identity.clone(),
+    };
+    println!("  {who} <-> {}", s.path.display());
     // The status line has the progress, the pause, the next try and a failure's problem.
     if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {
         println!("  problem: {e}");

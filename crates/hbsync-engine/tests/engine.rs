@@ -1914,7 +1914,7 @@ fn a_full_drive_holds_uploads_and_lets_the_rest_through() -> R {
     a.write("new.txt", vec![b'n'; 600])?;
     std::fs::remove_file(a.root.join("old.txt"))?;
     let report = a.sync()?;
-    assert!(report.full.is_some(), "{report:?}");
+    assert!(report.full, "{report:?}");
     // Held, not told: no note per file.
     assert!(
         report.failed.is_empty()
@@ -1935,12 +1935,12 @@ fn a_full_drive_holds_uploads_and_lets_the_rest_through() -> R {
     // refused again.
     server.lock().map_err(|_| "poisoned")?.set_quota(None);
     let report = a.sync()?;
-    assert!(report.full.is_some(), "{report:?}");
+    assert!(report.full, "{report:?}");
     assert_eq!(live_names()?, Vec::<String>::new());
     // Until the user asks for a sync (they may have made room).
     a.engine.drive().clear_full();
     let report = a.sync()?;
-    assert!(report.full.is_none(), "{report:?}");
+    assert!(!report.full, "{report:?}");
     assert_eq!(live_names()?, ["new.txt"]);
     Ok(())
 }

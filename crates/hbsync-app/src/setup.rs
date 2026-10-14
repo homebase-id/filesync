@@ -108,15 +108,7 @@ pub fn default_folder() -> control::Result<PathBuf> {
 
 /// Where this computer keeps `role`'s folder (resolved): what `hbsync add <role>` syncs.
 pub fn role_folder(role: Role) -> control::Result<PathBuf> {
-    use hbsync_platform::user_dirs::{UserDir, user_dir};
-    let dir = match role {
-        Role::Documents => UserDir::Documents,
-        Role::Pictures => UserDir::Pictures,
-        Role::Music => UserDir::Music,
-        Role::Videos => UserDir::Videos,
-        Role::Downloads => UserDir::Downloads,
-    };
-    user_dir(dir)
+    hbsync_platform::user_dirs::user_dir(role.user_dir())
         .map(|p| resolve(&p))
         .ok_or_else(|| format!("this computer has no {} folder", role.name()).into())
 }
@@ -446,12 +438,8 @@ pub fn set_up(
     if running && authorized {
         control::start_over(paths, identity)?;
     }
-    if running {
-        // It sets the folder up and starts syncing it, without a restart.
-        control::add_folder(paths, identity, &folder, None)?;
-    } else {
-        crate::folders::add(paths, identity, &folder, None)?;
-    }
+    // A running daemon sets the folder up and starts syncing it, without a restart.
+    crate::folders::add_synced(paths, identity, &folder, None)?;
     say(&format!("{} syncs with {identity}.", folder.display()));
 
     if request.at_logon {

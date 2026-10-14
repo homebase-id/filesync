@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use hbsync_app::folders::{self, Taken};
 use hbsync_types::Role;
 
 use super::*;
@@ -28,19 +29,15 @@ impl Server {
                 );
             }
         };
-        let Some(main) = config.roots.iter().find(|r| r.role.is_none()) else {
+        let Some(main) = config.root().ok().flatten() else {
             return "<h1>Folders</h1><p>Log in to Homebase first.</p>".into();
         };
         let identity = &main.identity;
-        let home = hbsync_app::paths::home().map(|h| setup::resolve(&h));
         let count_until = Instant::now() + COUNT_FOR;
         let rows: String = Role::ALL
             .into_iter()
             .map(|role| {
-                let synced = config
-                    .roots
-                    .iter()
-                    .find(|r| r.identity == *identity && r.role == Some(role));
+                let synced = config.folder(identity, Some(role));
                 let (path, action) = match synced {
                     Some(root) => (
                         Some(root.folder.clone()),
@@ -52,8 +49,7 @@ impl Server {
                             format!("<p class=small>{}</p>", escape(&e.to_string())),
                         ),
                         Ok(path) => {
-                            let refused = setup::refuse_folder(&path, home.as_deref())
-                                .or_else(|| setup::other_app(&path));
+                            let refused = folders::refusal(&config, identity, &path, Some(role));
                             let action = match refused {
                                 Some(why) => format!("<p class=small>{}</p>", escape(&why)),
                                 None => self.button("folders/add", role, "Sync", false),
@@ -116,41 +112,25 @@ impl Server {
         };
         let result = (|| -> control::Result<String> {
             let config = Config::load(&self.paths.config_file())?.unwrap_or_default();
-            let identity = config
-                .roots
-                .iter()
-                .find(|r| r.role.is_none())
-                .map(|r| r.identity.clone())
-                .ok_or("not logged in")?;
-            let running = control::running(&self.paths)?;
+            let identity = config.root()?.ok_or("not logged in")?.identity.clone();
             if add {
                 let folder = setup::role_folder(role)?;
                 // Read here, now: macOS asks for access to a protected folder (Documents,
                 // Downloads) while the user is at this page, not later out of the blue.
                 std::fs::read_dir(&folder)?;
-                if running {
-                    control::add_folder(&self.paths, &identity, &folder, Some(role))?;
-                } else {
-                    hbsync_app::folders::add(&self.paths, &identity, &folder, Some(role))?;
-                }
-                return Ok(if running {
-                    format!("{} syncs now.", role.name())
-                } else {
-                    format!("{} is set up: it syncs once Filesync runs.", role.name())
-                });
+                return Ok(
+                    match folders::add_synced(&self.paths, &identity, &folder, Some(role))? {
+                        Taken::Now => format!("{} syncs now.", role.name()),
+                        Taken::AtStart => {
+                            format!("{} is set up: it syncs once Filesync runs.", role.name())
+                        }
+                    },
+                );
             }
-            let Some(root) = config
-                .roots
-                .iter()
-                .find(|r| r.identity == identity && r.role == Some(role))
-            else {
+            let Some(root) = config.folder(&identity, Some(role)) else {
                 return Ok(format!("{} wasn't synced.", role.name()));
             };
-            if running {
-                control::remove_folder(&self.paths, &root.folder)?;
-            } else {
-                hbsync_app::folders::remove(&self.paths, &root.folder)?;
-            }
+            folders::remove_synced(&self.paths, &root.folder)?;
             Ok(format!(
                 "{} is no longer synced. Its files stay.",
                 role.name()

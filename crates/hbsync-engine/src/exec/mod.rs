@@ -106,7 +106,7 @@ pub struct ExecReport {
     pub stopped: Option<Stopped>,
     /// The drive refused an upload, out of storage: the run's uploads from then on were held
     /// (left dirty).
-    pub full: Option<String>,
+    pub full: bool,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
 }
@@ -143,7 +143,7 @@ enum Outcome {
     /// The remote refused access: stop the run.
     Stop(String),
     /// The drive is out of storage: hold this and every later upload of the run.
-    Full(String),
+    Full,
 }
 
 impl Outcome {
@@ -211,7 +211,7 @@ pub struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
-    /// The drive was full lately: uploads are held from the start.
+    /// The drive is full: uploads are held (from the start, when it was lately).
     full: bool,
 }
 
@@ -450,7 +450,7 @@ impl<'a> Executor<'a> {
     ) -> Result<(), StateError> {
         if matches!(
             outcome,
-            Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full(_)
+            Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full
         ) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
@@ -493,10 +493,11 @@ impl<'a> Executor<'a> {
                 self.db.write(|s| s.mark_dirty(node))?;
                 self.report.stopped.get_or_insert(Stopped::Denied(why));
             }
-            Outcome::Full(why) => {
+            Outcome::Full => {
                 let node = op.node();
                 self.db.write(|s| s.mark_dirty(node))?;
-                self.report.full.get_or_insert(why);
+                self.full = true;
+                self.report.full = true;
             }
         }
         Ok(())
@@ -885,7 +886,7 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         // The local source or sink failed: worth another try, but no reason to pause.
         RemoteError::Io(_) => Outcome::Retry(e.to_string()),
         RemoteError::Denied(_) => Outcome::Stop(e.to_string()),
-        RemoteError::Full(_) => Outcome::Full(e.to_string()),
+        RemoteError::Full(_) => Outcome::Full,
         // The drive won't take it as it is: retrying the same won't help.
         RemoteError::Fatal(_) | RemoteError::InvalidHash | RemoteError::HashRequired => {
             Outcome::unsyncable(e.to_string())

@@ -359,29 +359,64 @@ fn computers_join_documents_merging_what_they_hold() -> R {
 #[test]
 fn documents_deleted_on_the_drive_comes_back_when_added_again() -> R {
     let server = server_with_documents()?;
-    {
-        let mut srv = server.lock().map_err(|_| "poisoned")?;
-        let docs = srv
-            .live()
-            .find(|h| matches!(&h.body, RemoteBody::Live { node, .. } if *node == Role::Documents.node()))
-            .cloned()
-            .ok_or("no Documents")?;
-        if let RemoteBody::Live { node, content, .. } = docs.body {
-            let meta = hbsync_remote::contract::removed(&NodeMeta {
-                node,
-                parent: docs.parent,
-                kind: docs.kind,
-                content,
-            });
-            srv.update(docs.file_id, docs.version, &meta, None)?;
-        }
-    }
+    remove_documents(&server)?;
     let mut pc = DocsOnly::new(&server, &[])?;
     pc.start()?;
     assert_eq!(files(&pc.root), ["cv.txt"], "what was in it came back");
     assert_eq!(
         parent_on_server(&server, "cv.txt"),
         Some(Role::Documents.node())
+    );
+    Ok(())
+}
+
+/// Moves Documents (the folder itself) to Recently deleted on the server.
+fn remove_documents(server: &Arc<Mutex<FakeServer>>) -> R {
+    let mut srv = server.lock().map_err(|_| "poisoned")?;
+    let docs = srv
+        .live()
+        .find(
+            |h| matches!(&h.body, RemoteBody::Live { node, .. } if *node == Role::Documents.node()),
+        )
+        .cloned()
+        .ok_or("no Documents")?;
+    if let RemoteBody::Live { node, content, .. } = docs.body {
+        let meta = hbsync_remote::contract::removed(&NodeMeta {
+            node,
+            parent: docs.parent,
+            kind: docs.kind,
+            content,
+        });
+        srv.update(docs.file_id, docs.version, &meta, None)?;
+    }
+    Ok(())
+}
+
+/// Documents deleted on the drive while a computer syncs it comes back at that computer's next
+/// sync, nothing trashed here, nothing uploaded into Recently deleted (§12).
+#[test]
+fn documents_deleted_on_the_drive_while_synced_comes_back() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut pc = DocsOnly::new(&server, &[("cv.txt", "cv")])?;
+    pc.start()?;
+    remove_documents(&server)?;
+    std::fs::write(pc.root.join("new.txt"), "n")?;
+    pc.start()?;
+    assert_eq!(files(&pc.root), ["cv.txt", "new.txt"]);
+    assert_eq!(
+        parent_on_server(&server, "cv.txt"),
+        Some(Role::Documents.node())
+    );
+    assert_eq!(
+        parent_on_server(&server, "new.txt"),
+        Some(Role::Documents.node())
+    );
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    assert!(
+        srv.live().any(
+            |h| matches!(&h.body, RemoteBody::Live { node, .. } if *node == Role::Documents.node())
+        ),
+        "Documents is live again"
     );
     Ok(())
 }

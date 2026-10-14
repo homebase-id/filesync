@@ -235,13 +235,14 @@ impl Runner {
                 let status = Arc::clone(&runner.status);
                 let result = runner.run();
                 // Its account starts a failed runner again after a pause.
-                lock(&status).state = State::Stopped;
+                let mut status = lock(&status);
+                status.state = State::Stopped;
                 if let Err(e) = &result {
-                    let mut status = lock(&status);
                     status.state = State::Failing;
                     status.error = Some(e.to_string());
                     tracing::error!("the sync of {} stopped: {e}", status.path.display());
                 }
+                drop(status);
                 result
             })?;
         Ok((handle, thread))
