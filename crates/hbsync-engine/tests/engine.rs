@@ -933,7 +933,7 @@ fn a_folder_is_not_deleted_remotely_while_a_child_delete_failed() -> R {
 
 // ---- §10 filters ----
 
-fn ignoring(rules: &'static str) -> impl FnOnce(&mut hbsync_engine::EngineConfig) {
+fn ignoring(rules: &'static str) -> impl Fn(&mut hbsync_engine::EngineConfig) {
     move |cfg| {
         cfg.exec.filter = std::sync::Arc::new(
             hbsync_local::Filter::from_rules(rules, false).expect("valid rules"),

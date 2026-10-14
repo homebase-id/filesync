@@ -2,40 +2,23 @@
 //! (`.invalid`), so nothing leaves the machine: the daemon stays connecting.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
 const IDENTITY: &str = "hbsync-test.invalid";
 
-struct Home {
-    dir: tempfile::TempDir,
+mod common;
+
+use common::{Home, text};
+
+/// What a set-up home has.
+trait SetUp {
+    fn set_up(&self) -> Result<PathBuf, Box<dyn std::error::Error>>;
+    fn credentials(&self) -> PathBuf;
 }
 
-impl Home {
-    fn new() -> std::io::Result<Home> {
-        Ok(Home {
-            dir: tempfile::tempdir()?,
-        })
-    }
-
-    fn path(&self) -> &Path {
-        self.dir.path()
-    }
-
-    fn command(&self, exe: &str, args: &[&str]) -> Command {
-        let mut c = Command::new(exe);
-        c.args(args)
-            .env("HBSYNC_HOME", self.path())
-            .env("HBSYNC_CREDENTIALS", "file");
-        c
-    }
-
-    fn hbsync(&self, args: &[&str]) -> std::io::Result<Output> {
-        self.command(env!("CARGO_BIN_EXE_hbsync"), args).output()
-    }
-
+impl SetUp for Home {
     /// A config and credentials as `hbsync setup` leaves them, for an identity that can't be
     /// reached.
     fn set_up(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -67,24 +50,9 @@ impl Home {
     }
 }
 
-impl Drop for Home {
-    fn drop(&mut self) {
-        // Never leave a daemon behind.
-        let _ = self.hbsync(&["stop"]);
-    }
-}
-
 /// A TOML basic string (escapes the backslashes of Windows paths).
 fn toml_string(p: &Path) -> String {
     format!("\"{}\"", p.display().to_string().replace('\\', "\\\\"))
-}
-
-fn text(out: &Output) -> String {
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    )
 }
 
 #[test]

@@ -1601,6 +1601,7 @@ dependencies = [
 name = "hbsync-engine"
 version = "0.5.3"
 dependencies = [
+ "hbsync-engine",
  "hbsync-fileio",
  "hbsync-local",
  "hbsync-namemap",
