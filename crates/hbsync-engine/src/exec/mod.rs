@@ -221,6 +221,46 @@ struct Prepared {
     attempts: u8,
     job: Job,
     ctx: Ctx,
+    /// The path of what it removes, taken before it ran.
+    gone: Option<String>,
+}
+
+/// Operations collected for the worker pool, which runs them in any order.
+#[derive(Default)]
+struct Batch {
+    jobs: Vec<Prepared>,
+    /// Their nodes.
+    nodes: HashSet<NodeId>,
+    /// The folders on the drive they put a node into or take one from.
+    folders: HashSet<NodeId>,
+}
+
+impl Batch {
+    fn push(&mut self, p: Prepared) {
+        self.nodes.insert(p.job.node());
+        if let Job::Upload { meta, .. } | Job::Meta { meta, .. } = &p.job {
+            self.folders.insert(meta.parent);
+        }
+        if let Ctx::Meta {
+            from: Some(from), ..
+        } = &p.ctx
+        {
+            self.folders.insert(*from);
+        }
+        self.jobs.push(p);
+    }
+
+    /// Whether `op` must wait until the batch ran: it is about a node in it, or its server-side
+    /// order guard ([`Op::requires`]) waits on one: a folder created in it, or the children a
+    /// folder's delete waits for.
+    fn holds_up(&self, op: &Op) -> bool {
+        self.nodes.contains(&op.node())
+            || match op.requires() {
+                Some(Requirement::RemoteFolder(folder)) => self.nodes.contains(&folder),
+                Some(Requirement::NoRemoteChildren(folder)) => self.folders.contains(&folder),
+                None => false,
+            }
+    }
 }
 
 /// What the commit of a transfer needs to know.
@@ -239,6 +279,13 @@ enum Ctx {
         kind: NodeKind,
         content: NodeContent,
         hash: hbsync_types::ContentHash,
+    },
+    /// A metadata write; `from`: the folder on the drive the node leaves, if any.
+    Meta {
+        meta: NodeMeta,
+        hash: Option<hbsync_types::ContentHash>,
+        from: Option<NodeId>,
+        after: remote::After,
     },
 }
 
@@ -321,47 +368,29 @@ impl<'a> Executor<'a> {
             .fetch_add(visible.count() as u64, Ordering::Relaxed);
         self.count_bytes(&ops)?;
         self.queue = ops.into_iter().map(|op| (op, 0)).collect();
-        let mut batch: Vec<Prepared> = Vec::new();
+        let mut batch = Batch::default();
         loop {
             if self.should_stop() {
                 break;
             }
             let Some((op, attempts)) = self.queue.pop_front() else {
-                if batch.is_empty() {
+                if batch.jobs.is_empty() {
                     break;
                 }
                 self.flush(&mut batch)?;
                 continue;
             };
-            if let Err(wait) = self.ready(&op) {
-                self.handle(op, attempts, wait, None)?;
-                continue;
-            }
-            if op.is_transfer() {
-                // Transfers are collected and run together on the worker pool.
-                match self.prepare(&op) {
-                    Ok((job, ctx)) => batch.push(Prepared {
-                        op,
-                        attempts,
-                        job,
-                        ctx,
-                    }),
-                    Err(outcome) => self.handle(op, attempts, outcome, None)?,
-                }
-                continue;
-            }
-            if !batch.is_empty() {
+            // Everything else runs on its own, in order: after the batch.
+            let pooled = op.is_transfer() || op.touches_remote();
+            if !batch.jobs.is_empty() && (!pooled || batch.holds_up(&op)) {
                 self.flush(&mut batch)?;
                 if self.should_stop() {
                     break;
                 }
             }
-            if let Op::Settle { node } = op {
-                self.settle_run(node)?;
+            if let Err(wait) = self.ready(&op) {
+                self.handle(op, attempts, wait, None)?;
                 continue;
-            }
-            if op.touches_remote() {
-                self.wait_out_backoff();
             }
             // What a delete removes is described before its rows go.
             let gone = match activity::kind_of(&op) {
@@ -370,6 +399,25 @@ impl<'a> Executor<'a> {
                 }
                 _ => None,
             };
+            if pooled {
+                // Transfers and remote writes are collected and run together on the worker
+                // pool.
+                match self.prepare(&op) {
+                    Ok((job, ctx)) => batch.push(Prepared {
+                        op,
+                        attempts,
+                        job,
+                        ctx,
+                        gone,
+                    }),
+                    Err(outcome) => self.handle(op, attempts, outcome, gone)?,
+                }
+                continue;
+            }
+            if let Op::Settle { node } = op {
+                self.settle_run(node)?;
+                continue;
+            }
             let outcome = self.execute(&op);
             self.handle(op, attempts, outcome, gone)?;
             if self.crashed {
@@ -581,11 +629,12 @@ impl<'a> Executor<'a> {
     }
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
-    fn flush(&mut self, batch: &mut Vec<Prepared>) -> Result<(), StateError> {
+    fn flush(&mut self, batch: &mut Batch) -> Result<(), StateError> {
         self.wait_out_backoff();
         let mut pending: HashMap<NodeId, Prepared> = HashMap::new();
         let mut jobs = Vec::new();
-        for p in batch.drain(..) {
+        let batch = std::mem::take(batch);
+        for p in batch.jobs {
             jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
             pending.insert(p.job.node(), p);
         }
@@ -604,10 +653,12 @@ impl<'a> Executor<'a> {
         let mut first_error = None;
         // A DB error or a stopped run (requested, denied, unreachable) starts no further
         // transfers; the nodes stay dirty for the next sync.
+        let halt = self.stop.clone();
         run_jobs_while(
             remote,
             transfer,
             Some(&progress.bytes_done),
+            halt.as_deref(),
             jobs,
             |job, result| {
                 if first_error.is_some() {
@@ -615,7 +666,7 @@ impl<'a> Executor<'a> {
                 }
                 if let Some(p) = pending.remove(&job.node()) {
                     let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
-                    if let Err(e) = self.handle(p.op, p.attempts, outcome, None) {
+                    if let Err(e) = self.handle(p.op, p.attempts, outcome, p.gone) {
                         first_error = Some(e);
                     }
                 }
@@ -645,39 +696,15 @@ impl<'a> Executor<'a> {
                 tags,
             } => self.mkdir(*node, *parent, name, tags),
             Op::LocalMove { node, parent, name } => self.local_move(*node, *parent, name),
-            Op::LocalDownload { .. } => unreachable!("transfers run through flush"),
             Op::LocalTags { node, tags } => self.local_tags(*node, tags),
             Op::LocalTrash { node, subtree } => self.trash(*node, subtree, false),
-            Op::RemoteCreate {
-                node,
-                parent,
-                name,
-                kind,
-                tags,
-            } => self.create_folder(*node, *parent, name, *kind, tags),
-            Op::RemoteUpdate {
-                node,
-                file_id,
-                expected,
-                parent,
-                name,
-                upload,
-                tags,
-            } => {
-                debug_assert!(!upload, "uploads run through flush");
-                self.rename_remote(*node, *file_id, *expected, Some((*parent, name)), tags)
+            Op::LocalDownload { .. }
+            | Op::RemoteCreate { .. }
+            | Op::RemoteUpdate { .. }
+            | Op::RemoteTags { .. }
+            | Op::RemoteDelete { .. } => {
+                unreachable!("transfers and remote writes run through flush")
             }
-            Op::RemoteTags {
-                node,
-                file_id,
-                expected,
-                tags,
-            } => self.rename_remote(*node, *file_id, *expected, None, tags),
-            Op::RemoteDelete {
-                node,
-                file_id,
-                expected,
-            } => self.remove(*node, *file_id, *expected),
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
             Op::Forget { node, subtree } if subtree.is_empty() => self.forget_base(*node),

@@ -178,6 +178,11 @@ expected fingerprint is treated as done.
 - **Folders are deleted last.** A remote folder delete waits while the mirror still has a
   child in it (a child delete that failed or was skipped, or a child just added): the folder
   stays, and the next plan resurrects it if needed.
+- **Together on the pool.** Transfers and remote writes (folder creates, renames, moves, tags,
+  deletes) are collected and run together on the worker pool, in any order. An operation that
+  depends on one collected waits until they all ran: a create or move into a folder created
+  in the batch, a folder's delete while the batch moves or deletes a child of it, the same
+  node twice. Anything else (local work, settling) runs on its own, after the batch.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after
   round and across syncs, so nodes that stay dirty (held, deferred, failing) can't keep the
   rest waiting. A sync ends after a full sweep in which nothing was done.

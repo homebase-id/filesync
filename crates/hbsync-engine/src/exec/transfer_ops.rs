@@ -18,9 +18,36 @@ impl Executor<'_> {
                 node,
                 parent,
                 name,
+                kind: NodeKind::Folder,
+                tags,
+            } => self.prepare_folder(*node, *parent, name, tags),
+            Op::RemoteCreate {
+                node,
+                parent,
+                name,
                 kind,
                 tags,
             } => self.prepare_upload(*node, None, *parent, name, *kind, tags),
+            Op::RemoteUpdate {
+                node,
+                file_id,
+                expected,
+                parent,
+                name,
+                upload: false,
+                tags,
+            } => self.prepare_rename(*node, *file_id, *expected, Some((*parent, name)), tags),
+            Op::RemoteTags {
+                node,
+                file_id,
+                expected,
+                tags,
+            } => self.prepare_rename(*node, *file_id, *expected, None, tags),
+            Op::RemoteDelete {
+                node,
+                file_id,
+                expected,
+            } => self.prepare_remove(*node, *file_id, *expected),
             Op::RemoteUpdate {
                 node,
                 file_id,
@@ -191,6 +218,24 @@ impl Executor<'_> {
 
     pub(super) fn commit(&mut self, ctx: Ctx, result: JobResult) -> Step {
         match (ctx, result) {
+            (
+                Ctx::Meta {
+                    meta, hash, after, ..
+                },
+                result,
+            ) => {
+                let written = match result {
+                    JobResult::Written(w) => Ok(w),
+                    JobResult::Failed(JobError::Remote(e)) => Err(e),
+                    JobResult::Failed(e) => return Ok(Outcome::Retry(e.to_string())),
+                    JobResult::Downloaded { .. } => {
+                        return Ok(Outcome::unsyncable(
+                            "a transfer result for another operation (a fault of this client)",
+                        ));
+                    }
+                };
+                self.commit_meta(meta, hash, after, written)
+            }
             (_, JobResult::Failed(e)) => Ok(match e {
                 JobError::Remote(RemoteError::AlreadyExists) => Outcome::Done, // an earlier try landed
                 JobError::Remote(r) => remote_outcome(r),
@@ -215,7 +260,7 @@ impl Executor<'_> {
                     content,
                     hash,
                 },
-                JobResult::Uploaded(written),
+                JobResult::Written(written),
             ) => {
                 let row =
                     MirrorRow::from_content(written, node, parent, kind, &content, Some(hash));

@@ -210,9 +210,10 @@ impl Reconciler<'_> {
             }
         }
 
-        // Parents before children for creates, all folders before the files (which the executor
-        // uploads together on its pool, until a folder create stops it); children before parents
-        // for deletes; only the topmost local trash of a subtree is needed.
+        // Parents before children for creates, all folders before the files (the executor runs
+        // them together on its pool, a level at a time: a create waits for its folder's);
+        // children before parents for deletes; only the topmost local trash of a subtree is
+        // needed.
         creates.sort_by_key(|(d, op)| (op.is_transfer(), *d, op.node()));
         deletes.sort_by_key(|(d, op)| (std::cmp::Reverse(*d), op.node()));
         let trashed: HashSet<NodeId> = deletes.iter().filter_map(|(_, op)| op.trashes()).collect();

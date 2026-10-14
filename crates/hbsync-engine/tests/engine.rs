@@ -228,6 +228,101 @@ impl Remote for StopAfterCreates {
     }
 }
 
+/// A remote whose writes take a while, counting how many run at once.
+struct SlowWrites {
+    inner: FakeRemote,
+    running: AtomicUsize,
+    most: AtomicUsize,
+}
+
+impl SlowWrites {
+    fn write<T>(&self, f: impl FnOnce() -> T) -> T {
+        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let done = f();
+        self.running.fetch_sub(1, Ordering::SeqCst);
+        done
+    }
+}
+
+impl Remote for SlowWrites {
+    fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
+        self.inner.changes(cursor, limit)
+    }
+    fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
+        self.inner.header(file_id)
+    }
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
+        self.write(|| self.inner.create(node, payload))
+    }
+    fn update(
+        &self,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> RemoteResult<RemoteRef> {
+        self.write(|| self.inner.update(file_id, expected, meta, payload))
+    }
+    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
+        self.inner.delete(file_id, expected)
+    }
+    fn read(
+        &self,
+        file_id: RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn std::io::Write,
+    ) -> RemoteResult<u64> {
+        self.inner.read(file_id, range, sink)
+    }
+}
+
+/// Folder creates, renames and deletes run on the worker pool, several at once, each still
+/// after what it depends on: a folder before what goes into it, contents before their folder.
+#[test]
+fn remote_writes_run_together_in_dependency_order() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let slow = Arc::new(SlowWrites {
+        inner: a.remote.clone(),
+        running: AtomicUsize::new(0),
+        most: AtomicUsize::new(0),
+    });
+    let shared = Arc::clone(&slow);
+    a.restart_with(Box::new(shared), |_| {})?;
+    a.write("keep.txt", "k")?; // deleting every file would be held (the mass-delete guard)
+    for i in 0..12 {
+        fs::create_dir_all(a.root.join(format!("d{i}/sub/deeper")))?;
+        a.write(&format!("d{i}/sub/f.txt"), format!("{i}"))?;
+    }
+    let mut b = Client::new(&server, "b")?;
+    let mut check = |a: &mut Client, what: &str| -> R {
+        let report = a.sync()?;
+        assert!(report.failed.is_empty(), "{what}: {report:?}");
+        let again = a.engine.sync_once("2026-10-08")?;
+        assert!(again.is_idle(), "{what}: all done: {again:?}");
+        let most = slow.most.swap(0, Ordering::SeqCst);
+        assert!(most > 1, "{what}: one write at a time");
+        b.sync()?;
+        assert_eq!(b.tree_text(""), a.tree_text(""), "{what}");
+        Ok(())
+    };
+    check(&mut a, "creates")?;
+    for i in 0..12 {
+        fs::rename(a.root.join(format!("d{i}")), a.root.join(format!("e{i}")))?;
+    }
+    a.engine.scan_local()?;
+    check(&mut a, "renames")?;
+    for i in 0..12 {
+        fs::remove_dir_all(a.root.join(format!("e{i}")))?;
+    }
+    a.engine.scan_local()?;
+    check(&mut a, "deletes")?;
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
+    Ok(())
+}
+
 #[test]
 fn a_stopped_sync_keeps_what_it_did_and_the_next_one_finishes() -> R {
     let server = server();
