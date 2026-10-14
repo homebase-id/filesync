@@ -212,6 +212,7 @@ impl Executor<'_> {
                 kind,
                 content,
                 hash,
+                from: existing.and(mirror.map(|m| m.parent)),
             },
         ))
     }
@@ -259,6 +260,7 @@ impl Executor<'_> {
                     kind,
                     content,
                     hash,
+                    ..
                 },
                 JobResult::Written(written),
             ) => {

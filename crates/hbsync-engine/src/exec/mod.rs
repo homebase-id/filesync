@@ -233,21 +233,33 @@ struct Batch {
     nodes: HashSet<NodeId>,
     /// The folders on the drive they put a node into or take one from.
     folders: HashSet<NodeId>,
+    /// The nodes they move to another folder, and the folders those go into with every folder
+    /// above them.
+    moved: HashSet<NodeId>,
+    under: HashSet<NodeId>,
 }
 
 impl Batch {
-    fn push(&mut self, p: Prepared) {
+    /// Adds `p`; `target`: where it moves its node to, if it does ([`Executor::move_target`]).
+    fn push(&mut self, p: Prepared, target: Option<Vec<NodeId>>) {
         self.nodes.insert(p.job.node());
         if let Job::Upload { meta, .. } | Job::Meta { meta, .. } = &p.job {
             self.folders.insert(meta.parent);
+            self.folders.extend(p.ctx.leaves());
         }
-        if let Ctx::Meta {
-            from: Some(from), ..
-        } = &p.ctx
-        {
-            self.folders.insert(*from);
+        if let Some(target) = target {
+            self.moved.insert(p.job.node());
+            self.under.extend(target);
         }
         self.jobs.push(p);
+    }
+
+    /// Whether moving `node` to `target` (the folder and every one above it) could make a
+    /// cycle on the drive with a move in the batch, landing in either order: one of them
+    /// takes along a folder the other goes into. Moves that don't can't, together in any
+    /// number: each one's target keeps the folders above it.
+    fn crosses(&self, node: NodeId, target: &[NodeId]) -> bool {
+        self.under.contains(&node) || target.iter().any(|n| self.moved.contains(n))
     }
 
     /// Whether `op` must wait until the batch ran: it is about a node in it, or its server-side
@@ -279,6 +291,8 @@ enum Ctx {
         kind: NodeKind,
         content: NodeContent,
         hash: hbsync_types::ContentHash,
+        /// The folder on the drive an updated file is in now.
+        from: Option<NodeId>,
     },
     /// A metadata write; `from`: the folder on the drive the node leaves, if any.
     Meta {
@@ -287,6 +301,16 @@ enum Ctx {
         from: Option<NodeId>,
         after: remote::After,
     },
+}
+
+impl Ctx {
+    /// The folder on the drive the node is in before the write, if it is there.
+    fn leaves(&self) -> Option<NodeId> {
+        match self {
+            Ctx::Upload { from, .. } | Ctx::Meta { from, .. } => *from,
+            Ctx::Download { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for Executor<'_> {
@@ -382,11 +406,27 @@ impl<'a> Executor<'a> {
             };
             // Everything else runs on its own, in order: after the batch.
             let pooled = op.is_transfer() || op.touches_remote();
-            if !batch.jobs.is_empty() && (!pooled || batch.holds_up(&op)) {
+            let mut target = if pooled { self.move_target(&op)? } else { None };
+            if !batch.jobs.is_empty()
+                && (!pooled
+                    || batch.holds_up(&op)
+                    || target.as_ref().is_some_and(|t| batch.crosses(op.node(), t)))
+            {
                 self.flush(&mut batch)?;
                 if self.should_stop() {
                     break;
                 }
+                // What the batch did may have moved the target's folders.
+                if target.is_some() {
+                    target = self.move_target(&op)?;
+                }
+            }
+            // A folder temporarily inside its own destination waits for the move that takes
+            // the destination out (§8a): moved now, the drive would hold a cycle.
+            if target.as_ref().is_some_and(|t| t.contains(&op.node())) {
+                let wait = Outcome::Retry("its destination is inside it on the drive".into());
+                self.handle(op, attempts, wait, None)?;
+                continue;
             }
             if let Err(wait) = self.ready(&op) {
                 self.handle(op, attempts, wait, None)?;
@@ -403,13 +443,16 @@ impl<'a> Executor<'a> {
                 // Transfers and remote writes are collected and run together on the worker
                 // pool.
                 match self.prepare(&op) {
-                    Ok((job, ctx)) => batch.push(Prepared {
-                        op,
-                        attempts,
-                        job,
-                        ctx,
-                        gone,
-                    }),
+                    Ok((job, ctx)) => batch.push(
+                        Prepared {
+                            op,
+                            attempts,
+                            job,
+                            ctx,
+                            gone,
+                        },
+                        target,
+                    ),
                     Err(outcome) => self.handle(op, attempts, outcome, gone)?,
                 }
                 continue;
@@ -425,6 +468,23 @@ impl<'a> Executor<'a> {
             }
         }
         Ok(self.report)
+    }
+
+    /// Where `op` moves its node on the drive, if it moves it to another folder: that folder
+    /// and every one above it, as the mirror has them.
+    fn move_target(&mut self, op: &Op) -> Result<Option<Vec<NodeId>>, StateError> {
+        let Op::RemoteUpdate { node, parent, .. } = op else {
+            return Ok(None);
+        };
+        self.db.read(|s| {
+            if s.get_mirror(*node)?.is_none_or(|m| m.parent == *parent) {
+                return Ok(None);
+            }
+            let above = crate::walk::up::<_, StateError>(*parent, |at| {
+                Ok(s.get_mirror(at)?.map(|m| (at, m.parent)))
+            })?;
+            Ok(Some(above.items))
+        })
     }
 
     /// Settles `first` and the run of `Settle` ops after it (the plan puts them last) in one
@@ -520,14 +580,17 @@ impl<'a> Executor<'a> {
                 self.report.done += 1;
             }
             Outcome::Backoff(why) => {
-                self.streak += 1;
-                if self.streak >= UNREACHABLE_AFTER {
-                    self.report.stopped.get_or_insert(Stopped::Unreachable(why));
-                    return Ok(());
+                // Writes failing together on the pool, before the pause, are one failure.
+                if self.resume_at.is_none() {
+                    self.streak += 1;
+                    if self.streak >= UNREACHABLE_AFTER {
+                        self.report.stopped.get_or_insert(Stopped::Unreachable(why));
+                        return Ok(());
+                    }
+                    // One pause for the whole run, longer for each failure in a row.
+                    let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1));
+                    self.resume_at = Some(Instant::now() + pause);
                 }
-                // One pause for the whole run, longer for each failure in a row.
-                let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1));
-                self.resume_at = Some(Instant::now() + pause);
                 self.retry_or_fail(op, attempts, why);
             }
             Outcome::Retry(why) => self.retry_or_fail(op, attempts, why),
@@ -634,6 +697,7 @@ impl<'a> Executor<'a> {
         let mut pending: HashMap<NodeId, Prepared> = HashMap::new();
         let mut jobs = Vec::new();
         let batch = std::mem::take(batch);
+        let order: Vec<NodeId> = batch.jobs.iter().map(|p| p.job.node()).collect();
         for p in batch.jobs {
             jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
             pending.insert(p.job.node(), p);
@@ -652,7 +716,8 @@ impl<'a> Executor<'a> {
         let transfer = self.cfg.transfer;
         let mut first_error = None;
         // A DB error or a stopped run (requested, denied, unreachable) starts no further
-        // transfers; the nodes stay dirty for the next sync.
+        // transfers; the nodes stay dirty for the next sync. A remote that failed for now
+        // starts none either: they go back to the queue, to run after the pause.
         let halt = self.stop.clone();
         run_jobs_while(
             remote,
@@ -670,11 +735,18 @@ impl<'a> Executor<'a> {
                         first_error = Some(e);
                     }
                 }
-                first_error.is_none() && !self.should_stop()
+                first_error.is_none() && !self.should_stop() && self.resume_at.is_none()
             },
         );
         if let Some(e) = first_error {
             return Err(e);
+        }
+        if !self.should_stop() {
+            for node in order.into_iter().rev() {
+                if let Some(p) = pending.remove(&node) {
+                    self.queue.push_front((p.op, p.attempts));
+                }
+            }
         }
         if self.crashed {
             return Err(StateError::Conflict("crash point reached".into()));

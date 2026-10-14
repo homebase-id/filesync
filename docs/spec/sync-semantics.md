@@ -174,15 +174,20 @@ expected fingerprint is treated as done.
 - **Creates** run only while the local node still exists unchanged.
 - **Parents first on the server.** A remote create, upload or move waits (retry) until its
   parent folder is in the mirror; the server doesn't check parents, and a child of a folder
-  whose create failed would look like an orphan to every other client.
+  whose create failed would look like an orphan to every other client. A remote move whose
+  destination is inside the node on the drive (a nesting turned around) waits too, for the
+  move that takes the destination out: the server doesn't check cycles either.
 - **Folders are deleted last.** A remote folder delete waits while the mirror still has a
   child in it (a child delete that failed or was skipped, or a child just added): the folder
   stays, and the next plan resurrects it if needed.
 - **Together on the pool.** Transfers and remote writes (folder creates, renames, moves, tags,
   deletes) are collected and run together on the worker pool, in any order. An operation that
   depends on one collected waits until they all ran: a create or move into a folder created
-  in the batch, a folder's delete while the batch moves or deletes a child of it, the same
-  node twice. Anything else (local work, settling) runs on its own, after the batch.
+  in the batch, a move into a folder another move in the batch carries along (the two could
+  make a cycle on the drive), a folder's delete while the batch moves or deletes a child of
+  it, the same node twice. Anything else (local work, settling) runs on its own, after the
+  batch. A remote outage starts no further writes; those failing together count as one
+  failure, and the rest run again after the pause.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after
   round and across syncs, so nodes that stay dirty (held, deferred, failing) can't keep the
   rest waiting. A sync ends after a full sweep in which nothing was done.

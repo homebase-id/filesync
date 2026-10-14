@@ -224,8 +224,9 @@ pub fn run_jobs(
     });
 }
 
-/// [`run_jobs`], until `commit` returns `false` or `halt` is set: jobs not started by then are
-/// dropped (jobs already running finish and are committed). The bytes moved are added to
+/// [`run_jobs`], until `commit` returns `false`, `halt` is set, or the remote is out (a job
+/// failed with [`RemoteError::Transient`]: the next would too). Jobs not started by then are
+/// dropped; jobs already running finish and are committed. The bytes moved are added to
 /// `moved`.
 pub fn run_jobs_while(
     remote: &dyn Remote,
@@ -247,19 +248,26 @@ pub fn run_jobs_while(
         throttle: cfg.max_bytes_per_sec.map(Throttle::new),
         moved,
     };
+    let out = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<(Job, JobResult)>();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let tx = tx.clone();
             let queue = &queue;
             let meter = &meter;
+            let out = &out;
             scope.spawn(move || {
-                // Workers take the next job without waiting for the commits: a halt is seen
-                // here too, or fast jobs would all have started before it took effect.
-                while !halt.is_some_and(|h| h.load(Ordering::Relaxed))
+                // Workers take the next job without waiting for the commits: a halt or an
+                // outage is seen here, or fast jobs would all have started before it counted.
+                while !out.load(Ordering::Relaxed)
+                    && !halt.is_some_and(|h| h.load(Ordering::Relaxed))
                     && let Some(job) = queue.lock().ok().and_then(|mut q| q.take())
                 {
                     let result = run_job(remote, &job, meter);
+                    if let JobResult::Failed(JobError::Remote(RemoteError::Transient(_))) = &result
+                    {
+                        out.store(true, Ordering::Relaxed);
+                    }
                     if let Ok(mut q) = queue.lock() {
                         q.finished(&job);
                     }
