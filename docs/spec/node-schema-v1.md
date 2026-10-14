@@ -155,7 +155,8 @@ One metadata-only update of `groupId` and/or `content.name`, guarded by `version
 
 ## Rules for other clients
 What a client that isn't this one (the mobile Filesync mini-app in chat-kmp, odin-js) must do to
-write nodes this client syncs:
+write nodes this client syncs. The file browser's own guide, built on these rules, is
+`file-browser.md`.
 - **Create:** `v`, `name`, and for a file `mtime` and `size`, plus one `sync_data` payload with its
   hash. Every optional key may be left out; send `ct` only if the platform knows the item's real
   creation time (a photo's capture date counts), never the upload time.
