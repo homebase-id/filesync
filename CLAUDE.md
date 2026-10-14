@@ -42,6 +42,8 @@ Read these first:
 - `docs/spec/daemon.md`: the daemon, its files, config, credentials, control socket, autostart.
 - `docs/spec/encryption.md`: how files are encrypted (Homebase's AES-CBC format, checked
   against odin-js), and what it does and doesn't protect.
+- `docs/spec/file-browser.md`: the guide for the file browser (chat-kmp's Filesync mini-app),
+  which lists and opens the drive's files on demand: how it reads and writes what we sync.
 
 Ground rules:
 - Never lose data. The reconciler is a pure function; all OS and network work sits behind traits.
@@ -51,7 +53,8 @@ Ground rules:
 - A change to sync behavior gets a simulator property or regression test (`hbsync-sim`), not
   only an example test.
 - A change to what a node carries updates `docs/spec/node-schema-v1.md` (with a line under
-  Changes) in the same PR: other clients (chat-kmp's Filesync mini-app) follow it.
+  Changes) and, where the file browser is affected, `docs/spec/file-browser.md`, in the same
+  PR: other clients (chat-kmp's Filesync mini-app) follow them.
 
 ## Build and test
 
