@@ -20,101 +20,84 @@ use crate::exec::{content_of, remove_all, trash_dir, trashed_at};
 use crate::scope::Scope;
 use crate::tree::restored_names;
 
-/// Recently deleted in `scope`, newest first.
-pub fn list(db: &mut StateDb, scope: &Scope, limit: usize) -> Result<Vec<Deleted>, StateError> {
+/// Recently deleted in this DB's scope, newest first.
+pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> {
     db.read(|s| {
-        // Folder paths, each worked out once.
-        let mut folders: HashMap<NodeId, String> = HashMap::new();
-        let mut outside: HashMap<NodeId, bool> = HashMap::new();
-        s.list_removed(limit)?
-            .into_iter()
-            .filter_map(|r| match in_scope(s, scope, r.row.node, &mut outside) {
-                Ok(true) => Some(Ok(r)),
-                Ok(false) => None,
-                Err(e) => Some(Err(e)),
-            })
-            .map(|r| {
-                let r = r?;
-                let folder = folder_path(s, r.row.parent, &mut folders)?;
-                Ok(Deleted {
-                    node: r.row.node,
-                    parent: r.row.parent,
-                    path: join(&folder, &r.row.name),
-                    kind: r.row.kind,
-                    size: r.row.file.map(|f| f.size),
-                    removed_at_ms: r.removal.at_ms,
-                    root: r.removal.root,
-                })
-            })
-            .collect()
+        let scope = Scope::stored(s)?;
+        // Folders, each worked out once.
+        let mut folders = HashMap::new();
+        let mut out = Vec::new();
+        for r in s.list_removed(limit)? {
+            let (folder, outside) = folder(s, &scope, r.row.parent, &mut folders)?;
+            if outside || scope.outside.contains(&r.row.node) {
+                continue;
+            }
+            out.push(Deleted {
+                node: r.row.node,
+                parent: r.row.parent,
+                path: join(&folder, &r.row.name),
+                kind: r.row.kind,
+                size: r.row.file.map(|f| f.size),
+                removed_at_ms: r.removal.at_ms,
+                root: r.removal.root,
+            });
+        }
+        Ok(out)
     })
 }
 
-/// Whether `node` lies in `scope`: none of the folders above it, from the tree or from
-/// Recently deleted, is one the scope leaves out. Memoized in `known`.
-fn in_scope(
-    s: &Store<'_>,
-    scope: &Scope,
-    node: NodeId,
-    known: &mut HashMap<NodeId, bool>,
-) -> Result<bool, StateError> {
-    let mut chain = Vec::new();
-    let mut up = node;
-    // Bounded: a damaged DB must not hang.
-    let mut outside = loop {
-        if let Some(&out) = known.get(&up) {
-            break out;
+/// `rows` without those outside this DB's scope.
+fn in_scope(s: &Store<'_>, rows: Vec<RemovedRow>) -> Result<Vec<RemovedRow>, StateError> {
+    let scope = Scope::stored(s)?;
+    let mut folders = HashMap::new();
+    let mut kept = Vec::new();
+    for r in rows {
+        if !scope.outside.contains(&r.row.node) && !folder(s, &scope, r.row.parent, &mut folders)?.1
+        {
+            kept.push(r);
         }
-        if scope.outside.contains(&up) {
-            break true;
-        }
-        if up.is_root() || chain.len() >= 256 {
-            break false;
-        }
-        chain.push(up);
-        match s.get_mirror(up)?.or(s.removed_by_node(up)?.map(|r| r.row)) {
-            Some(row) => up = row.parent,
-            None => break false,
-        }
-    };
-    while let Some(n) = chain.pop() {
-        outside |= scope.outside.contains(&n);
-        known.insert(n, outside);
     }
-    Ok(!outside)
+    Ok(kept)
 }
 
-/// The path of folder `at` (empty for the top), from the tree or from Recently deleted; a
-/// folder deleted for good ends it (the path starts below it).
-fn folder_path(
+/// The path of folder `at` (empty for the top) and whether `scope` leaves it out, from the
+/// tree or from Recently deleted; a folder deleted for good ends the path (it starts below
+/// it). Memoized in `known`.
+fn folder(
     s: &Store<'_>,
+    scope: &Scope,
     at: NodeId,
-    known: &mut HashMap<NodeId, String>,
-) -> Result<String, StateError> {
-    if let Some(path) = known.get(&at) {
-        return Ok(path.clone());
-    }
+    known: &mut HashMap<NodeId, (String, bool)>,
+) -> Result<(String, bool), StateError> {
     let mut names = Vec::new();
     let mut up = at;
-    let mut base = String::new();
     // Bounded: a damaged DB must not hang the list.
-    while !up.is_root() && names.len() < 256 {
-        if let Some(path) = known.get(&up) {
-            base = path.clone();
-            break;
+    let (mut path, outside) = loop {
+        if let Some(k) = known.get(&up) {
+            break k.clone();
         }
-        let Some(folder) = s.get_mirror(up)?.or(s.removed_by_node(up)?.map(|r| r.row)) else {
-            break;
+        if scope.outside.contains(&up) {
+            break (String::new(), true);
+        }
+        if up.is_root() || names.len() >= 256 {
+            break (String::new(), false);
+        }
+        let row = match s.get_mirror(up)? {
+            Some(row) => Some(row),
+            None => s.removed_by_node(up)?.map(|r| r.row),
         };
-        names.push((up, folder.name));
-        up = folder.parent;
-    }
-    // Top-down, remembering each folder's path on the way.
+        let Some(row) = row else {
+            break (String::new(), false);
+        };
+        names.push((up, row.name));
+        up = row.parent;
+    };
+    // Top-down, remembering each folder on the way.
     for (id, name) in names.into_iter().rev() {
-        base = join(&base, &name);
-        known.insert(id, base.clone());
+        path = join(&path, &name);
+        known.insert(id, (path.clone(), outside));
     }
-    Ok(base)
+    Ok((path, outside))
 }
 
 fn join(folder: &str, name: &str) -> String {
@@ -128,13 +111,12 @@ fn join(folder: &str, name: &str) -> String {
 /// Restores `node` with what was deleted with it, and the folders it was in that are in
 /// Recently deleted too (just those, not their other contents). Returns how many items came
 /// back; 0 when `node` isn't in Recently deleted (any more).
-pub fn restore(
-    db: &mut StateDb,
-    remote: &dyn Remote,
-    scope: &Scope,
-    node: NodeId,
-) -> Result<usize, EngineError> {
-    if !db.read(|s| in_scope(s, scope, node, &mut HashMap::new()))? {
+pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<usize, EngineError> {
+    let mine = db.read(|s| {
+        let row = s.removed_by_node(node)?;
+        Ok(!in_scope(s, row.into_iter().collect())?.is_empty())
+    })?;
+    if !mine {
         return Ok(0);
     }
     let Some(plan) = db.read(|s| plan_restore(s, node))? else {
@@ -289,19 +271,16 @@ pub fn purge(
 pub fn empty(
     db: &mut StateDb,
     remote: &dyn Remote,
-    scope: &Scope,
     nodes: &[NodeId],
 ) -> Result<usize, EngineError> {
     let mut rows = db.read(|s| {
-        let mut rows = Vec::new();
-        let mut known = HashMap::new();
+        let mut tops = Vec::new();
         for &node in nodes {
-            if !in_scope(s, scope, node, &mut known)? {
-                continue;
-            }
-            if let Some(top) = s.removed_by_node(node)? {
-                rows.extend(group(s, top)?);
-            }
+            tops.extend(s.removed_by_node(node)?);
+        }
+        let mut rows = Vec::new();
+        for top in in_scope(s, tops)? {
+            rows.extend(group(s, top)?);
         }
         Ok(rows)
     })?;
@@ -315,19 +294,9 @@ pub fn empty(
 pub fn empty_until(
     db: &mut StateDb,
     remote: &dyn Remote,
-    scope: &Scope,
     at_ms: i64,
 ) -> Result<usize, EngineError> {
-    let rows = db.read(|s| {
-        let mut known = HashMap::new();
-        let mut rows = Vec::new();
-        for r in s.removed_before(at_ms.saturating_add(1))? {
-            if in_scope(s, scope, r.row.node, &mut known)? {
-                rows.push(r);
-            }
-        }
-        Ok(rows)
-    })?;
+    let rows = db.read(|s| in_scope(s, s.removed_before(at_ms.saturating_add(1))?))?;
     delete_for_good(db, remote, &rows)
 }
 

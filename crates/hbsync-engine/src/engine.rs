@@ -21,7 +21,6 @@ use crate::view;
 
 /// The state DB key of the fingerprint of the filter the DB was last synced with.
 const FILTER_KEY: &str = "filter.fingerprint";
-const SCOPE_KEY: &str = "scope.fingerprint";
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -61,7 +60,7 @@ impl EngineConfig {
             mass_delete_min: 50,
             mass_delete_fraction: 0.25,
             allow_mass_delete: false,
-            scope: Arc::default(),
+            scope: Arc::new(Scope::main()),
         }
     }
 }
@@ -268,12 +267,12 @@ impl Engine {
             // A new scope (§12) changes what is in view remotely only: no walk. The folders it
             // or the last one left out are planned again from their tops, which brings what
             // is in them: what this device holds there goes, what comes into view comes.
-            let last = s.get_kv(SCOPE_KEY)?;
+            let last = s.get_kv(crate::scope::KEY)?;
             if last.as_deref() != Some(scope.as_str()) {
                 let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
                 last.union(&self.cfg.scope.outside)
                     .try_for_each(|n| s.mark_dirty(*n))?;
-                s.set_kv(SCOPE_KEY, &scope)?;
+                s.set_kv(crate::scope::KEY, &scope)?;
             }
             if s.get_kv(FILTER_KEY)?.as_deref() == Some(fingerprint.as_str()) {
                 return Ok(false);
@@ -293,7 +292,7 @@ impl Engine {
 
     /// Recently deleted, newest first.
     pub fn recently_deleted(&mut self, limit: usize) -> Result<Vec<Deleted>, StateError> {
-        deleted::list(&mut self.db, &self.cfg.scope, limit)
+        deleted::list(&mut self.db, limit)
     }
 
     /// Restores these items of Recently deleted (each with what was deleted with it); the
@@ -302,8 +301,7 @@ impl Engine {
         feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
         let mut restored = 0;
         for &node in nodes {
-            restored +=
-                deleted::restore(&mut self.db, self.remote.as_ref(), &self.cfg.scope, node)?;
+            restored += deleted::restore(&mut self.db, self.remote.as_ref(), node)?;
         }
         Ok(restored)
     }
@@ -311,13 +309,13 @@ impl Engine {
     /// Deletes these items of Recently deleted for good, each with what was deleted with it.
     pub fn empty_deleted(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        deleted::empty(&mut self.db, self.remote.as_ref(), &self.cfg.scope, nodes)
+        deleted::empty(&mut self.db, self.remote.as_ref(), nodes)
     }
 
     /// Deletes for good everything removed until `at_ms` (Unix ms): what the user was shown.
     pub fn empty_deleted_until(&mut self, at_ms: i64) -> Result<usize, EngineError> {
         feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        deleted::empty_until(&mut self.db, self.remote.as_ref(), &self.cfg.scope, at_ms)
+        deleted::empty_until(&mut self.db, self.remote.as_ref(), at_ms)
     }
 
     /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted and

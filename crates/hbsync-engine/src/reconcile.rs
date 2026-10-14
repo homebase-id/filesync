@@ -81,7 +81,7 @@ impl Default for Options {
             confirmed: Arc::default(),
             pending_deletes: (0, 0),
             filter: Arc::default(),
-            scope: Arc::default(),
+            scope: Arc::new(Scope::main()),
         }
     }
 }

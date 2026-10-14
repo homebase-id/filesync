@@ -155,13 +155,12 @@ pub fn build_input(
     // A folder that is gone remotely (or masked) but present locally may be trashed or
     // detached: load all of it.
     // Each folder once: a dirty folder inside one already loaded is in it.
-    let masked = crate::mask::masked(&b.input.remote, filter);
-    let outside = scope.out_of_scope(&b.input.remote);
+    let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !loaded.contains(&node)
             && b.input.base.contains(node)
-            && (!b.input.remote.contains(node) || masked.contains(&node) || outside.contains(&node))
+            && (!b.input.remote.contains(node) || hidden.contains(&node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)
@@ -174,6 +173,7 @@ pub fn build_input(
     }
     // Whether a masked folder synced here leaves the drive depends on everything in it
     // remotely (§10): load all of it.
+    let masked = crate::mask::masked(&b.input.remote, filter);
     let mut expanded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !(masked.contains(&node) && b.input.base.contains(node)) {
@@ -188,6 +188,17 @@ pub fn build_input(
             }
             b.load_children(folder)?;
             folders.extend(b.input.remote.children(folder));
+        }
+    }
+    // What the scope leaves out, when this device holds nothing of it (the usual case: only an
+    // older version synced a role folder here), isn't the plan's at all.
+    let outside = scope.out_of_scope(&b.input.remote);
+    if !outside.is_empty()
+        && crate::mask::synced_outside(&b.input.base, &b.input.remote, scope).is_empty()
+        && !outside.iter().any(|n| b.input.local.contains(*n))
+    {
+        for node in outside {
+            b.input.remote.remove(node);
         }
     }
     Ok(b.input)

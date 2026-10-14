@@ -37,23 +37,20 @@ fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
 }
 
 fn run(clients: usize, events: &[Event]) -> Result<(), TestCaseError> {
-    run_with(clients, None, false, events)
+    run_with(clients, None, |sim| sim, events)
 }
 
-/// Runs `events` with the mass-delete guard at `guard` (its minimum), and with a role folder on
-/// the server if `role`, then lets every client settle (confirming what the guard holds, with
-/// the guard on) and checks the outcome.
+/// Runs `events` with the mass-delete guard at `guard` (its minimum), on a simulation `setup`
+/// prepares, then lets every client settle (confirming what the guard holds, with the guard
+/// on) and checks the outcome.
 fn run_with(
     clients: usize,
     guard: Option<usize>,
-    role: bool,
+    setup: fn(Sim) -> Sim,
     events: &[Event],
 ) -> Result<(), TestCaseError> {
     let outcome = |verbose: bool| {
-        let mut sim = Sim::new(clients);
-        if role {
-            sim = sim.with_role_folder();
-        }
+        let mut sim = setup(Sim::new(clients));
         sim.guard = guard;
         sim.verbose = verbose;
         sim.run(events);
@@ -106,14 +103,14 @@ proptest! {
         events in proptest::collection::vec(guarded_event(2), 0..80),
         min in 1usize..3,
     ) {
-        run_with(2, Some(min), false, &events)?;
+        run_with(2, Some(min), |sim| sim, &events)?;
     }
 
     /// The main folders leave a role folder another device made alone (§12): never synced
     /// here, never changed, whatever the users do around it.
     #[test]
     fn main_folders_leave_role_folders_alone(events in proptest::collection::vec(event(3), 0..120)) {
-        run_with(3, None, true, &events)?;
+        run_with(3, None, Sim::with_role_folder, &events)?;
     }
 }
 
@@ -848,7 +845,7 @@ fn regression_confirmed_trash_of_a_folder_moved_into_an_ignored_name() {
             },
         ),
     ];
-    if let Err(e) = run_with(2, Some(1), false, &events) {
+    if let Err(e) = run_with(2, Some(1), |sim| sim, &events) {
         panic!("{e}");
     }
 }
@@ -1022,7 +1019,7 @@ fn regression_detached_twice_back_into_the_role_folder() {
         act(0, CreateFile { parent: 0, name: 0 }),
         Event::Step { client: 2 },
     ];
-    if let Err(e) = run_with(3, None, true, &events) {
+    if let Err(e) = run_with(3, None, Sim::with_role_folder, &events) {
         panic!("{e}");
     }
 }

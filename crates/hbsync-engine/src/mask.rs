@@ -64,12 +64,16 @@ pub struct Masks {
 
 impl Masks {
     pub fn of(input: &Input, filter: &Filter, scope: &Scope, device: &str) -> Masks {
-        let mut masked = masked(&input.remote, filter);
         let outside = scope.out_of_scope(&input.remote);
+        // The filter's masks, on what the scope keeps; the rules below are the filter's (§10).
+        let mut masked: HashSet<NodeId> = masked(&input.remote, filter)
+            .into_iter()
+            .filter(|m| !outside.contains(m))
+            .collect();
         // What this device synced outside the scope (an older version's copy of a role
         // folder). Gone remotely, or still outside, it is let go of like the rest; moved into
         // the scope remotely, it is an ordinary move. Either way it never holds its folder here.
-        let synced_outside = synced_outside(&input.base, &input.remote, &outside, scope);
+        let synced_outside = synced_outside(&input.base, &input.remote, scope);
         let held_outside: Vec<NodeId> = synced_outside
             .iter()
             .copied()
@@ -85,13 +89,12 @@ impl Masks {
             .iter()
             .copied()
             .filter(|m| filtered_base.contains(m) && input.local.contains(*m))
-            .filter(|m| !outside.contains(m))
             .collect();
         masked.retain(|m| !brought_back.contains(m));
         let leaving: HashSet<NodeId> = masked
             .iter()
             .copied()
-            .filter(|m| filtered_base.contains(m) && !outside.contains(m))
+            .filter(|m| filtered_base.contains(m))
             .filter(|m| match (input.base.get(*m), input.remote.get(*m)) {
                 (Some(b), Some(r)) => {
                     b.same_place(r)
@@ -104,6 +107,17 @@ impl Masks {
         // Leaving is an ordinary local delete: the scanner no longer reports the item.
         let leaving = only_whole_folders(&input.remote, leaving);
         masked.retain(|m| !leaving.contains(m));
+        // The names the filter's masks hold stay taken; a role folder holds none for the scope:
+        // a plain folder of the same name keeps it (two at the top, told apart by id).
+        let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        for m in &masked {
+            if let Some(state) = input.remote.get(*m) {
+                names
+                    .entry(state.parent)
+                    .or_default()
+                    .insert(name_key(&state.name));
+            }
+        }
         masked.extend(outside.iter().copied().chain(held_outside));
         if masked.is_empty() {
             return Masks {
@@ -197,17 +211,6 @@ impl Masks {
             dirty,
             remote_complete: input.remote_complete,
         };
-        // A role folder holds no name for the scope: a plain folder of the same name keeps it
-        // (two at the top, told apart by id).
-        let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        for m in masked.iter().filter(|m| !outside.contains(m)) {
-            if let Some(state) = input.remote.get(*m) {
-                names
-                    .entry(state.parent)
-                    .or_default()
-                    .insert(name_key(&state.name));
-            }
-        }
         Masks {
             masked,
             keep_alive,
@@ -220,27 +223,27 @@ impl Masks {
 }
 
 /// The synced nodes whose synced place lies outside `scope`. A folder above may have no base
-/// any more (its copy here was detached): the remote's then tells where it is.
-fn synced_outside(
-    base: &Tree,
-    remote: &Tree,
-    outside: &HashSet<NodeId>,
-    scope: &Scope,
-) -> HashSet<NodeId> {
-    if outside.is_empty() {
-        return scope.out_of_scope(base);
-    }
-    let mut places = base.clone();
-    for (node, state) in remote.iter() {
-        if !places.contains(node) {
-            places.insert(node, state.clone());
+/// any more (its copy here was detached): the remote's then tells where it is. Costs what is
+/// outside.
+pub(crate) fn synced_outside(base: &Tree, remote: &Tree, scope: &Scope) -> HashSet<NodeId> {
+    let mut seen = HashSet::new();
+    let mut stack: Vec<NodeId> = scope.outside.iter().copied().collect();
+    while let Some(node) = stack.pop() {
+        if seen.insert(node) {
+            stack.extend(base.children(node));
+            stack.extend(remote.children(node).filter(|c| !base.contains(*c)));
         }
     }
-    scope
-        .out_of_scope(&places)
-        .into_iter()
-        .filter(|n| base.contains(*n))
-        .collect()
+    seen.retain(|n| base.contains(*n));
+    seen
+}
+
+/// What this device doesn't sync of `remote`: what `filter` matches (see [`masked`]) and what
+/// lies outside `scope`.
+pub fn hidden(remote: &Tree, filter: &Filter, scope: &Scope) -> HashSet<NodeId> {
+    let mut hidden = masked(remote, filter);
+    hidden.extend(scope.out_of_scope(remote));
+    hidden
 }
 
 /// `leaving` without the folders that hold anything else remotely (another device added it):

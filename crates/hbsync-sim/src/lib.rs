@@ -34,7 +34,7 @@ use hbsync_engine::tree::{Tree, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::Os;
-use hbsync_platform::name::{check_remote_name, name_key};
+use hbsync_platform::name::check_remote_name;
 use hbsync_platform::tags::express;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -171,6 +171,34 @@ impl Server {
         }
         t
     }
+
+    /// Puts `state` on the server as another device would, as a new file.
+    fn put(&mut self, node: NodeId, state: NodeState) -> RemoteRef {
+        let remote = RemoteRef {
+            file_id: RemoteFileId(self.uuid()),
+            version: VersionTag(self.uuid()),
+        };
+        self.ever.insert(node);
+        self.live.insert(node, ServerNode { state, remote });
+        remote
+    }
+
+    /// Whether `node` is the role folder or lies in it.
+    fn in_role_folder(&self, node: NodeId) -> bool {
+        let docs = Role::Documents.node();
+        let mut up = node;
+        // Bounded: a cycle ends it.
+        for _ in 0..=self.live.len() {
+            if up == docs {
+                return true;
+            }
+            match self.live.get(&up) {
+                Some(n) => up = n.state.parent,
+                None => return false,
+            }
+        }
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -227,8 +255,6 @@ pub struct Sim {
     tags_added: BTreeSet<(usize, NodeId, String)>,
     tags_removed: BTreeSet<(NodeId, String)>,
     deleted: BTreeSet<NodeId>,
-    /// Whether the server has a role folder ([`Sim::with_role_folder`]).
-    role: bool,
     /// The first operation a client ran on the role folder or what is in it.
     scope_breach: Option<String>,
 }
@@ -271,7 +297,6 @@ impl Sim {
             tags_added: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
             deleted: BTreeSet::new(),
-            role: false,
             scope_breach: None,
         }
     }
@@ -287,72 +312,42 @@ impl Sim {
         let folder = NodeState::folder(NodeId::ROOT, NAMES[0]);
         let cv = NodeState::file(docs, NAMES[3], self.new_blob());
         for (node, state) in [(docs, folder), (file, cv)] {
-            let remote = RemoteRef {
-                file_id: RemoteFileId(self.server.uuid()),
-                version: VersionTag(self.server.uuid()),
-            };
-            self.server.ever.insert(node);
+            let remote = self.server.put(node, state.clone());
             let holder = &mut self.clients[0];
-            holder.local.insert(node, state.clone());
-            holder.base.insert(node, state.clone());
             if state.kind == NodeKind::File {
                 holder
                     .extra
                     .insert(node, extra(&state, Some(remote.version)));
             }
-            self.server.live.insert(node, ServerNode { state, remote });
+            holder.local.insert(node, state.clone());
+            holder.base.insert(node, state);
         }
-        self.role = true;
         self
-    }
-
-    /// The role folder's subtree on the server, the folder first.
-    fn role_subtree(&self) -> Vec<NodeId> {
-        let tree = self.server.tree();
-        let out = Scope::main().out_of_scope(&tree);
-        let mut nodes: Vec<NodeId> = out.into_iter().collect();
-        nodes.sort();
-        nodes.retain(|n| *n != Role::Documents.node());
-        nodes.insert(0, Role::Documents.node());
-        nodes
     }
 
     /// Another device (the phone) changes a file in the role folder: `op` picks adding, editing,
     /// removing (to Recently deleted) or moving one to the top, under a free name.
     fn phone(&mut self, op: usize, pick: usize) {
-        if !self.role {
+        let docs = Role::Documents.node();
+        if !self.server.ever.contains(&docs) {
             return;
         }
-        let docs = Role::Documents.node();
         let files: Vec<NodeId> = self
-            .role_subtree()
-            .into_iter()
-            .filter(|n| {
-                self.server
-                    .live
-                    .get(n)
-                    .is_some_and(|s| s.state.kind == NodeKind::File)
-            })
+            .server
+            .live
+            .iter()
+            .filter(|(n, s)| s.state.kind == NodeKind::File && self.server.in_role_folder(**n))
+            .map(|(n, _)| *n)
             .collect();
-        let free = |server: &Server, parent: NodeId, name: &str| {
-            !server
-                .live
-                .values()
-                .any(|n| n.state.parent == parent && name_key(&n.state.name) == name_key(name))
-        };
+        let tree = self.server.tree();
+        let free = |parent: NodeId, name: &str| tree.child_named(parent, name, None).is_none();
         let version = VersionTag(self.server.uuid());
         match (op % 4, files.get(pick % files.len().max(1)).copied()) {
             (0, _) | (_, None) => {
                 let name = NAMES[pick % NAMES.len()];
-                if free(&self.server, docs, name) {
+                if free(docs, name) {
                     let state = NodeState::file(docs, name, self.new_blob());
-                    let node = NodeId::new();
-                    let remote = RemoteRef {
-                        file_id: RemoteFileId(self.server.uuid()),
-                        version,
-                    };
-                    self.server.ever.insert(node);
-                    self.server.live.insert(node, ServerNode { state, remote });
+                    self.server.put(NodeId::new(), state);
                 }
             }
             (1, Some(file)) => {
@@ -370,8 +365,7 @@ impl Sim {
                 }
             }
             (_, Some(file)) => {
-                let name = self.server.live[&file].state.name.clone();
-                if free(&self.server, NodeId::ROOT, &name)
+                if free(NodeId::ROOT, &self.server.live[&file].state.name)
                     && let Some(n) = self.server.live.get_mut(&file)
                 {
                     n.state.parent = NodeId::ROOT;
@@ -828,22 +822,15 @@ impl Sim {
         if !ready(&self.clients[c], op) {
             return Retry;
         }
-        if self.role && self.scope_breach.is_none() {
-            let outside = Scope::main().out_of_scope(&self.server.tree());
-            let target = match op {
-                Op::RemoteCreate { parent, .. } | Op::RemoteUpdate { parent, .. } => Some(*parent),
-                _ => None,
+        if self.scope_breach.is_none() {
+            let touched = match op {
+                Op::RemoteCreate { node, parent, .. } | Op::RemoteUpdate { node, parent, .. } => {
+                    vec![*node, *parent]
+                }
+                Op::RemoteTags { node, .. } | Op::RemoteDelete { node, .. } => vec![*node],
+                _ => Vec::new(),
             };
-            let writes = matches!(
-                op,
-                Op::RemoteCreate { .. }
-                    | Op::RemoteUpdate { .. }
-                    | Op::RemoteTags { .. }
-                    | Op::RemoteDelete { .. }
-            );
-            if writes
-                && (outside.contains(&op.node()) || target.is_some_and(|p| outside.contains(&p)))
-            {
+            if touched.iter().any(|n| self.server.in_role_folder(*n)) {
                 self.scope_breach = Some(format!("c{c} {op:?}"));
             }
         }
@@ -1451,7 +1438,7 @@ impl Sim {
         if let Some(op) = &self.scope_breach {
             return Err(format!("a client wrote to the role folder: {op}"));
         }
-        if self.role
+        if self.server.ever.contains(&Role::Documents.node())
             && server
                 .get(Role::Documents.node())
                 .is_none_or(|s| s.parent != NodeId::ROOT)

@@ -828,7 +828,7 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
         &mut db,
         dir.path(),
         hbsync_platform::Os::current(),
-        &Default::default(),
+        &hbsync_engine::scope::Scope::main(),
     )?;
     let took = started.elapsed();
     assert_eq!(adopted, N);
@@ -1046,16 +1046,29 @@ fn a_file_moved_into_a_folder_one_device_ignores_leaves_that_device_only() -> R 
     Ok(())
 }
 
-/// `c` restarted with the ignore rules `rules`.
-fn restart_ignoring(c: &mut Client, name: &str, rules: &'static str) -> R {
+/// `c` restarted with its config changed by `tweak`, as at a start-up: returns whether the
+/// filter changed.
+fn restart_with(
+    c: &mut Client,
+    name: &str,
+    tweak: impl FnOnce(&mut hbsync_engine::EngineConfig),
+) -> Result<bool, Box<dyn std::error::Error>> {
     let mut cfg = common::config(&c.root, name);
-    ignoring(rules)(&mut cfg);
+    tweak(&mut cfg);
     c.engine = Engine::new(
         StateDb::open(&c.db_path())?,
         Box::new(c.remote.clone()),
         cfg,
     );
-    assert!(c.engine.apply_filter_change()?, "the filter changed");
+    Ok(c.engine.apply_filter_change()?)
+}
+
+/// `c` restarted with the ignore rules `rules`.
+fn restart_ignoring(c: &mut Client, name: &str, rules: &'static str) -> R {
+    assert!(
+        restart_with(c, name, ignoring(rules))?,
+        "the filter changed"
+    );
     assert!(!c.engine.apply_filter_change()?, "and is recorded");
     Ok(())
 }
@@ -1703,33 +1716,17 @@ fn seed_role(
     data: &str,
 ) -> R {
     let mut srv = server.lock().map_err(|_| "poisoned")?;
-    srv.create(
-        &NodeMeta {
-            node: role.node(),
-            parent: hbsync_types::NodeId::ROOT,
-            kind: hbsync_types::NodeKind::Folder,
-            content: hbsync_types::schema::NodeContent::folder(role.name()),
-        },
-        None,
-    )?;
+    let folder = NodeMeta {
+        node: role.node(),
+        ..hbsync_remote::contract::folder(role.name(), hbsync_types::NodeId::ROOT)
+    };
+    srv.create(&folder, None)?;
     srv.seed_file(
         role.node(),
         file,
         data.as_bytes(),
         hbsync_fileio::HashAlgorithm::Blake3,
     )?;
-    Ok(())
-}
-
-/// `c` restarted with the main folder's scope, after syncing with none (an older version).
-fn restart_scoped(c: &mut Client, name: &str) -> R {
-    let cfg = common::config(&c.root, name);
-    c.engine = Engine::new(
-        StateDb::open(&c.db_path())?,
-        Box::new(c.remote.clone()),
-        cfg,
-    );
-    c.engine.apply_filter_change()?;
     Ok(())
 }
 
@@ -1782,7 +1779,7 @@ fn a_role_folder_an_older_version_synced_leaves_the_main_folder_only() -> R {
         ["Documents/", "Documents/cv.txt = role", "readme.txt = r"]
     );
 
-    restart_scoped(&mut a, "a")?;
+    restart_with(&mut a, "a", |_| {})?;
     a.sync()?;
     assert_eq!(a.tree_text(), ["readme.txt = r"]);
     let names = server.lock().map_err(|_| "poisoned")?.live_names();
@@ -1799,7 +1796,7 @@ fn an_edit_in_a_role_folder_an_older_version_synced_stays_as_a_folder_of_its_own
     a.sync()?;
     a.write("Documents/cv.txt", "edited here")?;
 
-    restart_scoped(&mut a, "a")?;
+    restart_with(&mut a, "a", |_| {})?;
     a.sync()?;
     // The edit can't go into the role folder from here: it stays, as a folder of its own.
     assert_eq!(
@@ -1856,7 +1853,7 @@ fn what_was_deleted_or_moved_in_a_role_folder_an_older_version_synced_stays_so()
         srv.update(moved.1.file_id, moved.1.version, &meta, None)?;
     }
 
-    restart_scoped(&mut a, "a")?;
+    restart_with(&mut a, "a", |_| {})?;
     a.sync()?;
     assert_eq!(a.tree_text(), ["moved.txt = moved", "readme.txt = r"]);
     let names = server.lock().map_err(|_| "poisoned")?.live_names();
@@ -1891,14 +1888,7 @@ fn a_role_folder_no_longer_left_out_comes_with_everything_in_it() -> R {
     a.sync()?;
     assert_eq!(a.tree_text(), ["readme.txt = r"]);
 
-    let mut cfg = common::config(&a.root, "a");
-    unscoped(&mut cfg);
-    a.engine = Engine::new(
-        StateDb::open(&a.db_path())?,
-        Box::new(a.remote.clone()),
-        cfg,
-    );
-    a.engine.apply_filter_change()?;
+    restart_with(&mut a, "a", unscoped)?;
     a.sync()?;
     assert_eq!(
         a.tree_text(),
@@ -1924,20 +1914,13 @@ fn recently_deleted_in_a_role_folder_isnt_the_main_folders() -> R {
             .collect();
         assert_eq!(files.len(), 2);
         for h in files {
-            if let hbsync_remote::RemoteBody::Live {
-                node, mut content, ..
-            } = h.body
-            {
-                content.set_removal(Some(hbsync_types::schema::Removal {
-                    at_ms: 1,
-                    root: node,
-                }));
-                let meta = NodeMeta {
+            if let hbsync_remote::RemoteBody::Live { node, content, .. } = h.body {
+                let meta = hbsync_remote::contract::removed(&NodeMeta {
                     node,
                     parent: h.parent,
                     kind: h.kind,
                     content,
-                };
+                });
                 srv.update(h.file_id, h.version, &meta, None)?;
             }
         }

@@ -207,9 +207,7 @@ fn answer(
     if let Ask::Deleted { limit } = request.ask {
         return Reply::Deleted(
             StateDb::open(&state_db_path(&root.folder))
-                .and_then(|mut db| {
-                    hbsync_engine::deleted::list(&mut db, &Default::default(), limit)
-                })
+                .and_then(|mut db| hbsync_engine::deleted::list(&mut db, limit))
                 .unwrap_or_default(),
         );
     }
