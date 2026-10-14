@@ -36,6 +36,7 @@ fn to_do(note: &str, folder: &Path, key: &str) -> (bool, bool) {
 
 /// Writes `bytes` to `path` when they differ from what is there; a file that can't be written
 /// again (Explorer holds it open) stays as it is.
+#[cfg(not(target_os = "macos"))]
 fn write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if std::fs::read(path).is_ok_and(|b| b == bytes) {
         return Ok(());
@@ -75,7 +76,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
             tracing::info!("the folder's icon: {e}");
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(not(windows))]
     if first {
         os::shortcut(folder);
     }
@@ -288,6 +289,9 @@ mod os {
     pub fn icon(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
         set_icon(folder, Some(icons.png))
     }
+
+    /// Finder's sidebar has no public interface.
+    pub fn shortcut(_folder: &Path) {}
 
     pub fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         set_icon(folder, None)
