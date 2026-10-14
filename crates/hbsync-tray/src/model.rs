@@ -187,7 +187,7 @@ pub fn menu(view: &View) -> Vec<Item> {
     ));
     if let Some(s) = status {
         items.push(Item::Action(
-            Action::OpenOnline(files_online(&s.identity)),
+            Action::OpenOnline(hbsync_app::files_online(&s.identity)),
             "Browse files online".into(),
         ));
         items.push(recently_synced(view.recent, &s.folder, view.now));
@@ -246,12 +246,6 @@ pub fn menu(view: &View) -> Vec<Item> {
     items.push(Item::Separator);
     items.push(quit());
     items
-}
-
-/// Chat's web app on the identity, opened on its Filesync mini-app: the drive's files in the
-/// browser.
-fn files_online(identity: &str) -> String {
-    format!("https://{identity}/apps/chat-wasm/#filesync")
 }
 
 fn quit() -> Item {
