@@ -15,7 +15,7 @@ use crate::adopt::adopt;
 use crate::deleted;
 use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
-use crate::reconcile::{Conflict, Op, Options, reconcile};
+use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
 use crate::scope::Scope;
 use crate::view;
 
@@ -382,6 +382,7 @@ impl Engine {
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
             filter: Arc::clone(&self.cfg.exec.filter),
             scope: Arc::clone(&self.cfg.scope),
+            taken: Arc::default(),
         };
         // The dirty set is planned page by page in node id order and swept round after
         // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
@@ -440,7 +441,10 @@ impl Engine {
         let input = self
             .db
             .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter, &self.cfg.scope))?;
-        let plan = reconcile(&input, opts);
+        let db = &mut self.db;
+        let plan = reconcile_with_known(&input, opts, |id| {
+            db.read(|s| s.knows_node(id)).unwrap_or(true)
+        });
         // A confirmation lasts while its node's plan deletes it: one whose delete was undone
         // (the file back) is forgotten, so a later delete is judged anew.
         let deleting: std::collections::HashSet<NodeId> =

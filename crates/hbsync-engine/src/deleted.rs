@@ -26,12 +26,20 @@ pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> 
         let scope = Scope::stored(s)?;
         // Folders, each worked out once.
         let mut folders = HashMap::new();
-        let mut out = Vec::new();
-        for r in s.list_removed(limit)? {
-            let (folder, outside) = folder(s, &scope, r.row.parent, &mut folders)?;
-            if outside || scope.outside.contains(&r.row.node) {
-                continue;
+        // More rows while those outside the scope crowd out the ones in it.
+        let mut asked = limit;
+        let rows = loop {
+            let rows = s.list_removed(asked)?;
+            let got = rows.len();
+            let kept = in_scope_with(s, &scope, &mut folders, rows)?;
+            if kept.len() >= limit || got < asked {
+                break kept;
             }
+            asked = asked.saturating_mul(4);
+        };
+        let mut out = Vec::new();
+        for r in rows.into_iter().take(limit) {
+            let (folder, _) = folder(s, &scope, r.row.parent, &mut folders)?;
             out.push(Deleted {
                 node: r.row.node,
                 parent: r.row.parent,
@@ -48,12 +56,19 @@ pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> 
 
 /// `rows` without those outside this DB's scope.
 fn in_scope(s: &Store<'_>, rows: Vec<RemovedRow>) -> Result<Vec<RemovedRow>, StateError> {
-    let scope = Scope::stored(s)?;
-    let mut folders = HashMap::new();
+    in_scope_with(s, &Scope::stored(s)?, &mut HashMap::new(), rows)
+}
+
+/// `rows` without those outside `scope`, with the folders worked out so far in `folders`.
+fn in_scope_with(
+    s: &Store<'_>,
+    scope: &Scope,
+    folders: &mut HashMap<NodeId, (String, bool)>,
+    rows: Vec<RemovedRow>,
+) -> Result<Vec<RemovedRow>, StateError> {
     let mut kept = Vec::new();
     for r in rows {
-        if !scope.outside.contains(&r.row.node) && !folder(s, &scope, r.row.parent, &mut folders)?.1
-        {
+        if !scope.outside.contains(&r.row.node) && !folder(s, scope, r.row.parent, folders)?.1 {
             kept.push(r);
         }
     }

@@ -330,17 +330,17 @@ local folder has an engine and a state DB of its own, scoped to a part of the dr
 
 What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
-syncs it, so this one only lets go of what it holds there (an older version synced a role folder
-into the main folder):
-- an unchanged copy goes to the trash; a changed one (edited, or new here) is detached and goes
-  up as a new folder of its own, beside the role folder;
-- what it synced in there and was deleted remotely since is trashed here, as any remote delete,
-  never brought back (it doesn't hold its folder here);
-- what moved into the scope remotely since follows the move, unless it was edited here: then
-  it stays put, as a conflict copy in the detached folder.
+syncs it. A role folder at the top that the engine holds nothing of isn't planned at all; no
+version ever synced one into the main folder, so a device holds one only through a bug, and
+then lets go of it as of anything masked. A role folder moved into a folder (against the node
+schema's rules) is masked there and keeps that folder alive (§6.3).
 
 A role folder holds no name for the scope: a plain folder of the same name at the top keeps it
 (two at the top, told apart by their ids). A new scope plans the folders it, or the last one,
 left out again, from their tops; it needs no walk, as only the remote view changed. Recently
 deleted is listed, restored and emptied per scope; the purge, by age, is the whole drive's
 (the main folder's engine runs it).
+
+A detached item's new id is fixed for the node and the device, so a replan picks the same one,
+but never one in use here: the same node detached again while its first copy lives gets the
+next.

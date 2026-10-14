@@ -190,15 +190,22 @@ pub fn build_input(
             folders.extend(b.input.remote.children(folder));
         }
     }
-    // What the scope leaves out, when this device holds nothing of it (the usual case: only an
-    // older version synced a role folder here), isn't the plan's at all.
-    let outside = scope.out_of_scope(&b.input.remote);
-    if !outside.is_empty()
-        && crate::mask::synced_outside(&b.input.base, &b.input.remote, scope).is_empty()
-        && !outside.iter().any(|n| b.input.local.contains(*n))
-    {
-        for node in outside {
-            b.input.remote.remove(node);
+    // A role folder at the top that this device holds nothing of (always, but for a bug) isn't
+    // the plan's at all: nothing to mask. One moved into a folder stays, masked, and keeps that
+    // folder alive (§6.3).
+    let top: Vec<NodeId> = scope
+        .outside
+        .iter()
+        .copied()
+        .filter(|n| b.input.remote.get(*n).is_some_and(|s| s.parent.is_root()))
+        .collect();
+    let held = |n: &NodeId| b.input.base.contains(*n) || b.input.local.contains(*n);
+    for folder in top {
+        let subtree = b.input.remote.subtree(folder);
+        if !subtree.iter().any(held) {
+            for node in subtree {
+                b.input.remote.remove(node);
+            }
         }
     }
     Ok(b.input)

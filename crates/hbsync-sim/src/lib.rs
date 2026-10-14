@@ -28,7 +28,9 @@ use std::sync::Arc;
 
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
-use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile};
+use hbsync_engine::reconcile::{
+    Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile_with_known,
+};
 use hbsync_engine::scope::Scope;
 use hbsync_engine::tree::{Tree, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
@@ -302,27 +304,34 @@ impl Sim {
     }
 
     /// Puts the Documents role folder on the server, named like the users' items (a role
-    /// folder may have any name), with a file another device made in it; client 0 holds both,
-    /// as an older version synced them into its main folder. Every client syncs the main
-    /// folder, which leaves role folders out (§12): no client may touch it or what is in it,
-    /// and what the phone does in it ([`Action::Phone`]) must not come back on its own.
+    /// folder may have any name), with a file another device made in it. Every client syncs the
+    /// main folder, which leaves role folders out (§12): no client may touch it or what is in
+    /// it, whatever the phone does there ([`Action::Phone`]).
     pub fn with_role_folder(mut self) -> Self {
         let docs = Role::Documents.node();
-        let file = NodeId(Uuid::from_u128(u128::MAX));
-        let folder = NodeState::folder(NodeId::ROOT, NAMES[0]);
+        self.server
+            .put(docs, NodeState::folder(NodeId::ROOT, NAMES[0]));
         let cv = NodeState::file(docs, NAMES[3], self.new_blob());
-        for (node, state) in [(docs, folder), (file, cv)] {
-            let remote = self.server.put(node, state.clone());
-            let holder = &mut self.clients[0];
-            if state.kind == NodeKind::File {
+        self.server.put(NodeId(Uuid::from_u128(u128::MAX)), cv);
+        self
+    }
+
+    /// [`Sim::with_role_folder`], with client 0 holding it and its file in its main folder as
+    /// synced: what a bug could leave (no version ever synced a role folder there). It lets go
+    /// of it as of anything masked (§10): a test of the masks, not a case to support.
+    pub fn with_role_folder_held(self) -> Self {
+        let mut sim = self.with_role_folder();
+        for (node, n) in sim.server.live.clone() {
+            let holder = &mut sim.clients[0];
+            if n.state.kind == NodeKind::File {
                 holder
                     .extra
-                    .insert(node, extra(&state, Some(remote.version)));
+                    .insert(node, extra(&n.state, Some(n.remote.version)));
             }
-            holder.local.insert(node, state.clone());
-            holder.base.insert(node, state);
+            holder.local.insert(node, n.state.clone());
+            holder.base.insert(node, n.state);
         }
-        self
+        sim
     }
 
     /// Another device (the phone) changes a file in the role folder: `op` picks adding, editing,
@@ -663,7 +672,10 @@ impl Sim {
             filter: Arc::clone(&client.filter),
             ..Options::default()
         };
-        let plan = reconcile(&input, &opts);
+        // Ids the client or the server knows are taken, as in the executor's state DB.
+        let plan = reconcile_with_known(&input, &opts, |id| {
+            client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
+        });
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         if let Some(min) = self.guard

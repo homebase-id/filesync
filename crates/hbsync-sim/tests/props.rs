@@ -1019,7 +1019,61 @@ fn regression_detached_twice_back_into_the_role_folder() {
         act(0, CreateFile { parent: 0, name: 0 }),
         Event::Step { client: 2 },
     ];
-    if let Err(e) = run_with(3, None, Sim::with_role_folder, &events) {
+    if let Err(e) = run_with(3, None, Sim::with_role_folder_held, &events) {
+        panic!("{e}");
+    }
+}
+
+/// c0 detaches its edited copy of the held role folder; the phone moves the file to the top,
+/// c0 downloads it there, then ignores its new name: detached again, it got the id of its first
+/// detached copy, and the download overwrote the edit.
+#[test]
+fn regression_detached_again_while_the_first_copy_lives() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Edit, Move, Phone, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(2, CreateFolder { parent: 0, name: 0 }),
+        act(2, ToggleIgnore),
+        act(2, CreateFile { parent: 2, name: 0 }),
+        act(0, Phone { op: 4, pick: 5 }),
+        act(2, Delete { node: 0 }),
+        act(2, ToggleIgnore),
+        act(2, ToggleIgnore),
+        act(0, Edit { file: 0 }),
+        act(0, Phone { op: 0, pick: 0 }),
+        plan(0),
+        act(2, ToggleIgnore),
+        act(0, ToggleIgnore),
+        act(0, Phone { op: 11, pick: 8 }),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        plan(2),
+        step(2),
+        act(
+            2,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 13,
+            },
+        ),
+        act(2, CreateFile { parent: 0, name: 0 }),
+        step(0),
+        plan(2),
+        step(0),
+        step(2),
+        plan(0),
+        step(0),
+        step(0),
+        step(2),
+        step(0),
+        step(0),
+        step(0),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_folder_held, &events) {
         panic!("{e}");
     }
 }

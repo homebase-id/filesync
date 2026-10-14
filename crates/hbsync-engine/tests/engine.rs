@@ -1768,100 +1768,6 @@ fn a_plain_documents_folder_beside_the_role_folder_keeps_its_name() -> R {
 }
 
 #[test]
-fn a_role_folder_an_older_version_synced_leaves_the_main_folder_only() -> R {
-    let server = server();
-    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
-    let mut a = Client::with_config(&server, "a", unscoped)?;
-    a.write("readme.txt", "r")?;
-    a.sync()?;
-    assert_eq!(
-        a.tree_text(),
-        ["Documents/", "Documents/cv.txt = role", "readme.txt = r"]
-    );
-
-    restart_with(&mut a, "a", |_| {})?;
-    a.sync()?;
-    assert_eq!(a.tree_text(), ["readme.txt = r"]);
-    let names = server.lock().map_err(|_| "poisoned")?.live_names();
-    assert_eq!(names, ["Documents", "cv.txt", "readme.txt"]);
-    Ok(())
-}
-
-#[test]
-fn an_edit_in_a_role_folder_an_older_version_synced_stays_as_a_folder_of_its_own() -> R {
-    let server = server();
-    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
-    let mut a = Client::with_config(&server, "a", unscoped)?;
-    a.write("readme.txt", "r")?;
-    a.sync()?;
-    a.write("Documents/cv.txt", "edited here")?;
-
-    restart_with(&mut a, "a", |_| {})?;
-    a.sync()?;
-    // The edit can't go into the role folder from here: it stays, as a folder of its own.
-    assert_eq!(
-        a.tree_text(),
-        [
-            "Documents/",
-            "Documents/cv.txt = edited here",
-            "readme.txt = r"
-        ]
-    );
-    // The role folder's file is untouched on the drive.
-    let srv = server.lock().map_err(|_| "poisoned")?;
-    let role_file = srv
-        .live()
-        .find(|h| h.parent == hbsync_types::Role::Documents.node())
-        .ok_or("the role folder's file")?;
-    assert!(
-        matches!(&role_file.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == "cv.txt")
-    );
-    Ok(())
-}
-
-#[test]
-fn what_was_deleted_or_moved_in_a_role_folder_an_older_version_synced_stays_so() -> R {
-    let server = server();
-    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
-    let (old, moved) = {
-        let mut srv = server.lock().map_err(|_| "poisoned")?;
-        let docs = hbsync_types::Role::Documents.node();
-        let alg = hbsync_fileio::HashAlgorithm::Blake3;
-        (
-            srv.seed_file(docs, "old.txt", b"old", alg)?,
-            srv.seed_file(docs, "moved.txt", b"moved", alg)?,
-        )
-    };
-    let mut a = Client::with_config(&server, "a", unscoped)?;
-    a.write("readme.txt", "r")?;
-    a.sync()?;
-    // Meanwhile, elsewhere: old.txt deleted, moved.txt moved to the top.
-    {
-        let mut srv = server.lock().map_err(|_| "poisoned")?;
-        srv.delete(old.1.file_id)?;
-        let meta = NodeMeta {
-            node: moved.0,
-            parent: hbsync_types::NodeId::ROOT,
-            kind: hbsync_types::NodeKind::File,
-            content: hbsync_types::schema::NodeContent::file(
-                "moved.txt",
-                1_700_000_000_000,
-                5,
-                false,
-            ),
-        };
-        srv.update(moved.1.file_id, moved.1.version, &meta, None)?;
-    }
-
-    restart_with(&mut a, "a", |_| {})?;
-    a.sync()?;
-    assert_eq!(a.tree_text(), ["moved.txt = moved", "readme.txt = r"]);
-    let names = server.lock().map_err(|_| "poisoned")?.live_names();
-    assert_eq!(names, ["Documents", "cv.txt", "moved.txt", "readme.txt"]);
-    Ok(())
-}
-
-#[test]
 fn a_plain_documents_folder_keeps_its_name_when_the_role_folder_comes() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
@@ -1937,5 +1843,113 @@ fn recently_deleted_in_a_role_folder_isnt_the_main_folders() -> R {
     a.engine.empty_deleted_until(i64::MAX - 1)?;
     let srv = server.lock().map_err(|_| "poisoned")?;
     assert_eq!(srv.removed().count(), 1);
+    Ok(())
+}
+
+#[test]
+fn a_role_folder_moved_into_a_folder_keeps_it_alive() -> R {
+    let server = server();
+    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
+    let mut a = Client::new(&server, "a")?;
+    a.write("Archive/old.txt", "o")?;
+    a.write("readme.txt", "r")?;
+    a.sync()?;
+    // A client that breaks the schema moves the role folder into Archive.
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let archive = srv
+            .live()
+            .find_map(|h| match &h.body {
+                hbsync_remote::RemoteBody::Live { node, content, .. }
+                    if content.name == "Archive" =>
+                {
+                    Some(*node)
+                }
+                _ => None,
+            })
+            .ok_or("Archive")?;
+        let docs = srv
+            .live()
+            .find(|h| {
+                matches!(&h.body, hbsync_remote::RemoteBody::Live { node, .. }
+                if *node == hbsync_types::Role::Documents.node())
+            })
+            .cloned()
+            .ok_or("the role folder")?;
+        let meta = NodeMeta {
+            parent: archive,
+            ..hbsync_remote::contract::folder("Documents", archive)
+        };
+        let meta = NodeMeta {
+            node: hbsync_types::Role::Documents.node(),
+            ..meta
+        };
+        srv.update(docs.file_id, docs.version, &meta, None)?;
+    }
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Archive"))?;
+    a.sync()?;
+    // Archive holds what this device doesn't see: it stays on the drive, and comes back here.
+    assert_eq!(a.tree_text(), ["Archive/", "readme.txt = r"]);
+    let names = server.lock().map_err(|_| "poisoned")?.live_names();
+    assert_eq!(names, ["Archive", "Documents", "cv.txt", "readme.txt"]);
+    Ok(())
+}
+
+#[test]
+fn deletes_in_a_role_folder_dont_crowd_recently_deleted() -> R {
+    let server = server();
+    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
+    let mut a = Client::new(&server, "a")?;
+    a.write("mine.txt", "m")?;
+    a.sync()?;
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let docs = hbsync_types::Role::Documents.node();
+        for i in 0..20 {
+            srv.seed_file(
+                docs,
+                &format!("p{i}.jpg"),
+                b"p",
+                hbsync_fileio::HashAlgorithm::Blake3,
+            )?;
+        }
+        // Removed elsewhere: mine first, then the photos, the newest.
+        let mut files: Vec<_> = srv
+            .live()
+            .filter(|h| h.kind == hbsync_types::NodeKind::File)
+            .cloned()
+            .collect();
+        files.sort_by_key(|h| match &h.body {
+            hbsync_remote::RemoteBody::Live { content, .. } => content.name != "mine.txt",
+            _ => true,
+        });
+        for (at, h) in files.into_iter().enumerate() {
+            if let hbsync_remote::RemoteBody::Live {
+                node, mut content, ..
+            } = h.body
+            {
+                content.set_removal(Some(hbsync_types::schema::Removal {
+                    at_ms: at as i64 + 1,
+                    root: node,
+                }));
+                let meta = NodeMeta {
+                    node,
+                    parent: h.parent,
+                    kind: h.kind,
+                    content,
+                };
+                srv.update(h.file_id, h.version, &meta, None)?;
+            }
+        }
+    }
+    a.sync()?;
+    let listed: Vec<String> = a
+        .engine
+        .recently_deleted(5)?
+        .into_iter()
+        .map(|d| d.path)
+        .collect();
+    assert_eq!(listed, ["mine.txt"]);
     Ok(())
 }
