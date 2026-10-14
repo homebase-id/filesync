@@ -44,6 +44,8 @@ impl Client {
     ) -> Res<Self> {
         let remote = FakeRemote::new(server.clone());
         Ok(Client(TestClient::new(remote, name, move |cfg| {
+            // No real pause between transient retries: the fake's faults are made up.
+            cfg.exec.retry_pause = std::time::Duration::from_millis(1);
             tweak(cfg);
             Ok(())
         })?))

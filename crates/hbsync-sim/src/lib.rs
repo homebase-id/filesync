@@ -1550,7 +1550,8 @@ fn numbered_name(
     name: &str,
     is_dir: bool,
 ) -> Option<String> {
-    let free = |c: &str| Ok::<_, Infallible>(client.local.child_named(parent, c, except).is_none());
+    let free =
+        |c: &String| Ok::<_, Infallible>(client.local.child_named(parent, c, except).is_none());
     let Ok(name) = first_free(numbered_names(name), free, |c| {
         syncs_at(client, parent, c, is_dir)
     });

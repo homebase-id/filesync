@@ -227,11 +227,11 @@ impl Tree {
 
 /// The first of `candidates` that `is_free`, preferring one `syncs` says this device syncs
 /// (§10); `None` if none is free. How the executor and the simulator pick a numbered name.
-pub fn first_free<E>(
-    candidates: impl IntoIterator<Item = String>,
-    mut is_free: impl FnMut(&str) -> Result<bool, E>,
-    mut syncs: impl FnMut(&str) -> bool,
-) -> Result<Option<String>, E> {
+pub fn first_free<T, E>(
+    candidates: impl IntoIterator<Item = T>,
+    mut is_free: impl FnMut(&T) -> Result<bool, E>,
+    mut syncs: impl FnMut(&T) -> bool,
+) -> Result<Option<T>, E> {
     let mut filtered = None;
     for candidate in candidates {
         if is_free(&candidate)? {
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn the_first_free_name_one_that_syncs_if_any() {
         let names = || ["a", "b", "c", "d"].map(String::from);
-        let free = |n: &str| Ok::<_, ()>(n != "a");
+        let free = |n: &String| Ok::<_, ()>(n != "a");
         assert_eq!(first_free(names(), free, |_| true), Ok(Some("b".into())));
         assert_eq!(
             first_free(names(), free, |n| n == "c"),

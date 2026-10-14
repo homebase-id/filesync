@@ -275,7 +275,7 @@ mod os {
     pub fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
         let path = plist(&program.label())?;
-        hbsync_fileio::write_atomic(&path, launchd_plist(program, &passed_env()).as_bytes())?;
+        hbsync_fileio::write_if_changed(&path, launchd_plist(program, &passed_env()).as_bytes())?;
         // The tray asks for this itself, running: launchd loads the agent at the next logon.
         if matches!(program, Program::Tray(_)) {
             return Ok(());
@@ -352,12 +352,12 @@ mod os {
         let daemon = match program {
             Program::Tray(tray) => {
                 let entry = desktop_entry(tray, &passed_env());
-                return hbsync_fileio::write_atomic(&desktop()?, entry.as_bytes());
+                return hbsync_fileio::write_if_changed(&desktop()?, entry.as_bytes()).map(drop);
             }
             Program::Daemon(daemon) => daemon,
         };
         let path = unit()?;
-        hbsync_fileio::write_atomic(&path, systemd_unit(daemon, &passed_env()).as_bytes())?;
+        hbsync_fileio::write_if_changed(&path, systemd_unit(daemon, &passed_env()).as_bytes())?;
         systemctl(&["daemon-reload"])
             .and_then(|()| systemctl(&["enable", UNIT]))
             // A unit systemd didn't take mustn't look installed.

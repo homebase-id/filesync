@@ -166,6 +166,7 @@ pub fn status_line(s: &Status, now: u64) -> String {
             Some(p) => format!("Syncing {}", progress(p)),
             None => "Syncing…".into(),
         },
+        State::Idle if s.pending == 1 => "1 item waiting".into(),
         State::Idle if s.pending > 0 => format!("{} items waiting", count(s.pending)),
         State::Idle => match &s.last_sync {
             Some(last) => format!("Up to date · synced {}", when_roughly(last.at, now)),

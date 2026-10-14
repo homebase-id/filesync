@@ -16,20 +16,15 @@ pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 /// Sets up a client's engine config; run again on every [`TestClient::restart`].
 type Configure = Box<dyn Fn(&mut EngineConfig) -> Res<()>>;
 
-/// The engine config of a test: no real pause between transient retries.
-pub fn config(root: &Path, name: &str) -> EngineConfig {
-    let mut cfg = EngineConfig::new(root, name);
-    cfg.exec.retry_pause = std::time::Duration::from_millis(1);
-    cfg
-}
-
 pub struct TestClient<R> {
-    _dir: tempfile::TempDir,
     pub root: PathBuf,
     pub name: String,
     pub engine: Engine,
     pub remote: R,
     configure: Configure,
+    /// Last: removed after the engine has closed the state DB in it (Windows can't remove an
+    /// open file).
+    _dir: tempfile::TempDir,
 }
 
 impl<R> std::fmt::Debug for TestClient<R> {
@@ -42,8 +37,8 @@ impl<R> std::fmt::Debug for TestClient<R> {
 }
 
 impl<R: Remote + Clone + 'static> TestClient<R> {
-    /// A client called `name` (its conflict copies say so) on `remote`, its [`config`] set up
-    /// further by `configure`.
+    /// A client called `name` (its conflict copies say so) on `remote`, its engine config set
+    /// up by `configure`.
     pub fn new(
         remote: R,
         name: &str,
@@ -55,12 +50,12 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         let configure: Configure = Box::new(configure);
         let engine = Self::engine(&root, name, Box::new(remote.clone()), &configure, |_| {})?;
         Ok(TestClient {
-            _dir: dir,
             root,
             name: name.to_owned(),
             engine,
             remote,
             configure,
+            _dir: dir,
         })
     }
 
@@ -71,7 +66,7 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         configure: &Configure,
         tweak: impl FnOnce(&mut EngineConfig),
     ) -> Res<Engine> {
-        let mut cfg = config(root, name);
+        let mut cfg = EngineConfig::new(root, name);
         configure(&mut cfg)?;
         tweak(&mut cfg);
         let db = StateDb::open(&hbsync_local::state_db_path(root))?;

@@ -21,7 +21,8 @@ pub fn fnv1a64_from(state: u64, bytes: &[u8]) -> u64 {
 }
 
 /// Writes `bytes` to `path` in one step (its folder made if needed): a crash leaves the old
-/// file or the new one. The file is readable by this user only (0600 on Unix).
+/// file or the new one. For this program's own files: it is readable by this user only (0600
+/// on Unix), and replaces a symlink rather than writing through it.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
@@ -32,12 +33,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// [`write_atomic`], unless `path` holds `bytes` already; whether it wrote.
+/// Writes `bytes` to `path` in place (its folder made if needed), unless it holds them
+/// already; whether it wrote. For files other programs read (autostart entries, launchers): the
+/// usual permissions, and through a symlink (dotfiles kept elsewhere).
 pub fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<bool> {
     if std::fs::read(path).is_ok_and(|old| old == bytes) {
         return Ok(false);
     }
-    write_atomic(path, bytes)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, bytes)?;
     Ok(true)
 }
 
@@ -61,6 +67,7 @@ mod tests {
         let path = dir.path().join("sub/file");
         assert!(write_if_changed(&path, b"one")?);
         assert!(!write_if_changed(&path, b"one")?);
+        assert_eq!(std::fs::read(&path)?, b"one");
         write_atomic(&path, b"two")?;
         assert_eq!(std::fs::read(&path)?, b"two");
         assert_eq!(

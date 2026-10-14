@@ -109,7 +109,7 @@ impl MirrorRow {
                     mtime_ms: content.mtime.unwrap_or(0),
                     executable: content.x,
                 }),
-            content_extra: content.carried_keys(),
+            content_extra: content.carried_json(),
         }
     }
 

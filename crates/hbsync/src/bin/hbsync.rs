@@ -414,7 +414,8 @@ fn print_status(s: &Status) {
         );
     }
     if s.pending > 0 && s.state != State::Idle {
-        println!("  {} items not synced yet", words::count(s.pending));
+        let items = if s.pending == 1 { "item" } else { "items" };
+        println!("  {} {items} not synced yet", words::count(s.pending));
     }
     if let Some(h) = &s.held_deletes {
         println!(

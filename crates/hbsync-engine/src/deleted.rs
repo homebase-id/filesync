@@ -200,12 +200,18 @@ struct RestorePlan {
 /// whose delete is the same (`rm.root`). What was deleted from it before stays out.
 fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
     let root = top.removal.root;
+    // Each node once: removed rows may form a cycle (left by a remote one).
+    let mut seen = HashSet::from([top.row.node]);
     let mut rows = vec![top];
     let mut next = 0;
     while next < rows.len() {
         if rows[next].row.kind == NodeKind::Folder {
             let below = s.removed_children(rows[next].row.node)?;
-            rows.extend(below.into_iter().filter(|r| r.removal.root == root));
+            rows.extend(
+                below
+                    .into_iter()
+                    .filter(|r| r.removal.root == root && seen.insert(r.row.node)),
+            );
         }
         next += 1;
     }
@@ -226,8 +232,13 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     })?
     .items;
     chain.reverse();
-    // Then the node and what was deleted with it, each after its folder.
-    let rows: Vec<RemovedRow> = chain.into_iter().chain(group(s, top)?).collect();
+    // Then the node and what was deleted with it, each after its folder; each node once.
+    let mut seen = HashSet::new();
+    let rows: Vec<RemovedRow> = chain
+        .into_iter()
+        .chain(group(s, top)?)
+        .filter(|r| seen.insert(r.row.node))
+        .collect();
     // The folders in the tree the rows may go into, and their names.
     let mut live = HashSet::from([NodeId::ROOT]);
     let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
@@ -340,5 +351,45 @@ fn empty_trash(trash: &Path, since: u64, before_ms: i64) {
         if at.is_some_and(|s| s >= since && (s as i64).saturating_mul(1000) < before_ms) {
             let _ = remove_all(&entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hbsync_state::MirrorRow;
+    use hbsync_types::schema::Removal;
+    use hbsync_types::{RemoteFileId, Uuid, VersionTag};
+
+    use super::*;
+
+    fn removed(node: NodeId, parent: NodeId, root: NodeId) -> RemovedRow {
+        RemovedRow {
+            row: MirrorRow {
+                file_id: RemoteFileId(Uuid::new_v4()),
+                version: VersionTag(Uuid::new_v4()),
+                node,
+                parent,
+                name: "d".into(),
+                kind: NodeKind::Folder,
+                file: None,
+                content_extra: None,
+            },
+            removal: Removal { at_ms: 1, root },
+        }
+    }
+
+    /// Removed folders in a cycle (a remote one left them so) are restored once each, and the
+    /// plan ends.
+    #[test]
+    fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let (a, b) = (NodeId::new(), NodeId::new());
+        db.write(|s| {
+            s.put_removed(&removed(a, b, a))?;
+            s.put_removed(&removed(b, a, a))
+        })?;
+        let plan = db.read(|s| plan_restore(s, a))?.map(|p| p.rows.len());
+        assert_eq!(plan, Some(2));
+        Ok(())
     }
 }

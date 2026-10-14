@@ -85,7 +85,7 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     }
     let removal = header.removal();
     // A version the mirror has already: the echo of this device's own write (the executor
-    // stored the row it wrote), or a page applied again. Nothing to plan.
+    // stored the row it wrote), or a page applied again. Nothing changes.
     let at = RemoteRef {
         file_id: header.file_id,
         version: header.version,
