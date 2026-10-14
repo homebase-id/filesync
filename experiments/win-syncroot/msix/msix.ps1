@@ -27,6 +27,12 @@ function Try-It([string] $title, [string] $run) {
     Write-Output "exit $LASTEXITCODE"
     & $run status 2>&1
     Show
+    foreach ($c in 'root-in-sync', 'root-syncing', 'root-paused', 'root-clear', 'root-in-sync') {
+        Write-Output "--- $c"
+        & $run $c 2>&1
+        Write-Output "exit $LASTEXITCODE"
+        attrib "$env:USERPROFILE\Homebase Test"
+    }
     & $run unregister 2>&1
     Write-Output "unregister: exit $LASTEXITCODE"
 }

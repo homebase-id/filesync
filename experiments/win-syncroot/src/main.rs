@@ -3,7 +3,9 @@
 //! OneDrive and Dropbox are, and do files turned into in-sync placeholders show the status
 //! ticks? It works on a test folder of its own, `%USERPROFILE%\Homebase Test`, never on the
 //! real one, and runs unpackaged (no MSIX identity). Started without arguments (a double click)
-//! it shows a menu; else `register`, `in-sync`, `syncing`, `status`, `unregister`.
+//! it shows a menu; else `register`, `in-sync`, `syncing`, `status`, `unregister`, and for the
+//! test folder itself (its entry at the top of the navigation pane) `root-in-sync`,
+//! `root-syncing`, `root-paused` (a custom state) and `root-clear`.
 
 #[cfg(not(windows))]
 fn main() {
@@ -26,12 +28,14 @@ mod win {
     use windows::Storage::Provider::{
         StorageProviderHardlinkPolicy, StorageProviderHydrationPolicy,
         StorageProviderHydrationPolicyModifier, StorageProviderInSyncPolicy,
-        StorageProviderPopulationPolicy, StorageProviderSyncRootInfo,
-        StorageProviderSyncRootManager,
+        StorageProviderItemProperties, StorageProviderItemProperty,
+        StorageProviderItemPropertyDefinition, StorageProviderPopulationPolicy,
+        StorageProviderSyncRootInfo, StorageProviderSyncRootManager,
     };
     use windows::Storage::Streams::DataWriter;
     use windows::Storage::{IStorageItem, StorageFolder};
     use windows::core::{HRESULT, HSTRING, Interface};
+    use windows_collections::IIterable;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LocalFree};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
@@ -52,6 +56,8 @@ mod win {
     /// The file `syncing` marks as not in sync.
     const SYNCING: &str = "Notes.txt";
     /// Not a cloud file (`ERROR_NOT_A_CLOUD_FILE`): reverting one that never was a placeholder.
+    /// The custom property for `root-paused`.
+    const STATUS: i32 = 1;
     const NOT_A_CLOUD_FILE: HRESULT = HRESULT(0x8007_0178_u32 as i32);
 
     pub fn main() {
@@ -74,6 +80,10 @@ mod win {
             println!("  3  Mark {SYNCING} as syncing (step 3: sync arrows?)");
             println!("  4  Show the sync roots Windows knows");
             println!("  5  Unregister and undo everything (keeps the test folder)");
+            println!("  6  Mark the test folder ITSELF as synced (a tick on the top entry?)");
+            println!("  7  Mark the test folder ITSELF as syncing (arrows on the top entry?)");
+            println!("  8  Show the test folder ITSELF as paused (a custom state)");
+            println!("  9  Clear that custom state");
             println!("  q  Quit");
             print!("> ");
             let _ = io::stdout().flush();
@@ -87,6 +97,10 @@ mod win {
                 "3" => "syncing",
                 "4" => "status",
                 "5" => "unregister",
+                "6" => "root-in-sync",
+                "7" => "root-syncing",
+                "8" => "root-paused",
+                "9" => "root-clear",
                 "q" | "Q" => return,
                 _ => continue,
             };
@@ -108,6 +122,10 @@ mod win {
             "syncing" => syncing(),
             "status" => status(),
             "unregister" => unregister(),
+            "root-in-sync" => root_in_sync(),
+            "root-syncing" => root_syncing(),
+            "root-paused" => root_state(Some("Paused")),
+            "root-clear" => root_state(None),
             other => Err(format!("unknown command {other:?}").into()),
         }
     }
@@ -162,6 +180,12 @@ mod win {
         let context = DataWriter::new()?;
         context.WriteBytes(PROVIDER.as_bytes())?;
         info.SetContext(&context.DetachBuffer()?)?;
+        // The custom state `root-paused` shows (a column in Explorer, and an icon).
+        let status = StorageProviderItemPropertyDefinition::new()?;
+        status.SetId(STATUS)?;
+        status.SetDisplayNameResource(&HSTRING::from("Homebase status"))?;
+        info.StorageProviderItemPropertyDefinitions()?
+            .Append(&status)?;
         StorageProviderSyncRootManager::Register(&info)?;
 
         println!("Registered {}.", dir.display());
@@ -230,10 +254,70 @@ mod win {
         Ok(())
     }
 
+    /// Makes the test folder itself a placeholder marked in sync (or marks it, when it already
+    /// is one).
+    fn root_in_sync() -> Result<(), Error> {
+        let dir = folder()?;
+        let file = CloudFile::open(&dir)?;
+        let identity = "root";
+        let hr = unsafe {
+            CfConvertToPlaceholder(
+                file.raw(),
+                identity.as_ptr().cast(),
+                identity.len() as u32,
+                CF_CONVERT_FLAG_MARK_IN_SYNC,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        match HRESULT(hr).ok() {
+            Ok(()) => println!("Made the test folder itself a placeholder, marked synced."),
+            Err(e) => {
+                println!("Converting the test folder itself: {e} (marking it instead)");
+                drop(file);
+                set_in_sync(&dir, CF_IN_SYNC_STATE_IN_SYNC)?;
+                println!("Marked the test folder itself as synced.");
+            }
+        }
+        println!("In a NEW Explorer window: a green tick on \"{NAME}\" in the left pane?");
+        Ok(())
+    }
+
+    fn root_syncing() -> Result<(), Error> {
+        set_in_sync(&folder()?, CF_IN_SYNC_STATE_NOT_IN_SYNC)?;
+        println!("Marked the test folder itself as not in sync (choose 6 to undo).");
+        println!("In Explorer: sync arrows on \"{NAME}\" in the left pane?");
+        Ok(())
+    }
+
+    /// Sets (or clears) a custom state on the test folder itself.
+    fn root_state(value: Option<&str>) -> Result<(), Error> {
+        let dir = folder()?;
+        let item = StorageFolder::GetFolderFromPathAsync(&HSTRING::from(dir.as_os_str()))?
+            .join()?
+            .cast::<IStorageItem>()?;
+        let mut props = Vec::new();
+        if let Some(value) = value {
+            let p = StorageProviderItemProperty::new()?;
+            p.SetId(STATUS)?;
+            p.SetValue(&HSTRING::from(value))?;
+            p.SetIconResource(&HSTRING::from(format!("{},0", icon_path()?.display())))?;
+            props.push(Some(p));
+        }
+        let props: IIterable<StorageProviderItemProperty> = props.into();
+        StorageProviderItemProperties::SetAsync(&item, &props)?.join()?;
+        match value {
+            Some(v) => println!("Set the custom state \"{v}\" on the test folder itself."),
+            None => println!("Cleared the custom state."),
+        }
+        println!("In Explorer: an icon on \"{NAME}\"? (Also try the Status column inside it.)");
+        Ok(())
+    }
+
     fn unregister() -> Result<(), Error> {
         let dir = folder()?;
         if dir.exists() {
-            for path in walk(&dir)? {
+            for path in walk(&dir)?.into_iter().chain([dir.clone()]) {
                 let file = CloudFile::open(&path)?;
                 let hr = unsafe {
                     CfRevertPlaceholder(file.raw(), CF_REVERT_FLAG_NONE, std::ptr::null_mut())

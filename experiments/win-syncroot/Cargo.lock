@@ -7,6 +7,7 @@ name = "homebase-syncroot-test"
 version = "0.0.0"
 dependencies = [
  "windows",
+ "windows-collections",
  "windows-sys",
 ]
 
