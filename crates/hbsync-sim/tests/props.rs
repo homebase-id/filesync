@@ -1077,3 +1077,49 @@ fn regression_detached_again_while_the_first_copy_lives() {
         panic!("{e}");
     }
 }
+
+/// c2 starts ignoring `d`, which it synced, after c0 tagged it: `d` was taken off the drive as
+/// unchanged since c2 synced it (only place and bytes were compared). It stays, with its tag.
+#[test]
+fn regression_a_folder_tagged_elsewhere_doesnt_leave() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Purge, Tag, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(0, CreateFolder { parent: 0, name: 5 }),
+        plan(0),
+        step(0),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 7, name: 0 }),
+        act(0, Tag { node: 2, tag: 0 }),
+        act(1, ToggleIgnore),
+        plan(2),
+        plan(1),
+        plan(0),
+        step(1),
+        step(2),
+        act(2, ToggleIgnore),
+        step(0),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        step(0),
+        plan(2),
+        step(2),
+        step(2),
+        act(1, CreateFile { parent: 6, name: 0 }),
+        act(0, Purge),
+        plan(1),
+        step(1),
+    ];
+    for setup in [(|sim| sim) as fn(Sim) -> Sim, Sim::with_role_folder] {
+        let mut sim = setup(Sim::new(3));
+        sim.run(&events);
+        assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            panic!("{e}");
+        }
+        assert_eq!(sim.server_tags("d"), Some(vec!["Red:6".to_owned()]));
+    }
+}

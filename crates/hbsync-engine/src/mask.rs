@@ -91,10 +91,12 @@ impl Masks {
             .copied()
             .filter(|m| filtered_base.contains(m))
             .filter(|m| match (input.base.get(*m), input.remote.get(*m)) {
+                // Unchanged remotely since it synced here: place, bytes and tags (§11).
                 (Some(b), Some(r)) => {
                     b.same_place(r)
                         && b.content.map(|c| (c.hash, c.executable))
                             == r.content.map(|c| (c.hash, c.executable))
+                        && b.tags == r.tags
                 }
                 _ => false,
             })

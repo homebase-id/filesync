@@ -245,7 +245,7 @@ An item inside a filtered folder is filtered too.
 2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
    never downloaded, and never deleted by this device, with one exception: a node this device
    synced at a place it now filters (a rule was added) is leaving per rule 1, and is deleted
-   remotely unless the remote changed it since (a folder: unless it holds anything that isn't
+   remotely unless the remote changed it since: its place, bytes or tags (a folder: unless it holds anything that isn't
    leaving, such as another device's new file; then only its base is dropped, once the bases
    below it are gone or go in the same run). If the user brings the local item back into view first (moves it out of
    the ignored place), it syncs as usual, and its local place wins over a remote move (the

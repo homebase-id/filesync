@@ -1097,6 +1097,9 @@ impl Sim {
                         self.server.removed.insert(node, n);
                     }
                     self.clients[c].planned_remote.remove(node);
+                    // Its tags go with it: a tag change loses to a delete (§11), and one brought
+                    // back later is a new start.
+                    self.deleted.insert(node);
                     Done
                 }
             },
