@@ -251,6 +251,8 @@ An item inside a filtered folder is filtered too.
    the ignored place), it syncs as usual, and its local place wins over a remote move (the
    remote place is filtered too, and following it would take the item out of view again). Names held by masked nodes stay taken: a local item with such a name gets a numbered
    one (a name clash).
+   A masked node that comes into view (a rule was removed, or another device moved it out of
+   the ignored place) is downloaded with everything in it.
    A synced node that becomes masked because another device moved it into a path this device
    ignores leaves this device, the remote untouched:
    - an unchanged local copy goes to the trash, and its base goes in the same step
