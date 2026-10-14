@@ -18,6 +18,10 @@ jobs:
       - run: rustup toolchain install
       - run: cargo build --release --locked
         working-directory: experiments/win-syncroot
+      # Registers it unpackaged, and packaged with and without the cloud files extension.
+      - name: Packaged or not
+        shell: powershell
+        run: ./experiments/win-syncroot/msix/msix.ps1 -Exe "$PWD\experiments\win-syncroot\target\release\homebase-syncroot-test.exe"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: homebase-syncroot-test

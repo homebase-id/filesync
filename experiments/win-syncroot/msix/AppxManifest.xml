@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The experiment as a loose MSIX layout, shaped like Conveyor's package for Filesync (full
+     trust, AppData exclusions). msix.ps1 fills in {NAME}, {ALIAS} and {EXT}: the cloud files
+     extension or nothing. -->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop3="http://schemas.microsoft.com/appx/manifest/desktop/windows10/3"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:virtualization="http://schemas.microsoft.com/appx/manifest/virtualization/windows10"
+  IgnorableNamespaces="uap3 desktop6 virtualization">
+  <Identity Name="{NAME}" Version="1.0.0.0" Publisher="CN=Homebase Test" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>{NAME}</DisplayName>
+    <PublisherDisplayName>Homebase</PublisherDisplayName>
+    <Logo>logo.png</Logo>
+    <virtualization:FileSystemWriteVirtualization>
+      <virtualization:ExcludedDirectories>
+        <virtualization:ExcludedDirectory>$(KnownFolder:LocalAppData)\Homebase Filesync Test</virtualization:ExcludedDirectory>
+      </virtualization:ExcludedDirectories>
+    </virtualization:FileSystemWriteVirtualization>
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+  </Properties>
+  <Resources>
+    <Resource Language="en" />
+  </Resources>
+  <Applications>
+    <Application Id="App" EntryPoint="Windows.FullTrustApplication" Executable="homebase-syncroot-test.exe">
+      <uap:VisualElements AppListEntry="default" DisplayName="{NAME}" Description="Test" BackgroundColor="transparent" Square150x150Logo="logo.png" Square44x44Logo="logo.png" />
+      <Extensions>
+        <uap3:Extension Category="windows.appExecutionAlias" Executable="homebase-syncroot-test.exe" EntryPoint="Windows.FullTrustApplication">
+          <uap3:AppExecutionAlias><desktop:ExecutionAlias Alias="{ALIAS}" /></uap3:AppExecutionAlias>
+        </uap3:Extension>
+        {EXT}
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+  </Capabilities>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26200.0" />
+  </Dependencies>
+</Package>
