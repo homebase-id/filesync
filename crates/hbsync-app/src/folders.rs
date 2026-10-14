@@ -9,7 +9,7 @@ use hbsync_types::Role;
 
 use crate::{Config, Paths, Root};
 
-pub type Error = Box<dyn std::error::Error + Send + Sync>;
+pub use crate::control::Error;
 
 /// Sets the folder at `path` up for `identity` (kept as it was if it is already: its marker
 /// names it), and lists it in the config. `hbsync setup` has checked that this is what the
@@ -83,7 +83,7 @@ mod tests {
         );
         assert_eq!(remove(&paths, &folder)?, None);
         assert!(
-            folder.join(hbsync_local::STATE_DIR).exists(),
+            hbsync_local::layout::state_dir(&folder).exists(),
             "its state stays"
         );
         Ok(())

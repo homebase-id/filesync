@@ -59,12 +59,6 @@ impl Server {
         if items.is_empty() {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
-        let list: Vec<&hbsync_types::activity::Deleted> =
-            items.iter().map(|i| &i.deleted).collect();
-        let identity: HashMap<_, _> = items
-            .iter()
-            .map(|i| (i.deleted.node, i.identity.as_str()))
-            .collect();
         let now = words::now();
         let main = control::configured(&self.paths)
             .ok()
@@ -72,9 +66,9 @@ impl Server {
             .map(|r| r.folder);
         // Shown: the items whose folder isn't in Recently deleted too; each with how many items
         // below it its restore brings back (those deleted with it).
-        let by_node: HashMap<_, _> = list.iter().map(|d| (d.node, *d)).collect();
+        let by_node: HashMap<_, _> = items.iter().map(|i| (i.deleted.node, &i.deleted)).collect();
         let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
-        for d in &list {
+        for d in items.iter().map(|i| &i.deleted) {
             let mut up = d.parent;
             for _ in 0..256 {
                 let Some(folder) = by_node.get(&up) else {
@@ -89,11 +83,12 @@ impl Server {
                 up = folder.parent;
             }
         }
-        let rows: String = list
+        let rows: String = items
             .iter()
-            .filter(|d| !by_node.contains_key(&d.parent))
+            .filter(|i| !by_node.contains_key(&i.deleted.parent))
             .take(MAX_DELETED)
-            .map(|d| {
+            .map(|item| {
+                let d = &item.deleted;
                 let along = match along.get(&d.node).copied().unwrap_or(0) {
                     0 => String::new(),
                     n => format!(" <span class=small>with {n} items in it</span>"),
@@ -105,7 +100,7 @@ impl Server {
                      <button class=secondary>Restore</button></form></li>",
                     url = self.pages.url("deleted/restore"),
                     node = d.node.0,
-                    identity = escape(identity.get(&d.node).copied().unwrap_or_default()),
+                    identity = escape(&item.identity),
                     what = escape(&words::deleted(d, main.as_deref(), now)),
                 )
             })
@@ -119,9 +114,9 @@ impl Server {
              <button class=secondary>Empty now…</button></form>",
             days = self.keep_days(),
             empty = self.pages.url("deleted/empty"),
-            count = list.len(),
+            count = items.len(),
             // Newest first: what the user sees, nothing deleted after this look.
-            until = list[0].removed_at_ms,
+            until = items[0].deleted.removed_at_ms,
         )
     }
 
@@ -162,25 +157,16 @@ impl Server {
         let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
             return "Nothing was deleted.".into();
         };
-        let mut identities: Vec<String> = Config::load(&self.paths.config_file())
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .roots
-            .into_iter()
-            .map(|r| r.identity)
-            .collect();
-        identities.sort();
-        identities.dedup();
-        let mut said = String::from("Nothing was deleted.");
-        for identity in identities {
-            said = self.ask_account(
-                &identity,
-                AccountControl::EmptyDeletedUntil { at_ms },
-                "Emptying Recently deleted.",
-            );
+        let emptied = control::deleted(&self.paths, usize::MAX).and_then(|items| {
+            control::empty_deleted_until(&self.paths, &items.unwrap_or_default(), at_ms)
+        });
+        match emptied {
+            Ok(()) => {
+                (self.send)(Event::Wake);
+                "Emptying Recently deleted.".into()
+            }
+            Err(e) => format!("That didn't work: {e}"),
         }
-        said
     }
 
     /// Sends `control` to the account `identity`; `done` if the daemon took it, else why not.
@@ -225,15 +211,7 @@ impl Server {
         let (Some(token), Some(path)) = (form.get("token"), path) else {
             return "Nothing was confirmed.".into();
         };
-        match control::control(
-            &self.paths,
-            Control::Folder {
-                path,
-                control: FolderControl::ConfirmDeletes {
-                    token: token.clone(),
-                },
-            },
-        ) {
+        match control::confirm_deletes(&self.paths, &path, token.clone()) {
             Ok(()) => {
                 (self.send)(Event::Wake);
                 "Confirmed: the deletions go through now.".into()

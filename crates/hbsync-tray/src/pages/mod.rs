@@ -13,10 +13,10 @@ use std::time::Duration;
 use hbsync_app::FolderStatus;
 use hbsync_app::control;
 use hbsync_app::local_http::{escape, read_request, redirect, respond};
-use hbsync_app::protocol::{AccountControl, FolderControl};
+use hbsync_app::protocol::AccountControl;
 use hbsync_app::setup::{self, Refusal};
 use hbsync_app::words;
-use hbsync_app::{Config, Control, Paths};
+use hbsync_app::{Config, Paths};
 
 use crate::{Event, Sender};
 

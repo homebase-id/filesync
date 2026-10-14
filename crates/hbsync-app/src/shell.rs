@@ -25,16 +25,6 @@ fn note(paths: &Paths, folder: &Path) -> PathBuf {
     paths.state.join(format!("folder-decorated-{key:016x}"))
 }
 
-/// The note of a version that kept one for the one folder (`<folder>\n<hash>`), if it names
-/// `folder`: its hash, as a folder's own note holds it. It goes.
-fn older_note(paths: &Paths, folder: &Path) -> Option<String> {
-    let older = paths.state.join("folder-decorated");
-    let text = std::fs::read_to_string(&older).ok()?;
-    let _ = std::fs::remove_file(&older);
-    let mut lines = text.lines();
-    (Path::new(lines.next()?) == folder).then(|| format!("{}\n", lines.next().unwrap_or("")))
-}
-
 /// What a folder's note (`None`: none yet) says is still to do with the icon hashed to `key`:
 /// (the shortcut too, being a new folder; the icon).
 fn to_do(note: Option<&str>, key: &str) -> (bool, bool) {
@@ -85,10 +75,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
     }
     let done = note(paths, folder);
     let key = format!("{:016x}", hbsync_fileio::fnv1a64(icon_bytes(icons)));
-    let own = std::fs::read_to_string(&done).ok();
-    let carried = own.is_none();
-    let note = own.or_else(|| older_note(paths, folder));
-    let (first, icon) = to_do(note.as_deref(), &key);
+    let (first, icon) = to_do(std::fs::read_to_string(&done).ok().as_deref(), &key);
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
     os::sync_root(paths, folder, identity, icons, first);
@@ -106,7 +93,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
         os::shortcut(folder);
     }
     let key = if icon_done { key.as_str() } else { "" };
-    if (first || icon || carried)
+    if (first || icon)
         && let Err(e) = std::fs::write(&done, format!("{key}\n"))
     {
         tracing::warn!("{}: {e}", done.display());

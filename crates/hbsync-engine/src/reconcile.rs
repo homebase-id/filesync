@@ -490,6 +490,16 @@ impl<'a> Reconciler<'a> {
             }
             self.fix_orphans();
         }
+        debug_assert!(
+            self.scope.iter().all(|&n| {
+                self.merged.cycle_members(n).is_empty()
+                    && self
+                        .merged
+                        .get(n)
+                        .is_none_or(|s| self.merged.exists(s.parent))
+            }),
+            "the repairs left a cycle or an orphan"
+        );
         self.fix_names();
         self.emit();
         self.guard_mass_delete();

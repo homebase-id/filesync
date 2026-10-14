@@ -11,7 +11,7 @@ use std::time::Duration;
 use hbsync_engine::testkit::{Res, TestClient};
 use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_local::{Filter, IGNORE_FILE, STATE_DIR};
+use hbsync_local::Filter;
 use hbsync_platform::tags::{self, Tag, Tags};
 
 struct Client(TestClient<Arc<HomebaseRemote>>);
@@ -44,7 +44,7 @@ impl Client {
 
     /// A restart with the ignore rules `rules`.
     fn restart_ignoring(&mut self, rules: &str) -> Res<()> {
-        fs::write(self.root.join(STATE_DIR).join(IGNORE_FILE), rules)?;
+        fs::write(hbsync_local::layout::ignore_file(&self.root), rules)?;
         self.restart()?;
         assert!(self.engine.apply_filter_change()?);
         Ok(())
@@ -62,11 +62,11 @@ impl Client {
             self.name,
             total.failed
         );
+        let skipped = self.0.engine.drive().take_skipped();
         assert!(
-            total.feed.skipped.is_empty(),
-            "{}: feed rows skipped {:?}",
-            self.name,
-            total.feed.skipped
+            skipped.is_empty(),
+            "{}: feed rows skipped {skipped:?}",
+            self.name
         );
         Ok(total)
     }

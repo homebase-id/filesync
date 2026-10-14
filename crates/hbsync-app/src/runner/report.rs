@@ -51,10 +51,12 @@ impl Told {
     }
 }
 
-/// The deletes the guard held in `report`, as the status shows them; `None` when none were.
+/// The deletes the guard held in `report` (of `nodes`), as the status shows them; `None` when
+/// none were.
 pub(super) fn held(
     engine: &mut Engine,
     report: &SyncReport,
+    nodes: &[NodeId],
 ) -> Result<Option<HeldDeletes>, StateError> {
     if report.held.is_empty() {
         return Ok(None);
@@ -68,12 +70,11 @@ pub(super) fn held(
     for op in report.held.iter().take(EXAMPLES) {
         examples.extend(engine.path_of(op.node())?);
     }
-    let nodes: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
     Ok(Some(HeldDeletes {
         here,
         remotely: report.held.len() as u64 - here,
         examples,
-        token: held_token(&nodes),
+        token: held_token(nodes),
     }))
 }
 

@@ -1,8 +1,9 @@
 //! One account (identity) of the daemon: it waits for the credentials (a keychain locked at
 //! logon), connects (retrying while the identity can't be reached: a laptop starts offline),
-//! and owns what is the account's: the [`Drive`], the notifier (whose hints it passes to each
-//! folder's runner), Recently deleted and its daily purge. Its folders' runners sync until
-//! the daemon stops.
+//! and owns what is the account's: the [`Drive`], the notifications (a change announced is
+//! pulled once, which wakes the folders it concerns), Recently deleted and its daily purge.
+//! Its folders' runners sync until the daemon stops, or until it starts over with new
+//! credentials.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,12 +17,14 @@ use hbsync_engine::root::SyncRoot;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
+use hbsync_state::{StateDb, StateError};
 
-use super::{DaemonError, wait};
-use crate::protocol::{AccountControl, AccountStatus, FolderStatus, Hints, State, Until};
-use crate::runner::{
-    Backoff, Command, Handle, Hint, Runner, RunnerConfig, RunnerError, lock, slept,
+use super::{DaemonError, join_finished};
+use crate::protocol::{
+    AccountControl, AccountStatus, DeletedItem, FolderStatus, Hints, RecentItem, State, Until,
 };
+use crate::runner::schedule::Announced;
+use crate::runner::{Backoff, Command, Handle, Runner, RunnerConfig, RunnerError, lock, slept};
 use crate::{Config, CredentialError, CredentialStore, Location, Paths};
 
 /// How often the account looks at its notifier, its requests and its runners.
@@ -40,7 +43,12 @@ pub(crate) struct Account {
     /// Paused (kept in the config too): a runner starts paused.
     paused: Mutex<Option<Until>>,
     /// Requests run on its thread.
-    requests: Mutex<Sender<Request>>,
+    requests: Sender<Request>,
+    /// Told to end (to start over with new credentials).
+    ended: AtomicBool,
+    /// A connection to its DB for the control socket's answers (recent, deleted), opened on
+    /// first use.
+    reader: Mutex<Option<StateDb>>,
 }
 
 /// What the account's thread is asked to do.
@@ -72,7 +80,7 @@ impl Account {
         folder: &Path,
         paused: Option<Until>,
     ) -> (Arc<Account>, Receiver<Request>) {
-        let (tx, rx) = channel();
+        let (requests, rx) = channel();
         let account = Account {
             identity: identity.to_owned(),
             db: paths.account_db(identity),
@@ -83,7 +91,9 @@ impl Account {
                 error: None,
             }),
             paused: Mutex::new(paused),
-            requests: Mutex::new(tx),
+            requests,
+            ended: AtomicBool::new(false),
+            reader: Mutex::new(None),
         };
         (Arc::new(account), rx)
     }
@@ -98,32 +108,28 @@ impl Account {
 
     /// Syncs the folder at `path` too (once connected).
     pub fn add_folder(&self, path: &Path) {
-        let mut phase = lock(&self.phase);
-        match &mut *phase {
+        match &mut *lock(&self.phase) {
             Phase::Waiting { folders, .. } => {
                 if !folders.iter().any(|f| f == path) {
                     folders.push(path.to_path_buf());
                 }
             }
             Phase::Running(_) => {
-                let _ = lock(&self.requests).send(Request::AddFolder(path.to_path_buf()));
+                let _ = self.requests.send(Request::AddFolder(path.to_path_buf()));
             }
         }
     }
 
     /// Stops syncing the folder at `path`.
     pub fn remove_folder(&self, path: &Path) {
-        let mut phase = lock(&self.phase);
-        match &mut *phase {
+        match &mut *lock(&self.phase) {
             Phase::Waiting { folders, .. } => folders.retain(|f| f != path),
             Phase::Running(_) => {
-                let _ = lock(&self.requests).send(Request::RemoveFolder(path.to_path_buf()));
+                let _ = self
+                    .requests
+                    .send(Request::RemoveFolder(path.to_path_buf()));
             }
         }
-    }
-
-    pub fn db(&self) -> &PathBuf {
-        &self.db
     }
 
     /// Its status and its folders'.
@@ -156,7 +162,7 @@ impl Account {
     }
 
     /// The runner of its folder at `path`, once running.
-    pub fn runner(&self, path: &PathBuf) -> Option<Handle> {
+    pub fn runner(&self, path: &Path) -> Option<Handle> {
         match &*lock(&self.phase) {
             Phase::Running(runners) => runners
                 .iter()
@@ -181,17 +187,11 @@ impl Account {
 
     /// Pauses (`Some`) or resumes its folders, also before they run.
     pub fn pause(&self, pause: Option<Until>) {
-        let phase = lock(&self.phase);
         *lock(&self.paused) = pause;
-        if let Phase::Running(runners) = &*phase {
-            let command = match pause {
-                Some(until) => Command::Pause { until },
-                None => Command::Resume,
-            };
-            for (_, h) in runners {
-                h.send(command.clone());
-            }
-        }
+        self.send_all(&match pause {
+            Some(until) => Command::Pause { until },
+            None => Command::Resume,
+        });
     }
 
     /// Why it can't take requests yet; `None` once it runs.
@@ -211,9 +211,59 @@ impl Account {
         if let Some(why) = self.not_running() {
             return Err(why);
         }
-        lock(&self.requests)
+        self.requests
             .send(Request::Deleted(control))
             .map_err(|_| "the account has stopped".to_owned())
+    }
+
+    /// Ends the account: its runners stop between operations and [`Account::run`] returns.
+    pub fn end(&self) {
+        self.ended.store(true, Ordering::Relaxed);
+    }
+
+    /// The newest `limit` entries of its folders' recently synced lists.
+    pub fn recent(&self, limit: usize) -> Vec<RecentItem> {
+        let folders = self.folders();
+        self.read(|db| {
+            let mut items = Vec::new();
+            for f in db.read(|s| s.folders())? {
+                let path = PathBuf::from(&f.path);
+                if !folders.contains(&path) {
+                    continue;
+                }
+                db.see_folder(f.id);
+                let synced = db.read(|s| s.recent_synced(limit));
+                db.see_account();
+                items.extend(synced?.into_iter().map(|synced| RecentItem {
+                    folder: path.clone(),
+                    synced,
+                }));
+            }
+            Ok(items)
+        })
+        .unwrap_or_default()
+    }
+
+    /// The newest `limit` items of its Recently deleted, newest first.
+    pub fn deleted(&self, limit: usize) -> Vec<DeletedItem> {
+        self.read(|db| hbsync_engine::deleted::list(db, limit))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|deleted| DeletedItem {
+                identity: self.identity.clone(),
+                deleted,
+            })
+            .collect()
+    }
+
+    /// `f` on the answers' connection (seeing no folder), opened on first use; `None` when the
+    /// DB isn't there yet or `f` failed.
+    fn read<T>(&self, f: impl FnOnce(&mut StateDb) -> Result<T, StateError>) -> Option<T> {
+        let mut reader = lock(&self.reader);
+        if reader.is_none() && self.db.exists() {
+            *reader = StateDb::open_account(&self.db).ok();
+        }
+        f(reader.as_mut()?).ok()
     }
 
     fn waiting(&self, to: State, why: String) {
@@ -223,8 +273,22 @@ impl Account {
         }
     }
 
-    /// Connects and syncs its folders until `stop`, then stops them. Returns the first error
-    /// a folder's runner ended with.
+    /// Whether it should stop: the daemon stops, or the account ends.
+    fn stopping(&self, stop: &AtomicBool) -> bool {
+        stop.load(Ordering::Relaxed) || self.ended.load(Ordering::Relaxed)
+    }
+
+    /// Waits `time`, or less if it should stop meanwhile. Returns whether it should.
+    fn wait(&self, time: Duration, stop: &AtomicBool) -> bool {
+        let until = Instant::now() + time;
+        while Instant::now() < until && !self.stopping(stop) {
+            std::thread::sleep(TICK);
+        }
+        self.stopping(stop)
+    }
+
+    /// Connects and syncs its folders until it should stop, then stops them. Returns the first
+    /// error a folder's runner ended with.
     pub fn run(
         &self,
         paths: &Paths,
@@ -247,6 +311,7 @@ impl Account {
                 .map_err(|e| DaemonError::Runner(e.into()))?,
             remote,
         );
+        let mut notifications = Notifications::default();
         let mut runners: Vec<Running> = Vec::new();
         // The first failure (a runner that ended with an error, or didn't start): the account
         // stops its runners and ends with it, the daemon with it (restarted whole).
@@ -275,7 +340,7 @@ impl Account {
         loop {
             let (wall, mono) = (SystemTime::now(), Instant::now());
             std::thread::sleep(TICK);
-            if stop.load(Ordering::Relaxed) || result.is_err() {
+            if self.stopping(stop) || result.is_err() {
                 for r in &runners {
                     r.handle.send(Command::Stop);
                 }
@@ -287,11 +352,13 @@ impl Account {
             ) {
                 notifier.reconnect();
             }
-            for hint in self.hints(&events) {
-                for r in &runners {
-                    let _ = r.hint.send(hint);
+            while let Ok(event) = events.try_recv() {
+                if let Some(hints) = notifications.event(event, &drive) {
+                    lock(&self.status).hints = hints;
                 }
             }
+            notifications.tick(&drive, Instant::now());
+            let mut changed = false;
             while let Ok(request) = requests.try_recv() {
                 match request {
                     Request::Deleted(control) => run_request(&drive, control),
@@ -306,12 +373,14 @@ impl Account {
                             Ok(r) => runners.push(r),
                             Err(e) => result = Err(e.into()),
                         }
+                        changed = true;
                     }
                     Request::RemoveFolder(folder) => {
                         for r in runners.iter_mut().filter(|r| r.path == folder) {
                             r.handle.send(Command::Stop);
                             r.removed = true;
                         }
+                        changed = true;
                     }
                 }
             }
@@ -327,19 +396,15 @@ impl Account {
                 }
             }
             // A runner that ended takes its folder out; the account ends with the last.
-            let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(&mut runners)
-                .into_iter()
-                .partition(|r| r.thread.is_finished());
-            runners = running;
-            for r in ended {
-                let ended = r.thread.join().map_err(|_| RunnerError::Panicked);
-                if let Err(e) = ended.and_then(|r| r)
-                    && result.is_ok()
-                {
-                    result = Err(DaemonError::Runner(e));
-                }
+            let before = runners.len();
+            if let Err(e) = join_finished(&mut runners, |r| r.thread.is_finished(), |r| r.thread)
+                && result.is_ok()
+            {
+                result = Err(DaemonError::Runner(e));
             }
-            *lock(&self.phase) = Phase::Running(shown(&runners));
+            if changed || runners.len() != before {
+                *lock(&self.phase) = Phase::Running(shown(&runners));
+            }
             if runners.is_empty() {
                 return result;
             }
@@ -361,12 +426,10 @@ impl Account {
             .find(|r| r.folder == folder)
             .and_then(|r| r.role);
         cfg.paused = *lock(&self.paused);
-        let (hint, hints) = channel();
-        let (handle, thread) = Runner::spawn(cfg, Arc::clone(drive), hints)?;
+        let (handle, thread) = Runner::spawn(cfg, Arc::clone(drive))?;
         Ok(Running {
             path: folder.to_path_buf(),
             handle,
-            hint,
             thread,
             removed: false,
         })
@@ -393,7 +456,7 @@ impl Account {
                     let wait_for = backoff.after(State::Failing);
                     tracing::warn!("can't read the keychain ({why}); trying again in {wait_for:?}");
                     self.waiting(State::Failing, format!("can't read the keychain: {why}"));
-                    if wait(wait_for, stop) {
+                    if self.wait(wait_for, stop) {
                         return Ok(None);
                     }
                 }
@@ -427,36 +490,55 @@ impl Account {
                         self.identity
                     );
                     self.waiting(state, e.to_string());
-                    if wait(wait_for, stop) {
+                    if self.wait(wait_for, stop) {
                         return None;
                     }
                 }
             }
         }
     }
+}
 
-    /// The notifier's events: the account's status, and the hints for its folders' runners.
-    fn hints(&self, events: &Receiver<Event>) -> Vec<Hint> {
-        let mut hints = Vec::new();
-        while let Ok(event) = events.try_recv() {
-            let (hint, status) = match event {
-                Event::Connected => (Some(Hint::Connected), Some(Hints::Connected)),
-                Event::Changed => (Some(Hint::Changed), None),
-                Event::Lost(why) => {
-                    tracing::info!("notifications lost ({why}); reconnecting");
-                    (None, Some(Hints::Lost(why)))
-                }
-                Event::Refused(why) => {
-                    tracing::warn!("notifications refused ({why}); syncing on the poll only");
-                    (None, Some(Hints::Refused(why)))
-                }
-            };
-            if let Some(status) = status {
-                lock(&self.status).hints = status;
+/// What the identity's notifications do to its drive: a change announced is pulled once the
+/// announcements have quieted (a burst of deletes reaches the mass-delete guard whole), which
+/// wakes the folders the change concerns; connecting again wakes every folder (changes made
+/// meanwhile weren't announced).
+#[derive(Debug, Default)]
+pub struct Notifications {
+    announced: Announced,
+}
+
+impl Notifications {
+    /// Takes `event`; the account's notification status when it changed.
+    pub fn event(&mut self, event: Event, drive: &Drive) -> Option<Hints> {
+        match event {
+            Event::Connected => {
+                drive.wake_all();
+                Some(Hints::Connected)
             }
-            hints.extend(hint);
+            Event::Changed => {
+                self.announced.note(Instant::now());
+                None
+            }
+            Event::Lost(why) => {
+                tracing::info!("notifications lost ({why}); reconnecting");
+                Some(Hints::Lost(why))
+            }
+            Event::Refused(why) => {
+                tracing::warn!("notifications refused ({why}); syncing on the poll only");
+                Some(Hints::Refused(why))
+            }
         }
-        hints
+    }
+
+    /// Pulls what was announced, once it has quieted.
+    pub fn tick(&mut self, drive: &Drive, now: Instant) {
+        if self.announced.due(now)
+            && let Err(e) = drive.pull(None)
+        {
+            tracing::info!("pulling announced changes failed ({e}); the folders' syncs will");
+            drive.wake_all();
+        }
     }
 }
 
@@ -464,8 +546,6 @@ impl Account {
 struct Running {
     path: PathBuf,
     handle: Handle,
-    /// Where it takes the notifications' hints.
-    hint: Sender<Hint>,
     thread: JoinHandle<Result<(), RunnerError>>,
     /// Asked to stop for good (its folder removed): it no longer shows.
     removed: bool,

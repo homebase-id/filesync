@@ -33,6 +33,17 @@ impl Daemon {
             _ => None,
         }
     }
+
+    /// The status of the folder that most needs the user (the main folder among equals): what
+    /// the status line and the icon say.
+    pub fn most_urgent(&self) -> Option<&FolderStatus> {
+        let Daemon::Running(s) = self else {
+            return None;
+        };
+        s.folders
+            .iter()
+            .max_by_key(|f| (folder_look(f), f.role.is_none()))
+    }
 }
 
 /// Everything the menu depends on.
@@ -99,12 +110,7 @@ pub fn look(view: &View) -> Look {
         Daemon::NotSetUp => Look::Quiet,
         Daemon::Starting(Some(_)) => Look::Attention,
         Daemon::Starting(None) => Look::Busy,
-        Daemon::Running(s) => s
-            .folders
-            .iter()
-            .map(folder_look)
-            .max()
-            .unwrap_or(Look::Quiet),
+        Daemon::Running(_) => view.daemon.most_urgent().map_or(Look::Quiet, folder_look),
     }
 }
 
@@ -128,7 +134,7 @@ pub fn status_line(view: &View) -> String {
         Daemon::NotSetUp => "Not connected".into(),
         Daemon::Starting(None) => "Starting…".into(),
         Daemon::Starting(Some(why)) => cut(&format!("Can't start: {why}")),
-        Daemon::Running(_) => match view.daemon.status() {
+        Daemon::Running(_) => match view.daemon.most_urgent() {
             Some(s) => cut(&words::status_line(s, view.now)),
             None => "Nothing to sync".into(),
         },
@@ -476,6 +482,11 @@ mod tests {
             folders: vec![status(State::Idle), held],
         }));
         assert_eq!(look(&view(&d, &[])), Look::Attention);
+        assert_eq!(
+            d.most_urgent().map(|f| f.path.clone()),
+            Some(PathBuf::from("/home/anna/Documents")),
+            "the status line tells of the folder that needs the user"
+        );
         assert_eq!(
             d.status().map(|s| s.path.clone()),
             Some(PathBuf::from("/home/anna/Homebase")),

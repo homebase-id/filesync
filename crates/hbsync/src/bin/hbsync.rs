@@ -6,11 +6,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use hbsync_app::control::{control, running, start, stop};
+use hbsync_app::control::{running, start, stop};
 use hbsync_app::protocol::{
-    AccountControl, DaemonControl, DaemonStatus, FolderControl, FolderStatus, Hints,
+    AccountControl, DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints,
 };
-use hbsync_app::{Config, Control, Paths, State, autostart, control as daemon, setup, words};
+use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
 use hbsync_types::NodeId;
 
@@ -184,22 +184,16 @@ fn run(command: Command) -> Res<ExitCode> {
             None => return Ok(not_running()),
         },
         Command::Sync => {
-            control(&paths, Control::Daemon(DaemonControl::SyncNow))?;
+            daemon::daemon(&paths, DaemonControl::SyncNow)?;
             println!("Syncing now.");
         }
         Command::Pause { for_: None } => {
-            control(
-                &paths,
-                Control::Daemon(DaemonControl::Pause { until: None }),
-            )?;
+            daemon::daemon(&paths, DaemonControl::Pause { until: None })?;
             println!("Paused. `hbsync resume` syncs again.");
         }
         Command::Pause { for_: Some(secs) } => {
             let until = words::now() + secs;
-            control(
-                &paths,
-                Control::Daemon(DaemonControl::Pause { until: Some(until) }),
-            )?;
+            daemon::daemon(&paths, DaemonControl::Pause { until: Some(until) })?;
             println!(
                 "Paused; syncing again {}. `hbsync resume` syncs now.",
                 words::when(until, words::now())
@@ -217,7 +211,7 @@ fn run(command: Command) -> Res<ExitCode> {
             None => return Ok(not_running()),
         },
         Command::Resume => {
-            control(&paths, Control::Daemon(DaemonControl::Resume))?;
+            daemon::daemon(&paths, DaemonControl::Resume)?;
             println!("Resumed.");
         }
         Command::Deleted { limit } => match daemon::deleted(&paths, limit)? {
@@ -233,56 +227,43 @@ fn run(command: Command) -> Res<ExitCode> {
             None => return Ok(not_running()),
         },
         Command::Restore { items } => {
-            let Some(picked) = pick(&paths, &items)? else {
+            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
                 return Ok(not_running());
             };
-            for (identity, nodes) in picked {
+            for (identity, nodes) in pick(&paths, &list, &items)? {
                 daemon::account(&paths, &identity, AccountControl::Restore { nodes })?;
             }
             println!("Restoring; the next sync brings it back.");
         }
         Command::EmptyDeleted { items, yes } => {
-            let (controls, what) = if items.is_empty() {
-                // Everything listed now (each account's, until its newest item); nothing deleted
-                // after this look.
-                let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
-                    return Ok(not_running());
-                };
-                if list.is_empty() {
-                    println!("Recently deleted is empty.");
-                    return Ok(ExitCode::SUCCESS);
-                }
-                let mut newest: BTreeMap<String, i64> = BTreeMap::new();
-                for item in &list {
-                    let at = newest.entry(item.identity.clone()).or_insert(i64::MIN);
-                    *at = (*at).max(item.deleted.removed_at_ms);
-                }
-                let controls = newest
-                    .into_iter()
-                    .map(|(identity, at_ms)| {
-                        (identity, AccountControl::EmptyDeletedUntil { at_ms })
-                    })
-                    .collect();
-                (
-                    controls,
-                    format!("the {} items in Recently deleted", list.len()),
-                )
-            } else {
-                let Some(picked) = pick(&paths, &items)? else {
-                    return Ok(not_running());
-                };
-                let controls: Vec<_> = picked
-                    .into_iter()
-                    .map(|(identity, nodes)| (identity, AccountControl::EmptyDeleted { nodes }))
-                    .collect();
-                (controls, items.join(", "))
+            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+                return Ok(not_running());
+            };
+            if list.is_empty() {
+                println!("Recently deleted is empty.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            // None: everything listed now, nothing deleted after this look.
+            let picked = match items.is_empty() {
+                true => None,
+                false => Some(pick(&paths, &list, &items)?),
+            };
+            let what = match &picked {
+                None => format!("the {} items in Recently deleted", list.len()),
+                Some(_) => items.join(", "),
             };
             if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
-            for (identity, control_) in controls {
-                daemon::account(&paths, &identity, control_)?;
+            match picked {
+                // Newest first.
+                None => daemon::empty_deleted_until(&paths, &list, list[0].deleted.removed_at_ms)?,
+                Some(picked) => {
+                    for (identity, nodes) in picked {
+                        daemon::account(&paths, &identity, AccountControl::EmptyDeleted { nodes })?;
+                    }
+                }
             }
             println!("Deleting for good.");
         }
@@ -358,13 +339,13 @@ fn run(command: Command) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The items of Recently deleted that `items` name, by node id or as `hbsync deleted` shows
-/// them ([`words::deleted_place`]; a path deleted twice names its latest), by account; `None`
-/// when the daemon isn't running.
-fn pick(paths: &Paths, items: &[String]) -> Res<Option<BTreeMap<String, Vec<NodeId>>>> {
-    let Some(list) = daemon::deleted(paths, usize::MAX)? else {
-        return Ok(None);
-    };
+/// The items of `list` (Recently deleted) that `items` name, by node id or as `hbsync deleted`
+/// shows them ([`words::deleted_place`]; a path deleted twice names its latest), by account.
+fn pick(
+    paths: &Paths,
+    list: &[DeletedItem],
+    items: &[String],
+) -> Res<BTreeMap<String, Vec<NodeId>>> {
     let main = daemon::configured(paths)?.map(|r| r.folder);
     let mut picked: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
     for item in items {
@@ -382,7 +363,7 @@ fn pick(paths: &Paths, items: &[String]) -> Res<Option<BTreeMap<String, Vec<Node
             .or_default()
             .push(found.deleted.node);
     }
-    Ok(Some(picked))
+    Ok(picked)
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.
@@ -423,13 +404,7 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
             continue;
         }
         // Exactly these: any delete since is held again, for another look.
-        control(
-            paths,
-            Control::Folder {
-                path,
-                control: FolderControl::ConfirmDeletes { token: held.token },
-            },
-        )?;
+        daemon::confirm_deletes(paths, &path, held.token)?;
         println!("Confirmed.");
     }
     Ok(())

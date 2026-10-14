@@ -10,10 +10,11 @@ use uuid::Uuid;
 use crate::NodeId;
 
 /// A special folder, found on each device by its role, never by its name.
+/// Written and read as [`Role::key`] names it (config files, the daemon's status).
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-#[serde(rename_all = "snake_case")]
+#[serde(into = "&'static str", try_from = "String")]
 pub enum Role {
     Documents,
     Pictures,
@@ -73,6 +74,20 @@ impl Role {
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.key())
+    }
+}
+
+impl From<Role> for &'static str {
+    fn from(role: Role) -> Self {
+        role.key()
+    }
+}
+
+impl TryFrom<String> for Role {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        s.parse()
     }
 }
 

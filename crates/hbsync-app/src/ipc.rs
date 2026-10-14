@@ -19,7 +19,7 @@ use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream};
 
 use crate::Paths;
-use crate::protocol::{PROTOCOL, Reply, Request};
+use crate::protocol::{Ask, OTHER_PROTOCOL, PROTOCOL, Reply, Request};
 
 /// How long either side waits for the other's line.
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -40,12 +40,6 @@ pub enum IpcError {
 /// Asks the daemon `request` and waits for its reply.
 pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
     let line = serde_json::to_string(request).map_err(|e| IpcError::Protocol(e.to_string()))?;
-    call_line(paths, &line)
-}
-
-/// Sends the daemon the request `line` (JSON, as it is) and waits for its reply: for a request
-/// of an older protocol ([`crate::control::stop`]).
-pub fn call_line(paths: &Paths, line: &str) -> Result<Reply, IpcError> {
     let name = endpoint(paths, false).map_err(not_running)?;
     let stream = Stream::connect(name).map_err(not_running)?;
     patience(&stream)?;
@@ -107,13 +101,22 @@ fn handle(conn: Stream, answer: &(dyn Fn(Request) -> Reply + Sync)) -> Result<()
     let Some(line) = read_line(&mut conn)? else {
         return Ok(());
     };
-    let reply = match serde_json::from_str::<Request>(&line) {
-        Ok(r) if r.protocol == PROTOCOL => answer(r),
-        Ok(r) => Reply::Refused(format!(
-            "this daemon speaks protocol {PROTOCOL}, the request {}: restart the daemon",
-            r.protocol
+    // The version first: a request of another protocol may not parse here.
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        protocol: u32,
+        ask: serde_json::Value,
+    }
+    let not_a_request = |e: serde_json::Error| Reply::Refused(format!("not a request: {e}"));
+    let reply = match serde_json::from_str::<Envelope>(&line) {
+        // Whatever the version: an update stops the daemon of the build before it.
+        Ok(e) if e.ask == "stop" => answer(Request::new(Ask::Stop)),
+        Ok(e) if e.protocol != PROTOCOL => Reply::Refused(format!(
+            "{OTHER_PROTOCOL}{PROTOCOL}, the request {}: restart the daemon",
+            e.protocol
         )),
-        Err(e) => Reply::Refused(format!("not a request: {e}")),
+        Ok(_) => serde_json::from_str::<Request>(&line).map_or_else(not_a_request, answer),
+        Err(e) => not_a_request(e),
     };
     let mut out = serde_json::to_string(&reply).map_err(|e| IpcError::Protocol(e.to_string()))?;
     out.push('\n');
@@ -283,9 +286,10 @@ mod tests {
                     Reply::Done
                 }
                 Ask::Deleted { .. } => Reply::Deleted(Vec::new()),
-                Ask::AddFolder { .. } | Ask::RemoveFolder { .. } => {
-                    Reply::Refused("not here".into())
-                }
+                Ask::AddFolder { .. }
+                | Ask::RemoveFolder { .. }
+                | Ask::StartOver { .. }
+                | Ask::Stop => Reply::Refused("not here".into()),
                 Ask::Recent { limit } => Reply::Recent(
                     (0..limit as u64)
                         .map(|i| RecentItem {
@@ -323,12 +327,18 @@ mod tests {
             other => panic!("{other:?}"),
         }
 
-        // Another protocol version is refused, with the reason.
-        let old = Request {
+        // Another protocol version is refused, with the reason, but for a stop.
+        let other = |ask| Request {
             protocol: PROTOCOL + 1,
-            ask: Ask::Status,
+            ask,
         };
-        assert!(matches!(call(&paths, &old)?, Reply::Refused(why) if why.contains("restart")));
+        assert!(
+            matches!(call(&paths, &other(Ask::Status))?, Reply::Refused(why) if why.starts_with(OTHER_PROTOCOL))
+        );
+        assert!(
+            matches!(call(&paths, &other(Ask::Stop))?, Reply::Refused(why) if why == "not here"),
+            "a stop reaches the daemon whatever its version"
+        );
         Ok(())
     }
 
@@ -337,6 +347,7 @@ mod tests {
     fn requests_look_as_documented() -> Result<(), serde_json::Error> {
         let json = |ask| serde_json::to_string(&Request::new(ask));
         assert_eq!(json(Ask::Status)?, r#"{"protocol":4,"ask":"status"}"#);
+        assert_eq!(json(Ask::Stop)?, r#"{"protocol":4,"ask":"stop"}"#);
         assert_eq!(
             json(Ask::Control(Control::Daemon(DaemonControl::SyncNow)))?,
             r#"{"protocol":4,"ask":{"control":{"daemon":"sync_now"}}}"#

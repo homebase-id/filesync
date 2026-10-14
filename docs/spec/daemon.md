@@ -161,7 +161,8 @@ account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
 {"protocol":4,"ask":"status"}
-{"protocol":4,"ask":{"control":{"daemon":"sync_now"}}}            // resume, stop
+{"protocol":4,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":4,"ask":{"control":{"daemon":"sync_now"}}}            // resume
 {"protocol":4,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
 {"protocol":4,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
 {"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
@@ -171,7 +172,13 @@ account (its Recently deleted) or to one folder (its held deletes):
 {"protocol":4,"ask":{"deleted":{"limit":100}}}
 {"protocol":4,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
 {"protocol":4,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":4,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
+
+A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
+which every daemon takes whatever protocol it speaks: an update stops the daemon of the build
+before it. `start_over` has an account stop its folders and start again with its credentials
+read anew (`hbsync setup` after logging in again).
 
 `add_folder` sets the folder up in its account's state DB (its marker written; kept as it was if
 it is already), adds it to the config and starts syncing it, in its account (a new one for an

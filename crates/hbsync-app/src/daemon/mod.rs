@@ -7,11 +7,13 @@
 mod account;
 mod answer;
 
+pub use account::Notifications;
+
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hbsync_homebase::HomebaseError;
 use hbsync_types::unix_now;
@@ -54,6 +56,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         paths: paths.clone(),
         stop,
         accounts: Mutex::default(),
+        starting_over: AtomicUsize::new(0),
     });
     for root in &config.roots {
         daemon.add_folder(&root.identity, &root.folder)?;
@@ -82,7 +85,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
                 result = Err(e);
             }
         }
-        if left == 0 {
+        if left == 0 && daemon.starting_over.load(Ordering::SeqCst) == 0 {
             break;
         }
     }
@@ -96,6 +99,8 @@ pub(crate) struct Daemon {
     paths: Paths,
     stop: Arc<AtomicBool>,
     accounts: Mutex<Vec<(Arc<Account>, AccountThread)>>,
+    /// Accounts starting over ([`Daemon::start_over`]): the daemon doesn't end meanwhile.
+    starting_over: AtomicUsize,
 }
 
 type AccountThread = JoinHandle<Result<(), DaemonError>>;
@@ -140,31 +145,55 @@ impl Daemon {
         Ok(())
     }
 
+    /// Starts the account `identity` over (its credentials changed): it stops its folders
+    /// between operations, then syncs them again with the new credentials.
+    fn start_over(&self, identity: &str) -> Result<(), DaemonError> {
+        let found = {
+            let mut accounts = lock(&self.accounts);
+            let at = accounts.iter().position(|(a, _)| a.identity == identity);
+            at.map(|at| accounts.remove(at))
+        };
+        let Some((account, thread)) = found else {
+            return Ok(());
+        };
+        self.starting_over.fetch_add(1, Ordering::SeqCst);
+        account.end();
+        let ended = thread
+            .join()
+            .unwrap_or(Err(DaemonError::Runner(RunnerError::Panicked)));
+        let again = account
+            .folders()
+            .iter()
+            .try_for_each(|folder| self.add_folder(identity, folder));
+        self.starting_over.fetch_sub(1, Ordering::SeqCst);
+        ended.and(again)
+    }
+
     /// Joins the accounts that ended: the first error among them, and how many still run.
     fn reap(&self) -> (Result<(), DaemonError>, usize) {
         let mut accounts = lock(&self.accounts);
-        let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(&mut *accounts)
-            .into_iter()
-            .partition(|(_, thread)| thread.is_finished());
-        *accounts = running;
-        let mut result = Ok(());
-        for (_, thread) in ended {
-            let ended = thread
-                .join()
-                .unwrap_or(Err(DaemonError::Runner(RunnerError::Panicked)));
-            if result.is_ok() {
-                result = ended;
-            }
-        }
+        let result = join_finished(&mut accounts, |(_, t)| t.is_finished(), |(_, t)| t);
         (result, accounts.len())
     }
 }
 
-/// Waits `time`, or less if `stop` is set meanwhile. Returns whether it was.
-fn wait(time: Duration, stop: &AtomicBool) -> bool {
-    let until = Instant::now() + time;
-    while Instant::now() < until && !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(200));
+/// Joins the threads of `items` that ended (`finished` tells, `thread` takes an item's out)
+/// and keeps the rest: the first error among them.
+pub(crate) fn join_finished<T, E: From<RunnerError>>(
+    items: &mut Vec<T>,
+    finished: impl Fn(&T) -> bool,
+    thread: impl Fn(T) -> JoinHandle<Result<(), E>>,
+) -> Result<(), E> {
+    let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(items).into_iter().partition(finished);
+    *items = running;
+    let mut result = Ok(());
+    for item in ended {
+        let ended = thread(item)
+            .join()
+            .unwrap_or_else(|_| Err(RunnerError::Panicked.into()));
+        if result.is_ok() {
+            result = ended;
+        }
     }
-    stop.load(Ordering::Relaxed)
+    result
 }

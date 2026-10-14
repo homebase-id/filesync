@@ -19,7 +19,7 @@ pub fn ask(paths: &Paths, what: Ask) -> std::result::Result<Reply, IpcError> {
 }
 
 /// A daemon of an older build is running (the programs were updated while it ran): it speaks
-/// an older protocol, and is stopped in its own words ([`stop`]).
+/// an older protocol; [`stop`] stops it all the same.
 #[derive(Debug, thiserror::Error)]
 #[error("the daemon running is of an older version: restart it")]
 pub struct OlderDaemon;
@@ -27,16 +27,13 @@ pub struct OlderDaemon;
 /// The protocol of the daemon that refused a request as `why`, when it isn't ours.
 fn older_protocol(why: &str) -> Option<u32> {
     let version = why
-        .strip_prefix("this daemon speaks protocol ")?
+        .strip_prefix(crate::protocol::OTHER_PROTOCOL)?
         .split(',')
         .next()?
         .parse()
         .ok()?;
     (version != crate::protocol::PROTOCOL).then_some(version)
 }
-
-/// The stop request of protocol 3: what a daemon of the build before protocol 4 understands.
-const STOP_3: &str = r#"{"protocol":3,"ask":{"control":"stop"}}"#;
 
 /// The daemon's status; `None` when it isn't running.
 pub fn status(paths: &Paths) -> Result<Option<DaemonStatus>> {
@@ -86,6 +83,48 @@ fn done(answer: std::result::Result<Reply, IpcError>) -> Result<()> {
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Sends `control` to every folder (sync now, pause, resume).
+pub fn daemon(paths: &Paths, control: DaemonControl) -> Result<()> {
+    self::control(paths, Control::Daemon(control))
+}
+
+/// Lets the held deletes of the folder at `path` through: `token` names those the user saw.
+pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> Result<()> {
+    self::control(
+        paths,
+        Control::Folder {
+            path: path.to_path_buf(),
+            control: crate::protocol::FolderControl::ConfirmDeletes { token },
+        },
+    )
+}
+
+/// Deletes for good what Recently deleted had until `at_ms` (Unix ms, its newest item the user
+/// saw), in every account of `items`: anything deleted since is newer.
+pub fn empty_deleted_until(paths: &Paths, items: &[DeletedItem], at_ms: i64) -> Result<()> {
+    let mut identities: Vec<&str> = items.iter().map(|i| i.identity.as_str()).collect();
+    identities.sort_unstable();
+    identities.dedup();
+    for identity in identities {
+        account(
+            paths,
+            identity,
+            crate::protocol::AccountControl::EmptyDeletedUntil { at_ms },
+        )?;
+    }
+    Ok(())
+}
+
+/// Has the account `identity` start over: its credentials changed.
+pub fn start_over(paths: &Paths, identity: &str) -> Result<()> {
+    done(ask(
+        paths,
+        Ask::StartOver {
+            identity: identity.to_owned(),
+        },
+    ))
 }
 
 /// Sends `control` to the account `identity` (its Recently deleted).
@@ -211,13 +250,7 @@ fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> 
 
 /// Stops the daemon and waits until it's gone. False when it wasn't running.
 pub fn stop(paths: &Paths) -> Result<bool> {
-    let mut answer = ask(paths, Ask::Control(Control::Daemon(DaemonControl::Stop)));
-    if let Ok(Reply::Refused(why)) = &answer
-        && older_protocol(why) == Some(3)
-    {
-        answer = ipc::call_line(paths, STOP_3);
-    }
-    match answer {
+    match ask(paths, Ask::Stop) {
         Err(IpcError::NotRunning) => return Ok(false),
         // The daemon may exit before its answer is out: the connection just ends.
         Err(IpcError::Protocol(_)) => {}

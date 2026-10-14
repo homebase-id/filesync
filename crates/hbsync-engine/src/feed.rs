@@ -48,8 +48,8 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
     let mut report = FeedReport::default();
     loop {
         let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
-        let page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
-        report.skipped.extend(page.skipped.iter().cloned());
+        let mut page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
+        report.skipped.append(&mut page.skipped);
         db().write(|s| {
             for header in &page.entries {
                 if apply(s, header)? {

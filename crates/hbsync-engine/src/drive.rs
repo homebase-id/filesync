@@ -2,7 +2,6 @@
 //! change feed (pulled once for all of them), and what is the whole drive's rather than a
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -79,14 +78,13 @@ impl Drive {
         }
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
-        let report = feed::pull(|| self.account(), self.remote(), FEED_PAGE)?;
+        let mut report = feed::pull(|| self.account(), self.remote(), FEED_PAGE)?;
         *answered = covers;
         drop(answered);
-        let touched = self.account().take_touched();
-        self.wake_folders(&touched, from);
+        self.wake_touched(&mut self.account(), from);
         let mut skipped = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
         let room = MAX_SKIPPED.saturating_sub(skipped.len());
-        skipped.extend(report.skipped.iter().take(room).cloned());
+        skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));
         Ok(report)
     }
 
@@ -107,15 +105,15 @@ impl Drive {
         rx
     }
 
-    /// Wakes every folder's engine but `except`'s: the drive changed. Folders gone are
-    /// forgotten.
-    pub fn wake(&self, except: Option<i64>) {
-        self.wake_where(|folder| Some(folder) != except);
+    /// Wakes every folder's engine: the drive changed. Folders gone are forgotten.
+    pub fn wake_all(&self) {
+        self.wake_where(|_| true);
     }
 
-    /// Wakes the engines of `folders` but `except`'s: changes marked nodes dirty there
-    /// ([`StateDb::take_touched`]).
-    pub fn wake_folders(&self, folders: &BTreeSet<i64>, except: Option<i64>) {
+    /// Wakes the engines of the folders the writes through `db` marked nodes dirty in
+    /// ([`StateDb::take_touched`]), but `except`'s.
+    pub fn wake_touched(&self, db: &mut StateDb, except: Option<i64>) {
+        let folders = db.take_touched();
         self.wake_where(|folder| Some(folder) != except && folders.contains(&folder));
     }
 
@@ -139,7 +137,7 @@ impl Drive {
         for &node in nodes {
             restored += deleted::restore(&mut self.account(), self.remote(), node)?;
         }
-        self.wake(None);
+        self.wake_all();
         Ok(restored)
     }
 

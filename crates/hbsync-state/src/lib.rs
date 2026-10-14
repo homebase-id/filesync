@@ -155,6 +155,16 @@ impl StateDb {
         self.path.as_deref()
     }
 
+    /// From now on this connection sees folder `folder`.
+    pub fn see_folder(&mut self, folder: i64) {
+        self.folder = folder;
+    }
+
+    /// From now on this connection sees no folder: the account's ([`StateDb::open_account`]).
+    pub fn see_account(&mut self) {
+        self.folder = NO_FOLDER;
+    }
+
     /// This DB seen as folder `folder`: the same connection.
     pub fn with_folder(mut self, folder: i64) -> Self {
         self.folder = folder;

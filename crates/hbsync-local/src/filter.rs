@@ -378,7 +378,7 @@ mod tests {
             source,
         })?;
         assert_eq!(Filter::load(dir.path(), false)?.rule_count(), 0);
-        let state = dir.path().join(crate::STATE_DIR);
+        let state = crate::layout::state_dir(dir.path());
         std::fs::create_dir_all(&state)
             .and_then(|()| std::fs::write(crate::layout::ignore_file(dir.path()), "*.log\n"))
             .map_err(|source| FilterError::Read {
