@@ -4,7 +4,6 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use hbsync_state::{StateError, Store};
 use hbsync_types::{NodeId, Role};
 
 use crate::tree::Tree;
@@ -31,17 +30,6 @@ impl Scope {
     pub fn fingerprint(&self) -> String {
         let outside: Vec<String> = self.outside.iter().map(|n| n.0.to_string()).collect();
         outside.join(",")
-    }
-
-    /// The scope the engine of this state DB syncs, as its last run recorded it; the main
-    /// folder's before any.
-    pub fn stored(s: &Store<'_>) -> Result<Scope, StateError> {
-        Ok(match s.get_kv(KEY)? {
-            Some(fingerprint) => Scope {
-                outside: Scope::outside_of(&fingerprint),
-            },
-            None => Scope::main(),
-        })
     }
 
     /// The folders a [`Scope::fingerprint`] left out.

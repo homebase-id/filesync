@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime};
 use hbsync_engine::activity::Counters;
 use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
-use hbsync_engine::{Conflict, Engine, EngineConfig, EngineError, SyncReport};
+use hbsync_engine::{Conflict, Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
 use hbsync_local::{Filter, FilterError, LocalObserver, Marker};
@@ -161,36 +161,12 @@ const REMOTE_QUIET: Duration = Duration::from_millis(1000);
 /// ...but no longer than this after the first.
 const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
 
-/// The state DB key of the last purge of Recently deleted (Unix seconds).
-const PURGED_KEY: &str = "deleted.purged_at";
-
-/// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the local
-/// trash of the same age). A failure waits for the next sync.
-fn purge_when_due(engine: &mut Engine, keep_days: u32) {
-    const DAY: u64 = 24 * 60 * 60;
-    let now = unix_now();
-    let last = engine
-        .db()
-        .read(|s| s.account_kv(PURGED_KEY))
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u64>().ok());
-    if last.is_some_and(|last| now < last + DAY) {
-        return;
-    }
-    let before_ms = now.saturating_sub(u64::from(keep_days) * DAY) as i64 * 1000;
-    match engine.purge(before_ms) {
-        Ok(n) => {
-            if n > 0 {
-                tracing::info!("{n} items deleted for good after {keep_days} days");
-            }
-            if let Err(e) = engine
-                .db()
-                .write(|s| s.set_account_kv(PURGED_KEY, &now.to_string()))
-            {
-                tracing::warn!("couldn't note the purge: {e}");
-            }
-        }
+/// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the trash of
+/// the same age). A failure waits for the next sync.
+fn purge_when_due(drive: &Drive, keep_days: u32) {
+    match drive.purge_when_due(keep_days) {
+        Ok(Some(n)) if n > 0 => tracing::info!("{n} items deleted for good after {keep_days} days"),
+        Ok(_) => {}
         Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
     }
 }
@@ -546,7 +522,8 @@ impl Runner {
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
         let db = crate::accounts::open_folder(&self.cfg.db, &self.cfg.identity, root)?;
-        let mut engine = Engine::new(db, Box::new(Arc::clone(&self.remote)), cfg);
+        let account = crate::accounts::open_account(&self.cfg.db, &self.cfg.identity)?;
+        let mut engine = Engine::new(db, Drive::new(account, Arc::clone(&self.remote)), cfg);
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
         let observer = LocalObserver::start(root, engine.scan_options().clone());
@@ -788,7 +765,7 @@ impl Runner {
                 p.engine.confirm_deletes(seen);
             }
             if !restore.is_empty() {
-                match p.engine.restore(&std::mem::take(&mut restore)) {
+                match p.engine.drive().restore(&std::mem::take(&mut restore)) {
                     Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
                     Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
                 }
@@ -797,8 +774,8 @@ impl Runner {
             let emptied = [
                 empty_until
                     .take()
-                    .map(|at| p.engine.empty_deleted_until(at)),
-                (!nodes.is_empty()).then(|| p.engine.empty_deleted(&nodes)),
+                    .map(|at| p.engine.drive().empty_until(at)),
+                (!nodes.is_empty()).then(|| p.engine.drive().empty(&nodes)),
             ];
             for result in emptied.into_iter().flatten() {
                 match result {
@@ -806,7 +783,7 @@ impl Runner {
                     Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
                 }
             }
-            purge_when_due(&mut p.engine, self.cfg.keep_deleted_days);
+            purge_when_due(p.engine.drive(), self.cfg.keep_deleted_days);
 
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.

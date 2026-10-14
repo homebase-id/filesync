@@ -4,12 +4,13 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hbsync_local::STATE_DIR;
 use hbsync_remote::Remote;
 use hbsync_state::StateDb;
 
-use crate::{Engine, EngineConfig, SyncReport};
+use crate::{Drive, Engine, EngineConfig, SyncReport};
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -71,7 +72,8 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         tweak(&mut cfg);
         // The account's DB, beside the folder (as the product keeps it with the account).
         let db = StateDb::open(&db_path(root))?;
-        Ok(Engine::new(db, remote, cfg))
+        let drive = Drive::new(StateDb::open_account(&db_path(root))?, Arc::from(remote));
+        Ok(Engine::new(db, drive, cfg))
     }
 
     /// A new engine on the same state DB, as after a restart.

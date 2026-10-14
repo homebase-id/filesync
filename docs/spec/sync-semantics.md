@@ -341,8 +341,11 @@ schema's rules) is masked there and keeps that folder alive (§6.3).
 A role folder holds no name for the scope: a plain folder of the same name at the top keeps it
 (two at the top, told apart by their ids). A new scope plans the folders it, or the last one,
 left out again, from their tops; it needs no walk, as only the remote view changed. Recently
-deleted is listed, restored and emptied per scope; the purge, by age, is the whole drive's
-(the main folder's engine runs it).
+deleted is the account's, like the mirror: one list, each item naming the folder of this
+device it comes back to (none for a role folder this device doesn't sync); restoring, emptying
+and the purge (by age, with every folder's trash) are the account's too. A change of the drive
+is planned in the folders it concerns: those holding the node, and the one whose part of the
+drive its place is in (every folder when that place isn't known).
 
 A detached item's new id is fixed for the node and the device, so a replan picks the same one,
 but never one in use here: the same node detached again while its first copy lives gets the

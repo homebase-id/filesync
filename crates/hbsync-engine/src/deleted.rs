@@ -2,8 +2,8 @@
 //! its bytes until the purge. A restore puts it back in the tree, where the next sync brings it
 //! to every device; the purge deletes it for good.
 //!
-//! An engine lists, restores and empties only what was deleted in its scope (§12); the purge,
-//! by age, is the whole drive's.
+//! It is the whole drive's, kept with the account ([`crate::drive::Drive`]): each item comes
+//! back to the folder of this device whose part of the drive it was in, if any.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -13,81 +13,57 @@ use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Deleted;
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_types::{NodeId, NodeKind, Role};
 
 use crate::engine::EngineError;
 use crate::exec::{remove_all, trash_dir, trashed_at, update_meta};
-use crate::scope::Scope;
 use crate::tree::restored_names;
 use crate::walk::End;
 
-/// Recently deleted in this DB's scope, newest first.
+/// Recently deleted, newest first: the drive's, each item with the folder of this device it
+/// comes back to and its path below that folder's top.
 pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> {
     db.read(|s| {
-        let scope = Scope::stored(s)?;
-        // Folders, each worked out once.
-        let mut folders = HashMap::new();
-        // More rows while those outside the scope crowd out the ones in it.
-        let mut asked = limit;
-        let rows = loop {
-            let rows = s.list_removed(asked)?;
-            let got = rows.len();
-            let kept = in_scope_with(s, &scope, &mut folders, rows)?;
-            if kept.len() >= limit || got < asked {
-                break kept;
-            }
-            asked = asked.saturating_mul(4);
-        };
-        let mut out = Vec::new();
-        for r in rows.into_iter().take(limit) {
-            let (folder, _) = folder(s, &scope, r.row.parent, &mut folders)?;
-            out.push(Deleted {
-                node: r.row.node,
-                parent: r.row.parent,
-                path: join(&folder, &r.row.name),
-                kind: r.row.kind,
-                size: r.row.file.map(|f| f.size),
-                removed_at_ms: r.removal.at_ms,
-                root: r.removal.root,
-            });
-        }
-        Ok(out)
+        // Where a walk up stops: a folder's top (here or not), the role folders whether
+        // synced here or not; above them all, the main folder's top (the drive's root).
+        let folders: HashMap<NodeId, String> =
+            s.folders()?.into_iter().map(|f| (f.top, f.path)).collect();
+        let tops: HashSet<NodeId> = folders
+            .keys()
+            .copied()
+            .chain(Role::ALL.iter().map(|r| r.node()))
+            .collect();
+        let mut known = HashMap::new();
+        s.list_removed(limit)?
+            .into_iter()
+            .map(|r| {
+                let (path, top) = place(s, &tops, r.row.parent, &mut known)?;
+                Ok(Deleted {
+                    node: r.row.node,
+                    parent: r.row.parent,
+                    path: join(&path, &r.row.name),
+                    kind: r.row.kind,
+                    size: r.row.file.map(|f| f.size),
+                    removed_at_ms: r.removal.at_ms,
+                    root: r.removal.root,
+                    folder: folders.get(&top).cloned(),
+                })
+            })
+            .collect()
     })
 }
 
-/// `rows` without those outside this DB's scope.
-fn in_scope(s: &Store<'_>, rows: Vec<RemovedRow>) -> Result<Vec<RemovedRow>, StateError> {
-    in_scope_with(s, &Scope::stored(s)?, &mut HashMap::new(), rows)
-}
-
-/// `rows` without those outside `scope`, with the folders worked out so far in `folders`.
-fn in_scope_with(
+/// The path of folder `at` below the top it is under (one of `tops`, else the drive's root:
+/// a folder deleted for good ends the path, which starts below it), and that top, from the
+/// tree or from Recently deleted. Memoized in `known`.
+fn place(
     s: &Store<'_>,
-    scope: &Scope,
-    folders: &mut HashMap<NodeId, (String, bool)>,
-    rows: Vec<RemovedRow>,
-) -> Result<Vec<RemovedRow>, StateError> {
-    let mut kept = Vec::new();
-    for r in rows {
-        if !scope.outside.contains(&r.row.node) && !folder(s, scope, r.row.parent, folders)?.1 {
-            kept.push(r);
-        }
-    }
-    Ok(kept)
-}
-
-/// The path of folder `at` (empty for the top) and whether `scope` leaves it out, from the
-/// tree or from Recently deleted; a folder deleted for good ends the path (it starts below
-/// it). Memoized in `known`.
-fn folder(
-    s: &Store<'_>,
-    scope: &Scope,
+    tops: &HashSet<NodeId>,
     at: NodeId,
-    known: &mut HashMap<NodeId, (String, bool)>,
-) -> Result<(String, bool), StateError> {
-    // Up to a folder already worked out or one outside the scope.
+    known: &mut HashMap<NodeId, (String, NodeId)>,
+) -> Result<(String, NodeId), StateError> {
     let up = crate::walk::up::<_, StateError>(at, |n| {
-        if known.contains_key(&n) || scope.outside.contains(&n) {
+        if known.contains_key(&n) || tops.contains(&n) {
             return Ok(None);
         }
         let row = match s.get_mirror(n)? {
@@ -96,19 +72,20 @@ fn folder(
         };
         Ok(row.map(|r| ((n, r.name), r.parent)))
     })?;
-    let (mut path, outside) = match up.end {
-        End::At(n) => match known.get(&n) {
-            Some(k) => k.clone(),
-            None => (String::new(), scope.outside.contains(&n)),
-        },
-        End::Top | End::Cycle => (String::new(), false),
+    let (mut path, top) = match up.end {
+        End::At(n) if tops.contains(&n) => (String::new(), n),
+        End::At(n) => known
+            .get(&n)
+            .cloned()
+            .unwrap_or((String::new(), NodeId::ROOT)),
+        End::Top | End::Cycle => (String::new(), NodeId::ROOT),
     };
     // Top-down, remembering each folder on the way.
     for (id, name) in up.items.into_iter().rev() {
         path = join(&path, &name);
-        known.insert(id, (path.clone(), outside));
+        known.insert(id, (path.clone(), top));
     }
-    Ok((path, outside))
+    Ok((path, top))
 }
 
 fn join(folder: &str, name: &str) -> String {
@@ -123,13 +100,6 @@ fn join(folder: &str, name: &str) -> String {
 /// Recently deleted too (just those, not their other contents). Returns how many items came
 /// back; 0 when `node` isn't in Recently deleted (any more).
 pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<usize, EngineError> {
-    let mine = db.read(|s| {
-        let row = s.removed_by_node(node)?;
-        Ok(!in_scope(s, row.into_iter().collect())?.is_empty())
-    })?;
-    if !mine {
-        return Ok(0);
-    }
     let Some(plan) = db.read(|s| plan_restore(s, node))? else {
         return Ok(0);
     };
@@ -175,10 +145,10 @@ pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<us
         };
         names.insert(name_key(&name));
         live.insert(row.node);
+        // The mirror's write marks it dirty in the folders it comes back to.
         db.write(|s| {
             s.delete_removed(row.node)?;
-            s.put_mirror(&back)?;
-            s.mark_dirty(row.node)
+            s.put_mirror(&back)
         })?;
         restored += 1;
     }
@@ -260,27 +230,29 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
 }
 
 /// Deletes for good what was removed before `before_ms` (Unix ms), files before their
-/// folders, and empties the local trash (`state_dir/trash`) of the same age. Returns how many
-/// items went.
-pub fn purge(
-    db: &mut StateDb,
-    remote: &dyn Remote,
-    before_ms: i64,
-    state_dir: &Path,
-) -> Result<usize, EngineError> {
+/// folders, and empties every folder's trash (`.hbsync/trash`) of the same age. Returns how
+/// many items went.
+pub fn purge(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize, EngineError> {
     let expired = db.read(|s| s.removed_before(before_ms))?;
     let gone = delete_for_good(db, remote, &expired)?;
-    // Only what went there since the purge has been emptying it: older entries (from before
-    // Recently deleted) may be the only copy left, and stay.
-    let since = db.write(|s| match s.get_kv(TRASH_SINCE_KEY)? {
-        Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
-        None => {
-            let now = hbsync_types::unix_now();
-            s.set_kv(TRASH_SINCE_KEY, &now.to_string())?;
-            Ok(now)
+    for folder in db.read(|s| s.folders())? {
+        if folder.path.is_empty() {
+            continue;
         }
-    })?;
-    empty_trash(&trash_dir(state_dir), since, before_ms);
+        // Only what went there since the purge has been emptying it: older entries (from
+        // before Recently deleted) may be the only copy left, and stay.
+        let key = format!("{TRASH_SINCE_KEY}.{}", folder.id);
+        let since = db.write(|s| match s.account_kv(&key)? {
+            Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
+            None => {
+                let now = hbsync_types::unix_now();
+                s.set_account_kv(&key, &now.to_string())?;
+                Ok(now)
+            }
+        })?;
+        let state_dir = Path::new(&folder.path).join(hbsync_local::STATE_DIR);
+        empty_trash(&trash_dir(&state_dir), since, before_ms);
+    }
     Ok(gone)
 }
 
@@ -297,7 +269,7 @@ pub fn empty(
             tops.extend(s.removed_by_node(node)?);
         }
         let mut rows = Vec::new();
-        for top in in_scope(s, tops)? {
+        for top in tops {
             rows.extend(group(s, top)?);
         }
         Ok(rows)
@@ -314,7 +286,7 @@ pub fn empty_until(
     remote: &dyn Remote,
     at_ms: i64,
 ) -> Result<usize, EngineError> {
-    let rows = db.read(|s| in_scope(s, s.removed_before(at_ms.saturating_add(1))?))?;
+    let rows = db.read(|s| s.removed_before(at_ms.saturating_add(1)))?;
     delete_for_good(db, remote, &rows)
 }
 
@@ -337,7 +309,8 @@ fn delete_for_good(
     Ok(gone)
 }
 
-/// The state DB key of when the purge started emptying the local trash (Unix s).
+/// The state DB key (the account's, `.<folder id>` after it) of when the purge started emptying
+/// a folder's trash (Unix s).
 const TRASH_SINCE_KEY: &str = "trash.purged_since";
 
 /// Deletes the trash entries (`<Unix s>-<node>`) that went there from `since` (Unix s) until

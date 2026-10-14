@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod adopt;
 pub mod deleted;
+pub mod drive;
 pub mod engine;
 pub mod exec;
 pub mod feed;
@@ -17,6 +18,7 @@ pub mod tree;
 pub mod view;
 pub mod walk;
 
+pub use drive::Drive;
 pub use engine::{Engine, EngineConfig, EngineError, StartupReport, SyncReport};
 pub use reconcile::{
     Agreement, BaseExtra, Conflict, Input, Op, Options, Plan, Requirement, reconcile,

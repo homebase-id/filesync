@@ -85,4 +85,8 @@ pub struct Deleted {
     /// The node whose delete took it along (itself, or a folder it was in): restoring that
     /// one restores this one.
     pub root: NodeId,
+    /// The folder of this device it comes back to (its path); `None`: a part of the drive no
+    /// folder here syncs. `path` is below that folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
