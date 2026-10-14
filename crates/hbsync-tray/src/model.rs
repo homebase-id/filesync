@@ -46,7 +46,7 @@ pub struct View<'a> {
     pub now: u64,
 }
 
-/// The icon: the mark, with a dot telling the state.
+/// The tray icon: the Filesync cloud, its dot telling the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Look {
     UpToDate,

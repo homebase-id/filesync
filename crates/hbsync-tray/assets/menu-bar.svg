@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<title>Homebase Filesync, one colour (black)</title>
+<!-- Homebase Filesync, the macOS menu bar's template image; see README.md. -->
+<g transform="translate(17 21.1) scale(.825) translate(-14 -8)"><g fill="#1d1d1b"><rect x="14" y="50" width="66" height="28" rx="14"/><circle cx="32" cy="52" r="14"/><circle cx="52" cy="44" r="20"/><circle cx="68" cy="56" r="12"/></g><circle cx="83" cy="19" r="11" fill="#1d1d1b"/></g>
+</svg>

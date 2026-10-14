@@ -178,7 +178,9 @@ impl Server {
             return respond(&mut stream, 404, "text/plain", b"not here");
         };
         match (request.method.as_str(), page) {
-            ("GET", "mark.png") => respond(&mut stream, 200, "image/png", crate::icons::MARK_256),
+            ("GET", "app-icon.png") => {
+                respond(&mut stream, 200, "image/png", crate::icons::APP_256)
+            }
             ("GET", "setup") => self.html(&mut stream, self.setup_page()),
             ("POST", "setup/folder") => {
                 self.choose_folder();
@@ -217,7 +219,7 @@ impl Server {
     }
 
     fn html(&self, stream: &mut TcpStream, body: String) -> std::io::Result<()> {
-        let page = frame(&self.pages.url("mark.png"), &body);
+        let page = frame(&self.pages.url("app-icon.png"), &body);
         respond(stream, 200, "text/html; charset=utf-8", page.as_bytes())
     }
 
@@ -376,7 +378,7 @@ impl Server {
                 self.pages.url("setup/again")
             ),
             Phase::Done(Ok(what)) => format!(
-                "<h1>Connected</h1><p>{}</p><p>The Homebase icon in your tray shows what it \
+                "<h1>Connected</h1><p>{}</p><p>The Filesync icon in your tray shows what it \
                  does. You can close this page.</p>",
                 escape(what)
             ),
@@ -649,13 +651,13 @@ fn redirect(stream: &mut TcpStream, url: &str) -> std::io::Result<()> {
 
 /// A page in Homebase's look (design manual v2: the purple to blue gradient, Montserrat where
 /// installed). Nothing is loaded from elsewhere.
-fn frame(mark: &str, body: &str) -> String {
+fn frame(icon: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=en><meta charset=utf-8>\
          <meta name=viewport content=\"width=device-width, initial-scale=1\">\
-         <title>Homebase Filesync</title><link rel=icon href=\"{mark}\">\
+         <title>Homebase Filesync</title><link rel=icon href=\"{icon}\">\
          <style>{STYLE}</style>\
-         <header><img src=\"{mark}\" alt=\"\"><span>Homebase Filesync</span></header>\
+         <header><img src=\"{icon}\" alt=\"\"><span>Homebase Filesync</span></header>\
          <main>{body}</main></html>"
     )
 }

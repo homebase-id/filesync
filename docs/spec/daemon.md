@@ -172,11 +172,12 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
 
 - **Linux:** a StatusNotifierItem over D-Bus (pure Rust, no GTK), as KDE, Xfce, Cinnamon and
   most panels show them; GNOME needs the AppIndicator extension. Windows and macOS: tao's event
-  loop on the main thread; on macOS a menu bar item without a Dock icon, the glyph as a
+  loop on the main thread; on macOS a menu bar item without a Dock icon, the cloud as a
   template image.
-- **Icon:** the Homebase mark with a dot: green up to date, blue syncing, grey paused or
-  offline or not set up, magenta when something needs the user (a failure, held deletes, a
-  refused login).
+- **Icon:** the Filesync cloud on the Homebase tile, its dot in the state's colour: green up to
+  date, cyan syncing, grey paused or offline or not set up, magenta when something needs the
+  user (a failure, held deletes, a refused login). On macOS the cloud in one colour; a problem
+  shows the tile with its magenta dot. The files: `crates/hbsync-tray/assets/README.md`.
 - **Menu:** version, identity, a status line (with progress while syncing, the first sync after
   starting included), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
@@ -192,11 +193,15 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a
   minute.
-- **The folder:** once per folder the tray gives it the Homebase icon (`desktop.ini` on
-  Windows, Finder's custom icon on macOS, `.directory` and GIO metadata on Linux) and, on
-  Linux, a shortcut (GTK bookmarks and KDE places; Finder's sidebar has no public interface).
-  Unlinking (also the tray's Log out, which unlinks) takes them off again; `hbsync logout`
-  keeps them.
+- **The folder:** the tray gives it the Filesync icon (`desktop.ini` on Windows, Finder's custom
+  icon on macOS, `.directory` and GIO metadata on Linux) and, on Linux, a shortcut (GTK
+  bookmarks and KDE places; Finder's sidebar has no public interface). The shortcut once per
+  folder, so one the user removed stays removed; the icon again when a new version brings
+  another (the note `folder-decorated` holds the folder and a hash of its icon; an icon that
+  failed is tried again at the next start). On Windows and Linux the icon is a file in the state
+  folder named after its content (`homebase-<hash>.ico`, `.png`), so file managers that cache
+  icons by path show a new one; Explorer is told the folder changed. Unlinking
+  (also the tray's Log out, which unlinks) takes them off again; `hbsync logout` keeps them.
 - **Explorer's navigation pane (Windows):** at every start the tray registers the folder as a
   Cloud Files sync root named "Homebase" (`HomebaseFilesync!<user SID>!<identity>~<hash of the
   folder>`), at the top of the pane as OneDrive's and Dropbox's are. Only the registration, no
