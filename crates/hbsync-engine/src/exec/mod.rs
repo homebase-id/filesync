@@ -141,7 +141,6 @@ enum Outcome {
     Stop(String),
 }
 
-/// A DB error inside an operation is retried like any transient failure.
 impl Outcome {
     fn stale(why: impl Into<String>) -> Outcome {
         Outcome::Skip(Skip::Stale(why.into()))
@@ -156,10 +155,12 @@ impl Outcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Skip {
     /// The world moved on since the plan (an item changed or went, on either side, or what the
-    /// operation needed isn't so any more): the next plan decides again. Nothing to tell.
+    /// operation needed isn't so any more): the next plan decides again, nothing to tell (unless
+    /// it keeps coming back: the runner tells one skipped sync after sync).
     Stale(String),
     /// This device can't do it as planned (a name or path it can't hold, access denied, the
-    /// drive refusing it): it stays as it is until something changes. The user is told.
+    /// drive refusing it, a fault of its own): the next plans try it again, and the user is
+    /// told.
     Unsyncable(String),
 }
 
@@ -178,12 +179,11 @@ impl Skip {
 
 impl std::fmt::Display for Skip {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Skip::Stale(why) | Skip::Unsyncable(why) => f.write_str(why),
-        }
+        f.write_str(self.as_str())
     }
 }
 
+/// A DB error inside an operation is retried like any transient failure.
 impl From<StateError> for Outcome {
     fn from(e: StateError) -> Self {
         Outcome::Retry(e.to_string())
@@ -871,7 +871,10 @@ fn remote_outcome(e: RemoteError) -> Outcome {
             Outcome::unsyncable(e.to_string())
         }
         // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
-        _ => Outcome::stale(e.to_string()),
+        RemoteError::AlreadyExists
+        | RemoteError::VersionMismatch
+        | RemoteError::NotFound
+        | RemoteError::HashMismatch => Outcome::stale(e.to_string()),
     }
 }
 

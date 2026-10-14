@@ -1,9 +1,10 @@
 //! A finished sync as people see it: its conflicts and failures worded, the held deletes, and
 //! the folder's status after it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use hbsync_engine::exec::Skip;
 use hbsync_engine::{Conflict, Engine, Op, SyncReport};
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
@@ -15,29 +16,65 @@ const RECENT: usize = 50;
 /// Paths shown for held deletes.
 const EXAMPLES: usize = 10;
 
-/// Each conflict and failure of `report`, and the drive's rows the client couldn't read
-/// (`skipped`), worded for people.
+/// A skip the next plan should have settled, told once it came back this many syncs in a row:
+/// something keeps it back that the plan can't see.
+const STALE_SYNCS: u32 = 3;
+
+/// Each conflict, failure and told skip of `report` (`skips`, [`Stalled::told`]), and the
+/// drive's rows the client couldn't read (`rows`), worded for people, each once.
 pub(super) fn notes(
     engine: &mut Engine,
     report: &SyncReport,
-    skipped: Vec<String>,
+    skips: &[(&Op, &str)],
+    rows: Vec<String>,
 ) -> Result<Vec<String>, StateError> {
     let mut notes = Vec::new();
     for c in &report.conflicts {
         notes.push(describe_conflict(engine, c)?);
     }
-    // What stalled since the plan is planned again quietly; what this device can't do is told.
-    let told = report.skipped.iter().filter(|(_, why)| why.tells());
     let failed = report.failed.iter().map(|(op, why)| (op, why.as_str()));
-    for (op, why) in failed.chain(told.map(|(op, why)| (op, why.as_str()))) {
+    for (op, why) in failed.chain(skips.iter().copied()) {
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
     // Drive rows the client can't read (not encrypted, another key, not a sync node).
-    for why in skipped {
+    for why in rows {
         notes.push(format!("a file on Homebase can't be synced: {why}"));
     }
+    // A node planned again in a later sweep of the same sync is told once.
+    let mut seen = HashSet::new();
+    notes.retain(|n| seen.insert(n.clone()));
     Ok(notes)
+}
+
+/// The operations a sync skipped, and for how many syncs in a row each was skipped as stale.
+#[derive(Debug, Default)]
+pub(super) struct Stalled(HashMap<(NodeId, &'static str), u32>);
+
+impl Stalled {
+    /// The skips of a sync to tell, each operation once: those this device can't do, and those
+    /// skipped as stale [`STALE_SYNCS`] syncs in a row.
+    pub fn told<'r>(&mut self, skipped: &'r [(Op, Skip)]) -> Vec<(&'r Op, &'r str)> {
+        let mut seen = HashSet::new();
+        let mut again = HashMap::new();
+        let mut told = Vec::new();
+        for (op, why) in skipped {
+            let key = (op.node(), op.kind());
+            if !seen.insert(key) {
+                continue;
+            }
+            let tell = why.tells() || {
+                let syncs = self.0.get(&key).copied().unwrap_or(0) + 1;
+                again.insert(key, syncs);
+                syncs >= STALE_SYNCS
+            };
+            if tell {
+                told.push((op, why.as_str()));
+            }
+        }
+        self.0 = again;
+        told
+    }
 }
 
 /// Notes told once: one that keeps coming back sync after sync (a file that can't be read)
@@ -199,6 +236,39 @@ mod tests {
         assert_eq!(s.recent.last().map(|n| n.text.as_str()), Some("note 59"));
         let last = s.last_sync.ok_or("no last sync");
         assert_eq!(last.map(|l| (l.done, l.millis)), Ok((3, 1500)));
+    }
+
+    #[test]
+    fn stale_skips_are_told_only_when_they_keep_coming_back() {
+        let (stuck, gone, bad) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let settle = |node| Op::Settle { node };
+        let stale = |why: &str| Skip::Stale(why.into());
+        let sync = vec![
+            (settle(stuck), stale("changed on disk")),
+            (settle(stuck), stale("changed on disk")),
+            (settle(gone), stale("gone")),
+            (
+                settle(bad),
+                Skip::Unsyncable("name can't be used here".into()),
+            ),
+        ];
+        let mut stalled = Stalled::default();
+        let nodes =
+            |told: Vec<(&Op, &str)>| told.iter().map(|(op, _)| op.node()).collect::<Vec<_>>();
+        assert_eq!(
+            nodes(stalled.told(&sync)),
+            [bad],
+            "only what can't be done, once"
+        );
+        assert_eq!(nodes(stalled.told(&sync[..2])), Vec::<NodeId>::new());
+        assert_eq!(
+            nodes(stalled.told(&sync[..2])),
+            [stuck],
+            "three syncs in a row"
+        );
+        // Settled once: counted from the start again.
+        assert_eq!(nodes(stalled.told(&sync[2..3])), Vec::<NodeId>::new());
+        assert_eq!(nodes(stalled.told(&sync[..1])), Vec::<NodeId>::new());
     }
 
     #[test]

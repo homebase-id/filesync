@@ -13,18 +13,20 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let parent = row.path.parent().unwrap_or_default();
-        let Ok(local) = to_local(name, self.cfg.os) else {
-            return Ok(Outcome::unsyncable(
-                "the conflict copy's name can't be used here",
-            ));
+        let unspellable = |e: NameIssue| {
+            Outcome::unsyncable(format!("the conflict copy's name can't be used here: {e}"))
         };
-        let Ok(target) = parent.join(&local.name) else {
-            return Ok(Outcome::unsyncable(
-                "the conflict copy's path is too long here",
-            ));
+        let local = match to_local(name, self.cfg.os) {
+            Ok(local) => local,
+            Err(e) => return Ok(unspellable(e)),
         };
+        let target = match parent.join(&local.name) {
+            Ok(target) => target,
+            Err(e) => return Ok(unspellable(e)),
+        };
+        // Its id is fixed by the node and the bytes: the next plan picks it again.
         if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
-            return Ok(Outcome::stale("conflict copy id already in use"));
+            return Ok(Outcome::unsyncable("its conflict copy's id is in use here"));
         }
         // The name may be held by something that stays: the copy can exist remotely already,
         // made by another device with the same bytes, named to fit its folder there. Then a

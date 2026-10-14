@@ -37,7 +37,9 @@ impl Executor<'_> {
                 NodeKind::File,
                 tags,
             ),
-            _ => Err(Outcome::stale("not a transfer")),
+            _ => Err(Outcome::unsyncable(
+                "not a transfer (a fault of this client)",
+            )),
         }
     }
 
@@ -219,7 +221,9 @@ impl Executor<'_> {
                     s.put_mirror(&row)
                 })
             }
-            _ => Ok(Outcome::stale("mismatched transfer result")),
+            _ => Ok(Outcome::unsyncable(
+                "a transfer result for another operation (a fault of this client)",
+            )),
         }
     }
 

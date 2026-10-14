@@ -168,6 +168,8 @@ pub struct Runner {
     held: Vec<NodeId>,
     /// The conflicts and failures of the last sync, to tell each one only once.
     told: report::Told,
+    /// Skips sync after sync: one that keeps coming back is told after all.
+    stalled: report::Stalled,
 }
 
 impl std::fmt::Debug for Runner {
@@ -225,6 +227,7 @@ impl Runner {
             progress,
             held: Vec::new(),
             told: Default::default(),
+            stalled: Default::default(),
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -502,8 +505,11 @@ impl Runner {
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), RunnerError> {
-        let skipped = self.drive.take_skipped();
-        let notes = self.told.fresh(report::notes(engine, report, skipped)?);
+        let skips = self.stalled.told(&report.skipped);
+        let rows = self.drive.take_skipped();
+        let notes = self
+            .told
+            .fresh(report::notes(engine, report, &skips, rows)?);
         self.held = report.held.iter().map(|op| op.node()).collect();
         let held = report::held(engine, report, &self.held)?;
         if report.ops_done > 0 || !notes.is_empty() {
