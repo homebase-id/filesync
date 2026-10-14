@@ -15,10 +15,10 @@ reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' /t REG_D
 [Environment]::OSVersion.Version
 
 $sequences = @(
-    @('register', 'status', 'unregister'),
-    @('register', 'root-in-sync', 'root-syncing', 'root-in-sync', 'unregister'),
-    @('register', 'root-paused', 'root-clear', 'unregister'),
-    @('register', 'root-paused', 'unregister')
+    @('register-bare', 'unregister-bare'),
+    @('register-bare', 'unregister'),
+    @('register', 'unregister-bare'),
+    @('register', 'root-in-sync', 'root-syncing', 'root-paused', 'root-clear', 'root-in-sync', 'unregister')
 )
 
 function Try-It([string] $title, [string] $run) {

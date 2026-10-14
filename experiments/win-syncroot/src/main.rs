@@ -117,7 +117,9 @@ mod win {
 
     fn run(command: &str) -> Result<(), Error> {
         match command {
-            "register" => register(),
+            "register" => register(true),
+            "register-bare" => register(false),
+            "unregister-bare" => unregister_bare(),
             "in-sync" => mark_all(),
             "syncing" => syncing(),
             "status" => status(),
@@ -147,7 +149,8 @@ mod win {
         Ok(HSTRING::from(format!("{PROVIDER}!{}!test", user_sid()?)))
     }
 
-    fn register() -> Result<(), Error> {
+    /// With `definitions`, it also declares the custom state `root-paused` sets.
+    fn register(definitions: bool) -> Result<(), Error> {
         println!(
             "Cloud Files supported here: {}",
             StorageProviderSyncRootManager::IsSupported()?
@@ -181,11 +184,13 @@ mod win {
         context.WriteBytes(PROVIDER.as_bytes())?;
         info.SetContext(&context.DetachBuffer()?)?;
         // The custom state `root-paused` shows (a column in Explorer, and an icon).
-        let status = StorageProviderItemPropertyDefinition::new()?;
-        status.SetId(STATUS)?;
-        status.SetDisplayNameResource(&HSTRING::from("Homebase status"))?;
-        info.StorageProviderItemPropertyDefinitions()?
-            .Append(&status)?;
+        if definitions {
+            let status = StorageProviderItemPropertyDefinition::new()?;
+            status.SetId(STATUS)?;
+            status.SetDisplayNameResource(&HSTRING::from("Homebase status"))?;
+            info.StorageProviderItemPropertyDefinitions()?
+                .Append(&status)?;
+        }
         StorageProviderSyncRootManager::Register(&info)?;
 
         println!("Registered {}.", dir.display());
@@ -334,6 +339,13 @@ mod win {
             "Unregistered. {} stays; delete it when you like.",
             dir.display()
         );
+        Ok(())
+    }
+
+    /// Unregisters only: no placeholders reverted, no files touched.
+    fn unregister_bare() -> Result<(), Error> {
+        StorageProviderSyncRootManager::Unregister(&id()?)?;
+        println!("Unregistered.");
         Ok(())
     }
 
