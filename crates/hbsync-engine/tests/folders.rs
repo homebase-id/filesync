@@ -244,7 +244,10 @@ fn a_file_moved_across_the_folders_here_is_kept() -> R {
     let server = server_with_documents()?;
     let mut pc = Computer::new(&server)?;
     pc.sync()?;
-    std::fs::rename(pc.main_root.join("notes.txt"), pc.docs_root.join("notes.txt"))?;
+    std::fs::rename(
+        pc.main_root.join("notes.txt"),
+        pc.docs_root.join("notes.txt"),
+    )?;
     pc.sync()?;
     assert_eq!(files(&pc.main_root), Vec::<String>::new());
     assert_eq!(files(&pc.docs_root), ["cv.txt", "notes.txt"]);

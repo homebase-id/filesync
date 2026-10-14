@@ -4,7 +4,7 @@
 //! the rest of the drive as one folder it leaves out ([`NodeId::OUTSIDE`]; the state DB
 //! translates, [`hbsync_state::Coords`], and so does [`ScopedRemote`] for what it writes).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use std::sync::Arc;
 
@@ -71,8 +71,10 @@ impl Scope {
     }
 
     /// The nodes of `tree` outside this scope: the folders left out and everything in them.
-    /// Costs what is outside, not the tree; a cycle (a folder moved into itself remotely)
-    /// ends the walk.
+    /// For the main folder this costs what is outside, not the tree; a cycle (a folder moved
+    /// into itself remotely) ends the walk. A folder holding part of the drive holds only what
+    /// reaches its top: a node whose place isn't known (its folder gone, a cycle) is outside it,
+    /// for the main folder to repair.
     pub fn out_of_scope(&self, tree: &Tree) -> HashSet<NodeId> {
         let mut out = HashSet::new();
         let mut stack: Vec<NodeId> = self
@@ -86,8 +88,44 @@ impl Scope {
                 stack.extend(tree.children(node));
             }
         }
+        if !self.top.is_root() {
+            let mut reaches: HashMap<NodeId, bool> = HashMap::new();
+            for (node, _) in tree.iter() {
+                if !reaches_root(tree, node, &mut reaches) {
+                    out.insert(node);
+                }
+            }
+        }
         out
     }
+}
+
+/// Whether `node` reaches the root through `tree`'s parents, memoized in `known` for every
+/// node on the way.
+fn reaches_root(tree: &Tree, node: NodeId, known: &mut HashMap<NodeId, bool>) -> bool {
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    let mut at = node;
+    let reached = loop {
+        if at.is_root() {
+            break true;
+        }
+        if let Some(&k) = known.get(&at) {
+            break k;
+        }
+        if !seen.insert(at) {
+            break false; // a cycle
+        }
+        chain.push(at);
+        match tree.get(at) {
+            Some(state) => at = state.parent,
+            None => break false,
+        }
+    };
+    for n in chain {
+        known.insert(n, reached);
+    }
+    reached
 }
 
 /// The remote as an engine holding part of the drive writes to it: a node it puts at its root
