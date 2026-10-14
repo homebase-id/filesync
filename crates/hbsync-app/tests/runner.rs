@@ -287,7 +287,7 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
     let root = dir.path().canonicalize()?;
     std::fs::create_dir_all(root.join(".hbsync"))?;
     hbsync_state::StateDb::open(&hbsync_local::state_db_path(&root))?
-        .write(|s| s.set_kv(hbsync_app::runner::IDENTITY_KEY, "other.example"))?;
+        .write(|s| s.set_account_kv(hbsync_app::runner::IDENTITY_KEY, "other.example"))?;
     std::fs::write(root.join("theirs.txt"), "not for test.example")?;
     let (handle, thread) = spawn_at(&server, &root)?;
     let err = thread

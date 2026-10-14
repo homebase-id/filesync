@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 4);
+    assert_eq!(db.schema_version()?, 5);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -601,6 +601,70 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 4);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 5);
     Ok(())
+}
+
+/// Two folders of one account in one DB: each has its own rows of the same node, its own
+/// names and settings; the drive's mirror is shared. Forgetting a folder takes its rows along,
+/// and the ids nothing else holds go too.
+#[test]
+fn folders_keep_their_own_rows() -> R {
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let docs_top = NodeId::new();
+    let docs = main.write(|s| s.add_folder(docs_top, "/home/a/Documents", "m2"))?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    assert_eq!(
+        (main.folder(), docs_db.folder()),
+        (hbsync_state::FIRST_FOLDER, docs)
+    );
+
+    // The same node in both folders, at the same path and with the same remote file.
+    let row = base(NodeState::folder(NodeId::ROOT, "Shared"));
+    let mut seen = local("Shared", NodeKind::Folder, 7);
+    seen.node = row.node;
+    for db in [&mut main, &mut docs_db] {
+        db.write(|s| {
+            s.put_base(&row)?;
+            s.put_local(&seen)?;
+            s.mark_dirty(row.node)?;
+            s.set_kv("filter.fingerprint", "f")
+        })?;
+    }
+    // A name is taken per folder only.
+    let mut other = local("Shared", NodeKind::Folder, 8);
+    assert!(matches!(
+        main.write(|s| s.put_local(&other)),
+        Err(StateError::Conflict(_))
+    ));
+    other.path = path("Only in docs");
+    docs_db.write(|s| s.put_local(&other))?;
+    assert_eq!(main.read(|s| s.local_count())?, 1);
+    assert_eq!(docs_db.read(|s| s.local_count())?, 2);
+    // The account's settings are shared; a folder's are its own.
+    main.write(|s| s.set_account_kv("remote.cursor", "c1"))?;
+    assert_eq!(
+        docs_db.read(|s| s.account_kv("remote.cursor"))?.as_deref(),
+        Some("c1")
+    );
+    docs_db.write(|s| s.delete_kv("filter.fingerprint"))?;
+    assert_eq!(
+        main.read(|s| s.get_kv("filter.fingerprint"))?.as_deref(),
+        Some("f")
+    );
+
+    // Forgetting docs takes its rows; main's keep the node's id.
+    assert!(main.write(|s| s.remove_folder(docs))?);
+    drop(docs_db);
+    assert!(StateDb::open_folder(&db_path, docs).is_err());
+    let (ids_before, collected) = main.write(|s| Ok((s.node_count()?, s.collect_nodes()?)))?;
+    assert_eq!(collected, 1, "only docs' own node goes, of {ids_before}");
+    main.read(|s| {
+        assert_eq!(s.get_base(row.node)?, Some(row.clone()));
+        assert!(s.is_dirty(row.node)?);
+        assert_eq!(s.folders()?.len(), 1);
+        Ok(())
+    })
 }

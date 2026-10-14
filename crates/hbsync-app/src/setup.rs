@@ -214,7 +214,7 @@ fn folder_state(config: &Config, identity: &str, folder: &Path) -> Result<Folder
     }
     if folder.join(STATE_DIR).is_dir() {
         let theirs = StateDb::open(&state_db_path(folder))
-            .and_then(|mut db| db.read(|s| s.get_kv(IDENTITY_KEY)))
+            .and_then(|mut db| db.read(|s| s.account_kv(IDENTITY_KEY)))
             .map_err(|e| e.to_string())?;
         return match theirs.filter(|t| t != identity) {
             Some(theirs) => Err(format!("{} is synced with {theirs}", folder.display())),
@@ -377,7 +377,7 @@ pub fn set_up(
     }
 
     std::fs::create_dir_all(folder.join(STATE_DIR))?;
-    StateDb::open(&state_db_path(&folder))?.write(|s| s.set_kv(IDENTITY_KEY, identity))?;
+    StateDb::open(&state_db_path(&folder))?.write(|s| s.set_account_kv(IDENTITY_KEY, identity))?;
     config.roots = vec![Root {
         identity: identity.to_owned(),
         folder: folder.clone(),
@@ -515,7 +515,8 @@ mod tests {
         assert!(plan("a.example", &full, true, &none)?.existing);
         // Synced before: with this identity it picks up where it was, with another it's refused.
         std::fs::create_dir(full.join(STATE_DIR))?;
-        StateDb::open(&state_db_path(&full))?.write(|s| s.set_kv(IDENTITY_KEY, "a.example"))?;
+        StateDb::open(&state_db_path(&full))?
+            .write(|s| s.set_account_kv(IDENTITY_KEY, "a.example"))?;
         assert!(plan("a.example", &full, false, &none).is_ok());
         refused(
             plan("b.example", &full, false, &none),

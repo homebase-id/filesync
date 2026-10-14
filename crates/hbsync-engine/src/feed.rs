@@ -41,7 +41,7 @@ pub fn pull(
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
     loop {
-        let cursor = db.read(|s| s.get_kv(REMOTE_CURSOR_KEY))?;
+        let cursor = db.read(|s| s.account_kv(REMOTE_CURSOR_KEY))?;
         let page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
         db.write(|s| {
             for header in &page.entries {
@@ -51,7 +51,7 @@ pub fn pull(
                     report.deleted += 1;
                 }
             }
-            s.set_kv(REMOTE_CURSOR_KEY, &page.cursor)
+            s.set_account_kv(REMOTE_CURSOR_KEY, &page.cursor)
         })?;
         report.pages += 1;
         if !page.has_more {

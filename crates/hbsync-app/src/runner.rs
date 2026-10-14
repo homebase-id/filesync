@@ -146,7 +146,7 @@ fn purge_when_due(engine: &mut Engine, keep_days: u32) {
     let now = unix_now();
     let last = engine
         .db()
-        .read(|s| s.get_kv(PURGED_KEY))
+        .read(|s| s.account_kv(PURGED_KEY))
         .ok()
         .flatten()
         .and_then(|v| v.parse::<u64>().ok());
@@ -161,7 +161,7 @@ fn purge_when_due(engine: &mut Engine, keep_days: u32) {
             }
             if let Err(e) = engine
                 .db()
-                .write(|s| s.set_kv(PURGED_KEY, &now.to_string()))
+                .write(|s| s.set_account_kv(PURGED_KEY, &now.to_string()))
             {
                 tracing::warn!("couldn't note the purge: {e}");
             }
@@ -521,10 +521,10 @@ impl Runner {
         let mut db = StateDb::open(&state_db_path(root))?;
         // A folder belongs to one identity: never mix two drives through one folder.
         let ours = &self.cfg.identity;
-        db.write(|s| match s.get_kv(IDENTITY_KEY)? {
+        db.write(|s| match s.account_kv(IDENTITY_KEY)? {
             Some(theirs) if theirs != *ours => Ok(Err(theirs)),
             Some(_) => Ok(Ok(())),
-            None => s.set_kv(IDENTITY_KEY, ours).map(Ok),
+            None => s.set_account_kv(IDENTITY_KEY, ours).map(Ok),
         })?
         .map_err(|theirs| RunnerError::OtherIdentity {
             folder: root.clone(),

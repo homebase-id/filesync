@@ -1,17 +1,20 @@
 //! The state DB's schema. `PRAGMA user_version` holds its version: [`SCHEMA`] is version
 //! [`BASE`], and each migration after it adds one. Migrations are append-only once released:
-//! never edit one that has shipped. A DB older than `BASE` (made before 0.3) isn't upgraded: its
-//! folder is set up again.
+//! never edit one that has shipped. A DB older than `BASE` (one per folder, before 0.6) isn't
+//! upgraded: its folder is set up again.
 
 use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{Result, StateError};
 
-/// The version [`SCHEMA`] creates: 0.3.0's.
-const BASE: u32 = 4;
+/// The version [`SCHEMA`] creates: one DB per account (0.6).
+const BASE: u32 = 5;
 
-/// The whole schema, as of [`BASE`]. It has shipped: change it only through [`MIGRATIONS`] (0.3
-/// DBs are at `BASE` and never run it again). `the_schema_is_0_3s` pins it.
+/// The whole schema, as of [`BASE`]: one DB per account. The drive's side (`nodes`, `remote`,
+/// `removed`, `kv`) is the account's; each synced folder has its rows in the other tables,
+/// with `folder` last in every key and index: a node's rows are found by id, a folder's listings
+/// by parent or file id, and a folder alone matches no index, so the planner (which has no
+/// statistics) never scans a whole folder for a lookup. `the_schema_is_pinned` pins it.
 const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
@@ -21,9 +24,21 @@ const SCHEMA: &str = r#"
         uuid BLOB NOT NULL UNIQUE
     );
 
-    -- The last state both sides agreed on (the three-way merge's ancestor).
+    -- The folders this account syncs on this device. `top` is the drive's node a folder
+    -- holds (the drive's root for the main folder); its rows below are in its own coordinates,
+    -- its top being the root. `marker` matches the marker file in the folder's `.hbsync`.
+    CREATE TABLE folders (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        top      BLOB NOT NULL UNIQUE,
+        path     TEXT NOT NULL,
+        marker   TEXT NOT NULL,
+        added_at INTEGER NOT NULL                     -- Unix seconds
+    );
+
+    -- Per folder: the last state both sides agreed on (the three-way merge's ancestor).
     CREATE TABLE base (
-        id             INTEGER PRIMARY KEY,           -- nodes.id
+        folder         INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id             INTEGER NOT NULL,              -- nodes.id
         parent         INTEGER NOT NULL,              -- nodes.id
         name           TEXT NOT NULL,                 -- remote spelling
         kind           INTEGER NOT NULL,              -- 0 file, 1 folder
@@ -31,19 +46,22 @@ const SCHEMA: &str = r#"
         size           INTEGER,
         mtime_ms       INTEGER,
         executable     INTEGER NOT NULL DEFAULT 0,
-        remote_file_id BLOB NOT NULL UNIQUE,          -- finds the node of a tombstone
+        remote_file_id BLOB NOT NULL,                 -- finds the node of a tombstone
         version_tag    BLOB NOT NULL,                 -- the version agreed on (conflict ids)
         content_state  INTEGER NOT NULL DEFAULT 0,    -- 0 local, 1 pinned, 2 online-only
         local_name     TEXT,                          -- recorded local spelling, if any
         local_hash     BLOB,                          -- hash of the local bytes then
-        tags           TEXT                           -- Finder tags (JSON, node schema `tags`); NULL: none
-    );
-    CREATE INDEX base_parent ON base(parent);
+        tags           TEXT,                          -- Finder tags (JSON, node schema `tags`); NULL: none
+        PRIMARY KEY (id, folder),
+        UNIQUE (remote_file_id, folder)
+    ) WITHOUT ROWID;
+    CREATE INDEX base_parent ON base(parent, folder);
 
-    -- What the last observation saw on disk, as a tree: each row holds its folder and its
-    -- on-disk name, so a path is derived and a moved folder changes one row.
+    -- Per folder: what the last observation saw on disk, as a tree: each row holds its folder
+    -- and its on-disk name, so a path is derived and a moved folder changes one row.
     CREATE TABLE local (
-        id         INTEGER PRIMARY KEY,               -- nodes.id
+        folder     INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id         INTEGER NOT NULL,                  -- nodes.id
         parent     INTEGER NOT NULL,                  -- nodes.id of the folder (the root's id at the top)
         name       TEXT NOT NULL,                     -- local spelling
         kind       INTEGER NOT NULL,
@@ -56,13 +74,15 @@ const SCHEMA: &str = r#"
         file_id_hi INTEGER,                           -- high 64 bits, only when not zero
         executable INTEGER,                           -- NULL where the OS has no x bit
         hash       BLOB,                              -- NULL until hashed (files)
-        tags       TEXT                               -- Finder tags (JSON); NULL: not known (none on
+        tags       TEXT,                              -- Finder tags (JSON); NULL: not known (none on
                                                       -- this system, or the read failed)
-    );
-    CREATE UNIQUE INDEX local_child ON local(parent, name);
-    CREATE INDEX local_file_id ON local(file_id);
+        PRIMARY KEY (id, folder),
+        UNIQUE (parent, name, folder)
+    ) WITHOUT ROWID;
+    CREATE INDEX local_file_id ON local(file_id, folder);
 
-    -- The client's copy of the live remote nodes (the remote side of the merge).
+    -- The client's copy of the live remote nodes (the remote side of the merge), the drive's
+    -- whole tree.
     CREATE TABLE remote (
         id            INTEGER PRIMARY KEY,            -- nodes.id
         file_id       BLOB NOT NULL UNIQUE,
@@ -78,19 +98,30 @@ const SCHEMA: &str = r#"
     );
     CREATE INDEX remote_parent ON remote(parent);
 
-    -- Nodes whose local or remote side changed and still need reconciling.
-    CREATE TABLE dirty (id INTEGER PRIMARY KEY);
+    -- Per folder: nodes whose local or remote side changed and still need reconciling.
+    CREATE TABLE dirty (
+        folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id     INTEGER NOT NULL,
+        PRIMARY KEY (id, folder)
+    ) WITHOUT ROWID;
 
-    -- Items parked under a temporary name in their folder, with the name they had.
-    CREATE TABLE parked (id INTEGER PRIMARY KEY, original_name TEXT NOT NULL);
+    -- Per folder: items parked under a temporary name in their folder, with the name they had.
+    CREATE TABLE parked (
+        folder        INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id            INTEGER NOT NULL,
+        original_name TEXT NOT NULL,
+        PRIMARY KEY (id, folder)
+    ) WITHOUT ROWID;
 
-    -- Conflict-copy forks in progress (written before the rename, in the same folder), so a
-    -- crash in between can be completed instead of misread.
+    -- Per folder: conflict-copy forks in progress (written before the rename, in the same
+    -- folder), so a crash in between can be completed instead of misread.
     CREATE TABLE forks (
-        id       INTEGER PRIMARY KEY,
+        folder   INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id       INTEGER NOT NULL,
         new_node INTEGER NOT NULL,
-        to_name  TEXT NOT NULL
-    );
+        to_name  TEXT NOT NULL,
+        PRIMARY KEY (id, folder)
+    ) WITHOUT ROWID;
 
     -- Node ids that lost a reference since the last collection (see Store::collect_nodes).
     -- Not unique: a trigger's conflict handling yields to the statement that fired it, and a
@@ -118,18 +149,28 @@ const SCHEMA: &str = r#"
     CREATE TRIGGER forks_gone AFTER DELETE ON forks
         BEGIN INSERT INTO gone VALUES (old.id), (old.new_node); END;
 
-    -- Cursors and small settings.
+    -- The account's cursors and settings (the feed's cursor, the identity).
     CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
 
-    -- What was synced, for people to see (the writer keeps the newest few hundred).
+    -- Per folder: cursors and settings (the journal's cursor, the filter's fingerprint).
+    CREATE TABLE folder_kv (
+        folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        key    TEXT NOT NULL,
+        value  TEXT NOT NULL,
+        PRIMARY KEY (folder, key)
+    ) WITHOUT ROWID;
+
+    -- Per folder: what was synced, for people to see (the writer keeps the newest few hundred).
     CREATE TABLE synced (
-        id    INTEGER PRIMARY KEY AUTOINCREMENT,
-        at    INTEGER NOT NULL,                       -- Unix seconds
-        kind  INTEGER NOT NULL,
-        path  TEXT NOT NULL,
-        files INTEGER NOT NULL,
-        bytes INTEGER NOT NULL
+        id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        at     INTEGER NOT NULL,                      -- Unix seconds
+        kind   INTEGER NOT NULL,
+        path   TEXT NOT NULL,
+        files  INTEGER NOT NULL,
+        bytes  INTEGER NOT NULL
     );
+    CREATE INDEX synced_folder ON synced(folder, id);
 
     -- Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
     -- until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
@@ -223,19 +264,19 @@ mod tests {
     }
 
     #[test]
-    fn a_db_from_before_0_3_is_refused() -> Result<()> {
+    fn a_db_of_one_folder_is_refused() -> Result<()> {
         let mut conn = Connection::open_in_memory()?;
-        conn.pragma_update(None, "user_version", 3)?;
+        conn.pragma_update(None, "user_version", 4)?;
         assert!(matches!(
             apply(&mut conn),
-            Err(StateError::TooOld { found: 3 })
+            Err(StateError::TooOld { found: 4 })
         ));
         Ok(())
     }
 
     /// The SQL of every table, index and trigger [`SCHEMA`] makes, without comments or layout.
     #[test]
-    fn the_schema_is_0_3s() -> Result<()> {
+    fn the_schema_is_pinned() -> Result<()> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         let mut objects = conn
@@ -253,13 +294,12 @@ mod tests {
                     .join(" "))
             })
             .collect::<Result<_>>()?;
-        assert_eq!(made.join("\n"), PINNED_0_3);
+        assert_eq!(made.join("\n"), PINNED);
         Ok(())
     }
 
-    /// What [`SCHEMA`] makes: the same tables, columns, constraints, indexes and triggers as
-    /// 0.3.0's four migrations (checked when they were squashed).
-    const PINNED_0_3: &str = "\
+    /// What [`SCHEMA`] makes. Once released, this changes only through [`MIGRATIONS`].
+    const PINNED: &str = "\
         CREATE TRIGGER base_gone AFTER DELETE ON base BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
         CREATE TRIGGER base_regone AFTER UPDATE OF parent ON base WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
         CREATE TRIGGER dirty_gone AFTER DELETE ON dirty BEGIN INSERT INTO gone VALUES (old.id); END\n\
@@ -269,23 +309,25 @@ mod tests {
         CREATE TRIGGER parked_gone AFTER DELETE ON parked BEGIN INSERT INTO gone VALUES (old.id); END\n\
         CREATE TRIGGER remote_gone AFTER DELETE ON remote BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
         CREATE TRIGGER remote_regone AFTER UPDATE OF parent ON remote WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
-        CREATE TABLE base ( id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, content_state INTEGER NOT NULL DEFAULT 0, local_name TEXT, local_hash BLOB, tags TEXT )\n\
-        CREATE TABLE dirty (id INTEGER PRIMARY KEY)\n\
-        CREATE TABLE forks ( id INTEGER PRIMARY KEY, new_node INTEGER NOT NULL, to_name TEXT NOT NULL )\n\
+        CREATE TABLE base ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL, version_tag BLOB NOT NULL, content_state INTEGER NOT NULL DEFAULT 0, local_name TEXT, local_hash BLOB, tags TEXT, PRIMARY KEY (id, folder), UNIQUE (remote_file_id, folder) ) WITHOUT ROWID\n\
+        CREATE TABLE dirty ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
+        CREATE TABLE folder_kv ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (folder, key) ) WITHOUT ROWID\n\
+        CREATE TABLE folders ( id INTEGER PRIMARY KEY AUTOINCREMENT, top BLOB NOT NULL UNIQUE, path TEXT NOT NULL, marker TEXT NOT NULL, added_at INTEGER NOT NULL )\n\
+        CREATE TABLE forks ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, new_node INTEGER NOT NULL, to_name TEXT NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
         CREATE TABLE gone (id INTEGER NOT NULL)\n\
         CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID\n\
-        CREATE TABLE local ( id INTEGER PRIMARY KEY, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, volume INTEGER NOT NULL, file_id INTEGER NOT NULL, file_id_hi INTEGER, executable INTEGER, hash BLOB, tags TEXT )\n\
+        CREATE TABLE local ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, volume INTEGER NOT NULL, file_id INTEGER NOT NULL, file_id_hi INTEGER, executable INTEGER, hash BLOB, tags TEXT, PRIMARY KEY (id, folder), UNIQUE (parent, name, folder) ) WITHOUT ROWID\n\
         CREATE TABLE nodes ( id INTEGER PRIMARY KEY AUTOINCREMENT, uuid BLOB NOT NULL UNIQUE )\n\
-        CREATE TABLE parked (id INTEGER PRIMARY KEY, original_name TEXT NOT NULL)\n\
+        CREATE TABLE parked ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, original_name TEXT NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
         CREATE TABLE remote ( id INTEGER PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT )\n\
         CREATE TABLE removed ( node BLOB PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, removed_at INTEGER NOT NULL, root BLOB NOT NULL ) WITHOUT ROWID\n\
         CREATE TABLE sqlite_sequence(name,seq)\n\
-        CREATE TABLE synced ( id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL )\n\
-        CREATE INDEX base_parent ON base(parent)\n\
-        CREATE UNIQUE INDEX local_child ON local(parent, name)\n\
-        CREATE INDEX local_file_id ON local(file_id)\n\
+        CREATE TABLE synced ( id INTEGER PRIMARY KEY AUTOINCREMENT, folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, at INTEGER NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL )\n\
+        CREATE INDEX base_parent ON base(parent, folder)\n\
+        CREATE INDEX local_file_id ON local(file_id, folder)\n\
         CREATE INDEX remote_parent ON remote(parent)\n\
         CREATE INDEX removed_at ON removed(removed_at)\n\
         CREATE INDEX removed_parent ON removed(parent)\n\
-        CREATE INDEX removed_root ON removed(root)";
+        CREATE INDEX removed_root ON removed(root)\n\
+        CREATE INDEX synced_folder ON synced(folder, id)";
 }

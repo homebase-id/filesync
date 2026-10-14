@@ -1,13 +1,16 @@
-//! The state DB: everything the client knows between runs, in one SQLite file.
+//! The state DB: everything the client knows between runs about one account, in one SQLite
+//! file, for every folder it syncs on this device.
 //!
 //! - **nodes**: one small integer id per node; every other table is keyed by it.
-//! - **base**: the last state both sides agreed on, per node (the three-way merge's ancestor).
-//! - **local**: what the last observation saw on disk, as a tree of (parent, name) rows.
-//! - **remote**: the client's copy of the live remote nodes.
-//! - **dirty**: nodes whose local or remote side changed and still need reconciling. Written
-//!   in the same transaction as the change, so a crash never loses one.
-//! - **parked**, **forks**: write-ahead records of the executor's temporary renames.
-//! - **kv**: cursors and small settings.
+//! - **folders**: the folders synced here, each holding a part of the drive.
+//! - **remote**: the client's copy of the drive's live nodes; **removed**: Recently deleted.
+//! - Per folder:
+//!   - **base**: the last state both sides agreed on, per node (the three-way merge's ancestor).
+//!   - **local**: what the last observation saw on disk, as a tree of (parent, name) rows.
+//!   - **dirty**: nodes whose local or remote side changed and still need reconciling. Written
+//!     in the same transaction as the change, so a crash never loses one.
+//!   - **parked**, **forks**: write-ahead records of the executor's temporary renames.
+//!   - **folder_kv**: the folder's cursors and settings; **kv** has the account's.
 //!
 //! Every access runs inside a transaction ([`StateDb::read`], [`StateDb::write`]); a write
 //! closure that returns an error rolls everything back.
@@ -22,7 +25,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, TransactionBehavior};
 
 pub use store::{
-    BaseRow, DirtyCursor, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, RemovedRow, Store,
+    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, RemovedRow, Store,
 };
 
 /// The state DB key of the remote change-feed cursor.
@@ -36,7 +39,9 @@ pub enum StateError {
     Corrupt(String),
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
-    #[error("state DB schema version {found} is from before Filesync 0.3 and isn't upgraded")]
+    #[error(
+        "state DB schema version {found} is from an older Filesync (one DB per folder) and isn't upgraded: set the folder up again"
+    )]
     TooOld { found: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
@@ -63,21 +68,60 @@ fn wal(conn: &Connection) -> Result<()> {
     }
 }
 
-/// An open state DB.
+/// An open state DB, seen as one of its folders.
 #[derive(Debug)]
 pub struct StateDb {
     conn: Connection,
+    folder: i64,
 }
 
+/// The folder a DB opened with [`StateDb::open`] sees: the first one, made on first use for the
+/// drive's root.
+pub const FIRST_FOLDER: i64 = 1;
+
 impl StateDb {
-    /// Opens (or creates) the DB at `path` and brings its schema up to date.
+    /// Opens (or creates) the DB at `path`, brings its schema up to date, and sees its first
+    /// folder (made for the drive's root if there is none).
     pub fn open(path: &Path) -> Result<Self> {
-        Self::setup(Connection::open(path)?)
+        Self::first(Self::setup(Connection::open(path)?)?)
     }
 
-    /// An in-memory DB, for tests.
+    /// The DB at `path` seen as folder `folder` (one of its `folders`).
+    pub fn open_folder(path: &Path, folder: i64) -> Result<Self> {
+        let mut db = Self::setup(Connection::open(path)?)?;
+        db.folder = folder;
+        if !db.read(|s| Ok(s.folders()?.iter().any(|f| f.id == folder)))? {
+            return Err(StateError::Conflict(format!(
+                "no folder {folder} in this DB"
+            )));
+        }
+        Ok(db)
+    }
+
+    /// An in-memory DB, for tests: its first folder holds the drive's root.
     pub fn open_in_memory() -> Result<Self> {
-        Self::setup(Connection::open_in_memory()?)
+        Self::first(Self::setup(Connection::open_in_memory()?)?)
+    }
+
+    fn first(mut db: StateDb) -> Result<Self> {
+        db.write(|s| {
+            if s.folders()?.is_empty() {
+                s.add_folder(hbsync_types::NodeId::ROOT, "", "")?;
+            }
+            Ok(())
+        })?;
+        Ok(db)
+    }
+
+    /// The folder this handle sees.
+    pub fn folder(&self) -> i64 {
+        self.folder
+    }
+
+    /// This DB seen as folder `folder`: the same connection.
+    pub fn with_folder(mut self, folder: i64) -> Self {
+        self.folder = folder;
+        self
     }
 
     fn setup(mut conn: Connection) -> Result<Self> {
@@ -95,7 +139,10 @@ impl StateDb {
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(64);
         migrations::apply(&mut conn)?;
-        Ok(StateDb { conn })
+        Ok(StateDb {
+            conn,
+            folder: FIRST_FOLDER,
+        })
     }
 
     /// Runs `f` in a read transaction (a consistent snapshot).
@@ -103,7 +150,7 @@ impl StateDb {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let out = f(&Store::new(&tx))?;
+        let out = f(&Store::new(&tx, self.folder))?;
         tx.finish()?;
         Ok(out)
     }
@@ -113,7 +160,7 @@ impl StateDb {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let out = f(&Store::new(&tx))?;
+        let out = f(&Store::new(&tx, self.folder))?;
         tx.commit()?;
         Ok(out)
     }

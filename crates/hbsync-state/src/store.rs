@@ -173,15 +173,29 @@ impl MirrorRow {
     }
 }
 
-/// The tables, seen through one open transaction.
+/// The tables, seen through one open transaction, for one folder: the account's tables (the
+/// mirror, Recently deleted, the account's kv) are shared, the others hold this folder's rows.
 #[derive(Debug)]
 pub struct Store<'a> {
     conn: &'a Connection,
+    /// `folders.id`, which `$F` in the SQL stands for.
+    folder: i64,
+}
+
+/// A folder this account syncs here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderRow {
+    pub id: i64,
+    /// The drive's node the folder holds: the drive's root for the main folder.
+    pub top: NodeId,
+    pub path: String,
+    pub marker: String,
 }
 
 const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size, b.mtime_ms, \
      b.executable, b.remote_file_id, b.version_tag, b.content_state, b.local_name, b.local_hash, \
-     b.tags FROM base b JOIN nodes n ON n.id = b.id JOIN nodes p ON p.id = b.parent";
+     b.tags FROM base b JOIN nodes n ON n.id = b.id AND b.folder = $F \
+     JOIN nodes p ON p.id = b.parent";
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
      mtime_ms, executable, content_extra, removed_at, root FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
@@ -195,27 +209,79 @@ const LOCAL_COL_COUNT: usize = 14;
 /// Deeper than any real tree (Windows' 32k-character paths hold about 16k levels); reaching it
 /// means a broken parent chain.
 pub const MAX_DEPTH: usize = 16_384;
-const LOCAL_FROM: &str = "FROM local l JOIN nodes n ON n.id = l.id";
+const LOCAL_FROM: &str = "FROM local l JOIN nodes n ON n.id = l.id AND l.folder = $F";
 /// A node's integer id, by UUID.
 const ID_OF: &str = "(SELECT id FROM nodes WHERE uuid = ?1)";
 
 /// A dirty node `d` with base `b` is a synced file gone locally (online-only files have no
 /// local copy by design), or gone remotely: what the mass-delete guard counts.
 const GONE_LOCALLY: &str = "b.kind = 0 AND b.content_state != 2 \
-    AND NOT EXISTS (SELECT 1 FROM local l WHERE l.id = d.id)";
+    AND NOT EXISTS (SELECT 1 FROM local l WHERE l.folder = $F AND l.id = d.id)";
 const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)";
 
 impl<'a> Store<'a> {
-    pub(crate) fn new(conn: &'a Connection) -> Self {
-        Store { conn }
+    pub(crate) fn new(conn: &'a Connection, folder: i64) -> Self {
+        Store { conn, folder }
+    }
+
+    /// `sql` prepared through the statement cache, `$F` standing for this store's folder.
+    fn prep(&self, sql: &str) -> rusqlite::Result<rusqlite::CachedStatement<'a>> {
+        if sql.contains("$F") {
+            self.conn
+                .prepare_cached(&sql.replace("$F", &self.folder.to_string()))
+        } else {
+            self.conn.prepare_cached(sql)
+        }
+    }
+
+    // ---- folders ----
+
+    /// The folder this store sees.
+    pub fn folder(&self) -> i64 {
+        self.folder
+    }
+
+    /// Registers a folder holding the drive's node `top`; its id.
+    pub fn add_folder(&self, top: NodeId, path: &str, marker: &str) -> Result<i64> {
+        self.prep(
+            "INSERT INTO folders (top, path, marker, added_at) VALUES (?1, ?2, ?3, unixepoch())",
+        )?
+        .execute(params![top.0.as_bytes(), path, marker])?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn folders(&self) -> Result<Vec<FolderRow>> {
+        let mut stmt = self.prep("SELECT id, top, path, marker FROM folders ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get(2)?,
+                r.get(3)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (id, top, path, marker) = r?;
+            Ok(FolderRow {
+                id,
+                top: codec::node(&top)?,
+                path,
+                marker,
+            })
+        })
+        .collect()
+    }
+
+    /// Forgets folder `id` and every row it has (the account's stay).
+    pub fn remove_folder(&self, id: i64) -> Result<bool> {
+        self.change("DELETE FROM folders WHERE id = ?1", id)
     }
 
     // ---- node ids ----
 
     fn key(&self, node: NodeId) -> Result<Option<i64>> {
         Ok(self
-            .conn
-            .prepare_cached("SELECT id FROM nodes WHERE uuid = ?1")?
+            .prep("SELECT id FROM nodes WHERE uuid = ?1")?
             .query_row([node.0.as_bytes()], |r| r.get(0))
             .optional()?)
     }
@@ -230,16 +296,14 @@ impl<'a> Store<'a> {
         if let Some(id) = self.key(node)? {
             return Ok(id);
         }
-        self.conn
-            .prepare_cached("INSERT INTO nodes (uuid) VALUES (?1)")?
+        self.prep("INSERT INTO nodes (uuid) VALUES (?1)")?
             .execute([node.0.as_bytes()])?;
         Ok(self.conn.last_insert_rowid())
     }
 
     fn uuid_of(&self, id: i64) -> Result<NodeId> {
         let bytes: Vec<u8> = self
-            .conn
-            .prepare_cached("SELECT uuid FROM nodes WHERE id = ?1")?
+            .prep("SELECT uuid FROM nodes WHERE id = ?1")?
             .query_row([id], |r| r.get(0))?;
         codec::node(&bytes)
     }
@@ -250,8 +314,7 @@ impl<'a> Store<'a> {
     /// another node.
     pub fn collect_nodes(&self) -> Result<usize> {
         let n = self
-            .conn
-            .prepare_cached(
+            .prep(
                 "DELETE FROM nodes WHERE id IN (SELECT id FROM gone) \
              AND NOT EXISTS (SELECT 1 FROM local WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM local WHERE parent = nodes.id) \
@@ -264,7 +327,7 @@ impl<'a> Store<'a> {
              AND NOT EXISTS (SELECT 1 FROM forks WHERE id = nodes.id OR new_node = nodes.id)",
             )?
             .execute([])?;
-        self.conn.prepare_cached("DELETE FROM gone")?.execute([])?;
+        self.prep("DELETE FROM gone")?.execute([])?;
         Ok(n)
     }
 
@@ -305,13 +368,12 @@ impl<'a> Store<'a> {
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.state.parent)?,
         );
-        self.conn
-            .prepare_cached(
-                "INSERT INTO base (id, parent, name, kind, hash, size, mtime_ms, \
+        self.prep(
+                "INSERT INTO base (folder, id, parent, name, kind, hash, size, mtime_ms, \
                  executable, remote_file_id, version_tag, content_state, local_name, local_hash, \
                  tags) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
-                 ON CONFLICT (id) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, hash = ?5, \
+                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT (id, folder) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, hash = ?5, \
                  size = ?6, mtime_ms = ?7, executable = ?8, remote_file_id = ?9, \
                  version_tag = ?10, content_state = ?11, local_name = ?12, local_hash = ?13, \
                  tags = ?14",
@@ -337,19 +399,19 @@ impl<'a> Store<'a> {
 
     pub fn delete_base(&self, node: NodeId) -> Result<bool> {
         self.change(
-            &format!("DELETE FROM base WHERE id = {ID_OF}"),
+            &format!("DELETE FROM base WHERE folder = $F AND id = {ID_OF}"),
             node.0.as_bytes(),
         )
     }
 
     pub fn base_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM base")
+        self.count("SELECT COUNT(*) FROM base WHERE folder = $F")
     }
 
     /// Number of file (not folder) nodes in the base; the mass-delete guard's denominator.
     /// A full table scan: callers take it once per sync.
     pub fn base_file_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM base WHERE kind = 0")
+        self.count("SELECT COUNT(*) FROM base WHERE folder = $F AND kind = 0")
     }
 
     // ---- local observations ----
@@ -359,9 +421,8 @@ impl<'a> Store<'a> {
         let Some(mut id) = self.key(NodeId::ROOT)? else {
             return Ok(None);
         };
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT id FROM local WHERE parent = ?1 AND name = ?2")?;
+        let mut stmt =
+            self.prep("SELECT id FROM local WHERE folder = $F AND parent = ?1 AND name = ?2")?;
         for name in path.components() {
             match stmt.query_row(params![id, name], |r| r.get(0)).optional()? {
                 Some(child) => id = child,
@@ -388,9 +449,7 @@ impl<'a> Store<'a> {
         {
             cache.insert(root, RelPath::root());
         }
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT parent, name FROM local WHERE id = ?1")?;
+        let mut stmt = self.prep("SELECT parent, name FROM local WHERE folder = $F AND id = ?1")?;
         let mut chain: Vec<(i64, String)> = Vec::new();
         let mut at = id;
         let mut path = loop {
@@ -421,7 +480,7 @@ impl<'a> Store<'a> {
     }
 
     fn raw_local(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<RawLocal>> {
-        let mut stmt = self.conn.prepare_cached(sql)?;
+        let mut stmt = self.prep(sql)?;
         let rows = stmt.query_map(params, |r| RawLocal::read(r, 0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -444,10 +503,9 @@ impl<'a> Store<'a> {
     /// The folder `node` is in locally: the root for a top-level item, `None` without a row.
     pub fn local_parent(&self, node: NodeId) -> Result<Option<NodeId>> {
         let parent: Option<Vec<u8>> = self
-            .conn
-            .prepare_cached(
+            .prep(
                 "SELECT p.uuid FROM local l JOIN nodes n ON n.id = l.id \
-                 JOIN nodes p ON p.id = l.parent WHERE n.uuid = ?1",
+                 JOIN nodes p ON p.id = l.parent WHERE n.uuid = ?1 AND l.folder = $F",
             )?
             .query_row([node.0.as_bytes()], |r| r.get(0))
             .optional()?;
@@ -514,8 +572,7 @@ impl<'a> Store<'a> {
         })?;
         let id = self.key_or_insert(row.node)?;
         let place: Option<(i64, String)> = self
-            .conn
-            .prepare_cached("SELECT parent, name FROM local WHERE id = ?1")?
+            .prep("SELECT parent, name FROM local WHERE folder = $F AND id = ?1")?
             .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;
         if let Some((p, n)) = place
@@ -528,8 +585,7 @@ impl<'a> Store<'a> {
             )));
         }
         let holder: Option<i64> = self
-            .conn
-            .prepare_cached("SELECT id FROM local WHERE parent = ?1 AND name = ?2")?
+            .prep("SELECT id FROM local WHERE folder = $F AND parent = ?1 AND name = ?2")?
             .query_row(params![parent, name], |r| r.get(0))
             .optional()?;
         if holder.is_some_and(|h| h != id) {
@@ -537,12 +593,11 @@ impl<'a> Store<'a> {
         }
         let fp = &row.fingerprint;
         let (lo, hi) = codec::file_id_parts(&fp.file_id);
-        self.conn
-            .prepare_cached(
-                "INSERT INTO local (id, parent, name, kind, size, mtime_ns, ctime_ns, \
+        self.prep(
+                "INSERT INTO local (folder, id, parent, name, kind, size, mtime_ns, ctime_ns, \
                  volume, file_id, file_id_hi, executable, hash, tags) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
-                 ON CONFLICT (id) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, size = ?5, \
+                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                 ON CONFLICT (id, folder) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, size = ?5, \
                  mtime_ns = ?6, ctime_ns = ?7, volume = ?8, file_id = ?9, file_id_hi = ?10, \
                  executable = ?11, hash = ?12, tags = ?13",
             )?
@@ -571,8 +626,7 @@ impl<'a> Store<'a> {
             return Ok(false);
         };
         let has_children = self
-            .conn
-            .prepare_cached("SELECT 1 FROM local WHERE parent = ?1 LIMIT 1")?
+            .prep("SELECT 1 FROM local WHERE folder = $F AND parent = ?1 LIMIT 1")?
             .query_row([id], |_| Ok(()))
             .optional()?
             .is_some();
@@ -582,8 +636,7 @@ impl<'a> Store<'a> {
             )));
         }
         Ok(self
-            .conn
-            .prepare_cached("DELETE FROM local WHERE id = ?1")?
+            .prep("DELETE FROM local WHERE folder = $F AND id = ?1")?
             .execute([id])?
             > 0)
     }
@@ -595,11 +648,9 @@ impl<'a> Store<'a> {
             .key(old)?
             .ok_or_else(|| StateError::Conflict(format!("{old:?} has no row")))?;
         let new_id = self.key_or_insert(new)?;
-        self.conn
-            .prepare_cached("UPDATE local SET id = ?2 WHERE id = ?1")?
+        self.prep("UPDATE local SET id = ?2 WHERE folder = $F AND id = ?1")?
             .execute([old_id, new_id])?;
-        self.conn
-            .prepare_cached("UPDATE local SET parent = ?2 WHERE parent = ?1")?
+        self.prep("UPDATE local SET parent = ?2 WHERE folder = $F AND parent = ?1")?
             .execute([old_id, new_id])?;
         Ok(())
     }
@@ -609,15 +660,16 @@ impl<'a> Store<'a> {
         let Some(start) = self.local_id_at(path)? else {
             return Ok(Vec::new());
         };
-        let mut stmt = self.conn.prepare_cached(&format!(
+        let mut stmt = self.prep(&format!(
             "WITH RECURSIVE sub(id, path, depth) AS ( \
                  VALUES (?1, ?2, 0) \
                  UNION ALL \
                  SELECT l.id, CASE WHEN sub.path = '' THEN l.name ELSE sub.path || '/' || l.name END, \
                  sub.depth + 1 \
-                 FROM local l JOIN sub ON l.parent = sub.id WHERE sub.depth < ?3) \
-             SELECT {LOCAL_COLS}, sub.path, sub.depth FROM sub JOIN local l ON l.id = sub.id \
-             JOIN nodes n ON n.id = l.id"
+                 FROM local l JOIN sub ON l.parent = sub.id \
+                 WHERE l.folder = $F AND sub.depth < ?3) \
+             SELECT {LOCAL_COLS}, sub.path, sub.depth FROM sub \
+             JOIN local l ON l.folder = $F AND l.id = sub.id JOIN nodes n ON n.id = l.id"
         ))?;
         let rows = stmt.query_map(params![start, path.as_str(), MAX_DEPTH as i64], |r| {
             Ok((
@@ -699,8 +751,7 @@ impl<'a> Store<'a> {
         if self.local_id_at(to)?.is_some() {
             return Err(conflict());
         }
-        self.conn
-            .prepare_cached("UPDATE local SET parent = ?2, name = ?3 WHERE id = ?1")?
+        self.prep("UPDATE local SET parent = ?2, name = ?3 WHERE folder = $F AND id = ?1")?
             .execute(params![id, parent, name])?;
         Ok(())
     }
@@ -708,9 +759,7 @@ impl<'a> Store<'a> {
     /// Deletes the rows of `path` and everything below it and returns them.
     pub fn delete_local_subtree(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
         let raw = self.subtree_raw(path)?;
-        let mut stmt = self
-            .conn
-            .prepare_cached("DELETE FROM local WHERE id = ?1")?;
+        let mut stmt = self.prep("DELETE FROM local WHERE folder = $F AND id = ?1")?;
         for (_, r) in &raw {
             stmt.execute([r.id])?;
         }
@@ -723,7 +772,7 @@ impl<'a> Store<'a> {
     }
 
     pub fn local_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM local")
+        self.count("SELECT COUNT(*) FROM local WHERE folder = $F")
     }
 
     // ---- parked items ----
@@ -736,8 +785,7 @@ impl<'a> Store<'a> {
             .name()
             .ok_or_else(|| StateError::Conflict("the root can't be parked".into()))?;
         let id = self.key_or_insert(node)?;
-        self.conn
-            .prepare_cached("INSERT OR REPLACE INTO parked (id, original_name) VALUES (?1, ?2)")?
+        self.prep("INSERT OR REPLACE INTO parked (folder, id, original_name) VALUES ($F, ?1, ?2)")?
             .execute(params![id, name])?;
         Ok(())
     }
@@ -745,9 +793,8 @@ impl<'a> Store<'a> {
     /// The name a parked node had.
     pub fn get_parked(&self, node: NodeId) -> Result<Option<String>> {
         Ok(self
-            .conn
-            .prepare_cached(&format!(
-                "SELECT original_name FROM parked WHERE id = {ID_OF}"
+            .prep(&format!(
+                "SELECT original_name FROM parked WHERE folder = $F AND id = {ID_OF}"
             ))?
             .query_row([node.0.as_bytes()], |r| r.get(0))
             .optional()?)
@@ -756,15 +803,14 @@ impl<'a> Store<'a> {
     /// Every parked node.
     pub fn all_parked(&self) -> Result<Vec<NodeId>> {
         let mut stmt = self
-            .conn
-            .prepare_cached("SELECT n.uuid FROM parked k JOIN nodes n ON n.id = k.id")?;
+            .prep("SELECT n.uuid FROM parked k JOIN nodes n ON n.id = k.id WHERE k.folder = $F")?;
         let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         rows.map(|r| codec::node(&r?)).collect()
     }
 
     pub fn delete_parked(&self, node: NodeId) -> Result<()> {
         self.change(
-            &format!("DELETE FROM parked WHERE id = {ID_OF}"),
+            &format!("DELETE FROM parked WHERE folder = $F AND id = {ID_OF}"),
             node.0.as_bytes(),
         )?;
         Ok(())
@@ -780,19 +826,18 @@ impl<'a> Store<'a> {
             .name()
             .ok_or_else(|| StateError::Conflict("the root can't be forked".into()))?;
         let (id, new_id) = (self.key_or_insert(node)?, self.key_or_insert(new_node)?);
-        self.conn
-            .prepare_cached(
-                "INSERT OR REPLACE INTO forks (id, new_node, to_name) VALUES (?1, ?2, ?3)",
-            )?
-            .execute(params![id, new_id, name])?;
+        self.prep(
+            "INSERT OR REPLACE INTO forks (folder, id, new_node, to_name) VALUES ($F, ?1, ?2, ?3)",
+        )?
+        .execute(params![id, new_id, name])?;
         Ok(())
     }
 
     /// `(node, new node, conflict-copy name)` of every fork in progress.
     pub fn all_forks(&self) -> Result<Vec<(NodeId, NodeId, String)>> {
-        let mut stmt = self.conn.prepare_cached(
+        let mut stmt = self.prep(
             "SELECT n.uuid, m.uuid, f.to_name FROM forks f \
-             JOIN nodes n ON n.id = f.id JOIN nodes m ON m.id = f.new_node",
+             JOIN nodes n ON n.id = f.id JOIN nodes m ON m.id = f.new_node WHERE f.folder = $F",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok((
@@ -810,7 +855,7 @@ impl<'a> Store<'a> {
 
     pub fn delete_fork(&self, node: NodeId) -> Result<()> {
         self.change(
-            &format!("DELETE FROM forks WHERE id = {ID_OF}"),
+            &format!("DELETE FROM forks WHERE folder = $F AND id = {ID_OF}"),
             node.0.as_bytes(),
         )?;
         Ok(())
@@ -831,8 +876,7 @@ impl<'a> Store<'a> {
     pub fn has_version(&self, at: RemoteRef, removed: bool) -> Result<bool> {
         let table = if removed { "removed" } else { "remote" };
         Ok(self
-            .conn
-            .prepare_cached(&format!(
+            .prep(&format!(
                 "SELECT 1 FROM {table} WHERE file_id = ?1 AND version_tag = ?2"
             ))?
             .exists([at.file_id.0.as_bytes(), at.version.0.as_bytes()])?)
@@ -862,28 +906,27 @@ impl<'a> Store<'a> {
             self.key_or_insert(row.parent)?,
         );
         let f = row.file.as_ref();
-        self.conn
-            .prepare_cached(
-                "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
+        self.prep(
+            "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
                  hash, size, mtime_ms, executable, content_extra) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
                  ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
                  kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
                  content_extra = ?11",
-            )?
-            .execute(params![
-                id,
-                row.file_id.0.as_bytes(),
-                row.version.0.as_bytes(),
-                parent,
-                codec::kind_to(row.kind),
-                row.name,
-                f.map(|f| codec::hash_to(&f.hash)),
-                f.map(|f| f.size as i64),
-                f.map(|f| f.mtime_ms),
-                f.is_some_and(|f| f.executable),
-                row.content_extra,
-            ])?;
+        )?
+        .execute(params![
+            id,
+            row.file_id.0.as_bytes(),
+            row.version.0.as_bytes(),
+            parent,
+            codec::kind_to(row.kind),
+            row.name,
+            f.map(|f| codec::hash_to(&f.hash)),
+            f.map(|f| f.size as i64),
+            f.map(|f| f.mtime_ms),
+            f.is_some_and(|f| f.executable),
+            row.content_extra,
+        ])?;
         Ok(())
     }
 
@@ -904,27 +947,26 @@ impl<'a> Store<'a> {
     /// Records a removed node (replacing an older record of it).
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         let (row, f) = (&removed.row, removed.row.file.as_ref());
-        self.conn
-            .prepare_cached(
-                "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
+        self.prep(
+            "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
                  hash, size, mtime_ms, executable, content_extra, removed_at, root) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            )?
-            .execute(params![
-                row.node.0.as_bytes(),
-                row.file_id.0.as_bytes(),
-                row.version.0.as_bytes(),
-                row.parent.0.as_bytes(),
-                codec::kind_to(row.kind),
-                row.name,
-                f.map(|f| codec::hash_to(&f.hash)),
-                f.map(|f| f.size as i64),
-                f.map(|f| f.mtime_ms),
-                f.is_some_and(|f| f.executable),
-                row.content_extra,
-                removed.removal.at_ms,
-                removed.removal.root.0.as_bytes(),
-            ])?;
+        )?
+        .execute(params![
+            row.node.0.as_bytes(),
+            row.file_id.0.as_bytes(),
+            row.version.0.as_bytes(),
+            row.parent.0.as_bytes(),
+            codec::kind_to(row.kind),
+            row.name,
+            f.map(|f| codec::hash_to(&f.hash)),
+            f.map(|f| f.size as i64),
+            f.map(|f| f.mtime_ms),
+            f.is_some_and(|f| f.executable),
+            row.content_extra,
+            removed.removal.at_ms,
+            removed.removal.root.0.as_bytes(),
+        ])?;
         Ok(())
     }
 
@@ -989,25 +1031,24 @@ impl<'a> Store<'a> {
 
     pub fn mark_dirty(&self, node: NodeId) -> Result<()> {
         let id = self.key_or_insert(node)?;
-        self.conn
-            .prepare_cached("INSERT OR IGNORE INTO dirty (id) VALUES (?1)")?
+        self.prep("INSERT OR IGNORE INTO dirty (folder, id) VALUES ($F, ?1)")?
             .execute([id])?;
         Ok(())
     }
 
     /// Marks every node with a base or a remote row dirty: all of them are planned again.
     pub fn mark_synced_dirty(&self) -> Result<()> {
-        self.conn
-            .prepare_cached(
-                "INSERT OR IGNORE INTO dirty (id) SELECT id FROM base UNION SELECT id FROM remote",
-            )?
-            .execute([])?;
+        self.prep(
+            "INSERT OR IGNORE INTO dirty (folder, id) \
+                 SELECT $F, id FROM base WHERE folder = $F UNION SELECT $F, id FROM remote",
+        )?
+        .execute([])?;
         Ok(())
     }
 
     pub fn clear_dirty(&self, node: NodeId) -> Result<()> {
         self.change(
-            &format!("DELETE FROM dirty WHERE id = {ID_OF}"),
+            &format!("DELETE FROM dirty WHERE folder = $F AND id = {ID_OF}"),
             node.0.as_bytes(),
         )?;
         Ok(())
@@ -1015,8 +1056,9 @@ impl<'a> Store<'a> {
 
     pub fn is_dirty(&self, node: NodeId) -> Result<bool> {
         Ok(self
-            .conn
-            .prepare_cached(&format!("SELECT 1 FROM dirty WHERE id = {ID_OF}"))?
+            .prep(&format!(
+                "SELECT 1 FROM dirty WHERE folder = $F AND id = {ID_OF}"
+            ))?
             .query_row([node.0.as_bytes()], |_| Ok(()))
             .optional()?
             .is_some())
@@ -1031,9 +1073,9 @@ impl<'a> Store<'a> {
         after: Option<DirtyCursor>,
         limit: usize,
     ) -> Result<(Vec<NodeId>, Option<DirtyCursor>)> {
-        let mut stmt = self.conn.prepare_cached(
+        let mut stmt = self.prep(
             "SELECT d.id, n.uuid FROM dirty d JOIN nodes n ON n.id = d.id \
-             WHERE d.id > ?1 ORDER BY d.id LIMIT ?2",
+             WHERE d.folder = $F AND d.id > ?1 ORDER BY d.id LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![after.map_or(0, |c| c.0), limit as i64], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
@@ -1054,8 +1096,8 @@ impl<'a> Store<'a> {
         let raw = self.raw_local(
             &format!(
                 "SELECT {LOCAL_COLS} {LOCAL_FROM} \
-                 WHERE l.id IN (SELECT id FROM dirty) \
-                 AND NOT EXISTS (SELECT 1 FROM base b WHERE b.id = l.id) \
+                 WHERE l.id IN (SELECT id FROM dirty WHERE folder = $F) \
+                 AND NOT EXISTS (SELECT 1 FROM base b WHERE b.folder = $F AND b.id = l.id) \
                  AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = l.id)"
             ),
             [],
@@ -1064,9 +1106,9 @@ impl<'a> Store<'a> {
     }
 
     pub fn dirty_nodes(&self, limit: usize) -> Result<Vec<NodeId>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("SELECT n.uuid FROM dirty d JOIN nodes n ON n.id = d.id LIMIT ?1")?;
+        let mut stmt = self.prep(
+            "SELECT n.uuid FROM dirty d JOIN nodes n ON n.id = d.id WHERE d.folder = $F LIMIT ?1",
+        )?;
         let rows = stmt.query_map([limit as i64], |r| r.get::<_, Vec<u8>>(0))?;
         rows.map(|r| codec::node(&r?)).collect()
     }
@@ -1078,7 +1120,8 @@ impl<'a> Store<'a> {
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
         let gone = |predicate: &str| {
             self.count(&format!(
-                "SELECT COUNT(*) FROM dirty d JOIN base b ON b.id = d.id WHERE {predicate}"
+                "SELECT COUNT(*) FROM dirty d JOIN base b ON b.folder = d.folder AND b.id = d.id \
+                 WHERE d.folder = $F AND {predicate}"
             ))
         };
         Ok((gone(GONE_LOCALLY)?, gone(GONE_REMOTELY)?))
@@ -1093,14 +1136,15 @@ impl<'a> Store<'a> {
             format!(
                 "WITH RECURSIVE top(id) AS (SELECT {ID_OF}), \
                  sub(id) AS (SELECT id FROM top \
-                   UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id) \
+                   UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id \
+                   WHERE l.folder = $F) \
                  SELECT n.uuid, d.id = (SELECT id FROM top), \
                    coalesce({GONE_LOCALLY}, 0), coalesce({GONE_REMOTELY}, 0) \
-                 FROM sub JOIN dirty d ON d.id = sub.id JOIN nodes n ON n.id = d.id \
-                 LEFT JOIN base b ON b.id = d.id"
+                 FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
+                 JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id"
             )
         });
-        let mut stmt = self.conn.prepare_cached(&SQL)?;
+        let mut stmt = self.prep(&SQL)?;
         let rows = stmt.query_map([node.0.as_bytes()], |r| {
             Ok((
                 r.get::<_, Vec<u8>>(0)?,
@@ -1124,28 +1168,41 @@ impl<'a> Store<'a> {
     }
 
     pub fn dirty_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM dirty")
+        self.count("SELECT COUNT(*) FROM dirty WHERE folder = $F")
     }
 
     // ---- key/value ----
 
+    /// This folder's setting `key`.
     pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
         Ok(self
-            .conn
-            .prepare_cached("SELECT value FROM kv WHERE key = ?1")?
+            .prep("SELECT value FROM folder_kv WHERE folder = $F AND key = ?1")?
             .query_row([key], |r| r.get(0))
             .optional()?)
     }
 
     pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
-        self.conn
-            .prepare_cached("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)")?
+        self.prep("INSERT OR REPLACE INTO folder_kv (folder, key, value) VALUES ($F, ?1, ?2)")?
             .execute([key, value])?;
         Ok(())
     }
 
     pub fn delete_kv(&self, key: &str) -> Result<()> {
-        self.change("DELETE FROM kv WHERE key = ?1", key)?;
+        self.change("DELETE FROM folder_kv WHERE folder = $F AND key = ?1", key)?;
+        Ok(())
+    }
+
+    /// The account's setting `key` (the feed's cursor, the identity).
+    pub fn account_kv(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .prep("SELECT value FROM kv WHERE key = ?1")?
+            .query_row([key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_account_kv(&self, key: &str, value: &str) -> Result<()> {
+        self.prep("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)")?
+            .execute([key, value])?;
         Ok(())
     }
 
@@ -1157,8 +1214,9 @@ impl<'a> Store<'a> {
         if entries.is_empty() {
             return Ok(());
         }
-        let mut insert = self.conn.prepare_cached(
-            "INSERT INTO synced (at, kind, path, files, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+        let mut insert = self.prep(
+            "INSERT INTO synced (folder, at, kind, path, files, bytes) \
+             VALUES ($F, ?1, ?2, ?3, ?4, ?5)",
         )?;
         for e in entries {
             insert.execute(params![
@@ -1169,16 +1227,19 @@ impl<'a> Store<'a> {
                 e.bytes as i64
             ])?;
         }
-        self.conn
-            .prepare_cached("DELETE FROM synced WHERE id <= (SELECT MAX(id) FROM synced) - ?1")?
-            .execute([keep as i64])?;
+        self.prep(
+            "DELETE FROM synced WHERE folder = $F AND id NOT IN \
+                 (SELECT id FROM synced WHERE folder = $F ORDER BY id DESC LIMIT ?1)",
+        )?
+        .execute([keep as i64])?;
         Ok(())
     }
 
     /// The newest `limit` entries, newest first.
     pub fn recent_synced(&self, limit: usize) -> Result<Vec<Synced>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT at, kind, path, files, bytes FROM synced ORDER BY id DESC LIMIT ?1",
+        let mut stmt = self.prep(
+            "SELECT at, kind, path, files, bytes FROM synced WHERE folder = $F \
+             ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit as i64], |r| {
             Ok((
@@ -1211,8 +1272,7 @@ impl<'a> Store<'a> {
         param: impl rusqlite::ToSql,
         decode: fn(&Row<'_>) -> Result<T>,
     ) -> Result<Option<T>> {
-        self.conn
-            .prepare_cached(sql)?
+        self.prep(sql)?
             .query_row([param], |r| Ok(decode(r)))
             .optional()?
             .transpose()
@@ -1224,18 +1284,18 @@ impl<'a> Store<'a> {
         params: impl rusqlite::Params,
         decode: fn(&Row<'_>) -> Result<T>,
     ) -> Result<Vec<T>> {
-        let mut stmt = self.conn.prepare_cached(sql)?;
+        let mut stmt = self.prep(sql)?;
         let rows = stmt.query_map(params, |r| Ok(decode(r)))?;
         rows.map(|r| r?).collect()
     }
 
     /// Runs a one-parameter statement; whether it changed a row.
     fn change(&self, sql: &str, param: impl rusqlite::ToSql) -> Result<bool> {
-        Ok(self.conn.prepare_cached(sql)?.execute([param])? > 0)
+        Ok(self.prep(sql)?.execute([param])? > 0)
     }
 
     fn count(&self, sql: &str) -> Result<u64> {
-        let n: i64 = self.conn.prepare_cached(sql)?.query_row([], |r| r.get(0))?;
+        let n: i64 = self.prep(sql)?.query_row([], |r| r.get(0))?;
         Ok(n as u64)
     }
 }
