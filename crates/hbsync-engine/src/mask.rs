@@ -28,7 +28,9 @@
 //!
 //! What lies outside the engine's scope (§12: the role folders, for the main folder) is masked
 //! the same way, but is never leaving or brought back: it is synced elsewhere, by another
-//! engine or another device, so this one only lets go of it.
+//! engine or another device, so this one only lets go of it, and of what it synced in there
+//! (an older version's copy of a role folder) that was deleted or moved remotely since. A
+//! role folder's name stays free for the scope's own items.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -64,7 +66,16 @@ impl Masks {
     pub fn of(input: &Input, filter: &Filter, scope: &Scope, device: &str) -> Masks {
         let mut masked = masked(&input.remote, filter);
         let outside = scope.out_of_scope(&input.remote);
-        if masked.is_empty() && outside.is_empty() {
+        // What this device synced outside the scope (an older version's copy of a role
+        // folder). Gone remotely, or still outside, it is let go of like the rest; moved into
+        // the scope remotely, it is an ordinary move. Either way it never holds its folder here.
+        let synced_outside = synced_outside(&input.base, &input.remote, &outside, scope);
+        let held_outside: Vec<NodeId> = synced_outside
+            .iter()
+            .copied()
+            .filter(|n| !input.remote.contains(*n) || outside.contains(n))
+            .collect();
+        if masked.is_empty() && outside.is_empty() && held_outside.is_empty() {
             return Masks::default();
         }
         // A node synced at a place this device filters now, whose local item the user brought
@@ -93,7 +104,7 @@ impl Masks {
         // Leaving is an ordinary local delete: the scanner no longer reports the item.
         let leaving = only_whole_folders(&input.remote, leaving);
         masked.retain(|m| !leaving.contains(m));
-        masked.extend(outside);
+        masked.extend(outside.iter().copied().chain(held_outside));
         if masked.is_empty() {
             return Masks {
                 brought_back,
@@ -109,29 +120,33 @@ impl Masks {
         // What must stay here, and the masked folders it needs.
         let mut detach: BTreeSet<NodeId> = BTreeSet::new();
         for (node, local) in input.local.iter() {
+            // Whether the local item holds what the remote doesn't (edited, or never synced).
+            let changed = || match (input.base.get(node), local.kind) {
+                (None, _) => true,
+                (Some(_), NodeKind::Folder) => false,
+                (Some(base), NodeKind::File) => match (base.content, local.content) {
+                    (Some(b), Some(l)) => {
+                        let base_bytes = input
+                            .base_extra
+                            .get(&node)
+                            .and_then(|e| e.local_hash)
+                            .unwrap_or(b.hash);
+                        base_bytes != l.hash || b.executable != l.executable
+                    }
+                    // Not hashed yet: it may hold anything.
+                    _ => true,
+                },
+            };
             let needs_place = if masked.contains(&node) {
-                let changed = match (input.base.get(node), local.kind) {
-                    (None, _) => true,
-                    (Some(_), NodeKind::Folder) => false,
-                    (Some(base), NodeKind::File) => match (base.content, local.content) {
-                        (Some(b), Some(l)) => {
-                            let base_bytes = input
-                                .base_extra
-                                .get(&node)
-                                .and_then(|e| e.local_hash)
-                                .unwrap_or(b.hash);
-                            base_bytes != l.hash || b.executable != l.executable
-                        }
-                        // Not hashed yet: it may hold anything.
-                        _ => true,
-                    },
-                };
+                let changed = changed();
                 if changed {
                     detach.insert(node);
                 }
                 changed
             } else {
-                masked.contains(&local.parent)
+                // What this device synced outside the scope and that moved into it remotely
+                // follows the move, unless it was edited here (a conflict copy stays put).
+                masked.contains(&local.parent) && (!synced_outside.contains(&node) || changed())
             };
             if needs_place {
                 // Up to the first masked folder already in: what is above it is in too.
@@ -182,8 +197,10 @@ impl Masks {
             dirty,
             remote_complete: input.remote_complete,
         };
+        // A role folder holds no name for the scope: a plain folder of the same name keeps it
+        // (two at the top, told apart by id).
         let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        for m in &masked {
+        for m in masked.iter().filter(|m| !outside.contains(m)) {
             if let Some(state) = input.remote.get(*m) {
                 names
                     .entry(state.parent)
@@ -200,6 +217,30 @@ impl Masks {
             input: Some(view),
         }
     }
+}
+
+/// The synced nodes whose synced place lies outside `scope`. A folder above may have no base
+/// any more (its copy here was detached): the remote's then tells where it is.
+fn synced_outside(
+    base: &Tree,
+    remote: &Tree,
+    outside: &HashSet<NodeId>,
+    scope: &Scope,
+) -> HashSet<NodeId> {
+    if outside.is_empty() {
+        return scope.out_of_scope(base);
+    }
+    let mut places = base.clone();
+    for (node, state) in remote.iter() {
+        if !places.contains(node) {
+            places.insert(node, state.clone());
+        }
+    }
+    scope
+        .out_of_scope(&places)
+        .into_iter()
+        .filter(|n| base.contains(*n))
+        .collect()
 }
 
 /// `leaving` without the folders that hold anything else remotely (another device added it):

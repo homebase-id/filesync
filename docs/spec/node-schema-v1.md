@@ -46,6 +46,9 @@ the same on every drive: devices that add one join it.
   `Documents`, and a role folder may be renamed.
 - They are ordinary folders otherwise (content `v`, `name`). On a computer, a role folder is
   synced only where the user chose it, and never inside the main folder (sync semantics §12).
+- A plain folder may share a role folder's name at the top: both are shown.
+- A role folder in Recently deleted still holds its `uniqueId` (Homebase refuses a second live
+  one, inferred): restore it rather than create it.
 
 ## File header fields
 

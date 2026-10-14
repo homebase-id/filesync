@@ -15,6 +15,7 @@ fn action() -> impl Strategy<Value = Action> {
         1 => Just(Action::Purge),
         2 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
         1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),
+        1 => (i(), i()).prop_map(|(op, pick)| Action::Phone { op, pick }),
     ]
 }
 
@@ -81,7 +82,11 @@ fn run_with(
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 2000, ..ProptestConfig::default() })]
+    // 2000 cases, unless `PROPTEST_CASES` says otherwise (a set `cases` would override it).
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000),
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn two_clients_converge_without_loss(events in proptest::collection::vec(event(2), 0..80)) {

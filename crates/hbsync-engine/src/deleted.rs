@@ -1,6 +1,9 @@
 //! Recently deleted (node schema): what a delete took out of the tree, kept on the drive with
 //! its bytes until the purge. A restore puts it back in the tree, where the next sync brings it
 //! to every device; the purge deletes it for good.
+//!
+//! An engine lists, restores and empties only what was deleted in its scope (§12); the purge,
+//! by age, is the whole drive's.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -14,16 +17,24 @@ use hbsync_types::{NodeId, NodeKind};
 
 use crate::engine::EngineError;
 use crate::exec::{content_of, remove_all, trash_dir, trashed_at};
+use crate::scope::Scope;
 use crate::tree::restored_names;
 
-/// Recently deleted, newest first.
-pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> {
+/// Recently deleted in `scope`, newest first.
+pub fn list(db: &mut StateDb, scope: &Scope, limit: usize) -> Result<Vec<Deleted>, StateError> {
     db.read(|s| {
         // Folder paths, each worked out once.
         let mut folders: HashMap<NodeId, String> = HashMap::new();
+        let mut outside: HashMap<NodeId, bool> = HashMap::new();
         s.list_removed(limit)?
             .into_iter()
+            .filter_map(|r| match in_scope(s, scope, r.row.node, &mut outside) {
+                Ok(true) => Some(Ok(r)),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            })
             .map(|r| {
+                let r = r?;
                 let folder = folder_path(s, r.row.parent, &mut folders)?;
                 Ok(Deleted {
                     node: r.row.node,
@@ -37,6 +48,40 @@ pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> 
             })
             .collect()
     })
+}
+
+/// Whether `node` lies in `scope`: none of the folders above it, from the tree or from
+/// Recently deleted, is one the scope leaves out. Memoized in `known`.
+fn in_scope(
+    s: &Store<'_>,
+    scope: &Scope,
+    node: NodeId,
+    known: &mut HashMap<NodeId, bool>,
+) -> Result<bool, StateError> {
+    let mut chain = Vec::new();
+    let mut up = node;
+    // Bounded: a damaged DB must not hang.
+    let mut outside = loop {
+        if let Some(&out) = known.get(&up) {
+            break out;
+        }
+        if scope.outside.contains(&up) {
+            break true;
+        }
+        if up.is_root() || chain.len() >= 256 {
+            break false;
+        }
+        chain.push(up);
+        match s.get_mirror(up)?.or(s.removed_by_node(up)?.map(|r| r.row)) {
+            Some(row) => up = row.parent,
+            None => break false,
+        }
+    };
+    while let Some(n) = chain.pop() {
+        outside |= scope.outside.contains(&n);
+        known.insert(n, outside);
+    }
+    Ok(!outside)
 }
 
 /// The path of folder `at` (empty for the top), from the tree or from Recently deleted; a
@@ -83,7 +128,15 @@ fn join(folder: &str, name: &str) -> String {
 /// Restores `node` with what was deleted with it, and the folders it was in that are in
 /// Recently deleted too (just those, not their other contents). Returns how many items came
 /// back; 0 when `node` isn't in Recently deleted (any more).
-pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<usize, EngineError> {
+pub fn restore(
+    db: &mut StateDb,
+    remote: &dyn Remote,
+    scope: &Scope,
+    node: NodeId,
+) -> Result<usize, EngineError> {
+    if !db.read(|s| in_scope(s, scope, node, &mut HashMap::new()))? {
+        return Ok(0);
+    }
     let Some(plan) = db.read(|s| plan_restore(s, node))? else {
         return Ok(0);
     };
@@ -236,11 +289,16 @@ pub fn purge(
 pub fn empty(
     db: &mut StateDb,
     remote: &dyn Remote,
+    scope: &Scope,
     nodes: &[NodeId],
 ) -> Result<usize, EngineError> {
     let mut rows = db.read(|s| {
         let mut rows = Vec::new();
+        let mut known = HashMap::new();
         for &node in nodes {
+            if !in_scope(s, scope, node, &mut known)? {
+                continue;
+            }
             if let Some(top) = s.removed_by_node(node)? {
                 rows.extend(group(s, top)?);
             }
@@ -257,9 +315,19 @@ pub fn empty(
 pub fn empty_until(
     db: &mut StateDb,
     remote: &dyn Remote,
+    scope: &Scope,
     at_ms: i64,
 ) -> Result<usize, EngineError> {
-    let rows = db.read(|s| s.removed_before(at_ms.saturating_add(1)))?;
+    let rows = db.read(|s| {
+        let mut known = HashMap::new();
+        let mut rows = Vec::new();
+        for r in s.removed_before(at_ms.saturating_add(1))? {
+            if in_scope(s, scope, r.row.node, &mut known)? {
+                rows.push(r);
+            }
+        }
+        Ok(rows)
+    })?;
     delete_for_good(db, remote, &rows)
 }
 
