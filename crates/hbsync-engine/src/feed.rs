@@ -6,11 +6,8 @@
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
-use hbsync_state::{
-    MirrorFile, MirrorRow, REMOTE_CURSOR_KEY, RemovedRow, StateDb, StateError, Store,
-};
-use hbsync_types::NodeKind;
-use hbsync_types::schema::{NodeContent, REMOVAL_KEY};
+use hbsync_state::{MirrorRow, REMOTE_CURSOR_KEY, RemovedRow, StateDb, StateError, Store};
+use hbsync_types::{NodeKind, RemoteRef};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -123,52 +120,22 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     else {
         return None;
     };
-    let file = match header.kind {
+    let payload = match header.kind {
         NodeKind::Folder => None,
-        NodeKind::File => {
-            let info = payload.as_ref()?; // `Remote`s refuse such rows
-
-            Some(MirrorFile {
-                hash: info.hash,
-                size: content.size.unwrap_or(info.bytes),
-                mtime_ms: content.mtime.unwrap_or(0),
-                executable: content.x,
-            })
-        }
+        // `Remote`s refuse such rows.
+        NodeKind::File => Some(payload.as_ref().map(|p| (p.hash, p.bytes))?),
     };
-    Some(MirrorRow {
-        file_id: header.file_id,
-        version: header.version,
-        node: *node,
-        parent: header.parent,
-        name: content.name.clone(),
-        kind: header.kind,
-        file,
-        content_extra: content_extra(content),
-    })
-}
-
-/// What a mirror row keeps of `content` beyond its columns: the keys sync carries without
-/// acting on them (unknown ones, and the creation time), read back by [`unknown_keys`]. Not
-/// the removal: the `removed` table has it in columns.
-pub(crate) fn content_extra(content: &NodeContent) -> Option<String> {
-    let mut unknown = content.unknown.clone();
-    unknown.remove(REMOVAL_KEY);
-    (!unknown.is_empty()).then(|| serde_json::Value::Object(unknown).to_string())
-}
-
-/// The content keys of `row` this client carries without acting on them (stored by
-/// [`mirror_row`]), to be written back unchanged.
-pub(crate) fn unknown_keys(row: &MirrorRow) -> serde_json::Map<String, serde_json::Value> {
-    row.content_extra
-        .as_deref()
-        .and_then(|extra| serde_json::from_str(extra).ok())
-        .unwrap_or_default()
-}
-
-/// The creation time `row`'s node carries, Unix ms.
-pub(crate) fn created_ms(row: &MirrorRow) -> Option<i64> {
-    NodeContent::created_ms_in(&unknown_keys(row))
+    Some(MirrorRow::from_content(
+        RemoteRef {
+            file_id: header.file_id,
+            version: header.version,
+        },
+        *node,
+        header.parent,
+        header.kind,
+        content,
+        payload,
+    ))
 }
 
 #[cfg(test)]

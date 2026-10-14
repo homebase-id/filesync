@@ -11,12 +11,12 @@ use std::path::Path;
 
 use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::engine::EngineError;
-use crate::exec::{content_of, remove_all, trash_dir, trashed_at};
+use crate::exec::{remove_all, trash_dir, trashed_at, update_meta};
 use crate::scope::Scope;
 use crate::tree::restored_names;
 
@@ -163,23 +163,16 @@ pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<us
             node: row.node,
             parent,
             kind: row.kind,
-            content: content_of(row, &name),
+            content: row.content(&name),
         };
-        let written = match remote.update(row.file_id, row.version, &meta, None) {
-            Ok(written) => written,
+        let back = match update_meta(remote, row.file_id, row.version, &meta, row.payload()) {
+            Ok(back) => back,
             // Changed or deleted for good meanwhile: the feed tells what it is now.
             Err(RemoteError::VersionMismatch | RemoteError::NotFound) => continue,
             Err(e) => return Err(EngineError::Remote(e)),
         };
         names.insert(name_key(&name));
         live.insert(row.node);
-        let back = MirrorRow {
-            file_id: written.file_id,
-            version: written.version,
-            parent,
-            name,
-            ..row.clone()
-        };
         db.write(|s| {
             s.delete_removed(row.node)?;
             s.put_mirror(&back)?;
