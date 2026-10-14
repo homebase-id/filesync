@@ -3,7 +3,6 @@
 //! deletes. Every path starts with a random secret, so only the tray's own links reach them.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,13 +13,11 @@ use std::time::Duration;
 use hbsync_app::control;
 use hbsync_app::runner::Status;
 use hbsync_app::setup::{self, Refusal};
-use hbsync_app::words::{self, escape_xml as escape};
+use hbsync_app::words;
 use hbsync_app::{Config, Control, Paths};
+use hbsync_homebase::local_http::{escape, read_request, redirect, respond};
 
 use crate::{Event, Sender};
-
-/// Requests and forms larger than this are refused.
-const MAX_REQUEST: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
@@ -159,17 +156,8 @@ struct Server {
     send: Sender,
 }
 
-/// A request, as far as the pages go.
-#[derive(Debug, PartialEq)]
-struct Request {
-    method: String,
-    path: String,
-    form: HashMap<String, String>,
-}
-
 impl Server {
     fn serve(&self, mut stream: TcpStream) -> std::io::Result<()> {
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         let Some(request) = read_request(&mut stream)? else {
             return respond(&mut stream, 400, "text/plain", b"bad request");
         };
@@ -587,68 +575,6 @@ impl Server {
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
-    let mut reader = BufReader::new(stream.take(MAX_REQUEST as u64));
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let mut parts = line.split_whitespace();
-    let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
-        return Ok(None);
-    };
-    let mut length = 0;
-    loop {
-        let mut header = String::new();
-        if reader.read_line(&mut header)? == 0 {
-            return Ok(None);
-        }
-        let header = header.trim_end();
-        if header.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("content-length")
-        {
-            length = value.trim().parse().unwrap_or(0);
-        }
-    }
-    if length > MAX_REQUEST {
-        return Ok(None);
-    }
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
-    // A query (`?error=` from the identity's redirect) isn't needed: the pages know the outcome.
-    let path = target.split_once('?').map_or(target, |(path, _)| path);
-    Ok(Some(Request {
-        method: method.to_owned(),
-        path: path.to_owned(),
-        form: parse_form(&String::from_utf8_lossy(&body)),
-    }))
-}
-
-/// `a=1&b=x%20y` (also `+` for spaces).
-fn parse_form(s: &str) -> HashMap<String, String> {
-    form_urlencoded::parse(s.as_bytes()).into_owned().collect()
-}
-
-fn respond(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8]) -> std::io::Result<()> {
-    write!(
-        stream,
-        "HTTP/1.1 {status} {}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
-        if status == 200 { "OK" } else { "Error" },
-        body.len()
-    )?;
-    stream.write_all(body)
-}
-
-fn redirect(stream: &mut TcpStream, url: &str) -> std::io::Result<()> {
-    write!(
-        stream,
-        "HTTP/1.1 303 See Other\r\nLocation: {url}\r\nContent-Length: 0\r\n\
-         Cache-Control: no-store\r\nConnection: close\r\n\r\n"
-    )
-}
-
 /// A page in Homebase's look (design manual v2: the purple to blue gradient, Montserrat where
 /// installed). Nothing is loaded from elsewhere.
 fn frame(icon: &str, body: &str) -> String {
@@ -693,29 +619,9 @@ ul.deleted button{margin-left:8px;padding:4px 14px}";
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+
     use super::*;
-
-    #[test]
-    fn forms_decode() {
-        let f = parse_form("identity=Anna.Example.com%2F&merge=on&x=a+b%");
-        assert_eq!(f["identity"], "Anna.Example.com/");
-        assert_eq!(f["merge"], "on");
-        assert_eq!(f["x"], "a b%");
-        assert_eq!(parse_form("x=%E2%9C%93")["x"], "✓");
-        assert_eq!(
-            parse_form("x=%ä")["x"],
-            "%ä",
-            "no panic in the middle of a character"
-        );
-    }
-
-    #[test]
-    fn text_is_escaped() {
-        assert_eq!(
-            escape("<a href=\"x\">&"),
-            "&lt;a href=&quot;x&quot;&gt;&amp;"
-        );
-    }
 
     type R = Result<(), Box<dyn std::error::Error>>;
 

@@ -10,20 +10,22 @@
 //!    `POST /api/owner/v1/youauth/token` and get the client auth token and the shared secret,
 //!    AES-CBC encrypted under the exchange key.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::collections::HashMap;
+use std::io::Write;
+use std::net::TcpListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::HomebaseError;
 use crate::crypto::{Exchange, Key, aes_cbc_decrypt, random};
+use crate::local_http;
 
 const CALLBACK_PATH: &str = "/authorization-code-callback";
 
@@ -169,28 +171,31 @@ impl Pending {
                 }
                 Err(e) => return Err(e.into()),
             };
+            let mut stream = stream;
             stream.set_nonblocking(false)?;
             // Anything else is ignored: a favicon request, or a TLS handshake from a browser
             // that tries https first (Firefox's HTTPS-First) before falling back to http.
-            let Some(query) = read_callback(&stream) else {
-                let _ = respond(stream, 404, "Not here.");
+            let request = local_http::read_request(&mut stream).ok().flatten();
+            let Some(request) = request.filter(|r| r.method == "GET" && r.path == CALLBACK_PATH)
+            else {
+                let _ = local_http::message(&mut stream, 404, "Not here.");
                 continue;
             };
-            let result = self.complete(&query);
+            let result = self.complete(&request.query);
             match (&self.return_to, &result) {
-                (Some(url), Ok(_)) => redirect(stream, url)?,
+                (Some(url), Ok(_)) => local_http::redirect(&mut stream, url)?,
                 (Some(url), Err(e)) => {
                     let why = utf8_percent_encode(&e.to_string(), NON_ALPHANUMERIC).to_string();
                     let sep = if url.contains('?') { '&' } else { '?' };
-                    redirect(stream, &format!("{url}{sep}error={why}"))?;
+                    local_http::redirect(&mut stream, &format!("{url}{sep}error={why}"))?;
                 }
-                (None, Ok(_)) => respond(
-                    stream,
+                (None, Ok(_)) => local_http::message(
+                    &mut stream,
                     200,
                     "Homebase Filesync is connected. You can close this window.",
                 )?,
-                (None, Err(e)) => respond(
-                    stream,
+                (None, Err(e)) => local_http::message(
+                    &mut stream,
                     200,
                     &format!("Homebase Filesync could not connect: {e}"),
                 )?,
@@ -199,13 +204,8 @@ impl Pending {
         }
     }
 
-    fn complete(&self, query: &[(String, String)]) -> Result<Credentials, HomebaseError> {
-        let get = |name: &str| {
-            query
-                .iter()
-                .find(|(k, _)| k == name)
-                .map(|(_, v)| v.as_str())
-        };
+    fn complete(&self, query: &HashMap<String, String>) -> Result<Credentials, HomebaseError> {
+        let get = |name: &str| query.get(name).map(String::as_str);
         if get("state") != Some(self.state.as_str()) {
             return Err(HomebaseError::Protocol(
                 "callback for another request".into(),
@@ -273,59 +273,4 @@ struct TokenResponse {
     base64_client_auth_token_iv: String,
     #[serde(default)]
     cipher: Option<String>,
-}
-
-/// The query of a `GET /authorization-code-callback?...` request; `None` for anything else.
-fn read_callback(stream: &TcpStream) -> Option<Vec<(String, String)>> {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .ok()?;
-    let mut line = Vec::new();
-    BufReader::new(stream).read_until(b'\n', &mut line).ok()?;
-    let line = String::from_utf8(line).ok()?;
-    let mut parts = line.split_whitespace();
-    if parts.next() != Some("GET") {
-        return None;
-    }
-    let target = parts.next().unwrap_or("");
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    if path != CALLBACK_PATH {
-        return None;
-    }
-    let decode = |s: &str| {
-        percent_decode_str(&s.replace('+', " "))
-            .decode_utf8_lossy()
-            .into_owned()
-    };
-    Some(
-        query
-            .split('&')
-            .filter(|p| !p.is_empty())
-            .map(|p| {
-                let (k, v) = p.split_once('=').unwrap_or((p, ""));
-                (decode(k), decode(v))
-            })
-            .collect(),
-    )
-}
-
-fn redirect(mut stream: TcpStream, url: &str) -> std::io::Result<()> {
-    write!(
-        stream,
-        "HTTP/1.1 303 See Other\r\nLocation: {url}\r\nContent-Length: 0\r\n\
-         Connection: close\r\n\r\n"
-    )
-}
-
-fn respond(mut stream: TcpStream, status: u16, text: &str) -> std::io::Result<()> {
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Homebase Filesync</title>\
-         <p style=\"font:16px system-ui;margin:3em\">{text}</p>"
-    );
-    write!(
-        stream,
-        "HTTP/1.1 {status} OK\r\nContent-Type: text/html; charset=utf-8\r\n\
-         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
 }

@@ -9,6 +9,7 @@ pub mod app;
 pub mod client;
 pub mod crypto;
 pub mod drive;
+pub mod local_http;
 pub mod multipart;
 pub mod notify;
 pub mod problem;

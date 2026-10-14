@@ -1632,6 +1632,7 @@ dependencies = [
  "aes",
  "base64",
  "cbc",
+ "form_urlencoded",
  "getrandom 0.3.4",
  "hbsync-fileio",
  "hbsync-remote",
@@ -1727,8 +1728,8 @@ dependencies = [
 name = "hbsync-tray"
 version = "0.5.3"
 dependencies = [
- "form_urlencoded",
  "hbsync-app",
+ "hbsync-homebase",
  "hbsync-types",
  "notify-rust",
  "png",
