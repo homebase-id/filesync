@@ -49,19 +49,12 @@ impl Store<'_> {
         Ok(Some(id))
     }
 
-    /// Forgets the folders [`Store::local_id_at`] and [`Store::folder_path`] found: a local
-    /// write may move or remove them.
+    /// Forgets the folders [`Store::local_id_at`] and [`Store::folder_path`] found: called after
+    /// (not before: its own lookups would find the old places again) any write that moves,
+    /// removes or rekeys a folder's row.
     pub(super) fn forget_local_ids(&self) {
         self.local_ids.borrow_mut().clear();
         self.local_paths.borrow_mut().clear();
-    }
-
-    /// Runs `write`, which may move or remove local rows, then forgets the folders found. After
-    /// it, not before: its own lookups would find the old places again.
-    fn forgetting<T>(&self, write: impl FnOnce() -> Result<T>) -> Result<T> {
-        let done = write();
-        self.forget_local_ids();
-        done
     }
 
     /// The id of the folder at `path`, to write a row into: the root's id is assigned on first
@@ -77,6 +70,9 @@ impl Store<'_> {
     /// until a folder found before in this transaction; every folder on the way is kept.
     pub(super) fn folder_path(&self, id: i64) -> Result<RelPath> {
         // Borrowed only around lookups and inserts, never across a query.
+        if let Some(p) = self.local_paths.borrow().get(&id) {
+            return Ok(p.clone());
+        }
         if self.local_paths.borrow().is_empty()
             && let Some(root) = self.key(NodeId::ROOT)?
         {
@@ -128,10 +124,16 @@ impl Store<'_> {
     pub(super) fn with_paths(&self, raw: Vec<RawLocal>) -> Result<Vec<LocalRow>> {
         raw.into_iter()
             .map(|r| {
-                let path = self
-                    .folder_path(r.parent)?
-                    .join(&r.name)
-                    .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
+                let known = self
+                    .local_paths
+                    .borrow()
+                    .get(&r.parent)
+                    .map(|p| p.join(&r.name));
+                let path = match known {
+                    Some(path) => path,
+                    None => self.folder_path(r.parent)?.join(&r.name),
+                }
+                .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
                 r.into_row(path)
             })
             .collect()
@@ -150,15 +152,15 @@ impl Store<'_> {
     }
 
     pub fn get_local(&self, path: &RelPath) -> Result<Option<LocalRow>> {
-        if path.is_root() {
+        let (Some(parent), Some(name)) = (path.parent(), path.name()) else {
             return Ok(None);
-        }
-        let Some(id) = self.local_id_at(path)? else {
+        };
+        let Some(parent) = self.local_id_at(&parent)? else {
             return Ok(None);
         };
         let raw = self.raw_local(
-            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.id = ?1"),
-            [id],
+            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1 AND l.name = ?2"),
+            params![parent, name],
         )?;
         raw.into_iter()
             .next()
@@ -207,27 +209,36 @@ impl Store<'_> {
         let parent = self.folder_id_for_write(&parent_path)?.ok_or_else(|| {
             StateError::Conflict(format!("{} has no recorded parent folder", row.path))
         })?;
-        let id = self.key_or_insert(row.node)?;
-        let place: Option<(i64, String)> = self
-            .prep("SELECT parent, name FROM local WHERE folder = $F AND id = ?1")?
-            .query_row([id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?;
-        if let Some((p, n)) = place
-            && (p != parent || n != name)
-        {
-            let at = self.local_by_node(row.node)?.map(|r| r.path);
-            return Err(StateError::Conflict(format!(
-                "{:?} is already at {at:?}",
-                row.node
-            )));
-        }
-        let holder: Option<i64> = self
-            .prep("SELECT id FROM local WHERE folder = $F AND parent = ?1 AND name = ?2")?
-            .query_row(params![parent, name], |r| r.get(0))
-            .optional()?;
-        if holder.is_some_and(|h| h != id) {
-            return Err(StateError::Conflict(format!("{} is taken", row.path)));
-        }
+        let (id, new) = self.node_key(row.node)?;
+        // A node new to the DB has no row yet.
+        let place: Option<(i64, String, i64)> = if new {
+            None
+        } else {
+            self.prep("SELECT parent, name, kind FROM local WHERE folder = $F AND id = ?1")?
+                .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?
+        };
+        let was_folder = match place {
+            Some((p, n, _)) if p != parent || n != name => {
+                let at = self.local_by_node(row.node)?.map(|r| r.path);
+                return Err(StateError::Conflict(format!(
+                    "{:?} is already at {at:?}",
+                    row.node
+                )));
+            }
+            // At its own place: nobody else holds it.
+            Some((_, _, kind)) => kind == codec::kind_to(NodeKind::Folder),
+            None => {
+                let holder: Option<i64> = self
+                    .prep("SELECT id FROM local WHERE folder = $F AND parent = ?1 AND name = ?2")?
+                    .query_row(params![parent, name], |r| r.get(0))
+                    .optional()?;
+                if holder.is_some() {
+                    return Err(StateError::Conflict(format!("{} is taken", row.path)));
+                }
+                false
+            }
+        };
         let fp = &row.fingerprint;
         let (lo, hi) = codec::file_id_parts(&fp.file_id);
         self.prep(
@@ -253,9 +264,11 @@ impl Store<'_> {
             row.hash.as_ref().map(codec::hash_to),
             row.tags.as_ref().map(tags_to_string),
         ])?;
-        // The row didn't move (checked above): what was found stays right. A new folder is
-        // known from now on.
-        if row.kind == NodeKind::Folder {
+        // The row didn't move (checked above): what was found stays right, unless a folder
+        // became a file. A new folder is known from now on.
+        if was_folder && row.kind != NodeKind::Folder {
+            self.forget_local_ids();
+        } else if row.kind == NodeKind::Folder {
             self.local_ids
                 .borrow_mut()
                 .insert(row.path.as_str().to_owned(), id);
@@ -266,41 +279,46 @@ impl Store<'_> {
     /// Deletes the row of `node`. A folder's contents must go first (or use
     /// [`Store::delete_local_subtree`]): rows below a deleted folder would have no path.
     pub fn delete_local(&self, node: NodeId) -> Result<bool> {
-        self.forgetting(|| {
-            let Some(id) = self.key(node)? else {
-                return Ok(false);
-            };
-            let has_children = self
-                .prep("SELECT 1 FROM local WHERE folder = $F AND parent = ?1 LIMIT 1")?
-                .query_row([id], |_| Ok(()))
-                .optional()?
-                .is_some();
-            if has_children {
-                return Err(StateError::Conflict(format!(
-                    "{node:?} still has rows below it"
-                )));
-            }
-            Ok(self
-                .prep("DELETE FROM local WHERE folder = $F AND id = ?1")?
-                .execute([id])?
-                > 0)
-        })
+        let Some(id) = self.key(node)? else {
+            return Ok(false);
+        };
+        let has_children = self
+            .prep("SELECT 1 FROM local WHERE folder = $F AND parent = ?1 LIMIT 1")?
+            .query_row([id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if has_children {
+            return Err(StateError::Conflict(format!(
+                "{node:?} still has rows below it"
+            )));
+        }
+        let kind: Option<i64> = self
+            .prep("DELETE FROM local WHERE folder = $F AND id = ?1 RETURNING kind")?
+            .query_row([id], |r| r.get(0))
+            .optional()?;
+        if kind == Some(codec::kind_to(NodeKind::Folder)) {
+            self.forget_local_ids();
+        }
+        Ok(kind.is_some())
     }
 
     /// The item recorded for `old` is node `new` from now on (adoption): same place, same
     /// observation, and its contents stay inside it.
     pub fn rekey_local(&self, old: NodeId, new: NodeId) -> Result<()> {
-        self.forgetting(|| {
-            let old_id = self
-                .key(old)?
-                .ok_or_else(|| StateError::Conflict(format!("{old:?} has no row")))?;
-            let new_id = self.key_or_insert(new)?;
-            self.prep("UPDATE local SET id = ?2 WHERE folder = $F AND id = ?1")?
-                .execute([old_id, new_id])?;
+        let old_id = self
+            .key(old)?
+            .ok_or_else(|| StateError::Conflict(format!("{old:?} has no row")))?;
+        let new_id = self.key_or_insert(new)?;
+        let kind: Option<i64> = self
+            .prep("UPDATE local SET id = ?2 WHERE folder = $F AND id = ?1 RETURNING kind")?
+            .query_row([old_id, new_id], |r| r.get(0))
+            .optional()?;
+        if kind == Some(codec::kind_to(NodeKind::Folder)) {
             self.prep("UPDATE local SET parent = ?2 WHERE folder = $F AND parent = ?1")?
                 .execute([old_id, new_id])?;
-            Ok(())
-        })
+            self.forget_local_ids();
+        }
+        Ok(())
     }
 
     /// `path` and everything below it with their ids, unsorted.
@@ -387,40 +405,43 @@ impl Store<'_> {
     /// Moves the row at `from`, and with it everything below, to `to` (a folder was moved or
     /// renamed): one row changes. Fails if `to` is taken or its folder has no row.
     pub fn move_local_subtree(&self, from: &RelPath, to: &RelPath) -> Result<()> {
-        self.forgetting(|| {
-            let conflict = || StateError::Conflict(format!("can't move {from} to {to}"));
-            if from.is_root() || to.starts_with(from) {
-                return Err(conflict());
-            }
-            let (Some(to_parent), Some(name)) = (to.parent(), to.name()) else {
-                return Err(conflict());
-            };
-            let id = self.local_id_at(from)?.ok_or_else(conflict)?;
-            let parent = self.folder_id_for_write(&to_parent)?.ok_or_else(conflict)?;
-            if self.local_id_at(to)?.is_some() {
-                return Err(conflict());
-            }
-            self.prep("UPDATE local SET parent = ?2, name = ?3 WHERE folder = $F AND id = ?1")?
-                .execute(params![id, parent, name])?;
-            Ok(())
-        })
+        let conflict = || StateError::Conflict(format!("can't move {from} to {to}"));
+        if from.is_root() || to.starts_with(from) {
+            return Err(conflict());
+        }
+        let (Some(to_parent), Some(name)) = (to.parent(), to.name()) else {
+            return Err(conflict());
+        };
+        let id = self.local_id_at(from)?.ok_or_else(conflict)?;
+        let parent = self.folder_id_for_write(&to_parent)?.ok_or_else(conflict)?;
+        if self.local_id_at(to)?.is_some() {
+            return Err(conflict());
+        }
+        self.prep("UPDATE local SET parent = ?2, name = ?3 WHERE folder = $F AND id = ?1")?
+            .execute(params![id, parent, name])?;
+        self.forget_local_ids();
+        Ok(())
     }
 
     /// Deletes the rows of `path` and everything below it and returns them.
     pub fn delete_local_subtree(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
-        self.forgetting(|| {
-            let raw = self.subtree_raw(path)?;
-            let mut stmt = self.prep("DELETE FROM local WHERE folder = $F AND id = ?1")?;
-            for (_, r) in &raw {
-                stmt.execute([r.id])?;
-            }
-            let mut rows = raw
-                .into_iter()
-                .map(|(p, r)| r.into_row(p))
-                .collect::<Result<Vec<_>>>()?;
-            rows.sort_by(|a, b| a.path.cmp(&b.path));
-            Ok(rows)
-        })
+        let raw = self.subtree_raw(path)?;
+        let mut stmt = self.prep("DELETE FROM local WHERE folder = $F AND id = ?1")?;
+        for (_, r) in &raw {
+            stmt.execute([r.id])?;
+        }
+        if raw
+            .iter()
+            .any(|(_, r)| r.kind == codec::kind_to(NodeKind::Folder))
+        {
+            self.forget_local_ids();
+        }
+        let mut rows = raw
+            .into_iter()
+            .map(|(p, r)| r.into_row(p))
+            .collect::<Result<Vec<_>>>()?;
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(rows)
     }
 
     pub fn local_count(&self) -> Result<u64> {

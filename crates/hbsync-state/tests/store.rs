@@ -855,11 +855,12 @@ fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
             s.put_local(&local("a/z", NodeKind::File, 4)).is_err(),
             "a went"
         );
-        let missing = |what: &str| StateError::Corrupt(format!("{what} missing"));
 
         let renewed = NodeId::new();
         s.rekey_local(a.node, renewed)?;
-        let y = s.get_local(&path("b/y"))?.ok_or_else(|| missing("b/y"))?;
+        let y = s
+            .get_local(&path("b/y"))?
+            .ok_or_else(|| StateError::Corrupt("b/y missing".into()))?;
         assert_eq!(s.local_parent(y.node)?, Some(renewed));
         s.delete_local_subtree(&path("b"))?;
         assert!(
@@ -874,6 +875,20 @@ fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
         assert!(
             s.put_local(&local("c/v", NodeKind::File, 7)).is_err(),
             "c went"
+        );
+
+        // A folder that became a file, then went.
+        let d = local("d", NodeKind::Folder, 8);
+        s.put_local(&d)?;
+        let d = LocalRow {
+            kind: NodeKind::File,
+            ..d
+        };
+        s.put_local(&d)?;
+        assert!(s.delete_local(d.node)?);
+        assert!(
+            s.put_local(&local("d/u", NodeKind::File, 9)).is_err(),
+            "d went"
         );
         Ok(())
     })?;

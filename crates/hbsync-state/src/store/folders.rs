@@ -139,12 +139,17 @@ impl Store<'_> {
 
     /// The integer id of `node`, assigned on first use.
     pub(super) fn key_or_insert(&self, node: NodeId) -> Result<i64> {
+        self.node_key(node).map(|(id, _)| id)
+    }
+
+    /// The id of `node`, inserted if it had none; whether it was.
+    pub(super) fn node_key(&self, node: NodeId) -> Result<(i64, bool)> {
         if let Some(id) = self.key(node)? {
-            return Ok(id);
+            return Ok((id, false));
         }
         self.prep("INSERT INTO nodes (uuid) VALUES (?1)")?
             .execute([node.0.as_bytes()])?;
-        Ok(self.conn.last_insert_rowid())
+        Ok((self.conn.last_insert_rowid(), true))
     }
 
     pub(super) fn uuid_of(&self, id: i64) -> Result<NodeId> {

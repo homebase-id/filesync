@@ -205,6 +205,8 @@ pub struct Store<'a> {
     /// [`Store::put_local`] forgets them.
     local_ids: std::cell::RefCell<HashMap<String, i64>>,
     local_paths: std::cell::RefCell<HashMap<i64, RelPath>>,
+    /// [`Store::prep`]: each SQL text with this store's folder put in.
+    sqls: std::cell::RefCell<HashMap<Box<str>, Box<str>>>,
 }
 
 /// A folder this account syncs here.
@@ -265,17 +267,23 @@ impl<'a> Store<'a> {
             touched: Default::default(),
             local_ids: Default::default(),
             local_paths: Default::default(),
+            sqls: Default::default(),
         }
     }
 
     /// `sql` prepared through the statement cache, `$F` standing for this store's folder.
     fn prep(&self, sql: &str) -> rusqlite::Result<rusqlite::CachedStatement<'a>> {
-        if sql.contains("$F") {
-            self.conn
-                .prepare_cached(&sql.replace("$F", &self.folder.to_string()))
-        } else {
-            self.conn.prepare_cached(sql)
+        if !sql.contains("$F") {
+            return self.conn.prepare_cached(sql);
         }
+        let mut sqls = self.sqls.borrow_mut();
+        if let Some(text) = sqls.get(sql) {
+            return self.conn.prepare_cached(text);
+        }
+        let text = sql.replace("$F", &self.folder.to_string());
+        let stmt = self.conn.prepare_cached(&text);
+        sqls.insert(sql.into(), text.into());
+        stmt
     }
 
     // ---- statement helpers (all through the statement cache) ----
