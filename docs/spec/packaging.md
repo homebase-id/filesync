@@ -30,8 +30,9 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
   `install.ps1` does), the tray starts from the package, and its log and lock land in the real
   `%LOCALAPPDATA%\Homebase Filesync` (the folders are excluded from MSIX's file virtualization,
   so the zip build and the CLI see the same files); it uninstalls cleanly. The tray's app in it
-  declares cloud files (`windows.cloudFiles`): Windows lets a packaged app register a sync root
-  (Explorer's navigation pane) only then.
+  declares cloud files (`windows.cloudFiles`): without it, Windows won't list or unregister a
+  packaged app's sync roots, which the tray does before it registers one (Explorer's
+  navigation pane).
 
 ## What the spike taught
 
