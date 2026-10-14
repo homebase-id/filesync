@@ -1631,15 +1631,17 @@ fn restored_tags(base: Option<&BaseRow>, ours: &Tags, removed: &RemovedRow) -> T
 /// The node whose delete takes `node` along: its topmost synced ancestor that is gone here
 /// too (a folder deleted with everything in it), or `node` itself.
 fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
-    let mut root = node;
-    while let Some(base) = s.get_base(root)?
-        && !base.state.parent.is_root()
-        && s.local_by_node(base.state.parent)?.is_none()
-        && s.get_base(base.state.parent)?.is_some()
-    {
-        root = base.state.parent;
-    }
-    Ok(root)
+    let Some(base) = s.get_base(node)? else {
+        return Ok(node);
+    };
+    // Up through the folders that went too: synced, and gone here.
+    let above = crate::walk::up::<_, StateError>(base.state.parent, |at| {
+        if s.local_by_node(at)?.is_some() {
+            return Ok(None);
+        }
+        Ok(s.get_base(at)?.map(|b| (at, b.state.parent)))
+    })?;
+    Ok(above.items().last().copied().unwrap_or(node))
 }
 
 /// The local trash: `<state dir>/trash/<Unix s>-<node>/<name>`.
@@ -1926,4 +1928,41 @@ pub fn unpark(db: &mut StateDb, cfg: &ExecConfig) -> Result<usize, StateError> {
         }
     }
     Ok(restored)
+}
+
+#[cfg(test)]
+mod tests {
+    use hbsync_state::{BaseRow, StateDb};
+    use hbsync_types::{ContentState, NodeState, RemoteFileId, RemoteRef, Uuid, VersionTag};
+
+    use super::*;
+
+    fn base(node: NodeId, parent: NodeId, name: &str) -> BaseRow {
+        BaseRow {
+            node,
+            state: NodeState::folder(parent, name),
+            remote: RemoteRef {
+                file_id: RemoteFileId(Uuid::new_v4()),
+                version: VersionTag(Uuid::new_v4()),
+            },
+            content_state: ContentState::Local,
+            local_name: None,
+            local_hash: None,
+        }
+    }
+
+    /// A cycle of bases, as a remote cycle leaves them, ends the walk instead of hanging it.
+    #[test]
+    fn the_removal_root_of_a_cycle_of_bases_is_found() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
+        db.write(|s| {
+            s.put_base(&base(a, b, "a"))?;
+            s.put_base(&base(b, a, "b"))?;
+            s.put_base(&base(c, a, "c"))
+        })?;
+        let root = db.read(|s| removal_root(s, c))?;
+        assert!(root == a || root == b, "{root:?}");
+        Ok(())
+    }
 }

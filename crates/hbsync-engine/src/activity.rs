@@ -72,16 +72,14 @@ pub fn path_of(s: &Store<'_>, node: NodeId) -> Result<Option<String>, StateError
     if let Some(row) = s.local_by_node(node)? {
         return Ok(Some(row.path.as_str().to_owned()));
     }
-    let mut names = Vec::new();
-    let mut at = node;
-    // Bounded: the base is a tree, but a damaged DB must not hang the status.
-    while !at.is_root() && names.len() < 256 {
-        let Some(base) = s.get_base(at)? else {
-            return Ok(None);
-        };
-        names.push(base.local_name.unwrap_or(base.state.name));
-        at = base.state.parent;
-    }
+    let up = crate::walk::up::<_, StateError>(node, |at| {
+        Ok(s.get_base(at)?
+            .map(|b| (b.local_name.unwrap_or(b.state.name), b.state.parent)))
+    })?;
+    // Only a path that reaches the top is one: a gap or a cycle gives none.
+    let crate::walk::Up::Top(mut names) = up else {
+        return Ok(None);
+    };
     names.reverse();
     Ok(Some(names.join("/")))
 }

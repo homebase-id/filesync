@@ -140,7 +140,7 @@ const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, 
 const LOCAL_COL_COUNT: usize = 14;
 /// Deeper than any real tree (Windows' 32k-character paths hold about 16k levels); reaching it
 /// means a broken parent chain.
-const MAX_DEPTH: usize = 16_384;
+pub const MAX_DEPTH: usize = 16_384;
 const LOCAL_FROM: &str = "FROM local l JOIN nodes n ON n.id = l.id";
 /// A node's integer id, by UUID.
 const ID_OF: &str = "(SELECT id FROM nodes WHERE uuid = ?1)";
