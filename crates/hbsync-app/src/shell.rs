@@ -6,8 +6,6 @@
 
 use std::path::{Path, PathBuf};
 
-use hbsync_platform::winpath::plain;
-
 use crate::Paths;
 
 /// The Homebase icon, as each OS wants it.
@@ -39,16 +37,14 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
     }
     let done = note(paths);
     let first = !std::fs::read_to_string(&done).is_ok_and(|f| Path::new(f.trim()) == folder);
-    // File managers don't take `\\?\` paths, which `canonicalize` gives on Windows.
-    let shown = plain(folder);
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
-    os::sync_root(paths, &shown, identity, icons, first);
+    os::sync_root(paths, folder, identity, icons, first);
     if !first {
         return;
     }
     tracing::info!("giving {} its icon and a shortcut", folder.display());
-    if let Err(e) = os::decorate(paths, &shown, icons) {
+    if let Err(e) = os::decorate(paths, folder, icons) {
         tracing::info!("the folder's icon or shortcut: {e}");
     }
     if let Err(e) = std::fs::write(&done, folder.display().to_string()) {
@@ -58,12 +54,11 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
 
 /// Takes the icon and shortcut off `folder` (synced with `identity`) again (unlinking it).
 pub fn undecorate(paths: &Paths, folder: &Path, identity: &str) {
-    let shown = plain(folder);
     #[cfg(windows)]
-    os::unregister(&shown, identity);
+    os::unregister(folder, identity);
     #[cfg(not(windows))]
     let _ = identity;
-    if let Err(e) = os::undecorate(paths, &shown) {
+    if let Err(e) = os::undecorate(paths, folder) {
         tracing::info!("removing the folder's icon or shortcut: {e}");
     }
     let _ = std::fs::remove_file(note(paths));
