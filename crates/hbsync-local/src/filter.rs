@@ -12,7 +12,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use hbsync_platform::RelPath;
 
 /// Bumped whenever the built-in junk list changes, so a changed list counts as a rule change.
-const JUNK_VERSION: u32 = 2;
+const JUNK_VERSION: u32 = 3;
 
 /// How the built-in list matches a name (ASCII case-insensitively).
 #[derive(Debug, Clone, Copy)]
@@ -60,9 +60,26 @@ const JUNK: &[Pat] = &[
     Pat::Name(".849C9593-D756-4E56-8D6E-42412F2A707B"),
     Pat::Name(".tmp.drivedownload"),
     Pat::Name(".tmp.driveupload"),
-    // Downloads in progress (Chrome, Firefox): they get their real name when done.
+    // Downloads in progress (Chrome and Edge, Firefox, older browsers, Safari's folder): they
+    // get their real name when done.
     Pat::Suffix(".crdownload"),
     Pat::Suffix(".part"),
+    Pat::Suffix(".partial"),
+    Pat::Suffix(".download"),
+];
+
+/// Built-in ignores: the user's data, but nothing to sync. Kept on their device only, like what
+/// the user's rules ignore (never disposable as junk is).
+const KEPT: &[Pat] = &[
+    // macOS app libraries: packages holding a live database beside its files, which the app
+    // rewrites as a whole. Synced piece by piece they'd arrive torn on another device (the
+    // media the Music and TV apps keep outside them sync as usual).
+    Pat::Suffix(".photoslibrary"),
+    Pat::Suffix(".photolibrary"),
+    Pat::Suffix(".musiclibrary"),
+    Pat::Suffix(".tvlibrary"),
+    Pat::Suffix(".imovielibrary"),
+    Pat::Name("Photo Booth Library"),
 ];
 
 fn starts(name: &str, p: &str) -> bool {
@@ -76,7 +93,16 @@ fn ends(name: &str, s: &str) -> bool {
 
 /// Whether `name` is on the built-in junk list (at any depth, in any case).
 pub fn is_junk(name: &str) -> bool {
-    JUNK.iter().any(|pat| match *pat {
+    matches(JUNK, name)
+}
+
+/// Whether `name` is on the built-in list of what is kept on its device ([`KEPT`]).
+fn is_kept(name: &str) -> bool {
+    matches(KEPT, name)
+}
+
+fn matches(list: &[Pat], name: &str) -> bool {
+    list.iter().any(|pat| match *pat {
         Pat::Name(n) => name.eq_ignore_ascii_case(n),
         Pat::Prefix(p) => starts(name, p),
         Pat::Suffix(s) => ends(name, s),
@@ -227,12 +253,14 @@ impl Filter {
             .unwrap_or_else(|| self.by_rules(path, is_dir))
     }
 
-    /// The verdict the name alone gives (the state folder, junk), if any.
+    /// The verdict the name alone gives (the state folder, junk, what is kept here), if any.
     fn by_name(&self, name: &str, at_root: bool) -> Option<Verdict> {
         if at_root && name == crate::STATE_DIR {
             Some(Verdict::Excluded)
         } else if is_junk(name) {
             Some(Verdict::Junk)
+        } else if is_kept(name) {
+            Some(Verdict::Ignored)
         } else {
             None
         }
@@ -275,6 +303,8 @@ mod tests {
             ".notes.txt.swp",
             "film.mkv.part",
             "setup.exe.crdownload",
+            "report.pdf.partial",
+            "photo.jpg.download",
             ".dropbox",
             ".Dropbox.Cache",
             ".849c9593-d756-4e56-8d6e-42412f2a707b",
@@ -291,6 +321,9 @@ mod tests {
             "~",
             "Thumbs.db.bak",
             "part",
+            "partial",
+            "Downloads",
+            "photoslibrary notes.txt",
             "lock#",
             "desktop.ini.txt",
             "Dropbox",
@@ -336,6 +369,25 @@ mod tests {
     fn a_path_is_judged_by_its_folders_first() {
         let f = rules("node_modules/\n");
         assert_eq!(f.path(&rel("a/.DS_Store"), false), Verdict::Junk);
+        // Libraries are the user's: kept here, never disposable.
+        for library in [
+            "Photos Library.photoslibrary",
+            "iPhoto Library.photolibrary",
+            "Music/Music Library.musiclibrary",
+            "TV Library.tvlibrary",
+            "iMovie Library.imovielibrary",
+            "Photo Booth Library",
+        ] {
+            assert_eq!(f.path(&rel(library), true), Verdict::Ignored, "{library}");
+        }
+        assert_eq!(
+            f.path(
+                &rel("Photos Library.photoslibrary/database/Photos.sqlite"),
+                false
+            ),
+            Verdict::Ignored
+        );
+        assert_eq!(f.path(&rel("Music/Media/song.m4a"), false), Verdict::Sync);
         assert_eq!(f.path(&rel("._x/b.txt"), false), Verdict::Junk);
         assert_eq!(
             f.path(&rel("app/node_modules/x/.DS_Store"), false),
