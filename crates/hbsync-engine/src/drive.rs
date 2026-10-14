@@ -51,7 +51,7 @@ impl Drive {
         })
     }
 
-    pub fn remote(&self) -> &dyn Remote {
+    fn remote(&self) -> &dyn Remote {
         self.remote.as_ref()
     }
 
@@ -66,8 +66,8 @@ impl Drive {
     /// Reads the feed until it has no more rows, into the mirror. One pull at a time: a caller
     /// that asked while another pull ran waits for it and pulls again only if that pull had
     /// started before it asked. Either way, what the drive had when it asked is in the mirror
-    /// when it returns. Wakes the other folders' engines when something changed.
-    pub fn pull(&self, from: i64) -> Result<FeedReport, FeedError> {
+    /// when it returns. Wakes the engines of the folders but `from`'s when something changed.
+    pub fn pull(&self, from: Option<i64>) -> Result<FeedReport, FeedError> {
         let ticket = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
         let mut answered = self.answered.lock().unwrap_or_else(|e| e.into_inner());
         if *answered >= ticket {
@@ -79,7 +79,7 @@ impl Drive {
         *answered = covers;
         drop(answered);
         if report.live + report.deleted > 0 {
-            self.wake(Some(from));
+            self.wake(from);
         }
         Ok(report)
     }
@@ -112,7 +112,7 @@ impl Drive {
     /// Restores these items of Recently deleted (each with what was deleted with it); the
     /// next syncs bring them back. Returns how many items came back.
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        self.pull(0)?;
+        self.pull(None)?;
         let mut restored = 0;
         for &node in nodes {
             restored += deleted::restore(&mut self.account(), self.remote(), node)?;
@@ -123,20 +123,20 @@ impl Drive {
 
     /// Deletes these items of Recently deleted for good, each with what was deleted with it.
     pub fn empty(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        self.pull(0)?;
+        self.pull(None)?;
         deleted::empty(&mut self.account(), self.remote(), nodes)
     }
 
     /// Deletes for good everything removed until `at_ms` (Unix ms): what the user was shown.
     pub fn empty_until(&self, at_ms: i64) -> Result<usize, EngineError> {
-        self.pull(0)?;
+        self.pull(None)?;
         deleted::empty_until(&mut self.account(), self.remote(), at_ms)
     }
 
     /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted, and
     /// the trash of every folder.
     pub fn purge(&self, before_ms: i64) -> Result<usize, EngineError> {
-        self.pull(0)?;
+        self.pull(None)?;
         deleted::purge(&mut self.account(), self.remote(), before_ms)
     }
 

@@ -1,57 +1,16 @@
 //! The account's drive, shared by its folders' engines: one feed for all, wakes, the purge.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
 use hbsync_engine::Drive;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
+use hbsync_remote::{NodeMeta, Remote};
 use hbsync_state::StateDb;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, VersionTag};
+use hbsync_types::{NodeId, NodeKind};
 
 type R = Result<(), Box<dyn std::error::Error>>;
-
-/// The fake, counting the feed's reads, each a little slow.
-struct Counting {
-    inner: FakeRemote,
-    reads: AtomicUsize,
-}
-
-impl Remote for Counting {
-    fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        std::thread::sleep(Duration::from_millis(100));
-        self.inner.changes(cursor, limit)
-    }
-    fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
-        self.inner.header(file_id)
-    }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
-        self.inner.create(node, payload)
-    }
-    fn update(
-        &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
-        meta: &NodeMeta,
-        payload: Option<Upload<'_>>,
-    ) -> RemoteResult<RemoteRef> {
-        self.inner.update(file_id, expected, meta, payload)
-    }
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
-        self.inner.delete(file_id, expected)
-    }
-    fn read(
-        &self,
-        file_id: RemoteFileId,
-        range: Option<std::ops::Range<u64>>,
-        sink: &mut dyn std::io::Write,
-    ) -> RemoteResult<u64> {
-        self.inner.read(file_id, range, sink)
-    }
-}
 
 fn folder(name: &str) -> NodeMeta {
     NodeMeta {
@@ -63,12 +22,10 @@ fn folder(name: &str) -> NodeMeta {
 }
 
 /// A drive on a fresh account DB in `dir`, and the fake server behind it.
-fn drive(dir: &std::path::Path) -> Result<(Arc<Drive>, Arc<Counting>), Box<dyn std::error::Error>> {
-    let server = FakeServer::new(ServerConfig::default());
-    let remote = Arc::new(Counting {
-        inner: FakeRemote::new(server),
-        reads: AtomicUsize::new(0),
-    });
+fn drive(
+    dir: &std::path::Path,
+) -> Result<(Arc<Drive>, Arc<FakeRemote>), Box<dyn std::error::Error>> {
+    let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
     let account = StateDb::open_account(&dir.join("state.db"))?;
     Ok((Drive::new(account, remote.clone()), remote))
 }
@@ -80,6 +37,12 @@ fn pulls_asked_at_once_are_merged() -> R {
     let dir = tempfile::tempdir()?;
     let (drive, remote) = drive(dir.path())?;
     let made = remote.create(&folder("Docs"), None)?;
+    // Each feed read a little slow, so the asks overlap.
+    let before = {
+        let mut faults = remote.faults();
+        faults.latency = Duration::from_millis(100);
+        faults.requests
+    };
     let start = Barrier::new(8);
     std::thread::scope(|scope| {
         let pulls: Vec<_> = (0..8)
@@ -87,7 +50,7 @@ fn pulls_asked_at_once_are_merged() -> R {
                 let (drive, start) = (&drive, &start);
                 scope.spawn(move || {
                     start.wait();
-                    drive.pull(engine).map(drop)
+                    drive.pull(Some(engine)).map(drop)
                 })
             })
             .collect();
@@ -95,13 +58,17 @@ fn pulls_asked_at_once_are_merged() -> R {
             .into_iter()
             .try_for_each(|p| p.join().expect("no panic"))
     })?;
-    let reads = remote.reads.load(Ordering::SeqCst);
+    let reads = {
+        let mut faults = remote.faults();
+        faults.latency = Duration::ZERO;
+        faults.requests - before
+    };
     assert!((1..=2).contains(&reads), "{reads} feed reads for 8 asks");
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     assert!(db.read(|s| s.mirror_by_file(made.file_id))?.is_some());
     // An ask after a pull finished pulls again: the drive may have changed since.
     let later = remote.create(&folder("Later"), None)?;
-    drive.pull(0)?;
+    drive.pull(None)?;
     assert!(db.read(|s| s.mirror_by_file(later.file_id))?.is_some());
     Ok(())
 }
@@ -113,10 +80,10 @@ fn a_change_wakes_the_other_folders() -> R {
     let (drive, remote) = drive(dir.path())?;
     let (main, docs) = (drive.subscribe(1), drive.subscribe(2));
     remote.create(&folder("Docs"), None)?;
-    drive.pull(1)?;
+    drive.pull(Some(1))?;
     assert!(docs.try_recv().is_ok());
     assert!(main.try_recv().is_err(), "the puller isn't woken");
-    drive.pull(1)?;
+    drive.pull(Some(1))?;
     assert!(docs.try_recv().is_err(), "nothing new: nobody is woken");
     Ok(())
 }

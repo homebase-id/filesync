@@ -154,14 +154,6 @@ impl StateDb {
         self.path.as_deref()
     }
 
-    /// A second connection to the same DB, seeing the same folder (for work on another thread).
-    pub fn another(&self) -> Result<Self> {
-        let path = self.path.as_deref().ok_or_else(|| {
-            StateError::Conflict("an in-memory DB has no second connection".into())
-        })?;
-        Self::open_folder(path, self.folder)
-    }
-
     /// This DB seen as folder `folder`: the same connection.
     pub fn with_folder(mut self, folder: i64) -> Self {
         self.folder = folder;
@@ -181,7 +173,7 @@ impl StateDb {
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
-        conn.set_prepared_statement_cache_capacity(64);
+        conn.set_prepared_statement_cache_capacity(128);
         migrations::apply(&mut conn)?;
         Ok(StateDb {
             conn,

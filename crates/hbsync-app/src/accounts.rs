@@ -9,7 +9,9 @@ use hbsync_state::{StateDb, StateError};
 use hbsync_types::NodeId;
 
 use crate::Paths;
-use crate::runner::IDENTITY_KEY;
+
+/// The account kv key of the identity an account DB belongs to.
+pub const IDENTITY_KEY: &str = "account.identity";
 
 /// The state DB an older Filesync kept in a folder's `.hbsync`.
 const OLDER_DB: &str = "state.db";
@@ -69,8 +71,8 @@ pub fn open_account(db: &Path, identity: &str) -> Result<StateDb, FolderError> {
     Ok(account)
 }
 
-/// The account DB at `db` seen as the folder at `root`, which its marker must name.
-pub fn open_folder(db: &Path, identity: &str, root: &Path) -> Result<StateDb, FolderError> {
+/// The marker of the folder at `root`, which must be `identity`'s.
+pub fn check_marker(root: &Path, identity: &str) -> Result<Marker, FolderError> {
     let Some(marker) = Marker::read(root)? else {
         return Err(if root.join(STATE_DIR).join(OLDER_DB).exists() {
             FolderError::Older(root.to_path_buf())
@@ -85,6 +87,12 @@ pub fn open_folder(db: &Path, identity: &str, root: &Path) -> Result<StateDb, Fo
             ours: identity.to_owned(),
         });
     }
+    Ok(marker)
+}
+
+/// The account DB at `db` seen as the folder at `root`, which its marker must name.
+pub fn open_folder(db: &Path, identity: &str, root: &Path) -> Result<StateDb, FolderError> {
+    let marker = check_marker(root, identity)?;
     let mut account = open_account(db, identity)?;
     let folder = account
         .read(|s| s.folders())?

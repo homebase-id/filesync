@@ -87,9 +87,13 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     let Some(row) = mirror_row(header) else {
         return Ok(true);
     };
-    // The store marks the nodes that changed dirty where that concerns, and leaves a version
-    // it has already alone (this device's own write coming back, or a page applied again).
-    if let Some(removal) = header.removal() {
+    // A version the store has already (this device's own write coming back, or a page applied
+    // again) changes nothing; the store marks the nodes that changed dirty where that concerns.
+    let removal = header.removal();
+    if s.has_version(row.remote_ref(), removal.is_some())? {
+        return Ok(removal.is_none());
+    }
+    if let Some(removal) = removal {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
         gone(s, header)?;
         s.put_removed(&RemovedRow { row, removal })?;

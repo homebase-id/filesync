@@ -181,10 +181,7 @@ impl Engine {
             .read(|s| Ok(s.coords()?.top))
             .unwrap_or(hbsync_types::NodeId::ROOT);
         if cfg.scope.top != top {
-            cfg.scope = Arc::new(match top {
-                t if t.is_root() => Scope::main(),
-                t => Scope::below(t),
-            });
+            cfg.scope = Arc::new(Scope::of(top));
         }
         let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
         scan_opts.filter = Arc::clone(&cfg.exec.filter);
@@ -262,7 +259,7 @@ impl Engine {
         let (local, feed) = std::thread::scope(|scope| {
             let local =
                 scope.spawn(|| -> Result<CatchUp, EngineError> { Ok(observer.catch_up(db)?) });
-            let feed = drive.pull(folder);
+            let feed = drive.pull(Some(folder));
             (local.join(), feed)
         });
         let local = local.map_err(|_| EngineError::Panic("local catch-up"))??;
@@ -319,7 +316,7 @@ impl Engine {
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;
-        report.feed = self.drive.pull(self.db.folder())?;
+        report.feed = self.drive.pull(Some(self.db.folder()))?;
         report.adopted = adopt(
             &mut self.db,
             &self.cfg.exec.root,
@@ -468,7 +465,7 @@ impl Engine {
             }
             Some(stopped) => return Err(stopped.into()),
         }
-        let more = self.drive.pull(self.db.folder())?;
+        let more = self.drive.pull(Some(self.db.folder()))?;
         report.feed += more;
         // What this folder wrote to the drive may concern the others.
         if exec.done > 0 {

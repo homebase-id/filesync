@@ -241,12 +241,11 @@ pub fn purge(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<us
         }
         // Only what went there since the purge has been emptying it: older entries (from
         // before Recently deleted) may be the only copy left, and stay.
-        let key = format!("{TRASH_SINCE_KEY}.{}", folder.id);
-        let since = db.write(|s| match s.account_kv(&key)? {
+        let since = db.write(|s| match s.folder_kv_of(folder.id, TRASH_SINCE_KEY)? {
             Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
             None => {
                 let now = hbsync_types::unix_now();
-                s.set_account_kv(&key, &now.to_string())?;
+                s.set_folder_kv_of(folder.id, TRASH_SINCE_KEY, &now.to_string())?;
                 Ok(now)
             }
         })?;
@@ -309,8 +308,7 @@ fn delete_for_good(
     Ok(gone)
 }
 
-/// The state DB key (the account's, `.<folder id>` after it) of when the purge started emptying
-/// a folder's trash (Unix s).
+/// The folder's state DB key of when the purge started emptying its trash (Unix s).
 const TRASH_SINCE_KEY: &str = "trash.purged_since";
 
 /// Deletes the trash entries (`<Unix s>-<node>`) that went there from `since` (Unix s) until

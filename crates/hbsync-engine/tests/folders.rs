@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hbsync_engine::scope::Scope;
 use hbsync_engine::{Drive, Engine, EngineConfig, SyncReport};
 use hbsync_fileio::HashAlgorithm;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
@@ -46,9 +45,7 @@ impl Computer {
             Arc::new(FakeRemote::new(server.clone())),
         );
         let main = Engine::new(main_db, drive.clone(), config(&main_root));
-        let mut docs_cfg = config(&docs_root);
-        docs_cfg.scope = Arc::new(Scope::below(Role::Documents.node()));
-        let docs = Engine::new(StateDb::open_folder(&db, docs)?, drive, docs_cfg);
+        let docs = Engine::new(StateDb::open_folder(&db, docs)?, drive, config(&docs_root));
         Ok(Computer {
             _dir: dir,
             main_root,

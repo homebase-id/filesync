@@ -182,12 +182,12 @@ pub struct Store<'a> {
     /// `folders.id`, which `$F` in the SQL stands for.
     folder: i64,
     /// [`Store::folders`], read once per transaction (a change through this store forgets it).
-    folders: std::cell::RefCell<Option<Vec<FolderRow>>>,
+    folders: std::cell::RefCell<Option<std::rc::Rc<[FolderRow]>>>,
     /// How this folder sees the drive, once known.
     coords: std::cell::Cell<Option<Coords>>,
-    /// [`Store::fan_out`]: the folder whose part of the drive a drive node is in (`None`: not
-    /// known, every folder), for the nodes walked through in this transaction.
-    places: std::cell::RefCell<HashMap<NodeId, Option<i64>>>,
+    /// [`Store::fan_out`]: the folder whose part of the drive a drive node is in, for the
+    /// nodes walked through in this transaction (not those whose place isn't known).
+    places: std::cell::RefCell<HashMap<NodeId, Place>>,
 }
 
 /// A folder this account syncs here.
@@ -214,8 +214,16 @@ const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, 
      l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name, l.tags";
 /// Columns in [`LOCAL_COLS`].
 const LOCAL_COL_COUNT: usize = 14;
-/// [`Store::fan_out`]: a place no folder here holds (`folders.id` starts at 1).
-const UNHELD: i64 = 0;
+/// Where a drive node is, for [`Store::fan_out`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// In this folder's part of the drive.
+    Folder(i64),
+    /// In a part no folder here holds (the drive's top with no main folder here).
+    Unheld,
+}
+/// The parent of a mirror node, by UUID.
+const MIRROR_PARENT: &str = "SELECT p.uuid FROM remote m JOIN nodes p ON p.id = m.parent WHERE m.id = (SELECT id FROM nodes WHERE uuid = ?1)";
 /// Deeper than any real tree (Windows' 32k-character paths hold about 16k levels); reaching it
 /// means a broken parent chain.
 pub const MAX_DEPTH: usize = 16_384;
@@ -315,6 +323,7 @@ impl<'a> Store<'a> {
     /// Registers a folder holding the drive's node `top`; its id.
     pub fn add_folder(&self, top: NodeId, path: &str, marker: &str) -> Result<i64> {
         self.folders.take();
+        self.places.borrow_mut().clear();
         self.prep(
             "INSERT INTO folders (top, path, marker, added_at) VALUES (?1, ?2, ?3, unixepoch())",
         )?
@@ -323,6 +332,11 @@ impl<'a> Store<'a> {
     }
 
     pub fn folders(&self) -> Result<Vec<FolderRow>> {
+        Ok(self.folder_list()?.to_vec())
+    }
+
+    /// [`Store::folders`], shared.
+    fn folder_list(&self) -> Result<std::rc::Rc<[FolderRow]>> {
         if let Some(known) = self.folders.borrow().as_ref() {
             return Ok(known.clone());
         }
@@ -344,7 +358,7 @@ impl<'a> Store<'a> {
                 marker,
             })
         })
-        .collect::<Result<Vec<_>>>()
+        .collect::<Result<std::rc::Rc<[FolderRow]>>>()
         .inspect(|all| *self.folders.borrow_mut() = Some(all.clone()))
     }
 
@@ -359,6 +373,7 @@ impl<'a> Store<'a> {
     /// Forgets folder `id` and every row it has (the account's stay).
     pub fn remove_folder(&self, id: i64) -> Result<bool> {
         self.folders.take();
+        self.places.borrow_mut().clear();
         self.change("DELETE FROM folders WHERE id = ?1", id)
     }
 
@@ -508,7 +523,9 @@ impl<'a> Store<'a> {
     /// Number of file (not folder) nodes in the base; the mass-delete guard's denominator.
     /// A full table scan: callers take it once per sync.
     pub fn base_file_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM base WHERE folder = $F AND kind = 0")
+        // `+folder`: a scan of the table, not of an index holding the folder that looks every
+        // row up again for its kind (five times slower).
+        self.count("SELECT COUNT(*) FROM base WHERE +folder = $F AND kind = 0")
     }
 
     // ---- local observations ----
@@ -1028,7 +1045,7 @@ impl<'a> Store<'a> {
         let Some(row) = &self.on_drive(row)? else {
             return Ok(());
         };
-        self.moved_folder(row.kind);
+        self.moved_folder(row.node, row.kind);
         let (id, parent) = (
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.parent)?,
@@ -1070,7 +1087,7 @@ impl<'a> Store<'a> {
             return Ok(None);
         };
         self.fan_out(row.node, row.parent)?;
-        self.moved_folder(row.kind);
+        self.moved_folder(row.node, row.kind);
         self.change(
             "DELETE FROM remote WHERE file_id = ?1",
             file_id.0.as_bytes(),
@@ -1083,53 +1100,44 @@ impl<'a> Store<'a> {
     /// `place` is in (the folder with the nearest top above it). Every folder when `place`
     /// doesn't reach the drive's top through the mirror (a gap or a cycle): none is left out.
     pub fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
-        let folders = self.folders()?;
-        let mark = |folder: i64| -> Result<()> {
-            let id = self.key_or_insert(node)?;
-            self.prep("INSERT OR IGNORE INTO dirty (folder, id) VALUES (?1, ?2)")?
-                .execute([folder, id])?;
-            Ok(())
-        };
-        if let [only] = folders.as_slice() {
-            return mark(only.id);
+        let folders = self.folder_list()?;
+        let id = self.key_or_insert(node)?;
+        if let [only] = &*folders {
+            return self.mark_dirty_in(only.id, id);
         }
-        if let Some(id) = self.key(node)? {
-            self.prep(
-                "INSERT OR IGNORE INTO dirty (folder, id) \
-                 SELECT folder, id FROM base WHERE id = ?1 \
-                 UNION SELECT folder, id FROM local WHERE id = ?1",
-            )?
-            .execute([id])?;
-        }
+        self.prep(
+            "INSERT OR IGNORE INTO dirty (folder, id) \
+             SELECT folder, id FROM base WHERE id = ?1 \
+             UNION ALL SELECT folder, id FROM local WHERE id = ?1",
+        )?
+        .execute([id])?;
         match self.place_of(place, &folders)? {
-            Some(UNHELD) => Ok(()),
-            Some(folder) => mark(folder),
+            Some(Place::Folder(folder)) => self.mark_dirty_in(folder, id),
+            Some(Place::Unheld) => Ok(()),
             // A gap or a cycle: whose it is isn't known.
-            None => folders.iter().try_for_each(|f| mark(f.id)),
+            None => folders
+                .iter()
+                .try_for_each(|f| self.mark_dirty_in(f.id, id)),
         }
     }
 
-    /// The folder whose part of the drive the drive's folder `place` is in (the one with the
-    /// nearest top above it; [`UNHELD`] at the drive's top when no folder here holds it); `None`
-    /// if the mirror doesn't connect `place` to the top. Remembered for every folder on the
-    /// way, until a folder of the mirror changes ([`Store::moved_folder`]).
-    fn place_of(&self, place: NodeId, folders: &[FolderRow]) -> Result<Option<i64>> {
-        let tops: HashMap<NodeId, i64> = folders.iter().map(|f| (f.top, f.id)).collect();
-        let mut parent = self.prep(&format!(
-            "SELECT p.uuid FROM remote m JOIN nodes p ON p.id = m.parent WHERE m.id = {ID_OF}"
-        ))?;
+    /// The place of the drive's folder `place` (the folder with the nearest top above it);
+    /// `None` if the mirror doesn't connect it to the top. Remembered for every folder on the
+    /// way, until one of them changes ([`Store::moved_folder`]).
+    fn place_of(&self, place: NodeId, folders: &[FolderRow]) -> Result<Option<Place>> {
+        let mut parent = self.prep(MIRROR_PARENT)?;
         let mut chain = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut at = place;
         let found = loop {
             if let Some(&known) = self.places.borrow().get(&at) {
-                break known;
+                break Some(known);
             }
-            if let Some(&folder) = tops.get(&at) {
-                break Some(folder);
+            if let Some(folder) = folders.iter().find(|f| f.top == at) {
+                break Some(Place::Folder(folder.id));
             }
             if at.is_root() {
-                break Some(UNHELD);
+                break Some(Place::Unheld);
             }
             chain.push(at);
             let up: Option<Vec<u8>> = parent
@@ -1140,16 +1148,20 @@ impl<'a> Store<'a> {
                 _ => break None,
             }
         };
-        let mut places = self.places.borrow_mut();
-        for n in chain {
-            places.insert(n, found);
+        // Not known: not remembered, so a folder arriving later fills the gap.
+        if let Some(found) = found {
+            let mut places = self.places.borrow_mut();
+            for n in chain {
+                places.insert(n, found);
+            }
         }
         Ok(found)
     }
 
-    /// A folder of the mirror changed (moved, gone): the places remembered may be stale.
-    fn moved_folder(&self, kind: NodeKind) {
-        if kind == NodeKind::Folder {
+    /// Folder `node` of the mirror changes (moves, goes): the places remembered through it
+    /// may be stale.
+    fn moved_folder(&self, node: NodeId, kind: NodeKind) {
+        if kind == NodeKind::Folder && self.places.borrow().contains_key(&node) {
             self.places.borrow_mut().clear();
         }
     }
@@ -1165,7 +1177,7 @@ impl<'a> Store<'a> {
         let Some(row) = &self.on_drive(&removed.row)? else {
             return Ok(());
         };
-        self.moved_folder(row.kind);
+        self.moved_folder(row.node, row.kind);
         let f = row.file.as_ref();
         let root = self.coords()?.to_drive(removed.removal.root);
         self.prep(
@@ -1261,9 +1273,13 @@ impl<'a> Store<'a> {
     // ---- dirty set ----
 
     pub fn mark_dirty(&self, node: NodeId) -> Result<()> {
-        let id = self.key_or_insert(node)?;
-        self.prep("INSERT OR IGNORE INTO dirty (folder, id) VALUES ($F, ?1)")?
-            .execute([id])?;
+        self.mark_dirty_in(self.folder, self.key_or_insert(node)?)
+    }
+
+    /// Marks the node with integer id `id` dirty in folder `folder`.
+    fn mark_dirty_in(&self, folder: i64, id: i64) -> Result<()> {
+        self.prep("INSERT OR IGNORE INTO dirty (folder, id) VALUES (?1, ?2)")?
+            .execute([folder, id])?;
         Ok(())
     }
 
@@ -1365,7 +1381,8 @@ impl<'a> Store<'a> {
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
         let gone = |predicate: &str| {
             self.count(&format!(
-                "SELECT COUNT(*) FROM dirty d JOIN base b ON b.folder = d.folder AND b.id = d.id \
+                // From the dirty set (CROSS JOIN keeps it outer): not a scan of every base row.
+                "SELECT COUNT(*) FROM dirty d CROSS JOIN base b ON b.folder = d.folder AND b.id = d.id \
                  WHERE d.folder = $F AND {predicate}"
             ))
         };
@@ -1420,15 +1437,25 @@ impl<'a> Store<'a> {
 
     /// This folder's setting `key`.
     pub fn get_kv(&self, key: &str) -> Result<Option<String>> {
-        Ok(self
-            .prep("SELECT value FROM folder_kv WHERE folder = $F AND key = ?1")?
-            .query_row([key], |r| r.get(0))
-            .optional()?)
+        self.folder_kv_of(self.folder, key)
     }
 
     pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
-        self.prep("INSERT OR REPLACE INTO folder_kv (folder, key, value) VALUES ($F, ?1, ?2)")?
-            .execute([key, value])?;
+        self.set_folder_kv_of(self.folder, key, value)
+    }
+
+    /// Folder `folder`'s setting `key`, from any handle (the account's purging every folder's
+    /// trash, say).
+    pub fn folder_kv_of(&self, folder: i64, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .prep("SELECT value FROM folder_kv WHERE folder = ?1 AND key = ?2")?
+            .query_row(params![folder, key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn set_folder_kv_of(&self, folder: i64, key: &str, value: &str) -> Result<()> {
+        self.prep("INSERT OR REPLACE INTO folder_kv (folder, key, value) VALUES (?1, ?2, ?3)")?
+            .execute(params![folder, key, value])?;
         Ok(())
     }
 
@@ -1654,7 +1681,7 @@ fn outside_row() -> MirrorRow {
         version: VersionTag(hbsync_types::Uuid::nil()),
         node: NodeId::OUTSIDE,
         parent: NodeId::ROOT,
-        name: "Outside".into(),
+        name: Coords::OUTSIDE_NAME.into(),
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,

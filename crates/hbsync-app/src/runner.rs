@@ -25,7 +25,7 @@ use hbsync_engine::feed::FeedError;
 use hbsync_engine::{Conflict, Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
-use hbsync_local::{Filter, FilterError, LocalObserver, Marker};
+use hbsync_local::{Filter, FilterError, LocalObserver};
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
@@ -34,6 +34,7 @@ use hbsync_types::unix_now;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
+use crate::accounts::FolderError;
 use crate::config::KeepDays;
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
@@ -82,38 +83,9 @@ pub enum RunnerError {
     Io(#[from] std::io::Error),
     #[error("the sync thread panicked")]
     Panicked,
-    #[error("{folder} is synced with {theirs}, not {ours}")]
-    OtherIdentity {
-        folder: PathBuf,
-        theirs: String,
-        ours: String,
-    },
     #[error(transparent)]
-    Folder(crate::accounts::FolderError),
+    Folder(#[from] crate::accounts::FolderError),
 }
-
-impl From<crate::accounts::FolderError> for RunnerError {
-    fn from(e: crate::accounts::FolderError) -> Self {
-        use crate::accounts::FolderError;
-        match e {
-            FolderError::OtherIdentity {
-                folder,
-                theirs,
-                ours,
-            } => RunnerError::OtherIdentity {
-                folder,
-                theirs,
-                ours,
-            },
-            FolderError::State(e) => RunnerError::State(e),
-            FolderError::Io(e) => RunnerError::Io(e),
-            other => RunnerError::Folder(other),
-        }
-    }
-}
-
-/// The state DB key of the identity a folder syncs with.
-pub const IDENTITY_KEY: &str = "account.identity";
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
@@ -160,16 +132,6 @@ impl RunnerConfig {
 const REMOTE_QUIET: Duration = Duration::from_millis(1000);
 /// ...but no longer than this after the first.
 const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
-
-/// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the trash of
-/// the same age). A failure waits for the next sync.
-fn purge_when_due(drive: &Drive, keep_days: u32) {
-    match drive.purge_when_due(keep_days) {
-        Ok(Some(n)) if n > 0 => tracing::info!("{n} items deleted for good after {keep_days} days"),
-        Ok(_) => {}
-        Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
-    }
-}
 
 /// How long a pause lasts: until then (Unix seconds), or until resumed (`None`).
 pub type Until = Option<u64>;
@@ -724,27 +686,25 @@ impl Runner {
                 continue;
             }
             announced = None;
-            if !matches!(Marker::read(&self.cfg.folder), Ok(Some(_))) {
-                // An older Filesync's folder (its DB in .hbsync): set up again, not gone.
-                if let Err(e @ crate::accounts::FolderError::Older(_)) =
-                    crate::accounts::open_folder(&self.cfg.db, &self.cfg.identity, &self.cfg.folder)
-                {
-                    return Err(e.into());
-                }
+            match crate::accounts::check_marker(&self.cfg.folder, &self.cfg.identity) {
+                Ok(_) => {}
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
-                const GONE: &str = "the folder is gone (moved, deleted or not mounted)";
-                if lock(&self.status).error.as_deref() != Some(GONE) {
-                    tracing::warn!("{GONE}: waiting for it to come back");
+                Err(FolderError::NoMarker(_) | FolderError::Io(_)) => {
+                    const GONE: &str = "the folder is gone (moved, deleted or not mounted)";
+                    if lock(&self.status).error.as_deref() != Some(GONE) {
+                        tracing::warn!("{GONE}: waiting for it to come back");
+                    }
+                    parts = None;
+                    not_before = Instant::now() + self.cfg.poll;
+                    self.set(|s| {
+                        s.state = State::Failing;
+                        s.error = Some(GONE.into());
+                        s.retry_at = Some(unix_now() + self.cfg.poll.as_secs());
+                    });
+                    continue;
                 }
-                parts = None;
-                not_before = Instant::now() + self.cfg.poll;
-                self.set(|s| {
-                    s.state = State::Failing;
-                    s.error = Some(GONE.into());
-                    s.retry_at = Some(unix_now() + self.cfg.poll.as_secs());
-                });
-                continue;
+                Err(e) => return Err(e.into()),
             }
             let p = match &mut parts {
                 Some(p) => p,
@@ -789,7 +749,15 @@ impl Runner {
                     Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
                 }
             }
-            purge_when_due(p.engine.drive(), self.cfg.keep_deleted_days);
+            // Once a day; a failure waits for the next sync.
+            let keep_days = self.cfg.keep_deleted_days;
+            match p.engine.drive().purge_when_due(keep_days) {
+                Ok(Some(n)) if n > 0 => {
+                    tracing::info!("{n} items deleted for good after {keep_days} days")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
+            }
 
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.

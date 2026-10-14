@@ -34,6 +34,7 @@ use hbsync_engine::reconcile::{
 };
 use hbsync_engine::scope::Scope;
 use hbsync_engine::tree::{Tree, first_free, numbered_names, restored_names};
+use hbsync_engine::walk::End;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::Os;
@@ -193,16 +194,21 @@ impl Server {
         remote
     }
 
-    /// Whether `node` is the role folder or lies in it.
-    fn in_role_folder(&self, node: NodeId) -> bool {
+    /// Where a walk up from `node` ends: at the role folder (`End::At` it) for the role folder
+    /// and what lies in it, at the drive's top for the rest of what reaches it.
+    fn place(&self, node: NodeId) -> End {
         let docs = Role::Documents.node();
-        // Up to the role folder, if it's above.
         let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(node, |at| {
             Ok((at != docs)
                 .then(|| self.live.get(&at).map(|n| ((), n.state.parent)))
                 .flatten())
         });
-        up.end == hbsync_engine::walk::End::At(docs)
+        up.end
+    }
+
+    /// Whether `node` is the role folder or lies in it.
+    fn in_role_folder(&self, node: NodeId) -> bool {
+        self.place(node) == End::At(Role::Documents.node())
     }
 }
 
@@ -234,12 +240,27 @@ struct Client {
 }
 
 impl Client {
+    fn new(name: String, os: Os, filter: Filter, coords: Coords) -> Self {
+        Client {
+            name,
+            local: Tree::new(),
+            base: Tree::new(),
+            extra: HashMap::new(),
+            plan: VecDeque::new(),
+            parked: HashMap::new(),
+            planned_local: Tree::new(),
+            planned_remote: Tree::new(),
+            filter: Arc::new(filter),
+            held: Vec::new(),
+            confirmed: HashSet::new(),
+            os,
+            coords,
+        }
+    }
+
     /// The part of the drive the client's folder syncs.
     fn scope(&self) -> Scope {
-        match self.coords.top {
-            top if top.is_root() => Scope::main(),
-            top => Scope::below(top),
-        }
+        Scope::of(self.coords.top)
     }
 }
 
@@ -284,24 +305,13 @@ impl Sim {
         Sim {
             server: Server::default(),
             clients: (0..clients)
-                .map(|i| Client {
-                    name: format!("c{i}"),
-                    local: Tree::new(),
-                    base: Tree::new(),
-                    extra: HashMap::new(),
-                    plan: VecDeque::new(),
-                    parked: HashMap::new(),
-                    planned_local: Tree::new(),
-                    planned_remote: Tree::new(),
-                    filter: Arc::new(if i % 2 == 1 {
-                        ignoring_d()
-                    } else {
-                        Filter::default()
-                    }),
-                    held: Vec::new(),
-                    confirmed: HashSet::new(),
-                    os: [Os::MacOs, Os::Linux, Os::Windows][i % 3],
-                    coords: Coords::MAIN,
+                .map(|i| {
+                    let filter = match i % 2 {
+                        1 => ignoring_d(),
+                        _ => Filter::default(),
+                    };
+                    let os = [Os::MacOs, Os::Linux, Os::Windows][i % 3];
+                    Client::new(format!("c{i}"), os, filter, Coords::MAIN)
                 })
                 .collect(),
             next_blob: 0,
@@ -329,23 +339,14 @@ impl Sim {
     pub fn with_role_device(self) -> Self {
         let mut sim = self.with_role_folder();
         let first = &sim.clients[0];
-        let docs = Client {
-            name: format!("{}-docs", first.name),
-            local: Tree::new(),
-            base: Tree::new(),
-            extra: HashMap::new(),
-            plan: VecDeque::new(),
-            parked: HashMap::new(),
-            planned_local: Tree::new(),
-            planned_remote: Tree::new(),
-            filter: Arc::new(Filter::default()),
-            held: Vec::new(),
-            confirmed: HashSet::new(),
-            os: first.os,
-            coords: Coords {
+        let docs = Client::new(
+            format!("{}-docs", first.name),
+            first.os,
+            Filter::default(),
+            Coords {
                 top: Role::Documents.node(),
             },
-        };
+        );
         sim.clients.push(docs);
         sim.computers.push((0, sim.clients.len() - 1));
         sim
@@ -353,23 +354,18 @@ impl Sim {
 
     /// The server as client `c`'s folder sees it ([`Coords`]).
     fn server_view(&self, c: usize) -> Tree {
-        let coords = self.clients[c].coords;
-        if coords == Coords::MAIN {
-            return self.server.tree();
-        }
         let mut t = Tree::new();
-        for (id, n) in &self.server.live {
-            if !coords.hides(*id) {
-                t.insert(
-                    *id,
-                    NodeState {
-                        parent: coords.from_drive(n.state.parent),
-                        ..n.state.clone()
-                    },
-                );
+        for id in self.server.live.keys() {
+            if let Some(state) = self.server_state(c, *id) {
+                t.insert(*id, state);
             }
         }
-        t.insert(NodeId::OUTSIDE, NodeState::folder(NodeId::ROOT, "Outside"));
+        if self.clients[c].coords != Coords::MAIN {
+            t.insert(
+                NodeId::OUTSIDE,
+                NodeState::folder(NodeId::ROOT, Coords::OUTSIDE_NAME),
+            );
+        }
         t
     }
 
@@ -392,17 +388,9 @@ impl Sim {
     /// role folder. A node whose place isn't known (a gap, or a cycle a sync's moves make for a
     /// moment) isn't.
     fn known_outside(&self, c: usize, node: NodeId) -> bool {
-        let docs = Role::Documents.node();
-        let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(node, |at| {
-            Ok((at != docs)
-                .then(|| self.server.live.get(&at).map(|n| ((), n.state.parent)))
-                .flatten())
-        });
-        let in_role = up.end == hbsync_engine::walk::End::At(docs);
-        let in_main = up.end == hbsync_engine::walk::End::Top;
         match self.clients[c].coords.top {
-            top if top.is_root() => in_role,
-            _ => in_main,
+            top if top.is_root() => self.server.in_role_folder(node),
+            _ => self.server.place(node) == End::Top,
         }
     }
 

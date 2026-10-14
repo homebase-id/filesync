@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use hbsync_app::accounts::FolderError;
 use hbsync_app::runner::RunnerError;
 use hbsync_app::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
@@ -302,7 +303,10 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
         .join()
         .map_err(|_| "panicked")?
         .expect_err("the runner refused the folder");
-    assert!(matches!(err, RunnerError::OtherIdentity { .. }), "{err}");
+    assert!(
+        matches!(err, RunnerError::Folder(FolderError::OtherIdentity { .. })),
+        "{err}"
+    );
     assert_eq!(handle.status().state, State::Stopped);
     assert!(
         handle

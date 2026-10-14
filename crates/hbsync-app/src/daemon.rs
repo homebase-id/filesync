@@ -194,22 +194,23 @@ fn answer(
     root: &Root,
     paths: &Paths,
 ) -> Reply {
-    // From the folder's state DB, in any phase (WAL: a sync writing doesn't block it), and
+    // From the account's state DB, in any phase (WAL: a sync writing doesn't block it), and
     // without holding up the other requests.
-    let folder_db = || {
-        let db = crate::accounts::db_path(paths, &root.identity);
-        crate::accounts::open_folder(&db, &root.identity, &root.folder).ok()
-    };
+    let db = crate::accounts::db_path(paths, &root.identity);
     if let Ask::Recent { limit } = request.ask {
         return Reply::Recent(
-            folder_db()
+            crate::accounts::open_folder(&db, &root.identity, &root.folder)
+                .ok()
                 .and_then(|mut db| db.read(|s| s.recent_synced(limit)).ok())
                 .unwrap_or_default(),
         );
     }
+    // Recently deleted is the account's, each item placed in drive coordinates.
     if let Ask::Deleted { limit } = request.ask {
         return Reply::Deleted(
-            folder_db()
+            db.exists()
+                .then(|| crate::accounts::open_account(&db, &root.identity).ok())
+                .flatten()
                 .and_then(|mut db| hbsync_engine::deleted::list(&mut db, limit).ok())
                 .unwrap_or_default(),
         );

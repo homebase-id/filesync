@@ -5,7 +5,7 @@
 //! translates, [`hbsync_state::Coords`], and so does [`ScopedRemote`] for what it writes).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_remote::{
@@ -15,6 +15,7 @@ use hbsync_state::Coords;
 use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Role, VersionTag};
 
 use crate::tree::Tree;
+use crate::walk::End;
 
 /// The state DB key of the scope's fingerprint: what the last run left out.
 pub(crate) const KEY: &str = "scope.fingerprint";
@@ -42,6 +43,14 @@ impl Scope {
         Scope {
             top,
             outside: BTreeSet::from([NodeId::OUTSIDE]),
+        }
+    }
+
+    /// The scope of a folder whose top is `top`: the main folder's, or a role folder's.
+    pub fn of(top: NodeId) -> Scope {
+        match top {
+            t if t.is_root() => Scope::main(),
+            t => Scope::below(t),
         }
     }
 
@@ -103,26 +112,18 @@ impl Scope {
 /// Whether `node` reaches the root through `tree`'s parents, memoized in `known` for every
 /// node on the way.
 fn reaches_root(tree: &Tree, node: NodeId, known: &mut HashMap<NodeId, bool>) -> bool {
-    let mut chain = Vec::new();
-    let mut seen = HashSet::new();
-    let mut at = node;
-    let reached = loop {
-        if at.is_root() {
-            break true;
-        }
-        if let Some(&k) = known.get(&at) {
-            break k;
-        }
-        if !seen.insert(at) {
-            break false; // a cycle
-        }
-        chain.push(at);
-        match tree.get(at) {
-            Some(state) => at = state.parent,
-            None => break false,
-        }
+    let Ok(up) = crate::walk::up::<_, Infallible>(node, |at| {
+        Ok(match known.contains_key(&at) {
+            true => None,
+            false => tree.get(at).map(|state| (at, state.parent)),
+        })
+    });
+    let reached = match up.end {
+        End::Top => true,
+        End::At(at) => known.get(&at).copied().unwrap_or(false),
+        End::Cycle => false,
     };
-    for n in chain {
+    for n in up.items {
         known.insert(n, reached);
     }
     reached

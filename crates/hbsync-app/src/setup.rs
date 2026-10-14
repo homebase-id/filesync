@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, HomebaseError, app};
-use hbsync_local::{Marker, STATE_DIR};
+use hbsync_local::STATE_DIR;
 use hbsync_remote::Remote;
 
 use crate::accounts::{self, FolderError};
@@ -213,26 +213,24 @@ fn folder_state(config: &Config, identity: &str, folder: &Path) -> Result<Folder
     }
     // Its marker says whose it is. Without one (an older Filesync's folder, or one half set
     // up) it is set up again, its files merged: identical ones are adopted, not copied.
-    match Marker::read(folder) {
-        Ok(Some(m)) if m.identity == identity => return Ok(FolderState::Ours),
-        Ok(Some(m)) => {
-            return Err(format!(
-                "{} is synced with {}",
-                folder.display(),
-                m.identity
-            ));
-        }
-        Ok(None) | Err(_) => {}
+    match accounts::check_marker(folder, identity) {
+        Ok(_) => return Ok(FolderState::Ours),
+        Err(e @ FolderError::OtherIdentity { .. }) => return Err(e.to_string()),
+        Err(_) => {}
     }
-    match std::fs::read_dir(folder) {
-        Ok(entries) => Ok(
-            match entries.flatten().any(|e| e.file_name() != STATE_DIR) {
-                true => FolderState::HasFiles,
-                false => FolderState::Fresh,
-            },
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FolderState::Fresh),
+    match has_files(folder) {
+        Ok(true) => Ok(FolderState::HasFiles),
+        Ok(false) => Ok(FolderState::Fresh),
         Err(e) => Err(format!("{}: {e}", folder.display())),
+    }
+}
+
+/// Whether `folder` holds anything besides its `.hbsync` (a missing one holds nothing).
+fn has_files(folder: &Path) -> std::io::Result<bool> {
+    match std::fs::read_dir(folder) {
+        Ok(entries) => Ok(entries.flatten().any(|e| e.file_name() != STATE_DIR)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -383,9 +381,7 @@ pub fn set_up(
 
     // The folder in the account's state DB, and its marker: kept if set up before.
     let db = accounts::db_path(paths, identity);
-    let has_files = std::fs::read_dir(&folder)?
-        .flatten()
-        .any(|e| e.file_name() != STATE_DIR);
+    let has_files = has_files(&folder)?;
     match accounts::open_folder(&db, identity, &folder) {
         Ok(_) => {}
         // Synced here before, its marker gone: an empty mount point, most likely. Setting it
@@ -545,7 +541,7 @@ mod tests {
         );
         assert!(plan("a.example", &full, true, &none)?.existing);
         // Synced before: with this identity it picks up where it was, with another it's refused.
-        Marker::new("a.example").write(&full)?;
+        hbsync_local::Marker::new("a.example").write(&full)?;
         assert!(plan("a.example", &full, false, &none).is_ok());
         refused(
             plan("b.example", &full, false, &none),

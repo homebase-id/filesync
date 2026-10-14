@@ -51,9 +51,10 @@ fn main() -> ExitCode {
         // is a folder that must be set up again: restarting can't help.
         DaemonError::NotSetUp(_)
         | DaemonError::Lock(LockError::Held { .. })
-        | DaemonError::Runner(RunnerError::State(StateError::TooOld { .. }))
         | DaemonError::Runner(RunnerError::Folder(
-            FolderError::Older(_) | FolderError::Unknown(_),
+            FolderError::Older(_)
+            | FolderError::Unknown(_)
+            | FolderError::State(StateError::TooOld { .. }),
         )) => {
             tracing::warn!("{e}");
             ExitCode::SUCCESS

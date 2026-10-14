@@ -14,6 +14,8 @@ pub struct Coords {
 
 impl Coords {
     pub const MAIN: Coords = Coords { top: NodeId::ROOT };
+    /// The name of the one folder the rest of the drive is to a folder holding part of it.
+    pub const OUTSIDE_NAME: &str = "Outside";
 
     fn is_main(self) -> bool {
         self.top.is_root()
