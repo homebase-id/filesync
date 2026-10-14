@@ -327,6 +327,7 @@ mod win {
                 }
             }
         }
+        println!("Placeholders reverted; unregistering.");
         StorageProviderSyncRootManager::Unregister(&id()?)?;
         let _ = fs::remove_file(icon_path()?);
         println!(

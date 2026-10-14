@@ -1,7 +1,9 @@
-# Does a packaged app need the cloud files extension to register a sync root? Registers the
-# test folder three ways and shows what Windows made of each: unpackaged (the baseline that
-# worked on a real PC), packaged without the extension (Filesync 0.5.2: E_BOUNDS), and packaged
-# with it. For a CI runner (it turns on developer mode to register loose packages).
+# Does a packaged app need the cloud files extension to register a sync root, and what can it do
+# with the root's own status? Runs a few sequences unpackaged (the baseline that worked on a real
+# PC) and packaged with the extension (as Filesync 0.5.3), and shows what Windows made of them.
+# (Packaged without the extension, as 0.5.2: listing sync roots fails and unregistering crashes;
+# shown in this workflow's earlier runs.) For a CI runner: it turns on developer mode to register
+# a loose package.
 param([Parameter(Mandatory)] [string] $Exe)
 
 $ErrorActionPreference = 'Continue'
@@ -12,44 +14,39 @@ $extension = '<desktop3:Extension Category="windows.cloudFiles"><desktop3:CloudF
 reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1 | Out-Null
 [Environment]::OSVersion.Version
 
-function Show {
-    Write-Output '--- SyncRootManager'
-    reg query 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SyncRootManager' /s
-    Write-Output '--- navigation pane (HKCU Desktop\NameSpace)'
+$sequences = @(
+    @('register', 'status', 'unregister'),
+    @('register', 'root-in-sync', 'root-syncing', 'root-in-sync', 'unregister'),
+    @('register', 'root-paused', 'root-clear', 'unregister'),
+    @('register', 'root-paused', 'unregister')
+)
+
+function Try-It([string] $title, [string] $run) {
+    foreach ($steps in $sequences) {
+        Write-Output ''
+        Write-Output "===== $title`: $($steps -join ', ')"
+        foreach ($step in $steps) {
+            $out = & $run $step 2>&1 | Where-Object { $_ -notmatch 'Explorer|sign out|NEW' }
+            Write-Output "$step -> exit $LASTEXITCODE  $($out -join ' / ')"
+        }
+    }
+    Write-Output '--- navigation pane (HKCU Desktop\NameSpace) afterwards'
     Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Desktop\NameSpace' -ErrorAction SilentlyContinue |
         ForEach-Object { '{0}  {1}' -f $_.PSChildName, $_.GetValue('') }
 }
 
-function Try-It([string] $title, [string] $run) {
-    Write-Output ''
-    Write-Output "===== $title"
-    & $run register 2>&1
-    Write-Output "exit $LASTEXITCODE"
-    & $run status 2>&1
-    Show
-    foreach ($c in 'root-in-sync', 'root-syncing', 'root-paused', 'root-clear', 'root-in-sync') {
-        Write-Output "--- $c"
-        & $run $c 2>&1
-        Write-Output "exit $LASTEXITCODE"
-        attrib "$env:USERPROFILE\Homebase Test"
-    }
-    & $run unregister 2>&1
-    Write-Output "unregister: exit $LASTEXITCODE"
-}
-
 Try-It 'unpackaged' $Exe
 
-foreach ($v in @(@{ Name = 'HomebaseSyncrootPlain'; Alias = 'hb-syncroot-plain.exe'; Ext = '' },
-                 @{ Name = 'HomebaseSyncrootCloudFiles'; Alias = 'hb-syncroot-cloudfiles.exe'; Ext = $extension })) {
-    $layout = Join-Path $env:RUNNER_TEMP $v.Name
-    New-Item -ItemType Directory -Force $layout | Out-Null
-    Copy-Item $Exe $layout
-    Copy-Item $logo (Join-Path $layout 'logo.png')
-    (Get-Content -Raw (Join-Path $here 'AppxManifest.xml')).
-        Replace('{NAME}', $v.Name).Replace('{ALIAS}', $v.Alias).Replace('{EXT}', $v.Ext) |
-        Set-Content -Encoding utf8 (Join-Path $layout 'AppxManifest.xml')
-    Add-AppxPackage -Register (Join-Path $layout 'AppxManifest.xml')
-    if (-not $?) { Write-Output "===== $($v.Name): not registered"; continue }
-    Start-Sleep 2
-    Try-It "packaged: $($v.Name)" (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$($v.Alias)")
-}
+$name = 'HomebaseSyncrootCloudFiles'
+$alias = 'hb-syncroot-cloudfiles.exe'
+$layout = Join-Path $env:RUNNER_TEMP $name
+New-Item -ItemType Directory -Force $layout | Out-Null
+Copy-Item $Exe $layout
+Copy-Item $logo (Join-Path $layout 'logo.png')
+(Get-Content -Raw (Join-Path $here 'AppxManifest.xml')).
+    Replace('{NAME}', $name).Replace('{ALIAS}', $alias).Replace('{EXT}', $extension) |
+    Set-Content -Encoding utf8 (Join-Path $layout 'AppxManifest.xml')
+Add-AppxPackage -Register (Join-Path $layout 'AppxManifest.xml')
+Start-Sleep 2
+Try-It 'packaged' (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps\$alias")
+exit 0
