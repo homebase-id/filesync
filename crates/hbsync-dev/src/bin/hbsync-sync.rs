@@ -5,8 +5,8 @@
 //! ```
 //!
 //! Uses the credentials `hbsync-register` saved, and the daemon's sync loop
-//! ([`hbsync_app::Runner`]) without the daemon: the state DB lives in `<folder>/.hbsync`, and
-//! what happens is logged to stderr. `--once` catches up, syncs and exits. Deletes of a large
+//! ([`hbsync_app::Runner`]) without the daemon: the account's state DB lives beside the
+//! folder (`<folder>.state.db`), and what happens is logged to stderr. `--once` catches up, syncs and exits. Deletes of a large
 //! share of the synced files are held unless `--allow-mass-delete` is given.
 
 use std::sync::Arc;
@@ -41,8 +41,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let remote = Arc::new(HomebaseRemote::connect(client.clone())?);
     std::fs::create_dir_all(folder)?;
     let root = std::fs::canonicalize(folder)?;
-    std::fs::create_dir_all(root.join(STATE_DIR))?;
-    let mut cfg = RunnerConfig::new(&root, identity, &hbsync_platform::host::device_name());
+    let db = root.with_extension("state.db");
+    if hbsync_app::accounts::open_folder(&db, identity, &root).is_err() {
+        hbsync_app::accounts::add_folder(&db, identity, &root)?;
+    }
+    let device = hbsync_platform::host::device_name();
+    let mut cfg = RunnerConfig::new(&root, &db, identity, &device);
     cfg.once = args.iter().any(|a| a == "--once");
     if args.iter().any(|a| a == "--allow-mass-delete") {
         cfg.tweak = Some(|c| c.allow_mass_delete = true);

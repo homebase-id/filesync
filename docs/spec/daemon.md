@@ -19,16 +19,22 @@ Otherwise:
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | config, credentials file | `$XDG_CONFIG_HOME/hbsync` (`~/.config/hbsync`) | `~/Library/Application Support/Homebase Filesync` | `%APPDATA%\Homebase Filesync` |
-| locks, pids, pipe token, the tray's icon files | `$XDG_STATE_HOME/hbsync` (`~/.local/state/hbsync`) | same as config | `%LOCALAPPDATA%\Homebase Filesync` |
+| locks, pids, pipe token, the tray's icon files, the state DBs | `$XDG_STATE_HOME/hbsync` (`~/.local/state/hbsync`) | same as config | `%LOCALAPPDATA%\Homebase Filesync` |
 | logs | `<state>/logs` | `~/Library/Logs/Homebase Filesync` | `<state>\logs` |
 | control socket | `$XDG_RUNTIME_DIR/hbsync`, else `<state>` | same as config | a named pipe |
 
-The sync folder keeps its own state in `<folder>/.hbsync` (state DB, temp files, trash, ignore
-rules), hidden on Windows too (the hidden attribute, set at every start). Its state DB records
-the identity it syncs with (`account.identity`): a folder synced with one identity is never
-synced with another. A state DB from before 0.3 isn't upgraded: the daemon stops (and isn't
-restarted); deleting `.hbsync/state.db` with its `-wal` and `-shm` files and setting the folder
-up again starts over (the trash and the ignore rules stay).
+Each account has one state DB, `<state>/accounts/<identity>/state.db` (the identity in lower
+case, a port's `:` as `_`), for every folder it syncs on this computer: the drive's side (its
+mirror, Recently deleted) once, each folder's own rows (what it has, what was agreed) keyed by
+the folder. It records its identity (`account.identity`).
+
+A sync folder keeps the rest in `<folder>/.hbsync` (temp files and trash, on the folder's
+disk for atomic renames; the ignore rules), hidden on Windows too (the hidden attribute, set
+at every start), and its marker `.hbsync/folder`: the identity and the folder's id in that DB.
+A folder is synced only through its marker: without one it is gone (or not mounted), with
+another identity's it is refused, and one the DB doesn't know is set up again. A folder of an
+older Filesync (its DB in `.hbsync`, no marker) is set up again as a folder with files: what it
+has is adopted, nothing is copied twice.
 
 ## `config.toml`
 
@@ -98,9 +104,9 @@ a failure (service managers restart it then).
 - **Network changes:** the reconnect backoff (at most 30 s) and the poll; no OS hooks yet.
 - **Ignore rules:** `.hbsync/ignore` is checked for an edit at every poll and on a sync
   request; an edit restarts the engine with the new rules (sync semantics §10).
-- **The folder gone** (moved, deleted, a disk not mounted: its `.hbsync` missing): nothing
-  syncs, the status says why, and the loop waits for it to come back. It never creates a new
-  `.hbsync`: only `hbsync setup` does.
+- **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
+  syncs, the status says why, and the loop waits for it to come back. It never creates a
+  marker: only `hbsync setup` does.
 - **Held deletes:** the status shows how many (deleted here; deleted elsewhere), some paths,
   and a token naming exactly these deletes. A confirmation carries the token back and lets
   exactly them through; when the held deletes changed since, it is refused (sync semantics,
@@ -267,7 +273,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync start`, `stop` | |
 | `hbsync autostart [on\|off]` | |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
-| `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files and `.hbsync` stay, so setting it up again resumes |
+| `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
 | `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |
 | `hbsync restore <path or node id>…` | restores removed items (a folder with what was deleted with it) |
 | `hbsync empty-deleted [--yes]` | deletes everything in Recently deleted for good, after asking |

@@ -24,6 +24,9 @@ The **root** is implicit: it has the fixed id from the node schema and is never 
 - **Local**: what the local file system holds now, after identity matching (section 3).
 - **Remote**: the client's mirror of the drive, fed by the change cursor.
 
+They live in the account's state DB (`daemon.md`, Files): the mirror once per account, base and
+local per sync root. Base, local and the dirty set of a root change only with that root.
+
 **Content state** (per file node, local only, never synced): `local` (default; may be evicted),
 `pinned` (always kept locally), `online-only` (no local bytes). A missing local file is a delete
 only when the base says the bytes were local.

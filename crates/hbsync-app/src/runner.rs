@@ -25,9 +25,9 @@ use hbsync_engine::feed::FeedError;
 use hbsync_engine::{Conflict, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
-use hbsync_local::{Filter, FilterError, LocalObserver, STATE_DIR, state_db_path};
+use hbsync_local::{Filter, FilterError, LocalObserver, Marker};
 use hbsync_remote::{Remote, RemoteError};
-use hbsync_state::{StateDb, StateError};
+use hbsync_state::StateError;
 use hbsync_types::NodeId;
 pub use hbsync_types::activity::Progress;
 use hbsync_types::unix_now;
@@ -88,6 +88,28 @@ pub enum RunnerError {
         theirs: String,
         ours: String,
     },
+    #[error(transparent)]
+    Folder(crate::accounts::FolderError),
+}
+
+impl From<crate::accounts::FolderError> for RunnerError {
+    fn from(e: crate::accounts::FolderError) -> Self {
+        use crate::accounts::FolderError;
+        match e {
+            FolderError::OtherIdentity {
+                folder,
+                theirs,
+                ours,
+            } => RunnerError::OtherIdentity {
+                folder,
+                theirs,
+                ours,
+            },
+            FolderError::State(e) => RunnerError::State(e),
+            FolderError::Io(e) => RunnerError::Io(e),
+            other => RunnerError::Folder(other),
+        }
+    }
 }
 
 /// The state DB key of the identity a folder syncs with.
@@ -96,6 +118,8 @@ pub const IDENTITY_KEY: &str = "account.identity";
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     pub folder: PathBuf,
+    /// The account's state DB ([`crate::accounts::db_path`]).
+    pub db: PathBuf,
     pub identity: String,
     /// Shown in conflict-copy names.
     pub device: String,
@@ -115,9 +139,10 @@ pub struct RunnerConfig {
 }
 
 impl RunnerConfig {
-    pub fn new(folder: &Path, identity: &str, device: &str) -> Self {
+    pub fn new(folder: &Path, db: &Path, identity: &str, device: &str) -> Self {
         RunnerConfig {
             folder: folder.to_path_buf(),
+            db: db.to_path_buf(),
             identity: identity.to_owned(),
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
@@ -506,8 +531,8 @@ impl Runner {
         });
     }
 
-    /// The engine and observer for the folder, which must have been set up (its `.hbsync`
-    /// exists): an unmounted disk's empty mount point must not become a new sync folder.
+    /// The engine and observer for the folder, which must have been set up (its marker names
+    /// it): an unmounted disk's empty mount point must not become a new sync folder.
     fn open(&self) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
@@ -518,19 +543,9 @@ impl Runner {
             tweak(&mut cfg);
         }
         let rules = cfg.exec.filter.rule_count();
-        let mut db = StateDb::open(&state_db_path(root))?;
-        // A folder belongs to one identity: never mix two drives through one folder.
-        let ours = &self.cfg.identity;
-        db.write(|s| match s.account_kv(IDENTITY_KEY)? {
-            Some(theirs) if theirs != *ours => Ok(Err(theirs)),
-            Some(_) => Ok(Ok(())),
-            None => s.set_account_kv(IDENTITY_KEY, ours).map(Ok),
-        })?
-        .map_err(|theirs| RunnerError::OtherIdentity {
-            folder: root.clone(),
-            theirs,
-            ours: ours.clone(),
-        })?;
+        // A folder belongs to one identity (its marker says which): never mix two drives
+        // through one folder.
+        let db = crate::accounts::open_folder(&self.cfg.db, &self.cfg.identity, root)?;
         let mut engine = Engine::new(db, Box::new(Arc::clone(&self.remote)), cfg);
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
@@ -558,7 +573,6 @@ impl Runner {
         // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
         // (the first announcement, quiet from then on)
         let mut announced: Option<(Instant, Instant)> = None;
-        let db_path = state_db_path(&self.cfg.folder);
         let mut pause = self.cfg.paused;
         let mut started = false;
         let mut wanted = true;
@@ -733,7 +747,7 @@ impl Runner {
                 continue;
             }
             announced = None;
-            if !self.cfg.folder.join(STATE_DIR).is_dir() {
+            if !matches!(Marker::read(&self.cfg.folder), Ok(Some(_))) {
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
                 const GONE: &str = "the folder is gone (moved, deleted or not mounted)";
@@ -808,9 +822,7 @@ impl Runner {
             let result = if started {
                 p.engine.sync_once(&today)
             } else {
-                p.engine
-                    .start_up(&mut p.observer, &db_path, &today)
-                    .map(|r| r.sync)
+                p.engine.start_up(&mut p.observer, &today).map(|r| r.sync)
             };
             match result {
                 Ok(report) => {

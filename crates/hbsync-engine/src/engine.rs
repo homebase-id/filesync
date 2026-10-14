@@ -229,24 +229,22 @@ impl Engine {
         &self.scan_opts
     }
 
-    /// Start-up: the local catch-up (journal or walk, on its own connection to the state DB
-    /// at `db_path`) and the remote feed run in parallel. Planning starts only when both are
-    /// done, so nothing is uploaded while the local state is still unknown.
+    /// Start-up: the local catch-up (journal or walk, on its own connection to the state DB)
+    /// and the remote feed run in parallel. Planning starts only when both are done, so nothing
+    /// is uploaded while the local state is still unknown.
     pub fn start_up(
         &mut self,
         observer: &mut LocalObserver,
-        db_path: &Path,
         date: &str,
     ) -> Result<StartupReport, EngineError> {
         self.apply_filter_change()?;
+        let mut own = self.db.another()?;
         let remote = self.remote.as_ref();
         let page = self.cfg.feed_page_size;
         let db = &mut self.db;
         let (local, feed) = std::thread::scope(|scope| {
-            let local = scope.spawn(|| -> Result<CatchUp, EngineError> {
-                let mut own = StateDb::open(db_path)?;
-                Ok(observer.catch_up(&mut own)?)
-            });
+            let local = scope
+                .spawn(|| -> Result<CatchUp, EngineError> { Ok(observer.catch_up(&mut own)?) });
             let feed = feed::pull(db, remote, page);
             (local.join(), feed)
         });

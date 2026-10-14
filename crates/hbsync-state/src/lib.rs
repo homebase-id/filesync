@@ -19,7 +19,7 @@ mod codec;
 mod migrations;
 mod store;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, TransactionBehavior};
@@ -73,22 +73,34 @@ fn wal(conn: &Connection) -> Result<()> {
 pub struct StateDb {
     conn: Connection,
     folder: i64,
+    /// `None` in memory.
+    path: Option<PathBuf>,
 }
 
 /// The folder a DB opened with [`StateDb::open`] sees: the first one, made on first use for the
 /// drive's root.
 pub const FIRST_FOLDER: i64 = 1;
+/// What [`StateDb::open_account`] sees: no folder.
+const NO_FOLDER: i64 = 0;
 
 impl StateDb {
     /// Opens (or creates) the DB at `path`, brings its schema up to date, and sees its first
     /// folder (made for the drive's root if there is none).
     pub fn open(path: &Path) -> Result<Self> {
-        Self::first(Self::setup(Connection::open(path)?)?)
+        Self::first(Self::setup(Connection::open(path)?, Some(path))?)
+    }
+
+    /// The DB at `path` as the account's: no folder made, none seen (a folder's rows can't be
+    /// written through it). [`StateDb::with_folder`] picks one.
+    pub fn open_account(path: &Path) -> Result<Self> {
+        let mut db = Self::setup(Connection::open(path)?, Some(path))?;
+        db.folder = NO_FOLDER;
+        Ok(db)
     }
 
     /// The DB at `path` seen as folder `folder` (one of its `folders`).
     pub fn open_folder(path: &Path, folder: i64) -> Result<Self> {
-        let mut db = Self::setup(Connection::open(path)?)?;
+        let mut db = Self::setup(Connection::open(path)?, Some(path))?;
         db.folder = folder;
         if !db.read(|s| Ok(s.folders()?.iter().any(|f| f.id == folder)))? {
             return Err(StateError::Conflict(format!(
@@ -100,7 +112,7 @@ impl StateDb {
 
     /// An in-memory DB, for tests: its first folder holds the drive's root.
     pub fn open_in_memory() -> Result<Self> {
-        Self::first(Self::setup(Connection::open_in_memory()?)?)
+        Self::first(Self::setup(Connection::open_in_memory()?, None)?)
     }
 
     fn first(mut db: StateDb) -> Result<Self> {
@@ -118,13 +130,26 @@ impl StateDb {
         self.folder
     }
 
+    /// The DB's file (`None` in memory).
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// A second connection to the same DB, seeing the same folder (for work on another thread).
+    pub fn another(&self) -> Result<Self> {
+        let path = self.path.as_deref().ok_or_else(|| {
+            StateError::Conflict("an in-memory DB has no second connection".into())
+        })?;
+        Self::open_folder(path, self.folder)
+    }
+
     /// This DB seen as folder `folder`: the same connection.
     pub fn with_folder(mut self, folder: i64) -> Self {
         self.folder = folder;
         self
     }
 
-    fn setup(mut conn: Connection) -> Result<Self> {
+    fn setup(mut conn: Connection, path: Option<&Path>) -> Result<Self> {
         // Start-up runs the local catch-up and the feed on two connections; a long scan
         // transaction must not make the other writer give up.
         conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -142,6 +167,7 @@ impl StateDb {
         Ok(StateDb {
             conn,
             folder: FIRST_FOLDER,
+            path: path.map(Path::to_path_buf),
         })
     }
 

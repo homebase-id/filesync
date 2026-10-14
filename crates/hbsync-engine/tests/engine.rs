@@ -587,8 +587,7 @@ fn start_up_catches_up_both_sides_in_parallel() -> R {
     b.write("from-b/two.txt", "2")?;
     let opts = b.engine.scan_options().clone();
     let mut observer = hbsync_local::LocalObserver::start(&b.root, opts);
-    let db_path = b.db_path();
-    let report = b.engine.start_up(&mut observer, &db_path, "2026-10-08")?;
+    let report = b.engine.start_up(&mut observer, "2026-10-08")?;
     assert!(report.feed.live >= 2, "{:?}", report.feed);
     assert_eq!(report.local.report.added, 2);
     b.sync()?;

@@ -45,7 +45,7 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         configure: impl Fn(&mut EngineConfig) -> Res<()> + 'static,
     ) -> Res<Self> {
         let dir = tempfile::tempdir()?;
-        let root = dir.path().canonicalize()?;
+        let root = dir.path().canonicalize()?.join("root");
         fs::create_dir_all(root.join(STATE_DIR))?;
         let configure: Configure = Box::new(configure);
         let engine = Self::engine(&root, name, Box::new(remote.clone()), &configure, |_| {})?;
@@ -69,7 +69,8 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         let mut cfg = EngineConfig::new(root, name);
         configure(&mut cfg)?;
         tweak(&mut cfg);
-        let db = StateDb::open(&hbsync_local::state_db_path(root))?;
+        // The account's DB, beside the folder (as the product keeps it with the account).
+        let db = StateDb::open(&db_path(root))?;
         Ok(Engine::new(db, remote, cfg))
     }
 
@@ -91,7 +92,7 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
 
     /// The state DB file (for a second connection).
     pub fn db_path(&self) -> PathBuf {
-        hbsync_local::state_db_path(&self.root)
+        db_path(&self.root)
     }
 
     /// Scan, then sync until idle (six passes at most), `before` each pass; every pass's
@@ -149,6 +150,10 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
             })
             .collect()
     }
+}
+
+fn db_path(root: &Path) -> PathBuf {
+    root.with_file_name("state.db")
 }
 
 fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {

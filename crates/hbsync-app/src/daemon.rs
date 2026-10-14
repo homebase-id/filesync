@@ -12,8 +12,6 @@ use std::time::{Duration, Instant};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::Notifier;
 use hbsync_homebase::{Client, HomebaseError};
-use hbsync_local::state_db_path;
-use hbsync_state::StateDb;
 use hbsync_types::unix_now;
 
 use crate::ipc::{self, Ask, Reply, Request};
@@ -162,7 +160,8 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         notifier: Some(Notifier::spawn(client, remote.drive(), tx)),
         events: rx,
     };
-    let mut cfg = RunnerConfig::new(&root.folder, &root.identity, &config.device_name());
+    let db = crate::accounts::db_path(paths, &root.identity);
+    let mut cfg = RunnerConfig::new(&root.folder, &db, &root.identity, &config.device_name());
     cfg.mass_delete = config.mass_delete;
     cfg.keep_deleted_days = config.keep_deleted_days.0;
     cfg.credentials_warning = warning;
@@ -197,17 +196,21 @@ fn answer(
 ) -> Reply {
     // From the folder's state DB, in any phase (WAL: a sync writing doesn't block it), and
     // without holding up the other requests.
+    let folder_db = || {
+        let db = crate::accounts::db_path(paths, &root.identity);
+        crate::accounts::open_folder(&db, &root.identity, &root.folder).ok()
+    };
     if let Ask::Recent { limit } = request.ask {
         return Reply::Recent(
-            StateDb::open(&state_db_path(&root.folder))
-                .and_then(|mut db| db.read(|s| s.recent_synced(limit)))
+            folder_db()
+                .and_then(|mut db| db.read(|s| s.recent_synced(limit)).ok())
                 .unwrap_or_default(),
         );
     }
     if let Ask::Deleted { limit } = request.ask {
         return Reply::Deleted(
-            StateDb::open(&state_db_path(&root.folder))
-                .and_then(|mut db| hbsync_engine::deleted::list(&mut db, limit))
+            folder_db()
+                .and_then(|mut db| hbsync_engine::deleted::list(&mut db, limit).ok())
                 .unwrap_or_default(),
         );
     }

@@ -5,20 +5,18 @@
 
 pub mod filter;
 pub mod journal;
+pub mod marker;
 pub mod scan;
 pub mod walk;
 pub mod watch;
 
 pub use filter::{Filter, FilterError, IGNORE_FILE, Verdict, is_junk};
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
+pub use marker::{MARKER_FILE, Marker};
 pub use scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
 pub use watch::{Debounce, LiveWatcher, LocalObserver, WatchBatch};
 
-/// The client's own folder at the top of the sync root (state, temp files, trash). Never synced.
+/// The client's own folder at the top of the sync root (its marker, ignore rules, temp files,
+/// trash). Never synced. The state DB is the account's, elsewhere.
 pub const STATE_DIR: &str = ".hbsync";
-
-/// The state DB of the sync root `root`, in [`STATE_DIR`].
-pub fn state_db_path(root: &std::path::Path) -> std::path::PathBuf {
-    root.join(STATE_DIR).join("state.db")
-}
