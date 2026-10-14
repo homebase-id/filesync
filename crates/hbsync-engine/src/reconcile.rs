@@ -437,6 +437,10 @@ pub fn reconcile(input: &Input, opts: &Options) -> Plan {
     Reconciler::new(input, opts, &masks).run()
 }
 
+/// Rounds of orphan and cycle repair at most (each round ends at least one cycle; a real tree
+/// needs one or two).
+const MAX_REPAIRS: usize = 64;
+
 struct Reconciler<'a> {
     /// The input with the masks applied.
     input: &'a Input,
@@ -477,7 +481,15 @@ impl<'a> Reconciler<'a> {
             self.merge_node(node);
         }
         self.fix_orphans();
-        self.fix_cycles();
+        // Undoing a move can put a node back into a folder deleted meanwhile (a new orphan,
+        // whose folder its live child keeps alive), and keeping a folder can close a cycle:
+        // both again until neither changes anything.
+        for _ in 0..MAX_REPAIRS {
+            if !self.fix_cycles() {
+                break;
+            }
+            self.fix_orphans();
+        }
         self.fix_names();
         self.emit();
         self.guard_mass_delete();
@@ -810,7 +822,9 @@ impl<'a> Reconciler<'a> {
         }
     }
 
-    fn fix_cycles(&mut self) {
+    /// Undoes moves that would put a folder inside itself. Whether it undid any.
+    fn fix_cycles(&mut self) -> bool {
+        let mut fixed = false;
         let candidates: Vec<NodeId> = self.scope.iter().copied().collect();
         for node in candidates {
             loop {
@@ -851,8 +865,10 @@ impl<'a> Reconciler<'a> {
                 }
                 self.retarget(victim, state);
                 self.plan.conflicts.push(Conflict::Cycle { node: victim });
+                fixed = true;
             }
         }
+        fixed
     }
 
     fn fix_names(&mut self) {
