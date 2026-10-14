@@ -1712,6 +1712,7 @@ fn seed_role(
 
 fn unscoped(cfg: &mut hbsync_engine::EngineConfig) {
     cfg.scope = Arc::new(hbsync_engine::scope::Scope {
+        top: hbsync_types::NodeId::ROOT,
         outside: Default::default(),
     });
 }

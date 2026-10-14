@@ -55,6 +55,10 @@ impl Drive {
         self.remote.as_ref()
     }
 
+    pub fn shared_remote(&self) -> Arc<dyn Remote> {
+        Arc::clone(&self.remote)
+    }
+
     fn account(&self) -> MutexGuard<'_, StateDb> {
         self.account.lock().unwrap_or_else(|e| e.into_inner())
     }

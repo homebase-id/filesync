@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
-use hbsync_remote::RemoteError;
+use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
@@ -148,6 +148,8 @@ impl SyncReport {
 pub struct Engine {
     db: StateDb,
     drive: Arc<Drive>,
+    /// The drive's remote as this engine writes to it ([`Scope::remote`]).
+    remote: Arc<dyn Remote>,
     cfg: EngineConfig,
     scan_opts: ScanOptions,
     /// Nodes whose transfers go first (a file the user just opened).
@@ -175,9 +177,11 @@ impl Engine {
     pub fn new(db: StateDb, drive: Arc<Drive>, cfg: EngineConfig) -> Self {
         let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
         scan_opts.filter = Arc::clone(&cfg.exec.filter);
+        let remote = cfg.scope.remote(drive.shared_remote());
         Engine {
             db,
             drive,
+            remote,
             cfg,
             scan_opts,
             urgent: Default::default(),
@@ -424,7 +428,7 @@ impl Engine {
         if plan.ops.is_empty() {
             return Ok(plan.held);
         }
-        let exec = Executor::new(&mut self.db, self.drive.remote(), &self.cfg.exec)
+        let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
             .with_urgent(self.urgent.clone())
             .with_stop(Arc::clone(&self.stop))
             .with_progress(Arc::clone(&self.progress))

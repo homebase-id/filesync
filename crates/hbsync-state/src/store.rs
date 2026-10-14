@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::codec;
+use crate::coords::Coords;
 use crate::{Result, StateError};
 
 /// The agreed state of one node.
@@ -182,6 +183,8 @@ pub struct Store<'a> {
     folder: i64,
     /// [`Store::folders`], read once per transaction (a change through this store forgets it).
     folders: std::cell::RefCell<Option<Vec<FolderRow>>>,
+    /// How this folder sees the drive, once known.
+    coords: std::cell::Cell<Option<Coords>>,
 }
 
 /// A folder this account syncs here.
@@ -227,6 +230,7 @@ impl<'a> Store<'a> {
             conn,
             folder,
             folders: Default::default(),
+            coords: Default::default(),
         }
     }
 
@@ -245,6 +249,57 @@ impl<'a> Store<'a> {
     /// The folder this store sees.
     pub fn folder(&self) -> i64 {
         self.folder
+    }
+
+    /// How this store's folder sees the drive's rows (the mirror, Recently deleted): its top
+    /// as the root, the rest of the drive as [`NodeId::OUTSIDE`]. The account (no folder) sees
+    /// them as they are.
+    pub fn coords(&self) -> Result<Coords> {
+        if let Some(c) = self.coords.get() {
+            return Ok(c);
+        }
+        let c = self
+            .folders()?
+            .into_iter()
+            .find(|f| f.id == self.folder)
+            .map_or(Coords::MAIN, |f| Coords { top: f.top });
+        self.coords.set(Some(c));
+        Ok(c)
+    }
+
+    /// `row` of the drive as this folder sees it; `None` for its top (its root).
+    fn seen(&self, mut row: MirrorRow) -> Result<Option<MirrorRow>> {
+        let c = self.coords()?;
+        if c.hides(row.node) {
+            return Ok(None);
+        }
+        row.parent = c.from_drive(row.parent);
+        Ok(Some(row))
+    }
+
+    fn seen_removed(&self, mut r: RemovedRow) -> Result<Option<RemovedRow>> {
+        let Some(row) = self.seen(r.row)? else {
+            return Ok(None);
+        };
+        r.row = row;
+        r.removal.root = self.coords()?.from_drive(r.removal.root);
+        Ok(Some(r))
+    }
+
+    /// `row` as the drive has it: the folder's root is its top. The root and the rest of the
+    /// drive ([`NodeId::OUTSIDE`]) aren't nodes to write.
+    fn on_drive(&self, row: &MirrorRow) -> Result<MirrorRow> {
+        let c = self.coords()?;
+        if row.node.is_root() || c.is_outside(row.node) {
+            return Err(StateError::Conflict(format!(
+                "{:?} isn't a node of the drive",
+                row.node
+            )));
+        }
+        Ok(MirrorRow {
+            parent: c.to_drive(row.parent),
+            ..row.clone()
+        })
     }
 
     /// Registers a folder holding the drive's node `top`; its id.
@@ -888,11 +943,20 @@ impl<'a> Store<'a> {
     // ---- remote mirror ----
 
     pub fn get_mirror(&self, node: NodeId) -> Result<Option<MirrorRow>> {
-        self.one(
+        if node.is_root() {
+            return Ok(None);
+        }
+        if self.coords()?.is_outside(node) {
+            return Ok(Some(outside_row()));
+        }
+        match self.one(
             &format!("{MIRROR_SELECT} WHERE n.uuid = ?1"),
             node.0.as_bytes(),
             mirror_row,
-        )
+        )? {
+            Some(row) => self.seen(row),
+            None => Ok(None),
+        }
     }
 
     /// Whether the mirror has file `at` at that version (the node is the file's), or, with
@@ -907,19 +971,32 @@ impl<'a> Store<'a> {
     }
 
     pub fn mirror_by_file(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
-        self.one(
+        match self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
             file_id.0.as_bytes(),
             mirror_row,
-        )
+        )? {
+            Some(row) => self.seen(row),
+            None => Ok(None),
+        }
     }
 
     pub fn mirror_children(&self, parent: NodeId) -> Result<Vec<MirrorRow>> {
-        self.many(
+        let c = self.coords()?;
+        let rows = self.many(
             &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF}"),
-            [parent.0.as_bytes()],
+            [c.to_drive(parent).0.as_bytes()],
             mirror_row,
-        )
+        )?;
+        let mut seen = Vec::with_capacity(rows.len() + 1);
+        for row in rows {
+            seen.extend(self.seen(row)?);
+        }
+        // The rest of the drive is a folder at the top.
+        if parent.is_root() && c.is_outside(NodeId::OUTSIDE) {
+            seen.push(outside_row());
+        }
+        Ok(seen)
     }
 
     /// Records a live remote node, and marks it dirty in the folders the change concerns
@@ -930,6 +1007,7 @@ impl<'a> Store<'a> {
         if self.has_version(row.remote_ref(), false)? {
             return Ok(());
         }
+        let row = &self.on_drive(row)?;
         let (id, parent) = (
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.parent)?,
@@ -962,15 +1040,20 @@ impl<'a> Store<'a> {
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
     /// ([`Store::fan_out`]), and returns the row.
     pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
-        let row = self.mirror_by_file(file_id)?;
-        if let Some(row) = &row {
-            self.fan_out(row.node, row.parent)?;
-            self.change(
-                "DELETE FROM remote WHERE file_id = ?1",
-                file_id.0.as_bytes(),
-            )?;
-        }
-        Ok(row)
+        let Some(row) = self.one(
+            &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
+            file_id.0.as_bytes(),
+            mirror_row,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.fan_out(row.node, row.parent)?;
+        self.change(
+            "DELETE FROM remote WHERE file_id = ?1",
+            file_id.0.as_bytes(),
+        )?;
+        self.seen(row)
     }
 
     /// Marks `node` dirty in the folders a change of it, now in the drive's folder `place`,
@@ -1025,10 +1108,12 @@ impl<'a> Store<'a> {
     /// Records a removed node (replacing an older record of it), and marks it dirty where that
     /// concerns ([`Store::fan_out`]); the same version again changes nothing.
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
-        let (row, f) = (&removed.row, removed.row.file.as_ref());
-        if self.has_version(row.remote_ref(), true)? {
+        if self.has_version(removed.row.remote_ref(), true)? {
             return Ok(());
         }
+        let row = &self.on_drive(&removed.row)?;
+        let f = row.file.as_ref();
+        let root = self.coords()?.to_drive(removed.removal.root);
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
                  hash, size, mtime_ms, executable, content_extra, removed_at, root) \
@@ -1047,48 +1132,58 @@ impl<'a> Store<'a> {
             f.is_some_and(|f| f.executable),
             row.content_extra,
             removed.removal.at_ms,
-            removed.removal.root.0.as_bytes(),
+            root.0.as_bytes(),
         ])?;
         self.fan_out(row.node, row.parent)
     }
 
     pub fn removed_by_node(&self, node: NodeId) -> Result<Option<RemovedRow>> {
-        self.one(
+        match self.one(
             &format!("{REMOVED_SELECT} WHERE node = ?1"),
             node.0.as_bytes(),
             removed_row,
-        )
+        )? {
+            Some(r) => self.seen_removed(r),
+            None => Ok(None),
+        }
+    }
+
+    /// Rows of Recently deleted as this folder sees them.
+    fn removed_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<RemovedRow>> {
+        let mut seen = Vec::new();
+        for r in self.many(sql, params, removed_row)? {
+            seen.extend(self.seen_removed(r)?);
+        }
+        Ok(seen)
     }
 
     /// The removed nodes in folder `parent`.
     pub fn removed_children(&self, parent: NodeId) -> Result<Vec<RemovedRow>> {
-        self.many(
+        let parent = self.coords()?.to_drive(parent);
+        self.removed_rows(
             &format!("{REMOVED_SELECT} WHERE parent = ?1"),
             [parent.0.as_bytes()],
-            removed_row,
         )
     }
 
     /// Recently deleted, newest first.
     pub fn list_removed(&self, limit: usize) -> Result<Vec<RemovedRow>> {
-        self.many(
+        self.removed_rows(
             &format!("{REMOVED_SELECT} ORDER BY removed_at DESC, name LIMIT ?1"),
             [i64::try_from(limit).unwrap_or(i64::MAX)],
-            removed_row,
         )
     }
 
     /// What was removed before `at_ms` (Unix ms), with the delete that took it along (its
     /// root, if still removed): a folder's delete goes as a whole. Files before folders.
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
-        self.many(
+        self.removed_rows(
             &format!(
                 "{REMOVED_SELECT} WHERE removed_at < ?1 AND NOT EXISTS \
                  (SELECT 1 FROM removed r WHERE r.node = removed.root AND r.removed_at >= ?1) \
                  ORDER BY kind, removed_at"
             ),
             [at_ms],
-            removed_row,
         )
     }
 
@@ -1482,6 +1577,20 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
             .map(codec::hash_from)
             .transpose()?,
     })
+}
+
+/// The rest of the drive as a folder holding part of it sees it: one folder at its top.
+fn outside_row() -> MirrorRow {
+    MirrorRow {
+        file_id: RemoteFileId(hbsync_types::Uuid::nil()),
+        version: VersionTag(hbsync_types::Uuid::nil()),
+        node: NodeId::OUTSIDE,
+        parent: NodeId::ROOT,
+        name: "Outside".into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+    }
 }
 
 fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {

@@ -734,3 +734,105 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
     }
     Ok(())
 }
+
+/// A folder holding part of the drive sees the drive's rows in its own coordinates: its top
+/// is its root (and no node), the rest of the drive one folder, OUTSIDE, at its top. What it
+/// writes at its root goes to its top.
+#[test]
+fn a_role_folder_sees_its_top_as_the_root() -> R {
+    use hbsync_state::{MirrorRow, RemovedRow};
+    use hbsync_types::schema::Removal;
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let top = NodeId::new();
+    let docs = main.write(|s| s.add_folder(top, "/d", "m2"))?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    let row = |node, parent, name: &str| MirrorRow {
+        file_id: RemoteFileId(Uuid::new_v4()),
+        version: VersionTag(Uuid::new_v4()),
+        node,
+        parent,
+        name: name.into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+    };
+    let (inside, elsewhere) = (NodeId::new(), NodeId::new());
+    main.write(|s| {
+        s.put_mirror(&row(top, NodeId::ROOT, "Documents"))?;
+        s.put_mirror(&row(inside, top, "Work"))?;
+        s.put_mirror(&row(elsewhere, NodeId::ROOT, "Music stuff"))
+    })?;
+    docs_db.read(|s| {
+        assert_eq!(s.get_mirror(top)?, None, "its top is its root");
+        assert_eq!(s.get_mirror(inside)?.map(|r| r.parent), Some(NodeId::ROOT));
+        assert_eq!(
+            s.get_mirror(elsewhere)?.map(|r| r.parent),
+            Some(NodeId::OUTSIDE)
+        );
+        let outside = s
+            .get_mirror(NodeId::OUTSIDE)?
+            .ok_or(StateError::Corrupt("no".into()))?;
+        assert_eq!(
+            (outside.parent, outside.kind),
+            (NodeId::ROOT, NodeKind::Folder)
+        );
+        let mut at_top: Vec<NodeId> = s
+            .mirror_children(NodeId::ROOT)?
+            .iter()
+            .map(|r| r.node)
+            .collect();
+        at_top.sort();
+        let mut expected = vec![inside, NodeId::OUTSIDE];
+        expected.sort();
+        assert_eq!(at_top, expected);
+        let rest: Vec<NodeId> = s
+            .mirror_children(NodeId::OUTSIDE)?
+            .iter()
+            .map(|r| r.node)
+            .collect();
+        assert_eq!(
+            rest,
+            [elsewhere],
+            "the drive's top without the folder's own top"
+        );
+        Ok(())
+    })?;
+    // Written at its root, it is at its top on the drive; OUTSIDE is never written.
+    let new = NodeId::new();
+    docs_db.write(|s| s.put_mirror(&row(new, NodeId::ROOT, "New")))?;
+    assert_eq!(
+        main.read(|s| s.get_mirror(new))?.map(|r| r.parent),
+        Some(top)
+    );
+    assert!(
+        docs_db
+            .write(|s| s.put_mirror(&row(NodeId::OUTSIDE, NodeId::ROOT, "x")))
+            .is_err()
+    );
+    // Recently deleted too.
+    let removal = Removal {
+        at_ms: 1,
+        root: new,
+    };
+    let gone = main
+        .read(|s| s.get_mirror(new))?
+        .ok_or(StateError::Corrupt("no".into()))?;
+    docs_db.write(|s| {
+        s.delete_mirror(gone.file_id)?;
+        s.put_removed(&RemovedRow {
+            row: MirrorRow {
+                parent: NodeId::ROOT,
+                ..gone.clone()
+            },
+            removal,
+        })
+    })?;
+    assert_eq!(
+        main.read(|s| s.removed_by_node(new))?.map(|r| r.row.parent),
+        Some(top)
+    );
+    assert_eq!(docs_db.read(|s| s.removed_children(NodeId::ROOT))?.len(), 1);
+    Ok(())
+}
