@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn folders_are_resolved_before_they_are_judged() -> control::Result<()> {
         let dir = tempfile::tempdir()?;
-        let home = dir.path().canonicalize()?.join("anna");
+        let home = canonical(dir.path())?.join("anna");
         std::fs::create_dir_all(home.join("Docs"))?;
         // `..` and a symlink can't make a folder look like something else.
         assert_eq!(
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn plans_are_checked() -> R {
         let dir = tempfile::tempdir()?;
-        let home = dir.path().canonicalize()?.join("anna");
+        let home = canonical(dir.path())?.join("anna");
         let fresh = home.join("Homebase");
         let full = home.join("Mine");
         std::fs::create_dir_all(&full)?;
