@@ -41,10 +41,11 @@ mod win {
     use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
     use windows_sys::Win32::Storage::CloudFilters::{
         CF_CONVERT_FLAG_MARK_IN_SYNC, CF_IN_SYNC_STATE, CF_IN_SYNC_STATE_IN_SYNC,
-        CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_OPEN_FILE_FLAG_WRITE_ACCESS, CF_REVERT_FLAG_NONE,
-        CF_SET_IN_SYNC_FLAG_NONE, CfCloseHandle, CfConvertToPlaceholder,
+        CF_IN_SYNC_STATE_NOT_IN_SYNC, CF_OPEN_FILE_FLAG_WRITE_ACCESS, CF_PIN_STATE,
+        CF_PIN_STATE_PINNED, CF_PIN_STATE_UNSPECIFIED, CF_REVERT_FLAG_NONE,
+        CF_SET_IN_SYNC_FLAG_NONE, CF_SET_PIN_FLAG_RECURSE, CfCloseHandle, CfConvertToPlaceholder,
         CfGetWin32HandleFromProtectedHandle, CfOpenFileWithOplock, CfRevertPlaceholder,
-        CfSetInSyncState,
+        CfSetInSyncState, CfSetPinState,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -87,6 +88,8 @@ mod win {
             println!("  7  Mark the test folder ITSELF as syncing (arrows on the top entry?)");
             println!("  8  Show the test folder ITSELF as paused (a custom state)");
             println!("  9  Clear that custom state");
+            println!(" 10  Pin everything: \"always keep on this device\" (solid green ticks?)");
+            println!(" 11  Unpin everything");
             println!("  q  Quit");
             print!("> ");
             let _ = io::stdout().flush();
@@ -104,6 +107,8 @@ mod win {
                 "7" => "root-syncing",
                 "8" => "root-paused",
                 "9" => "root-clear",
+                "10" => "pin",
+                "11" => "unpin",
                 "q" | "Q" => return,
                 _ => continue,
             };
@@ -132,6 +137,8 @@ mod win {
             "root-in-sync-win32" => root_in_sync_win32(),
             "root-paused" => root_state(Some("Paused")),
             "root-clear" => root_state(None),
+            "pin" => pin(CF_PIN_STATE_PINNED),
+            "unpin" => pin(CF_PIN_STATE_UNSPECIFIED),
             other => Err(format!("unknown command {other:?}").into()),
         }
     }
@@ -311,6 +318,38 @@ mod win {
         };
         HRESULT(hr).ok()?;
         println!("Marked the test folder itself as synced (an ordinary handle).");
+        Ok(())
+    }
+
+    /// Sets the pin state of the test folder and everything in it: the folder's, recursively,
+    /// or else item by item.
+    fn pin(state: CF_PIN_STATE) -> Result<(), Error> {
+        let dir = folder()?;
+        let set = |path: &Path, flags| -> Result<(), Error> {
+            let file = CloudFile::open(path)?;
+            let hr = unsafe { CfSetPinState(file.raw(), state, flags, std::ptr::null_mut()) };
+            HRESULT(hr)
+                .ok()
+                .map_err(|e| format!("{}: {e}", path.display()).into())
+        };
+        match set(&dir, CF_SET_PIN_FLAG_RECURSE) {
+            Ok(()) => println!("Set the pin state of the test folder, recursively."),
+            Err(e) => {
+                println!("Recursively from the test folder: {e} (item by item instead)");
+                let (mut done, mut failed) = (0, 0);
+                for path in walk(&dir)? {
+                    match set(&path, 0) {
+                        Ok(()) => done += 1,
+                        Err(e) => {
+                            failed += 1;
+                            println!("  {e}");
+                        }
+                    }
+                }
+                println!("Set the pin state of {done} items ({failed} failed).");
+            }
+        }
+        println!("In Explorer: solid green ticks in the Status column, and on the top entry?");
         Ok(())
     }
 

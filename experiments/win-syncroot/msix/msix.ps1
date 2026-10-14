@@ -17,16 +17,7 @@ reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' /t REG_D
 # Each inner list is one process's commands, in order.
 $sequences = @(
     @('register'),
-    @('status unregister-bare'),
-    @('register'),
-    @('root-in-sync unregister-bare'),
-    @('register'),
-    @('root-in-sync-win32 unregister-bare'),
-    @('register'),
-    @('root-paused unregister-bare'),
-    @('register'),
-    @('root-in-sync-win32 root-syncing root-in-sync-win32'),
-    @('unregister-bare')
+    @('in-sync root-in-sync-win32 pin unpin pin status unregister-bare')
 )
 
 function Try-It([string] $title, [string] $run) {
