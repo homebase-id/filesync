@@ -119,6 +119,8 @@ impl Store<'_> {
     pub fn remove_folder(&self, id: i64) -> Result<bool> {
         self.folders.take();
         self.places.borrow_mut().clear();
+        self.local_ids.borrow_mut().clear();
+        self.local_paths.borrow_mut().clear();
         self.change("DELETE FROM folders WHERE id = ?1", id)
     }
 

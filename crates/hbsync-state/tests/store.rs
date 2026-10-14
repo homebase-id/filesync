@@ -835,3 +835,37 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
     assert_eq!(docs_db.read(|s| s.removed_children(NodeId::ROOT))?.len(), 1);
     Ok(())
 }
+
+/// Folder paths and ids found in a transaction are kept for it, and forgotten by every local
+/// write that changes them: a move, a rekey, a delete.
+#[test]
+fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    db.write(|s| {
+        let a = local("a", NodeKind::Folder, 1);
+        s.put_local(&a)?;
+        s.put_local(&local("a/x", NodeKind::File, 2))?;
+        assert_eq!(s.local_by_node(a.node)?.map(|r| r.path), Some(path("a")));
+        s.move_local_subtree(&path("a"), &path("b"))?;
+        s.put_local(&local("b/y", NodeKind::File, 3))?;
+        assert!(
+            s.put_local(&local("a/z", NodeKind::File, 4)).is_err(),
+            "a went"
+        );
+        let missing = |what: &str| StateError::Corrupt(format!("{what} missing"));
+        let x = s.get_local(&path("b/x"))?.ok_or_else(|| missing("b/x"))?;
+        assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("b/x")));
+
+        let renewed = NodeId::new();
+        s.rekey_local(a.node, renewed)?;
+        let y = s.get_local(&path("b/y"))?.ok_or_else(|| missing("b/y"))?;
+        assert_eq!(s.local_parent(y.node)?, Some(renewed));
+        s.delete_local_subtree(&path("b"))?;
+        assert!(
+            s.put_local(&local("b/w", NodeKind::File, 5)).is_err(),
+            "b went"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}

@@ -5,20 +5,41 @@ use super::*;
 impl Store<'_> {
     // ---- local observations ----
 
-    /// The id of the local row at `path`; for the root, the root's id (it has no row).
+    /// The id of the local row at `path`; for the root, the root's id (it has no row). Walks
+    /// down from the nearest folder found before in this transaction.
     pub(super) fn local_id_at(&self, path: &RelPath) -> Result<Option<i64>> {
-        let Some(mut id) = self.key(NodeId::ROOT)? else {
-            return Ok(None);
+        let mut missing = Vec::new();
+        let mut at = path.clone();
+        let mut id = loop {
+            if at.is_root() {
+                match self.key(NodeId::ROOT)? {
+                    Some(root) => break root,
+                    None => return Ok(None),
+                }
+            }
+            if let Some(&known) = self.local_ids.borrow().get(&at) {
+                break known;
+            }
+            let parent = at.parent().unwrap_or_default();
+            missing.push(std::mem::replace(&mut at, parent));
         };
         let mut stmt =
             self.prep("SELECT id FROM local WHERE folder = $F AND parent = ?1 AND name = ?2")?;
-        for name in path.components() {
+        for below in missing.into_iter().rev() {
+            let name = below.name().unwrap_or_default();
             match stmt.query_row(params![id, name], |r| r.get(0)).optional()? {
                 Some(child) => id = child,
                 None => return Ok(None),
             }
+            self.local_ids.borrow_mut().insert(below, id);
         }
         Ok(Some(id))
+    }
+
+    /// Forgets the folder ids [`Store::local_id_at`] found: a local write may change them.
+    fn forget_local_ids(&self) {
+        self.local_ids.borrow_mut().clear();
+        self.local_paths.borrow_mut().clear();
     }
 
     /// The id of the folder at `path`, to write a row into: the root's id is assigned on first
@@ -31,12 +52,9 @@ impl Store<'_> {
     }
 
     /// The path of the folder `id` (the root's id gives the root), walking up its parents
-    /// until a folder already in `cache`; every folder on the way is cached.
-    pub(super) fn folder_path(
-        &self,
-        id: i64,
-        cache: &mut HashMap<i64, RelPath>,
-    ) -> Result<RelPath> {
+    /// until a folder found before in this transaction; every folder on the way is kept.
+    pub(super) fn folder_path(&self, id: i64) -> Result<RelPath> {
+        let mut cache = self.local_paths.borrow_mut();
         if cache.is_empty()
             && let Some(root) = self.key(NodeId::ROOT)?
         {
@@ -85,11 +103,10 @@ impl Store<'_> {
     /// Rows found without their path: each path is its folder's (derived once per folder)
     /// plus its name.
     pub(super) fn with_paths(&self, raw: Vec<RawLocal>) -> Result<Vec<LocalRow>> {
-        let mut cache = HashMap::new();
         raw.into_iter()
             .map(|r| {
                 let path = self
-                    .folder_path(r.parent, &mut cache)?
+                    .folder_path(r.parent)?
                     .join(&r.name)
                     .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
                 r.into_row(path)
@@ -219,6 +236,13 @@ impl Store<'_> {
     /// Deletes the row of `node`. A folder's contents must go first (or use
     /// [`Store::delete_local_subtree`]): rows below a deleted folder would have no path.
     pub fn delete_local(&self, node: NodeId) -> Result<bool> {
+        // Forgotten after the write: the lookups before it find the old places again.
+        let done = self.delete_local_rows(node);
+        self.forget_local_ids();
+        done
+    }
+
+    fn delete_local_rows(&self, node: NodeId) -> Result<bool> {
         let Some(id) = self.key(node)? else {
             return Ok(false);
         };
@@ -241,6 +265,13 @@ impl Store<'_> {
     /// The item recorded for `old` is node `new` from now on (adoption): same place, same
     /// observation, and its contents stay inside it.
     pub fn rekey_local(&self, old: NodeId, new: NodeId) -> Result<()> {
+        // Forgotten after the write: the lookups before it find the old places again.
+        let done = self.rekey_local_rows(old, new);
+        self.forget_local_ids();
+        done
+    }
+
+    fn rekey_local_rows(&self, old: NodeId, new: NodeId) -> Result<()> {
         let old_id = self
             .key(old)?
             .ok_or_else(|| StateError::Conflict(format!("{old:?} has no row")))?;
@@ -336,6 +367,13 @@ impl Store<'_> {
     /// Moves the row at `from`, and with it everything below, to `to` (a folder was moved or
     /// renamed): one row changes. Fails if `to` is taken or its folder has no row.
     pub fn move_local_subtree(&self, from: &RelPath, to: &RelPath) -> Result<()> {
+        // Forgotten after the write: the lookups before it find the old places again.
+        let done = self.move_local_subtree_rows(from, to);
+        self.forget_local_ids();
+        done
+    }
+
+    fn move_local_subtree_rows(&self, from: &RelPath, to: &RelPath) -> Result<()> {
         let conflict = || StateError::Conflict(format!("can't move {from} to {to}"));
         if from.is_root() || to.starts_with(from) {
             return Err(conflict());
@@ -355,6 +393,13 @@ impl Store<'_> {
 
     /// Deletes the rows of `path` and everything below it and returns them.
     pub fn delete_local_subtree(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
+        // Forgotten after the write: the lookups before it find the old places again.
+        let done = self.delete_local_subtree_rows(path);
+        self.forget_local_ids();
+        done
+    }
+
+    fn delete_local_subtree_rows(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
         let raw = self.subtree_raw(path)?;
         let mut stmt = self.prep("DELETE FROM local WHERE folder = $F AND id = ?1")?;
         for (_, r) in &raw {
