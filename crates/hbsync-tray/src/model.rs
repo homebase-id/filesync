@@ -62,6 +62,8 @@ pub enum Action {
     LogIn,
     LogInAgain,
     OpenFolder,
+    /// Open this page in the browser.
+    OpenOnline(String),
     /// Show this file or folder in the file manager.
     Reveal(PathBuf),
     /// Pause for this many seconds.
@@ -184,6 +186,10 @@ pub fn menu(view: &View) -> Vec<Item> {
         "Open Homebase folder".into(),
     ));
     if let Some(s) = status {
+        items.push(Item::Action(
+            Action::OpenOnline(files_online(&s.identity)),
+            "Browse files online".into(),
+        ));
         items.push(recently_synced(view.recent, &s.folder, view.now));
         let problems = problems(s, view.now);
         if !problems.is_empty() {
@@ -240,6 +246,12 @@ pub fn menu(view: &View) -> Vec<Item> {
     items.push(Item::Separator);
     items.push(quit());
     items
+}
+
+/// Chat's web app on the identity, opened on its Filesync mini-app: the drive's files in the
+/// browser.
+fn files_online(identity: &str) -> String {
+    format!("https://{identity}/apps/chat-wasm/#filesync")
 }
 
 fn quit() -> Item {
@@ -490,6 +502,13 @@ mod tests {
             m.contains(&Item::Action(
                 Action::RecentlyDeleted,
                 "Recently deleted…".into()
+            )),
+            "{m:?}"
+        );
+        assert!(
+            m.contains(&Item::Action(
+                Action::OpenOnline("https://anna.example.com/apps/chat-wasm/#filesync".into()),
+                "Browse files online".into()
             )),
             "{m:?}"
         );
