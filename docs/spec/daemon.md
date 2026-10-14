@@ -193,13 +193,12 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a
   minute.
-- **The folder:** once per folder the tray gives it the Filesync icon (`desktop.ini` on
-  Windows, Finder's custom icon on macOS, `.directory` and GIO metadata on Linux; on Windows and
-  Linux an icon file in the state folder, replaced at a start when a new version brings another
-  icon) and, on
-  Linux, a shortcut (GTK bookmarks and KDE places; Finder's sidebar has no public interface).
-  Unlinking (also the tray's Log out, which unlinks) takes them off again; `hbsync logout`
-  keeps them.
+- **The folder:** the tray gives it the Filesync icon (`desktop.ini` on Windows, Finder's custom
+  icon on macOS, `.directory` and GIO metadata on Linux) and, on Linux, a shortcut (GTK
+  bookmarks and KDE places; Finder's sidebar has no public interface). The shortcut once per
+  folder, so one the user removed stays removed; the icon again when a new version brings
+  another (the note `folder-decorated` holds the folder and a hash of its icons). Unlinking
+  (also the tray's Log out, which unlinks) takes them off again; `hbsync logout` keeps them.
 - **Explorer's navigation pane (Windows):** at every start the tray registers the folder as a
   Cloud Files sync root named "Homebase" (`HomebaseFilesync!<user SID>!<identity>~<hash of the
   folder>`), at the top of the pane as OneDrive's and Dropbox's are. Only the registration, no

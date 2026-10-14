@@ -178,7 +178,9 @@ impl Server {
             return respond(&mut stream, 404, "text/plain", b"not here");
         };
         match (request.method.as_str(), page) {
-            ("GET", "mark.png") => respond(&mut stream, 200, "image/png", crate::icons::APP_256),
+            ("GET", "app-icon.png") => {
+                respond(&mut stream, 200, "image/png", crate::icons::APP_256)
+            }
             ("GET", "setup") => self.html(&mut stream, self.setup_page()),
             ("POST", "setup/folder") => {
                 self.choose_folder();
@@ -217,7 +219,7 @@ impl Server {
     }
 
     fn html(&self, stream: &mut TcpStream, body: String) -> std::io::Result<()> {
-        let page = frame(&self.pages.url("mark.png"), &body);
+        let page = frame(&self.pages.url("app-icon.png"), &body);
         respond(stream, 200, "text/html; charset=utf-8", page.as_bytes())
     }
 

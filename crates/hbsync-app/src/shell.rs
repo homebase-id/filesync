@@ -1,8 +1,9 @@
 //! The synced folder in the file manager: the Homebase icon on it, and a place in the sidebar
 //! (Windows: Explorer's navigation pane, `sync_root.rs`; Linux: GTK bookmarks and KDE places;
-//! Finder's sidebar has no public interface). Done once per folder (a note in the state
-//! folder), so a shortcut the user removed stays removed; undone when the folder is unlinked.
-//! All best effort: a file manager that doesn't take it is no failure.
+//! Finder's sidebar has no public interface). The shortcut is made once per folder (a note in
+//! the state folder), so one the user removed stays removed; the icon again when a version
+//! brings another. Undone when the folder is unlinked. All best effort: a file manager that
+//! doesn't take it is no failure.
 
 use std::path::{Path, PathBuf};
 
@@ -17,15 +18,35 @@ pub struct Icons<'a> {
     pub ico: &'a [u8],
 }
 
-/// The note of the folder already given its icon and shortcut.
+/// The note of the folder already decorated, and of the icons it got: `<folder>\n<hash>`.
 const DONE: &str = "folder-decorated";
 
 fn note(paths: &Paths) -> PathBuf {
     paths.state.join(DONE)
 }
 
-/// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already had them
-/// once.
+/// What the note says is still to do for `folder` with icons hashed to `key`: (the shortcut
+/// too, being a new folder; the icon).
+fn to_do(note: &str, folder: &Path, key: &str) -> (bool, bool) {
+    let mut lines = note.lines();
+    let first = !lines.next().is_some_and(|f| Path::new(f.trim()) == folder);
+    let icon = first || lines.next().map(str::trim) != Some(key);
+    (first, icon)
+}
+
+/// Writes `bytes` to `path` when they differ from what is there; a file that can't be written
+/// again (Explorer holds it open) stays as it is.
+fn write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|b| b == bytes) {
+        return Ok(());
+    }
+    match std::fs::write(path, bytes) {
+        Err(e) if !path.exists() => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already has them.
 pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) {
     // Not for a folder no longer set up: a late call that lost the race with Log out.
     let configured = crate::control::configured(paths)
@@ -36,20 +57,29 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
         return;
     }
     let done = note(paths);
-    let first = !std::fs::read_to_string(&done).is_ok_and(|f| Path::new(f.trim()) == folder);
+    let key = format!(
+        "{:016x}",
+        crate::ipc::fnv1a(&[icons.png, icons.ico].concat())
+    );
+    let (first, icon) = to_do(
+        &std::fs::read_to_string(&done).unwrap_or_default(),
+        folder,
+        &key,
+    );
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
     os::sync_root(paths, folder, identity, icons, first);
+    if icon {
+        tracing::info!("giving {} its icon", folder.display());
+        if let Err(e) = os::icon(paths, folder, icons) {
+            tracing::info!("the folder's icon: {e}");
+        }
+    }
     #[cfg(target_os = "linux")]
-    os::refresh_icon(paths, icons);
-    if !first {
-        return;
+    if first {
+        os::shortcut(folder);
     }
-    tracing::info!("giving {} its icon and a shortcut", folder.display());
-    if let Err(e) = os::decorate(paths, folder, icons) {
-        tracing::info!("the folder's icon or shortcut: {e}");
-    }
-    if let Err(e) = std::fs::write(&done, folder.display().to_string()) {
+    if icon && let Err(e) = std::fs::write(&done, format!("{}\n{key}\n", folder.display())) {
         tracing::warn!("{}: {e}", done.display());
     }
 }
@@ -160,16 +190,8 @@ mod os {
         }
     }
 
-    fn icon(paths: &Paths) -> PathBuf {
+    fn icon_file(paths: &Paths) -> PathBuf {
         paths.state.join("homebase.png")
-    }
-
-    /// A newer icon (another version's) replaces the one the folder was given before.
-    pub fn refresh_icon(paths: &Paths, icons: Icons<'_>) {
-        let icon = icon(paths);
-        if icon.exists() && std::fs::read(&icon).is_ok_and(|b| b != icons.png) {
-            let _ = std::fs::write(&icon, icons.png);
-        }
     }
 
     /// Dolphin's folder settings, giving the icon.
@@ -177,9 +199,9 @@ mod os {
         format!("[Desktop Entry]\nIcon={}\n", icon.display())
     }
 
-    pub fn decorate(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
-        let icon = icon(paths);
-        std::fs::write(&icon, icons.png)?;
+    pub fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+        let icon = icon_file(paths);
+        write_if_changed(&icon, icons.png)?;
         // GNOME's Files and others: GIO metadata (outside the folder).
         let _ = Command::new("gio")
             .args(["set", "-t", "string"])
@@ -192,6 +214,10 @@ mod os {
         if !directory.exists() {
             std::fs::write(&directory, dolphin(&icon))?;
         }
+        Ok(())
+    }
+
+    pub fn shortcut(folder: &Path) {
         let uri = file_uri(folder);
         if let Some(config) = xdg_dir("XDG_CONFIG_HOME", ".config") {
             edit(&config.join("gtk-3.0/bookmarks"), true, |t| {
@@ -204,7 +230,6 @@ mod os {
                 kde_places_with(t, &uri, "Homebase")
             });
         }
-        Ok(())
     }
 
     pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
@@ -214,7 +239,7 @@ mod os {
             .arg("metadata::custom-icon")
             .output();
         let directory = folder.join(".directory");
-        if std::fs::read_to_string(&directory).is_ok_and(|t| t == dolphin(&icon(paths))) {
+        if std::fs::read_to_string(&directory).is_ok_and(|t| t == dolphin(&icon_file(paths))) {
             std::fs::remove_file(&directory)?;
         }
         let uri = file_uri(folder);
@@ -260,7 +285,7 @@ mod os {
         }
     }
 
-    pub fn decorate(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+    pub fn icon(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
         set_icon(folder, Some(icons.png))
     }
 
@@ -319,20 +344,8 @@ mod os {
             .output();
     }
 
-    fn icon(paths: &Paths) -> PathBuf {
+    fn icon_file(paths: &Paths) -> PathBuf {
         paths.state.join("homebase.ico")
-    }
-
-    /// The icon file, written when it differs; one Explorer holds open stays as it is.
-    fn ensure_icon(paths: &Paths, ico: &[u8]) -> std::io::Result<PathBuf> {
-        let icon = icon(paths);
-        if std::fs::read(&icon).is_ok_and(|b| b == ico) {
-            return Ok(icon);
-        }
-        match std::fs::write(&icon, ico) {
-            Err(e) if !icon.exists() => Err(e),
-            _ => Ok(icon),
-        }
     }
 
     /// Explorer's folder settings, giving the icon.
@@ -348,8 +361,9 @@ mod os {
     /// below: it comes off, so it isn't in the pane twice. Where Explorer won't take a root (not
     /// NTFS, a share, inside another provider's root), the first time pins it there instead.
     pub fn sync_root(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>, first: bool) {
-        let registered = ensure_icon(paths, icons.ico)
-            .and_then(|icon| crate::sync_root::register(folder, identity, &icon));
+        let icon = icon_file(paths);
+        let registered = write_if_changed(&icon, icons.ico)
+            .and_then(|()| crate::sync_root::register(folder, identity, &icon));
         match registered {
             Ok(true) if !first => quick_access(folder, false),
             Ok(_) => {}
@@ -368,8 +382,9 @@ mod os {
         }
     }
 
-    pub fn decorate(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
-        let icon = ensure_icon(paths, icons.ico)?;
+    pub fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+        let icon = icon_file(paths);
+        write_if_changed(&icon, icons.ico)?;
         let ini = folder.join("desktop.ini");
         if !ini.exists() {
             std::fs::write(&ini, desktop_ini(&icon))?;
@@ -382,7 +397,7 @@ mod os {
 
     pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let ini = folder.join("desktop.ini");
-        let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t == desktop_ini(&icon(paths)));
+        let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t == desktop_ini(&icon_file(paths)));
         if ours {
             attributes(&ini, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, false)?;
             std::fs::remove_file(&ini)?;
@@ -398,6 +413,23 @@ mod tests {
     use super::*;
 
     const URI: &str = "file:///home/anna/Homebase";
+
+    #[test]
+    fn the_note_says_what_is_left_to_do() {
+        let home = Path::new("/home/anna/Homebase");
+        assert_eq!(to_do("", home, "k1"), (true, true));
+        assert_eq!(to_do("/home/bob/Homebase\nk1\n", home, "k1"), (true, true));
+        assert_eq!(
+            to_do("/home/anna/Homebase\nk1\n", home, "k1"),
+            (false, false)
+        );
+        // Another version's icons, or a note from before there was a hash: the icon again.
+        assert_eq!(
+            to_do("/home/anna/Homebase\nk0\n", home, "k1"),
+            (false, true)
+        );
+        assert_eq!(to_do("/home/anna/Homebase", home, "k1"), (false, true));
+    }
 
     #[test]
     fn uris() {

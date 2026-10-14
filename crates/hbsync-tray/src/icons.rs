@@ -40,6 +40,12 @@ pub fn decode(png_bytes: &[u8]) -> Result<Rgba, png::DecodingError> {
     })
 }
 
+/// The macOS menu bar's template image, and the tile it shows instead when there is a problem.
+#[cfg(any(target_os = "macos", test))]
+const MENU_BAR: &[u8] = include_bytes!("../assets/menu-bar-36.png");
+#[cfg(any(target_os = "macos", test))]
+const MENU_BAR_PROBLEM: &[u8] = include_bytes!("../assets/tray-problem-36.png");
+
 /// The tile with the dot in the state's colour (design manual: green; the cyan and magenta
 /// accents; grey).
 #[cfg(any(not(target_os = "macos"), test))]
@@ -58,11 +64,8 @@ pub fn tray(look: Look) -> Result<(Rgba, bool), png::DecodingError> {
     // still shows, on the tile with its magenta dot.
     #[cfg(target_os = "macos")]
     let icon = match look {
-        Look::Attention => (
-            decode(include_bytes!("../assets/tray-problem-36.png"))?,
-            false,
-        ),
-        _ => (decode(include_bytes!("../assets/menu-bar-36.png"))?, true),
+        Look::Attention => (decode(MENU_BAR_PROBLEM)?, false),
+        _ => (decode(MENU_BAR)?, true),
     };
     #[cfg(not(target_os = "macos"))]
     let icon = (decode(tile(look))?, false);
@@ -93,14 +96,8 @@ mod tests {
         );
         assert_eq!(decode(APP_256)?.width, 256);
         assert_eq!(decode(FOLDER.png)?.width, 256);
-        assert_eq!(
-            decode(include_bytes!("../assets/menu-bar-36.png"))?.width,
-            36
-        );
-        assert_eq!(
-            decode(include_bytes!("../assets/tray-problem-36.png"))?.width,
-            36
-        );
+        assert_eq!(decode(MENU_BAR)?.width, 36);
+        assert_eq!(decode(MENU_BAR_PROBLEM)?.width, 36);
         Ok(())
     }
 }
