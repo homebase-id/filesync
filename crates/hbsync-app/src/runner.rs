@@ -8,7 +8,7 @@
 //! - **Pause** stops a running sync between operations (and before the next transfer) and
 //!   syncs nothing until **resume**; the watcher keeps recording changes meanwhile.
 //! - **Sleep**: a wall-clock gap across a short wait means the machine slept. The runner then
-//!   syncs at once, forgets its backoff and has the notifier reconnect.
+//!   syncs at once and forgets its backoff (the account has the notifier reconnect).
 //! - **Ignore rules** (`.hbsync/ignore`) are checked for changes at every poll and on request;
 //!   a change restarts the engine, which re-plans everything (sync semantics §10).
 
@@ -24,20 +24,16 @@ use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Conflict, Drive, Engine, EngineConfig, EngineError, SyncReport};
-use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
 use hbsync_local::{Filter, FilterError, LocalObserver};
-use hbsync_remote::{Remote, RemoteError};
+use hbsync_remote::RemoteError;
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
 pub use hbsync_types::activity::Progress;
 use hbsync_types::unix_now;
 
 use crate::MassDelete;
-use crate::config::KeepDays;
-use crate::protocol::{
-    AccountStatus, FolderStatus, HeldDeletes, Hints, LastSync, Note, State, Until,
-};
+use crate::protocol::{FolderStatus, HeldDeletes, LastSync, Note, State, Until};
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
@@ -98,16 +94,12 @@ pub struct RunnerConfig {
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
-    /// Recently deleted keeps an item this many days.
-    pub keep_deleted_days: u32,
     /// Start paused: until then, or until resumed (`Some(None)`).
     pub paused: Option<Until>,
     /// A sync at least this often.
     pub poll: Duration,
     /// Catch up, sync once, and stop (development).
     pub once: bool,
-    /// Why the credentials aren't in the keychain, for the status.
-    pub credentials_warning: Option<String>,
     /// Tests: adjusts the engine's config.
     pub tweak: Option<fn(&mut EngineConfig)>,
 }
@@ -120,11 +112,9 @@ impl RunnerConfig {
             identity: identity.to_owned(),
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
-            keep_deleted_days: KeepDays::default().0,
             paused: None,
             poll: Duration::from_secs(60),
             once: false,
-            credentials_warning: None,
             tweak: None,
         }
     }
@@ -161,37 +151,17 @@ pub enum Command {
     ConfirmDeletes {
         token: String,
     },
-    /// Restore these items of Recently deleted, each with what was deleted with it.
-    Restore {
-        nodes: Vec<NodeId>,
-    },
-    /// Delete these items of Recently deleted for good, each with what was deleted with it.
-    EmptyDeleted {
-        nodes: Vec<NodeId>,
-    },
-    /// Delete everything in Recently deleted removed until then (Unix ms) for good: what the
-    /// user saw, nothing removed since.
-    EmptyDeletedUntil {
-        at_ms: i64,
-    },
     /// Stop the runner (between operations).
     Stop,
 }
 
-/// Wake-up hints from the identity: the notifier's events, and the notifier to reconnect.
-#[derive(Debug)]
-pub struct HintSource {
-    pub events: Receiver<Event>,
-    pub notifier: Option<Notifier>,
-}
-
-impl HintSource {
-    pub fn none() -> HintSource {
-        HintSource {
-            events: channel().1,
-            notifier: None,
-        }
-    }
+/// What the identity's notifications tell a folder's runner (passed on by its account).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint {
+    /// Connected (again): changes may have been missed meanwhile.
+    Connected,
+    /// The drive changed.
+    Changed,
 }
 
 /// Controls a running [`Runner`] from other threads.
@@ -200,7 +170,6 @@ pub struct Handle {
     control: Sender<Command>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
-    account: Arc<Mutex<AccountStatus>>,
     progress: Arc<Counters>,
 }
 
@@ -215,11 +184,6 @@ impl Handle {
     }
 
     /// Paused while the pause flag is set: seen at once, not only once the runner gets to it.
-    /// The account's part of the status (the notifications, the credentials).
-    pub fn account(&self) -> AccountStatus {
-        lock(&self.account).clone()
-    }
-
     pub fn status(&self) -> FolderStatus {
         let mut status = lock(&self.status).clone();
         if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
@@ -240,12 +204,11 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 pub struct Runner {
     cfg: RunnerConfig,
-    remote: Arc<dyn Remote>,
-    hints: HintSource,
+    drive: Arc<Drive>,
+    hints: Receiver<Hint>,
     control: Receiver<Command>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
-    account: Arc<Mutex<AccountStatus>>,
     progress: Arc<Counters>,
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
@@ -265,6 +228,8 @@ impl std::fmt::Debug for Runner {
 struct Parts {
     engine: Engine,
     observer: LocalObserver,
+    /// Woken when another folder's sync changed this one's part of the drive.
+    wake: Receiver<()>,
 }
 
 impl Parts {
@@ -278,20 +243,14 @@ impl Parts {
 }
 
 impl Runner {
-    /// Starts syncing `cfg.folder` with `remote` on a new thread.
+    /// Starts syncing `cfg.folder` on its account's `drive` on a new thread, woken by `hints`.
     pub fn spawn(
         cfg: RunnerConfig,
-        remote: Arc<dyn Remote>,
-        hints: HintSource,
+        drive: Arc<Drive>,
+        hints: Receiver<Hint>,
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
-        let mut account = AccountStatus::new(&cfg.identity);
-        if hints.notifier.is_some() {
-            account.hints = Hints::Connecting;
-        }
-        account.credentials_warning = cfg.credentials_warning.clone();
-        let account = Arc::new(Mutex::new(account));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
         status.paused_until = cfg.paused.flatten();
         let status = Arc::new(Mutex::new(status));
@@ -300,17 +259,15 @@ impl Runner {
             control: tx,
             stop: Arc::clone(&stop),
             status: Arc::clone(&status),
-            account: Arc::clone(&account),
             progress: Arc::clone(&progress),
         };
         let runner = Runner {
             cfg,
-            remote,
+            drive,
             hints,
             control: rx,
             stop,
             status,
-            account,
             progress,
             held: Vec::new(),
             last_notes: Default::default(),
@@ -358,8 +315,7 @@ impl Runner {
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
         let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
-        let drive = Drive::new(sync_root.account()?, Arc::clone(&self.remote));
-        let mut engine = Engine::new(sync_root.state()?, drive, cfg);
+        let mut engine = Engine::new(sync_root.state()?, Arc::clone(&self.drive), cfg);
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
         let observer = LocalObserver::start(root, engine.scan_options().clone());
@@ -370,7 +326,12 @@ impl Runner {
             s.rules = rules;
             s.watcher_error = observer.watcher_error.clone();
         });
-        Ok(Parts { engine, observer })
+        let wake = self.drive.subscribe(sync_root.folder());
+        Ok(Parts {
+            engine,
+            observer,
+            wake,
+        })
     }
 
     fn run(mut self) -> Result<(), RunnerError> {
@@ -378,10 +339,6 @@ impl Runner {
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
-        // Restores and empties of Recently deleted asked for, run when the engine is open.
-        let mut restore: Vec<NodeId> = Vec::new();
-        let mut empty: Vec<NodeId> = Vec::new();
-        let mut empty_until: Option<i64> = None;
         // Changes announced on the drive: synced once they stop coming (a burst of deletes is
         // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
         // (the first announcement, quiet from then on)
@@ -425,9 +382,6 @@ impl Runner {
                 wanted = true;
                 backoff = Backoff::new();
                 not_before = Instant::now();
-                if let Some(n) = &self.hints.notifier {
-                    n.reconnect();
-                }
             }
 
             loop {
@@ -466,21 +420,6 @@ impl Runner {
                         wanted = true;
                         not_before = Instant::now();
                     }
-                    Ok(Command::Restore { nodes }) => {
-                        restore.extend(nodes);
-                        wanted = true;
-                        not_before = Instant::now();
-                    }
-                    Ok(Command::EmptyDeleted { nodes }) => {
-                        empty.extend(nodes);
-                        wanted = true;
-                        not_before = Instant::now();
-                    }
-                    Ok(Command::EmptyDeletedUntil { at_ms }) => {
-                        empty_until = Some(empty_until.map_or(at_ms, |t| t.max(at_ms)));
-                        wanted = true;
-                        not_before = Instant::now();
-                    }
                     Ok(Command::Stop) | Err(TryRecvError::Disconnected) => {
                         tracing::info!("stopped");
                         return Ok(());
@@ -490,36 +429,23 @@ impl Runner {
             }
 
             while hints_open {
-                let hint = match self.hints.events.try_recv() {
-                    Ok(e) => e,
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        hints_open = false;
-                        break;
-                    }
-                };
-                let hints = match hint {
-                    Event::Connected => {
-                        wanted = true;
-                        Hints::Connected
-                    }
-                    Event::Changed => {
+                match self.hints.try_recv() {
+                    Ok(Hint::Connected) => wanted = true,
+                    Ok(Hint::Changed) => {
                         wanted = true;
                         let now = Instant::now();
                         let first = announced.map_or(now, |(first, _)| first);
                         announced = Some((first, now + REMOTE_QUIET));
-                        continue;
                     }
-                    Event::Lost(why) => {
-                        tracing::info!("notifications lost ({why}); reconnecting");
-                        Hints::Lost(why)
-                    }
-                    Event::Refused(why) => {
-                        tracing::warn!("notifications refused ({why}); syncing on the poll only");
-                        Hints::Refused(why)
-                    }
-                };
-                lock(&self.account).hints = hints;
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => hints_open = false,
+                }
+            }
+            // Another folder's sync changed this one's part of the drive.
+            if let Some(p) = &parts
+                && p.wake.try_iter().count() > 0
+            {
+                wanted = true;
             }
 
             if pause.flatten().is_some_and(|t| unix_now() >= t) {
@@ -604,35 +530,6 @@ impl Runner {
             if let Some(seen) = confirmed.take() {
                 p.engine.confirm_deletes(seen);
             }
-            if !restore.is_empty() {
-                match p.engine.drive().restore(&std::mem::take(&mut restore)) {
-                    Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
-                    Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
-                }
-            }
-            let nodes = std::mem::take(&mut empty);
-            let emptied = [
-                empty_until
-                    .take()
-                    .map(|at| p.engine.drive().empty_until(at)),
-                (!nodes.is_empty()).then(|| p.engine.drive().empty(&nodes)),
-            ];
-            for result in emptied.into_iter().flatten() {
-                match result {
-                    Ok(n) => tracing::info!("{n} items deleted for good"),
-                    Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
-                }
-            }
-            // Once a day; a failure waits for the next sync.
-            let keep_days = self.cfg.keep_deleted_days;
-            match p.engine.drive().purge_when_due(keep_days) {
-                Ok(Some(n)) if n > 0 => {
-                    tracing::info!("{n} items deleted for good after {keep_days} days")
-                }
-                Ok(_) => {}
-                Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
-            }
-
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.
             self.progress.reset();
@@ -783,7 +680,7 @@ impl Runner {
 /// work (recorded a batch, rescanned). The monotonic clock stops in sleep on Linux and macOS:
 /// a wall clock far ahead of it is a sleep. On Windows it runs on, so a long wait that did no
 /// work counts too. A clock set forward only costs a sync.
-fn slept(wall: Option<Duration>, mono: Duration, worked: bool) -> bool {
+pub(crate) fn slept(wall: Option<Duration>, mono: Duration, worked: bool) -> bool {
     let Some(wall) = wall else {
         return false;
     };
