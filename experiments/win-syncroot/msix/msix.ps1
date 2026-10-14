@@ -14,11 +14,19 @@ $extension = '<desktop3:Extension Category="windows.cloudFiles"><desktop3:CloudF
 reg add 'HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock' /t REG_DWORD /f /v AllowDevelopmentWithoutDevLicense /d 1 | Out-Null
 [Environment]::OSVersion.Version
 
+# Each inner list is one process's commands, in order.
 $sequences = @(
-    @('register-bare', 'unregister-bare'),
-    @('register-bare', 'unregister'),
-    @('register', 'unregister-bare'),
-    @('register', 'root-in-sync', 'root-syncing', 'root-paused', 'root-clear', 'root-in-sync', 'unregister')
+    @('register'),
+    @('status unregister-bare'),
+    @('register'),
+    @('root-in-sync unregister-bare'),
+    @('register'),
+    @('root-in-sync-win32 unregister-bare'),
+    @('register'),
+    @('root-paused unregister-bare'),
+    @('register'),
+    @('root-in-sync-win32 root-syncing root-in-sync-win32'),
+    @('unregister-bare')
 )
 
 function Try-It([string] $title, [string] $run) {
@@ -26,7 +34,7 @@ function Try-It([string] $title, [string] $run) {
         Write-Output ''
         Write-Output "===== $title`: $($steps -join ', ')"
         foreach ($step in $steps) {
-            $out = & $run $step 2>&1 | Where-Object { $_ -notmatch 'Explorer|sign out|NEW' }
+            $out = & $run ($step -split ' ') 2>&1 | Where-Object { $_ -notmatch 'Explorer|sign out|NEW' }
             Write-Output "$step -> exit $LASTEXITCODE  $($out -join ' / ')"
         }
     }

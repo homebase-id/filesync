@@ -55,17 +55,20 @@ mod win {
     const ICON: &[u8] = include_bytes!("../../../crates/hbsync-tray/assets/homebase.ico");
     /// The file `syncing` marks as not in sync.
     const SYNCING: &str = "Notes.txt";
-    /// Not a cloud file (`ERROR_NOT_A_CLOUD_FILE`): reverting one that never was a placeholder.
     /// The custom property for `root-paused`.
     const STATUS: i32 = 1;
+    /// Not a cloud file (`ERROR_NOT_A_CLOUD_FILE`): reverting one that never was a placeholder.
     const NOT_A_CLOUD_FILE: HRESULT = HRESULT(0x8007_0178_u32 as i32);
 
     pub fn main() {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        if let Some(command) = args.first() {
-            if let Err(e) = run(command) {
-                eprintln!("Failed: {e}");
-                std::process::exit(1);
+        // Several commands run one after the other in this one process.
+        if !args.is_empty() {
+            for command in &args {
+                if let Err(e) = run(command) {
+                    eprintln!("Failed: {command}: {e}");
+                    std::process::exit(1);
+                }
             }
             return;
         }
@@ -126,6 +129,7 @@ mod win {
             "unregister" => unregister(),
             "root-in-sync" => root_in_sync(),
             "root-syncing" => root_syncing(),
+            "root-in-sync-win32" => root_in_sync_win32(),
             "root-paused" => root_state(Some("Paused")),
             "root-clear" => root_state(None),
             other => Err(format!("unknown command {other:?}").into()),
@@ -285,6 +289,28 @@ mod win {
             }
         }
         println!("In a NEW Explorer window: a green tick on \"{NAME}\" in the left pane?");
+        Ok(())
+    }
+
+    /// Marks the test folder itself synced through an ordinary handle (not the Cloud Files one).
+    fn root_in_sync_win32() -> Result<(), Error> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        // FILE_WRITE_DATA | FILE_READ_ATTRIBUTES; FILE_FLAG_BACKUP_SEMANTICS opens a folder.
+        let dir = fs::OpenOptions::new()
+            .access_mode(0x0002 | 0x0080)
+            .custom_flags(0x0200_0000)
+            .open(folder()?)?;
+        let hr = unsafe {
+            CfSetInSyncState(
+                dir.as_raw_handle(),
+                CF_IN_SYNC_STATE_IN_SYNC,
+                CF_SET_IN_SYNC_FLAG_NONE,
+                std::ptr::null_mut(),
+            )
+        };
+        HRESULT(hr).ok()?;
+        println!("Marked the test folder itself as synced (an ordinary handle).");
         Ok(())
     }
 
