@@ -1,4 +1,4 @@
-<p align="center"><img src="crates/hbsync-tray/assets/mark.svg" width="96" alt=""></p>
+<p align="center"><img src="crates/hbsync-tray/assets/app-icon.svg" width="96" alt=""></p>
 
 # Homebase Filesync
 

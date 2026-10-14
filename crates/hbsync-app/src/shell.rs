@@ -40,6 +40,8 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
     os::sync_root(paths, folder, identity, icons, first);
+    #[cfg(target_os = "linux")]
+    os::refresh_icon(paths, icons);
     if !first {
         return;
     }
@@ -160,6 +162,14 @@ mod os {
 
     fn icon(paths: &Paths) -> PathBuf {
         paths.state.join("homebase.png")
+    }
+
+    /// A newer icon (another version's) replaces the one the folder was given before.
+    pub fn refresh_icon(paths: &Paths, icons: Icons<'_>) {
+        let icon = icon(paths);
+        if icon.exists() && std::fs::read(&icon).is_ok_and(|b| b != icons.png) {
+            let _ = std::fs::write(&icon, icons.png);
+        }
     }
 
     /// Dolphin's folder settings, giving the icon.

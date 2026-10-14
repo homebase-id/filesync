@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+<title>Homebase Filesync, badge (paused)</title>
+<!-- Homebase Filesync, design manual v2 colours; see README.md. -->
+<defs><linearGradient id="brand" x1="0" y1="0" x2="100" y2="100" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#5b438e"/><stop offset=".55" stop-color="#57458c"/><stop offset="1" stop-color="#396281"/></linearGradient><mask id="ring" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120"><rect width="120" height="120" fill="#fff"/><circle cx="78" cy="32" r="17" fill="#000"/></mask></defs>
+<rect width="100" height="100" rx="12.4" fill="url(#brand)"/><g transform="translate(17 24.8) scale(.868) translate(-14 -20)"><g fill="#fff" mask="url(#ring)"><rect x="14" y="50" width="66" height="28" rx="14"/><circle cx="32" cy="52" r="14"/><circle cx="52" cy="44" r="20"/><circle cx="68" cy="56" r="12"/></g><circle cx="78" cy="32" r="12" fill="#9aa3b5"/></g>
+</svg>

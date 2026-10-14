@@ -178,7 +178,7 @@ impl Server {
             return respond(&mut stream, 404, "text/plain", b"not here");
         };
         match (request.method.as_str(), page) {
-            ("GET", "mark.png") => respond(&mut stream, 200, "image/png", crate::icons::MARK_256),
+            ("GET", "mark.png") => respond(&mut stream, 200, "image/png", crate::icons::APP_256),
             ("GET", "setup") => self.html(&mut stream, self.setup_page()),
             ("POST", "setup/folder") => {
                 self.choose_folder();

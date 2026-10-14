@@ -94,7 +94,7 @@ fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     if !control::dev_home() {
         std::thread::spawn(|| {
-            if let Err(e) = autostart::add_launcher(icons::MARK_256) {
+            if let Err(e) = autostart::add_launcher(icons::APP_256) {
                 tracing::info!("no launcher: {e}");
             }
         });
