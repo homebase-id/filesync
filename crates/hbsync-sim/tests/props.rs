@@ -36,14 +36,23 @@ fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
 }
 
 fn run(clients: usize, events: &[Event]) -> Result<(), TestCaseError> {
-    run_with(clients, None, events)
+    run_with(clients, None, false, events)
 }
 
-/// Runs `events` with the mass-delete guard at `guard` (its minimum), then lets every client
-/// settle (confirming what the guard holds, with the guard on) and checks the outcome.
-fn run_with(clients: usize, guard: Option<usize>, events: &[Event]) -> Result<(), TestCaseError> {
+/// Runs `events` with the mass-delete guard at `guard` (its minimum), and with a role folder on
+/// the server if `role`, then lets every client settle (confirming what the guard holds, with
+/// the guard on) and checks the outcome.
+fn run_with(
+    clients: usize,
+    guard: Option<usize>,
+    role: bool,
+    events: &[Event],
+) -> Result<(), TestCaseError> {
     let outcome = |verbose: bool| {
         let mut sim = Sim::new(clients);
+        if role {
+            sim = sim.with_role_folder();
+        }
         sim.guard = guard;
         sim.verbose = verbose;
         sim.run(events);
@@ -92,7 +101,14 @@ proptest! {
         events in proptest::collection::vec(guarded_event(2), 0..80),
         min in 1usize..3,
     ) {
-        run_with(2, Some(min), &events)?;
+        run_with(2, Some(min), false, &events)?;
+    }
+
+    /// The main folders leave a role folder another device made alone (§12): never synced
+    /// here, never changed, whatever the users do around it.
+    #[test]
+    fn main_folders_leave_role_folders_alone(events in proptest::collection::vec(event(3), 0..120)) {
+        run_with(3, None, true, &events)?;
     }
 }
 
@@ -827,7 +843,7 @@ fn regression_confirmed_trash_of_a_folder_moved_into_an_ignored_name() {
             },
         ),
     ];
-    if let Err(e) = run_with(2, Some(1), &events) {
+    if let Err(e) = run_with(2, Some(1), false, &events) {
         panic!("{e}");
     }
 }

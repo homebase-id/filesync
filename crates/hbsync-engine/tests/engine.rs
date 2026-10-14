@@ -824,7 +824,12 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
     hbsync_local::scan(&mut db, dir.path(), &opts)?;
     hbsync_engine::feed::pull(&mut db, &FakeRemote::new(server.clone()), 500)?;
     let started = std::time::Instant::now();
-    let adopted = hbsync_engine::adopt::adopt(&mut db, dir.path(), hbsync_platform::Os::current())?;
+    let adopted = hbsync_engine::adopt::adopt(
+        &mut db,
+        dir.path(),
+        hbsync_platform::Os::current(),
+        &Default::default(),
+    )?;
     let took = started.elapsed();
     assert_eq!(adopted, N);
     // Matching each file against all its siblings took 50 s here (debug); grouped, under 1 s.
@@ -1685,5 +1690,137 @@ fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
         assert_eq!(names, ["Blue"]);
     }
     assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
+// ---- §12 scopes ----
+
+/// The role folder `role` on the drive, made by another device, with one file in it.
+fn seed_role(
+    server: &Arc<std::sync::Mutex<hbsync_remote::fake::FakeServer>>,
+    role: hbsync_types::Role,
+    file: &str,
+    data: &str,
+) -> R {
+    let mut srv = server.lock().map_err(|_| "poisoned")?;
+    srv.create(
+        &NodeMeta {
+            node: role.node(),
+            parent: hbsync_types::NodeId::ROOT,
+            kind: hbsync_types::NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder(role.name()),
+        },
+        None,
+    )?;
+    srv.seed_file(
+        role.node(),
+        file,
+        data.as_bytes(),
+        hbsync_fileio::HashAlgorithm::Blake3,
+    )?;
+    Ok(())
+}
+
+/// `c` restarted with the main folder's scope, after syncing with none (an older version).
+fn restart_scoped(c: &mut Client, name: &str) -> R {
+    let cfg = common::config(&c.root, name);
+    c.engine = Engine::new(
+        StateDb::open(&c.db_path())?,
+        Box::new(c.remote.clone()),
+        cfg,
+    );
+    c.engine.apply_filter_change()?;
+    Ok(())
+}
+
+fn unscoped(cfg: &mut hbsync_engine::EngineConfig) {
+    cfg.scope = Arc::new(hbsync_engine::scope::Scope {
+        root: hbsync_types::NodeId::ROOT,
+        outside: Default::default(),
+    });
+}
+
+#[test]
+fn role_folders_stay_out_of_the_main_folder() -> R {
+    let server = server();
+    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "mine")?;
+    let mut a = Client::new(&server, "a")?;
+    a.write("readme.txt", "r")?;
+    a.sync()?;
+    assert_eq!(a.tree_text(), ["readme.txt = r"]);
+    let names = server.lock().map_err(|_| "poisoned")?.live_names();
+    assert_eq!(names, ["Documents", "cv.txt", "readme.txt"]);
+    Ok(())
+}
+
+#[test]
+fn a_plain_documents_folder_beside_the_role_folder_gets_a_number() -> R {
+    let server = server();
+    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
+    let mut a = Client::new(&server, "a")?;
+    a.write("Documents/mine.txt", "plain")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    // The role folder holds the name at the drive's top: the plain one takes a number, here
+    // too, as for any name a masked node holds (§10).
+    let plain = [
+        "Documents (conflict 1)/",
+        "Documents (conflict 1)/mine.txt = plain",
+    ];
+    assert_eq!(a.tree_text(), plain);
+    assert_eq!(b.tree_text(), plain);
+    Ok(())
+}
+
+#[test]
+fn a_role_folder_an_older_version_synced_leaves_the_main_folder_only() -> R {
+    let server = server();
+    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
+    let mut a = Client::with_config(&server, "a", unscoped)?;
+    a.write("readme.txt", "r")?;
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(),
+        ["Documents/", "Documents/cv.txt = role", "readme.txt = r"]
+    );
+
+    restart_scoped(&mut a, "a")?;
+    a.sync()?;
+    assert_eq!(a.tree_text(), ["readme.txt = r"]);
+    let names = server.lock().map_err(|_| "poisoned")?.live_names();
+    assert_eq!(names, ["Documents", "cv.txt", "readme.txt"]);
+    Ok(())
+}
+
+#[test]
+fn an_edit_in_a_role_folder_an_older_version_synced_stays_as_a_folder_of_its_own() -> R {
+    let server = server();
+    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
+    let mut a = Client::with_config(&server, "a", unscoped)?;
+    a.write("readme.txt", "r")?;
+    a.sync()?;
+    a.write("Documents/cv.txt", "edited here")?;
+
+    restart_scoped(&mut a, "a")?;
+    a.sync()?;
+    // The edit can't go into the role folder from here: it stays, as a folder of its own.
+    assert_eq!(
+        a.tree_text(),
+        [
+            "Documents (conflict 1)/",
+            "Documents (conflict 1)/cv.txt = edited here",
+            "readme.txt = r"
+        ]
+    );
+    // The role folder's file is untouched on the drive.
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let role_file = srv
+        .live()
+        .find(|h| h.parent == hbsync_types::Role::Documents.node())
+        .ok_or("the role folder's file")?;
+    assert!(
+        matches!(&role_file.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == "cv.txt")
+    );
     Ok(())
 }

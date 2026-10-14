@@ -16,10 +16,12 @@ use crate::deleted;
 use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
 use crate::feed::{self, FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile};
+use crate::scope::Scope;
 use crate::view;
 
 /// The state DB key of the fingerprint of the filter the DB was last synced with.
 const FILTER_KEY: &str = "filter.fingerprint";
+const SCOPE_KEY: &str = "scope.fingerprint";
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -34,6 +36,8 @@ pub struct EngineConfig {
     pub mass_delete_min: usize,
     pub mass_delete_fraction: f64,
     pub allow_mass_delete: bool,
+    /// The part of the drive this engine syncs (§12).
+    pub scope: Arc<Scope>,
 }
 
 impl EngineConfig {
@@ -57,6 +61,7 @@ impl EngineConfig {
             mass_delete_min: 50,
             mass_delete_fraction: 0.25,
             allow_mass_delete: false,
+            scope: Arc::default(),
         }
     }
 }
@@ -258,7 +263,19 @@ impl Engine {
     /// the new fingerprint, so a crash can't skip it.
     pub fn apply_filter_change(&mut self) -> Result<bool, StateError> {
         let fingerprint = self.cfg.exec.filter.fingerprint();
+        let scope = self.cfg.scope.fingerprint();
         self.db.write(|s| {
+            // A new scope (§12) changes what is in view remotely only: no walk. What it leaves
+            // out and this device holds (a role folder an older version synced into the main
+            // folder) is planned again from its top, which brings what is in it.
+            if s.get_kv(SCOPE_KEY)?.as_deref() != Some(scope.as_str()) {
+                self.cfg
+                    .scope
+                    .outside
+                    .iter()
+                    .try_for_each(|n| s.mark_dirty(*n))?;
+                s.set_kv(SCOPE_KEY, &scope)?;
+            }
             if s.get_kv(FILTER_KEY)?.as_deref() == Some(fingerprint.as_str()) {
                 return Ok(false);
             }
@@ -326,7 +343,12 @@ impl Engine {
         unpark(&mut self.db, &self.cfg.exec)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;
         report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        report.adopted = adopt(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
+        report.adopted = adopt(
+            &mut self.db,
+            &self.cfg.exec.root,
+            self.cfg.exec.os,
+            &self.cfg.scope,
+        )?;
 
         // The guard must judge the whole delete, even when it is planned in several batches;
         // confirmed deletes don't count. Confirmations of nodes with nothing left to do are
@@ -361,6 +383,7 @@ impl Engine {
             confirmed: Arc::new(self.confirmed.clone()),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
             filter: Arc::clone(&self.cfg.exec.filter),
+            scope: Arc::clone(&self.cfg.scope),
         };
         // The dirty set is planned page by page in node id order and swept round after
         // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
@@ -418,7 +441,7 @@ impl Engine {
         let os = self.cfg.exec.os;
         let input = self
             .db
-            .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter))?;
+            .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter, &self.cfg.scope))?;
         let plan = reconcile(&input, opts);
         // A confirmation lasts while its node's plan deletes it: one whose delete was undone
         // (the file back) is forgotten, so a later delete is judged anew.

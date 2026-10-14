@@ -318,3 +318,21 @@ the item changes again. A tag change makes the scan read the file again (the cha
 part of the fingerprint, to catch writes that keep the modification time). An item that becomes
 a new node on a device that can't hold all its tags (detached on Windows, §10) goes up with
 the tags that device has.
+
+## 12. Scopes
+A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where
+they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"). Each
+local folder has an engine and a state DB of its own, scoped to a part of the drive:
+- the main folder's scope is the drive's top **without the role folders**, on every device,
+  whether it syncs them or not: a role folder appears only where it is synced in place, never
+  inside `~/Homebase`;
+- a role folder's scope is that folder (to come: the engine syncing it).
+
+What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
+never changed or deleted remotely, its names still taken. It is never *leaving* (§10, rule 1):
+another engine or device syncs it, so this one only lets go of what it holds there (an older
+version synced a role folder into the main folder): an unchanged copy goes to the trash, and a
+changed one is detached and goes up as a new folder of its own, beside the role folder. A
+local item named like a role folder at the main folder's top takes a numbered name, as for any
+name a masked node holds. A new scope plans the role folders this device holds again; it needs
+no walk, as only the remote view changed.

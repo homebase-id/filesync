@@ -22,8 +22,11 @@ use hbsync_platform::name::name_key;
 use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError};
 use hbsync_types::{NodeId, NodeKind};
 
-/// Adopts what it can among the dirty nodes. Returns the number of adoptions.
-pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError> {
+use crate::scope::Scope;
+
+/// Adopts what it can among the dirty nodes, never as a folder the scope leaves out (§12: a
+/// plain local `Documents` isn't the role folder). Returns the number of adoptions.
+pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usize, StateError> {
     // Local-only candidates: dirty, no base, no mirror row.
     let mut candidates = db.read(|s| s.unpaired_local())?;
     // Grouped by folder, parents before children.
@@ -49,6 +52,9 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError>
         };
         let mut siblings: HashMap<String, Vec<MirrorRow>> = HashMap::new();
         for remote in db.read(|s| s.mirror_children(parent))? {
+            if scope.outside.contains(&remote.node) {
+                continue;
+            }
             siblings
                 .entry(name_key(&remote.name))
                 .or_default()

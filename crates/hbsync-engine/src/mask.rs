@@ -25,6 +25,10 @@
 //! local item back into view instead, it isn't masked at all, and its local place wins over a
 //! remote move (which would take it out of view again). The names masked nodes hold stay taken
 //! for this device's own items.
+//!
+//! What lies outside the engine's scope (§12: the role folders, for the main folder) is masked
+//! the same way, but is never leaving or brought back: it is synced elsewhere, by another
+//! engine or another device, so this one only lets go of it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -33,6 +37,7 @@ use hbsync_platform::name::name_key;
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::reconcile::Input;
+use crate::scope::Scope;
 use crate::tree::Tree;
 
 /// The masks of one plan.
@@ -56,9 +61,10 @@ pub struct Masks {
 }
 
 impl Masks {
-    pub fn of(input: &Input, filter: &Filter, device: &str) -> Masks {
+    pub fn of(input: &Input, filter: &Filter, scope: &Scope, device: &str) -> Masks {
         let mut masked = masked(&input.remote, filter);
-        if masked.is_empty() {
+        let outside = scope.out_of_scope(&input.remote);
+        if masked.is_empty() && outside.is_empty() {
             return Masks::default();
         }
         // A node synced at a place this device filters now, whose local item the user brought
@@ -68,18 +74,13 @@ impl Masks {
             .iter()
             .copied()
             .filter(|m| filtered_base.contains(m) && input.local.contains(*m))
+            .filter(|m| !outside.contains(m))
             .collect();
         masked.retain(|m| !brought_back.contains(m));
-        if masked.is_empty() {
-            return Masks {
-                brought_back,
-                ..Masks::default()
-            };
-        }
         let leaving: HashSet<NodeId> = masked
             .iter()
             .copied()
-            .filter(|m| filtered_base.contains(m))
+            .filter(|m| filtered_base.contains(m) && !outside.contains(m))
             .filter(|m| match (input.base.get(*m), input.remote.get(*m)) {
                 (Some(b), Some(r)) => {
                     b.same_place(r)
@@ -92,6 +93,7 @@ impl Masks {
         // Leaving is an ordinary local delete: the scanner no longer reports the item.
         let leaving = only_whole_folders(&input.remote, leaving);
         masked.retain(|m| !leaving.contains(m));
+        masked.extend(outside);
         if masked.is_empty() {
             return Masks {
                 brought_back,

@@ -5,9 +5,11 @@ use std::fmt;
 
 pub use hbsync_fileio::{ContentHash, HashAlgorithm};
 pub use hbsync_platform::tags::{Tag, Tags};
+pub use role::Role;
 pub use uuid::Uuid;
 
 pub mod activity;
+pub mod role;
 pub mod schema;
 
 /// Now, in Unix milliseconds.

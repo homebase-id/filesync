@@ -29,6 +29,7 @@ use std::sync::Arc;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile};
+use hbsync_engine::scope::Scope;
 use hbsync_engine::tree::{Tree, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
@@ -37,7 +38,7 @@ use hbsync_platform::name::check_remote_name;
 use hbsync_platform::tags::express;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Tag, Tags, Uuid, VersionTag,
+    Role, Tag, Tags, Uuid, VersionTag,
 };
 
 /// A user action on one client's local tree. Indices pick among existing items modulo their
@@ -220,6 +221,8 @@ pub struct Sim {
     tags_added: BTreeSet<(usize, NodeId, String)>,
     tags_removed: BTreeSet<(NodeId, String)>,
     deleted: BTreeSet<NodeId>,
+    /// The role folder's file another device put on the server ([`Sim::with_role_folder`]).
+    role_file: Option<(NodeId, ContentHash)>,
 }
 
 impl Sim {
@@ -260,7 +263,35 @@ impl Sim {
             tags_added: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
             deleted: BTreeSet::new(),
+            role_file: None,
         }
+    }
+
+    /// Puts the Documents role folder on the server, with a file another device made in it.
+    /// Every client here syncs the main folder, which leaves role folders out (§12): it must
+    /// stay as it is, and out of every client's tree.
+    pub fn with_role_folder(mut self) -> Self {
+        let docs = Role::Documents.node();
+        let file = NodeId(Uuid::from_u128(u128::MAX));
+        let content = self.new_blob();
+        let folder = NodeState::folder(NodeId::ROOT, Role::Documents.name());
+        let cv = NodeState {
+            parent: docs,
+            name: "cv.txt".into(),
+            kind: NodeKind::File,
+            content: Some(content),
+            tags: Tags::default(),
+        };
+        for (node, state) in [(docs, folder), (file, cv)] {
+            let remote = RemoteRef {
+                file_id: RemoteFileId(self.server.uuid()),
+                version: VersionTag(self.server.uuid()),
+            };
+            self.server.ever.insert(node);
+            self.server.live.insert(node, ServerNode { state, remote });
+        }
+        self.role_file = Some((file, content.hash));
+        self
     }
 
     fn new_blob(&mut self) -> FileContent {
@@ -1272,6 +1303,9 @@ impl Sim {
             for n in masked(&server, &client.filter) {
                 synced.remove(n);
             }
+            for n in Scope::main().out_of_scope(&server) {
+                synced.remove(n);
+            }
             // The tags as the client sees them.
             see_held_tags(client, &mut visible, &server);
             let server_view = view(&synced);
@@ -1305,6 +1339,23 @@ impl Sim {
             .collect();
         if !broken.is_empty() {
             return Err(format!("server: {broken:?}"));
+        }
+        // No client touched the role folder or what is in it.
+        if let Some((file, hash)) = self.role_file {
+            let docs = Role::Documents.node();
+            let folder_kept = server
+                .get(docs)
+                .is_some_and(|s| s.parent == NodeId::ROOT && s.name == Role::Documents.name());
+            let file_kept = server
+                .get(file)
+                .is_some_and(|s| s.parent == docs && s.content.map(|c| c.hash) == Some(hash));
+            if !(folder_kept && file_kept) {
+                return Err(format!(
+                    "a client changed the role folder: {:?} {:?}",
+                    server.get(docs),
+                    server.get(file)
+                ));
+            }
         }
         if let Some((_, bad)) = server
             .iter()

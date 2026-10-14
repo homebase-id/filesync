@@ -19,6 +19,7 @@ use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
 
 use crate::exec::parked_name;
 use crate::reconcile::{BaseExtra, Input};
+use crate::scope::Scope;
 
 /// The local state of one node, as the reconciler sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,12 +116,14 @@ pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, St
     Ok(row.path.parent().unwrap_or_default().join(&name).ok())
 }
 
-/// Loads everything the reconciler needs for `dirty`; `filter` is this device's (§10).
+/// Loads everything the reconciler needs for `dirty`; `filter` is this device's (§10), `scope`
+/// the engine's (§12).
 pub fn build_input(
     s: &Store<'_>,
     dirty: &[NodeId],
     os: Os,
     filter: &Filter,
+    scope: &Scope,
 ) -> Result<Input, StateError> {
     let mut b = Builder {
         s,
@@ -153,11 +156,12 @@ pub fn build_input(
     // detached: load all of it.
     // Each folder once: a dirty folder inside one already loaded is in it.
     let masked = crate::mask::masked(&b.input.remote, filter);
+    let outside = scope.out_of_scope(&b.input.remote);
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !loaded.contains(&node)
             && b.input.base.contains(node)
-            && (!b.input.remote.contains(node) || masked.contains(&node))
+            && (!b.input.remote.contains(node) || masked.contains(&node) || outside.contains(&node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)

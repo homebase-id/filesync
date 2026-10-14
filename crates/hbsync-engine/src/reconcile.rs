@@ -27,6 +27,7 @@ use hbsync_types::{
 };
 
 use crate::mask::Masks;
+use crate::scope::Scope;
 use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
 
 /// Per-node facts about the base that aren't part of [`NodeState`].
@@ -64,6 +65,8 @@ pub struct Options {
     pub pending_deletes: (usize, usize),
     /// What this device never syncs: remote nodes it matches are masked (§10).
     pub filter: Arc<Filter>,
+    /// The part of the drive this engine syncs: what is outside it is masked (§12).
+    pub scope: Arc<Scope>,
 }
 
 impl Default for Options {
@@ -78,6 +81,7 @@ impl Default for Options {
             confirmed: Arc::default(),
             pending_deletes: (0, 0),
             filter: Arc::default(),
+            scope: Arc::default(),
         }
     }
 }
@@ -393,7 +397,7 @@ enum Origin {
 }
 
 pub fn reconcile(input: &Input, opts: &Options) -> Plan {
-    let masks = Masks::of(input, &opts.filter, &opts.device);
+    let masks = Masks::of(input, &opts.filter, &opts.scope, &opts.device);
     let input = masks.input.as_ref().unwrap_or(input);
     Reconciler::new(input, opts, &masks).run()
 }
