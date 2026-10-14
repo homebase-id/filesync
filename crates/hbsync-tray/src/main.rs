@@ -224,8 +224,11 @@ impl App {
                     && s.folder.is_dir()
                 {
                     // Off this thread: some file managers take their time (PowerShell).
-                    let (paths, folder) = (self.paths.clone(), s.folder.clone());
-                    std::thread::spawn(move || shell::decorate(&paths, &folder, icons::FOLDER));
+                    let (paths, folder, identity) =
+                        (self.paths.clone(), s.folder.clone(), s.identity.clone());
+                    std::thread::spawn(move || {
+                        shell::decorate(&paths, &folder, &identity, icons::FOLDER)
+                    });
                     self.decorated = Some(s.folder.clone());
                 }
                 self.pages.set_status(daemon.status().cloned());

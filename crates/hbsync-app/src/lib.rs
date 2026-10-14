@@ -15,6 +15,8 @@ pub mod runner;
 pub mod secrets;
 pub mod setup;
 pub mod shell;
+#[cfg(windows)]
+mod sync_root;
 pub mod words;
 
 pub use config::{Config, ConfigError, MassDelete, Root};
