@@ -16,6 +16,7 @@
 //! it keeps both versions).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_local::Filter;
@@ -28,7 +29,7 @@ use hbsync_types::{
 
 use crate::mask::Masks;
 use crate::scope::Scope;
-use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
+use crate::tree::{Tree, conflict_copy_name, first_free, numbered_conflict_name};
 
 /// Per-node facts about the base that aren't part of [`NodeState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -855,19 +856,16 @@ impl<'a> Reconciler<'a> {
                     let Some(mut state) = self.merged.get(loser).cloned() else {
                         continue;
                     };
-                    let base_name = state.name.clone();
-                    let mut n = 1;
-                    let new_name = loop {
-                        let candidate = numbered_conflict_name(&base_name, n);
-                        if self
-                            .merged
-                            .child_named(parent, &candidate, Some(loser))
-                            .is_none()
-                            && !taken(&name_key(&candidate))
-                        {
-                            break candidate;
-                        }
-                        n += 1;
+                    // Unbounded: some numbered name is always free.
+                    let candidates = (1..).map(|n| numbered_conflict_name(&state.name, n));
+                    let free = |c: &str| {
+                        Ok::<_, Infallible>(
+                            self.merged.child_named(parent, c, Some(loser)).is_none()
+                                && !taken(&name_key(c)),
+                        )
+                    };
+                    let Ok(Some(new_name)) = first_free(candidates, free, |_| true) else {
+                        continue;
                     };
                     state.name = new_name;
                     self.retarget(loser, state);

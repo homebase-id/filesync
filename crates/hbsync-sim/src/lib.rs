@@ -24,6 +24,7 @@
 //! ignored item, kept on its client only, counts as present for the no-loss check.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_engine::exec::parked_name;
@@ -32,7 +33,7 @@ use hbsync_engine::reconcile::{
     Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile_with_known,
 };
 use hbsync_engine::scope::Scope;
-use hbsync_engine::tree::{Tree, numbered_names, restored_names};
+use hbsync_engine::tree::{Tree, first_free, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::Os;
@@ -1554,20 +1555,11 @@ fn numbered_name(
     name: &str,
     is_dir: bool,
 ) -> Option<String> {
-    let mut filtered = None;
-    for candidate in numbered_names(name) {
-        if client
-            .local
-            .child_named(parent, &candidate, except)
-            .is_none()
-        {
-            if syncs_at(client, parent, &candidate, is_dir) {
-                return Some(candidate);
-            }
-            filtered.get_or_insert(candidate);
-        }
-    }
-    filtered
+    let free = |c: &str| Ok::<_, Infallible>(client.local.child_named(parent, c, except).is_none());
+    let Ok(name) = first_free(numbered_names(name), free, |c| {
+        syncs_at(client, parent, c, is_dir)
+    });
+    name
 }
 
 /// Whether the client syncs an item `name` in its folder `parent`.

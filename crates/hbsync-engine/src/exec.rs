@@ -1695,19 +1695,14 @@ fn numbered_place(
     let (Some(name), folder) = (target.name(), target.parent().unwrap_or_default()) else {
         return Ok(None);
     };
-    let mut filtered = None;
-    for candidate in crate::tree::numbered_names(name) {
-        let Ok(candidate) = folder.join(&candidate) else {
-            break;
-        };
-        if is_free(db, cfg, &candidate)? {
-            if cfg.filter.path(&candidate, is_dir).is_sync() {
-                return Ok(Some(candidate));
-            }
-            filtered.get_or_insert(candidate);
-        }
-    }
-    Ok(filtered)
+    // A name the folder can't join (too long) is no place.
+    let place = |name: &str| folder.join(name).ok();
+    let name = crate::tree::first_free(
+        crate::tree::numbered_names(name),
+        |n| place(n).map_or(Ok(false), |p| is_free(db, cfg, &p)),
+        |n| place(n).is_some_and(|p| cfg.filter.path(&p, is_dir).is_sync()),
+    )?;
+    Ok(name.and_then(|n| place(&n)))
 }
 
 /// A real name for a parked item that leaves its temporary one: its `original` place if that is
