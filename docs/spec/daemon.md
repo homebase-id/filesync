@@ -179,7 +179,7 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   refused login).
 - **Menu:** version, identity, a status line (with progress while syncing, the first sync after
   starting included), Open Homebase folder, Browse files online (chat's web app on the
-  identity, opened on its Filesync mini-app: `https://<identity>/apps/chat-wasm/#filesync`),
+  identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
   in the file manager), Problems (the status notes), Review N deletions…, Recently deleted…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start

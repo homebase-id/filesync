@@ -501,7 +501,7 @@ mod tests {
         );
         assert!(
             m.contains(&Item::Action(
-                Action::OpenOnline("https://anna.example.com/apps/chat-wasm/#filesync".into()),
+                Action::OpenOnline("https://anna.example.com/apps/chat/#filesync".into()),
                 "Browse files online".into()
             )),
             "{m:?}"

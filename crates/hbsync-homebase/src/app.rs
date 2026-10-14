@@ -26,7 +26,7 @@ pub const APP_SLUG: &str = "filesync";
 /// The identity's files in the browser: chat's web app on the identity, opened on its Filesync
 /// mini-app.
 pub fn files_online(identity: &str) -> String {
-    format!("https://{identity}/apps/chat-wasm/#filesync")
+    format!("https://{identity}/apps/chat/#filesync")
 }
 
 /// A drive the app asks for at registration.
