@@ -44,13 +44,10 @@ fn icon_bytes(icons: Icons<'_>) -> &[u8] {
 /// with other names go (one Explorer still holds stays, until a later start).
 #[cfg(not(target_os = "macos"))]
 fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
-    use std::io::Write;
     let name = format!("homebase-{:016x}.{ext}", crate::ipc::fnv1a(bytes));
     let path = paths.state.join(&name);
     if !path.exists() {
-        let mut tmp = tempfile::NamedTempFile::new_in(&paths.state)?;
-        tmp.write_all(bytes)?;
-        tmp.persist(&path).map_err(|e| e.error)?;
+        hbsync_fileio::write_atomic(&path, bytes)?;
     }
     for entry in std::fs::read_dir(&paths.state)?.flatten() {
         let other = entry.file_name();

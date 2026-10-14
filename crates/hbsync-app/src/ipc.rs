@@ -190,12 +190,10 @@ fn read_line(stream: &mut BufReader<Stream>) -> Result<Option<String>, IpcError>
 #[cfg(unix)]
 const MAX_SOCKET_PATH: usize = 100;
 
-/// FNV-1a, 64 bits: unlike `std`'s hasher, the same in every build, for names and ids that
+/// FNV-1a, 64 bits ([`hbsync_fileio::fnv1a64`]): the same in every build, for names that
 /// must not change with the compiler.
 pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
-        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
-    })
+    hbsync_fileio::fnv1a64(hbsync_fileio::FNV1A64_OFFSET, bytes)
 }
 
 /// The socket file (Unix): in the runtime folder or, when that path is too long for a socket

@@ -600,15 +600,7 @@ fn write_launcher(
     icon_png: &[u8],
     packaged: bool,
 ) -> io::Result<()> {
-    let write = |path: &Path, bytes: &[u8]| -> io::Result<()> {
-        if std::fs::read(path).is_ok_and(|old| old == bytes) {
-            return Ok(());
-        }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, bytes)
-    };
+    let write = |path: &Path, bytes: &[u8]| hbsync_fileio::write_if_changed(path, bytes).map(drop);
     let entry = desktop_entry(tray, &passed_env());
     let icon = data
         .join("icons/hicolor/256x256/apps")

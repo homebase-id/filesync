@@ -11,7 +11,6 @@
 //!    AES-CBC encrypted under the exchange key.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,12 +72,7 @@ impl Credentials {
     /// this user only (0600 on Unix). The product keeps these in the OS keychain when there is
     /// one.
     pub fn save(&self, path: &Path) -> Result<(), HomebaseError> {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        tmp.write_all(&serde_json::to_vec_pretty(self)?)?;
-        tmp.as_file().sync_all()?;
-        tmp.persist(path).map_err(|e| e.error)?;
+        hbsync_fileio::write_atomic(path, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
 }

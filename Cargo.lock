@@ -1548,6 +1548,7 @@ version = "0.5.3"
 dependencies = [
  "apple-native-keyring-store",
  "hbsync-engine",
+ "hbsync-fileio",
  "hbsync-homebase",
  "hbsync-local",
  "hbsync-platform",
@@ -1644,7 +1645,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
  "thiserror 2.0.21",
  "tungstenite",
  "ureq",
