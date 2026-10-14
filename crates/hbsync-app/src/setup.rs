@@ -28,18 +28,18 @@ pub fn authorize(
     browser: Option<&str>,
     show: impl FnOnce(&str),
 ) -> Result<Credentials, HomebaseError> {
-    let pending = begin(identity, device)?;
-    show(&pending.authorize_url);
+    let login = begin(identity, device)?;
+    show(login.authorize_url());
     // The URL was shown: a browser that doesn't start isn't an error.
-    let _ = open_browser(browser, &pending.authorize_url);
-    pending.finish(APPROVAL_TIMEOUT)
+    let _ = open_browser(browser, login.authorize_url());
+    login.finish(APPROVAL_TIMEOUT)
 }
 
 /// Starts authorizing this device (named after `device` in the owner's list) on `identity`:
 /// the caller takes the browser to `authorize_url` and waits with `finish`
 /// ([`APPROVAL_TIMEOUT`]).
-pub fn begin(identity: &str, device: &str) -> Result<hbsync_homebase::Pending, HomebaseError> {
-    hbsync_homebase::begin(identity, &format!("Filesync on {device}"))
+pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, HomebaseError> {
+    crate::login::begin(identity, &format!("Filesync on {device}"))
 }
 
 /// What [`prepare`] found and did.

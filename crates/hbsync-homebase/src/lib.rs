@@ -9,7 +9,6 @@ pub mod app;
 pub mod client;
 pub mod crypto;
 pub mod drive;
-pub mod local_http;
 pub mod multipart;
 pub mod notify;
 pub mod problem;
@@ -17,7 +16,7 @@ pub mod youauth;
 
 pub use client::Client;
 pub use problem::ApiError;
-pub use youauth::{Credentials, Pending, begin};
+pub use youauth::{Credentials, Pending};
 
 #[derive(Debug, thiserror::Error)]
 pub enum HomebaseError {

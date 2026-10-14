@@ -318,9 +318,9 @@ impl Server {
         let (paths, pages, send) = (self.paths.clone(), self.pages.clone(), self.send.clone());
         std::thread::spawn(move || {
             let mut authorize = |identity: &str, device: &str| {
-                let pending = setup::begin(identity, device)?.return_to(&done);
-                let _ = url_tx.send(pending.authorize_url.clone());
-                pending.finish_unless(setup::APPROVAL_TIMEOUT, &cancel)
+                let login = setup::begin(identity, device)?.return_to(&done);
+                let _ = url_tx.send(login.authorize_url().to_owned());
+                login.finish_unless(setup::APPROVAL_TIMEOUT, &cancel)
             };
             let result = setup::set_up(&paths, &request, &mut authorize, &mut |line| {
                 tracing::info!("{line}");

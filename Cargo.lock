@@ -1531,6 +1531,7 @@ dependencies = [
  "clap",
  "hbsync-app",
  "hbsync-dev",
+ "hbsync-engine",
  "hbsync-homebase",
  "hbsync-local",
  "hbsync-platform",
@@ -1547,6 +1548,7 @@ name = "hbsync-app"
 version = "0.5.3"
 dependencies = [
  "apple-native-keyring-store",
+ "form_urlencoded",
  "hbsync-engine",
  "hbsync-fileio",
  "hbsync-homebase",
@@ -1634,7 +1636,6 @@ dependencies = [
  "aes",
  "base64",
  "cbc",
- "form_urlencoded",
  "getrandom 0.3.4",
  "hbsync-fileio",
  "hbsync-remote",
@@ -1709,6 +1710,7 @@ dependencies = [
  "hbsync-fileio",
  "hbsync-local",
  "hbsync-platform",
+ "hbsync-state",
  "hbsync-types",
  "proptest",
 ]
