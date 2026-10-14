@@ -34,6 +34,19 @@ impl Daemon {
         }
     }
 
+    /// The folder whose held deletes wait for the user (the main folder's first); else the main
+    /// folder: what the deletions page shows.
+    pub fn held_or_main(&self) -> Option<&FolderStatus> {
+        let Daemon::Running(s) = self else {
+            return None;
+        };
+        s.folders
+            .iter()
+            .filter(|f| f.held_deletes.is_some())
+            .max_by_key(|f| f.role.is_none())
+            .or_else(|| s.main_folder())
+    }
+
     /// The status of the folder that most needs the user (the main folder among equals): what
     /// the status line and the icon say.
     pub fn most_urgent(&self) -> Option<&FolderStatus> {
@@ -190,7 +203,11 @@ pub fn menu(view: &View) -> Vec<Item> {
                 problems,
             ));
         }
-        if let Some(h) = &s.held_deletes {
+        if let Some(h) = view
+            .daemon
+            .held_or_main()
+            .and_then(|f| f.held_deletes.as_ref())
+        {
             items.push(Item::Action(
                 Action::ReviewDeletions,
                 format!("Review {} deletions…", h.total()),
@@ -354,6 +371,28 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_role_folders_held_deletes_are_reviewed_from_the_menu() {
+        let mut pictures = FolderStatus::new("anna.example.com", Path::new("/home/anna/Pictures"));
+        pictures.role = Some(hbsync_types::Role::Pictures);
+        pictures.held_deletes = Some(HeldDeletes {
+            here: 0,
+            remotely: 300,
+            examples: Vec::new(),
+            token: "t".into(),
+        });
+        let daemon = Daemon::Running(Box::new(DaemonStatus {
+            version: hbsync_app::VERSION.into(),
+            accounts: Vec::new(),
+            folders: vec![status(State::Idle), pictures],
+        }));
+        assert_eq!(
+            daemon.held_or_main().map(|f| f.path.clone()),
+            Some(PathBuf::from("/home/anna/Pictures"))
+        );
+        assert!(actions(&menu(&view(&daemon, &[]))).contains(&Action::ReviewDeletions));
     }
 
     #[test]

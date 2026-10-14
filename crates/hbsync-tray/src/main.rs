@@ -231,7 +231,7 @@ impl App {
                     });
                     self.decorated = Some(s.path.clone());
                 }
-                self.pages.set_status(daemon.status().cloned());
+                self.pages.set_status(daemon.held_or_main().cloned());
                 self.updated = updated;
                 self.daemon = daemon;
                 self.recent = recent;

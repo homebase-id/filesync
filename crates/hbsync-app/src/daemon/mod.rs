@@ -157,12 +157,13 @@ impl Daemon {
             return Ok(());
         };
         self.starting_over.fetch_add(1, Ordering::SeqCst);
+        // Its folders as they are now: those of an ending account go as their runners stop.
+        let folders = account.folders();
         account.end();
         let ended = thread
             .join()
             .unwrap_or(Err(DaemonError::Runner(RunnerError::Panicked)));
-        let again = account
-            .folders()
+        let again = folders
             .iter()
             .try_for_each(|folder| self.add_folder(identity, folder));
         self.starting_over.fetch_sub(1, Ordering::SeqCst);

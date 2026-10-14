@@ -235,10 +235,7 @@ on its own.
   `.849C9593-D756-4E56-8D6E-42412F2A707B`, Google Drive `.tmp.drivedownload`,
   `.tmp.driveupload`. Junk is disposable.
 - **Ignored**: the user's rules in `.hbsync/ignore` (gitignore syntax, per device, never
-  synced), matched case-insensitively on case-insensitive volumes; and built in, in any case
-  at any depth, the macOS app libraries, packages holding a live database the app rewrites as a
-  whole (synced piece by piece they'd arrive torn): `*.photoslibrary`, `*.photolibrary`,
-  `*.musiclibrary`, `*.tvlibrary`, `*.imovielibrary`, `Photo Booth Library`. Ignored items are the user's
+  synced), matched case-insensitively on case-insensitive volumes. Ignored items are the user's
   data, kept on this device only. A rule that doesn't parse stops the client: skipping it would
   sync what the user meant to keep here.
 

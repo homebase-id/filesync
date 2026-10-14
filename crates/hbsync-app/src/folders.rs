@@ -18,7 +18,17 @@ pub use crate::control::Error;
 /// made when the folder first syncs). An identity has one main folder and one of each role;
 /// a folder inside another synced folder, or holding one, is refused.
 pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Result<(), Error> {
-    if let Some(why) = crate::setup::refuse_folder(path, crate::paths::home().as_deref()) {
+    // One at a time in this process (the tray's pages serve each request on a thread): two
+    // set-ups of one folder would each make it anew, the second undoing the first.
+    static ADDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ADDING.lock().unwrap_or_else(|e| e.into_inner());
+    let home = crate::paths::home().map(|h| crate::setup::resolve(&h));
+    if let Some(why) = crate::setup::refuse_folder(path, home.as_deref()) {
+        return Err(why.into());
+    }
+    // One this identity syncs already stays so.
+    let ours = hbsync_local::Marker::read(path)?.is_some_and(|m| m.identity == identity);
+    if !ours && let Some(why) = crate::setup::other_app(path) {
         return Err(why.into());
     }
     let config_path = paths.config_file();

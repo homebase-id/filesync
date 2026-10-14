@@ -104,7 +104,8 @@ pub struct ExecReport {
     pub rescan: Vec<RelPath>,
     /// Why the run stopped early, leaving the rest dirty for a later sync.
     pub stopped: Option<Stopped>,
-    /// The drive is out of storage: the run's uploads from then on were held (left dirty).
+    /// The drive refused an upload, out of storage: the run's uploads from then on were held
+    /// (left dirty).
     pub full: Option<String>,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
@@ -210,6 +211,8 @@ pub struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
+    /// The drive was full lately: uploads are held from the start.
+    full: bool,
 }
 
 /// A transfer whose guards passed, waiting for a worker.
@@ -263,6 +266,7 @@ impl<'a> Executor<'a> {
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
+            full: false,
         }
     }
 
@@ -289,6 +293,12 @@ impl<'a> Executor<'a> {
     /// Counts what the run does (and, for transfers, the bytes) into `progress`.
     pub fn with_progress(mut self, progress: Arc<Counters>) -> Self {
         self.progress = progress;
+        self
+    }
+
+    /// Holds every upload: the drive was full lately ([`ExecReport::full`] of an earlier run).
+    pub fn with_full(mut self, full: bool) -> Self {
+        self.full = full;
         self
     }
 

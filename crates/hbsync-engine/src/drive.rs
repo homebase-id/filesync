@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
@@ -34,7 +35,12 @@ pub struct Drive {
     wakes: Mutex<Vec<(i64, Sender<()>)>>,
     /// Feed rows the client can't read, whoever pulled them, until taken.
     skipped: Mutex<Vec<String>>,
+    /// The drive refused an upload, out of storage: why, and until when uploads are held.
+    full: Mutex<Option<(Instant, String)>>,
 }
+
+/// How long uploads are held after the drive said it is full: then one is tried again.
+const FULL_HOLD: Duration = Duration::from_secs(600);
 
 impl std::fmt::Debug for Drive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,7 +58,27 @@ impl Drive {
             answered: Mutex::new(0),
             wakes: Mutex::default(),
             skipped: Mutex::default(),
+            full: Mutex::default(),
         })
+    }
+
+    /// Why uploads are held, while they are: the drive said it is full lately.
+    pub fn full(&self) -> Option<String> {
+        let full = self.full.lock().unwrap_or_else(|e| e.into_inner());
+        full.as_ref()
+            .filter(|(until, _)| Instant::now() < *until)
+            .map(|(_, why)| why.clone())
+    }
+
+    /// Tries uploads again at once (the user asked for a sync: they may have made room).
+    pub fn clear_full(&self) {
+        *self.full.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// The drive refused an upload, out of storage: hold uploads for a while, in every folder.
+    pub fn set_full(&self, why: &str) {
+        *self.full.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((Instant::now() + FULL_HOLD, why.to_owned()));
     }
 
     fn remote(&self) -> &dyn Remote {
@@ -143,20 +169,26 @@ impl Drive {
         }
         if removed {
             self.restore(&[top])?;
-            return Ok(());
+        } else {
+            let meta = NodeMeta {
+                node: top,
+                parent: NodeId::ROOT,
+                kind: NodeKind::Folder,
+                content: NodeContent::folder(name),
+            };
+            match self.remote().create(&meta, None) {
+                // Another device made it (or deleted it) meanwhile: seen below.
+                Ok(_) | Err(RemoteError::AlreadyExists) => {}
+                Err(e) => return Err(EngineError::Remote(e)),
+            }
         }
-        let meta = NodeMeta {
-            node: top,
-            parent: NodeId::ROOT,
-            kind: NodeKind::Folder,
-            content: NodeContent::folder(name),
-        };
-        match self.remote().create(&meta, None) {
-            // Another device made it meanwhile.
-            Ok(_) | Err(RemoteError::AlreadyExists) => {}
-            Err(e) => return Err(EngineError::Remote(e)),
-        }
+        // Never sync into a top that isn't there: what goes up would land in Recently deleted.
         self.pull(None)?;
+        if self.account().read(|s| s.get_mirror(top))?.is_none() {
+            return Err(EngineError::Remote(RemoteError::Transient(format!(
+                "{name} isn't on the drive yet"
+            ))));
+        }
         Ok(())
     }
 

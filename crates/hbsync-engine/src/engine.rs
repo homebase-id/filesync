@@ -455,13 +455,20 @@ impl Engine {
             .with_urgent(self.urgent.clone())
             .with_stop(Arc::clone(&self.stop))
             .with_progress(Arc::clone(&self.progress))
+            .with_full(self.drive.full().is_some())
             .run(plan.ops)?;
+        if let Some(why) = &exec.full {
+            self.drive.set_full(why);
+        }
         // What was done counts, and the folders it asks to look at are looked at, however
         // the run ended.
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
-        report.full = exec.full.or(report.full.take());
+        report.full = exec
+            .full
+            .or_else(|| self.drive.full())
+            .or(report.full.take());
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
         self.db.write(|s| s.add_synced(&synced, activity::KEEP))?;
         report.synced.extend(synced);

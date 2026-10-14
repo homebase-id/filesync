@@ -336,6 +336,8 @@ impl Account {
             *phase = Phase::Running(shown(&runners));
         }
 
+        // Folders to start once no runner of theirs is left.
+        let mut adding: Vec<PathBuf> = Vec::new();
         let keep_days = config.keep_deleted_days.0;
         let mut next_purge = Instant::now();
         loop {
@@ -363,20 +365,15 @@ impl Account {
             while let Ok(request) = requests.try_recv() {
                 match request {
                     Request::Deleted(control) => run_request(&drive, control),
+                    // Started below, once no runner of the folder is left (one removed a moment
+                    // ago may still be finishing an operation).
                     Request::AddFolder(folder) => {
-                        if result.is_err() || runners.iter().any(|r| r.path == folder && !r.removed)
-                        {
-                            continue;
+                        if !adding.contains(&folder) {
+                            adding.push(folder);
                         }
-                        // The config as it is now: the folder was just added to it.
-                        let now = Config::load(&paths.config_file())?.unwrap_or_default();
-                        match self.start(&drive, &now, &folder) {
-                            Ok(r) => runners.push(r),
-                            Err(e) => result = Err(e.into()),
-                        }
-                        changed = true;
                     }
                     Request::RemoveFolder(folder) => {
+                        adding.retain(|f| *f != folder);
                         for r in runners.iter_mut().filter(|r| r.path == folder) {
                             r.handle.send(Command::Stop);
                             r.removed = true;
@@ -403,25 +400,64 @@ impl Account {
             let ending = self.stopping(stop) || result.is_err();
             for r in &mut runners {
                 r.ended(ending);
-                if r.restart_at.is_some_and(|at| Instant::now() >= at) {
-                    let now = Config::load(&paths.config_file())?.unwrap_or_default();
-                    match self.start(&drive, &now, &r.path) {
-                        Ok(new) => {
-                            *r = Running {
-                                backoff: r.backoff,
-                                ..new
-                            }
-                        }
-                        Err(e) => result = Err(e.into()),
+                if ending || !r.restart_at.is_some_and(|at| Instant::now() >= at) {
+                    continue;
+                }
+                // The config as it is now (its settings may have changed meanwhile).
+                let started = Self::config(paths).map(|now| self.start(&drive, &now, &r.path));
+                match started {
+                    Some(Ok(new)) => {
+                        *r = Running {
+                            backoff: r.backoff,
+                            ..new
+                        };
+                        changed = true;
                     }
+                    Some(Err(e)) => result = Err(e.into()),
+                    None => r.restart_at = Some(Instant::now() + r.backoff.after(State::Failing)),
                 }
             }
             runners.retain(|r| r.thread.is_some() || r.restart_at.is_some() && !ending);
+            if ending {
+                adding.clear();
+            }
+            let free = |runners: &[Running], f: &PathBuf| !runners.iter().any(|r| r.path == *f);
+            if adding.iter().any(|f| free(&runners, f))
+                && let Some(now) = Self::config(paths)
+            {
+                for folder in std::mem::take(&mut adding) {
+                    if !free(&runners, &folder) {
+                        // One being removed is still finishing: wait for it. One that runs
+                        // syncs it already.
+                        if runners.iter().any(|r| r.path == folder && r.removed) {
+                            adding.push(folder);
+                        }
+                        continue;
+                    }
+                    match self.start(&drive, &now, &folder) {
+                        Ok(r) => runners.push(r),
+                        Err(e) => result = Err(e.into()),
+                    }
+                    changed = true;
+                }
+            }
             if changed || runners.len() != before {
                 *lock(&self.phase) = Phase::Running(shown(&runners));
             }
             if runners.is_empty() {
                 return result;
+            }
+        }
+    }
+
+    /// The config as it is now; `None` (logged) while it can't be read (being edited, say):
+    /// what needs it waits.
+    fn config(paths: &Paths) -> Option<Config> {
+        match Config::load(&paths.config_file()) {
+            Ok(c) => Some(c.unwrap_or_default()),
+            Err(e) => {
+                tracing::warn!("can't read the config: {e}");
+                None
             }
         }
     }

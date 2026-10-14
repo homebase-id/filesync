@@ -8,9 +8,14 @@ use hbsync_types::Role;
 
 use super::*;
 
-/// Counting a folder's files stops after this many entries, or this long.
+/// Counting a folder's files stops after this many entries; the page's counting, after this long.
 const COUNT_AT_MOST: usize = 200_000;
 const COUNT_FOR: Duration = Duration::from_secs(2);
+
+/// Whether macOS asks before an app reads `role`'s folder: not read before the user chose it.
+fn asks_first(role: Role) -> bool {
+    cfg!(target_os = "macos") && matches!(role, Role::Documents | Role::Downloads)
+}
 
 impl Server {
     pub(super) fn folders_page(&self, said: Option<&str>) -> String {
@@ -27,7 +32,8 @@ impl Server {
             return "<h1>Folders</h1><p>Log in to Homebase first.</p>".into();
         };
         let identity = &main.identity;
-        let home = hbsync_app::paths::home();
+        let home = hbsync_app::paths::home().map(|h| setup::resolve(&h));
+        let count_until = Instant::now() + COUNT_FOR;
         let rows: String = Role::ALL
             .into_iter()
             .map(|role| {
@@ -46,7 +52,8 @@ impl Server {
                             format!("<p class=small>{}</p>", escape(&e.to_string())),
                         ),
                         Ok(path) => {
-                            let refused = setup::refuse_folder(&path, home.as_deref());
+                            let refused = setup::refuse_folder(&path, home.as_deref())
+                                .or_else(|| setup::other_app(&path));
                             let action = match refused {
                                 Some(why) => format!("<p class=small>{}</p>", escape(&why)),
                                 None => self.button("folders/add", role, "Sync", false),
@@ -56,11 +63,12 @@ impl Server {
                     },
                 };
                 let place = path.as_deref().map_or(String::new(), |p| {
-                    format!(
-                        "<code>{}</code> {}",
-                        escape(&p.display().to_string()),
-                        size(p)
-                    )
+                    let size = if synced.is_none() && asks_first(role) {
+                        String::new()
+                    } else {
+                        size(p, count_until)
+                    };
+                    format!("<code>{}</code> {size}", escape(&p.display().to_string()))
                 });
                 let note = match role {
                     Role::Downloads => {
@@ -125,7 +133,11 @@ impl Server {
                 } else {
                     hbsync_app::folders::add(&self.paths, &identity, &folder, Some(role))?;
                 }
-                return Ok(format!("{} syncs now.", role.name()));
+                return Ok(if running {
+                    format!("{} syncs now.", role.name())
+                } else {
+                    format!("{} is set up: it syncs once Filesync runs.", role.name())
+                });
             }
             let Some(root) = config
                 .roots
@@ -149,9 +161,9 @@ impl Server {
     }
 }
 
-/// How much `path` holds, in words; "more than" when counting stopped early.
-fn size(path: &Path) -> String {
-    let started = Instant::now();
+/// How much `path` holds, in words, counted until `until` at most; "more than" when counting
+/// stopped early.
+fn size(path: &Path, until: Instant) -> String {
     let (mut files, mut bytes, mut seen) = (0u64, 0u64, 0usize);
     let mut todo = vec![path.to_path_buf()];
     while let Some(dir) = todo.pop() {
@@ -160,7 +172,7 @@ fn size(path: &Path) -> String {
         };
         for entry in entries.flatten() {
             seen += 1;
-            if seen > COUNT_AT_MOST || started.elapsed() > COUNT_FOR {
+            if seen > COUNT_AT_MOST || Instant::now() > until {
                 return format!(
                     "<span class=small>more than {} files, {}</span>",
                     words::count(files),

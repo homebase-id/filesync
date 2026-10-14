@@ -342,6 +342,8 @@ impl Runner {
                     Ok(Command::SyncNow) => {
                         schedule.asked(Instant::now());
                         check_rules = true;
+                        // The user may have made room on the drive.
+                        self.drive.clear_full();
                     }
                     Ok(Command::Pause { until }) => {
                         schedule.pause(until);

@@ -30,7 +30,8 @@ impl Server {
         };
         format!(
             "<h1>{} deletions are waiting</h1>\
-             <p>Filesync holds back deletions this large until you confirm them.</p>{what}\
+             <p>Filesync holds back deletions this large until you confirm them. In \
+             <code>{folder}</code>:</p>{what}\
              <ul>{examples}{more}</ul>\
              <form method=post action=\"{url}\">\
              <input type=hidden name=token value=\"{token}\">\
@@ -38,6 +39,7 @@ impl Server {
              <p class=small>Not sure? Leave this page: nothing is deleted, and the files stay \
              as they are on every device until you confirm.</p>",
             held.total(),
+            folder = escape(&status.path.display().to_string()),
             url = self.pages.url("deletions"),
             token = escape(&held.token),
         )

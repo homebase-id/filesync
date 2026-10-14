@@ -346,13 +346,11 @@ fn run(command: Command) -> Res<ExitCode> {
         } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = one_identity(&config, identity)?;
+            // Refused (where setup refuses a folder, or another app syncs it) by the adding.
             let folder = match folder {
                 Some(f) => setup::resolve(&f),
                 None => setup::role_folder(role)?,
             };
-            if let Some(why) = setup::refuse_folder(&folder, hbsync_app::paths::home().as_deref()) {
-                return Err(why.into());
-            }
             match daemon::add_folder(&paths, &identity, &folder, Some(role)) {
                 // Set up now; the daemon syncs it once started.
                 Err(_) if !running(&paths).unwrap_or(true) => {
@@ -429,12 +427,18 @@ fn run(command: Command) -> Res<ExitCode> {
 
 /// The identity a command is for: `given`, or the only one set up.
 fn one_identity(config: &Config, given: Option<String>) -> Res<String> {
-    if let Some(identity) = given {
-        return Ok(setup::normalize_identity(&identity));
-    }
     let mut set_up: Vec<&str> = config.roots.iter().map(|r| r.identity.as_str()).collect();
     set_up.sort_unstable();
     set_up.dedup();
+    if let Some(identity) = given {
+        let identity = setup::normalize_identity(&identity);
+        if !set_up.contains(&identity.as_str()) {
+            return Err(
+                format!("{identity} isn't set up here: `hbsync setup {identity}` first").into(),
+            );
+        }
+        return Ok(identity);
+    }
     match set_up[..] {
         [one] => Ok(one.to_owned()),
         [] => Err("not set up: `hbsync setup <identity>` first".into()),

@@ -131,9 +131,9 @@ mod imp {
         Some(home()?.join(english(dir)))
     }
 
-    /// OneDrive's folders under `~/Library/CloudStorage`; iCloud's Desktop & Documents, which
-    /// keeps `~/Documents` (and `~/Desktop`) in iCloud Drive once its folder there exists
-    /// (inferred from how macOS lays it out, not from an API).
+    /// OneDrive's folders under `~/Library/CloudStorage`, and iCloud Drive's own. (iCloud's
+    /// Desktop & Documents, which keeps `~/Documents` in iCloud Drive, isn't told apart from a
+    /// folder the user named Documents there: not detected.)
     pub fn synced_roots() -> Vec<(Owner, PathBuf)> {
         let Some(home) = home() else {
             return Vec::new();
@@ -146,12 +146,10 @@ mod imp {
                 }
             }
         }
-        let cloud_docs = home.join("Library/Mobile Documents/com~apple~CloudDocs");
-        if cloud_docs.join("Documents").is_dir() {
-            roots.push((Owner::ICloud, home.join("Documents")));
-            roots.push((Owner::ICloud, home.join("Desktop")));
-        }
-        roots.push((Owner::ICloud, cloud_docs));
+        roots.push((
+            Owner::ICloud,
+            home.join("Library/Mobile Documents/com~apple~CloudDocs"),
+        ));
         roots
     }
 }

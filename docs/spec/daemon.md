@@ -135,8 +135,8 @@ a failure (service managers restart it then).
   (something holds it back that the plan can't see: a file written all the time, one that can't
   be read). One waiting for another operation (a folder's base for its children's) isn't told:
   that one says why. A full drive (Homebase's 507) is one note, "Homebase is out of storage":
-  the sync holds every upload from then on and does the rest (downloads, moves, deletes); the
-  next sync tries again. A row on the drive the
+  every folder of the account holds its uploads for ten minutes (or until Sync now) and does
+  the rest (downloads, moves, deletes); then one upload tries again. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
   transfers, done and to do.
