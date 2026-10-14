@@ -203,7 +203,7 @@ pub struct Store<'a> {
     /// The ids of local folders by path, and their paths by id, found in this transaction
     /// ([`Store::local_id_at`], [`Store::folder_path`]); any local write but
     /// [`Store::put_local`] forgets them.
-    local_ids: std::cell::RefCell<HashMap<RelPath, i64>>,
+    local_ids: std::cell::RefCell<HashMap<String, i64>>,
     local_paths: std::cell::RefCell<HashMap<i64, RelPath>>,
 }
 

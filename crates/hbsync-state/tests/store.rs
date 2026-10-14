@@ -844,17 +844,18 @@ fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
     db.write(|s| {
         let a = local("a", NodeKind::Folder, 1);
         s.put_local(&a)?;
-        s.put_local(&local("a/x", NodeKind::File, 2))?;
-        assert_eq!(s.local_by_node(a.node)?.map(|r| r.path), Some(path("a")));
+        let x = local("a/x", NodeKind::File, 2);
+        s.put_local(&x)?;
+        // Both ways in: a's id by its path, and its path by its id.
+        assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("a/x")));
         s.move_local_subtree(&path("a"), &path("b"))?;
+        assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("b/x")));
         s.put_local(&local("b/y", NodeKind::File, 3))?;
         assert!(
             s.put_local(&local("a/z", NodeKind::File, 4)).is_err(),
             "a went"
         );
         let missing = |what: &str| StateError::Corrupt(format!("{what} missing"));
-        let x = s.get_local(&path("b/x"))?.ok_or_else(|| missing("b/x"))?;
-        assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("b/x")));
 
         let renewed = NodeId::new();
         s.rekey_local(a.node, renewed)?;
@@ -864,6 +865,15 @@ fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
         assert!(
             s.put_local(&local("b/w", NodeKind::File, 5)).is_err(),
             "b went"
+        );
+
+        let c = local("c", NodeKind::Folder, 6);
+        s.put_local(&c)?;
+        assert!(s.local_children(&path("c"))?.is_empty());
+        assert!(s.delete_local(c.node)?);
+        assert!(
+            s.put_local(&local("c/v", NodeKind::File, 7)).is_err(),
+            "c went"
         );
         Ok(())
     })?;
