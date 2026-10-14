@@ -104,7 +104,7 @@ pub struct SyncReport {
     pub feed: FeedReport,
     pub rounds: usize,
     pub ops_done: usize,
-    pub skipped: Vec<(Op, String)>,
+    pub skipped: Vec<(Op, crate::exec::Skip)>,
     pub failed: Vec<(Op, String)>,
     /// Deletes held by the mass-delete guard, waiting for confirmation.
     pub held: Vec<Op>,

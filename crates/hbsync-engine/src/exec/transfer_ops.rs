@@ -37,7 +37,7 @@ impl Executor<'_> {
                 NodeKind::File,
                 tags,
             ),
-            _ => Err(Outcome::Skip("not a transfer".into())),
+            _ => Err(Outcome::stale("not a transfer")),
         }
     }
 
@@ -53,14 +53,14 @@ impl Executor<'_> {
             .db
             .read(|s| Ok((s.get_mirror(node)?, s.local_by_node(node)?)))?;
         let Some(mirror) = mirror else {
-            return Err(Outcome::Skip("gone remotely".into()));
+            return Err(Outcome::stale("gone remotely"));
         };
         let Some(file) = mirror.file else {
-            return Err(Outcome::Skip("not a file".into()));
+            return Err(Outcome::stale("not a file"));
         };
         let expected = file.hash;
         if replace != current.is_some() {
-            return Err(Outcome::Skip("local presence changed".into()));
+            return Err(Outcome::stale("local presence changed"));
         }
         if let Some(row) = &current
             && !self.on_disk_unchanged(row)
@@ -109,13 +109,13 @@ impl Executor<'_> {
             ))
         })?;
         let Some(row) = row else {
-            return Err(Outcome::Skip("gone locally".into()));
+            return Err(Outcome::stale("gone locally"));
         };
         if !self.on_disk_unchanged(&row) {
             return Err(rescan(&mut self.report, &row.path));
         }
         let Some(file) = view::local_content(&row, base.as_ref()) else {
-            return Err(Outcome::Skip("not hashed yet".into()));
+            return Err(Outcome::stale("not hashed yet"));
         };
         let mut content = NodeContent::file(name, file.mtime_ms, file.size, file.executable);
         let (hash, size) = (file.hash, file.size);
@@ -148,7 +148,7 @@ impl Executor<'_> {
             }
             Some((file_id, version)) => {
                 let Some(mirror) = &mirror else {
-                    return Err(Outcome::Skip("gone remotely".into()));
+                    return Err(Outcome::stale("gone remotely"));
                 };
                 content.unknown = mirror.carried_keys();
                 // A node from before creation times, or from a client that sends none.
@@ -219,7 +219,7 @@ impl Executor<'_> {
                     s.put_mirror(&row)
                 })
             }
-            _ => Ok(Outcome::Skip("mismatched transfer result".into())),
+            _ => Ok(Outcome::stale("mismatched transfer result")),
         }
     }
 
@@ -240,9 +240,7 @@ impl Executor<'_> {
             && self.db.read(|s| s.local_by_node(node))?.as_ref() != Some(row)
         {
             done.keep_for_retry();
-            return Ok(Outcome::Skip(
-                "local item changed during the transfer".into(),
-            ));
+            return Ok(Outcome::stale("local item changed during the transfer"));
         }
         // The tags go on before the file is in place: a scan in between would read none, and
         // take that for the user removing them.

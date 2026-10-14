@@ -15,7 +15,7 @@ impl Executor<'_> {
     ) -> Step {
         debug_assert_eq!(kind, NodeKind::Folder, "file creates run through flush");
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
-            return Ok(Outcome::Skip("gone locally".into()));
+            return Ok(Outcome::stale("gone locally"));
         };
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
@@ -66,7 +66,7 @@ impl Executor<'_> {
         tags: &Tags,
     ) -> Step {
         let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
-            return Ok(Outcome::Skip("gone remotely".into()));
+            return Ok(Outcome::stale("gone remotely"));
         };
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
         let mut content = mirror.content(name);

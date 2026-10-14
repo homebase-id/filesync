@@ -126,7 +126,10 @@ a failure (service managers restart it then).
   exactly them through; when the held deletes changed since, it is refused (sync semantics,
   the mass-delete guard).
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
-  file that can't be read) isn't noted again until it has gone away. A row on the drive the
+  file that can't be read) isn't noted again until it has gone away. An operation left for the
+  next plan is noted only when this device can't do it (a name or path it can't hold, access
+  denied, the drive refusing it); one that went stale since the plan (the item changed or went)
+  is planned again quietly. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
   transfers, done and to do.

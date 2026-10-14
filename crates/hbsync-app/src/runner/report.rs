@@ -26,7 +26,10 @@ pub(super) fn notes(
     for c in &report.conflicts {
         notes.push(describe_conflict(engine, c)?);
     }
-    for (op, why) in report.failed.iter().chain(&report.skipped) {
+    // What stalled since the plan is planned again quietly; what this device can't do is told.
+    let told = report.skipped.iter().filter(|(_, why)| why.tells());
+    let failed = report.failed.iter().map(|(op, why)| (op, why.as_str()));
+    for (op, why) in failed.chain(told.map(|(op, why)| (op, why.as_str()))) {
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }

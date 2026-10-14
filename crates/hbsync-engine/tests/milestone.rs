@@ -331,7 +331,7 @@ fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
         report
             .skipped
             .iter()
-            .any(|(_, why)| why.starts_with("name can't be used here")),
+            .any(|(_, why)| why.tells() && why.as_str().starts_with("name can't be used here")),
         "{report:?}"
     );
     let names: Vec<String> = win.entries("").into_iter().map(|(p, _)| p).collect();
