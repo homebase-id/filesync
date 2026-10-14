@@ -2,7 +2,8 @@
 //!
 //! Pages are applied in feed order, each in one transaction together with the cursor, so a
 //! crash replays at most one page (and applying a page twice is harmless). Every node a page
-//! touches is marked dirty. The feed is drained completely before planning, which is what
+//! changes is marked dirty; a version the mirror has already (this device's own write coming
+//! back) changes nothing. The feed is drained completely before planning, which is what
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
@@ -86,11 +87,20 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     let Some(row) = mirror_row(header) else {
         return Ok(true);
     };
+    // A version the mirror has already: the echo of this device's own write (the executor
+    // stored the row it wrote), or a page applied again. Nothing to plan.
+    let known = |r: &MirrorRow| r.file_id == row.file_id && r.version == row.version;
     if let Some(removal) = header.removal() {
+        if s.removed_by_node(row.node)?.is_some_and(|r| known(&r.row)) {
+            return Ok(false);
+        }
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
         gone(s, header)?;
         s.put_removed(&RemovedRow { row, removal })?;
         return Ok(false);
+    }
+    if s.get_mirror(row.node)?.is_some_and(|r| known(&r)) {
+        return Ok(true);
     }
     s.delete_removed(row.node)?;
     s.put_mirror(&row)?;
@@ -175,6 +185,47 @@ mod tests {
             1,
             "the mirror keeps the file"
         );
+        Ok(())
+    }
+
+    /// The feed brings this device's own writes back: a version the mirror has is no change.
+    #[test]
+    fn a_known_version_marks_nothing() -> Result<(), StateError> {
+        use hbsync_types::schema::Removal;
+        let mut db = StateDb::open_in_memory()?;
+        let node = NodeId::new();
+        let header = |version: u128, content: NodeContent| RemoteHeader {
+            file_id: RemoteFileId(Uuid::from_u128(1)),
+            version: VersionTag(Uuid::from_u128(version)),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            body: RemoteBody::Live {
+                node,
+                content,
+                payload: None,
+            },
+        };
+        let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
+            db.write(|s| {
+                s.clear_dirty(node)?;
+                apply(s, h)?;
+                s.dirty_count()
+            })
+        };
+        let mut gone = NodeContent::folder("d");
+        gone.set_removal(Some(Removal {
+            at_ms: 9,
+            root: node,
+        }));
+        for (version, content) in [(1, NodeContent::folder("d")), (2, gone)] {
+            let h = header(version, content);
+            assert_eq!(dirty_after(&mut db, &h)?, 1, "version {version} is news");
+            assert_eq!(
+                dirty_after(&mut db, &h)?,
+                0,
+                "version {version} again isn't"
+            );
+        }
         Ok(())
     }
 

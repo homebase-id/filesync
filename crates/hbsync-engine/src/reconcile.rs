@@ -1084,9 +1084,19 @@ impl<'a> Reconciler<'a> {
             }
         }
 
-        // Parents before children for creates; children before parents for deletes; only the
-        // topmost local trash of a subtree is needed.
-        creates.sort_by_key(|(d, op)| (*d, op.node()));
+        // Parents before children for creates, all folders before the files (which the executor
+        // uploads together on its pool, until a folder create stops it); children before parents
+        // for deletes; only the topmost local trash of a subtree is needed.
+        let uploads = |op: &Op| {
+            matches!(
+                op,
+                Op::RemoteCreate {
+                    kind: NodeKind::File,
+                    ..
+                }
+            )
+        };
+        creates.sort_by_key(|(d, op)| (uploads(op), *d, op.node()));
         deletes.sort_by_key(|(d, op)| (std::cmp::Reverse(*d), op.node()));
         let trashed: HashSet<NodeId> = deletes.iter().filter_map(|(_, op)| op.trashes()).collect();
         let deletes: Vec<Op> = deletes
