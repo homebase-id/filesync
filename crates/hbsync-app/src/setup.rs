@@ -12,6 +12,8 @@ use hbsync_homebase::{Client, Credentials, HomebaseError, app};
 use hbsync_local::STATE_DIR;
 use hbsync_remote::Remote;
 
+use hbsync_types::Role;
+
 use crate::control;
 use crate::paths::home;
 use crate::{Config, CredentialStore, Location, Paths, autostart};
@@ -104,9 +106,25 @@ pub fn default_folder() -> control::Result<PathBuf> {
         .ok_or_else(|| "no home folder (HOME unset): choose a folder".into())
 }
 
+/// Where this computer keeps `role`'s folder (resolved): what `hbsync add <role>` syncs.
+pub fn role_folder(role: Role) -> control::Result<PathBuf> {
+    use hbsync_platform::user_dirs::{UserDir, user_dir};
+    let dir = match role {
+        Role::Documents => UserDir::Documents,
+        Role::Pictures => UserDir::Pictures,
+        Role::Music => UserDir::Music,
+        Role::Videos => UserDir::Videos,
+        Role::Downloads => UserDir::Downloads,
+    };
+    user_dir(dir)
+        .map(|p| resolve(&p))
+        .ok_or_else(|| format!("this computer has no {} folder", role.name()).into())
+}
+
 /// Why `folder` (absolute) must not be synced, if it mustn't: the home folder itself or a folder
 /// above it, the top of a disk, or a system folder. Syncing those would take in (and on
-/// another device, put down) files that aren't the user's to sync.
+/// another device, put down) files that aren't the user's to sync. Nor one another app syncs
+/// (OneDrive, iCloud): two apps syncing one folder fight over every change.
 ///
 /// It compares the paths as given: pass them through [`resolve`] first, so a symlink or `..`
 /// can't hide what a folder really is.
@@ -141,10 +159,16 @@ pub fn refuse_folder(folder: &Path, home: Option<&Path>) -> Option<String> {
         "C:\\Program Files (x86)",
         "C:\\ProgramData",
     ];
-    SYSTEM
-        .iter()
-        .find(|s| within(folder, Path::new(s)))
-        .map(|s| format!("{} is in a system folder ({s})", folder.display()))
+    if let Some(s) = SYSTEM.iter().find(|s| within(folder, Path::new(s))) {
+        return Some(format!("{} is in a system folder ({s})", folder.display()));
+    }
+    hbsync_platform::user_dirs::owner(folder).map(|owner| {
+        format!(
+            "{} syncs {} already: two apps syncing one folder fight over every change",
+            owner.name(),
+            folder.display()
+        )
+    })
 }
 
 /// Whether `path` is `folder` or inside it; ignoring case where the file system usually does

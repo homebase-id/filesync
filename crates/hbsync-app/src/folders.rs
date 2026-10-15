@@ -18,6 +18,9 @@ pub use crate::control::Error;
 /// made when the folder first syncs). An identity has one main folder and one of each role;
 /// a folder inside another synced folder, or holding one, is refused.
 pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Result<(), Error> {
+    if let Some(why) = crate::setup::refuse_folder(path, crate::paths::home().as_deref()) {
+        return Err(why.into());
+    }
     let config_path = paths.config_file();
     let config = Config::load(&config_path)?.unwrap_or_default();
     for other in config.roots.iter().filter(|r| r.folder != path) {
