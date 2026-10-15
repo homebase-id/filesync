@@ -186,12 +186,17 @@ pub fn dev_home() -> bool {
 
 /// Starts the daemon and waits until it answers: through the service manager when it starts
 /// the daemon at logon (so that it supervises it), else `hbsyncd` beside this program, on its
-/// own.
+/// own (on Linux, in a unit of the app's unless this program runs in one: [`crate::unit`]).
 pub fn start(paths: &Paths) -> Result<()> {
     if !dev_home() && autostart::installed()? && autostart::start()? {
         return wait_until_running(paths, None);
     }
     let exe = autostart::daemon_exe()?;
+    // Started from a terminal, say: in a unit of the app's, not the terminal's.
+    #[cfg(target_os = "linux")]
+    if !dev_home() && !crate::unit::in_own_unit() && crate::unit::start(&exe, &[]) {
+        return wait_until_running(paths, None);
+    }
     #[cfg(windows)]
     keep_std_handles_from_children();
     let mut process = Command::new(&exe);

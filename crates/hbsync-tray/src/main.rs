@@ -73,6 +73,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Linux, started from a terminal (say): again, in a unit of the app's ([`hbsync_app::unit`]).
+    #[cfg(target_os = "linux")]
+    if !control::dev_home()
+        && !hbsync_app::unit::in_own_unit()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        if hbsync_app::unit::start(&exe, &args) {
+            tracing::info!("started again in a unit of its own");
+            return ExitCode::SUCCESS;
+        }
+    }
     let _lock = match InstanceLock::acquire_for(&paths, PROGRAM) {
         Ok(lock) => lock,
         // Started again (at logon, by hand): the one running is enough.
