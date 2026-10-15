@@ -303,10 +303,16 @@ programs are started by their links in `/usr/bin`, which last across package ver
 On Linux the tray also lists itself among the desktop's applications each time it starts
 (unless `HBSYNC_HOME` is set): the same entry in `~/.local/share/applications/` and its icon in
 `~/.local/share/icons/hicolor/256x256/apps/homebase-filesync.png`, rewritten only when they
-changed; an autostart entry is brought up to date with it. Started from there or at logon, the session gives it a group of its own (System
-Monitor shows Homebase Filesync, the daemon below it); started from a terminal, it belongs to
-the terminal. The launcher stays after Log out, as the way to log in again. Elsewhere the
-installer will do this (not built yet).
+changed; an autostart entry is brought up to date with it. Started from there or at logon, the
+session gives it a systemd unit of its own (System Monitor shows Homebase Filesync, the daemon
+below it). Started from a terminal on a desktop, the tray starts again in a scope of the app's
+(`systemd-run --user --scope`, which runs it with this environment; `app-id.homebase.filesync-
+<random>.scope`) and the first process ends; the daemon a terminal starts (`hbsync setup`,
+`start`) runs in one from the start. The app is listed as itself, not as the terminal, and
+closing the terminal ends neither. Not away from a desktop (no display: over SSH, a scope
+would end with the user's service manager at logout), with `HBSYNC_HOME` set, or without a
+systemd user session: they run where they were started. The launcher stays after Log out, as
+the way to log in again. Elsewhere the installer will do this (not built yet).
 
 `hbsync setup` turns autostart on, `logout` and `unlink` turn it off, `hbsync autostart on|off`
 by hand. With the daemon starting at logon, `hbsync start` goes through launchd or systemd so

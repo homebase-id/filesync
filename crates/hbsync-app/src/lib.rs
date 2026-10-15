@@ -21,6 +21,8 @@ pub mod setup;
 pub mod shell;
 #[cfg(windows)]
 mod sync_root;
+#[cfg(target_os = "linux")]
+pub mod unit;
 pub mod words;
 
 pub use config::{Config, ConfigError, MassDelete, Root};

@@ -5,9 +5,37 @@
 Keeps a folder on your computer in sync with your [Homebase](https://homebase.id) drive, on
 Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
 
-**[Download the latest release](https://github.com/homebase-id/filesync/releases)**: an MSIX
-for Windows, a `.dmg` for the Mac, `.deb` and `.rpm` packages for Linux, for Intel and ARM.
-They update themselves.
+## Getting started
+
+1. **Install** it from the [latest release](https://github.com/homebase-id/filesync/releases/latest):
+   - **Windows** 10/11: `homebase-filesync.exe`. It installs the package for your PC and keeps
+     it up to date.
+   - **macOS** 11+: `Homebase-Filesync-mac-aarch64.dmg` (Apple Silicon) or `…-mac-amd64.dmg`
+     (Intel); drag the app to Applications. It updates itself.
+   - **Ubuntu, Debian**: `sudo apt install ./homebase-filesync_amd64.deb` (or `_arm64`).
+     Updates come with `apt upgrade` (the package adds its repository).
+   - **Fedora, openSUSE**: `sudo dnf install ./homebase-filesync-*.x86_64.rpm` (or
+     `.aarch64`; `sudo zypper install` on openSUSE). Updates by hand, for now.
+   - **Other Linux, servers**: `homebase-filesync-*-linux-amd64.tar.gz` (or `-aarch64`), static
+     programs. Updates by hand.
+2. **Start Homebase Filesync.** Installing doesn't start it, and it has no window, only an icon:
+   - **Windows**: open **Homebase Filesync** from the Start menu. Its icon is in the
+     notification area at the right of the taskbar (behind the **^** arrow at first).
+   - **macOS**: open **Homebase Filesync** from Applications. Its icon is in the menu bar.
+   - **Linux**: open **Homebase Filesync** from the app menu (Activities on Ubuntu), or run
+     `homebase-filesync` in a terminal (from the tarball:
+     `homebase-filesync-*/bin/homebase-filesync`); with systemd it carries on when the terminal
+     closes (without, start it with `setsid`). Its icon is in the top bar or panel; GNOME needs
+     the AppIndicator extension, which Ubuntu has.
+3. **Choose Log in to Homebase…** from that icon. Your browser opens so you can approve this
+   computer, and the folder `~/Homebase` starts syncing (or pick another). From then on it
+   starts by itself when you log in.
+
+From a terminal instead of steps 2 and 3: `hbsync setup <your identity>`.
+
+After an update on Linux, the menu offers **Restart to finish the update**.
+
+Your Homebase needs odin-core v0.1.954 or newer.
 
 ## Why it's nice
 
@@ -71,14 +99,6 @@ They update themselves.
 - **Yours to tune.** `.hbsync/ignore` takes gitignore-style rules per computer, and well-known
   junk (`.DS_Store`, `Thumbs.db`, editor temp files) is left out on its own. `hbsync` gives you
   status, recent changes, pause and resume, Recently deleted, and the logs from a terminal.
-
-## Getting started
-
-Install it, start **Homebase Filesync**, and choose **Log in to Homebase…** in its tray or
-menu-bar menu. Your browser opens so you can approve this computer, and the folder
-`~/Homebase` starts syncing (or pick another). From a terminal: `hbsync setup <your identity>`.
-
-Your Homebase needs odin-core v0.1.954 or newer.
 
 ## For developers
 
