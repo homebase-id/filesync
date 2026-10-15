@@ -1,24 +1,36 @@
-//! Remote operations: folders, renames and moves, deletes.
+//! Remote operations: folders, renames and moves, deletes. Each is checked here and written on
+//! the worker pool ([`Job::Meta`]), next to the transfers.
 
 use super::*;
 
-impl Executor<'_> {
-    // ---- remote operations ----
+/// What a metadata write means for the DB once it landed.
+pub(super) enum After {
+    /// A folder created, or restored from Recently deleted.
+    Created,
+    /// Renamed, moved or tagged.
+    Updated,
+    /// Moved to Recently deleted: its mirror row (`file_id`) goes, its removed row comes.
+    Removed {
+        file_id: hbsync_types::RemoteFileId,
+        removal: Removal,
+    },
+}
 
-    pub(super) fn create_folder(
+impl Executor<'_> {
+    // ---- remote operations: guards before the worker pool, the DB after ----
+
+    pub(super) fn prepare_folder(
         &mut self,
         node: NodeId,
         parent: NodeId,
         name: &str,
-        kind: NodeKind,
         tags: &Tags,
-    ) -> Step {
-        debug_assert_eq!(kind, NodeKind::Folder, "file creates run through flush");
+    ) -> Step<(Job, Ctx)> {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
-            return Ok(Outcome::stale("gone locally"));
+            return Err(Outcome::stale("gone locally"));
         };
         if !self.on_disk_unchanged(&row) {
-            return Ok(rescan(&mut self.report, &row.path));
+            return Err(rescan(&mut self.report, &row.path));
         }
         let removed = self.db.read(|s| s.removed_by_node(node))?;
         let mut content = NodeContent::folder(name);
@@ -34,39 +46,31 @@ impl Executor<'_> {
                 content.set_tags(tags);
             }
         }
-        let new = NodeMeta {
+        let meta = NodeMeta {
             node,
             parent,
-            kind,
-            content: content.clone(),
+            kind: NodeKind::Folder,
+            content,
         };
-        let result = match &removed {
-            Some(r) => self.remote.update(r.row.file_id, r.row.version, &new, None),
-            None => self.remote.create(&new, None),
-        };
-        let written = match result {
-            Ok(w) => w,
-            Err(RemoteError::AlreadyExists) => return Ok(Outcome::Done),
-            Err(e) => return Ok(remote_outcome(e)),
-        };
-        self.finish(&[(node, false)], |s| {
-            s.delete_removed(node)?;
-            s.put_mirror(&written_row(written, &new, None))
-        })
+        let target = removed.map(|r| RemoteRef {
+            file_id: r.row.file_id,
+            version: r.row.version,
+        });
+        Ok(meta_job(meta, target, None, None, After::Created))
     }
 
     /// A metadata-only update: move or rename (to `place`; `None` keeps it) and the tags,
     /// keeping the payload.
-    pub(super) fn rename_remote(
+    pub(super) fn prepare_rename(
         &mut self,
         node: NodeId,
         file_id: hbsync_types::RemoteFileId,
         expected: hbsync_types::VersionTag,
         place: Option<(NodeId, &str)>,
         tags: &Tags,
-    ) -> Step {
+    ) -> Step<(Job, Ctx)> {
         let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
-            return Ok(Outcome::stale("gone remotely"));
+            return Err(Outcome::stale("gone remotely"));
         };
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
         let mut content = mirror.content(name);
@@ -83,28 +87,34 @@ impl Executor<'_> {
             kind: mirror.kind,
             content,
         };
-        let hash = mirror.file.map(|f| f.hash);
-        let row = match update_meta(self.remote, file_id, expected, &meta, hash) {
-            Ok(row) => row,
-            Err(e) => return Ok(remote_outcome(e)),
+        let target = RemoteRef {
+            file_id,
+            version: expected,
         };
-        self.finish(&[(node, false)], |s| s.put_mirror(&row))
+        let hash = mirror.file.map(|f| f.hash);
+        Ok(meta_job(
+            meta,
+            Some(target),
+            hash,
+            Some(mirror.parent),
+            After::Updated,
+        ))
     }
 
     /// A delete: the node goes to Recently deleted (a metadata-only update setting its
     /// removal), its bytes kept there until the purge.
-    pub(super) fn remove(
+    pub(super) fn prepare_remove(
         &mut self,
         node: NodeId,
         file_id: hbsync_types::RemoteFileId,
         expected: hbsync_types::VersionTag,
-    ) -> Step {
+    ) -> Step<(Job, Ctx)> {
         let Some(mirror) = self
             .db
             .read(|s| s.mirror_by_file(file_id))?
             .filter(|m| m.node == node)
         else {
-            return Ok(Outcome::Done); // already out of the tree
+            return Err(Outcome::Done); // already out of the tree
         };
         let removal = Removal {
             at_ms: hbsync_types::unix_now_ms(),
@@ -118,18 +128,56 @@ impl Executor<'_> {
             kind: mirror.kind,
             content,
         };
-        let hash = mirror.file.map(|f| f.hash);
-        let removed = match update_meta(self.remote, file_id, expected, &meta, hash) {
-            Ok(row) => Some(RemovedRow { row, removal }),
-            Err(RemoteError::NotFound) => None, // deleted for good meanwhile
-            Err(e) => return Ok(remote_outcome(e)),
+        let target = RemoteRef {
+            file_id,
+            version: expected,
         };
-        self.finish(&[(node, false)], |s| {
-            s.delete_mirror(file_id)?;
-            if let Some(removed) = &removed {
-                s.put_removed(removed)?;
+        let hash = mirror.file.map(|f| f.hash);
+        Ok(meta_job(
+            meta,
+            Some(target),
+            hash,
+            Some(mirror.parent),
+            After::Removed { file_id, removal },
+        ))
+    }
+
+    /// Records a metadata write that landed (`written`), or a removal the drive no longer
+    /// needed (`None`: deleted for good meanwhile).
+    pub(super) fn commit_meta(
+        &mut self,
+        meta: NodeMeta,
+        hash: Option<hbsync_types::ContentHash>,
+        after: After,
+        written: Option<RemoteRef>,
+    ) -> Step {
+        let node = meta.node;
+        let row = written.map(|w| written_row(w, &meta, hash));
+        self.finish(&[(node, false)], |s| match after {
+            After::Created => {
+                s.delete_removed(node)?;
+                row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
-            s.mark_dirty(node)
+            After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
+            After::Removed { file_id, removal } => {
+                s.delete_mirror(file_id)?;
+                if let Some(row) = row {
+                    s.put_removed(&RemovedRow { row, removal })?;
+                }
+                s.mark_dirty(node)
+            }
         })
     }
+}
+
+/// The job and the commit context of a metadata write; `from`: the folder the node leaves
+/// (its parent on the drive now), if any.
+fn meta_job(
+    meta: NodeMeta,
+    target: Option<RemoteRef>,
+    hash: Option<hbsync_types::ContentHash>,
+    from: Option<NodeId>,
+    after: After,
+) -> (Job, Ctx) {
+    (Job::Meta { meta, target }, Ctx::Meta { hash, from, after })
 }

@@ -14,7 +14,7 @@
 //! takes each attribute both sides now agree on) are one transaction: the base never falls
 //! behind what was done on disk or remotely.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -215,12 +215,76 @@ pub struct Executor<'a> {
     full: bool,
 }
 
-/// A transfer whose guards passed, waiting for a worker.
+/// An operation whose guards passed, its job waiting for a worker.
 struct Prepared {
     op: Op,
     attempts: u8,
-    job: Job,
     ctx: Ctx,
+    /// The path of what it removes, taken before it ran.
+    gone: Option<String>,
+}
+
+/// Operations collected for the worker pool, which runs them in any order.
+#[derive(Default)]
+struct Batch {
+    jobs: Vec<(Job, Prepared)>,
+    /// Their nodes.
+    nodes: HashSet<NodeId>,
+    /// The folders they create (or restore).
+    created: HashSet<NodeId>,
+    /// The folders on the drive they put a node into or take one from.
+    folders: HashSet<NodeId>,
+    /// The nodes they move to another folder, and the folders those go into with every folder
+    /// above them.
+    moved: HashSet<NodeId>,
+    under: HashSet<NodeId>,
+}
+
+impl Batch {
+    /// Adds `job`; `target`: where it moves its node to, if it does
+    /// ([`Executor::move_target`]).
+    fn push(&mut self, job: Job, p: Prepared, target: Option<Vec<NodeId>>) {
+        let node = job.node();
+        self.nodes.insert(node);
+        if let Job::Upload { meta, .. } | Job::Meta { meta, .. } = &job {
+            self.folders.insert(meta.parent);
+        }
+        match &p.ctx {
+            Ctx::Upload { from, .. } => self.folders.extend(*from),
+            Ctx::Meta { from, after, .. } => {
+                self.folders.extend(*from);
+                if matches!(after, remote::After::Created) {
+                    self.created.insert(node);
+                }
+            }
+            Ctx::Download { .. } => {}
+        }
+        if let Some(target) = target {
+            self.moved.insert(node);
+            self.under.extend(target);
+        }
+        self.jobs.push((job, p));
+    }
+
+    /// Whether moving `node` to `target` (the folder and every one above it) could make a
+    /// cycle on the drive with a move in the batch, landing in either order: one of them
+    /// takes along a folder the other goes into. Moves that don't can't, together in any
+    /// number: each one's target keeps the folders above it.
+    fn crosses(&self, node: NodeId, target: &[NodeId]) -> bool {
+        self.under.contains(&node) || target.iter().any(|n| self.moved.contains(n))
+    }
+
+    /// Whether `op` must wait until the batch ran: it is about a node in it, or its server-side
+    /// order guard ([`Op::requires`]) waits on one: a folder created in it, or the children a
+    /// folder's delete waits for.
+    fn holds_up(&self, op: &Op) -> bool {
+        self.nodes.contains(&op.node())
+            || match op.requires() {
+                Some(Requirement::RemoteFolder(folder)) => self.created.contains(&folder),
+                Some(Requirement::NoRemoteChildren(folder)) => self.folders.contains(&folder),
+                None => false,
+            }
+    }
 }
 
 /// What the commit of a transfer needs to know.
@@ -233,12 +297,16 @@ enum Ctx {
         created_ms: Option<i64>,
         tags: Tags,
     },
+    /// `from`: the folder on the drive an updated file is in now.
     Upload {
-        node: NodeId,
-        parent: NodeId,
-        kind: NodeKind,
-        content: NodeContent,
         hash: hbsync_types::ContentHash,
+        from: Option<NodeId>,
+    },
+    /// A metadata write; `from`: the folder on the drive the node leaves, if any.
+    Meta {
+        hash: Option<hbsync_types::ContentHash>,
+        from: Option<NodeId>,
+        after: remote::After,
     },
 }
 
@@ -321,47 +389,45 @@ impl<'a> Executor<'a> {
             .fetch_add(visible.count() as u64, Ordering::Relaxed);
         self.count_bytes(&ops)?;
         self.queue = ops.into_iter().map(|op| (op, 0)).collect();
-        let mut batch: Vec<Prepared> = Vec::new();
+        let mut batch = Batch::default();
         loop {
             if self.should_stop() {
                 break;
             }
             let Some((op, attempts)) = self.queue.pop_front() else {
-                if batch.is_empty() {
+                if batch.jobs.is_empty() {
                     break;
                 }
                 self.flush(&mut batch)?;
                 continue;
             };
-            if let Err(wait) = self.ready(&op) {
-                self.handle(op, attempts, wait, None)?;
-                continue;
-            }
-            if op.is_transfer() {
-                // Transfers are collected and run together on the worker pool.
-                match self.prepare(&op) {
-                    Ok((job, ctx)) => batch.push(Prepared {
-                        op,
-                        attempts,
-                        job,
-                        ctx,
-                    }),
-                    Err(outcome) => self.handle(op, attempts, outcome, None)?,
-                }
-                continue;
-            }
-            if !batch.is_empty() {
+            // Everything else runs on its own, in order: after the batch.
+            let pooled = op.pooled();
+            let mut target = if pooled { self.move_target(&op)? } else { None };
+            if !batch.jobs.is_empty()
+                && (!pooled
+                    || batch.holds_up(&op)
+                    || target.as_ref().is_some_and(|t| batch.crosses(op.node(), t)))
+            {
                 self.flush(&mut batch)?;
                 if self.should_stop() {
                     break;
                 }
+                // What the batch did may have moved the target's folders.
+                if target.is_some() {
+                    target = self.move_target(&op)?;
+                }
             }
-            if let Op::Settle { node } = op {
-                self.settle_run(node)?;
+            // A folder temporarily inside its own destination waits for the move that takes
+            // the destination out (§8a): moved now, the drive would hold a cycle.
+            if target.as_ref().is_some_and(|t| t.contains(&op.node())) {
+                let wait = Outcome::Retry("its destination is inside it on the drive".into());
+                self.handle(op, attempts, wait, None)?;
                 continue;
             }
-            if op.touches_remote() {
-                self.wait_out_backoff();
+            if let Err(wait) = self.ready(&op) {
+                self.handle(op, attempts, wait, None)?;
+                continue;
             }
             // What a delete removes is described before its rows go.
             let gone = match activity::kind_of(&op) {
@@ -370,6 +436,28 @@ impl<'a> Executor<'a> {
                 }
                 _ => None,
             };
+            if pooled {
+                // Transfers and remote writes are collected and run together on the worker
+                // pool.
+                match self.prepare(&op) {
+                    Ok((job, ctx)) => batch.push(
+                        job,
+                        Prepared {
+                            op,
+                            attempts,
+                            ctx,
+                            gone,
+                        },
+                        target,
+                    ),
+                    Err(outcome) => self.handle(op, attempts, outcome, gone)?,
+                }
+                continue;
+            }
+            if let Op::Settle { node } = op {
+                self.settle_run(node)?;
+                continue;
+            }
             let outcome = self.execute(&op);
             self.handle(op, attempts, outcome, gone)?;
             if self.crashed {
@@ -377,6 +465,23 @@ impl<'a> Executor<'a> {
             }
         }
         Ok(self.report)
+    }
+
+    /// Where `op` moves its node on the drive, if it moves it to another folder: that folder
+    /// and every one above it, as the mirror has them.
+    fn move_target(&mut self, op: &Op) -> Result<Option<Vec<NodeId>>, StateError> {
+        let Op::RemoteUpdate { node, parent, .. } = op else {
+            return Ok(None);
+        };
+        self.db.read(|s| {
+            if s.get_mirror(*node)?.is_none_or(|m| m.parent == *parent) {
+                return Ok(None);
+            }
+            let above = crate::walk::up::<_, StateError>(*parent, |at| {
+                Ok(s.get_mirror(at)?.map(|m| (at, m.parent)))
+            })?;
+            Ok(Some(above.items))
+        })
     }
 
     /// Settles `first` and the run of `Settle` ops after it (the plan puts them last) in one
@@ -472,14 +577,17 @@ impl<'a> Executor<'a> {
                 self.report.done += 1;
             }
             Outcome::Backoff(why) => {
-                self.streak += 1;
-                if self.streak >= UNREACHABLE_AFTER {
-                    self.report.stopped.get_or_insert(Stopped::Unreachable(why));
-                    return Ok(());
+                // Writes failing together on the pool, before the pause, are one failure.
+                if self.resume_at.is_none() {
+                    self.streak += 1;
+                    if self.streak >= UNREACHABLE_AFTER {
+                        self.report.stopped.get_or_insert(Stopped::Unreachable(why));
+                        return Ok(());
+                    }
+                    // One pause for the whole run, longer for each failure in a row.
+                    let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1));
+                    self.resume_at = Some(Instant::now() + pause);
                 }
-                // One pause for the whole run, longer for each failure in a row.
-                let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1));
-                self.resume_at = Some(Instant::now() + pause);
                 self.retry_or_fail(op, attempts, why);
             }
             Outcome::Retry(why) => self.retry_or_fail(op, attempts, why),
@@ -581,13 +689,15 @@ impl<'a> Executor<'a> {
     }
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
-    fn flush(&mut self, batch: &mut Vec<Prepared>) -> Result<(), StateError> {
+    fn flush(&mut self, batch: &mut Batch) -> Result<(), StateError> {
         self.wait_out_backoff();
-        let mut pending: HashMap<NodeId, Prepared> = HashMap::new();
+        // In node order: what didn't start goes back to the queue in an order that doesn't
+        // change from run to run.
+        let mut pending: BTreeMap<NodeId, Prepared> = BTreeMap::new();
         let mut jobs = Vec::new();
-        for p in batch.drain(..) {
-            jobs.push((self.urgent.contains(&p.job.node()), p.job.clone()));
-            pending.insert(p.job.node(), p);
+        for (job, p) in std::mem::take(batch).jobs {
+            pending.insert(job.node(), p);
+            jobs.push((self.urgent.contains(&job.node()), job));
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -603,27 +713,35 @@ impl<'a> Executor<'a> {
         let transfer = self.cfg.transfer;
         let mut first_error = None;
         // A DB error or a stopped run (requested, denied, unreachable) starts no further
-        // transfers; the nodes stay dirty for the next sync.
+        // transfers; the nodes stay dirty for the next sync. A remote that failed for now
+        // starts none either: they go back to the queue, to run after the pause.
+        let halt = self.stop.clone();
         run_jobs_while(
             remote,
             transfer,
             Some(&progress.bytes_done),
+            halt.as_deref(),
             jobs,
             |job, result| {
                 if first_error.is_some() {
                     return false;
                 }
                 if let Some(p) = pending.remove(&job.node()) {
-                    let outcome = self.commit(p.ctx, result).unwrap_or_else(|o| o);
-                    if let Err(e) = self.handle(p.op, p.attempts, outcome, None) {
+                    let outcome = self.commit(p.ctx, job, result).unwrap_or_else(|o| o);
+                    if let Err(e) = self.handle(p.op, p.attempts, outcome, p.gone) {
                         first_error = Some(e);
                     }
                 }
-                first_error.is_none() && !self.should_stop()
+                first_error.is_none() && !self.should_stop() && self.resume_at.is_none()
             },
         );
         if let Some(e) = first_error {
             return Err(e);
+        }
+        if !self.should_stop() {
+            for p in pending.into_values().rev() {
+                self.queue.push_front((p.op, p.attempts));
+            }
         }
         if self.crashed {
             return Err(StateError::Conflict("crash point reached".into()));
@@ -645,39 +763,15 @@ impl<'a> Executor<'a> {
                 tags,
             } => self.mkdir(*node, *parent, name, tags),
             Op::LocalMove { node, parent, name } => self.local_move(*node, *parent, name),
-            Op::LocalDownload { .. } => unreachable!("transfers run through flush"),
             Op::LocalTags { node, tags } => self.local_tags(*node, tags),
             Op::LocalTrash { node, subtree } => self.trash(*node, subtree, false),
-            Op::RemoteCreate {
-                node,
-                parent,
-                name,
-                kind,
-                tags,
-            } => self.create_folder(*node, *parent, name, *kind, tags),
-            Op::RemoteUpdate {
-                node,
-                file_id,
-                expected,
-                parent,
-                name,
-                upload,
-                tags,
-            } => {
-                debug_assert!(!upload, "uploads run through flush");
-                self.rename_remote(*node, *file_id, *expected, Some((*parent, name)), tags)
+            Op::LocalDownload { .. }
+            | Op::RemoteCreate { .. }
+            | Op::RemoteUpdate { .. }
+            | Op::RemoteTags { .. }
+            | Op::RemoteDelete { .. } => {
+                unreachable!("transfers and remote writes run through flush")
             }
-            Op::RemoteTags {
-                node,
-                file_id,
-                expected,
-                tags,
-            } => self.rename_remote(*node, *file_id, *expected, None, tags),
-            Op::RemoteDelete {
-                node,
-                file_id,
-                expected,
-            } => self.remove(*node, *file_id, *expected),
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
             Op::Forget { node, subtree } if subtree.is_empty() => self.forget_base(*node),

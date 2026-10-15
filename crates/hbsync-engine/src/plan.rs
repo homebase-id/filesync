@@ -245,11 +245,13 @@ impl Op {
         }
     }
 
-    /// Whether this op calls the remote (transfers aside, which run on the worker pool).
-    pub fn touches_remote(&self) -> bool {
+    /// Whether the executor runs it on its worker pool: the transfers, and every write to
+    /// the remote.
+    pub fn pooled(&self) -> bool {
         matches!(
             self,
-            Op::RemoteCreate { .. }
+            Op::LocalDownload { .. }
+                | Op::RemoteCreate { .. }
                 | Op::RemoteUpdate { .. }
                 | Op::RemoteTags { .. }
                 | Op::RemoteDelete { .. }

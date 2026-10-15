@@ -46,7 +46,7 @@ fn transfers_run_in_parallel() -> R {
         },
         jobs,
         |_, r| {
-            if matches!(r, JobResult::Uploaded(_)) {
+            if matches!(r, JobResult::Written(_)) {
                 ok += 1;
             }
         },
@@ -86,7 +86,7 @@ fn only_a_few_large_files_at_once() -> R {
         },
         jobs,
         |job, r| {
-            assert!(matches!(r, JobResult::Uploaded(_)));
+            assert!(matches!(r, JobResult::Written(_)));
             done.push((job.size(), start.elapsed()));
         },
     );

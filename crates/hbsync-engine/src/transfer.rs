@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -152,19 +152,26 @@ pub enum Job {
         hash: ContentHash,
         size: u64,
     },
+    /// Writes `meta` without bytes: a create, or with `target` an update of that node at that
+    /// version (a folder restored, a rename or move, tags, a removal).
+    Meta {
+        meta: NodeMeta,
+        target: Option<RemoteRef>,
+    },
 }
 
 impl Job {
     pub fn node(&self) -> NodeId {
         match self {
             Job::Download(d) => d.node,
-            Job::Upload { meta, .. } => meta.node,
+            Job::Upload { meta, .. } | Job::Meta { meta, .. } => meta.node,
         }
     }
 
     pub fn size(&self) -> u64 {
         match self {
             Job::Download(Download { size, .. }) | Job::Upload { size, .. } => *size,
+            Job::Meta { .. } => 0,
         }
     }
 }
@@ -176,7 +183,8 @@ pub enum JobResult {
         file: CompletedFile,
         local_hash: ContentHash,
     },
-    Uploaded(RemoteRef),
+    /// An upload or a [`Job::Meta`] landed.
+    Written(RemoteRef),
     Failed(JobError),
 }
 
@@ -210,18 +218,21 @@ pub fn run_jobs(
     jobs: Vec<(bool, Job)>,
     mut commit: impl FnMut(Job, JobResult),
 ) {
-    run_jobs_while(remote, cfg, None, jobs, |job, result| {
+    run_jobs_while(remote, cfg, None, None, jobs, |job, result| {
         commit(job, result);
         true
     });
 }
 
-/// [`run_jobs`], until `commit` returns `false`: jobs not started by then are dropped (jobs
-/// already running finish and are committed). The bytes moved are added to `moved`.
+/// [`run_jobs`], until `commit` returns `false`, `halt` is set, or the remote is out (a job
+/// failed with [`RemoteError::Transient`]: the next would too). Jobs not started by then are
+/// dropped; jobs already running finish and are committed. The bytes moved are added to
+/// `moved`.
 pub fn run_jobs_while(
     remote: &dyn Remote,
     cfg: TransferConfig,
     moved: Option<&AtomicU64>,
+    halt: Option<&AtomicBool>,
     mut jobs: Vec<(bool, Job)>,
     mut commit: impl FnMut(Job, JobResult) -> bool,
 ) {
@@ -237,15 +248,26 @@ pub fn run_jobs_while(
         throttle: cfg.max_bytes_per_sec.map(Throttle::new),
         moved,
     };
+    let out = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<(Job, JobResult)>();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let tx = tx.clone();
             let queue = &queue;
             let meter = &meter;
+            let out = &out;
             scope.spawn(move || {
-                while let Some(job) = queue.lock().ok().and_then(|mut q| q.take()) {
+                // Workers take the next job without waiting for the commits: a halt or an
+                // outage is seen here, or fast jobs would all have started before it counted.
+                while !out.load(Ordering::Relaxed)
+                    && !halt.is_some_and(|h| h.load(Ordering::Relaxed))
+                    && let Some(job) = queue.lock().ok().and_then(|mut q| q.take())
+                {
                     let result = run_job(remote, &job, meter);
+                    if let JobResult::Failed(JobError::Remote(RemoteError::Transient(_))) = &result
+                    {
+                        out.store(true, Ordering::Relaxed);
+                    }
                     if let Ok(mut q) = queue.lock() {
                         q.finished(&job);
                     }
@@ -295,6 +317,19 @@ impl Queue {
     }
 }
 
+/// Writes `meta` (and `upload`): a create, or with `target` an update at that version.
+fn write(
+    remote: &dyn Remote,
+    meta: &NodeMeta,
+    target: Option<RemoteRef>,
+    upload: Option<Upload<'_>>,
+) -> Result<RemoteRef, RemoteError> {
+    match target {
+        None => remote.create(meta, upload),
+        Some(at) => remote.update(at.file_id, at.version, meta, upload),
+    }
+}
+
 fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
     let result = match job {
         Job::Download(d) => download(remote, d, meter),
@@ -316,11 +351,11 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
                 reader: &mut file,
                 pace: Some(meter),
             });
-            Ok(JobResult::Uploaded(match target {
-                None => remote.create(meta, upload)?,
-                Some(at) => remote.update(at.file_id, at.version, meta, upload)?,
-            }))
+            Ok(JobResult::Written(write(remote, meta, *target, upload)?))
         })(),
+        Job::Meta { meta, target } => write(remote, meta, *target, None)
+            .map(JobResult::Written)
+            .map_err(JobError::Remote),
     };
     result.unwrap_or_else(JobResult::Failed)
 }

@@ -1,14 +1,16 @@
 //! The executor and engine end to end: real folders, a real state DB, the fake remote.
 
+use std::collections::HashMap;
 use std::fs;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use hbsync_engine::exec::CrashPoint;
+use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
-use hbsync_types::{RemoteFileId, RemoteRef, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, RemoteRef, VersionTag};
 
 mod common;
 
@@ -228,6 +230,226 @@ impl Remote for StopAfterCreates {
     }
 }
 
+/// A remote whose writes take a while, counting how many run at once, and the writes after
+/// which the drive held a cycle. Writes ending before `down_until` fail (an outage).
+struct SlowWrites {
+    inner: FakeRemote,
+    running: AtomicUsize,
+    most: AtomicUsize,
+    cycles: AtomicUsize,
+    down_until: Mutex<Option<std::time::Instant>>,
+}
+
+impl SlowWrites {
+    fn new(inner: FakeRemote) -> Arc<Self> {
+        Arc::new(SlowWrites {
+            inner,
+            running: AtomicUsize::new(0),
+            most: AtomicUsize::new(0),
+            cycles: AtomicUsize::new(0),
+            down_until: Mutex::new(None),
+        })
+    }
+
+    /// Fails with an outage while one lasts, else runs `f`.
+    fn unless_down<T>(&self, f: impl FnOnce() -> RemoteResult<T>) -> RemoteResult<T> {
+        let down = self.down_until.lock().map_or(true, |d| {
+            d.is_some_and(|until| std::time::Instant::now() < until)
+        });
+        if down {
+            return Err(hbsync_remote::RemoteError::Transient("outage".into()));
+        }
+        f()
+    }
+
+    fn write<T>(&self, f: impl FnOnce() -> T) -> T {
+        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let done = f();
+        if self.has_cycle() {
+            self.cycles.fetch_add(1, Ordering::SeqCst);
+        }
+        self.running.fetch_sub(1, Ordering::SeqCst);
+        done
+    }
+
+    /// Whether some live node on the drive is in a cycle.
+    fn has_cycle(&self) -> bool {
+        let server = self.inner.server();
+        let parents: HashMap<NodeId, NodeId> = server
+            .live()
+            .filter_map(|h| Some((h.node()?, h.parent)))
+            .collect();
+        parents.keys().any(|&start| {
+            let up = walk::up::<_, ()>(start, |at| Ok(parents.get(&at).map(|&p| ((), p))));
+            matches!(
+                up,
+                Ok(walk::Up {
+                    end: walk::End::Cycle,
+                    ..
+                })
+            )
+        })
+    }
+}
+
+impl Remote for SlowWrites {
+    fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
+        self.inner.changes(cursor, limit)
+    }
+    fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
+        self.inner.header(file_id)
+    }
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
+        self.write(|| self.unless_down(|| self.inner.create(node, payload)))
+    }
+    fn update(
+        &self,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> RemoteResult<RemoteRef> {
+        self.write(|| self.unless_down(|| self.inner.update(file_id, expected, meta, payload)))
+    }
+    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
+        self.inner.delete(file_id, expected)
+    }
+    fn read(
+        &self,
+        file_id: RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn std::io::Write,
+    ) -> RemoteResult<u64> {
+        self.inner.read(file_id, range, sink)
+    }
+}
+
+/// Folder creates, renames and deletes run on the worker pool, several at once, each still
+/// after what it depends on: a folder before what goes into it, contents before their folder.
+#[test]
+fn remote_writes_run_together_in_dependency_order() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let slow = SlowWrites::new(a.remote.clone());
+    a.restart_with(Box::new(Arc::clone(&slow)), |_| {})?;
+    a.write("keep.txt", "k")?; // deleting every file would be held (the mass-delete guard)
+    for i in 0..12 {
+        fs::create_dir_all(a.root.join(format!("d{i}/sub/deeper")))?;
+        a.write(&format!("d{i}/sub/f.txt"), format!("{i}"))?;
+    }
+    let mut b = Client::new(&server, "b")?;
+    let mut check = |a: &mut Client, what: &str| -> R {
+        let report = a.sync()?;
+        assert!(report.failed.is_empty(), "{what}: {report:?}");
+        let again = a.engine.sync_once("2026-10-08")?;
+        assert!(again.is_idle(), "{what}: all done: {again:?}");
+        let most = slow.most.swap(0, Ordering::SeqCst);
+        assert!(most > 1, "{what}: one write at a time");
+        assert_eq!(slow.cycles.load(Ordering::SeqCst), 0, "{what}");
+        b.sync()?;
+        assert_eq!(b.tree_text(""), a.tree_text(""), "{what}");
+        Ok(())
+    };
+    check(&mut a, "creates")?;
+    for i in 0..12 {
+        fs::rename(a.root.join(format!("d{i}")), a.root.join(format!("e{i}")))?;
+    }
+    check(&mut a, "renames")?;
+    for i in 0..12 {
+        fs::remove_dir_all(a.root.join(format!("e{i}")))?;
+    }
+    check(&mut a, "deletes")?;
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
+    Ok(())
+}
+
+/// Two moves that turn a nesting around (B out of A, A into B's child C) don't run together:
+/// the drive never holds a cycle, not even for a moment.
+#[test]
+fn moves_that_turn_a_nesting_around_never_make_a_cycle() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let slow = SlowWrites::new(a.remote.clone());
+    a.restart_with(Box::new(Arc::clone(&slow)), |_| {})?;
+    fs::create_dir_all(a.root.join("A/B/C"))?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    fs::rename(a.root.join("A/B"), a.root.join("B"))?;
+    fs::rename(a.root.join("A"), a.root.join("B/C/A"))?;
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        slow.cycles.load(Ordering::SeqCst),
+        0,
+        "a cycle on the drive"
+    );
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    assert!(b.root.join("B/C/A").is_dir());
+    Ok(())
+}
+
+/// A folder's delete waits for an edited file moving out of it in the same batch: one sync
+/// does both.
+#[test]
+fn a_folder_goes_after_an_edited_file_moves_out_of_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("F/c.txt", "v1")?;
+    a.sync()?;
+    // Moved, then edited (seen apart: one node, moved with new bytes).
+    fs::rename(a.root.join("F/c.txt"), a.root.join("c.txt"))?;
+    a.engine.scan_local()?;
+    a.write("c.txt", "version 2")?;
+    fs::remove_dir_all(a.root.join("F"))?;
+    a.engine.scan_local()?;
+    let report = a.engine.sync_once("2026-10-09")?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert!(report.pending == 0, "{report:?}");
+    let live = server.lock().map_err(|_| "poisoned")?.live_names();
+    assert_eq!(live, ["c.txt", "keep.txt"]);
+    Ok(())
+}
+
+/// A short outage that fails many writes at once on the pool counts as one failure: the run
+/// pauses, and the rest goes through in the same sync.
+#[test]
+fn a_short_outage_during_many_writes_pauses_and_goes_on() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let slow = SlowWrites::new(a.remote.clone());
+    a.restart_with(Box::new(Arc::clone(&slow)), |_| {})?;
+    a.write("keep.txt", "k")?;
+    for i in 0..20 {
+        fs::create_dir_all(a.root.join(format!("d{i:02}")))?;
+    }
+    a.sync()?;
+    for i in 0..20 {
+        fs::rename(
+            a.root.join(format!("d{i:02}")),
+            a.root.join(format!("e{i:02}")),
+        )?;
+    }
+    a.engine.scan_local()?;
+    // Down for 50 ms: the eight renames in flight fail together, and the next round too.
+    // Counted one by one, they would end the run as unreachable.
+    *slow.down_until.lock().map_err(|_| "poisoned")? =
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(50));
+    let report = a.engine.sync_once("2026-10-09")?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    let mut expected: Vec<String> = (0..20).map(|i| format!("e{i:02}")).collect();
+    expected.push("keep.txt".into());
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        expected
+    );
+    Ok(())
+}
+
 #[test]
 fn a_stopped_sync_keeps_what_it_did_and_the_next_one_finishes() -> R {
     let server = server();
@@ -324,10 +546,10 @@ fn a_dead_remote_ends_the_run_early_and_loses_nothing() -> R {
         ),
         "{err}"
     );
-    // Trying every op four times would be 240 requests. Workers that fail instantly can run
-    // ahead of the commits until the run stops, so up to one try per upload may happen.
+    // Trying every op four times would be 240 requests. An outage stops the pool, and the
+    // writes in flight count as one failure: a pool's worth (8) at most for each of the 6.
     let requests = a.remote.faults().requests - before;
-    assert!(requests <= 70, "gave up after {requests} requests");
+    assert!(requests <= 50, "gave up after {requests} requests");
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 0);
 
     // Back up: everything goes through.

@@ -1,4 +1,5 @@
-//! Transfers: their guards before the worker pool, placing and recording what it brought.
+//! Transfers: their guards before the worker pool, placing and recording what it brought (and
+//! what the remote writes of `remote.rs` did).
 
 use super::*;
 
@@ -18,9 +19,36 @@ impl Executor<'_> {
                 node,
                 parent,
                 name,
+                kind: NodeKind::Folder,
+                tags,
+            } => self.prepare_folder(*node, *parent, name, tags),
+            Op::RemoteCreate {
+                node,
+                parent,
+                name,
                 kind,
                 tags,
             } => self.prepare_upload(*node, None, *parent, name, *kind, tags),
+            Op::RemoteUpdate {
+                node,
+                file_id,
+                expected,
+                parent,
+                name,
+                upload: false,
+                tags,
+            } => self.prepare_rename(*node, *file_id, *expected, Some((*parent, name)), tags),
+            Op::RemoteTags {
+                node,
+                file_id,
+                expected,
+                tags,
+            } => self.prepare_rename(*node, *file_id, *expected, None, tags),
+            Op::RemoteDelete {
+                node,
+                file_id,
+                expected,
+            } => self.prepare_remove(*node, *file_id, *expected),
             Op::RemoteUpdate {
                 node,
                 file_id,
@@ -170,7 +198,7 @@ impl Executor<'_> {
                 node,
                 parent,
                 kind,
-                content: content.clone(),
+                content,
             },
             target,
             path,
@@ -180,18 +208,29 @@ impl Executor<'_> {
         Ok((
             job,
             Ctx::Upload {
-                node,
-                parent,
-                kind,
-                content,
                 hash,
+                from: existing.and(mirror.map(|m| m.parent)),
             },
         ))
     }
 
-    pub(super) fn commit(&mut self, ctx: Ctx, result: JobResult) -> Step {
-        match (ctx, result) {
-            (_, JobResult::Failed(e)) => Ok(match e {
+    /// Records what a job did: `job` is the one that ran, given back by the pool.
+    pub(super) fn commit(&mut self, ctx: Ctx, job: Job, result: JobResult) -> Step {
+        match (ctx, job, result) {
+            (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }, JobResult::Written(w)) => {
+                self.commit_meta(meta, hash, after, Some(w))
+            }
+            // Deleted for good meanwhile: out of the tree all the same.
+            (
+                Ctx::Meta {
+                    hash,
+                    after: after @ remote::After::Removed { .. },
+                    ..
+                },
+                Job::Meta { meta, .. },
+                JobResult::Failed(JobError::Remote(RemoteError::NotFound)),
+            ) => self.commit_meta(meta, hash, after, None),
+            (_, _, JobResult::Failed(e)) => Ok(match e {
                 JobError::Remote(RemoteError::AlreadyExists) => Outcome::Done, // an earlier try landed
                 JobError::Remote(r) => remote_outcome(r),
                 // Local file errors (locked, changed mid-read, short) are worth another try.
@@ -205,20 +244,12 @@ impl Executor<'_> {
                     created_ms,
                     tags,
                 },
+                _,
                 JobResult::Downloaded { file, local_hash },
             ) => self.place_download(node, &target, current, created_ms, &tags, file, local_hash),
-            (
-                Ctx::Upload {
-                    node,
-                    parent,
-                    kind,
-                    content,
-                    hash,
-                },
-                JobResult::Uploaded(written),
-            ) => {
-                let row =
-                    MirrorRow::from_content(written, node, parent, kind, &content, Some(hash));
+            (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
+                let node = meta.node;
+                let row = written_row(written, &meta, Some(hash));
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 self.finish(&[(node, true)], |s| {
                     s.delete_removed(node)?;
