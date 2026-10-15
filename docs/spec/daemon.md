@@ -305,12 +305,10 @@ On Linux the tray also lists itself among the desktop's applications each time i
 `~/.local/share/icons/hicolor/256x256/apps/homebase-filesync.png`, rewritten only when they
 changed; an autostart entry is brought up to date with it. Started from there or at logon, the
 session gives it a systemd unit of its own (System Monitor shows Homebase Filesync, the daemon
-below it). Started anywhere else (a terminal), the tray and the daemon start again in such a
-unit through `systemd-run --user` (`app-id.homebase.filesync@<pid>.service`: a service's
-random part follows an `@`, which KDE's System Monitor reads the app's ID before), with the
-session's environment passed on, and the first process ends: the app is listed as itself, not
-as the terminal, and closing the terminal ends neither. Not with `HBSYNC_HOME` set, nor without
-a systemd user session (they run where they were started). The launcher stays after Log out, as
+below it). Started from a terminal, the tray and the daemon start again in such a unit through
+`systemd-run --user`, with this environment, and the first process ends: the app is listed as
+itself, not as the terminal, and closing the terminal ends neither. Not with `HBSYNC_HOME` set,
+nor without a systemd user session (they run where they were started). The launcher stays after Log out, as
 the way to log in again. Elsewhere the installer will do this (not built yet).
 
 `hbsync setup` turns autostart on, `logout` and `unlink` turn it off, `hbsync autostart on|off`

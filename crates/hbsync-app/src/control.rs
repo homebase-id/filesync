@@ -194,7 +194,7 @@ pub fn start(paths: &Paths) -> Result<()> {
     let exe = autostart::daemon_exe()?;
     // Started from a terminal, say: in a unit of the app's, not the terminal's.
     #[cfg(target_os = "linux")]
-    if !dev_home() && !crate::unit::in_own_unit() && crate::unit::start(&exe, &[]) {
+    if crate::unit::relaunch(&exe, &[]) {
         return wait_until_running(paths, None);
     }
     #[cfg(windows)]

@@ -75,12 +75,9 @@ fn main() -> ExitCode {
     };
     // Linux, started from a terminal (say): again, in a unit of the app's ([`hbsync_app::unit`]).
     #[cfg(target_os = "linux")]
-    if !control::dev_home()
-        && !hbsync_app::unit::in_own_unit()
-        && let Ok(exe) = std::env::current_exe()
-    {
+    if let Ok(exe) = autostart::program_of(PROGRAM) {
         let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-        if hbsync_app::unit::start(&exe, &args) {
+        if hbsync_app::unit::relaunch(&exe, &args) {
             tracing::info!("started again in a unit of its own");
             return ExitCode::SUCCESS;
         }

@@ -223,7 +223,7 @@ fn home() -> io::Result<PathBuf> {
 
 /// Runs a service manager command, turning a failure into an error with its output.
 #[cfg(unix)]
-fn run(program: &str, args: &[&str]) -> io::Result<()> {
+pub(crate) fn run<S: AsRef<std::ffi::OsStr>>(program: &str, args: &[S]) -> io::Result<()> {
     let out = std::process::Command::new(program)
         .args(args)
         .output()
@@ -231,6 +231,7 @@ fn run(program: &str, args: &[&str]) -> io::Result<()> {
     if out.status.success() {
         Ok(())
     } else {
+        let args: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
         Err(io::Error::other(format!(
             "{program} {}: {}",
             args.join(" "),

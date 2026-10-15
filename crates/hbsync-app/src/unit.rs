@@ -6,35 +6,70 @@
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::autostart::LABEL;
 
-/// Set in the units started here: what runs in one doesn't start another (whatever its cgroup
-/// says).
+/// Set in the units started here: what runs in one never starts another, should its cgroup
+/// not show it.
 const MARK: &str = "HBSYNC_UNIT";
 
-/// What the desktop session needs, passed on as it is set here (the user's service manager may
-/// have another session's, or none), with what decides where Filesync keeps its files.
-const SESSION_ENV: &[&str] = &[
-    "DISPLAY",
-    "WAYLAND_DISPLAY",
-    "XAUTHORITY",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "XDG_CURRENT_DESKTOP",
-    "XDG_SESSION_DESKTOP",
-    "XDG_SESSION_TYPE",
-    "XDG_DATA_DIRS",
-    "XDG_DATA_HOME",
-    "PATH",
-    "LANG",
-    "LANGUAGE",
-    "RUST_LOG",
+/// Variables of the service manager's, not passed on to a unit.
+const MANAGERS: &[&str] = &[
+    MARK,
+    "INVOCATION_ID",
+    "JOURNAL_STREAM",
+    "NOTIFY_SOCKET",
+    "LISTEN_PID",
+    "LISTEN_FDS",
+    "LISTEN_FDNAMES",
+    "MANAGERPID",
+    "SYSTEMD_EXEC_PID",
 ];
 
-/// Whether this process runs in a unit of the app's: started by the desktop (from its menu, at
-/// login) or by [`start`].
-pub fn in_own_unit() -> bool {
+/// Starts `program` with `args` again in a unit of the app's, unless this process runs in one
+/// already (started from the menu, at login, or by this), is a private instance
+/// (`HBSYNC_HOME`), or there is no systemd user session. True when it did: this process is
+/// done.
+pub fn relaunch(program: &Path, args: &[OsString]) -> bool {
+    if crate::control::dev_home() || in_own_unit() {
+        return false;
+    }
+    let mut run: Vec<OsString> = vec![
+        "--user".into(),
+        "--quiet".into(),
+        "--collect".into(),
+        // A service's random part follows an `@` (a scope's, a `-`): the app's ID is what
+        // comes before it.
+        format!("--unit=app-{LABEL}@{}.service", std::process::id()).into(),
+        format!("--description={}", crate::APP_NAME).into(),
+        // Started once the program runs; up while anything it started does (the daemon).
+        "--property=Type=exec".into(),
+        "--property=ExitType=cgroup".into(),
+        format!("--setenv={MARK}=1").into(),
+    ];
+    // This environment (the user's service manager may have another session's, or none): by
+    // name, systemd-run reads the values, which a command line would show to everyone.
+    for (key, _) in std::env::vars_os() {
+        if let Some(key) = key.to_str()
+            && !MANAGERS.contains(&key)
+        {
+            run.push(format!("--setenv={key}").into());
+        }
+    }
+    run.push("--".into());
+    run.push(program.into());
+    run.extend(args.iter().cloned());
+    match crate::autostart::run("systemd-run", &run) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::info!("not in a unit of its own: {e}");
+            false
+        }
+    }
+}
+
+/// Whether this process runs in a unit of the app's.
+fn in_own_unit() -> bool {
     std::env::var_os(MARK).is_some()
         || std::fs::read_to_string("/proc/self/cgroup").is_ok_and(|c| ours(&c))
 }
@@ -47,42 +82,6 @@ fn ours(cgroup: &str) -> bool {
         .lines()
         .filter_map(|line| line.rsplit('/').next())
         .any(|unit| unit.starts_with("app-") && unit.contains(LABEL))
-}
-
-/// Starts `program` with `args` in a new unit of the app's, through `systemd-run`, and returns
-/// once it runs. False when it can't (no systemd user session): the caller starts it itself.
-pub fn start(program: &Path, args: &[OsString]) -> bool {
-    let mut run = Command::new("systemd-run");
-    run.args(["--user", "--quiet", "--collect"])
-        // A service's random part follows an `@` (a scope's, a `-`): the app's ID is what
-        // comes before it.
-        .arg(format!("--unit=app-{LABEL}@{}.service", std::process::id()))
-        .arg("--description=Homebase Filesync")
-        // Started once the program runs; up while anything it started does (the daemon).
-        .args(["--property=Type=exec", "--property=ExitType=cgroup"])
-        .arg(format!("--setenv={MARK}=1"));
-    let passed = crate::autostart::passed_env();
-    let session = SESSION_ENV
-        .iter()
-        .filter_map(|k| Some((k.to_string(), std::env::var(k).ok()?)));
-    for (key, value) in passed.into_iter().chain(session) {
-        run.arg(format!("--setenv={key}={value}"));
-    }
-    run.arg("--").arg(program).args(args);
-    match run.stdin(Stdio::null()).stdout(Stdio::null()).output() {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            tracing::info!(
-                "systemd-run: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            false
-        }
-        Err(e) => {
-            tracing::info!("systemd-run: {e}");
-            false
-        }
-    }
 }
 
 #[cfg(test)]
