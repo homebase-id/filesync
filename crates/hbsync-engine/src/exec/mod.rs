@@ -722,7 +722,8 @@ impl<'a> Executor<'a> {
         if !records.is_empty() {
             self.write_durable(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
         } else if !self.ids_durable {
-            self.flush_db()?;
+            self.db.flush()?;
+            self.ids_durable = true;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -896,17 +897,16 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    /// Makes what this run did so far durable.
-    fn flush_db(&mut self) -> Result<(), StateError> {
-        self.db.flush()?;
-        self.ids_durable = true;
-        Ok(())
-    }
-
-    /// Renames `from` to `to` on disk, never over anything.
+    /// Renames `from` to `to` on disk, never over anything ([`rename_ordered`]).
     fn rename(&mut self, from: &RelPath, to: &RelPath) -> Result<io::Result<()>, StateError> {
         let (from, to) = (self.abs(from), self.abs(to));
         rename_ordered(self.db, &from, &to)
+    }
+
+    /// Puts something at `path` on disk with `put` ([`put_ordered`]).
+    fn put<T>(&mut self, path: &RelPath, put: impl FnOnce(&Path) -> T) -> Result<T, StateError> {
+        let at = self.abs(path);
+        put_ordered(self.db, &at, put)
     }
 
     /// Frees `target` if a node that the plan is about to move away holds it: that node is
@@ -960,7 +960,6 @@ mod settle;
 mod transfer_ops;
 
 pub use park::parked_name;
-use park::unpark;
 use park::{numbered_place, occupant, release_place, restore_parked};
 pub use recover::recover;
 use recover::{complete_fork, download_key};
@@ -984,14 +983,28 @@ fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
     Ok(above.items.last().copied().unwrap_or(node))
 }
 
-/// Renames `from` to `to` on disk, never over anything, in the order the state DB keeps with
-/// its durable commits ([`StateDb::filling`]).
+// Every change the executor makes on disk goes through these two, which keep the order the
+// state DB needs with its durable commits (its docs on durability).
+
+/// Puts something at `at` on disk with `put`: once the place can take it
+/// ([`StateDb::filling`]), its folder noted as changed after.
+fn put_ordered<T>(
+    db: &mut StateDb,
+    at: &Path,
+    put: impl FnOnce(&Path) -> T,
+) -> Result<T, StateError> {
+    db.filling(at)?;
+    let out = put(at);
+    db.changed(at);
+    Ok(out)
+}
+
+/// Renames `from` to `to` on disk, never over anything ([`put_ordered`]); `from` is noted as
+/// emptied.
 fn rename_ordered(db: &mut StateDb, from: &Path, to: &Path) -> Result<io::Result<()>, StateError> {
-    db.filling(to)?;
-    let renamed = ops::rename_noreplace(from, to);
+    let renamed = put_ordered(db, to, |to| ops::rename_noreplace(from, to))?;
     if renamed.is_ok() {
         db.emptied(from);
-        db.changed(to);
     }
     Ok(renamed)
 }

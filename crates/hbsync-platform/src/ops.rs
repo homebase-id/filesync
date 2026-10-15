@@ -3,7 +3,7 @@
 //! - [`rename_noreplace`] never overwrites: a user file that appeared at the target in the
 //!   meantime is never clobbered. This is the default for moves.
 //! - [`replace`] atomically swaps a fully written temp file over the target.
-//! - [`sync_dir`] makes a rename durable (Unix; a no-op on Windows, where NTFS journals it).
+//! - [`sync_dirs`] makes renames durable (Unix; a no-op on Windows, where NTFS journals them).
 
 use std::fs;
 use std::io;
@@ -32,41 +32,10 @@ pub fn replace(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
-/// Flushes a directory entry change (create, rename, delete) to disk.
-pub fn sync_dir(dir: &Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        fs::File::open(dir)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Ok(())
-    }
-}
-
-/// Flushes everything the file system holding `path` has written (`syncfs`): one call instead
-/// of many [`sync_dir`]s. `false` where there is none (only Linux has one).
-pub fn sync_volume(path: &Path) -> io::Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::fd::AsRawFd;
-        let dir = fs::File::open(path)?;
-        // SAFETY: a valid open descriptor.
-        if unsafe { libc::syncfs(dir.as_raw_fd()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(true)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = path;
-        Ok(false)
-    }
-}
-
-/// Syncs each of `dirs` (best effort: one that is gone needs none). Many on one volume (a mass
-/// delete into the trash) in one call where the system has one ([`sync_volume`]).
+/// Syncs each of `dirs`, so the changes of their entries (made, renamed, removed) are on the
+/// disk (best effort: one that is gone needs none). On macOS as far as the drive's cache: a
+/// full sync after them (the state DB's durable commit) flushes it once for all. Many on one
+/// volume in one call where the system has one (Linux: `syncfs`).
 pub fn sync_dirs(dirs: impl IntoIterator<Item = PathBuf>) {
     #[cfg(target_os = "linux")]
     {
@@ -79,18 +48,32 @@ pub fn sync_dirs(dirs: impl IntoIterator<Item = PathBuf>) {
             }
         }
         for dirs in volumes.into_values() {
-            if dirs.len() > MANY && sync_volume(&dirs[0]).unwrap_or(false) {
+            if dirs.len() > MANY && sync_fd(&dirs[0], libc::syncfs).is_ok() {
                 continue;
             }
             for dir in &dirs {
-                let _ = sync_dir(dir);
+                let _ = sync_fd(dir, libc::fsync);
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
     for dir in dirs {
-        let _ = sync_dir(&dir);
+        let _ = sync_fd(&dir, libc::fsync);
     }
+    #[cfg(windows)]
+    drop(dirs);
+}
+
+/// Calls `sync` (`fsync`, `syncfs`) on `path` opened.
+#[cfg(unix)]
+fn sync_fd(path: &Path, sync: unsafe extern "C" fn(libc::c_int) -> libc::c_int) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let file = fs::File::open(path)?;
+    // SAFETY: a valid open descriptor.
+    if unsafe { sync(file.as_raw_fd()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Sets the modification time of a file or directory, in nanoseconds since the Unix epoch.
@@ -428,7 +411,7 @@ mod tests {
         fs::write(&target, b"old")?;
         fs::write(&tmp, b"new")?;
         replace(&tmp, &target)?;
-        sync_dir(dir.path())?;
+        sync_dirs([dir.path().to_path_buf()]);
         assert_eq!(fs::read(&target)?, b"new");
         assert!(!tmp.exists());
         Ok(())

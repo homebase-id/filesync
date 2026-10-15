@@ -84,10 +84,7 @@ impl Executor<'_> {
             {
                 self.write_durable(|s| s.put_placing(&record))?;
             }
-            self.db.filling(&abs)?;
-            let made = fs::create_dir(&abs);
-            self.db.changed(&abs);
-            if let Err(e) = made {
+            if let Err(e) = self.put(&target, |at| fs::create_dir(at))? {
                 return Ok(io_outcome(e));
             }
         }
@@ -212,7 +209,7 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         };
         if holding.is_empty() {
-            if let Err(e) = self.move_to_trash(&row.path, node) {
+            if let Err(e) = self.move_to_trash(&row.path, node)? {
                 return Ok(io_outcome(e));
             }
         } else {
@@ -229,7 +226,7 @@ impl Executor<'_> {
                 let in_holder = r.path.parent().is_some_and(|p| holders.contains(&p));
                 if in_holder
                     && !holders.contains(&r.path)
-                    && let Err(e) = self.move_to_trash(&r.path, r.node)
+                    && let Err(e) = self.move_to_trash(&r.path, r.node)?
                 {
                     self.report.rescan.push(row.path.clone());
                     return Ok(io_outcome(e));
@@ -330,15 +327,21 @@ impl Executor<'_> {
     }
 
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
-    pub(super) fn move_to_trash(&mut self, path: &RelPath, node: NodeId) -> io::Result<()> {
-        let stamp = hbsync_types::unix_now();
-        let dir = layout::trash_dir(&self.cfg.root).join(format!("{stamp}-{}", node.0.simple()));
-        fs::create_dir_all(&dir)?;
-        let (from, to) = (self.abs(path), dir.join(path.name().unwrap_or("item")));
-        ops::rename_noreplace(&from, &to)?;
-        self.db.emptied(&from);
-        self.db.changed(&to);
-        self.db.changed(&dir);
-        Ok(())
+    pub(super) fn move_to_trash(
+        &mut self,
+        path: &RelPath,
+        node: NodeId,
+    ) -> Result<io::Result<()>, StateError> {
+        let trash = layout::trash_dir(&self.cfg.root);
+        let dir = trash.join(format!("{}-{}", hbsync_types::unix_now(), node.0.simple()));
+        if !trash.exists() {
+            let _ = fs::create_dir_all(&trash);
+            self.db.changed(&trash);
+        }
+        if let Err(e) = put_ordered(self.db, &dir, |dir| fs::create_dir_all(dir))? {
+            return Ok(Err(e));
+        }
+        let to = dir.join(path.name().unwrap_or("item"));
+        rename_ordered(self.db, &self.abs(path), &to)
     }
 }

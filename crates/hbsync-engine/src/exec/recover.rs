@@ -1,5 +1,6 @@
 //! What a crash left behind: conflict copies half made, temporary files no download can use.
 
+use super::park::unpark;
 use super::*;
 use crate::adopt;
 use hbsync_types::NodeState;
@@ -14,8 +15,7 @@ pub fn recover(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), StateError> {
     recover_forks(db, &cfg.root)?;
     unpark(db, cfg)?;
     sweep_tmp(db, &cfg.root)?;
-    recover_placements(db, &cfg.root, cfg.os)?;
-    Ok(())
+    recover_placements(db, &cfg.root, cfg.os)
 }
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
@@ -36,8 +36,7 @@ pub(super) fn complete_fork(
 /// the scan has followed the renamed file (same node, now under the conflict-copy name, in
 /// whatever folder it is now), and completing hands that row to the copy's node, so the plan
 /// never reads the fork as the user renaming the original.
-pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
-    let mut completed = 0;
+pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateError> {
     for (node, new_node, copy_name) in db.read(|s| s.all_forks())? {
         let Some(row) = db.read(|s| s.local_by_node(node))? else {
             db.write(|s| s.delete_fork(node))?;
@@ -51,7 +50,6 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, Stat
                 s.mark_dirty(new_node)?;
                 s.mark_dirty(node)
             })?;
-            completed += 1;
         } else if hbsync_platform::stat(&row.path.to_native(root))
             .is_ok_and(|meta| meta.file_id == row.fingerprint.file_id)
         {
@@ -60,7 +58,7 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, Stat
         }
         // Otherwise the scan hasn't caught up with the disk yet: decide next time.
     }
-    Ok(completed)
+    Ok(())
 }
 
 /// Finds downloads (and folders made again) that were put in place but whose commit a crash
@@ -69,11 +67,7 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, Stat
 /// commit wrote. Later changes on the drive are then plain
 /// changes against that base, whenever the feed brings them. Every record goes: the next
 /// batch writes its own.
-pub(super) fn recover_placements(
-    db: &mut StateDb,
-    root: &Path,
-    os: Os,
-) -> Result<usize, StateError> {
+pub(super) fn recover_placements(db: &mut StateDb, root: &Path, os: Os) -> Result<(), StateError> {
     let found = db.read(|s| {
         let mut found = Vec::new();
         for p in s.all_placing()? {
@@ -89,7 +83,7 @@ pub(super) fn recover_placements(
         Ok(found)
     })?;
     if found.is_empty() {
-        return Ok(0);
+        return Ok(());
     }
     // Outside the write: a file of another client's hash algorithm is hashed.
     let found: Vec<(Placing, Option<LocalRow>)> = found
@@ -104,7 +98,6 @@ pub(super) fn recover_placements(
             (p, row)
         })
         .collect();
-    let mut recovered = 0;
     db.write(|s| {
         for (p, row) in &found {
             let node = p.base.node;
@@ -133,11 +126,9 @@ pub(super) fn recover_placements(
                 ..p.base.clone()
             })?;
             s.mark_dirty(node)?;
-            recovered += 1;
         }
         Ok(())
-    })?;
-    Ok(recovered)
+    })
 }
 
 /// The temp file name stem of a download: node and content, so a partial file is resumed only
@@ -150,21 +141,20 @@ pub(super) fn download_key(node: NodeId, expected: &hbsync_types::ContentHash) -
 /// the current remote content of a node that still needs syncing (interrupted downloads of
 /// content since replaced, files that were placed by other means, leftovers of other
 /// versions). Run before each plan, while no transfer is running.
-pub(super) fn sweep_tmp(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+pub(super) fn sweep_tmp(db: &mut StateDb, root: &Path) -> Result<(), StateError> {
     let Ok(entries) = fs::read_dir(layout::tmp_dir(root)) else {
-        return Ok(0);
+        return Ok(());
     };
-    let mut removed = 0;
     for entry in entries.flatten() {
         let wanted = match entry.file_name().to_str() {
             Some(name) => wanted_download(db, name)?,
             None => false,
         };
-        if !wanted && fs::remove_file(entry.path()).is_ok() {
-            removed += 1;
+        if !wanted {
+            let _ = fs::remove_file(entry.path());
         }
     }
-    Ok(removed)
+    Ok(())
 }
 
 pub(super) fn wanted_download(db: &mut StateDb, file_name: &str) -> Result<bool, StateError> {
