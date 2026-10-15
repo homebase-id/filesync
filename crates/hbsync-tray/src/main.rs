@@ -20,10 +20,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
-use hbsync_app::protocol::DaemonControl;
+use hbsync_app::protocol::{DaemonControl, RecentItem};
 use hbsync_app::{APP_NAME, Control, Paths, autostart, control, shell, words};
 use hbsync_app::{FolderStatus, State};
-use hbsync_types::activity::Synced;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -37,7 +36,7 @@ use pages::Pages;
 pub enum Event {
     /// The watcher's latest look at the daemon, the recently synced list, and the program
     /// that replaced this one on disk ([`os::replacement`]).
-    Daemon(Daemon, Vec<Synced>, Option<PathBuf>),
+    Daemon(Daemon, Vec<RecentItem>, Option<PathBuf>),
     Menu(MenuId),
     /// A page wants a folder chosen (the OS's picker runs on the main thread).
     PickFolder(mpsc::Sender<Option<PathBuf>>),
@@ -129,7 +128,7 @@ struct App {
     pages: Pages,
     tray: Option<TrayIcon>,
     daemon: Daemon,
-    recent: Vec<Synced>,
+    recent: Vec<RecentItem>,
     start_at_login: bool,
     /// The program that replaced this one on disk ([`os::replacement`]), once seen.
     updated: Option<PathBuf>,
@@ -461,12 +460,25 @@ impl App {
     }
 }
 
-/// Notifications for what changed and needs the user: a new conflict or failure, held
-/// deletes, a refused login.
+/// Notifications for what changed and needs the user, in any folder: a new conflict or
+/// failure, held deletes, a refused login.
 fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, String)> {
     let (Daemon::Running(before), Daemon::Running(now)) = (before, next) else {
         return Vec::new();
     };
+    let mut out = Vec::new();
+    for now in &now.folders {
+        if let Some(before) = before.folders.iter().find(|f| f.path == now.path) {
+            out.extend(folder_notices(before, now));
+        }
+    }
+    out
+}
+
+fn folder_notices(
+    before: &FolderStatus,
+    now: &FolderStatus,
+) -> Vec<(&'static str, &'static str, String)> {
     let mut out = Vec::new();
     // The notes added since the last look (the newest are last).
     let added = now.notes_added.saturating_sub(before.notes_added) as usize;

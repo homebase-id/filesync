@@ -1196,3 +1196,75 @@ fn regression_a_role_folder_untangles_a_cycle_of_its_own() {
         panic!("{e}");
     }
 }
+
+/// A folder moved into another here while that one was moved into it elsewhere, its old parent
+/// deleted here: undoing the local move puts it back into the deleted folder, which then comes
+/// back for it (§6.3) instead of being deleted on the drive under a live child, a plan no
+/// executor can carry out (found by `main_folders_leave_role_folders_alone`).
+#[test]
+fn regression_an_undone_move_brings_back_the_folder_deleted_here() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, CreateJunk, Delete, Move, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 2 }),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        act(2, CreateFolder { parent: 0, name: 2 }),
+        act(2, ToggleIgnore),
+        act(2, ToggleIgnore),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        act(0, ToggleIgnore),
+        act(2, CreateFolder { parent: 0, name: 0 }),
+        act(0, CreateFolder { parent: 0, name: 6 }),
+        act(0, CreateFile { parent: 0, name: 8 }),
+        act(
+            0,
+            CreateFolder {
+                parent: 14,
+                name: 1,
+            },
+        ),
+        act(2, CreateFolder { parent: 1, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateJunk { parent: 0 }),
+        plan(0),
+        step(0),
+        plan(2),
+        act(0, CreateJunk { parent: 0 }),
+        step(2),
+        step(2),
+        act(2, CreateFolder { parent: 2, name: 0 }),
+        step(2),
+        step(0),
+        step(2),
+        act(
+            2,
+            Move {
+                node: 13,
+                parent: 2,
+                name: 1,
+            },
+        ),
+        plan(0),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        step(0),
+        act(0, CreateFile { parent: 1, name: 0 }),
+        act(2, Delete { node: 0 }),
+        act(0, CreateFile { parent: 1, name: 0 }),
+        step(0),
+        step(0),
+        act(
+            0,
+            Move {
+                node: 3,
+                parent: 4,
+                name: 6,
+            },
+        ),
+        act(0, CreateFile { parent: 2, name: 0 }),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_folder, &events) {
+        panic!("{e}");
+    }
+}

@@ -3,8 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
+use hbsync_app::protocol::RecentItem;
 use hbsync_app::words;
-use hbsync_app::{FolderStatus, State};
+use hbsync_app::{DaemonStatus, FolderStatus, State};
 use hbsync_types::activity::{Synced, SyncedKind};
 
 /// Entries of the recently synced list in the menu.
@@ -21,14 +22,14 @@ pub enum Daemon {
     NotSetUp,
     /// Set up, not answering yet: being started, or failing to start (why).
     Starting(Option<String>),
-    /// Running: its main folder.
-    Running(Box<FolderStatus>),
+    Running(Box<DaemonStatus>),
 }
 
 impl Daemon {
+    /// The main folder's status, which the menu shows.
     pub fn status(&self) -> Option<&FolderStatus> {
         match self {
-            Daemon::Running(s) => Some(s),
+            Daemon::Running(s) => s.main_folder(),
             _ => None,
         }
     }
@@ -38,7 +39,7 @@ impl Daemon {
 #[derive(Debug, Clone)]
 pub struct View<'a> {
     pub daemon: &'a Daemon,
-    pub recent: &'a [Synced],
+    pub recent: &'a [RecentItem],
     pub start_at_login: bool,
     /// This program was replaced on disk (an update, on Linux): restarting runs the new one.
     pub updated: bool,
@@ -48,12 +49,13 @@ pub struct View<'a> {
 }
 
 /// The tray icon: the Filesync cloud, its dot telling the state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Ordered by urgency: the icon shows the most urgent folder's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Look {
     UpToDate,
-    Busy,
     /// Paused, offline, not set up.
     Quiet,
+    Busy,
     /// Something needs the user: a failure, held deletes, a refused login.
     Attention,
 }
@@ -97,14 +99,23 @@ pub fn look(view: &View) -> Look {
         Daemon::NotSetUp => Look::Quiet,
         Daemon::Starting(Some(_)) => Look::Attention,
         Daemon::Starting(None) => Look::Busy,
-        Daemon::Running(s) => match s.state {
-            State::Failing | State::Denied => Look::Attention,
-            _ if s.held_deletes.is_some() => Look::Attention,
-            State::Paused | State::Offline | State::Stopped => Look::Quiet,
-            State::Starting | State::Syncing => Look::Busy,
-            State::Idle if s.pending > 0 => Look::Busy,
-            State::Idle => Look::UpToDate,
-        },
+        Daemon::Running(s) => s
+            .folders
+            .iter()
+            .map(folder_look)
+            .max()
+            .unwrap_or(Look::Quiet),
+    }
+}
+
+fn folder_look(s: &FolderStatus) -> Look {
+    match s.state {
+        State::Failing | State::Denied => Look::Attention,
+        _ if s.held_deletes.is_some() => Look::Attention,
+        State::Paused | State::Offline | State::Stopped => Look::Quiet,
+        State::Starting | State::Syncing => Look::Busy,
+        State::Idle if s.pending > 0 => Look::Busy,
+        State::Idle => Look::UpToDate,
     }
 }
 
@@ -117,7 +128,10 @@ pub fn status_line(view: &View) -> String {
         Daemon::NotSetUp => "Not connected".into(),
         Daemon::Starting(None) => "Starting…".into(),
         Daemon::Starting(Some(why)) => cut(&format!("Can't start: {why}")),
-        Daemon::Running(s) => cut(&words::status_line(s, view.now)),
+        Daemon::Running(_) => match view.daemon.status() {
+            Some(s) => cut(&words::status_line(s, view.now)),
+            None => "Nothing to sync".into(),
+        },
     }
 }
 
@@ -161,7 +175,7 @@ pub fn menu(view: &View) -> Vec<Item> {
             Action::OpenOnline(hbsync_app::files_online(&s.identity)),
             "Browse files online".into(),
         ));
-        items.push(recently_synced(view.recent, &s.path, view.now));
+        items.push(recently_synced(view.recent, view.now));
         let problems = problems(s, view.now);
         if !problems.is_empty() {
             items.push(Item::Submenu(
@@ -223,16 +237,17 @@ fn quit() -> Item {
     Item::Action(Action::Quit, "Quit Homebase Filesync".into())
 }
 
-fn recently_synced(recent: &[Synced], folder: &Path, now: u64) -> Item {
+fn recently_synced(recent: &[RecentItem], now: u64) -> Item {
     let mut entries: Vec<Item> = recent
         .iter()
         .take(RECENT_SHOWN)
-        .map(|s| {
+        .map(|item| {
+            let s = &item.synced;
             let text = cut(&recent_line(s, now));
             match s.kind {
                 // Gone from here: nothing to show.
                 SyncedKind::DeletedRemotely | SyncedKind::TrashedLocally => Item::Label(text),
-                _ => Item::Action(Action::Reveal(local_path(folder, &s.path)), text),
+                _ => Item::Action(Action::Reveal(local_path(&item.folder, &s.path)), text),
             }
         })
         .collect();
@@ -301,7 +316,16 @@ mod tests {
         s
     }
 
-    fn view<'a>(daemon: &'a Daemon, recent: &'a [Synced]) -> View<'a> {
+    /// The daemon running with this one folder.
+    fn running(folder: FolderStatus) -> Daemon {
+        Daemon::Running(Box::new(DaemonStatus {
+            version: hbsync_app::VERSION.into(),
+            accounts: Vec::new(),
+            folders: vec![folder],
+        }))
+    }
+
+    fn view<'a>(daemon: &'a Daemon, recent: &'a [RecentItem]) -> View<'a> {
         View {
             daemon,
             recent,
@@ -353,7 +377,7 @@ mod tests {
             downloaded_changes: 0,
             adopted: 0,
         });
-        let d = Daemon::Running(Box::new(s.clone()));
+        let d = running(s.clone());
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::UpToDate);
         assert_eq!(status_line(&v), "Up to date · synced 2 min ago");
@@ -368,14 +392,14 @@ mod tests {
             bytes_done: 1_000_000,
             bytes_total: 40_000_000,
         });
-        let d = Daemon::Running(Box::new(s));
+        let d = running(s);
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Busy);
         assert_eq!(status_line(&v), "Syncing 3 of 12 files, 1.0 MB of 40 MB");
 
         // Start-up: catching up until its first sync has a plan, then that sync's progress.
         let mut s = status(State::Starting);
-        let d = Daemon::Running(Box::new(s.clone()));
+        let d = running(s.clone());
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Busy);
         assert_eq!(status_line(&v), "Catching up…");
@@ -385,7 +409,7 @@ mod tests {
             bytes_done: 0,
             bytes_total: 0,
         });
-        let d = Daemon::Running(Box::new(s));
+        let d = running(s);
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Busy);
         assert_eq!(status_line(&v), "Syncing 1,234 of 19,000 files");
@@ -395,7 +419,7 @@ mod tests {
     fn paused_offers_resume() {
         let mut s = status(State::Paused);
         s.paused_until = Some(NOW + 3 * 3600);
-        let d = Daemon::Running(Box::new(s));
+        let d = running(s);
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Quiet);
         assert_eq!(status_line(&v), "Paused · syncing again in 3 h");
@@ -417,7 +441,7 @@ mod tests {
             at: NOW - 60,
             text: "report.docx: edited on two devices".into(),
         }];
-        let d = Daemon::Running(Box::new(s));
+        let d = running(s);
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Attention);
         let m = menu(&v);
@@ -429,10 +453,34 @@ mod tests {
             |i| matches!(i, Item::Submenu(t, inner) if t == "Problems (1)" && inner.len() == 1)
         ));
 
-        let d = Daemon::Running(Box::new(status(State::Denied)));
+        let d = running(status(State::Denied));
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Attention);
         assert!(actions(&menu(&v)).contains(&Action::LogInAgain));
+    }
+
+    /// The icon shows the most urgent folder's look.
+    #[test]
+    fn the_most_urgent_folder_sets_the_look() {
+        let mut held = status(State::Idle);
+        held.path = PathBuf::from("/home/anna/Documents");
+        held.held_deletes = Some(HeldDeletes {
+            here: 60,
+            remotely: 0,
+            examples: Vec::new(),
+            token: "t".into(),
+        });
+        let d = Daemon::Running(Box::new(DaemonStatus {
+            version: hbsync_app::VERSION.into(),
+            accounts: Vec::new(),
+            folders: vec![status(State::Idle), held],
+        }));
+        assert_eq!(look(&view(&d, &[])), Look::Attention);
+        assert_eq!(
+            d.status().map(|s| s.path.clone()),
+            Some(PathBuf::from("/home/anna/Homebase")),
+            "the menu shows the main folder"
+        );
     }
 
     #[test]
@@ -460,7 +508,14 @@ mod tests {
                 bytes: 0,
             },
         ];
-        let d = Daemon::Running(Box::new(status(State::Idle)));
+        let recent: Vec<RecentItem> = recent
+            .into_iter()
+            .map(|synced| RecentItem {
+                folder: PathBuf::from("/home/anna/Homebase"),
+                synced,
+            })
+            .collect();
+        let d = running(status(State::Idle));
         let v = view(&d, &recent);
         let m = menu(&v);
         assert!(
