@@ -4,10 +4,11 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use hbsync_types::activity::{Deleted, Synced};
-
-use crate::ipc::{self, Ask, IpcError, Reply, Request};
-use crate::{Config, Control, CredentialStore, Paths, Root, Status, autostart};
+use crate::ipc::{self, IpcError};
+use crate::protocol::{
+    Ask, Control, DaemonControl, DaemonStatus, DeletedItem, RecentItem, Reply, Request,
+};
+use crate::{Config, CredentialStore, Paths, Root, autostart};
 
 /// An error worded for people: the CLI prints it, the tray shows it.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -18,7 +19,7 @@ pub fn ask(paths: &Paths, what: Ask) -> std::result::Result<Reply, IpcError> {
 }
 
 /// The daemon's status; `None` when it isn't running.
-pub fn status(paths: &Paths) -> Result<Option<Status>> {
+pub fn status(paths: &Paths) -> Result<Option<DaemonStatus>> {
     match ask(paths, Ask::Status) {
         Ok(Reply::Status(s)) => Ok(Some(*s)),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
@@ -29,7 +30,7 @@ pub fn status(paths: &Paths) -> Result<Option<Status>> {
 
 /// The newest `limit` entries of the recently synced list, newest first; `None` when the
 /// daemon isn't running.
-pub fn recent(paths: &Paths, limit: usize) -> Result<Option<Vec<Synced>>> {
+pub fn recent(paths: &Paths, limit: usize) -> Result<Option<Vec<RecentItem>>> {
     match ask(paths, Ask::Recent { limit }) {
         Ok(Reply::Recent(list)) => Ok(Some(list)),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
@@ -39,7 +40,7 @@ pub fn recent(paths: &Paths, limit: usize) -> Result<Option<Vec<Synced>>> {
 }
 
 /// Recently deleted, newest first; `None` when the daemon isn't running.
-pub fn deleted(paths: &Paths, limit: usize) -> Result<Option<Vec<Deleted>>> {
+pub fn deleted(paths: &Paths, limit: usize) -> Result<Option<Vec<DeletedItem>>> {
     match ask(paths, Ask::Deleted { limit }) {
         Ok(Reply::Deleted(list)) => Ok(Some(list)),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
@@ -152,7 +153,7 @@ fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> 
 
 /// Stops the daemon and waits until it's gone. False when it wasn't running.
 pub fn stop(paths: &Paths) -> Result<bool> {
-    match ask(paths, Ask::Control(Control::Stop)) {
+    match ask(paths, Ask::Control(Control::Daemon(DaemonControl::Stop))) {
         Err(IpcError::NotRunning) => return Ok(false),
         // The daemon may exit before its answer is out: the connection just ends.
         Err(IpcError::Protocol(_)) => {}

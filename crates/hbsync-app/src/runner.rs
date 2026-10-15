@@ -3,7 +3,7 @@
 //! A sync runs when the folder changes (live watcher), when the identity announces a change
 //! on the drive (notification hints), at least once a minute regardless, and when asked. After
 //! a failed sync the runner waits, doubling up to five minutes. It is controlled through a
-//! [`Handle`] and publishes a [`Status`].
+//! [`Handle`] and publishes a [`FolderStatus`].
 //!
 //! - **Pause** stops a running sync between operations (and before the next transfer) and
 //!   syncs nothing until **resume**; the watcher keeps recording changes meanwhile.
@@ -32,10 +32,12 @@ use hbsync_state::StateError;
 use hbsync_types::NodeId;
 pub use hbsync_types::activity::Progress;
 use hbsync_types::unix_now;
-use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
 use crate::config::KeepDays;
+use crate::protocol::{
+    AccountStatus, FolderStatus, HeldDeletes, Hints, LastSync, Note, State, Until,
+};
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
@@ -66,7 +68,7 @@ impl Backoff {
 const TICK: Duration = Duration::from_millis(250);
 /// A wall-clock gap this much longer than a tick means the machine slept.
 const SLEPT: Duration = Duration::from_secs(30);
-/// Entries kept in [`Status::recent`].
+/// Entries kept in [`FolderStatus::recent`].
 const RECENT: usize = 50;
 /// Paths shown for held deletes.
 const EXAMPLES: usize = 10;
@@ -133,13 +135,20 @@ const REMOTE_QUIET: Duration = Duration::from_millis(1000);
 /// ...but no longer than this after the first.
 const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
 
-/// How long a pause lasts: until then (Unix seconds), or until resumed (`None`).
-pub type Until = Option<u64>;
+/// The token of the held deletes of `nodes`, a hash of their sorted ids (made and checked by
+/// one daemon process).
+fn held_token(nodes: &[NodeId]) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut sorted = nodes.to_vec();
+    sorted.sort();
+    let mut hasher = DefaultHasher::new();
+    sorted.hash(&mut hasher);
+    format!("{:016x}-{}", hasher.finish(), sorted.len())
+}
 
 /// Requests to the runner.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Control {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Command {
     /// Sync now, without waiting out a backoff.
     SyncNow,
     /// Pause until then (Unix seconds), or until resumed (`None`).
@@ -169,152 +178,6 @@ pub enum Control {
     Stop,
 }
 
-/// What the runner is doing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum State {
-    /// Catching up with the folder and the drive.
-    Starting,
-    Syncing,
-    /// Up to date, or waiting for the next change.
-    Idle,
-    Paused,
-    /// The identity can't be reached; retrying.
-    Offline,
-    /// The last sync failed for another reason; retrying.
-    Failing,
-    /// The identity refused this device: authorize it again.
-    Denied,
-    Stopped,
-}
-
-/// The notification connection (wake-up hints from the identity).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Hints {
-    /// None: syncs come from local changes and the poll.
-    Off,
-    Connecting,
-    Connected,
-    Lost(String),
-    Refused(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Status {
-    /// The daemon's version (empty from a daemon too old to say).
-    #[serde(default)]
-    pub version: String,
-    pub state: State,
-    /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
-    pub paused_until: Option<u64>,
-    /// How far the sync in progress is.
-    pub progress: Option<Progress>,
-    pub identity: String,
-    pub folder: PathBuf,
-    /// Why the last sync failed (states `Offline`, `Failing`, `Denied`).
-    pub error: Option<String>,
-    /// When the next attempt is after a failure (Unix seconds).
-    pub retry_at: Option<u64>,
-    pub last_sync: Option<LastSync>,
-    /// Items not in sync yet.
-    pub pending: u64,
-    /// Deletes waiting for the user's confirmation.
-    pub held_deletes: Option<HeldDeletes>,
-    /// Conflicts and failures of recent syncs, newest last.
-    pub recent: Vec<Note>,
-    /// Notes added since the daemon started (more than [`Status::recent`] keeps): what is
-    /// new since a client last looked.
-    pub notes_added: u64,
-    /// Entries added to the recently synced list since the daemon started: a client reads
-    /// the list again ([`crate::ipc::Ask::Recent`]) when this changes.
-    pub synced_added: u64,
-    /// Why there is no live watcher (the folder is then rescanned at every poll).
-    pub watcher_error: Option<String>,
-    pub hints: Hints,
-    /// Ignore rules in `.hbsync/ignore`.
-    pub rules: usize,
-    /// Why the credentials aren't in the keychain.
-    pub credentials_warning: Option<String>,
-}
-
-impl Status {
-    /// Starting to sync `folder` with `identity`.
-    pub fn new(identity: &str, folder: &Path) -> Status {
-        Status {
-            version: crate::VERSION.into(),
-            state: State::Starting,
-            paused_until: None,
-            progress: None,
-            identity: identity.to_owned(),
-            folder: folder.to_path_buf(),
-            error: None,
-            retry_at: None,
-            last_sync: None,
-            pending: 0,
-            held_deletes: None,
-            recent: Vec::new(),
-            notes_added: 0,
-            synced_added: 0,
-            watcher_error: None,
-            hints: Hints::Off,
-            rules: 0,
-            credentials_warning: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LastSync {
-    /// When it ended (Unix seconds).
-    pub at: u64,
-    pub millis: u64,
-    pub done: usize,
-    pub downloaded_changes: usize,
-    pub adopted: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeldDeletes {
-    /// Items deleted here, to be deleted on the drive.
-    pub here: u64,
-    /// Items deleted elsewhere, to be moved to the trash here.
-    pub remotely: u64,
-    /// Some of them.
-    pub examples: Vec<String>,
-    /// Names exactly these deletes: a confirmation carries it back.
-    pub token: String,
-}
-
-impl HeldDeletes {
-    pub fn total(&self) -> u64 {
-        self.here + self.remotely
-    }
-
-    /// More are held than [`HeldDeletes::examples`] shows.
-    pub fn more_than_shown(&self) -> bool {
-        (self.examples.len() as u64) < self.total()
-    }
-}
-
-/// The token of the held deletes of `nodes`, a hash of their sorted ids (made and checked by
-/// one daemon process).
-fn held_token(nodes: &[NodeId]) -> String {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut sorted = nodes.to_vec();
-    sorted.sort();
-    let mut hasher = DefaultHasher::new();
-    sorted.hash(&mut hasher);
-    format!("{:016x}-{}", hasher.finish(), sorted.len())
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Note {
-    /// Unix seconds.
-    pub at: u64,
-    pub text: String,
-}
-
 /// Wake-up hints from the identity: the notifier's events, and the notifier to reconnect.
 #[derive(Debug)]
 pub struct HintSource {
@@ -334,24 +197,30 @@ impl HintSource {
 /// Controls a running [`Runner`] from other threads.
 #[derive(Debug, Clone)]
 pub struct Handle {
-    control: Sender<Control>,
+    control: Sender<Command>,
     stop: Arc<AtomicBool>,
-    status: Arc<Mutex<Status>>,
+    status: Arc<Mutex<FolderStatus>>,
+    account: Arc<Mutex<AccountStatus>>,
     progress: Arc<Counters>,
 }
 
 impl Handle {
     /// Passes `control` on. Pause and stop also interrupt a sync in progress. False when the
     /// runner has ended.
-    pub fn send(&self, control: Control) -> bool {
-        if matches!(control, Control::Pause { .. } | Control::Stop) {
+    pub fn send(&self, control: Command) -> bool {
+        if matches!(control, Command::Pause { .. } | Command::Stop) {
             self.stop.store(true, Ordering::Relaxed);
         }
         self.control.send(control).is_ok()
     }
 
     /// Paused while the pause flag is set: seen at once, not only once the runner gets to it.
-    pub fn status(&self) -> Status {
+    /// The account's part of the status (the notifications, the credentials).
+    pub fn account(&self) -> AccountStatus {
+        lock(&self.account).clone()
+    }
+
+    pub fn status(&self) -> FolderStatus {
         let mut status = lock(&self.status).clone();
         if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
             status.state = State::Paused;
@@ -373,9 +242,10 @@ pub struct Runner {
     cfg: RunnerConfig,
     remote: Arc<dyn Remote>,
     hints: HintSource,
-    control: Receiver<Control>,
+    control: Receiver<Command>,
     stop: Arc<AtomicBool>,
-    status: Arc<Mutex<Status>>,
+    status: Arc<Mutex<FolderStatus>>,
+    account: Arc<Mutex<AccountStatus>>,
     progress: Arc<Counters>,
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
@@ -416,11 +286,13 @@ impl Runner {
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
-        let mut status = Status::new(&cfg.identity, &cfg.folder);
+        let mut account = AccountStatus::new(&cfg.identity);
         if hints.notifier.is_some() {
-            status.hints = Hints::Connecting;
+            account.hints = Hints::Connecting;
         }
-        status.credentials_warning = cfg.credentials_warning.clone();
+        account.credentials_warning = cfg.credentials_warning.clone();
+        let account = Arc::new(Mutex::new(account));
+        let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
         status.paused_until = cfg.paused.flatten();
         let status = Arc::new(Mutex::new(status));
         let progress = Arc::new(Counters::default());
@@ -428,6 +300,7 @@ impl Runner {
             control: tx,
             stop: Arc::clone(&stop),
             status: Arc::clone(&status),
+            account: Arc::clone(&account),
             progress: Arc::clone(&progress),
         };
         let runner = Runner {
@@ -437,6 +310,7 @@ impl Runner {
             control: rx,
             stop,
             status,
+            account,
             progress,
             held: Vec::new(),
             last_notes: Default::default(),
@@ -456,7 +330,7 @@ impl Runner {
         Ok((handle, thread))
     }
 
-    fn set(&self, f: impl FnOnce(&mut Status)) {
+    fn set(&self, f: impl FnOnce(&mut FolderStatus)) {
         f(&mut lock(&self.status));
     }
 
@@ -558,12 +432,12 @@ impl Runner {
 
             loop {
                 match self.control.try_recv() {
-                    Ok(Control::SyncNow) => {
+                    Ok(Command::SyncNow) => {
                         wanted = true;
                         check_rules = true;
                         not_before = Instant::now();
                     }
-                    Ok(Control::Pause { until }) => {
+                    Ok(Command::Pause { until }) => {
                         pause = Some(until);
                         self.set(|s| s.paused_until = until);
                         match until {
@@ -574,7 +448,7 @@ impl Runner {
                             None => tracing::info!("paused"),
                         }
                     }
-                    Ok(Control::Resume) => {
+                    Ok(Command::Resume) => {
                         if pause.take().is_some() {
                             tracing::info!("resumed");
                         }
@@ -582,7 +456,7 @@ impl Runner {
                         not_before = Instant::now();
                         self.resume();
                     }
-                    Ok(Control::ConfirmDeletes { token }) => {
+                    Ok(Command::ConfirmDeletes { token }) => {
                         if token != held_token(&self.held) {
                             tracing::warn!("a confirmation of deletes that changed since: ignored");
                             continue;
@@ -592,22 +466,22 @@ impl Runner {
                         wanted = true;
                         not_before = Instant::now();
                     }
-                    Ok(Control::Restore { nodes }) => {
+                    Ok(Command::Restore { nodes }) => {
                         restore.extend(nodes);
                         wanted = true;
                         not_before = Instant::now();
                     }
-                    Ok(Control::EmptyDeleted { nodes }) => {
+                    Ok(Command::EmptyDeleted { nodes }) => {
                         empty.extend(nodes);
                         wanted = true;
                         not_before = Instant::now();
                     }
-                    Ok(Control::EmptyDeletedUntil { at_ms }) => {
+                    Ok(Command::EmptyDeletedUntil { at_ms }) => {
                         empty_until = Some(empty_until.map_or(at_ms, |t| t.max(at_ms)));
                         wanted = true;
                         not_before = Instant::now();
                     }
-                    Ok(Control::Stop) | Err(TryRecvError::Disconnected) => {
+                    Ok(Command::Stop) | Err(TryRecvError::Disconnected) => {
                         tracing::info!("stopped");
                         return Ok(());
                     }
@@ -645,7 +519,7 @@ impl Runner {
                         Hints::Refused(why)
                     }
                 };
-                self.set(|s| s.hints = hints);
+                lock(&self.account).hints = hints;
             }
 
             if pause.flatten().is_some_and(|t| unix_now() >= t) {
@@ -828,7 +702,7 @@ impl Runner {
         }
         for (op, why) in report.failed.iter().chain(&report.skipped) {
             let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
-            notes.push(format!("{path}: {} ({why})", op_name(op)));
+            notes.push(format!("{path}: {} ({why})", op.kind()));
         }
         // Drive rows the client can't read (not encrypted, another key, not a sync node).
         for why in self.remote.take_skipped() {
@@ -920,16 +794,6 @@ fn is_offline(e: &EngineError) -> bool {
         }
         _ => false,
     }
-}
-
-/// The operation's kind, from its debug form (`RemoteCreate { .. }` → `RemoteCreate`).
-fn op_name(op: &hbsync_engine::Op) -> String {
-    let debug = format!("{op:?}");
-    debug
-        .split([' ', '{', '('])
-        .next()
-        .unwrap_or_default()
-        .to_owned()
 }
 
 fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateError> {

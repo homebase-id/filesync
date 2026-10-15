@@ -15,63 +15,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hbsync_types::activity::{Deleted, Synced};
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream};
-use serde::{Deserialize, Serialize};
 
 use crate::Paths;
-use crate::runner::{Control, Status};
-
-/// The protocol version this build speaks.
-pub const PROTOCOL: u32 = 3;
+use crate::protocol::{PROTOCOL, Reply, Request};
 
 /// How long either side waits for the other's line.
 const PATIENCE: Duration = Duration::from_secs(10);
 /// Longer lines are refused (a status is a few kilobytes).
 const MAX_LINE: u64 = 1 << 20;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Request {
-    pub protocol: u32,
-    pub ask: Ask,
-}
-
-impl Request {
-    pub fn new(ask: Ask) -> Request {
-        Request {
-            protocol: PROTOCOL,
-            ask,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Ask {
-    Status,
-    Control(Control),
-    /// The newest entries of the recently synced list.
-    Recent {
-        limit: usize,
-    },
-    /// The newest items of Recently deleted.
-    Deleted {
-        limit: usize,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Reply {
-    Status(Box<Status>),
-    /// Newest first.
-    Recent(Vec<Synced>),
-    /// Newest first.
-    Deleted(Vec<Deleted>),
-    Done,
-    Refused(String),
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpcError {
@@ -284,14 +237,25 @@ fn endpoint(paths: &Paths, serving: bool) -> io::Result<Name<'static>> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::runner::State;
+    use std::path::{Path, PathBuf};
 
-    fn status() -> Status {
-        let mut s = Status::new("a.example", std::path::Path::new("/home/a/Homebase"));
-        s.state = State::Idle;
-        s.pending = 3;
-        s
+    use hbsync_types::activity::{Synced, SyncedKind};
+
+    use super::*;
+    use crate::protocol::{
+        AccountControl, AccountStatus, Ask, Control, DaemonControl, DaemonStatus, FolderControl,
+        FolderStatus, RecentItem, State,
+    };
+
+    fn status() -> DaemonStatus {
+        let mut folder = FolderStatus::new("a.example", Path::new("/home/a/Homebase"));
+        folder.state = State::Idle;
+        folder.pending = 3;
+        DaemonStatus {
+            version: crate::VERSION.into(),
+            accounts: vec![AccountStatus::new("a.example")],
+            folders: vec![folder],
+        }
     }
 
     #[test]
@@ -316,12 +280,15 @@ mod tests {
                 Ask::Deleted { .. } => Reply::Deleted(Vec::new()),
                 Ask::Recent { limit } => Reply::Recent(
                     (0..limit as u64)
-                        .map(|i| Synced {
-                            at: 1_800_000_000 - i,
-                            kind: hbsync_types::activity::SyncedKind::Downloaded,
-                            path: format!("Photos/p{i}.jpg"),
-                            files: 1,
-                            bytes: 1000,
+                        .map(|i| RecentItem {
+                            folder: PathBuf::from("/home/a/Homebase"),
+                            synced: Synced {
+                                at: 1_800_000_000 - i,
+                                kind: SyncedKind::Downloaded,
+                                path: format!("Photos/p{i}.jpg"),
+                                files: 1,
+                                bytes: 1000,
+                            },
                         })
                         .collect(),
                 ),
@@ -332,8 +299,11 @@ mod tests {
             Reply::Status(s) => assert_eq!(*s, status()),
             other => panic!("{other:?}"),
         }
-        let confirm = Control::ConfirmDeletes {
-            token: "0123456789abcdef-60".into(),
+        let confirm = Control::Folder {
+            path: PathBuf::from("/home/a/Homebase"),
+            control: FolderControl::ConfirmDeletes {
+                token: "0123456789abcdef-60".into(),
+            },
         };
         assert_eq!(
             call(&paths, &Request::new(Ask::Control(confirm.clone())))?,
@@ -354,41 +324,50 @@ mod tests {
         Ok(())
     }
 
-    /// The wire format docs/spec/daemon.md documents for protocol 3.
+    /// The wire format docs/spec/daemon.md documents for protocol 4.
     #[test]
     fn requests_look_as_documented() -> Result<(), serde_json::Error> {
         let json = |ask| serde_json::to_string(&Request::new(ask));
-        assert_eq!(json(Ask::Status)?, r#"{"protocol":3,"ask":"status"}"#);
+        assert_eq!(json(Ask::Status)?, r#"{"protocol":4,"ask":"status"}"#);
         assert_eq!(
-            json(Ask::Control(Control::SyncNow))?,
-            r#"{"protocol":3,"ask":{"control":"sync_now"}}"#
+            json(Ask::Control(Control::Daemon(DaemonControl::SyncNow)))?,
+            r#"{"protocol":4,"ask":{"control":{"daemon":"sync_now"}}}"#
         );
         assert_eq!(
-            json(Ask::Control(Control::ConfirmDeletes { token: "t".into() }))?,
-            r#"{"protocol":3,"ask":{"control":{"confirm_deletes":{"token":"t"}}}}"#
-        );
-        assert_eq!(
-            json(Ask::Control(Control::Pause {
+            json(Ask::Control(Control::Daemon(DaemonControl::Pause {
                 until: Some(1_800_000_000)
-            }))?,
-            r#"{"protocol":3,"ask":{"control":{"pause":{"until":1800000000}}}}"#
+            })))?,
+            r#"{"protocol":4,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#
         );
         assert_eq!(
-            json(Ask::Recent { limit: 10 })?,
-            r#"{"protocol":3,"ask":{"recent":{"limit":10}}}"#
+            json(Ask::Control(Control::Folder {
+                path: PathBuf::from("/h"),
+                control: FolderControl::ConfirmDeletes { token: "t".into() }
+            }))?,
+            r#"{"protocol":4,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
         );
         let node = hbsync_types::NodeId(hbsync_types::Uuid::from_u128(1));
         assert_eq!(
-            json(Ask::Control(Control::Restore { nodes: vec![node] }))?,
-            r#"{"protocol":3,"ask":{"control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}"#
+            json(Ask::Control(Control::Account {
+                identity: "a.example".into(),
+                control: AccountControl::Restore { nodes: vec![node] }
+            }))?,
+            r#"{"protocol":4,"ask":{"control":{"account":{"identity":"a.example","control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}}}"#
         );
         assert_eq!(
-            json(Ask::Control(Control::EmptyDeletedUntil { at_ms: 7 }))?,
-            r#"{"protocol":3,"ask":{"control":{"empty_deleted_until":{"at_ms":7}}}}"#
+            json(Ask::Control(Control::Account {
+                identity: "a.example".into(),
+                control: AccountControl::EmptyDeletedUntil { at_ms: 7 }
+            }))?,
+            r#"{"protocol":4,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_deleted_until":{"at_ms":7}}}}}}"#
+        );
+        assert_eq!(
+            json(Ask::Recent { limit: 10 })?,
+            r#"{"protocol":4,"ask":{"recent":{"limit":10}}}"#
         );
         assert_eq!(
             json(Ask::Deleted { limit: 100 })?,
-            r#"{"protocol":3,"ask":{"deleted":{"limit":100}}}"#
+            r#"{"protocol":4,"ask":{"deleted":{"limit":100}}}"#
         );
         assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);
         Ok(())
@@ -416,7 +395,10 @@ mod tests {
         let mode = std::fs::metadata(folder)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
         assert_eq!(
-            call(&paths, &Request::new(Ask::Control(Control::SyncNow)))?,
+            call(
+                &paths,
+                &Request::new(Ask::Control(Control::Daemon(DaemonControl::SyncNow)))
+            )?,
             Reply::Done
         );
 
@@ -445,7 +427,10 @@ mod tests {
         let mode = std::fs::metadata(&paths.runtime)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
         assert_eq!(
-            call(&paths, &Request::new(Ask::Control(Control::SyncNow)))?,
+            call(
+                &paths,
+                &Request::new(Ask::Control(Control::Daemon(DaemonControl::SyncNow)))
+            )?,
             Reply::Done
         );
         Ok(())

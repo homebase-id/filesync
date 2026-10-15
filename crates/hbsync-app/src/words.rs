@@ -5,7 +5,7 @@ use std::path::Path;
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
-use crate::runner::{HeldDeletes, State, Status};
+use crate::protocol::{FolderStatus, HeldDeletes, State};
 
 /// Now, in Unix seconds.
 pub use hbsync_types::unix_now as now;
@@ -170,8 +170,8 @@ pub fn progress(p: &Progress) -> String {
     )
 }
 
-/// What the daemon is doing, in one line: the tray's status line and the head of `hbsync status`.
-pub fn status_line(s: &Status, now: u64) -> String {
+/// What a folder's sync is doing, in one line: the tray's status line and the head of `hbsync status`.
+pub fn status_line(s: &FolderStatus, now: u64) -> String {
     match s.state {
         State::Starting if s.progress.is_none() => "Catching up…".into(),
         // Start-up's first sync shows its progress like any other: on a new install it can take
@@ -239,7 +239,7 @@ mod tests {
     /// The CLI and the tray say the same: waiting items, a refusal, a failure.
     #[test]
     fn status_lines() {
-        let mut s = Status::new(
+        let mut s = FolderStatus::new(
             "anna.example.com",
             std::path::Path::new("/home/anna/Homebase"),
         );

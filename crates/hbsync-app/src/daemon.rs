@@ -14,11 +14,14 @@ use hbsync_homebase::notify::Notifier;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_types::unix_now;
 
-use crate::ipc::{self, Ask, Reply, Request};
+use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
+use crate::protocol::{
+    AccountControl, AccountStatus, Ask, Control, DaemonControl, DaemonStatus, DeletedItem,
+    FolderControl, FolderStatus, RecentItem, Reply, Request, State, Until,
+};
 use crate::runner::{
-    Backoff, Control, Handle, HintSource, Runner, RunnerConfig, RunnerError, State, Status, Until,
-    lock,
+    Backoff, Command, Handle, HintSource, Runner, RunnerConfig, RunnerError, lock,
 };
 use crate::{Config, ConfigError, CredentialError, CredentialStore, Location, Paths, Root};
 use hbsync_engine::root::SyncRoot;
@@ -179,7 +182,7 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
 
     while !thread.is_finished() {
         if stop.load(Ordering::Relaxed) {
-            handle.send(Control::Stop);
+            handle.send(Command::Stop);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -204,7 +207,13 @@ fn answer(
                 .and_then(|r| r.state())
                 .ok()
                 .and_then(|mut db| db.read(|s| s.recent_synced(limit)).ok())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into_iter()
+                .map(|synced| RecentItem {
+                    folder: root.folder.clone(),
+                    synced,
+                })
+                .collect(),
         );
     }
     // Recently deleted is the account's, each item placed in drive coordinates.
@@ -214,68 +223,85 @@ fn answer(
                 .then(|| SyncRoot::open_account(&db, &root.identity).ok())
                 .flatten()
                 .and_then(|mut db| hbsync_engine::deleted::list(&mut db, limit).ok())
-                .unwrap_or_default(),
+                .unwrap_or_default()
+                .into_iter()
+                .map(|deleted| DeletedItem {
+                    identity: root.identity.clone(),
+                    deleted,
+                })
+                .collect(),
         );
     }
     let mut phase = lock(phase);
-    match (request.ask, &mut *phase) {
-        (Ask::Recent { .. } | Ask::Deleted { .. }, _) => unreachable!("answered above"),
-        (Ask::Status, Phase::Running(h)) => Reply::Status(Box::new(h.status())),
-        (
-            Ask::Status,
-            Phase::Waiting {
-                state,
-                error,
-                warning,
-                paused,
-            },
-        ) => {
-            let mut s = Status::new(&root.identity, &root.folder);
-            s.state = if paused.is_some() {
-                State::Paused
-            } else {
-                *state
-            };
-            s.paused_until = paused.flatten();
-            s.error.clone_from(error);
-            s.credentials_warning.clone_from(warning);
-            Reply::Status(Box::new(s))
-        }
-        (Ask::Control(Control::Stop), phase) => {
+    let control = match request.ask {
+        Ask::Recent { .. } | Ask::Deleted { .. } => unreachable!("answered above"),
+        Ask::Status => return Reply::Status(Box::new(status(&phase, root))),
+        Ask::Control(c) => c,
+    };
+    let command = match control {
+        Control::Daemon(DaemonControl::Stop) => {
             stop.store(true, Ordering::Relaxed);
-            if let Phase::Running(h) = phase {
-                h.send(Control::Stop);
+            if let Phase::Running(h) = &*phase {
+                h.send(Command::Stop);
             }
-            Reply::Done
+            return Reply::Done;
         }
-        (Ask::Control(Control::ConfirmDeletes { token }), Phase::Running(h))
-            if h.status().held_deletes.map(|held| held.token) != Some(token.clone()) =>
-        {
-            Reply::Refused(
-                "the held deletes changed since you looked: check them again with \
-                 `hbsync confirm-deletes`"
-                    .into(),
-            )
-        }
-        (Ask::Control(c @ (Control::Pause { .. } | Control::Resume)), phase) => {
+        Control::Daemon(c @ (DaemonControl::Pause { .. } | DaemonControl::Resume)) => {
             let pause = match c {
-                Control::Pause { until } => Some(until),
+                DaemonControl::Pause { until } => Some(until),
                 _ => None,
             };
             // Pausing survives a restart, and is kept until the sync starts.
             if let Err(e) = remember_paused(paths, pause) {
                 return Reply::Refused(format!("couldn't save the pause in the config: {e}"));
             }
-            match phase {
-                Phase::Running(h) => send(h, c),
+            match &mut *phase {
+                Phase::Running(h) => {
+                    return send(
+                        h,
+                        match pause {
+                            Some(until) => Command::Pause { until },
+                            None => Command::Resume,
+                        },
+                    );
+                }
                 Phase::Waiting { paused, .. } => {
                     *paused = pause;
-                    Reply::Done
+                    return Reply::Done;
                 }
             }
         }
-        (Ask::Control(c), Phase::Running(h)) => send(h, c),
-        (Ask::Control(_), Phase::Waiting { error, .. }) => Reply::Refused(format!(
+        Control::Daemon(DaemonControl::SyncNow) => Command::SyncNow,
+        Control::Account { identity, .. } if identity != root.identity => {
+            return Reply::Refused(format!("{identity} isn't set up here"));
+        }
+        Control::Account { control, .. } => match control {
+            AccountControl::Restore { nodes } => Command::Restore { nodes },
+            AccountControl::EmptyDeleted { nodes } => Command::EmptyDeleted { nodes },
+            AccountControl::EmptyDeletedUntil { at_ms } => Command::EmptyDeletedUntil { at_ms },
+        },
+        Control::Folder { path, .. } if path != root.folder => {
+            return Reply::Refused(format!("{} isn't synced here", path.display()));
+        }
+        Control::Folder {
+            control: FolderControl::ConfirmDeletes { token },
+            ..
+        } => {
+            if let Phase::Running(h) = &*phase
+                && h.status().held_deletes.map(|held| held.token) != Some(token.clone())
+            {
+                return Reply::Refused(
+                    "the held deletes changed since you looked: check them again with \
+                     `hbsync confirm-deletes`"
+                        .into(),
+                );
+            }
+            Command::ConfirmDeletes { token }
+        }
+    };
+    match &*phase {
+        Phase::Running(h) => send(h, command),
+        Phase::Waiting { error, .. } => Reply::Refused(format!(
             "not connected to {} yet{}",
             root.identity,
             error.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
@@ -283,7 +309,37 @@ fn answer(
     }
 }
 
-fn send(handle: &Handle, control: Control) -> Reply {
+/// The daemon's status: its account and folder, from the runner once it runs.
+fn status(phase: &Phase, root: &Root) -> DaemonStatus {
+    let (account, folder) = match phase {
+        Phase::Running(h) => (h.account(), h.status()),
+        Phase::Waiting {
+            state,
+            error,
+            warning,
+            paused,
+        } => {
+            let mut account = AccountStatus::new(&root.identity);
+            account.credentials_warning.clone_from(warning);
+            let mut folder = FolderStatus::new(&root.identity, &root.folder);
+            folder.state = if paused.is_some() {
+                State::Paused
+            } else {
+                *state
+            };
+            folder.paused_until = paused.flatten();
+            folder.error.clone_from(error);
+            (account, folder)
+        }
+    };
+    DaemonStatus {
+        version: crate::VERSION.into(),
+        accounts: vec![account],
+        folders: vec![folder],
+    }
+}
+
+fn send(handle: &Handle, control: Command) -> Reply {
     if handle.send(control) {
         Reply::Done
     } else {

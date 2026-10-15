@@ -10,7 +10,10 @@ use uuid::Uuid;
 use crate::NodeId;
 
 /// A special folder, found on each device by its role, never by its name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     Documents,
     Pictures,

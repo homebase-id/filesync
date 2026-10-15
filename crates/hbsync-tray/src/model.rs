@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use hbsync_app::runner::{State, Status};
 use hbsync_app::words;
+use hbsync_app::{FolderStatus, State};
 use hbsync_types::activity::{Synced, SyncedKind};
 
 /// Entries of the recently synced list in the menu.
@@ -21,11 +21,12 @@ pub enum Daemon {
     NotSetUp,
     /// Set up, not answering yet: being started, or failing to start (why).
     Starting(Option<String>),
-    Running(Box<Status>),
+    /// Running: its main folder.
+    Running(Box<FolderStatus>),
 }
 
 impl Daemon {
-    pub fn status(&self) -> Option<&Status> {
+    pub fn status(&self) -> Option<&FolderStatus> {
         match self {
             Daemon::Running(s) => Some(s),
             _ => None,
@@ -160,7 +161,7 @@ pub fn menu(view: &View) -> Vec<Item> {
             Action::OpenOnline(hbsync_app::files_online(&s.identity)),
             "Browse files online".into(),
         ));
-        items.push(recently_synced(view.recent, &s.folder, view.now));
+        items.push(recently_synced(view.recent, &s.path, view.now));
         let problems = problems(s, view.now);
         if !problems.is_empty() {
             items.push(Item::Submenu(
@@ -208,7 +209,7 @@ pub fn menu(view: &View) -> Vec<Item> {
         items.push(Item::Submenu(
             "Log out".into(),
             vec![
-                Item::Label(cut(&format!("Your files stay in {}", s.folder.display()))),
+                Item::Label(cut(&format!("Your files stay in {}", s.path.display()))),
                 Item::Action(Action::LogOut, format!("Log out of {}", s.identity)),
             ],
         ));
@@ -259,7 +260,7 @@ pub fn recent_line(s: &Synced, now: u64) -> String {
     )
 }
 
-fn problems(s: &Status, now: u64) -> Vec<Item> {
+fn problems(s: &FolderStatus, now: u64) -> Vec<Item> {
     s.recent
         .iter()
         .rev()
@@ -290,12 +291,12 @@ fn cut(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hbsync_app::runner::{HeldDeletes, LastSync, Note, Progress};
+    use hbsync_app::protocol::{HeldDeletes, LastSync, Note, Progress};
 
     const NOW: u64 = 1_800_000_000;
 
-    fn status(state: State) -> Status {
-        let mut s = Status::new("anna.example.com", Path::new("/home/anna/Homebase"));
+    fn status(state: State) -> FolderStatus {
+        let mut s = FolderStatus::new("anna.example.com", Path::new("/home/anna/Homebase"));
         s.state = state;
         s
     }

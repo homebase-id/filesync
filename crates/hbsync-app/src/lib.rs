@@ -11,6 +11,7 @@ pub mod ipc;
 pub mod lock;
 pub mod logging;
 pub mod paths;
+pub mod protocol;
 pub mod runner;
 pub mod secrets;
 pub mod setup;
@@ -24,7 +25,8 @@ pub use hbsync_homebase::app::{APP_NAME, files_online};
 /// The local pages' HTTP (login callback, the tray's pages), and `escape` for HTML and XML.
 pub use hbsync_homebase::local_http;
 pub use paths::{NoHome, Paths};
-pub use runner::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
+pub use protocol::{Control, DaemonStatus, FolderStatus, State};
+pub use runner::{Command, Handle, HintSource, Runner, RunnerConfig};
 pub use secrets::{CredentialError, CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};

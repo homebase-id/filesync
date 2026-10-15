@@ -108,18 +108,17 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
         let out = home.hbsync(&["status", "--json"])?;
         assert!(out.status.success(), "{}", text(&out));
         let status: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-        if status["state"] == "offline" || Instant::now() > until {
+        if status["folders"][0]["state"] == "offline" || Instant::now() > until {
             break status;
         }
         std::thread::sleep(Duration::from_millis(200));
     };
-    assert_eq!(status["state"], "offline", "{status}");
-    assert_eq!(status["identity"], IDENTITY);
-    assert_eq!(
-        Path::new(status["folder"].as_str().ok_or("folder")?),
-        folder
-    );
-    assert!(status["credentials_warning"].is_string(), "{status}");
+    let (account, main) = (&status["accounts"][0], &status["folders"][0]);
+    assert_eq!(main["state"], "offline", "{status}");
+    assert_eq!(main["identity"], IDENTITY);
+    assert_eq!(Path::new(main["path"].as_str().ok_or("path")?), folder);
+    assert_eq!(account["identity"], IDENTITY);
+    assert!(account["credentials_warning"].is_string(), "{status}");
     let out = home.hbsync(&["status"])?;
     assert!(
         text(&out).contains("Homebase Filesync: Offline"),
@@ -134,7 +133,7 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     assert!(out.status.success(), "{}", text(&out));
     let status: serde_json::Value =
         serde_json::from_slice(&home.hbsync(&["status", "--json"])?.stdout)?;
-    assert_eq!(status["state"], "paused", "{status}");
+    assert_eq!(status["folders"][0]["state"], "paused", "{status}");
     let config = std::fs::read_to_string(home.path().join("config.toml"))?;
     assert!(config.contains("paused = true"), "{config}");
     let out = home.hbsync(&["resume"])?;

@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hbsync_app::runner::RunnerError;
-use hbsync_app::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
+use hbsync_app::{Command, FolderStatus, Handle, HintSource, Runner, RunnerConfig, State};
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
@@ -55,12 +55,12 @@ impl Device {
         self.root.join(rel).exists()
     }
 
-    fn status(&self) -> Status {
+    fn status(&self) -> FolderStatus {
         self.handle.status()
     }
 
     fn stop(&mut self) -> R {
-        assert!(self.handle.send(Control::Stop));
+        assert!(self.handle.send(Command::Stop));
         if let Some(t) = self.thread.take() {
             t.join().map_err(|_| "the runner panicked")??;
         }
@@ -71,7 +71,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        self.handle.send(Control::Stop);
+        self.handle.send(Command::Stop);
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -114,7 +114,7 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     wait_until("b is idle", || b.status().state == State::Idle)?;
     assert!(b.status().last_sync.is_some());
 
-    b.handle.send(Control::Pause { until: None });
+    b.handle.send(Command::Pause { until: None });
     assert_eq!(b.status().state, State::Paused, "shown at once");
     a.write("two.txt", "2")?;
     wait_until("two.txt is up", || on_server(&server, "two.txt"))?;
@@ -125,7 +125,7 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     std::thread::sleep(Duration::from_secs(1));
     assert!(!on_server(&server, "three.txt"));
 
-    b.handle.send(Control::Resume);
+    b.handle.send(Command::Resume);
     wait_until("b has two.txt", || b.has("two.txt"))?;
     wait_until("three.txt is up", || on_server(&server, "three.txt"))?;
     b.stop()?;
@@ -142,7 +142,7 @@ fn sync_now_reads_the_drive_without_waiting_for_the_poll() -> R {
     wait_until("news.txt is up", || on_server(&server, "news.txt"))?;
     std::thread::sleep(Duration::from_millis(500));
     assert!(!b.has("news.txt"), "no hints, no poll: b can't know yet");
-    b.handle.send(Control::SyncNow);
+    b.handle.send(Command::SyncNow);
     wait_until("b has news.txt", || b.has("news.txt"))?;
     Ok(())
 }
@@ -176,13 +176,13 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
 
     // A confirmation of something else (the held deletes changed since) is ignored.
-    a.handle.send(Control::ConfirmDeletes {
+    a.handle.send(Command::ConfirmDeletes {
         token: "0000000000000000-60".into(),
     });
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
 
-    a.handle.send(Control::ConfirmDeletes { token: held.token });
+    a.handle.send(Command::ConfirmDeletes { token: held.token });
     wait_until("the drive is empty", || live_names(&server).is_empty())?;
     wait_until("nothing is held", || a.status().held_deletes.is_none())?;
     Ok(())
@@ -199,7 +199,7 @@ fn an_edited_ignore_file_applies_without_a_restart() -> R {
     assert_eq!(a.status().rules, 0);
 
     a.write(".hbsync/ignore", "*.log\n")?;
-    a.handle.send(Control::SyncNow);
+    a.handle.send(Command::SyncNow);
     wait_until("debug.log left the drive", || {
         !on_server(&server, "debug.log")
     })?;
@@ -242,7 +242,7 @@ fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
     let (handle, thread) = spawn_at(&server, &root)?;
     std::fs::write(root.join("a.txt"), "a")?;
     wait_until("a.txt is up", || on_server(&server, "a.txt"))?;
-    handle.send(Control::Stop);
+    handle.send(Command::Stop);
     thread.join().map_err(|_| "panicked")??;
 
     // The disk isn't mounted at the next start: an empty mount point where the folder was.
@@ -270,7 +270,7 @@ fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
     std::fs::write(root.join("b.txt"), "b")?;
     wait_until("b.txt is up", || on_server(&server, "b.txt"))?;
     assert!(on_server(&server, "a.txt"));
-    handle.send(Control::Stop);
+    handle.send(Command::Stop);
     thread.join().map_err(|_| "panicked")??;
     Ok(())
 }
@@ -348,7 +348,7 @@ fn a_timed_pause_ends_by_itself() -> R {
     let a = Device::start(&server, "a", NO_POLL)?;
     wait_until("a is idle", || a.status().state == State::Idle)?;
     let until = hbsync_types::unix_now() + 2;
-    a.handle.send(Control::Pause { until: Some(until) });
+    a.handle.send(Command::Pause { until: Some(until) });
     assert_eq!(a.status().state, State::Paused);
     wait_until("the pause shows its end", || {
         a.status().paused_until == Some(until)
@@ -384,7 +384,6 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
     // The status shows no progress once idle.
     wait_until("a is idle", || a.status().state == State::Idle)?;
     assert_eq!(a.status().progress, None);
-    assert_eq!(a.status().version, hbsync_app::VERSION);
     Ok(())
 }
 
@@ -410,7 +409,7 @@ fn progress_shows_during_the_first_sync() -> R {
     let (state, p) = seen.ok_or("no progress")?;
     assert_eq!((state, p.bytes_total), (State::Starting, 600_000));
     wait_until("big.bin is up", || on_server(&server, "big.bin"))?;
-    handle.send(Control::Stop);
+    handle.send(Command::Stop);
     Ok(())
 }
 
@@ -435,6 +434,6 @@ fn progress_shows_while_a_transfer_runs() -> R {
     assert_eq!((p.files_total, p.bytes_total), (1, 600_000));
     assert!(p.bytes_done < p.bytes_total, "{p:?}");
     wait_until("big.bin is up", || on_server(&server, "big.bin"))?;
-    handle.send(Control::Stop);
+    handle.send(Command::Stop);
     Ok(())
 }
