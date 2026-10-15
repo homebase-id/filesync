@@ -46,6 +46,16 @@ pub enum Ask {
     Deleted {
         limit: usize,
     },
+    /// Set the folder at `path` up for `identity` and sync it (`hbsync setup` has checked it).
+    AddFolder {
+        identity: String,
+        path: PathBuf,
+        role: Option<Role>,
+    },
+    /// Stop syncing the folder at `path`; its files and state stay.
+    RemoveFolder {
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

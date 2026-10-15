@@ -4,7 +4,7 @@
 //! folder's runner), Recently deleted and its daily purge. Its folders' runners sync until
 //! the daemon stops.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -32,51 +32,94 @@ const PURGE_LOOK: Duration = Duration::from_secs(600);
 /// An account of the daemon, shared with the control socket's thread.
 pub(crate) struct Account {
     pub identity: String,
-    /// Its folders here.
-    pub folders: Vec<PathBuf>,
     /// Its state DB.
     db: PathBuf,
     status: Mutex<AccountStatus>,
+    /// Its folders here, and their runners once it runs.
     phase: Mutex<Phase>,
-    /// Requests for its Recently deleted, run on its thread.
-    requests: Mutex<Sender<AccountControl>>,
+    /// Paused (kept in the config too): a runner starts paused.
+    paused: Mutex<Option<Until>>,
+    /// Requests run on its thread.
+    requests: Mutex<Sender<Request>>,
+}
+
+/// What the account's thread is asked to do.
+pub(crate) enum Request {
+    Deleted(AccountControl),
+    /// Start syncing this folder.
+    AddFolder(PathBuf),
+    /// Stop syncing this folder.
+    RemoveFolder(PathBuf),
 }
 
 /// Before its runners start, the account still answers.
 enum Phase {
     /// Waiting for the credentials or the identity.
     Waiting {
+        folders: Vec<PathBuf>,
         state: State,
         error: Option<String>,
-        /// Kept in the config too: the runners start paused.
-        paused: Option<Until>,
     },
     Running(Vec<(PathBuf, Handle)>),
 }
 
 impl Account {
-    /// The account `identity` syncing `folders`, started paused when `paused`; its thread runs
+    /// The account `identity` syncing `folder`, started paused when `paused`; its thread runs
     /// with the returned receiver ([`Account::run`]).
     pub fn new(
         paths: &Paths,
         identity: &str,
-        folders: Vec<PathBuf>,
+        folder: &Path,
         paused: Option<Until>,
-    ) -> (Arc<Account>, Receiver<AccountControl>) {
+    ) -> (Arc<Account>, Receiver<Request>) {
         let (tx, rx) = channel();
         let account = Account {
             identity: identity.to_owned(),
-            folders,
             db: paths.account_db(identity),
             status: Mutex::new(AccountStatus::new(identity)),
             phase: Mutex::new(Phase::Waiting {
+                folders: vec![folder.to_path_buf()],
                 state: State::Starting,
                 error: None,
-                paused,
             }),
+            paused: Mutex::new(paused),
             requests: Mutex::new(tx),
         };
         (Arc::new(account), rx)
+    }
+
+    /// Its folders.
+    pub fn folders(&self) -> Vec<PathBuf> {
+        match &*lock(&self.phase) {
+            Phase::Waiting { folders, .. } => folders.clone(),
+            Phase::Running(runners) => runners.iter().map(|(p, _)| p.clone()).collect(),
+        }
+    }
+
+    /// Syncs the folder at `path` too (once connected).
+    pub fn add_folder(&self, path: &Path) {
+        let mut phase = lock(&self.phase);
+        match &mut *phase {
+            Phase::Waiting { folders, .. } => {
+                if !folders.iter().any(|f| f == path) {
+                    folders.push(path.to_path_buf());
+                }
+            }
+            Phase::Running(_) => {
+                let _ = lock(&self.requests).send(Request::AddFolder(path.to_path_buf()));
+            }
+        }
+    }
+
+    /// Stops syncing the folder at `path`.
+    pub fn remove_folder(&self, path: &Path) {
+        let mut phase = lock(&self.phase);
+        match &mut *phase {
+            Phase::Waiting { folders, .. } => folders.retain(|f| f != path),
+            Phase::Running(_) => {
+                let _ = lock(&self.requests).send(Request::RemoveFolder(path.to_path_buf()));
+            }
+        }
     }
 
     pub fn db(&self) -> &PathBuf {
@@ -88,24 +131,26 @@ impl Account {
         let folders = match &*lock(&self.phase) {
             Phase::Running(runners) => runners.iter().map(|(_, h)| h.status()).collect(),
             Phase::Waiting {
+                folders,
                 state,
                 error,
-                paused,
-            } => self
-                .folders
-                .iter()
-                .map(|path| {
-                    let mut folder = FolderStatus::new(&self.identity, path);
-                    folder.state = if paused.is_some() {
-                        State::Paused
-                    } else {
-                        *state
-                    };
-                    folder.paused_until = paused.flatten();
-                    folder.error.clone_from(error);
-                    folder
-                })
-                .collect(),
+            } => {
+                let paused = *lock(&self.paused);
+                folders
+                    .iter()
+                    .map(|path| {
+                        let mut folder = FolderStatus::new(&self.identity, path);
+                        folder.state = if paused.is_some() {
+                            State::Paused
+                        } else {
+                            *state
+                        };
+                        folder.paused_until = paused.flatten();
+                        folder.error.clone_from(error);
+                        folder
+                    })
+                    .collect()
+            }
         };
         (lock(&self.status).clone(), folders)
     }
@@ -136,18 +181,16 @@ impl Account {
 
     /// Pauses (`Some`) or resumes its folders, also before they run.
     pub fn pause(&self, pause: Option<Until>) {
-        let mut phase = lock(&self.phase);
-        match &mut *phase {
-            Phase::Running(runners) => {
-                let command = match pause {
-                    Some(until) => Command::Pause { until },
-                    None => Command::Resume,
-                };
-                for (_, h) in runners.iter() {
-                    h.send(command.clone());
-                }
+        let phase = lock(&self.phase);
+        *lock(&self.paused) = pause;
+        if let Phase::Running(runners) = &*phase {
+            let command = match pause {
+                Some(until) => Command::Pause { until },
+                None => Command::Resume,
+            };
+            for (_, h) in runners {
+                h.send(command.clone());
             }
-            Phase::Waiting { paused, .. } => *paused = pause,
         }
     }
 
@@ -169,7 +212,7 @@ impl Account {
             return Err(why);
         }
         lock(&self.requests)
-            .send(control)
+            .send(Request::Deleted(control))
             .map_err(|_| "the account has stopped".to_owned())
     }
 
@@ -186,7 +229,7 @@ impl Account {
         &self,
         paths: &Paths,
         config: &Config,
-        requests: &Receiver<AccountControl>,
+        requests: &Receiver<Request>,
         stop: &AtomicBool,
     ) -> Result<(), DaemonError> {
         let Some(creds) = self.credentials(paths, stop)? else {
@@ -204,29 +247,24 @@ impl Account {
                 .map_err(|e| DaemonError::Runner(e.into()))?,
             remote,
         );
-        let (runners, mut hints, mut threads) = {
-            // Under the lock: no pause gets lost between the two phases.
-            let mut phase = lock(&self.phase);
-            let paused = match &*phase {
-                Phase::Waiting { paused, .. } => *paused,
-                Phase::Running(_) => None,
-            };
-            let mut runners = Vec::new();
-            let (mut hints, mut threads) = (Vec::new(), Vec::new());
-            for folder in &self.folders {
-                let mut cfg =
-                    RunnerConfig::new(folder, &self.db, &self.identity, &config.device_name());
-                cfg.mass_delete = config.mass_delete;
-                cfg.paused = paused;
-                let (tx, rx) = channel();
-                let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive), rx)?;
-                runners.push((folder.clone(), handle));
-                hints.push(tx);
-                threads.push(thread);
-            }
-            *phase = Phase::Running(runners.clone());
-            (runners, hints, threads)
+        let mut runners = Runners {
+            drive: Arc::clone(&drive),
+            hints: Vec::new(),
+            threads: Vec::new(),
         };
+        {
+            // Under the lock: no pause or folder gets lost between the two phases.
+            let mut phase = lock(&self.phase);
+            let folders = match &*phase {
+                Phase::Waiting { folders, .. } => folders.clone(),
+                Phase::Running(_) => Vec::new(),
+            };
+            let mut handles = Vec::new();
+            for folder in folders {
+                handles.push((folder.clone(), runners.start(self, config, &folder)?));
+            }
+            *phase = Phase::Running(handles);
+        }
 
         let keep_days = config.keep_deleted_days.0;
         let mut next_purge = Instant::now();
@@ -235,9 +273,7 @@ impl Account {
             let (wall, mono) = (SystemTime::now(), Instant::now());
             std::thread::sleep(TICK);
             if stop.load(Ordering::Relaxed) {
-                for (_, h) in &runners {
-                    h.send(Command::Stop);
-                }
+                self.send_all(&Command::Stop);
             }
             if slept(
                 SystemTime::now().duration_since(wall).ok(),
@@ -246,9 +282,28 @@ impl Account {
             ) {
                 notifier.reconnect();
             }
-            self.pass_hints(&events, &mut hints);
-            while let Ok(control) = requests.try_recv() {
-                run_request(&drive, control);
+            self.pass_hints(&events, &mut runners.hints);
+            while let Ok(request) = requests.try_recv() {
+                match request {
+                    Request::Deleted(control) => run_request(&drive, control),
+                    Request::AddFolder(folder) => {
+                        let mut phase = lock(&self.phase);
+                        if let Phase::Running(handles) = &mut *phase
+                            && !handles.iter().any(|(p, _)| *p == folder)
+                        {
+                            let handle = runners.start(self, config, &folder)?;
+                            handles.push((folder, handle));
+                        }
+                    }
+                    Request::RemoveFolder(folder) => {
+                        if let Phase::Running(handles) = &mut *lock(&self.phase) {
+                            for (_, h) in handles.iter().filter(|(p, _)| *p == folder) {
+                                h.send(Command::Stop);
+                            }
+                            handles.retain(|(p, _)| *p != folder);
+                        }
+                    }
+                }
             }
             if Instant::now() >= next_purge {
                 next_purge = Instant::now() + PURGE_LOOK;
@@ -261,9 +316,10 @@ impl Account {
                 }
             }
             // A runner that ended takes its folder out; the account ends with the last.
-            let (ended, running): (Vec<_>, Vec<_>) =
-                threads.into_iter().partition(JoinHandle::is_finished);
-            threads = running;
+            let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(&mut runners.threads)
+                .into_iter()
+                .partition(JoinHandle::is_finished);
+            runners.threads = running;
             for thread in ended {
                 let ended = thread.join().map_err(|_| RunnerError::Panicked);
                 if let Err(e) = ended.and_then(|r| r)
@@ -272,7 +328,7 @@ impl Account {
                     result = Err(DaemonError::Runner(e));
                 }
             }
-            if threads.is_empty() {
+            if runners.threads.is_empty() {
                 return result;
             }
         }
@@ -363,6 +419,38 @@ impl Account {
                 runners.retain(|tx| tx.send(hint).is_ok());
             }
         }
+    }
+}
+
+/// The account's folders' runners.
+struct Runners {
+    drive: Arc<Drive>,
+    /// Where each takes the notifications' hints.
+    hints: Vec<Sender<Hint>>,
+    threads: Vec<JoinHandle<Result<(), RunnerError>>>,
+}
+
+impl Runners {
+    /// Starts syncing `folder` of `account`.
+    fn start(
+        &mut self,
+        account: &Account,
+        config: &Config,
+        folder: &Path,
+    ) -> Result<Handle, RunnerError> {
+        let mut cfg = RunnerConfig::new(
+            folder,
+            &account.db,
+            &account.identity,
+            &config.device_name(),
+        );
+        cfg.mass_delete = config.mass_delete;
+        cfg.paused = *lock(&account.paused);
+        let (tx, rx) = channel();
+        let (handle, thread) = Runner::spawn(cfg, Arc::clone(&self.drive), rx)?;
+        self.hints.push(tx);
+        self.threads.push(thread);
+        Ok(handle)
     }
 }
 

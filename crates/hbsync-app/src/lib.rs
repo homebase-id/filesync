@@ -6,10 +6,13 @@ pub mod autostart;
 pub mod config;
 pub mod control;
 pub mod daemon;
+pub mod folders;
 pub mod install;
 pub mod ipc;
+pub mod local_http;
 pub mod lock;
 pub mod logging;
+pub mod login;
 pub mod paths;
 pub mod protocol;
 pub mod runner;
@@ -22,8 +25,6 @@ pub mod words;
 
 pub use config::{Config, ConfigError, MassDelete, Root};
 pub use hbsync_homebase::app::{APP_NAME, files_online};
-/// The local pages' HTTP (login callback, the tray's pages), and `escape` for HTML and XML.
-pub use hbsync_homebase::local_http;
 pub use paths::{NoHome, Paths};
 pub use protocol::{Control, DaemonStatus, FolderStatus, State};
 pub use runner::{Command, Handle, Hint, Runner, RunnerConfig};

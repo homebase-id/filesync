@@ -278,6 +278,9 @@ mod tests {
                     Reply::Done
                 }
                 Ask::Deleted { .. } => Reply::Deleted(Vec::new()),
+                Ask::AddFolder { .. } | Ask::RemoveFolder { .. } => {
+                    Reply::Refused("not here".into())
+                }
                 Ask::Recent { limit } => Reply::Recent(
                     (0..limit as u64)
                         .map(|i| RecentItem {

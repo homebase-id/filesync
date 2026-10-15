@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use hbsync_types::Role;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::Until;
@@ -28,7 +29,7 @@ pub enum ConfigError {
     Parse(PathBuf, toml::de::Error),
     #[error(transparent)]
     Write(#[from] toml::ser::Error),
-    #[error("{0} folders are configured; this version syncs one")]
+    #[error("{0} main folders are configured; this version syncs one")]
     TooManyRoots(usize),
 }
 
@@ -71,6 +72,21 @@ pub struct Root {
     /// The identity's domain, e.g. `anna.example.com`.
     pub identity: String,
     pub folder: PathBuf,
+    /// The role folder it is (sync semantics §12); none for the main folder, which holds the
+    /// drive's root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+}
+
+impl Root {
+    /// The main folder at `folder`, synced with `identity`.
+    pub fn main(identity: &str, folder: &Path) -> Root {
+        Root {
+            identity: identity.to_owned(),
+            folder: folder.to_path_buf(),
+            role: None,
+        }
+    }
 }
 
 /// When deletes are held for confirmation (sync semantics, the mass-delete guard): at least
@@ -115,9 +131,10 @@ impl Config {
             .map_err(|e| ConfigError::Io(path.to_owned(), e))
     }
 
-    /// The one folder to sync, if any.
+    /// The main folder, if any (one at most, for now).
     pub fn root(&self) -> Result<Option<&Root>, ConfigError> {
-        match self.roots.as_slice() {
+        let mains: Vec<&Root> = self.roots.iter().filter(|r| r.role.is_none()).collect();
+        match mains.as_slice() {
             [] => Ok(None),
             [root] => Ok(Some(root)),
             more => Err(ConfigError::TooManyRoots(more.len())),
@@ -163,10 +180,13 @@ mod tests {
                 fraction: 0.5,
             },
             keep_deleted_days: KeepDays(7),
-            roots: vec![Root {
-                identity: "anna.example.com".into(),
-                folder: "/home/anna/Homebase".into(),
-            }],
+            roots: vec![
+                Root::main("anna.example.com", Path::new("/home/anna/Homebase")),
+                Root {
+                    role: Some(Role::Documents),
+                    ..Root::main("anna.example.com", Path::new("/home/anna/Documents"))
+                },
+            ],
         };
         config.save(&path).expect("ok");
         assert_eq!(Config::load(&path).expect("ok"), Some(config.clone()));

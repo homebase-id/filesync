@@ -14,7 +14,7 @@ use hbsync_remote::Remote;
 
 use crate::control;
 use crate::paths::home;
-use crate::{Config, CredentialStore, Location, Paths, Root, autostart};
+use crate::{Config, CredentialStore, Location, Paths, autostart};
 
 /// How long the owner has to approve in the browser.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -28,18 +28,18 @@ pub fn authorize(
     browser: Option<&str>,
     show: impl FnOnce(&str),
 ) -> Result<Credentials, HomebaseError> {
-    let pending = begin(identity, device)?;
-    show(&pending.authorize_url);
+    let login = begin(identity, device)?;
+    show(login.authorize_url());
     // The URL was shown: a browser that doesn't start isn't an error.
-    let _ = open_browser(browser, &pending.authorize_url);
-    pending.finish(APPROVAL_TIMEOUT)
+    let _ = open_browser(browser, login.authorize_url());
+    login.finish(APPROVAL_TIMEOUT)
 }
 
 /// Starts authorizing this device (named after `device` in the owner's list) on `identity`:
 /// the caller takes the browser to `authorize_url` and waits with `finish`
 /// ([`APPROVAL_TIMEOUT`]).
-pub fn begin(identity: &str, device: &str) -> Result<hbsync_homebase::Pending, HomebaseError> {
-    hbsync_homebase::begin(identity, &format!("Filesync on {device}"))
+pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, HomebaseError> {
+    crate::login::begin(identity, &format!("Filesync on {device}"))
 }
 
 /// What [`prepare`] found and did.
@@ -327,7 +327,7 @@ pub fn set_up(
     say: &mut dyn FnMut(&str),
 ) -> control::Result<()> {
     let config_path = paths.config_file();
-    let mut config = Config::load(&config_path)?.unwrap_or_default();
+    let config = Config::load(&config_path)?.unwrap_or_default();
     // Checked again: the config may have changed since the request was planned.
     let checked = plan(
         &config,
@@ -379,7 +379,8 @@ pub fn set_up(
         )),
     }
 
-    // The folder in the account's state DB, and its marker: kept if set up before.
+    // The folder in the account's state DB, and its marker: kept if set up before. Checked
+    // here, set up by the daemon (or here, when it isn't running).
     let db = paths.account_db(identity);
     let has_files = has_files(&folder)?;
     match SyncRoot::open(&db, identity, &folder) {
@@ -400,16 +401,16 @@ pub fn set_up(
         Err(RootError::Unknown(_) | RootError::Older(_)) if has_files && !checked.existing => {
             return Err(Refusal::NeedsMerge(folder).into());
         }
-        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
-            SyncRoot::create(&db, identity, &folder)?;
-        }
+        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {}
         Err(e) => return Err(e.into()),
     }
-    config.roots = vec![Root {
-        identity: identity.to_owned(),
-        folder: folder.clone(),
-    }];
-    config.save(&config_path)?;
+    let running = control::running(paths)?;
+    if running {
+        // It sets the folder up and starts syncing it, without a restart.
+        control::add_folder(paths, identity, &folder, None)?;
+    } else {
+        crate::folders::add(paths, identity, &folder, None)?;
+    }
     say(&format!("{} syncs with {identity}.", folder.display()));
 
     if request.at_logon {
@@ -426,10 +427,9 @@ pub fn set_up(
     if !request.start {
         return Ok(());
     }
-    if control::running(paths)? {
-        control::stop(paths)?;
+    if !running {
+        control::start(paths)?;
     }
-    control::start(paths)?;
     say("The daemon is running: `hbsync status` shows what it does.");
     Ok(())
 }
@@ -549,10 +549,7 @@ mod tests {
         );
         // Another folder or identity already set up.
         let set = Config {
-            roots: vec![Root {
-                identity: "a.example".into(),
-                folder: fresh.clone(),
-            }],
+            roots: vec![crate::Root::main("a.example", &fresh)],
             ..Config::default()
         };
         assert!(plan("a.example", &fresh, false, &set).is_ok());

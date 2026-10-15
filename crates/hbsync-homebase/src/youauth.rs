@@ -11,10 +11,7 @@
 //!    AES-CBC encrypted under the exchange key.
 
 use std::collections::HashMap;
-use std::net::TcpListener;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -24,9 +21,6 @@ use sha2::Digest;
 
 use crate::HomebaseError;
 use crate::crypto::{Exchange, Key, aes_cbc_decrypt, random};
-use crate::local_http;
-
-const CALLBACK_PATH: &str = "/authorization-code-callback";
 
 /// What a device keeps after authorizing: who it talks to and how.
 #[derive(Clone, Serialize, Deserialize)]
@@ -77,29 +71,28 @@ impl Credentials {
     }
 }
 
-/// A YouAuth flow waiting for the browser to come back.
+/// A YouAuth flow waiting for the identity's answer, which comes back to `redirect_uri` (a
+/// loopback page the caller serves: [`Pending::complete`] takes its query).
 #[derive(Debug)]
 pub struct Pending {
     identity: String,
     exchange: Exchange,
     state: String,
-    listener: TcpListener,
     /// Open this in the browser.
     pub authorize_url: String,
-    /// Where the browser goes once the identity is back (`?error=` added on failure); else it
-    /// shows a line of text.
-    return_to: Option<String>,
 }
 
 /// Starts authorizing this device for the app on `identity` (a domain such as
-/// `frodo.dotyou.cloud`). `friendly_name` names the device in the owner's list.
-pub fn begin(identity: &str, friendly_name: &str) -> Result<Pending, HomebaseError> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    let redirect_uri = format!("http://localhost:{port}{CALLBACK_PATH}");
+/// `frodo.dotyou.cloud`). `friendly_name` names the device in the owner's list; the identity
+/// sends the browser back to `redirect_uri`.
+pub fn begin(
+    identity: &str,
+    friendly_name: &str,
+    redirect_uri: &str,
+) -> Result<Pending, HomebaseError> {
     let exchange = Exchange::new()?;
     let state = uuid::Uuid::from_bytes(random::<16>()?).simple().to_string();
-    let request = crate::app::permission_request(friendly_name, &redirect_uri);
+    let request = crate::app::permission_request(friendly_name, redirect_uri);
     let params = [
         ("client_id", crate::app::APP_ID.simple().to_string()),
         ("client_type", "app".to_owned()),
@@ -107,7 +100,7 @@ pub fn begin(identity: &str, friendly_name: &str) -> Result<Pending, HomebaseErr
         ("public_key", exchange.public_jwk_base64url()),
         ("permission_request", request.to_string()),
         ("state", state.clone()),
-        ("redirect_uri", redirect_uri),
+        ("redirect_uri", redirect_uri.to_owned()),
     ];
     let query: Vec<String> = params
         .iter()
@@ -121,84 +114,14 @@ pub fn begin(identity: &str, friendly_name: &str) -> Result<Pending, HomebaseErr
         identity: identity.to_owned(),
         exchange,
         state,
-        listener,
         authorize_url,
-        return_to: None,
     })
 }
 
 impl Pending {
-    /// Sends the browser to `url` once the identity is back, instead of showing a line of text
-    /// (`?error=<why>` added when connecting failed).
-    pub fn return_to(mut self, url: &str) -> Self {
-        self.return_to = Some(url.to_owned());
-        self
-    }
-
-    /// Waits up to `timeout` for the browser's callback, then exchanges it for credentials.
-    pub fn finish(self, timeout: Duration) -> Result<Credentials, HomebaseError> {
-        self.finish_unless(timeout, &AtomicBool::new(false))
-    }
-
-    /// [`Pending::finish`], given up as soon as `cancel` is set (the user started over).
-    pub fn finish_unless(
-        self,
-        timeout: Duration,
-        cancel: &AtomicBool,
-    ) -> Result<Credentials, HomebaseError> {
-        let deadline = Instant::now() + timeout;
-        self.listener.set_nonblocking(true)?;
-        loop {
-            let (stream, _) = match self.listener.accept() {
-                Ok(conn) => conn,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if cancel.load(Ordering::Relaxed) {
-                        return Err(HomebaseError::Protocol("given up: started over".into()));
-                    }
-                    if Instant::now() > deadline {
-                        return Err(HomebaseError::Protocol(
-                            "no answer from the browser in time".into(),
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
-            let mut stream = stream;
-            stream.set_nonblocking(false)?;
-            // Anything else is ignored: a favicon request, or a TLS handshake from a browser
-            // that tries https first (Firefox's HTTPS-First) before falling back to http.
-            let request = local_http::read_request(&mut stream).ok().flatten();
-            let Some(request) = request.filter(|r| r.method == "GET" && r.path == CALLBACK_PATH)
-            else {
-                let _ = local_http::message(&mut stream, 404, "Not here.");
-                continue;
-            };
-            let result = self.complete(&request.query);
-            match (&self.return_to, &result) {
-                (Some(url), Ok(_)) => local_http::redirect(&mut stream, url)?,
-                (Some(url), Err(e)) => {
-                    let why = utf8_percent_encode(&e.to_string(), NON_ALPHANUMERIC).to_string();
-                    let sep = if url.contains('?') { '&' } else { '?' };
-                    local_http::redirect(&mut stream, &format!("{url}{sep}error={why}"))?;
-                }
-                (None, Ok(_)) => local_http::message(
-                    &mut stream,
-                    200,
-                    "Homebase Filesync is connected. You can close this window.",
-                )?,
-                (None, Err(e)) => local_http::message(
-                    &mut stream,
-                    200,
-                    &format!("Homebase Filesync could not connect: {e}"),
-                )?,
-            }
-            return result;
-        }
-    }
-
-    fn complete(&self, query: &HashMap<String, String>) -> Result<Credentials, HomebaseError> {
+    /// The identity's answer, the query of the request it sent the browser back with,
+    /// exchanged for credentials.
+    pub fn complete(&self, query: &HashMap<String, String>) -> Result<Credentials, HomebaseError> {
         let get = |name: &str| query.get(name).map(String::as_str);
         if get("state") != Some(self.state.as_str()) {
             return Err(HomebaseError::Protocol(
