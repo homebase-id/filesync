@@ -25,7 +25,6 @@ use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
-use hbsync_local::watch::Debounce;
 use hbsync_local::{Filter, FilterError, LocalObserver};
 use hbsync_remote::RemoteError;
 use hbsync_state::StateError;
@@ -276,7 +275,7 @@ impl Runner {
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
         let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
-        let mut engine = Engine::new(sync_root.state()?, Arc::clone(&self.drive), cfg);
+        let mut engine = Engine::open(&sync_root, Arc::clone(&self.drive), cfg)?;
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
         let observer = LocalObserver::start(root, engine.scan_options().clone());
@@ -319,10 +318,7 @@ impl Runner {
             let mut worked = false;
             match &mut parts {
                 Some(p) => {
-                    if p.observer
-                        .poll(p.engine.db(), TICK, Debounce::default())?
-                        .is_some()
-                    {
+                    if p.engine.observe(&mut p.observer, TICK)?.is_some() {
                         schedule.want();
                         worked = true;
                     }

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use hbsync_app::runner::RunnerError;
 use hbsync_app::{Command, FolderStatus, Handle, Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
-use hbsync_engine::root::{RootError, SyncRoot};
+use hbsync_engine::root::{AccountReader, RootError, SyncRoot};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -235,8 +235,11 @@ fn spawn(
     cfg: RunnerConfig,
     server: &Arc<Mutex<FakeServer>>,
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
-    let account = SyncRoot::open_account(&cfg.db, &cfg.identity)?;
-    let drive = Drive::new(account, Arc::new(FakeRemote::new(server.clone())));
+    let drive = Drive::open(
+        &cfg.db,
+        &cfg.identity,
+        Arc::new(FakeRemote::new(server.clone())),
+    )?;
     Runner::spawn(cfg, drive)
 }
 
@@ -382,9 +385,10 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
     a.write("two.txt", "22")?;
     wait_until("both are listed", || a.status().synced_added == 2)?;
     // The list is the folder's state DB's.
-    let recent = SyncRoot::open(&db_of(&a.root), "test.example", &a.root)?
-        .state()?
-        .read(|s| s.recent_synced(10))?;
+    let folder = SyncRoot::find(&db_of(&a.root), "test.example", &a.root)?.folder();
+    let recent = AccountReader::open(&db_of(&a.root), "test.example")?
+        .ok_or("no DB")?
+        .recent_synced(folder, 10)?;
     assert_eq!(recent.len(), 2);
     assert!(
         recent

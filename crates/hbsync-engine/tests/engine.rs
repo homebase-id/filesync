@@ -1570,7 +1570,7 @@ fn recently_deleted_restores_and_purges() -> R {
     a.sync()?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
-    let listed = b.engine.drive().recently_deleted(10)?;
+    let listed = b.recently_deleted(10)?;
     let mut paths: Vec<_> = listed.iter().map(|d| d.path.as_str()).collect();
     paths.sort();
     assert_eq!(paths, ["d", "d/sub", "d/sub/y.txt", "d/x.txt", "z.txt"]);
@@ -1595,8 +1595,6 @@ fn recently_deleted_restores_and_purges() -> R {
     a.write("z.txt", "new z")?;
     a.sync()?;
     let z = a
-        .engine
-        .drive()
         .recently_deleted(10)?
         .into_iter()
         .find(|i| i.path == "z.txt")
@@ -1612,7 +1610,7 @@ fn recently_deleted_restores_and_purges() -> R {
     a.sync()?;
     assert_eq!(a.engine.drive().purge(i64::MAX)?, 1);
     b.sync()?;
-    assert!(b.engine.drive().recently_deleted(10)?.is_empty());
+    assert!(b.recently_deleted(10)?.is_empty());
     assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
     Ok(())
 }
@@ -1631,7 +1629,7 @@ fn an_edit_restores_what_another_client_deleted() -> R {
     b.sync()?; // the edit wins: restored with b's bytes
     a.sync()?;
     assert_eq!(a.read_text("notes.txt")?, "1 and 2");
-    assert!(a.engine.drive().recently_deleted(10)?.is_empty());
+    assert!(a.recently_deleted(10)?.is_empty());
     let srv = server.lock().map_err(|_| "poisoned")?;
     assert_eq!((srv.live().count(), srv.removed().count()), (1, 0));
     Ok(())
@@ -1689,8 +1687,6 @@ fn a_restored_item_is_guarded_again() -> R {
     assert!(!a.root.join("d").exists());
 
     let d = a
-        .engine
-        .drive()
         .recently_deleted(10)?
         .into_iter()
         .find(|i| i.path == "d")
@@ -1727,9 +1723,7 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     fs::remove_dir_all(a.root.join("P"))?;
     a.sync()?;
     let find = |a: &mut common::Client, path: &str| -> Result<_, Box<dyn std::error::Error>> {
-        Ok(a.engine
-            .drive()
-            .recently_deleted(10)?
+        Ok(a.recently_deleted(10)?
             .into_iter()
             .find(|i| i.path == path)
             .ok_or(format!("{path} not listed"))?)
@@ -1752,8 +1746,6 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     a.sync()?;
     assert_eq!(a.engine.drive().empty_until(until)?, 1);
     let left: Vec<_> = a
-        .engine
-        .drive()
         .recently_deleted(10)?
         .into_iter()
         .map(|i| i.path)
@@ -2042,8 +2034,6 @@ fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
     }
     a.sync()?;
     let mut listed: Vec<(String, Option<String>)> = a
-        .engine
-        .drive()
         .recently_deleted(10)?
         .into_iter()
         .map(|d| (d.path, d.folder))

@@ -220,14 +220,14 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 /// The version this client makes and reads.
-const VERSION: u32 = BASE + MIGRATIONS.len() as u32;
+pub(crate) const VERSION: u32 = BASE + MIGRATIONS.len() as u32;
 
 pub(crate) fn user_version(conn: &Connection) -> Result<u32> {
     Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
 }
 
 /// Refuses a DB this client can't use (0 is a new one).
-fn check(version: u32) -> Result<()> {
+pub(crate) fn check(version: u32) -> Result<()> {
     if version > VERSION {
         Err(StateError::TooNew {
             found: version,

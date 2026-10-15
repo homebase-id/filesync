@@ -2,6 +2,7 @@
 //! change feed (pulled once for all of them), and what is the whole drive's rather than a
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -10,13 +11,13 @@ use std::time::{Duration, Instant};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeId;
-use hbsync_types::activity::Deleted;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeKind, Role};
 
 use crate::deleted;
 use crate::engine::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
+use crate::root::{RootError, SyncRoot};
 
 /// Rows of the change feed read per request.
 pub const FEED_PAGE: usize = 500;
@@ -49,6 +50,16 @@ impl std::fmt::Debug for Drive {
 }
 
 impl Drive {
+    /// The drive of `identity`'s account, whose state DB is at `db` (made if new; refused if
+    /// another's).
+    pub fn open(
+        db: &Path,
+        identity: &str,
+        remote: Arc<dyn Remote>,
+    ) -> Result<Arc<Drive>, RootError> {
+        Ok(Drive::new(SyncRoot::open_account(db, identity)?, remote))
+    }
+
     /// The drive of the account whose state DB `account` is ([`StateDb::open_account`]).
     pub fn new(account: StateDb, remote: Arc<dyn Remote>) -> Arc<Drive> {
         Arc::new(Drive {
@@ -84,6 +95,11 @@ impl Drive {
 
     pub fn shared_remote(&self) -> Arc<dyn Remote> {
         Arc::clone(&self.remote)
+    }
+
+    /// Whether `db` is a connection to the drive's DB file.
+    pub(crate) fn same_file(&self, db: &StateDb) -> bool {
+        self.account().same_file(db)
     }
 
     fn account(&self) -> MutexGuard<'_, StateDb> {
@@ -182,11 +198,6 @@ impl Drive {
             ))));
         }
         Ok(())
-    }
-
-    /// Recently deleted, newest first, each item with the folder it would come back to.
-    pub fn recently_deleted(&self, limit: usize) -> Result<Vec<Deleted>, StateError> {
-        deleted::list(&mut self.account(), limit)
     }
 
     /// Restores these items of Recently deleted (each with what was deleted with it); the

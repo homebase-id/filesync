@@ -3,8 +3,9 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
+use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{DirtyCursor, StateDb, StateError, keys};
 use hbsync_types::NodeId;
@@ -16,6 +17,7 @@ use crate::drive::Drive;
 use crate::exec::{ExecConfig, Executor, Stopped, recover};
 use crate::feed::{FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
+use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
 
@@ -173,6 +175,19 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
+    /// The engine of the folder `root`, on its account's `drive` ([`Engine::new`]), which
+    /// must keep its state in the same DB.
+    pub fn open(root: &SyncRoot, drive: Arc<Drive>, cfg: EngineConfig) -> Result<Self, RootError> {
+        let db = root.state()?;
+        if !drive.same_file(&db) {
+            return Err(RootError::State(StateError::Conflict(format!(
+                "{}: its drive keeps its state in another DB",
+                root.path().display()
+            ))));
+        }
+        Ok(Engine::new(db, drive, cfg))
+    }
+
     /// The engine of the folder `db` sees, on the account's `drive`. The folder's top (the
     /// state DB's) decides which part of the drive it syncs: `cfg`'s scope is kept only when
     /// it has that top.
@@ -228,6 +243,18 @@ impl Engine {
         self.urgent = nodes.into_iter().collect();
     }
 
+    /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
+    /// them ([`LocalObserver::poll`]). `None` if nothing happened.
+    pub fn observe(
+        &mut self,
+        observer: &mut LocalObserver,
+        timeout: Duration,
+    ) -> Result<Option<ScanReport>, StateError> {
+        observer.poll(&mut self.db, timeout, Debounce::default())
+    }
+
+    /// The engine's connection, for tests that set up what a crash leaves behind.
+    #[cfg(feature = "testkit")]
     pub fn db(&mut self) -> &mut StateDb {
         &mut self.db
     }

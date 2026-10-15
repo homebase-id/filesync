@@ -14,7 +14,8 @@
 //!   - **folder_kv**: the folder's cursors and settings; **kv** has the account's.
 //!
 //! Every access runs inside a transaction ([`StateDb::read`], [`StateDb::write`]); a write
-//! closure that returns an error rolls everything back.
+//! closure that returns an error rolls everything back. What only reads while others write
+//! (answers, checks) uses a [`Reader`], which can't write.
 //!
 //! **Durability.** A commit reaches the disk soon, not at once: an OS crash or a power cut can
 //! lose the last ones, in order, never one in the middle. A durable commit
@@ -42,6 +43,7 @@ mod codec;
 mod coords;
 pub mod keys;
 mod migrations;
+mod reader;
 mod store;
 
 use std::collections::{HashMap, HashSet};
@@ -52,6 +54,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, TransactionBehavior};
 
 pub use coords::Coords;
+pub use reader::Reader;
 pub use store::{
     BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing,
     RemovedRow, Store,
@@ -69,6 +72,12 @@ pub enum StateError {
         "state DB schema version {found} is from an older Filesync (one DB per folder) and isn't upgraded: set the folder up again"
     )]
     TooOld { found: u32 },
+    /// Older than this client's, and a [`Reader`] can't bring it up to date: a writer does
+    /// (the daemon of this version as it starts).
+    #[error(
+        "state DB schema version {found} is older than this client's ({supported}): it is brought up to date when this version's daemon starts (restart a running one)"
+    )]
+    Behind { found: u32, supported: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
 }
@@ -355,16 +364,6 @@ impl StateDb {
         self.path.as_deref()
     }
 
-    /// From now on this connection sees folder `folder`.
-    pub fn see_folder(&mut self, folder: i64) {
-        self.folder = folder;
-    }
-
-    /// From now on this connection sees no folder: the account's ([`StateDb::open_account`]).
-    pub fn see_account(&mut self) {
-        self.folder = NO_FOLDER;
-    }
-
     /// This DB seen as folder `folder`: the same connection.
     pub fn with_folder(mut self, folder: i64) -> Self {
         self.folder = folder;
@@ -409,12 +408,7 @@ impl StateDb {
 
     /// Runs `f` in a read transaction (a consistent snapshot).
     pub fn read<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let out = f(&Store::new(&tx, self.folder))?;
-        tx.finish()?;
-        Ok(out)
+        read_in(&mut self.conn, self.folder, f)
     }
 
     /// Runs `f` in a write transaction, committed only if `f` succeeds. The commit reaches the
@@ -571,10 +565,27 @@ impl StateDb {
         std::mem::take(&mut self.touched)
     }
 
+    /// Whether `other` is a connection to the same DB file.
+    pub fn same_file(&self, other: &StateDb) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+    }
+
     /// The schema version in use.
     pub fn schema_version(&self) -> Result<u32> {
         migrations::user_version(&self.conn)
     }
+}
+
+/// Runs `f` in a read transaction on `conn`, seeing folder `folder`.
+fn read_in<T>(
+    conn: &mut Connection,
+    folder: i64,
+    f: impl FnOnce(&Store<'_>) -> Result<T>,
+) -> Result<T> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let out = f(&Store::new(&tx, folder))?;
+    tx.finish()?;
+    Ok(out)
 }
 
 #[cfg(test)]

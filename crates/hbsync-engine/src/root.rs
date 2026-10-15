@@ -7,8 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use hbsync_local::{Marker, layout};
-use hbsync_state::{StateDb, StateError, keys};
+use hbsync_state::{FolderRow, Reader, StateDb, StateError, keys};
 use hbsync_types::NodeId;
+use hbsync_types::activity::{Deleted, Synced};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RootError {
@@ -52,24 +53,46 @@ impl SyncRoot {
     /// The folder at `path` of `identity`'s DB at `db`, which its marker must name. A folder
     /// moved since is found all the same, and its new place recorded.
     pub fn open(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
+        let (root, recorded) = match Self::locate(db, identity, path) {
+            Err(RootError::State(StateError::Behind { .. })) => {
+                Self::upgrade(db, identity)?;
+                Self::locate(db, identity, path)?
+            }
+            found => found?,
+        };
+        let text = path.to_string_lossy();
+        if recorded != text {
+            Self::open_account(db, identity)?.write(|s| s.set_folder_path(root.folder, &text))?;
+        }
+        Ok(root)
+    }
+
+    /// [`SyncRoot::open`] without writing anything (a moved folder's new place isn't
+    /// recorded), for a check while the daemon may be syncing. A DB of an older schema is
+    /// refused ([`StateError::Behind`]) rather than brought up to date: see
+    /// [`SyncRoot::upgrade`].
+    pub fn find(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
+        Ok(Self::locate(db, identity, path)?.0)
+    }
+
+    /// The folder at `path` and the path its DB has for it.
+    fn locate(db: &Path, identity: &str, path: &Path) -> Result<(SyncRoot, String), RootError> {
         let marker = Self::check(path, identity)?;
-        let mut account = Self::open_account(db, identity)?;
-        let folder = account
-            .read(|s| s.folders())?
+        let unknown = || RootError::Unknown(path.to_path_buf());
+        let folder = AccountReader::open(db, identity)?
+            .ok_or_else(unknown)?
+            .folders()?
             .into_iter()
             .find(|f| f.marker == marker.id)
-            .ok_or_else(|| RootError::Unknown(path.to_path_buf()))?;
-        let text = path.to_string_lossy();
-        if folder.path != text {
-            account.write(|s| s.set_folder_path(folder.id, &text))?;
-        }
-        Ok(SyncRoot {
+            .ok_or_else(unknown)?;
+        let root = SyncRoot {
             path: path.to_path_buf(),
             db: db.to_path_buf(),
             identity: identity.to_owned(),
             folder: folder.id,
             top: folder.top,
-        })
+        };
+        Ok((root, folder.path))
     }
 
     /// Sets the folder at `path` up in `identity`'s DB at `db` as the main folder, holding the
@@ -159,48 +182,38 @@ impl SyncRoot {
 
     /// Whether `identity`'s DB at `db` has a folder at `path` (whatever its marker says).
     pub fn knows_path(db: &Path, identity: &str, path: &Path) -> Result<bool, RootError> {
-        if !db.exists() {
+        let Some(mut account) = AccountReader::open(db, identity)? else {
             return Ok(false);
-        }
+        };
         let text = path.to_string_lossy();
-        Ok(Self::open_account(db, identity)?
-            .read(|s| s.folders())?
-            .iter()
-            .any(|f| f.path == text))
+        Ok(account.folders()?.iter().any(|f| f.path == text))
+    }
+
+    /// Brings `identity`'s DB at `db` up to date (made if new; refused if another's), for
+    /// what only looks next ([`SyncRoot::find`], [`AccountReader`]). Only while nothing else
+    /// may write it: an older daemon would find a schema it doesn't know.
+    pub fn upgrade(db: &Path, identity: &str) -> Result<(), RootError> {
+        Self::open_account(db, identity).map(drop)
     }
 
     /// The account DB at `db`, for `identity` (made if new; refused if another's).
-    pub fn open_account(db: &Path, identity: &str) -> Result<StateDb, RootError> {
+    pub(crate) fn open_account(db: &Path, identity: &str) -> Result<StateDb, RootError> {
         if let Some(dir) = db.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let mut account = StateDb::open_account(db)?;
         // Read first: a DB that has its identity is opened without writing.
-        let theirs = match account.read(|s| s.account_kv(keys::IDENTITY))? {
-            Some(theirs) => theirs,
-            None => {
-                account.write(|s| s.set_account_kv(keys::IDENTITY, identity))?;
-                identity.to_owned()
-            }
-        };
-        if theirs != identity {
-            return Err(RootError::OtherIdentity {
-                folder: db.to_path_buf(),
-                theirs,
-                ours: identity.to_owned(),
-            });
+        let theirs = account.read(|s| s.account_kv(keys::IDENTITY))?;
+        if theirs.is_none() {
+            account.write(|s| s.set_account_kv(keys::IDENTITY, identity))?;
         }
+        refuse_other(db, theirs, identity)?;
         Ok(account)
     }
 
     /// A connection to the account's DB seeing this folder.
-    pub fn state(&self) -> Result<StateDb, RootError> {
+    pub(crate) fn state(&self) -> Result<StateDb, RootError> {
         Ok(StateDb::open_folder(&self.db, self.folder)?)
-    }
-
-    /// A connection to the account's DB seeing no folder (for its [`crate::Drive`]).
-    pub fn account(&self) -> Result<StateDb, RootError> {
-        Self::open_account(&self.db, &self.identity)
     }
 
     pub fn path(&self) -> &Path {
@@ -219,6 +232,52 @@ impl SyncRoot {
     /// The drive's node the folder holds: the drive's root for the main folder.
     pub fn top(&self) -> NodeId {
         self.top
+    }
+}
+
+/// Refuses the DB at `db` if it is another identity's: `theirs`, the one it has (`None`: it
+/// has nothing yet, its identity is written on the first open).
+fn refuse_other(db: &Path, theirs: Option<String>, identity: &str) -> Result<(), RootError> {
+    match theirs {
+        Some(theirs) if theirs != identity => Err(RootError::OtherIdentity {
+            folder: db.to_path_buf(),
+            theirs,
+            ours: identity.to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// The account's DB for reading only, its identity checked: what is answered (Recent,
+/// Recently deleted) and checked (setup) while the daemon's engines may be writing it.
+#[derive(Debug)]
+pub struct AccountReader {
+    db: Reader,
+}
+
+impl AccountReader {
+    /// `identity`'s DB at `db` (refused if another's); `None` if there is none.
+    pub fn open(db: &Path, identity: &str) -> Result<Option<AccountReader>, RootError> {
+        let Some(mut reader) = Reader::open(db)? else {
+            return Ok(None);
+        };
+        refuse_other(db, reader.read(|s| s.account_kv(keys::IDENTITY))?, identity)?;
+        Ok(Some(AccountReader { db: reader }))
+    }
+
+    /// The folders synced with the account on this device.
+    pub fn folders(&mut self) -> Result<Vec<FolderRow>, StateError> {
+        self.db.read(|s| s.folders())
+    }
+
+    /// The newest `limit` entries of `folder`'s recently synced list.
+    pub fn recent_synced(&mut self, folder: i64, limit: usize) -> Result<Vec<Synced>, StateError> {
+        self.db.read_folder(folder, |s| s.recent_synced(limit))
+    }
+
+    /// Recently deleted, newest first ([`crate::deleted::list`]).
+    pub fn recently_deleted(&mut self, limit: usize) -> Result<Vec<Deleted>, StateError> {
+        self.db.read(|s| crate::deleted::list(s, limit))
     }
 }
 
@@ -252,7 +311,8 @@ mod tests {
         // Set up again: a new folder, the old one's rows gone.
         let again = SyncRoot::create(&db, anna, &root)?;
         assert_ne!(again.folder(), first);
-        assert_eq!(again.account()?.read(|s| s.folders())?.len(), 1);
+        let account = AccountReader::open(&db, anna)?.ok_or("no DB")?.folders()?;
+        assert_eq!(account.len(), 1);
         // Moved: found through its marker, its new place recorded.
         let moved = home.path().join("Moved");
         std::fs::rename(&root, &moved)?;
@@ -263,6 +323,35 @@ mod tests {
         assert!(matches!(
             SyncRoot::open(&db, anna, &moved),
             Err(RootError::Unknown(_))
+        ));
+        Ok(())
+    }
+
+    /// What only looks ([`SyncRoot::find`], [`SyncRoot::knows_path`], [`AccountReader`])
+    /// writes nothing: no DB is made, a moved folder's place isn't recorded.
+    #[test]
+    fn looking_writes_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("accounts/anna/state.db");
+        let root = home.path().join("Homebase");
+        let anna = "anna.example.com";
+        std::fs::create_dir_all(&root)?;
+        assert!(!SyncRoot::knows_path(&db, anna, &root)?);
+        assert!(AccountReader::open(&db, anna)?.is_none());
+        assert!(!db.parent().ok_or("parent")?.exists(), "no DB is made");
+
+        let folder = SyncRoot::create(&db, anna, &root)?.folder();
+        let moved = home.path().join("Moved");
+        std::fs::rename(&root, &moved)?;
+        assert_eq!(SyncRoot::find(&db, anna, &moved)?.folder(), folder);
+        assert!(
+            SyncRoot::knows_path(&db, anna, &root)?,
+            "the old place stays"
+        );
+        assert!(!SyncRoot::knows_path(&db, anna, &moved)?);
+        assert!(matches!(
+            AccountReader::open(&db, "bob.example.com"),
+            Err(RootError::OtherIdentity { .. })
         ));
         Ok(())
     }
