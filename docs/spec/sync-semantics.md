@@ -24,6 +24,9 @@ The **root** is implicit: it has the fixed id from the node schema and is never 
 - **Local**: what the local file system holds now, after identity matching (section 3).
 - **Remote**: the client's mirror of the drive, fed by the change cursor.
 
+They live in the account's state DB (`daemon.md`, Files): the mirror once per account, base and
+local per sync root. Base, local and the dirty set of a root change only with that root.
+
 **Content state** (per file node, local only, never synced): `local` (default; may be evicted),
 `pinned` (always kept locally), `online-only` (no local bytes). A missing local file is a delete
 only when the base says the bytes were local.
@@ -322,11 +325,15 @@ the tags that device has.
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where
 they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"). Each
-local folder has an engine and a state DB of its own, scoped to a part of the drive:
+local folder has an engine of its own, scoped to a part of the drive; they share the account's
+state DB (one mirror, one feed) and keep their own base and local rows:
 - the main folder's scope is the drive's top **without the role folders**, on every device,
   whether it syncs them or not: a role folder appears only where it is synced in place, never
   inside `~/Homebase`;
-- a role folder's scope is that folder (to come: the engine syncing it).
+- a role folder's scope is what lies in that folder. Its engine sees the folder as its root
+  and the rest of the drive as one folder at its top that it leaves out; what it writes at its
+  root goes into the role folder. A node whose place isn't known (its folder gone from the
+  drive, a cycle) isn't a role folder's: the main folder repairs it (§6).
 
 What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
@@ -338,8 +345,11 @@ schema's rules) is masked there and keeps that folder alive (§6.3).
 A role folder holds no name for the scope: a plain folder of the same name at the top keeps it
 (two at the top, told apart by their ids). A new scope plans the folders it, or the last one,
 left out again, from their tops; it needs no walk, as only the remote view changed. Recently
-deleted is listed, restored and emptied per scope; the purge, by age, is the whole drive's
-(the main folder's engine runs it).
+deleted is the account's, like the mirror: one list, each item naming the folder of this
+device it comes back to (none for a role folder this device doesn't sync); restoring, emptying
+and the purge (by age, with every folder's trash) are the account's too. A change of the drive
+is planned in the folders it concerns: those holding the node, and the one whose part of the
+drive its place is in (every folder when that place isn't known).
 
 A detached item's new id is fixed for the node and the device, so a replan picks the same one,
 but never one in use here: the same node detached again while its first copy lives gets the

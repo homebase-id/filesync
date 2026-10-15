@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 4);
+    assert_eq!(db.schema_version()?, 5);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -601,6 +601,238 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 4);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 5);
+    Ok(())
+}
+
+/// Two folders of one account in one DB: each has its own rows of the same node, its own
+/// names and settings; the drive's mirror is shared. Forgetting a folder takes its rows along,
+/// and the ids nothing else holds go too.
+#[test]
+fn folders_keep_their_own_rows() -> R {
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let docs_top = NodeId::new();
+    let docs = main.write(|s| s.add_folder(docs_top, "/home/a/Documents", "m2"))?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    assert_eq!(
+        (main.folder(), docs_db.folder()),
+        (hbsync_state::FIRST_FOLDER, docs)
+    );
+
+    // The same node in both folders, at the same path and with the same remote file.
+    let row = base(NodeState::folder(NodeId::ROOT, "Shared"));
+    let mut seen = local("Shared", NodeKind::Folder, 7);
+    seen.node = row.node;
+    for db in [&mut main, &mut docs_db] {
+        db.write(|s| {
+            s.put_base(&row)?;
+            s.put_local(&seen)?;
+            s.mark_dirty(row.node)?;
+            s.set_kv("filter.fingerprint", "f")
+        })?;
+    }
+    // A name is taken per folder only.
+    let mut other = local("Shared", NodeKind::Folder, 8);
+    assert!(matches!(
+        main.write(|s| s.put_local(&other)),
+        Err(StateError::Conflict(_))
+    ));
+    other.path = path("Only in docs");
+    docs_db.write(|s| s.put_local(&other))?;
+    assert_eq!(main.read(|s| s.local_count())?, 1);
+    assert_eq!(docs_db.read(|s| s.local_count())?, 2);
+    // The account's settings are shared; a folder's are its own.
+    main.write(|s| s.set_account_kv("remote.cursor", "c1"))?;
+    assert_eq!(
+        docs_db.read(|s| s.account_kv("remote.cursor"))?.as_deref(),
+        Some("c1")
+    );
+    docs_db.write(|s| s.delete_kv("filter.fingerprint"))?;
+    assert_eq!(
+        main.read(|s| s.get_kv("filter.fingerprint"))?.as_deref(),
+        Some("f")
+    );
+
+    // Forgetting docs takes its rows; main's keep the node's id.
+    assert!(main.write(|s| s.remove_folder(docs))?);
+    drop(docs_db);
+    assert!(StateDb::open_folder(&db_path, docs).is_err());
+    let (ids_before, collected) = main.write(|s| Ok((s.node_count()?, s.collect_nodes()?)))?;
+    assert_eq!(collected, 1, "only docs' own node goes, of {ids_before}");
+    main.read(|s| {
+        assert_eq!(s.get_base(row.node)?, Some(row.clone()));
+        assert!(s.is_dirty(row.node)?);
+        assert_eq!(s.folders()?.len(), 1);
+        Ok(())
+    })
+}
+
+/// A change of the drive is marked dirty in the folders it concerns: those holding the node,
+/// and the one whose part of the drive it is in; every folder when its place isn't known.
+#[test]
+fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
+    use hbsync_state::MirrorRow;
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let (docs_top, pics_top) = (NodeId::new(), NodeId::new());
+    let (docs, pics) = main.write(|s| {
+        Ok((
+            s.add_folder(docs_top, "/d", "m2")?,
+            s.add_folder(pics_top, "/p", "m3")?,
+        ))
+    })?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    let mut pics_db = StateDb::open_folder(&db_path, pics)?;
+    let folder = |node, parent, name: &str| MirrorRow {
+        file_id: RemoteFileId(Uuid::new_v4()),
+        version: VersionTag(Uuid::new_v4()),
+        node,
+        parent,
+        name: name.into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+    };
+    let dirty = |db: &mut StateDb, node| db.read(|s| s.is_dirty(node));
+    // The role folders' tops, then a folder inside Documents: only docs is concerned.
+    let inside = NodeId::new();
+    main.write(|s| {
+        s.put_mirror(&folder(docs_top, NodeId::ROOT, "Documents"))?;
+        s.put_mirror(&folder(pics_top, NodeId::ROOT, "Pictures"))?;
+        s.put_mirror(&folder(inside, docs_top, "Work"))
+    })?;
+    assert!(dirty(&mut docs_db, inside)?);
+    assert!(!dirty(&mut main, inside)? && !dirty(&mut pics_db, inside)?);
+    // Pictures holds it (moved from there): pics is concerned too, the main folder isn't.
+    let held = base(NodeState::folder(pics_top, "Work"));
+    pics_db.write(|s| {
+        s.put_base(&BaseRow {
+            node: inside,
+            ..held
+        })?;
+        s.clear_dirty(inside)
+    })?;
+    docs_db.write(|s| s.clear_dirty(inside))?;
+    main.write(|s| s.put_mirror(&folder(inside, docs_top, "Work (2)")))?;
+    assert!(dirty(&mut docs_db, inside)? && dirty(&mut pics_db, inside)?);
+    assert!(!dirty(&mut main, inside)?);
+    // The same version again changes nothing.
+    pics_db.write(|s| s.clear_dirty(inside))?;
+    let again = main
+        .read(|s| s.get_mirror(inside))?
+        .ok_or(StateError::Corrupt("gone".into()))?;
+    main.write(|s| s.put_mirror(&again))?;
+    assert!(!dirty(&mut pics_db, inside)?);
+    // A place the mirror doesn't connect to the top: every folder looks.
+    let lost = NodeId::new();
+    main.write(|s| s.put_mirror(&folder(lost, NodeId::new(), "Lost")))?;
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        assert!(dirty(db, lost)?);
+    }
+    Ok(())
+}
+
+/// A folder holding part of the drive sees the drive's rows in its own coordinates: its top
+/// is its root (and no node), the rest of the drive one folder, OUTSIDE, at its top. What it
+/// writes at its root goes to its top.
+#[test]
+fn a_role_folder_sees_its_top_as_the_root() -> R {
+    use hbsync_state::{MirrorRow, RemovedRow};
+    use hbsync_types::schema::Removal;
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let top = NodeId::new();
+    let docs = main.write(|s| s.add_folder(top, "/d", "m2"))?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    let row = |node, parent, name: &str| MirrorRow {
+        file_id: RemoteFileId(Uuid::new_v4()),
+        version: VersionTag(Uuid::new_v4()),
+        node,
+        parent,
+        name: name.into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+    };
+    let (inside, elsewhere) = (NodeId::new(), NodeId::new());
+    main.write(|s| {
+        s.put_mirror(&row(top, NodeId::ROOT, "Documents"))?;
+        s.put_mirror(&row(inside, top, "Work"))?;
+        s.put_mirror(&row(elsewhere, NodeId::ROOT, "Music stuff"))
+    })?;
+    docs_db.read(|s| {
+        assert_eq!(s.get_mirror(top)?, None, "its top is its root");
+        assert_eq!(s.get_mirror(inside)?.map(|r| r.parent), Some(NodeId::ROOT));
+        assert_eq!(
+            s.get_mirror(elsewhere)?.map(|r| r.parent),
+            Some(NodeId::OUTSIDE)
+        );
+        let outside = s
+            .get_mirror(NodeId::OUTSIDE)?
+            .ok_or(StateError::Corrupt("no".into()))?;
+        assert_eq!(
+            (outside.parent, outside.kind),
+            (NodeId::ROOT, NodeKind::Folder)
+        );
+        let mut at_top: Vec<NodeId> = s
+            .mirror_children(NodeId::ROOT)?
+            .iter()
+            .map(|r| r.node)
+            .collect();
+        at_top.sort();
+        let mut expected = vec![inside, NodeId::OUTSIDE];
+        expected.sort();
+        assert_eq!(at_top, expected);
+        let rest: Vec<NodeId> = s
+            .mirror_children(NodeId::OUTSIDE)?
+            .iter()
+            .map(|r| r.node)
+            .collect();
+        assert_eq!(
+            rest,
+            [elsewhere],
+            "the drive's top without the folder's own top"
+        );
+        Ok(())
+    })?;
+    // Written at its root, it is at its top on the drive; OUTSIDE is never written.
+    let new = NodeId::new();
+    docs_db.write(|s| s.put_mirror(&row(new, NodeId::ROOT, "New")))?;
+    assert_eq!(
+        main.read(|s| s.get_mirror(new))?.map(|r| r.parent),
+        Some(top)
+    );
+    assert!(
+        docs_db
+            .write(|s| s.put_mirror(&row(NodeId::OUTSIDE, NodeId::ROOT, "x")))
+            .is_err()
+    );
+    // Recently deleted too.
+    let removal = Removal {
+        at_ms: 1,
+        root: new,
+    };
+    let gone = main
+        .read(|s| s.get_mirror(new))?
+        .ok_or(StateError::Corrupt("no".into()))?;
+    docs_db.write(|s| {
+        s.delete_mirror(gone.file_id)?;
+        s.put_removed(&RemovedRow {
+            row: MirrorRow {
+                parent: NodeId::ROOT,
+                ..gone.clone()
+            },
+            removal,
+        })
+    })?;
+    assert_eq!(
+        main.read(|s| s.removed_by_node(new))?.map(|r| r.row.parent),
+        Some(top)
+    );
+    assert_eq!(docs_db.read(|s| s.removed_children(NodeId::ROOT))?.len(), 1);
     Ok(())
 }

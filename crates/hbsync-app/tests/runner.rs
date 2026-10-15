@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use hbsync_app::accounts::FolderError;
 use hbsync_app::runner::RunnerError;
 use hbsync_app::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
@@ -28,10 +29,8 @@ impl Device {
         poll: Duration,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
-        let root = dir.path().canonicalize()?;
-        // What setting a folder up does.
-        std::fs::create_dir_all(root.join(".hbsync"))?;
-        let mut cfg = RunnerConfig::new(&root, "test.example", name);
+        let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
+        let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", name);
         cfg.poll = poll;
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
         let remote = Arc::new(FakeRemote::new(server.clone()));
@@ -210,11 +209,23 @@ fn an_edited_ignore_file_applies_without_a_restart() -> R {
     Ok(())
 }
 
+/// The account DB of a test folder: beside it.
+fn db_of(root: &Path) -> PathBuf {
+    root.with_file_name("state.db")
+}
+
+/// What setting the folder at `root` up does: its marker, and its row in the account DB.
+fn set_up(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(root)?;
+    hbsync_app::accounts::add_folder(&db_of(root), "test.example", root)?;
+    Ok(root.to_path_buf())
+}
+
 fn spawn_at(
     server: &Arc<Mutex<FakeServer>>,
     root: &Path,
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
-    let mut cfg = RunnerConfig::new(root, "test.example", "a");
+    let mut cfg = RunnerConfig::new(root, &db_of(root), "test.example", "a");
     cfg.poll = Duration::from_millis(300);
     Runner::spawn(
         cfg,
@@ -227,8 +238,7 @@ fn spawn_at(
 fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
     let server = server();
     let parent = tempfile::tempdir()?;
-    let root = parent.path().canonicalize()?.join("sync");
-    std::fs::create_dir_all(root.join(".hbsync"))?;
+    let root = set_up(&parent.path().canonicalize()?.join("sync"))?;
     let (handle, thread) = spawn_at(&server, &root)?;
     std::fs::write(root.join("a.txt"), "a")?;
     wait_until("a.txt is up", || on_server(&server, "a.txt"))?;
@@ -284,17 +294,19 @@ fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
 fn a_folder_synced_with_another_identity_is_refused() -> R {
     let server = server();
     let dir = tempfile::tempdir()?;
-    let root = dir.path().canonicalize()?;
-    std::fs::create_dir_all(root.join(".hbsync"))?;
-    hbsync_state::StateDb::open(&hbsync_local::state_db_path(&root))?
-        .write(|s| s.set_kv(hbsync_app::runner::IDENTITY_KEY, "other.example"))?;
+    let root = dir.path().canonicalize()?.join("sync");
+    std::fs::create_dir_all(&root)?;
+    hbsync_local::Marker::new("other.example").write(&root)?;
     std::fs::write(root.join("theirs.txt"), "not for test.example")?;
     let (handle, thread) = spawn_at(&server, &root)?;
     let err = thread
         .join()
         .map_err(|_| "panicked")?
         .expect_err("the runner refused the folder");
-    assert!(matches!(err, RunnerError::OtherIdentity { .. }), "{err}");
+    assert!(
+        matches!(err, RunnerError::Folder(FolderError::OtherIdentity { .. })),
+        "{err}"
+    );
     assert_eq!(handle.status().state, State::Stopped);
     assert!(
         handle
@@ -303,6 +315,30 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
             .is_some_and(|e| e.contains("other.example"))
     );
     assert!(live_names(&server).is_empty(), "nothing was uploaded");
+    Ok(())
+}
+
+/// A folder an older Filesync synced (its state DB in .hbsync, no marker) isn't gone: the
+/// runner stops and says to set it up again.
+#[test]
+fn a_folder_of_an_older_filesync_is_set_up_again() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?.join("sync");
+    std::fs::create_dir_all(root.join(".hbsync"))?;
+    std::fs::write(root.join(".hbsync/state.db"), "an older Filesync's")?;
+    let (handle, thread) = spawn_at(&server, &root)?;
+    let err = thread
+        .join()
+        .map_err(|_| "panicked")?
+        .expect_err("the runner stopped");
+    assert!(err.to_string().contains("set it up again"), "{err}");
+    assert!(
+        handle
+            .status()
+            .error
+            .is_some_and(|e| e.contains("older Filesync"))
+    );
     Ok(())
 }
 
@@ -336,7 +372,7 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
     a.write("two.txt", "22")?;
     wait_until("both are listed", || a.status().synced_added == 2)?;
     // The list is the folder's state DB's.
-    let recent = hbsync_state::StateDb::open(&hbsync_local::state_db_path(&a.root))?
+    let recent = hbsync_app::accounts::open_folder(&db_of(&a.root), "test.example", &a.root)?
         .read(|s| s.recent_synced(10))?;
     assert_eq!(recent.len(), 2);
     assert!(
@@ -356,11 +392,10 @@ fn the_recently_synced_list_follows_the_syncs() -> R {
 fn progress_shows_during_the_first_sync() -> R {
     let server = server();
     let dir = tempfile::tempdir()?;
-    let root = dir.path().canonicalize()?;
-    std::fs::create_dir_all(root.join(".hbsync"))?;
+    let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
     // There before the daemon starts: uploaded by start-up's first sync.
     std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
-    let mut cfg = RunnerConfig::new(&root, "test.example", "a");
+    let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
     cfg.poll = NO_POLL;
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
     let remote = Arc::new(FakeRemote::new(server.clone()));
@@ -382,9 +417,8 @@ fn progress_shows_during_the_first_sync() -> R {
 fn progress_shows_while_a_transfer_runs() -> R {
     let server = server();
     let dir = tempfile::tempdir()?;
-    let root = dir.path().canonicalize()?;
-    std::fs::create_dir_all(root.join(".hbsync"))?;
-    let mut cfg = RunnerConfig::new(&root, "test.example", "a");
+    let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
+    let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
     cfg.poll = NO_POLL;
     // 600 kB at 300 kB/s: two seconds to watch.
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));

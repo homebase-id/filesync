@@ -8,13 +8,13 @@ use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs,
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{DirtyCursor, StateDb, StateError};
 use hbsync_types::NodeId;
-use hbsync_types::activity::{Deleted, Synced};
+use hbsync_types::activity::Synced;
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
-use crate::deleted;
+use crate::drive::Drive;
 use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
-use crate::feed::{self, FeedError, FeedReport};
+use crate::feed::{FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
 use crate::scope::Scope;
 use crate::view;
@@ -27,7 +27,6 @@ pub struct EngineConfig {
     pub exec: ExecConfig,
     /// Shown in conflict-copy names.
     pub device: String,
-    pub feed_page_size: usize,
     /// Plan/execute rounds per sync before giving the rest to the next sync.
     pub max_rounds: usize,
     /// Dirty nodes planned per round.
@@ -54,7 +53,6 @@ impl EngineConfig {
                 crash_at: None,
             },
             device: device.to_owned(),
-            feed_page_size: 500,
             max_rounds: 8,
             batch: 20_000,
             mass_delete_min: 50,
@@ -149,7 +147,9 @@ impl SyncReport {
 
 pub struct Engine {
     db: StateDb,
-    remote: Box<dyn Remote>,
+    drive: Arc<Drive>,
+    /// The drive's remote as this engine writes to it ([`Scope::remote`]).
+    remote: Arc<dyn Remote>,
     cfg: EngineConfig,
     scan_opts: ScanOptions,
     /// Nodes whose transfers go first (a file the user just opened).
@@ -173,11 +173,22 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
-    pub fn new(db: StateDb, remote: Box<dyn Remote>, cfg: EngineConfig) -> Self {
+    /// The engine of the folder `db` sees, on the account's `drive`. The folder's top (the
+    /// state DB's) decides which part of the drive it syncs: `cfg`'s scope is kept only when
+    /// it has that top.
+    pub fn new(mut db: StateDb, drive: Arc<Drive>, mut cfg: EngineConfig) -> Self {
+        let top = db
+            .read(|s| Ok(s.coords()?.top))
+            .unwrap_or(hbsync_types::NodeId::ROOT);
+        if cfg.scope.top != top {
+            cfg.scope = Arc::new(Scope::of(top));
+        }
         let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
         scan_opts.filter = Arc::clone(&cfg.exec.filter);
+        let remote = cfg.scope.remote(drive.shared_remote());
         Engine {
             db,
+            drive,
             remote,
             cfg,
             scan_opts,
@@ -221,6 +232,11 @@ impl Engine {
         &mut self.db
     }
 
+    /// The account's drive: the feed, Recently deleted.
+    pub fn drive(&self) -> &Arc<Drive> {
+        &self.drive
+    }
+
     pub fn config(&self) -> &EngineConfig {
         &self.cfg
     }
@@ -229,25 +245,21 @@ impl Engine {
         &self.scan_opts
     }
 
-    /// Start-up: the local catch-up (journal or walk, on its own connection to the state DB
-    /// at `db_path`) and the remote feed run in parallel. Planning starts only when both are
-    /// done, so nothing is uploaded while the local state is still unknown.
+    /// Start-up: the local catch-up (journal or walk, on its own connection to the state DB)
+    /// and the remote feed run in parallel. Planning starts only when both are done, so nothing
+    /// is uploaded while the local state is still unknown.
     pub fn start_up(
         &mut self,
         observer: &mut LocalObserver,
-        db_path: &Path,
         date: &str,
     ) -> Result<StartupReport, EngineError> {
         self.apply_filter_change()?;
-        let remote = self.remote.as_ref();
-        let page = self.cfg.feed_page_size;
+        let (drive, folder) = (Arc::clone(&self.drive), self.db.folder());
         let db = &mut self.db;
         let (local, feed) = std::thread::scope(|scope| {
-            let local = scope.spawn(|| -> Result<CatchUp, EngineError> {
-                let mut own = StateDb::open(db_path)?;
-                Ok(observer.catch_up(&mut own)?)
-            });
-            let feed = feed::pull(db, remote, page);
+            let local =
+                scope.spawn(|| -> Result<CatchUp, EngineError> { Ok(observer.catch_up(db)?) });
+            let feed = drive.pull(Some(folder));
             (local.join(), feed)
         });
         let local = local.map_err(|_| EngineError::Panic("local catch-up"))??;
@@ -290,42 +302,6 @@ impl Engine {
         self.db.read(|s| activity::path_of(s, node))
     }
 
-    /// Recently deleted, newest first.
-    pub fn recently_deleted(&mut self, limit: usize) -> Result<Vec<Deleted>, StateError> {
-        deleted::list(&mut self.db, limit)
-    }
-
-    /// Restores these items of Recently deleted (each with what was deleted with it); the
-    /// next sync brings them to this folder. Returns how many items came back.
-    pub fn restore(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        let mut restored = 0;
-        for &node in nodes {
-            restored += deleted::restore(&mut self.db, self.remote.as_ref(), node)?;
-        }
-        Ok(restored)
-    }
-
-    /// Deletes these items of Recently deleted for good, each with what was deleted with it.
-    pub fn empty_deleted(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        deleted::empty(&mut self.db, self.remote.as_ref(), nodes)
-    }
-
-    /// Deletes for good everything removed until `at_ms` (Unix ms): what the user was shown.
-    pub fn empty_deleted_until(&mut self, at_ms: i64) -> Result<usize, EngineError> {
-        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        deleted::empty_until(&mut self.db, self.remote.as_ref(), at_ms)
-    }
-
-    /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted and
-    /// the local trash.
-    pub fn purge(&mut self, before_ms: i64) -> Result<usize, EngineError> {
-        feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
-        let state_dir = self.cfg.exec.state_dir();
-        deleted::purge(&mut self.db, self.remote.as_ref(), before_ms, &state_dir)
-    }
-
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
         Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)
@@ -340,7 +316,7 @@ impl Engine {
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.state_dir())?;
-        report.feed = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        report.feed = self.drive.pull(Some(self.db.folder()))?;
         report.adopted = adopt(
             &mut self.db,
             &self.cfg.exec.root,
@@ -489,8 +465,12 @@ impl Engine {
             }
             Some(stopped) => return Err(stopped.into()),
         }
-        let more = feed::pull(&mut self.db, self.remote.as_ref(), self.cfg.feed_page_size)?;
+        let more = self.drive.pull(Some(self.db.folder()))?;
         report.feed += more;
+        // What this folder wrote to the drive may concern the others.
+        if exec.done > 0 {
+            self.drive.wake(Some(self.db.folder()));
+        }
         Ok(plan.held)
     }
 }

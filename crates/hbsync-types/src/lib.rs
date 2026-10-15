@@ -38,6 +38,10 @@ impl NodeId {
     /// The implicit root of every sync drive (node schema v1).
     pub const ROOT: NodeId = NodeId(Uuid::from_u128(0x2a1c0d55_8ad3_417e_a5d7_42c3d0baba0e));
 
+    /// Never on a drive: in a folder holding part of the drive (a role folder), the rest of
+    /// the drive, seen as one folder at its top that the folder leaves out.
+    pub const OUTSIDE: NodeId = NodeId(Uuid::from_u128(0x5c1e7f0a_3b2d_4e8f_9a61_0d4c2b7e9f13));
+
     /// A fresh id. UUIDv7 keeps DB index inserts roughly sequential.
     pub fn new() -> Self {
         NodeId(Uuid::now_v7())

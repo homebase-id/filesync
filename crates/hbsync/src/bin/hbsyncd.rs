@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use hbsync_app::Paths;
+use hbsync_app::accounts::FolderError;
 use hbsync_app::daemon::DaemonError;
 use hbsync_app::lock::LockError;
 use hbsync_app::runner::RunnerError;
@@ -47,10 +48,14 @@ fn main() -> ExitCode {
     }
     match e {
         // Nothing to do is no failure: launchd and systemd restart a daemon that failed. Nor
-        // is a state DB from before 0.3: restarting can't help.
+        // is a folder that must be set up again: restarting can't help.
         DaemonError::NotSetUp(_)
         | DaemonError::Lock(LockError::Held { .. })
-        | DaemonError::Runner(RunnerError::State(StateError::TooOld { .. })) => {
+        | DaemonError::Runner(RunnerError::Folder(
+            FolderError::Older(_)
+            | FolderError::Unknown(_)
+            | FolderError::State(StateError::TooOld { .. }),
+        )) => {
             tracing::warn!("{e}");
             ExitCode::SUCCESS
         }

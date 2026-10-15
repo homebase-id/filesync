@@ -5,8 +5,8 @@
 //! ```
 //!
 //! Uses the credentials `hbsync-register` saved, and the daemon's sync loop
-//! ([`hbsync_app::Runner`]) without the daemon: the state DB lives in `<folder>/.hbsync`, and
-//! what happens is logged to stderr. `--once` catches up, syncs and exits. Deletes of a large
+//! ([`hbsync_app::Runner`]) without the daemon: the account's state DB lives beside the
+//! folder (`<folder name>.state.db`), and what happens is logged to stderr. `--once` catches up, syncs and exits. Deletes of a large
 //! share of the synced files are held unless `--allow-mass-delete` is given.
 
 use std::sync::Arc;
@@ -41,8 +41,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let remote = Arc::new(HomebaseRemote::connect(client.clone())?);
     std::fs::create_dir_all(folder)?;
     let root = std::fs::canonicalize(folder)?;
-    std::fs::create_dir_all(root.join(STATE_DIR))?;
-    let mut cfg = RunnerConfig::new(&root, identity, &hbsync_platform::host::device_name());
+    let name = root.file_name().ok_or("the folder has no name")?;
+    let db = root.with_file_name(format!("{}.state.db", name.to_string_lossy()));
+    use hbsync_app::accounts::{self, FolderError};
+    match accounts::open_folder(&db, identity, &root) {
+        Ok(_) => {}
+        Err(FolderError::NoMarker(_) | FolderError::Unknown(_) | FolderError::Older(_)) => {
+            accounts::add_folder(&db, identity, &root)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let device = hbsync_platform::host::device_name();
+    let mut cfg = RunnerConfig::new(&root, &db, identity, &device);
     cfg.once = args.iter().any(|a| a == "--once");
     if args.iter().any(|a| a == "--allow-mass-delete") {
         cfg.tweak = Some(|c| c.allow_mass_delete = true);

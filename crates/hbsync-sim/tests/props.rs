@@ -16,6 +16,7 @@ fn action() -> impl Strategy<Value = Action> {
         2 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
         1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),
         1 => (i(), i()).prop_map(|(op, pick)| Action::Phone { op, pick }),
+        1 => i().prop_map(|file| Action::MoveAcross { file }),
     ]
 }
 
@@ -111,6 +112,16 @@ proptest! {
     #[test]
     fn main_folders_leave_role_folders_alone(events in proptest::collection::vec(event(3), 0..120)) {
         run_with(3, None, Sim::with_role_folder, &events)?;
+    }
+
+    /// One computer syncs the main folder and the role folder, each in its own coordinates,
+    /// beside two computers with the main folder only, while the phone works in the role
+    /// folder (§12): each folder converges to its part of the drive and writes nowhere else,
+    /// a node is in one folder of a computer at most, files moved between the folders and
+    /// between the parts are never lost.
+    #[test]
+    fn role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(4), 0..120)) {
+        run_with(3, None, Sim::with_role_device, &events)?;
     }
 }
 
@@ -1121,5 +1132,67 @@ fn regression_a_folder_tagged_elsewhere_doesnt_leave() {
             panic!("{e}");
         }
         assert_eq!(sim.server_tags("d"), Some(vec!["Red:6".to_owned()]));
+    }
+}
+
+/// c0 deletes a folder while c1 puts a file in it: the file is left without its folder on the
+/// drive. Every folder looks at it (its place isn't known), and the role folder of c0's
+/// computer repaired it as the main folder does, moving it to its own top: into the role
+/// folder. Only what reaches its top is a role folder's; the main folder repairs the rest.
+#[test]
+fn regression_a_role_folder_leaves_a_lost_file_to_the_main_folder() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete};
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        act(0, Delete { node: 0 }),
+        Event::Step { client: 1 },
+        act(1, CreateFile { parent: 0, name: 0 }),
+        act(1, CreateFolder { parent: 6, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 3 },
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Step { client: 3 },
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
+        panic!("{e}");
+    }
+}
+
+/// In the role folder, the user moves a folder below what was its child: the plan's moves
+/// make a cycle on the drive for a moment, which reaches neither the role folder nor the top.
+/// That is no write outside the role folder.
+#[test]
+fn regression_a_role_folder_untangles_a_cycle_of_its_own() {
+    use hbsync_sim::Action::{CreateFolder, Move};
+    let act = |action| Event::Act { client: 3, action };
+    let events = [
+        act(CreateFolder { parent: 0, name: 3 }),
+        act(CreateFolder { parent: 8, name: 0 }),
+        Event::Plan { client: 3 },
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+        act(Move {
+            node: 4,
+            parent: 2,
+            name: 0,
+        }),
+        act(CreateFolder { parent: 4, name: 0 }),
+        act(Move {
+            node: 4,
+            parent: 2,
+            name: 0,
+        }),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
+        panic!("{e}");
     }
 }

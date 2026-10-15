@@ -8,7 +8,7 @@
 
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{MirrorRow, REMOTE_CURSOR_KEY, RemovedRow, StateDb, StateError, Store};
-use hbsync_types::{NodeKind, RemoteRef};
+use hbsync_types::{NodeId, NodeKind, RemoteRef};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -41,7 +41,7 @@ pub fn pull(
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
     loop {
-        let cursor = db.read(|s| s.get_kv(REMOTE_CURSOR_KEY))?;
+        let cursor = db.read(|s| s.account_kv(REMOTE_CURSOR_KEY))?;
         let page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
         db.write(|s| {
             for header in &page.entries {
@@ -51,7 +51,7 @@ pub fn pull(
                     report.deleted += 1;
                 }
             }
-            s.set_kv(REMOTE_CURSOR_KEY, &page.cursor)
+            s.set_account_kv(REMOTE_CURSOR_KEY, &page.cursor)
         })?;
         report.pages += 1;
         if !page.has_more {
@@ -83,20 +83,16 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         gone(s, header)?;
         return Ok(false);
     }
-    let removal = header.removal();
-    // A version the mirror has already: the echo of this device's own write (the executor
-    // stored the row it wrote), or a page applied again. Nothing changes.
-    let at = RemoteRef {
-        file_id: header.file_id,
-        version: header.version,
-    };
-    if s.has_version(at, removal.is_some())? {
-        return Ok(removal.is_none());
-    }
     // A live file without its payload changes nothing: it must never read as a delete.
     let Some(row) = mirror_row(header) else {
         return Ok(true);
     };
+    // A version the store has already (this device's own write coming back, or a page applied
+    // again) changes nothing; the store marks the nodes that changed dirty where that concerns.
+    let removal = header.removal();
+    if s.has_version(row.remote_ref(), removal.is_some())? {
+        return Ok(removal.is_none());
+    }
     if let Some(removal) = removal {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
         gone(s, header)?;
@@ -105,17 +101,17 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     }
     s.delete_removed(row.node)?;
     s.put_mirror(&row)?;
-    s.mark_dirty(row.node)?;
     Ok(true)
 }
 
-/// The mirror without the file of `header`, its node marked to plan again. A tombstone has
-/// no node id: the node is found by file id.
+/// The mirror without the file of `header`, its node marked to plan again where it was
+/// held. A tombstone has no node id: the node is found by file id.
 fn gone(s: &Store<'_>, header: &RemoteHeader) -> Result<(), StateError> {
-    if let Some(row) = s.delete_mirror(header.file_id)? {
-        s.mark_dirty(row.node)?;
-    } else if let Some(base) = s.base_by_remote_file(header.file_id)? {
-        s.mark_dirty(base.node)?;
+    if s.delete_mirror(header.file_id)?.is_none()
+        && let Some(node) = s.node_of_file(header.file_id)?
+    {
+        // Its place went with its row: the folders holding it are the ones concerned.
+        s.fan_out(node, NodeId::ROOT)?;
     }
     Ok(())
 }

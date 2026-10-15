@@ -216,8 +216,9 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(list) if list.is_empty() => println!("Recently deleted is empty."),
             Some(list) => {
                 let now = words::now();
+                let main = daemon::configured(&paths)?.map(|r| r.folder);
                 for d in &list {
-                    println!("{}  {}", d.node.0, words::deleted(d, now));
+                    println!("{}  {}", d.node.0, words::deleted(d, main.as_deref(), now));
                 }
             }
             None => return Ok(not_running()),
@@ -330,8 +331,9 @@ fn run(command: Command) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The items of Recently deleted that `items` name, by node id or path (a path deleted twice
-/// names its latest); `None` when the daemon isn't running.
+/// The items of Recently deleted that `items` name, by node id or as `hbsync deleted` shows
+/// them ([`words::deleted_place`]; a path deleted twice names its latest); `None` when the
+/// daemon isn't running.
 fn pick(paths: &Paths, items: &[String]) -> Res<Option<Vec<NodeId>>> {
     let ids: Option<Vec<NodeId>> = items.iter().map(|i| i.parse().ok().map(NodeId)).collect();
     if let Some(ids) = ids {
@@ -340,12 +342,16 @@ fn pick(paths: &Paths, items: &[String]) -> Res<Option<Vec<NodeId>>> {
     let Some(list) = daemon::deleted(paths, usize::MAX)? else {
         return Ok(None);
     };
+    let main = daemon::configured(paths)?.map(|r| r.folder);
     items
         .iter()
         .map(|item| {
             let id = item.parse().ok().map(NodeId);
+            let item_place = item.trim_end_matches('/');
             list.iter()
-                .find(|d| Some(d.node) == id || d.path == item.trim_end_matches('/'))
+                .find(|d| {
+                    Some(d.node) == id || words::deleted_place(d, main.as_deref()) == item_place
+                })
                 .map(|d| d.node)
                 .ok_or_else(|| format!("{item} isn't in Recently deleted").into())
         })

@@ -433,6 +433,10 @@ impl Server {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
         let now = words::now();
+        let main = control::configured(&self.paths)
+            .ok()
+            .flatten()
+            .map(|r| r.folder);
         // Shown: the items whose folder isn't in Recently deleted too; each with how many items
         // below it its restore brings back (those deleted with it).
         let by_node: HashMap<_, _> = list.iter().map(|d| (d.node, d)).collect();
@@ -467,7 +471,7 @@ impl Server {
                      <button class=secondary>Restore</button></form></li>",
                     url = self.pages.url("deleted/restore"),
                     node = d.node.0,
-                    what = escape(&words::deleted(d, now)),
+                    what = escape(&words::deleted(d, main.as_deref(), now)),
                 )
             })
             .collect();

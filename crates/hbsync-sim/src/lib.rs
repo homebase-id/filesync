@@ -34,11 +34,13 @@ use hbsync_engine::reconcile::{
 };
 use hbsync_engine::scope::Scope;
 use hbsync_engine::tree::{Tree, first_free, numbered_names, restored_names};
+use hbsync_engine::walk::End;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::Os;
 use hbsync_platform::name::check_remote_name;
 use hbsync_platform::tags::express;
+use hbsync_state::Coords;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
     Role, Tag, Tags, Uuid, VersionTag,
@@ -98,6 +100,12 @@ pub enum Action {
     Phone {
         op: usize,
         pick: usize,
+    },
+    /// The user moves a file from one folder of the client's computer to the other, at its
+    /// top ([`Sim::with_role_device`]): the scan of the other folder finds a new item. Nothing
+    /// on a client with one folder.
+    MoveAcross {
+        file: usize,
     },
 }
 
@@ -186,16 +194,21 @@ impl Server {
         remote
     }
 
-    /// Whether `node` is the role folder or lies in it.
-    fn in_role_folder(&self, node: NodeId) -> bool {
+    /// Where a walk up from `node` ends: at the role folder (`End::At` it) for the role folder
+    /// and what lies in it, at the drive's top for the rest of what reaches it.
+    fn place(&self, node: NodeId) -> End {
         let docs = Role::Documents.node();
-        // Up to the role folder, if it's above.
         let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(node, |at| {
             Ok((at != docs)
                 .then(|| self.live.get(&at).map(|n| ((), n.state.parent)))
                 .flatten())
         });
-        up.end == hbsync_engine::walk::End::At(docs)
+        up.end
+    }
+
+    /// Whether `node` is the role folder or lies in it.
+    fn in_role_folder(&self, node: NodeId) -> bool {
+        self.place(node) == End::At(Role::Documents.node())
     }
 }
 
@@ -221,6 +234,34 @@ struct Client {
     confirmed: HashSet<NodeId>,
     /// How the client holds tags.
     os: Os,
+    /// How the client's folder sees the drive: the main folder sees it as it is, a role
+    /// folder its top as the root and the rest as one folder it leaves out (§12).
+    coords: Coords,
+}
+
+impl Client {
+    fn new(name: String, os: Os, filter: Filter, coords: Coords) -> Self {
+        Client {
+            name,
+            local: Tree::new(),
+            base: Tree::new(),
+            extra: HashMap::new(),
+            plan: VecDeque::new(),
+            parked: HashMap::new(),
+            planned_local: Tree::new(),
+            planned_remote: Tree::new(),
+            filter: Arc::new(filter),
+            held: Vec::new(),
+            confirmed: HashSet::new(),
+            os,
+            coords,
+        }
+    }
+
+    /// The part of the drive the client's folder syncs.
+    fn scope(&self) -> Scope {
+        Scope::of(self.coords.top)
+    }
 }
 
 /// The simulation.
@@ -253,8 +294,10 @@ pub struct Sim {
     tags_added: BTreeSet<(usize, NodeId, String)>,
     tags_removed: BTreeSet<(NodeId, String)>,
     deleted: BTreeSet<NodeId>,
-    /// The first operation a client ran on the role folder or what is in it.
+    /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
+    /// Clients that are two folders of one computer (the main folder, a role folder).
+    computers: Vec<(usize, usize)>,
 }
 
 impl Sim {
@@ -262,23 +305,13 @@ impl Sim {
         Sim {
             server: Server::default(),
             clients: (0..clients)
-                .map(|i| Client {
-                    name: format!("c{i}"),
-                    local: Tree::new(),
-                    base: Tree::new(),
-                    extra: HashMap::new(),
-                    plan: VecDeque::new(),
-                    parked: HashMap::new(),
-                    planned_local: Tree::new(),
-                    planned_remote: Tree::new(),
-                    filter: Arc::new(if i % 2 == 1 {
-                        ignoring_d()
-                    } else {
-                        Filter::default()
-                    }),
-                    held: Vec::new(),
-                    confirmed: HashSet::new(),
-                    os: [Os::MacOs, Os::Linux, Os::Windows][i % 3],
+                .map(|i| {
+                    let filter = match i % 2 {
+                        1 => ignoring_d(),
+                        _ => Filter::default(),
+                    };
+                    let os = [Os::MacOs, Os::Linux, Os::Windows][i % 3];
+                    Client::new(format!("c{i}"), os, filter, Coords::MAIN)
                 })
                 .collect(),
             next_blob: 0,
@@ -296,6 +329,68 @@ impl Sim {
             tags_removed: BTreeSet::new(),
             deleted: BTreeSet::new(),
             scope_breach: None,
+            computers: Vec::new(),
+        }
+    }
+
+    /// [`Sim::with_role_folder`], and client 0's computer syncs it too, as a folder of its own
+    /// (one more client, last, in the role folder's coordinates). Both folders converge to
+    /// their parts of the drive; the user moves files between them ([`Action::MoveAcross`]).
+    pub fn with_role_device(self) -> Self {
+        let mut sim = self.with_role_folder();
+        let first = &sim.clients[0];
+        let docs = Client::new(
+            format!("{}-docs", first.name),
+            first.os,
+            Filter::default(),
+            Coords {
+                top: Role::Documents.node(),
+            },
+        );
+        sim.clients.push(docs);
+        sim.computers.push((0, sim.clients.len() - 1));
+        sim
+    }
+
+    /// The server as client `c`'s folder sees it ([`Coords`]).
+    fn server_view(&self, c: usize) -> Tree {
+        let mut t = Tree::new();
+        for id in self.server.live.keys() {
+            if let Some(state) = self.server_state(c, *id) {
+                t.insert(*id, state);
+            }
+        }
+        if self.clients[c].coords != Coords::MAIN {
+            t.insert(
+                NodeId::OUTSIDE,
+                NodeState::folder(NodeId::ROOT, Coords::OUTSIDE_NAME),
+            );
+        }
+        t
+    }
+
+    /// The server's state of `node` as client `c` sees it.
+    fn server_state(&self, c: usize, node: NodeId) -> Option<NodeState> {
+        let coords = self.clients[c].coords;
+        let n = self
+            .server
+            .live
+            .get(&node)
+            .filter(|_| !coords.hides(node))?;
+        Some(NodeState {
+            parent: coords.from_drive(n.state.parent),
+            ..n.state.clone()
+        })
+    }
+
+    /// Whether drive node `node` is known to lie outside client `c`'s folder's part of the
+    /// drive: in the role folder for the main folder, under the drive's top elsewhere for the
+    /// role folder. A node whose place isn't known (a gap, or a cycle a sync's moves make for a
+    /// moment) isn't.
+    fn known_outside(&self, c: usize, node: NodeId) -> bool {
+        match self.clients[c].coords.top {
+            top if top.is_root() => self.server.in_role_folder(node),
+            _ => self.server.place(node) == End::Top,
         }
     }
 
@@ -480,6 +575,48 @@ impl Sim {
             }
             Action::Restore { node } => self.restore(node),
             Action::Phone { op, pick } => self.phone(op, pick),
+            Action::MoveAcross { file } => {
+                let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
+                    return;
+                };
+                let to = if a == c { b } else { a };
+                if files.is_empty() {
+                    return;
+                }
+                let node = files[file % files.len()];
+                let Some(state) = self.clients[c].local.get(node).cloned() else {
+                    return;
+                };
+                // Not one the executor holds under a temporary name; to the other folder's top,
+                // if its name is free there.
+                if self.clients[c].parked.contains_key(&node)
+                    || !name_free(&self.clients[to].local, NodeId::ROOT, &state.name, None)
+                {
+                    return;
+                }
+                self.clients[c].local.remove(node);
+                // The other folder's scan finds an item it never had: a new id. Its tags went
+                // along.
+                let new = self.release_id();
+                self.clients[to].local.insert(
+                    new,
+                    NodeState {
+                        parent: NodeId::ROOT,
+                        ..state
+                    },
+                );
+                self.retrack(c, node, new);
+                let moved: Vec<_> = self
+                    .tags_added
+                    .iter()
+                    .filter(|(at, n, _)| *at == c && *n == new)
+                    .cloned()
+                    .collect();
+                for (_, n, name) in moved {
+                    self.tags_added.remove(&(c, n, name.clone()));
+                    self.tags_added.insert((to, n, name));
+                }
+            }
             Action::Purge => {
                 for (_, n) in std::mem::take(&mut self.server.removed) {
                     self.supersede(n.state.content);
@@ -604,7 +741,7 @@ impl Sim {
     fn plan(&mut self, c: usize) {
         self.unpark(c);
         self.release_filtered(c);
-        let remote = self.server.tree();
+        let remote = self.server_view(c);
         let client = &self.clients[c];
         // A parked node is reported at its original place: the temporary name is the
         // executor's business and must never reach the remote.
@@ -643,6 +780,7 @@ impl Sim {
             .server
             .live
             .iter()
+            .filter(|(id, _)| !client.coords.hides(**id))
             .map(|(id, n)| (*id, n.remote))
             .collect();
         input.dirty = client
@@ -666,6 +804,7 @@ impl Sim {
             synced_files,
             confirmed: Arc::clone(&confirmed),
             filter: Arc::clone(&client.filter),
+            scope: Arc::new(client.scope()),
             ..Options::default()
         };
         // Ids the client or the server knows are taken, as in the executor's state DB.
@@ -786,7 +925,13 @@ impl Sim {
             return false;
         };
         let node = op.node();
+        // Every remote write that lands stays in the folder's part of the drive (§12): what it
+        // writes, and where to (judged before it runs; one refused on its version wrote nothing).
+        let breach = self.breaches(c, &op);
         let outcome = self.execute(c, &op);
+        if outcome == Outcome::Done && breach && self.scope_breach.is_none() {
+            self.scope_breach = Some(format!("{} {op:?}", self.clients[c].name));
+        }
         if outcome == Outcome::Done && self.server.dangling.is_none() {
             let parent_unknown = self.server.live.get(&node).is_some_and(|n| {
                 !n.state.parent.is_root() && !self.server.ever.contains(&n.state.parent)
@@ -820,6 +965,21 @@ impl Sim {
         true
     }
 
+    /// Whether `op` of client `c` would write outside its folder's part of the drive.
+    fn breaches(&self, c: usize, op: &Op) -> bool {
+        let coords = self.clients[c].coords;
+        let touched = match op {
+            Op::RemoteCreate { parent, .. } => vec![*parent],
+            Op::RemoteUpdate { node, parent, .. } => vec![*node, *parent],
+            Op::RemoteTags { node, .. } | Op::RemoteDelete { node, .. } => vec![*node],
+            _ => Vec::new(),
+        };
+        touched.iter().any(|n| {
+            let on_drive = coords.to_drive(*n);
+            coords.is_outside(*n) || self.known_outside(c, on_drive)
+        })
+    }
+
     /// Applies one op if its guards pass.
     fn execute(&mut self, c: usize, op: &Op) -> Outcome {
         use Outcome::{Done, Retry, Skip};
@@ -830,18 +990,7 @@ impl Sim {
         if !ready(&self.clients[c], op) {
             return Retry;
         }
-        if self.scope_breach.is_none() {
-            let touched = match op {
-                Op::RemoteCreate { node, parent, .. } | Op::RemoteUpdate { node, parent, .. } => {
-                    vec![*node, *parent]
-                }
-                Op::RemoteTags { node, .. } | Op::RemoteDelete { node, .. } => vec![*node],
-                _ => Vec::new(),
-            };
-            if touched.iter().any(|n| self.server.in_role_folder(*n)) {
-                self.scope_breach = Some(format!("c{c} {op:?}"));
-            }
-        }
+        let coords = self.clients[c].coords;
         match op.clone() {
             Op::LocalFork {
                 node,
@@ -1031,6 +1180,10 @@ impl Sim {
                 self.server.removed.remove(&node);
                 self.server.ever.insert(node);
                 self.clients[c].planned_remote.insert(node, state.clone());
+                let state = NodeState {
+                    parent: coords.to_drive(state.parent),
+                    ..state
+                };
                 self.server.live.insert(node, ServerNode { state, remote });
                 Done
             }
@@ -1057,11 +1210,14 @@ impl Sim {
                     };
                     server.state.content = Some(content);
                 }
-                server.state.parent = parent;
+                server.state.parent = coords.to_drive(parent);
                 server.state.name = name;
                 server.state.tags = tags;
                 server.remote.version = version;
-                let state = server.state.clone();
+                let state = NodeState {
+                    parent,
+                    ..server.state.clone()
+                };
                 self.clients[c].planned_remote.insert(node, state);
                 Done
             }
@@ -1080,7 +1236,10 @@ impl Sim {
                 }
                 server.state.tags = tags;
                 server.remote.version = version;
-                let state = server.state.clone();
+                let state = NodeState {
+                    parent: coords.from_drive(server.state.parent),
+                    ..server.state.clone()
+                };
                 self.clients[c].planned_remote.insert(node, state);
                 Done
             }
@@ -1307,7 +1466,7 @@ impl Sim {
 
     /// The executor's settle rule ([`Agreement`]) on the simulated sides.
     fn settle(&mut self, c: usize, node: NodeId) {
-        let remote = self.server.live.get(&node).map(|n| n.state.clone());
+        let remote = self.server_state(c, node);
         let version = self.server.live.get(&node).map(|n| n.remote.version);
         let client = &mut self.clients[c];
         let local = client
@@ -1392,7 +1551,8 @@ impl Sim {
         }
         let server = self.server.tree();
         let mut kept_here: BTreeSet<u64> = BTreeSet::new();
-        for client in &self.clients {
+        for (c, client) in self.clients.iter().enumerate() {
+            let server = self.server_view(c);
             let hidden = masked(&client.local, &client.filter);
             let mut visible = client.local.clone();
             for n in &hidden {
@@ -1408,7 +1568,7 @@ impl Sim {
             for n in masked(&server, &client.filter) {
                 synced.remove(n);
             }
-            for n in Scope::main().out_of_scope(&server) {
+            for n in client.scope().out_of_scope(&server) {
                 synced.remove(n);
             }
             // The tags as the client sees them.
@@ -1445,9 +1605,18 @@ impl Sim {
         if !broken.is_empty() {
             return Err(format!("server: {broken:?}"));
         }
-        // No client touched the role folder or what is in it.
+        // No folder wrote outside its part of the drive.
         if let Some(op) = &self.scope_breach {
-            return Err(format!("a client wrote to the role folder: {op}"));
+            return Err(format!(
+                "a folder wrote outside its part of the drive: {op}"
+            ));
+        }
+        // A computer holds a node in one of its folders at most.
+        for &(a, b) in &self.computers {
+            let (a, b) = (&self.clients[a].local, &self.clients[b].local);
+            if let Some(both) = a.ids().find(|n| b.contains(*n)) {
+                return Err(format!("{both:?} is in both folders of one computer"));
+            }
         }
         if self.server.ever.contains(&Role::Documents.node())
             && server

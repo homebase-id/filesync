@@ -587,8 +587,7 @@ fn start_up_catches_up_both_sides_in_parallel() -> R {
     b.write("from-b/two.txt", "2")?;
     let opts = b.engine.scan_options().clone();
     let mut observer = hbsync_local::LocalObserver::start(&b.root, opts);
-    let db_path = b.db_path();
-    let report = b.engine.start_up(&mut observer, &db_path, "2026-10-08")?;
+    let report = b.engine.start_up(&mut observer, "2026-10-08")?;
     assert!(report.feed.live >= 2, "{:?}", report.feed);
     assert_eq!(report.local.report.added, 2);
     b.sync()?;
@@ -1346,7 +1345,7 @@ fn recently_deleted_restores_and_purges() -> R {
     a.sync()?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
-    let listed = b.engine.recently_deleted(10)?;
+    let listed = b.engine.drive().recently_deleted(10)?;
     let mut paths: Vec<_> = listed.iter().map(|d| d.path.as_str()).collect();
     paths.sort();
     assert_eq!(paths, ["d", "d/sub", "d/sub/y.txt", "d/x.txt", "z.txt"]);
@@ -1360,7 +1359,7 @@ fn recently_deleted_restores_and_purges() -> R {
     );
 
     // b restores the folder: it comes back whole, on both; z.txt stays deleted.
-    assert_eq!(b.engine.restore(&[d])?, 4);
+    assert_eq!(b.engine.drive().restore(&[d])?, 4);
     b.sync()?;
     a.sync()?;
     assert_eq!(a.tree_text(""), b.tree_text(""));
@@ -1372,12 +1371,13 @@ fn recently_deleted_restores_and_purges() -> R {
     a.sync()?;
     let z = a
         .engine
+        .drive()
         .recently_deleted(10)?
         .into_iter()
         .find(|i| i.path == "z.txt")
         .ok_or("z")?
         .node;
-    assert_eq!(a.engine.restore(&[z])?, 1);
+    assert_eq!(a.engine.drive().restore(&[z])?, 1);
     a.sync()?;
     assert_eq!(a.read_text("z (restored).txt")?, "z");
     assert_eq!(a.read_text("z.txt")?, "new z");
@@ -1385,9 +1385,9 @@ fn recently_deleted_restores_and_purges() -> R {
     // The purge leaves nothing restorable.
     fs::remove_file(a.root.join("z.txt"))?;
     a.sync()?;
-    assert_eq!(a.engine.purge(i64::MAX)?, 1);
+    assert_eq!(a.engine.drive().purge(i64::MAX)?, 1);
     b.sync()?;
-    assert!(b.engine.recently_deleted(10)?.is_empty());
+    assert!(b.engine.drive().recently_deleted(10)?.is_empty());
     assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
     Ok(())
 }
@@ -1406,7 +1406,7 @@ fn an_edit_restores_what_another_client_deleted() -> R {
     b.sync()?; // the edit wins: restored with b's bytes
     a.sync()?;
     assert_eq!(a.read_text("notes.txt")?, "1 and 2");
-    assert!(a.engine.recently_deleted(10)?.is_empty());
+    assert!(a.engine.drive().recently_deleted(10)?.is_empty());
     let srv = server.lock().map_err(|_| "poisoned")?;
     assert_eq!((srv.live().count(), srv.removed().count()), (1, 0));
     Ok(())
@@ -1465,12 +1465,13 @@ fn a_restored_item_is_guarded_again() -> R {
 
     let d = a
         .engine
+        .drive()
         .recently_deleted(10)?
         .into_iter()
         .find(|i| i.path == "d")
         .ok_or("d")?
         .node;
-    assert_eq!(a.engine.restore(&[d])?, 5);
+    assert_eq!(a.engine.drive().restore(&[d])?, 5);
     a.sync()?;
     b.sync()?;
     assert!(b.root.join("d/f3.txt").exists());
@@ -1502,6 +1503,7 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     a.sync()?;
     let find = |a: &mut common::Client, path: &str| -> Result<_, Box<dyn std::error::Error>> {
         Ok(a.engine
+            .drive()
             .recently_deleted(10)?
             .into_iter()
             .find(|i| i.path == path)
@@ -1509,7 +1511,7 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     };
     // P/E was taken along by P's delete: restoring it brings back P (alone) and E's content.
     let e = find(&mut a, "P/E")?.node;
-    assert_eq!(a.engine.restore(&[e])?, 3);
+    assert_eq!(a.engine.drive().restore(&[e])?, 3);
     a.sync()?;
     assert_eq!(a.read_text("P/E/x.txt")?, "x");
     assert!(
@@ -1523,9 +1525,10 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     fs::remove_file(a.root.join("keep.txt"))?;
     a.write("other.txt", "o")?; // not every file deleted (the guard)
     a.sync()?;
-    assert_eq!(a.engine.empty_deleted_until(until)?, 1);
+    assert_eq!(a.engine.drive().empty_until(until)?, 1);
     let left: Vec<_> = a
         .engine
+        .drive()
         .recently_deleted(10)?
         .into_iter()
         .map(|i| i.path)
@@ -1709,6 +1712,7 @@ fn seed_role(
 
 fn unscoped(cfg: &mut hbsync_engine::EngineConfig) {
     cfg.scope = Arc::new(hbsync_engine::scope::Scope {
+        top: hbsync_types::NodeId::ROOT,
         outside: Default::default(),
     });
 }
@@ -1780,8 +1784,11 @@ fn a_role_folder_no_longer_left_out_comes_with_everything_in_it() -> R {
     Ok(())
 }
 
+/// Recently deleted is the account's: the main folder lists the role folder's removals too,
+/// each with the folder it comes back to (none here for a role folder this device doesn't
+/// sync), and emptying what was shown takes both.
 #[test]
-fn recently_deleted_in_a_role_folder_isnt_the_main_folders() -> R {
+fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
     let server = server();
     seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
     let mut a = Client::new(&server, "a")?;
@@ -1809,17 +1816,24 @@ fn recently_deleted_in_a_role_folder_isnt_the_main_folders() -> R {
         }
     }
     a.sync()?;
-    let listed: Vec<String> = a
+    let mut listed: Vec<(String, Option<String>)> = a
         .engine
+        .drive()
         .recently_deleted(10)?
         .into_iter()
-        .map(|d| d.path)
+        .map(|d| (d.path, d.folder))
         .collect();
-    assert_eq!(listed, ["mine.txt"]);
-    // Emptying what was shown leaves the role folder's alone.
-    a.engine.empty_deleted_until(i64::MAX - 1)?;
+    listed.sort();
+    assert_eq!(
+        listed,
+        [
+            ("cv.txt".into(), None),
+            ("mine.txt".into(), Some(String::new()))
+        ]
+    );
+    a.engine.drive().empty_until(i64::MAX - 1)?;
     let srv = server.lock().map_err(|_| "poisoned")?;
-    assert_eq!(srv.removed().count(), 1);
+    assert_eq!(srv.removed().count(), 0);
     Ok(())
 }
 
@@ -1870,63 +1884,5 @@ fn a_role_folder_moved_into_a_folder_keeps_it_alive() -> R {
     assert_eq!(a.tree_text(""), ["Archive/", "readme.txt = r"]);
     let names = server.lock().map_err(|_| "poisoned")?.live_names();
     assert_eq!(names, ["Archive", "Documents", "cv.txt", "readme.txt"]);
-    Ok(())
-}
-
-#[test]
-fn deletes_in_a_role_folder_dont_crowd_recently_deleted() -> R {
-    let server = server();
-    seed_role(&server, hbsync_types::Role::Documents, "cv.txt", "role")?;
-    let mut a = Client::new(&server, "a")?;
-    a.write("mine.txt", "m")?;
-    a.sync()?;
-    {
-        let mut srv = server.lock().map_err(|_| "poisoned")?;
-        let docs = hbsync_types::Role::Documents.node();
-        for i in 0..20 {
-            srv.seed_file(
-                docs,
-                &format!("p{i}.jpg"),
-                b"p",
-                hbsync_fileio::HashAlgorithm::Blake3,
-            )?;
-        }
-        // Removed elsewhere: mine first, then the photos, the newest.
-        let mut files: Vec<_> = srv
-            .live()
-            .filter(|h| h.kind == hbsync_types::NodeKind::File)
-            .cloned()
-            .collect();
-        files.sort_by_key(|h| match &h.body {
-            hbsync_remote::RemoteBody::Live { content, .. } => content.name != "mine.txt",
-            _ => true,
-        });
-        for (at, h) in files.into_iter().enumerate() {
-            if let hbsync_remote::RemoteBody::Live {
-                node, mut content, ..
-            } = h.body
-            {
-                content.set_removal(Some(hbsync_types::schema::Removal {
-                    at_ms: at as i64 + 1,
-                    root: node,
-                }));
-                let meta = NodeMeta {
-                    node,
-                    parent: h.parent,
-                    kind: h.kind,
-                    content,
-                };
-                srv.update(h.file_id, h.version, &meta, None)?;
-            }
-        }
-    }
-    a.sync()?;
-    let listed: Vec<String> = a
-        .engine
-        .recently_deleted(5)?
-        .into_iter()
-        .map(|d| d.path)
-        .collect();
-    assert_eq!(listed, ["mine.txt"]);
     Ok(())
 }

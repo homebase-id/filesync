@@ -22,18 +22,19 @@ use std::time::{Duration, Instant, SystemTime};
 use hbsync_engine::activity::Counters;
 use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
-use hbsync_engine::{Conflict, Engine, EngineConfig, EngineError, SyncReport};
+use hbsync_engine::{Conflict, Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::watch::Debounce;
-use hbsync_local::{Filter, FilterError, LocalObserver, STATE_DIR, state_db_path};
+use hbsync_local::{Filter, FilterError, LocalObserver};
 use hbsync_remote::{Remote, RemoteError};
-use hbsync_state::{StateDb, StateError};
+use hbsync_state::StateError;
 use hbsync_types::NodeId;
 pub use hbsync_types::activity::Progress;
 use hbsync_types::unix_now;
 use serde::{Deserialize, Serialize};
 
 use crate::MassDelete;
+use crate::accounts::FolderError;
 use crate::config::KeepDays;
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
@@ -82,20 +83,15 @@ pub enum RunnerError {
     Io(#[from] std::io::Error),
     #[error("the sync thread panicked")]
     Panicked,
-    #[error("{folder} is synced with {theirs}, not {ours}")]
-    OtherIdentity {
-        folder: PathBuf,
-        theirs: String,
-        ours: String,
-    },
+    #[error(transparent)]
+    Folder(#[from] crate::accounts::FolderError),
 }
-
-/// The state DB key of the identity a folder syncs with.
-pub const IDENTITY_KEY: &str = "account.identity";
 
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     pub folder: PathBuf,
+    /// The account's state DB ([`crate::accounts::db_path`]).
+    pub db: PathBuf,
     pub identity: String,
     /// Shown in conflict-copy names.
     pub device: String,
@@ -115,9 +111,10 @@ pub struct RunnerConfig {
 }
 
 impl RunnerConfig {
-    pub fn new(folder: &Path, identity: &str, device: &str) -> Self {
+    pub fn new(folder: &Path, db: &Path, identity: &str, device: &str) -> Self {
         RunnerConfig {
             folder: folder.to_path_buf(),
+            db: db.to_path_buf(),
             identity: identity.to_owned(),
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
@@ -135,40 +132,6 @@ impl RunnerConfig {
 const REMOTE_QUIET: Duration = Duration::from_millis(1000);
 /// ...but no longer than this after the first.
 const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
-
-/// The state DB key of the last purge of Recently deleted (Unix seconds).
-const PURGED_KEY: &str = "deleted.purged_at";
-
-/// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the local
-/// trash of the same age). A failure waits for the next sync.
-fn purge_when_due(engine: &mut Engine, keep_days: u32) {
-    const DAY: u64 = 24 * 60 * 60;
-    let now = unix_now();
-    let last = engine
-        .db()
-        .read(|s| s.get_kv(PURGED_KEY))
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u64>().ok());
-    if last.is_some_and(|last| now < last + DAY) {
-        return;
-    }
-    let before_ms = now.saturating_sub(u64::from(keep_days) * DAY) as i64 * 1000;
-    match engine.purge(before_ms) {
-        Ok(n) => {
-            if n > 0 {
-                tracing::info!("{n} items deleted for good after {keep_days} days");
-            }
-            if let Err(e) = engine
-                .db()
-                .write(|s| s.set_kv(PURGED_KEY, &now.to_string()))
-            {
-                tracing::warn!("couldn't note the purge: {e}");
-            }
-        }
-        Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
-    }
-}
 
 /// How long a pause lasts: until then (Unix seconds), or until resumed (`None`).
 pub type Until = Option<u64>;
@@ -506,8 +469,8 @@ impl Runner {
         });
     }
 
-    /// The engine and observer for the folder, which must have been set up (its `.hbsync`
-    /// exists): an unmounted disk's empty mount point must not become a new sync folder.
+    /// The engine and observer for the folder, which must have been set up (its marker names
+    /// it): an unmounted disk's empty mount point must not become a new sync folder.
     fn open(&self) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
@@ -518,20 +481,11 @@ impl Runner {
             tweak(&mut cfg);
         }
         let rules = cfg.exec.filter.rule_count();
-        let mut db = StateDb::open(&state_db_path(root))?;
-        // A folder belongs to one identity: never mix two drives through one folder.
-        let ours = &self.cfg.identity;
-        db.write(|s| match s.get_kv(IDENTITY_KEY)? {
-            Some(theirs) if theirs != *ours => Ok(Err(theirs)),
-            Some(_) => Ok(Ok(())),
-            None => s.set_kv(IDENTITY_KEY, ours).map(Ok),
-        })?
-        .map_err(|theirs| RunnerError::OtherIdentity {
-            folder: root.clone(),
-            theirs,
-            ours: ours.clone(),
-        })?;
-        let mut engine = Engine::new(db, Box::new(Arc::clone(&self.remote)), cfg);
+        // A folder belongs to one identity (its marker says which): never mix two drives
+        // through one folder.
+        let db = crate::accounts::open_folder(&self.cfg.db, &self.cfg.identity, root)?;
+        let account = crate::accounts::open_account(&self.cfg.db, &self.cfg.identity)?;
+        let mut engine = Engine::new(db, Drive::new(account, Arc::clone(&self.remote)), cfg);
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
         let observer = LocalObserver::start(root, engine.scan_options().clone());
@@ -558,7 +512,6 @@ impl Runner {
         // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
         // (the first announcement, quiet from then on)
         let mut announced: Option<(Instant, Instant)> = None;
-        let db_path = state_db_path(&self.cfg.folder);
         let mut pause = self.cfg.paused;
         let mut started = false;
         let mut wanted = true;
@@ -733,21 +686,25 @@ impl Runner {
                 continue;
             }
             announced = None;
-            if !self.cfg.folder.join(STATE_DIR).is_dir() {
+            match crate::accounts::check_marker(&self.cfg.folder, &self.cfg.identity) {
+                Ok(_) => {}
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
-                const GONE: &str = "the folder is gone (moved, deleted or not mounted)";
-                if lock(&self.status).error.as_deref() != Some(GONE) {
-                    tracing::warn!("{GONE}: waiting for it to come back");
+                Err(FolderError::NoMarker(_) | FolderError::Io(_)) => {
+                    const GONE: &str = "the folder is gone (moved, deleted or not mounted)";
+                    if lock(&self.status).error.as_deref() != Some(GONE) {
+                        tracing::warn!("{GONE}: waiting for it to come back");
+                    }
+                    parts = None;
+                    not_before = Instant::now() + self.cfg.poll;
+                    self.set(|s| {
+                        s.state = State::Failing;
+                        s.error = Some(GONE.into());
+                        s.retry_at = Some(unix_now() + self.cfg.poll.as_secs());
+                    });
+                    continue;
                 }
-                parts = None;
-                not_before = Instant::now() + self.cfg.poll;
-                self.set(|s| {
-                    s.state = State::Failing;
-                    s.error = Some(GONE.into());
-                    s.retry_at = Some(unix_now() + self.cfg.poll.as_secs());
-                });
-                continue;
+                Err(e) => return Err(e.into()),
             }
             let p = match &mut parts {
                 Some(p) => p,
@@ -774,7 +731,7 @@ impl Runner {
                 p.engine.confirm_deletes(seen);
             }
             if !restore.is_empty() {
-                match p.engine.restore(&std::mem::take(&mut restore)) {
+                match p.engine.drive().restore(&std::mem::take(&mut restore)) {
                     Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
                     Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
                 }
@@ -783,8 +740,8 @@ impl Runner {
             let emptied = [
                 empty_until
                     .take()
-                    .map(|at| p.engine.empty_deleted_until(at)),
-                (!nodes.is_empty()).then(|| p.engine.empty_deleted(&nodes)),
+                    .map(|at| p.engine.drive().empty_until(at)),
+                (!nodes.is_empty()).then(|| p.engine.drive().empty(&nodes)),
             ];
             for result in emptied.into_iter().flatten() {
                 match result {
@@ -792,7 +749,15 @@ impl Runner {
                     Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
                 }
             }
-            purge_when_due(&mut p.engine, self.cfg.keep_deleted_days);
+            // Once a day; a failure waits for the next sync.
+            let keep_days = self.cfg.keep_deleted_days;
+            match p.engine.drive().purge_when_due(keep_days) {
+                Ok(Some(n)) if n > 0 => {
+                    tracing::info!("{n} items deleted for good after {keep_days} days")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
+            }
 
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.
@@ -808,9 +773,7 @@ impl Runner {
             let result = if started {
                 p.engine.sync_once(&today)
             } else {
-                p.engine
-                    .start_up(&mut p.observer, &db_path, &today)
-                    .map(|r| r.sync)
+                p.engine.start_up(&mut p.observer, &today).map(|r| r.sync)
             };
             match result {
                 Ok(report) => {
