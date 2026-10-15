@@ -100,19 +100,7 @@ impl Executor<'_> {
         let target = self.target_path(parent, name)?;
         let created_ms = mirror.created_ms();
         // What its commit records, as the drive has it now: kept until then.
-        let record = mirror.state().map(|state| {
-            Box::new(Placing {
-                base: BaseRow {
-                    node,
-                    state,
-                    remote: mirror.remote_ref(),
-                    content_state: ContentState::Local,
-                    local_name: None,
-                    local_hash: None,
-                },
-                target: target.clone(),
-            })
-        });
+        let record = Placing::of(&mirror, target.clone()).map(Box::new);
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -309,6 +297,7 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
+                self.filling(target)?;
                 match self.move_to_trash(&row.path, node) {
                     Ok(()) => done.persist_new(&self.abs(target), created_ms),
                     Err(e) => {
@@ -322,9 +311,11 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
+                self.filling(target)?;
                 done.persist_new(&self.abs(target), created_ms)
             }
         };
+        self.changed_entry(target);
         let meta = match placed {
             Ok(m) => m,
             Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, target)),

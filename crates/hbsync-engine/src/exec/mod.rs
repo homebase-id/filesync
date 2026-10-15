@@ -213,6 +213,21 @@ pub struct Executor<'a> {
     counted: HashSet<NodeId>,
     /// The drive is full: uploads are held (from the start, when it was lately).
     full: bool,
+    /// Places on disk emptied since the last durable commit (by [`place_key`]). With the
+    /// commits since lost (a power cut), what is put there next would be taken for what was
+    /// there: before that, they are made durable ([`Executor::filling`]).
+    emptied_places: HashSet<String>,
+    /// Folders whose entries this run changed and hasn't synced: synced before the DB records
+    /// the change durably ([`Executor::durably`]), so it can't hold one the disk lost.
+    unsynced_dirs: HashSet<PathBuf>,
+    /// The ids the scan gave new items are durable: before anything goes to the drive, they
+    /// are (a power cut must not make the scan give others to what went out).
+    ids_durable: bool,
+}
+
+/// A place on disk as [`Executor::emptied_places`] knows it (any case).
+fn place_key(path: &RelPath) -> String {
+    name_key(path.as_str())
 }
 
 /// An operation whose guards passed, its job waiting for a worker.
@@ -337,6 +352,9 @@ impl<'a> Executor<'a> {
             progress: Arc::default(),
             counted: HashSet::new(),
             full: false,
+            emptied_places: HashSet::new(),
+            unsynced_dirs: HashSet::new(),
+            ids_durable: false,
         }
     }
 
@@ -380,6 +398,18 @@ impl<'a> Executor<'a> {
 
     /// Runs a plan's operations, in order.
     pub fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
+        let ran = self.run_ops(ops);
+        // The next run (a plan's next page) doesn't know the places this one emptied: durable
+        // now if any. Otherwise the folders at least, before the sync's closing flush.
+        if ran.is_ok() && !self.emptied_places.is_empty() {
+            self.flush_db()?;
+        }
+        self.sync_dirs();
+        ran?;
+        Ok(self.report)
+    }
+
+    fn run_ops(&mut self, ops: Vec<Op>) -> Result<(), StateError> {
         self.forgetting = ops
             .iter()
             .filter(|op| matches!(op, Op::Forget { .. }))
@@ -400,7 +430,7 @@ impl<'a> Executor<'a> {
                 if batch.jobs.is_empty() {
                     break;
                 }
-                self.flush(&mut batch)?;
+                self.run_batch(&mut batch)?;
                 continue;
             };
             // Everything else runs on its own, in order: after the batch.
@@ -411,7 +441,7 @@ impl<'a> Executor<'a> {
                     || batch.holds_up(&op)
                     || target.as_ref().is_some_and(|t| batch.crosses(op.node(), t)))
             {
-                self.flush(&mut batch)?;
+                self.run_batch(&mut batch)?;
                 if self.should_stop() {
                     break;
                 }
@@ -466,7 +496,7 @@ impl<'a> Executor<'a> {
                 return Err(StateError::Conflict("crash point reached".into()));
             }
         }
-        Ok(self.report)
+        Ok(())
     }
 
     /// Where `op` moves its node on the drive, if it moves it to another folder: that folder
@@ -691,7 +721,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
-    fn flush(&mut self, batch: &mut Batch) -> Result<(), StateError> {
+    fn run_batch(&mut self, batch: &mut Batch) -> Result<(), StateError> {
         self.wait_out_backoff();
         // In node order: what didn't start goes back to the queue in an order that doesn't
         // change from run to run.
@@ -711,8 +741,9 @@ impl<'a> Executor<'a> {
         // Write-ahead: a download put in place whose commit a crash loses is found there again
         // by its record (`recover_placements`).
         if !records.is_empty() {
-            self.db
-                .write(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
+            self.write_ahead(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
+        } else if !self.ids_durable {
+            self.flush_db()?;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -873,6 +904,69 @@ impl<'a> Executor<'a> {
         occupant(self.db, self.cfg.case_insensitive, target)
     }
 
+    /// Writes a record of what is about to happen on disk, durably (with every commit before).
+    fn write_ahead(
+        &mut self,
+        f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
+    ) -> Result<(), StateError> {
+        self.durably(|db| db.write_durable(f))
+    }
+
+    /// Makes what this run did so far durable.
+    fn flush_db(&mut self) -> Result<(), StateError> {
+        self.durably(StateDb::flush)
+    }
+
+    /// Runs `commit`, a durable commit, after syncing the folders this run changed (so the DB
+    /// never holds a change the disk lost): every place emptied before is durable then.
+    fn durably(
+        &mut self,
+        commit: impl FnOnce(&mut StateDb) -> Result<(), StateError>,
+    ) -> Result<(), StateError> {
+        self.sync_dirs();
+        commit(self.db)?;
+        self.emptied_places.clear();
+        self.ids_durable = true;
+        Ok(())
+    }
+
+    /// Syncs the folders this run changed (best effort: one that is gone needs none). Many at
+    /// once (a mass delete into the trash) in one call where the system has one.
+    fn sync_dirs(&mut self) {
+        const MANY: usize = 32;
+        if self.unsynced_dirs.len() > MANY && ops::sync_volume(&self.cfg.root).unwrap_or(false) {
+            self.unsynced_dirs.clear();
+        }
+        for dir in self.unsynced_dirs.drain() {
+            let _ = ops::sync_dir(&dir);
+        }
+    }
+
+    /// The entry of `path` on disk was just changed: its folder is synced before the next
+    /// durable commit.
+    pub(super) fn changed_entry(&mut self, path: &RelPath) {
+        let parent = path.parent().unwrap_or_default();
+        let dir = self.abs(&parent);
+        self.unsynced_dirs.insert(dir);
+    }
+
+    /// `path` on disk was just emptied (moved or trashed from).
+    fn mark_emptied(&mut self, path: &RelPath) {
+        self.emptied_places.insert(place_key(path));
+        self.changed_entry(path);
+    }
+
+    /// Before something is put at `path`: if it was emptied since the last durable commit, that
+    /// is made durable first, so a power cut can't leave the DB holding the old item there
+    /// while the new one is.
+    fn filling(&mut self, path: &RelPath) -> Result<(), StateError> {
+        if self.emptied_places.contains(&place_key(path)) {
+            self.flush_db()?;
+        }
+        self.changed_entry(path);
+        Ok(())
+    }
+
     /// Frees `target` if a node that the plan is about to move away holds it: that node is
     /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
     /// The mover itself may hold it under another case (a case-only rename).
@@ -899,12 +993,12 @@ impl<'a> Executor<'a> {
         // item under its temporary name, and this record maps it back to its real place (a
         // record counts only while the item carries that name), so the temporary name can't
         // reach the remote as a rename.
-        self.db
-            .write(|s| s.put_parked(occupant.node, &occupant.path))?;
+        self.write_ahead(|s| s.put_parked(occupant.node, &occupant.path))?;
         if ops::rename_noreplace(&self.abs(&occupant.path), &self.abs(&parked)).is_err() {
             self.db.write(|s| s.delete_parked(occupant.node))?;
             return Ok(false);
         }
+        self.mark_emptied(&occupant.path);
         if self.crash_here(CrashPoint::AfterParkRename) {
             return Ok(false);
         }

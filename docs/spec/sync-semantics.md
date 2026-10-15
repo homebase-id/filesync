@@ -224,6 +224,19 @@ expected fingerprint is treated as done.
   removed before each plan. The stored journal position never passes a change that isn't
   recorded: it is taken before waiting for events and stored only once the event queue has
   drained.
+- **Power cuts.** The state DB syncs its commits to the disk only now and then
+  (`synchronous=NORMAL`): an OS crash or a power cut can lose the last ones, in order, while the
+  folder and the drive keep what was done. So a sync starts and ends with the DB durable (what
+  earlier syncs did is on the disk before parked items are put back), a run starts from a durable
+  DB (the ids the scan gave new items go out with them), and so does an upload after a detach
+  (its new id); write-ahead records (parking, conflict copies, downloads, a folder this device
+  synced before made again) and a folder's registration are durable; before something is put
+  where an item was moved or trashed from since the last durable commit, the commits are made
+  durable (with that record lost, the scan would take the newcomer for the old item); and the
+  folders whose entries a run changed are synced before each durable commit (macOS: full syncs),
+  so the DB never holds a change the disk lost. What the lost commits did is then found again
+  as after a crash. The engine's randomized crash test cuts the power too, keeping any commits
+  since the last durable one.
 
 ## 9. Properties the simulator checks
 1. **Convergence:** after edits stop and every client syncs twice, all local trees and the

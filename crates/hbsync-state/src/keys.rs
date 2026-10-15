@@ -16,6 +16,8 @@ pub const IDENTITY: AccountKey = AccountKey("account.identity");
 pub const REMOTE_CURSOR: AccountKey = AccountKey("remote.cursor");
 /// When Recently deleted was last purged (Unix s).
 pub const PURGED_AT: AccountKey = AccountKey("deleted.purged_at");
+/// How often the DB was flushed to the disk on purpose (the write such a commit syncs).
+pub(crate) const FLUSHES: AccountKey = AccountKey("db.flushes");
 
 /// The local change journal's cursor (USN, FSEvents).
 pub const JOURNAL_CURSOR: FolderKey = FolderKey("local.journal_cursor");

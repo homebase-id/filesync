@@ -7,7 +7,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::exec::Skip;
@@ -18,7 +17,7 @@ use hbsync_state::testkit::Commit;
 
 mod common;
 
-use common::{Client, Res, server};
+use common::{Client, Kept, Res, server};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -250,22 +249,17 @@ fn converged(
 }
 
 /// Crashes `c` at its state DB's `at`-th commit of a sync (if it gets that far), just before
-/// or after it. A crash between operations, or inside one; one between an operation's change on
-/// disk and a commit of its write-ahead record is that record's case (the `CrashPoint` tests).
-fn crash_at(c: &mut Client, at: usize, before: bool) -> Res<bool> {
-    let when = if before {
-        Commit::Before
-    } else {
-        Commit::After
-    };
-    let commits = AtomicUsize::new(0);
-    common::crash(c, move |now| {
-        now == when && commits.fetch_add(1, Ordering::SeqCst) == at
+/// or after it, the DB keeping what `kept` says. A crash between operations,
+/// or inside one; one between an operation's change on disk and a commit of its write-ahead
+/// record is that record's case (the `CrashPoint` tests).
+fn crash_at(c: &mut Client, at: usize, before: bool, kept: Kept) -> Res<bool> {
+    common::crash(c, kept, move |now, n| {
+        n == at && (now == Commit::Before) == before
     })
 }
 
-/// Crashes at any of the first 64 commits of a sync, just before or after one: the clients
-/// still converge, with nothing lost and nothing twice.
+/// Crashes and power cuts at any of the first 64 commits of a sync, just before or after one:
+/// the clients still converge, with nothing lost and nothing twice.
 #[test]
 fn randomized_crashes() -> R {
     let seeds = seeds();
@@ -298,7 +292,13 @@ fn randomized_crashes() -> R {
                     } else {
                         rng.below(64)
                     };
-                    down[i] = crash_at(&mut clients[i], at, rng.below(2) == 0)
+                    let before = rng.below(2) == 0;
+                    let kept = match rng.below(3) {
+                        0 => Kept::All,
+                        1 => Kept::Durable(None),
+                        _ => Kept::Durable(Some(rng.below(at + 1))),
+                    };
+                    down[i] = crash_at(&mut clients[i], at, before, kept)
                         .map_err(|e| format!("seed {seed}: {e}"))?;
                     crashes += usize::from(down[i]);
                 }

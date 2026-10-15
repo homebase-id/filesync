@@ -45,6 +45,26 @@ pub fn sync_dir(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// Flushes everything the file system holding `path` has written (`syncfs`): one call instead
+/// of many [`sync_dir`]s. `false` where there is none (only Linux has one).
+pub fn sync_volume(path: &Path) -> io::Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let dir = fs::File::open(path)?;
+        // SAFETY: a valid open descriptor.
+        if unsafe { libc::syncfs(dir.as_raw_fd()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        Ok(false)
+    }
+}
+
 /// Sets the modification time of a file or directory, in nanoseconds since the Unix epoch.
 pub fn set_mtime(path: &Path, mtime_ns: i64) -> io::Result<()> {
     let secs = mtime_ns.div_euclid(1_000_000_000);

@@ -79,8 +79,9 @@ pub struct StateDb {
     /// `None` in memory.
     path: Option<PathBuf>,
     /// Shared by every connection of this process to the same file: writes take turns here
-    /// instead of in SQLite's busy wait (which stays for other processes).
-    gate: Arc<Mutex<()>>,
+    /// instead of in SQLite's busy wait (which stays for other processes). It holds whether a
+    /// commit since the last durable one may not be on the disk yet.
+    gate: Arc<Mutex<bool>>,
     /// The folders writes through this connection marked a node dirty in
     /// ([`StateDb::take_touched`]).
     touched: std::collections::BTreeSet<i64>,
@@ -94,8 +95,8 @@ fn file_key(path: &Path) -> PathBuf {
 }
 
 /// The write gate of the DB file `key` ([`file_key`]), one per file in this process.
-fn gate(key: Option<&Path>) -> Arc<Mutex<()>> {
-    static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+fn gate(key: Option<&Path>) -> Arc<Mutex<bool>> {
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<bool>>>>> =
         LazyLock::new(Default::default);
     let Some(key) = key else {
         return Arc::default();
@@ -119,6 +120,8 @@ pub mod testkit {
     pub enum Commit {
         Before,
         After,
+        /// After a durable one ([`StateDb::write_durable`]).
+        Durable,
     }
 
     impl std::fmt::Debug for Hook {
@@ -137,6 +140,51 @@ pub mod testkit {
             Some(hook) => hooks.insert(file_key(path), hook),
             None => hooks.remove(&file_key(path)),
         };
+    }
+
+    impl StateDb {
+        /// Copies the DB as of its last commit to a new file at `to`.
+        pub fn copy_to(&mut self, to: &Path) -> Result<()> {
+            self.conn
+                .execute("VACUUM INTO ?1", [to.to_string_lossy().as_ref()])?;
+            Ok(())
+        }
+
+        /// Puts back every row of a copy made with [`StateDb::copy_to`], in one transaction:
+        /// the DB as a power cut leaves it, its last commits lost. Every engine on the DB is to
+        /// be started again after it.
+        pub fn restore_from(&mut self, copy: &Path) -> Result<()> {
+            let _turn = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+            // No cascades while tables are emptied one by one.
+            self.conn.pragma_update(None, "foreign_keys", false)?;
+            self.conn
+                .execute("ATTACH ?1 AS copy", [copy.to_string_lossy().as_ref()])?;
+            let restored = (|| -> Result<()> {
+                let tx = self
+                    .conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let tables: Vec<String> = tx
+                    .prepare(
+                        "SELECT name FROM main.sqlite_master WHERE type = 'table' \
+                         AND (name NOT LIKE 'sqlite_%' OR name = 'sqlite_sequence')",
+                    )?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                // `gone` last: the triggers of the others write to it.
+                let (gone, others): (Vec<String>, Vec<String>) =
+                    tables.into_iter().partition(|t| t == "gone");
+                for t in others.into_iter().chain(gone) {
+                    tx.execute_batch(&format!(
+                        "DELETE FROM main.\"{t}\"; \
+                         INSERT INTO main.\"{t}\" SELECT * FROM copy.\"{t}\";"
+                    ))?;
+                }
+                Ok(tx.commit()?)
+            })();
+            self.conn.execute("DETACH copy", [])?;
+            self.conn.pragma_update(None, "foreign_keys", true)?;
+            restored
+        }
     }
 
     /// The hook of the DB file `key` ([`file_key`]).
@@ -224,14 +272,17 @@ impl StateDb {
         // Start-up runs the local catch-up and the feed on two connections; a long scan
         // transaction must not make the other writer give up.
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // WAL keeps readers off the writer's back; FULL syncs each commit, so after a power loss
-        // the DB is never more than the one step in flight behind the disk. The executor's
-        // crash handling (write-ahead records, the scan's identity rules) relies on that, so
-        // speed comes from fewer commits (an operation and its settling are one), not from
-        // weaker ones. (NORMAL, ~70x cheaper a commit, was tried: then every effect on the disk
-        // or the drive needs a durable record of its own first, an operation log.)
+        // WAL keeps readers off the writer's back. NORMAL syncs the WAL only at checkpoints:
+        // an OS crash or a power cut can lose the last commits, in order, never one in the middle
+        // and never the DB. A durable commit (`write_durable`, `flush`) syncs every one before
+        // it too; the executor makes one where losing commits would mislead it (sync semantics
+        // §8a, power cuts). A commit costs ~0.03 ms this way, 2 ms (NVMe) to 90 ms (a spinning
+        // disk) with each one synced.
         wal(&conn)?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // A sync on macOS stops at the drive's cache unless it is a full one.
+        #[cfg(target_os = "macos")]
+        conn.pragma_update(None, "fullfsync", true)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(128);
@@ -258,23 +309,62 @@ impl StateDb {
         Ok(out)
     }
 
-    /// Runs `f` in a write transaction, committed only if `f` succeeds.
+    /// Runs `f` in a write transaction, committed only if `f` succeeds. The commit reaches the
+    /// disk soon, not at once: an OS crash or a power cut can lose it ([`StateDb::flush`]).
     pub fn write<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        let _turn = self.gate.lock().unwrap_or_else(|e| e.into_inner());
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let store = Store::new(&tx, self.folder);
-        let out = f(&store)?;
-        let touched = store.take_touched();
-        #[cfg(feature = "testkit")]
-        if let Some(hook) = &self.hook {
-            (hook.0)(testkit::Commit::Before);
+        self.commit(false, f)
+    }
+
+    /// [`StateDb::write`], on the disk when it returns, with every commit before it.
+    pub fn write_durable<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
+        self.commit(true, f)
+    }
+
+    /// Puts every commit so far on the disk (nothing to do when they are).
+    pub fn flush(&mut self) -> Result<()> {
+        if !*self.gate.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Ok(());
         }
-        tx.commit()?;
+        // A commit syncs only when it writes something.
+        self.write_durable(|s| s.count_flush())
+    }
+
+    fn commit<T>(&mut self, durable: bool, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
+        let mut unsynced = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if durable {
+            self.conn.pragma_update(None, "synchronous", "FULL")?;
+        }
+        // A commit that writes nothing syncs nothing.
+        let changes = self.conn.total_changes();
+        let committed = (|| -> Result<_> {
+            let tx = self
+                .conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let store = Store::new(&tx, self.folder);
+            let out = f(&store)?;
+            let touched = store.take_touched();
+            #[cfg(feature = "testkit")]
+            if let Some(hook) = &self.hook {
+                (hook.0)(testkit::Commit::Before);
+            }
+            tx.commit()?;
+            Ok((out, touched))
+        })();
+        if durable {
+            // Left on FULL if this fails: slower, never wrong.
+            let _ = self.conn.pragma_update(None, "synchronous", "NORMAL");
+        }
+        let (out, touched) = committed?;
+        if self.conn.total_changes() != changes {
+            *unsynced = !durable;
+        }
         #[cfg(feature = "testkit")]
         if let Some(hook) = &self.hook {
-            (hook.0)(testkit::Commit::After);
+            (hook.0)(if durable {
+                testkit::Commit::Durable
+            } else {
+                testkit::Commit::After
+            });
         }
         self.touched.extend(touched);
         Ok(out)

@@ -53,6 +53,31 @@ pub struct Placing {
     pub target: RelPath,
 }
 
+impl Placing {
+    /// The record of `mirror`'s node put at `target` (`None` for a file the mirror lacks the
+    /// content of).
+    pub fn of(mirror: &MirrorRow, target: RelPath) -> Option<Placing> {
+        Some(Placing {
+            base: BaseRow::new(mirror.node, mirror.state()?, mirror.remote_ref()),
+            target,
+        })
+    }
+}
+
+impl BaseRow {
+    /// A base of local content holding `state`, agreed at `remote`.
+    pub fn new(node: NodeId, state: NodeState, remote: RemoteRef) -> BaseRow {
+        BaseRow {
+            node,
+            state,
+            remote,
+            content_state: ContentState::Local,
+            local_name: None,
+            local_hash: None,
+        }
+    }
+}
+
 /// What the last observation saw at one local path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalRow {

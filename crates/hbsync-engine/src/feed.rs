@@ -58,7 +58,11 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
                     report.deleted += 1;
                 }
             }
-            s.set_account_kv(keys::REMOTE_CURSOR, &page.cursor)
+            // Unchanged on an idle pull: no write, so nothing to sync.
+            if !page.entries.is_empty() || cursor.as_deref() != Some(page.cursor.as_str()) {
+                s.set_account_kv(keys::REMOTE_CURSOR, &page.cursor)?;
+            }
+            Ok(())
         })?;
         report.pages += 1;
         if !page.has_more {

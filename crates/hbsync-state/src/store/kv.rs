@@ -51,6 +51,16 @@ impl Store<'_> {
         Ok(())
     }
 
+    /// Counts a [`crate::StateDb::flush`]: the write its commit syncs.
+    pub(crate) fn count_flush(&self) -> Result<()> {
+        self.prep(
+            "INSERT INTO kv (key, value) VALUES (?1, '1') \
+             ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+        )?
+        .execute([crate::keys::FLUSHES.0])?;
+        Ok(())
+    }
+
     // ---- what was synced ----
 
     /// Adds `entries` (oldest first) and keeps only the newest `keep`.

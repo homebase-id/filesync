@@ -36,14 +36,7 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
     let Some(state) = agreed.settle(base.as_ref().map(|b| b.state.clone()), &l, &r) else {
         return Ok(());
     };
-    let mut row = base.unwrap_or(BaseRow {
-        node,
-        state: r.clone(),
-        remote: mirror.remote_ref(),
-        content_state: ContentState::Local,
-        local_name: None,
-        local_hash: None,
-    });
+    let mut row = base.unwrap_or_else(|| BaseRow::new(node, r.clone(), mirror.remote_ref()));
     row.state = state;
     row.remote = mirror.remote_ref();
     if agreed.place {
