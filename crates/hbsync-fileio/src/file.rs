@@ -4,7 +4,9 @@
 //!   belongs to one consistent version of the file.
 //! - [`PartialFile`] receives a download into a temp file next to the sync root, can resume
 //!   after a crash or a dropped connection, verifies the hash, and is then moved into place with
-//!   [`CompletedFile::persist_new`] (never overwrites) or [`CompletedFile::persist_over`].
+//!   [`CompletedFile::persist_new`] (never overwrites) or [`CompletedFile::persist_over`]. Its
+//!   bytes are synced before; the rename is the caller's to sync with its folder (many at once,
+//!   before it records them durably).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -223,15 +225,7 @@ fn placed(target: &Path, created_ms: Option<i64>) -> Result<LocalMeta, FileIoErr
     if let Some(t) = created_ms {
         let _ = ops::set_created(target, t);
     }
-    sync_parent(target)?;
     Ok(hbsync_platform::stat(target)?)
-}
-
-fn sync_parent(path: &Path) -> io::Result<()> {
-    match path.parent() {
-        Some(parent) => ops::sync_dir(parent),
-        None => Ok(()),
-    }
 }
 
 #[cfg(test)]

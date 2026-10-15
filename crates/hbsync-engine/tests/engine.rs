@@ -2180,7 +2180,7 @@ fn a_download_placed_but_not_recorded_is_found_again() -> R {
     let mut b = Client::new(&server, "b")?;
     // b crashes just before the commit that records x.txt in place.
     let placed = b.root.join("x.txt");
-    let crashed = common::crash(&mut b, common::Kept::All, move |at| {
+    let crashed = common::crash(&mut b, common::Kept::All, move |at, _| {
         at == Commit::Before && placed.exists()
     })?;
     assert!(crashed && b.read_text("x.txt")? == "the bytes");
@@ -2213,7 +2213,7 @@ fn a_power_cut_after_a_folder_was_replaced_keeps_the_new_folder() -> R {
     a.sync()?;
     // b's power goes just before the first commit once the new folder is there.
     let (gone, f) = (std::sync::atomic::AtomicBool::new(false), b.root.join("F"));
-    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at| {
+    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at, _| {
         if !f.exists() {
             gone.store(true, Ordering::SeqCst);
         }
@@ -2245,7 +2245,7 @@ fn a_power_cut_after_a_detach_uploads_the_item_once() -> R {
     // b's power goes right after the commit that follows its upload of the detached item.
     let drive = server.clone();
     let uploaded = move || drive.lock().is_ok_and(|s| s.live().count() == 4);
-    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at| {
+    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at, _| {
         at == Commit::After && uploaded()
     })?;
     assert!(crashed);
@@ -2281,7 +2281,7 @@ fn a_power_cut_after_a_folder_came_back_keeps_one() -> R {
     a.sync()?;
     // Just before the commit that records it.
     let g = b.root.join("G");
-    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at| {
+    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at, _| {
         at == Commit::Before && g.exists()
     })?;
     assert!(crashed);

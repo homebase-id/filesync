@@ -7,7 +7,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::exec::Skip;
@@ -254,9 +253,8 @@ fn converged(
 /// or inside one; one between an operation's change on disk and a commit of its write-ahead
 /// record is that record's case (the `CrashPoint` tests).
 fn crash_at(c: &mut Client, at: usize, before: bool, kept: Kept) -> Res<bool> {
-    let commits = AtomicUsize::new(0);
-    common::crash(c, kept, move |now| {
-        (now == Commit::Before) == before && commits.fetch_add(1, Ordering::SeqCst) == at
+    common::crash(c, kept, move |now, n| {
+        n == at && (now == Commit::Before) == before
     })
 }
 

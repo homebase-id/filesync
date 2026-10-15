@@ -80,6 +80,8 @@ pub(super) fn restore_parked(
     if let Err(e) = ops::rename_noreplace(&row.path.to_native(root), &to.to_native(root)) {
         return Ok(Err(e));
     }
+    // Synced before its record goes (a rare move): the DB never holds one the disk lost.
+    let _ = ops::sync_dir(&to.parent().unwrap_or_default().to_native(root));
     let refreshed = renamed_row(root, row, to);
     db.write(|s| {
         s.move_local_subtree(&row.path, to)?;

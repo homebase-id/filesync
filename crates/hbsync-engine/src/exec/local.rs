@@ -60,11 +60,11 @@ impl Executor<'_> {
         }
         let target = self.target_path(parent, name)?;
         let abs = self.abs(&target);
+        let (mirror, synced_before) = self
+            .db
+            .read(|s| Ok((s.get_mirror(node)?, s.get_base(node)?.is_some())))?;
         let created_ms = if ops::CAN_SET_CREATED {
-            self.db
-                .read(|s| s.get_mirror(node))?
-                .as_ref()
-                .and_then(MirrorRow::created_ms)
+            mirror.as_ref().and_then(MirrorRow::created_ms)
         } else {
             None
         };
@@ -76,31 +76,17 @@ impl Executor<'_> {
             if !self.free_target(&target, None)? {
                 return Ok(Outcome::Retry("name taken".into()));
             }
-            self.filling(&target)?;
             // Write-ahead for a folder this device synced before: with the commit lost, the
             // scan would find it as a new folder, which adoption doesn't pair with a node that
             // has a base (`recover_placements` does, by this record).
-            let record = self.db.read(|s| {
-                if s.get_base(node)?.is_none() {
-                    return Ok(None);
-                }
-                Ok(s.get_mirror(node)?.and_then(|m| {
-                    Some(Placing {
-                        base: BaseRow {
-                            node,
-                            state: m.state()?,
-                            remote: m.remote_ref(),
-                            content_state: ContentState::Local,
-                            local_name: None,
-                            local_hash: None,
-                        },
-                        target: target.clone(),
-                    })
-                }))
-            })?;
-            if let Some(record) = record {
-                self.write_ahead(|s| s.put_placing(&record))?;
+            match mirror
+                .filter(|_| synced_before)
+                .and_then(|m| Placing::of(&m, target.clone()))
+            {
+                Some(record) => self.write_ahead(|s| s.put_placing(&record))?,
+                None => self.filling(&target)?,
             }
+            self.changed_entry(&target);
             if let Err(e) = fs::create_dir(&abs) {
                 return Ok(io_outcome(e));
             }
@@ -314,25 +300,24 @@ impl Executor<'_> {
                 }
             }
         };
-        let detached = self.finish(&[], |s| {
-            let below = s.local_subtree(&row.path)?;
-            s.rekey_local(node, new_node)?;
-            // The old node isn't synced here any more; a base left behind would read as a
-            // local delete once it is back in view.
-            s.delete_base(node)?;
-            s.mark_dirty(node)?;
-            s.mark_dirty(new_node)?;
-            below
-                .iter()
-                .filter(|r| r.node != node)
-                .try_for_each(|r| s.mark_dirty(r.node))
-        });
-        // The new id goes out with the item in this run: durable first (a power cut must not
+        // The new id goes out with the item in this run: durable at once (a power cut must not
         // make the next plan pick another).
-        if detached.is_ok() {
-            self.flush_db()?;
-        }
-        detached
+        self.durably(|db| {
+            db.write_durable(|s| {
+                let below = s.local_subtree(&row.path)?;
+                s.rekey_local(node, new_node)?;
+                // The old node isn't synced here any more; a base left behind would read as a
+                // local delete once it is back in view.
+                s.delete_base(node)?;
+                s.mark_dirty(node)?;
+                s.mark_dirty(new_node)?;
+                below
+                    .iter()
+                    .filter(|r| r.node != node)
+                    .try_for_each(|r| s.mark_dirty(r.node))
+            })
+        })?;
+        Ok(Outcome::Settled)
     }
 
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).

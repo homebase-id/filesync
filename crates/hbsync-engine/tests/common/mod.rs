@@ -73,13 +73,14 @@ pub enum Kept {
     Durable(Option<usize>),
 }
 
-/// Syncs `c` until it crashes at a commit `when` picks (just before one: that operation's DB
-/// changes are lost, what it did on disk or on the drive stays), the DB keeping what `kept`
-/// says, then starts it again. Returns whether it crashed.
+/// Syncs `c` until it crashes where `when` says, given the moment and the commit's number in
+/// the sync (just before a commit: that operation's DB changes are lost, what it did on disk or
+/// on the drive stays), the DB keeping what `kept` says, then starts it again. Returns whether
+/// it crashed.
 pub fn crash(
     c: &mut Client,
     kept: Kept,
-    when: impl Fn(Commit) -> bool + Send + Sync + 'static,
+    when: impl Fn(Commit, usize) -> bool + Send + Sync + 'static,
 ) -> Res<bool> {
     let power_cut = kept != Kept::All;
     let db = c.db_path();
@@ -99,13 +100,14 @@ pub fn crash(
     }
     let commits = std::sync::atomic::AtomicUsize::new(0);
     let hook = Hook(Arc::new(move |at| {
-        if when(at) {
+        let n = commits.load(std::sync::atomic::Ordering::SeqCst);
+        if when(at, n) {
             std::panic::panic_any(Crash);
         }
         if at == Commit::Before {
             return;
         }
-        let n = commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if power_cut && (at == Commit::Durable || kept == Kept::Durable(Some(n))) {
             keep();
         }

@@ -218,11 +218,14 @@ pub struct Executor<'a> {
     /// there: before that, they are made durable ([`Executor::filling`]).
     emptied_places: HashSet<String>,
     /// Folders whose entries this run changed and hasn't synced: synced before the DB records
-    /// the change durably ([`Executor::flush_db`]), so it can't hold one the disk lost.
+    /// the change durably ([`Executor::durably`]), so it can't hold one the disk lost.
     unsynced_dirs: HashSet<PathBuf>,
+    /// The ids the scan gave new items are durable: before anything goes to the drive, they
+    /// are (a power cut must not make the scan give others to what went out).
+    ids_durable: bool,
 }
 
-/// A place on disk as [`Executor::emptied`] knows it (any case).
+/// A place on disk as [`Executor::emptied_places`] knows it (any case).
 fn place_key(path: &RelPath) -> String {
     name_key(path.as_str())
 }
@@ -351,6 +354,7 @@ impl<'a> Executor<'a> {
             full: false,
             emptied_places: HashSet::new(),
             unsynced_dirs: HashSet::new(),
+            ids_durable: false,
         }
     }
 
@@ -394,9 +398,14 @@ impl<'a> Executor<'a> {
 
     /// Runs a plan's operations, in order.
     pub fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
-        // What the plan was made from is durable before anything acts on it: the ids the scan
-        // gave new items go out with them (a power cut must not make the scan give others).
-        self.flush_db()?;
+        let ran = self.run_ops(ops);
+        // Before the sync's closing flush, however the run ended.
+        self.sync_dirs();
+        ran?;
+        Ok(self.report)
+    }
+
+    fn run_ops(&mut self, ops: Vec<Op>) -> Result<(), StateError> {
         self.forgetting = ops
             .iter()
             .filter(|op| matches!(op, Op::Forget { .. }))
@@ -483,9 +492,7 @@ impl<'a> Executor<'a> {
                 return Err(StateError::Conflict("crash point reached".into()));
             }
         }
-        // Before the sync's closing flush.
-        self.sync_dirs();
-        Ok(self.report)
+        Ok(())
     }
 
     /// Where `op` moves its node on the drive, if it moves it to another folder: that folder
@@ -731,6 +738,8 @@ impl<'a> Executor<'a> {
         // by its record (`recover_placements`).
         if !records.is_empty() {
             self.write_ahead(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
+        } else if !self.ids_durable {
+            self.flush_db()?;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -896,22 +905,34 @@ impl<'a> Executor<'a> {
         &mut self,
         f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
     ) -> Result<(), StateError> {
-        self.sync_dirs();
-        self.db.write_durable(f)?;
-        self.emptied_places.clear();
-        Ok(())
+        self.durably(|db| db.write_durable(f))
     }
 
-    /// Makes what this run did so far durable: the folders it changed, then the DB.
+    /// Makes what this run did so far durable.
     fn flush_db(&mut self) -> Result<(), StateError> {
+        self.durably(StateDb::flush)
+    }
+
+    /// Runs `commit`, a durable commit, after syncing the folders this run changed (so the DB
+    /// never holds a change the disk lost): every place emptied before is durable then.
+    fn durably(
+        &mut self,
+        commit: impl FnOnce(&mut StateDb) -> Result<(), StateError>,
+    ) -> Result<(), StateError> {
         self.sync_dirs();
-        self.db.flush()?;
+        commit(self.db)?;
         self.emptied_places.clear();
+        self.ids_durable = true;
         Ok(())
     }
 
-    /// Syncs the folders this run changed (best effort: one that is gone needs none).
+    /// Syncs the folders this run changed (best effort: one that is gone needs none). Many at
+    /// once (a mass delete into the trash) in one call where the system has one.
     fn sync_dirs(&mut self) {
+        const MANY: usize = 32;
+        if self.unsynced_dirs.len() > MANY && ops::sync_volume(&self.cfg.root).unwrap_or(false) {
+            self.unsynced_dirs.clear();
+        }
         for dir in self.unsynced_dirs.drain() {
             let _ = ops::sync_dir(&dir);
         }
@@ -919,7 +940,7 @@ impl<'a> Executor<'a> {
 
     /// The entry of `path` on disk was just changed: its folder is synced before the next
     /// durable commit.
-    fn changed_entry(&mut self, path: &RelPath) {
+    pub(super) fn changed_entry(&mut self, path: &RelPath) {
         let parent = path.parent().unwrap_or_default();
         let dir = self.abs(&parent);
         self.unsynced_dirs.insert(dir);
