@@ -221,18 +221,15 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     let Some(top) = s.removed_by_node(node)? else {
         return Ok(None);
     };
-    // The folders above, as far as they are in Recently deleted.
-    let mut chain = Vec::new();
-    let mut at = top.row.parent;
-    while !at.is_root() && chain.len() < 256 {
-        match s.removed_by_node(at)? {
-            Some(folder) => {
-                at = folder.row.parent;
-                chain.push(folder);
-            }
-            None => break, // in the tree, or deleted for good (then the top it is)
-        }
-    }
+    // The folders above, as far as they are in Recently deleted (then in the tree, or deleted
+    // for good: the top it is).
+    let mut chain = crate::walk::up::<_, StateError>(top.row.parent, |at| {
+        Ok(s.removed_by_node(at)?.map(|f| {
+            let parent = f.row.parent;
+            (f, parent)
+        }))
+    })?
+    .items();
     chain.reverse();
     // Then the node and what was deleted with it, each after its folder.
     let rows: Vec<RemovedRow> = chain.into_iter().chain(group(s, top)?).collect();

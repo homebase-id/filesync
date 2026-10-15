@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, TransactionBehavior};
 
-pub use store::{BaseRow, DirtyCursor, LocalRow, MirrorFile, MirrorRow, RemovedRow, Store};
+pub use store::{
+    BaseRow, DirtyCursor, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, RemovedRow, Store,
+};
 
 /// The state DB key of the remote change-feed cursor.
 pub const REMOTE_CURSOR_KEY: &str = "remote.cursor";

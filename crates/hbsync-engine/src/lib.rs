@@ -13,6 +13,7 @@ pub mod scope;
 pub mod transfer;
 pub mod tree;
 pub mod view;
+pub mod walk;
 
 pub use engine::{Engine, EngineConfig, EngineError, StartupReport, SyncReport};
 pub use reconcile::{
