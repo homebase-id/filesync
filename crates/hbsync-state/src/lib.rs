@@ -9,11 +9,28 @@
 //!   - **local**: what the last observation saw on disk, as a tree of (parent, name) rows.
 //!   - **dirty**: nodes whose local or remote side changed and still need reconciling. Written
 //!     in the same transaction as the change, so a crash never loses one.
-//!   - **parked**, **forks**: write-ahead records of the executor's temporary renames.
+//!   - **parked**, **forks**, **placing**: write-ahead records of the executor's temporary
+//!     renames, conflict copies and downloads.
 //!   - **folder_kv**: the folder's cursors and settings; **kv** has the account's.
 //!
 //! Every access runs inside a transaction ([`StateDb::read`], [`StateDb::write`]); a write
 //! closure that returns an error rolls everything back.
+//!
+//! **Durability.** A commit reaches the disk soon, not at once: an OS crash or a power cut can
+//! lose the last ones, in order, never one in the middle. A durable commit
+//! ([`StateDb::write_durable`], [`StateDb::flush`]) is on the disk when it returns, with every
+//! commit before it. What the client does on disk is ordered against that here, for every
+//! connection of the process to the DB file:
+//! - the folders whose entries changed ([`StateDb::changed`], [`StateDb::emptied`]) are synced
+//!   before any commit is made durable, so the DB never durably holds a change the disk lost;
+//! - a place emptied since the last durable commit is made durable before something else is
+//!   put there ([`StateDb::filling`]), so a power cut can't leave the DB holding the old item
+//!   where the new one is;
+//! - SQLite checkpoints (which put every commit on the disk) only right after a durable commit.
+//!
+//! Losing the commits since the last durable one is then like a crash just after it, with what
+//! was done on disk since still there: the executor's write-ahead records and the scan's rules
+//! (sync semantics §8a) take it from there.
 
 mod codec;
 mod coords;
@@ -21,7 +38,7 @@ pub mod keys;
 mod migrations;
 mod store;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -79,9 +96,12 @@ pub struct StateDb {
     /// `None` in memory.
     path: Option<PathBuf>,
     /// Shared by every connection of this process to the same file: writes take turns here
-    /// instead of in SQLite's busy wait (which stays for other processes). It holds whether a
-    /// commit since the last durable one may not be on the disk yet.
-    gate: Arc<Mutex<bool>>,
+    /// instead of in SQLite's busy wait (which stays for other processes).
+    gate: Arc<Mutex<Gate>>,
+    /// Places on disk emptied through this connection since its last durable commit, by
+    /// [`place_key`]. Its own: another connection's durable commit may come before this one's
+    /// commit that records the emptying.
+    emptied: HashSet<String>,
     /// The folders writes through this connection marked a node dirty in
     /// ([`StateDb::take_touched`]).
     touched: std::collections::BTreeSet<i64>,
@@ -94,15 +114,75 @@ fn file_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// What a DB file's next durable commit waits for (see the crate's docs on durability).
+#[derive(Debug, Default)]
+struct Gate {
+    /// A commit since the last durable one may not be on the disk yet.
+    unsynced: bool,
+    /// Commits since the last checkpoint.
+    commits: u32,
+    /// Folders whose entries changed since the last durable commit.
+    dirs: HashSet<PathBuf>,
+}
+
+impl Gate {
+    fn sync_dirs(&mut self) {
+        if !self.dirs.is_empty() {
+            hbsync_platform::ops::sync_dirs(self.dirs.drain());
+        }
+    }
+}
+
+/// A place on disk as [`StateDb::emptied`] knows it (any case).
+fn place_key(path: &Path) -> String {
+    hbsync_platform::name::name_key(&path.to_string_lossy())
+}
+
+/// The folder holding `path`.
+fn folder_of(path: &Path) -> PathBuf {
+    path.parent().unwrap_or(path).to_path_buf()
+}
+
+/// Copies the WAL into the DB file, which puts every commit in it on the disk: only while none
+/// is waiting for a durable commit (`gate` is held, and not unsynced).
+fn checkpoint(conn: &Connection, gate: &mut Gate) {
+    // Best effort: a reader in the way leaves the rest for the next one.
+    if conn
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
+        .is_ok()
+    {
+        gate.commits = 0;
+    }
+}
+
+/// Commits after which a durable one checkpoints (SQLite's own default is 1000 pages).
+const CHECKPOINT_AFTER: u32 = 1000;
+
 /// The write gate of the DB file `key` ([`file_key`]), one per file in this process.
-fn gate(key: Option<&Path>) -> Arc<Mutex<bool>> {
-    static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<bool>>>>> =
+fn gate(key: Option<&Path>) -> Arc<Mutex<Gate>> {
+    static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<Gate>>>>> =
         LazyLock::new(Default::default);
     let Some(key) = key else {
         return Arc::default();
     };
     let mut gates = GATES.lock().unwrap_or_else(|e| e.into_inner());
     Arc::clone(gates.entry(key.to_path_buf()).or_default())
+}
+
+impl Drop for StateDb {
+    fn drop(&mut self) {
+        // The last connection to the file checkpoints as it closes: the folders changed since
+        // the last durable commit go first. A gate in use has another connection open, so this
+        // one isn't the last.
+        let gate = match self.gate.try_lock() {
+            Ok(gate) => Some(gate),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut gate) = gate {
+            gate.sync_dirs();
+        }
+    }
 }
 
 /// Watching commits, for tests that crash a client at one (feature `testkit`).
@@ -154,7 +234,10 @@ pub mod testkit {
         /// the DB as a power cut leaves it, its last commits lost. Every engine on the DB is to
         /// be started again after it.
         pub fn restore_from(&mut self, copy: &Path) -> Result<()> {
-            let _turn = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+            let mut turn = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+            // What the lost commits did on disk is still there; nothing waits any more.
+            *turn = Gate::default();
+            self.emptied.clear();
             // No cascades while tables are emptied one by one.
             self.conn.pragma_update(None, "foreign_keys", false)?;
             self.conn
@@ -272,14 +355,12 @@ impl StateDb {
         // Start-up runs the local catch-up and the feed on two connections; a long scan
         // transaction must not make the other writer give up.
         conn.busy_timeout(BUSY_TIMEOUT)?;
-        // WAL keeps readers off the writer's back. NORMAL syncs the WAL only at checkpoints:
-        // an OS crash or a power cut can lose the last commits, in order, never one in the middle
-        // and never the DB. A durable commit (`write_durable`, `flush`) syncs every one before
-        // it too; the executor makes one where losing commits would mislead it (sync semantics
-        // §8a, power cuts). A commit costs ~0.03 ms this way, 2 ms (NVMe) to 90 ms (a spinning
-        // disk) with each one synced.
+        // WAL keeps readers off the writer's back. NORMAL syncs the WAL only at checkpoints,
+        // which run only after durable commits (the crate's docs on durability). A commit costs
+        // ~0.03 ms this way, 2 ms (NVMe) to 90 ms (a spinning disk) with each one synced.
         wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "wal_autocheckpoint", 0)?;
         // A sync on macOS stops at the drive's cache unless it is a full one.
         #[cfg(target_os = "macos")]
         conn.pragma_update(None, "fullfsync", true)?;
@@ -293,6 +374,7 @@ impl StateDb {
             folder: FIRST_FOLDER,
             path: path.map(Path::to_path_buf),
             gate: gate(key.as_deref()),
+            emptied: HashSet::new(),
             touched: Default::default(),
             #[cfg(feature = "testkit")]
             hook: testkit::hook(key.as_deref()),
@@ -310,7 +392,8 @@ impl StateDb {
     }
 
     /// Runs `f` in a write transaction, committed only if `f` succeeds. The commit reaches the
-    /// disk soon, not at once: an OS crash or a power cut can lose it ([`StateDb::flush`]).
+    /// disk soon, not at once: an OS crash or a power cut can lose it (the crate's docs on
+    /// durability).
     pub fn write<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
         self.commit(false, f)
     }
@@ -320,18 +403,54 @@ impl StateDb {
         self.commit(true, f)
     }
 
-    /// Puts every commit so far on the disk (nothing to do when they are).
+    /// Puts every commit so far on the disk (nothing to do when they are), and into the DB
+    /// file.
     pub fn flush(&mut self) -> Result<()> {
-        if !*self.gate.lock().unwrap_or_else(|e| e.into_inner()) {
-            return Ok(());
+        if self.turn().unsynced {
+            // A commit syncs only when it writes something.
+            self.write_durable(|s| s.count_flush())?;
         }
-        // A commit syncs only when it writes something.
-        self.write_durable(|s| s.count_flush())
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if !gate.unsynced {
+            self.emptied.clear();
+            if gate.commits > 0 {
+                checkpoint(&self.conn, &mut gate);
+            }
+        }
+        Ok(())
+    }
+
+    /// The item at `path` on disk just left it (moved away or trashed); the commit recording
+    /// that is to come through this connection. See [`StateDb::filling`].
+    pub fn emptied(&mut self, path: &Path) {
+        self.emptied.insert(place_key(path));
+        self.changed(path);
+    }
+
+    /// An entry at `path` on disk was just made, replaced or moved there: its folder is synced
+    /// before any commit is made durable.
+    pub fn changed(&self, path: &Path) {
+        self.turn().dirs.insert(folder_of(path));
+    }
+
+    /// Before something is put at `path` on disk: if that place was emptied through this
+    /// connection since its last durable commit, every commit is made durable first. Call
+    /// [`StateDb::changed`] once it is there.
+    pub fn filling(&mut self, path: &Path) -> Result<()> {
+        if self.emptied.contains(&place_key(path)) {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn turn(&self) -> std::sync::MutexGuard<'_, Gate> {
+        self.gate.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn commit<T>(&mut self, durable: bool, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        let mut unsynced = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        let mut gate = self.gate.lock().unwrap_or_else(|e| e.into_inner());
         if durable {
+            gate.sync_dirs();
             self.conn.pragma_update(None, "synchronous", "FULL")?;
         }
         // A commit that writes nothing syncs nothing.
@@ -356,7 +475,14 @@ impl StateDb {
         }
         let (out, touched) = committed?;
         if self.conn.total_changes() != changes {
-            *unsynced = !durable;
+            gate.unsynced = !durable;
+            gate.commits += 1;
+        }
+        if !gate.unsynced {
+            self.emptied.clear();
+            if gate.commits >= CHECKPOINT_AFTER {
+                checkpoint(&self.conn, &mut gate);
+            }
         }
         #[cfg(feature = "testkit")]
         if let Some(hook) = &self.hook {
@@ -379,5 +505,71 @@ impl StateDb {
     /// The schema version in use.
     pub fn schema_version(&self) -> Result<u32> {
         migrations::user_version(&self.conn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flushes(db: &mut StateDb) -> Result<Option<String>> {
+        db.read(|s| s.account_kv(keys::FLUSHES))
+    }
+
+    fn write(db: &mut StateDb, value: &str) -> Result<()> {
+        db.write(|s| s.set_kv(keys::FILTER, value))
+    }
+
+    /// A place emptied since the last durable commit is made durable before something is put
+    /// there; one that wasn't, or was made durable since, isn't.
+    #[test]
+    fn filling_an_emptied_place_makes_the_commits_durable_first() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| StateError::Conflict(e.to_string()))?;
+        let path = dir.path().join("state.db");
+        let (mut a, mut b) = (StateDb::open(&path)?, StateDb::open(&path)?);
+        let (place, other) = (dir.path().join("Place"), dir.path().join("other"));
+        a.emptied(&place);
+        write(&mut a, "1")?;
+        a.filling(&other)?;
+        assert_eq!(flushes(&mut a)?, None);
+        // Any case: the same place on a volume that ignores it.
+        a.filling(&dir.path().join("place"))?;
+        assert_eq!(flushes(&mut a)?.as_deref(), Some("1"));
+        a.filling(&place)?;
+        assert_eq!(flushes(&mut a)?.as_deref(), Some("1"));
+
+        // Another connection's durable commit can't vouch for a commit still to come here.
+        a.emptied(&place);
+        b.write_durable(|s| s.set_kv(keys::SCOPE, "2"))?;
+        write(&mut a, "3")?;
+        a.filling(&place)?;
+        assert_eq!(flushes(&mut a)?.as_deref(), Some("2"));
+        Ok(())
+    }
+
+    /// Commits reach the DB file only by a checkpoint right after a durable one: SQLite's own
+    /// would put commits on the disk before the folders changed are.
+    #[test]
+    fn only_a_flush_or_many_commits_with_a_durable_one_checkpoint() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| StateError::Conflict(e.to_string()))?;
+        let path = dir.path().join("state.db");
+        let mut db = StateDb::open(&path)?;
+        db.flush()?;
+        let len = || std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let before = len();
+        for i in 0..2 * CHECKPOINT_AFTER {
+            write(&mut db, &format!("{i:0>4000}"))?;
+        }
+        assert_eq!(len(), before);
+        db.flush()?;
+        assert!(len() > before);
+        let before = len();
+        for i in 0..CHECKPOINT_AFTER {
+            db.write(|s| s.set_kv(keys::SCOPE, &format!("{i:0>4000}")))?;
+        }
+        assert_eq!(len(), before);
+        db.write_durable(|s| s.set_kv(keys::SCOPE, "done"))?;
+        assert!(len() > before);
+        Ok(())
     }
 }

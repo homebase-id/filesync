@@ -297,7 +297,7 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                self.filling(target)?;
+                self.db.filling(&self.abs(target))?;
                 match self.move_to_trash(&row.path, node) {
                     Ok(()) => done.persist_new(&self.abs(target), created_ms),
                     Err(e) => {
@@ -311,11 +311,11 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
-                self.filling(target)?;
+                self.db.filling(&self.abs(target))?;
                 done.persist_new(&self.abs(target), created_ms)
             }
         };
-        self.changed_entry(target);
+        self.db.changed(&self.abs(target));
         let meta = match placed {
             Ok(m) => m,
             Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, target)),

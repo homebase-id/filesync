@@ -4,6 +4,20 @@ use super::*;
 use crate::adopt;
 use hbsync_types::NodeState;
 
+/// Puts right what a crash or a power cut left behind, from the executor's write-ahead records
+/// and its temporary names, once the scan has seen the disk and before planning: conflict
+/// copies half made ([`recover_forks`]), parked items ([`unpark`]), temporary files no
+/// download can use ([`sweep_tmp`]), downloads and folders placed but not recorded
+/// ([`recover_placements`]). In that order: a completed fork drops its parking record, and a
+/// placement is looked for where every item has its own name again.
+pub fn recover(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), StateError> {
+    recover_forks(db, &cfg.root)?;
+    unpark(db, cfg)?;
+    sweep_tmp(db, &cfg.root)?;
+    recover_placements(db, &cfg.root, cfg.os)?;
+    Ok(())
+}
+
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
 pub(super) fn complete_fork(
     s: &Store<'_>,
@@ -22,7 +36,7 @@ pub(super) fn complete_fork(
 /// the scan has followed the renamed file (same node, now under the conflict-copy name, in
 /// whatever folder it is now), and completing hands that row to the copy's node, so the plan
 /// never reads the fork as the user renaming the original.
-pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
     let mut completed = 0;
     for (node, new_node, copy_name) in db.read(|s| s.all_forks())? {
         let Some(row) = db.read(|s| s.local_by_node(node))? else {
@@ -55,7 +69,11 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
 /// commit wrote. Later changes on the drive are then plain
 /// changes against that base, whenever the feed brings them. Every record goes: the next
 /// batch writes its own.
-pub fn recover_placements(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError> {
+pub(super) fn recover_placements(
+    db: &mut StateDb,
+    root: &Path,
+    os: Os,
+) -> Result<usize, StateError> {
     let found = db.read(|s| {
         let mut found = Vec::new();
         for p in s.all_placing()? {
@@ -132,7 +150,7 @@ pub(super) fn download_key(node: NodeId, expected: &hbsync_types::ContentHash) -
 /// the current remote content of a node that still needs syncing (interrupted downloads of
 /// content since replaced, files that were placed by other means, leftovers of other
 /// versions). Run before each plan, while no transfer is running.
-pub fn sweep_tmp(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+pub(super) fn sweep_tmp(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
     let Ok(entries) = fs::read_dir(layout::tmp_dir(root)) else {
         return Ok(0);
     };

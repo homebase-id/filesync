@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::meta;
 
@@ -62,6 +62,34 @@ pub fn sync_volume(path: &Path) -> io::Result<bool> {
     {
         let _ = path;
         Ok(false)
+    }
+}
+
+/// Syncs each of `dirs` (best effort: one that is gone needs none). Many on one volume (a mass
+/// delete into the trash) in one call where the system has one ([`sync_volume`]).
+pub fn sync_dirs(dirs: impl IntoIterator<Item = PathBuf>) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        const MANY: usize = 32;
+        let mut volumes: std::collections::HashMap<u64, Vec<PathBuf>> = Default::default();
+        for dir in dirs {
+            if let Ok(meta) = fs::metadata(&dir) {
+                volumes.entry(meta.dev()).or_default().push(dir);
+            }
+        }
+        for dirs in volumes.into_values() {
+            if dirs.len() > MANY && sync_volume(&dirs[0]).unwrap_or(false) {
+                continue;
+            }
+            for dir in &dirs {
+                let _ = sync_dir(dir);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    for dir in dirs {
+        let _ = sync_dir(&dir);
     }
 }
 
