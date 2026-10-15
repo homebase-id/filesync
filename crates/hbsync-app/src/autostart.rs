@@ -46,7 +46,13 @@ pub fn passed_env() -> Vec<(String, String)> {
         "XDG_STATE_HOME",
     ]
     .into_iter()
-    .filter_map(|k| Some((k.to_owned(), std::env::var(k).ok()?)))
+    // Empty is unset ([`crate::Paths`]).
+    .filter_map(|k| {
+        Some((
+            k.to_owned(),
+            std::env::var(k).ok().filter(|v| !v.is_empty())?,
+        ))
+    })
     .collect()
 }
 

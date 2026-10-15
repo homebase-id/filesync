@@ -49,6 +49,10 @@ libc = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The secret service's, already: systemd's scopes (`unit`).
+zbus = "5.19"
+
 [dev-dependencies]
 tempfile.workspace = true
 

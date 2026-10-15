@@ -305,13 +305,14 @@ On Linux the tray also lists itself among the desktop's applications each time i
 `~/.local/share/icons/hicolor/256x256/apps/homebase-filesync.png`, rewritten only when they
 changed; an autostart entry is brought up to date with it. Started from there or at logon, the
 session gives it a systemd unit of its own (System Monitor shows Homebase Filesync, the daemon
-below it). Started from a terminal on a desktop, the tray starts again in a scope of the app's
-(`systemd-run --user --scope`, which runs it with this environment; `app-id.homebase.filesync-
-<random>.scope`) and the first process ends; the daemon a terminal starts (`hbsync setup`,
-`start`) runs in one from the start. The app is listed as itself, not as the terminal, and
-closing the terminal ends neither. Not away from a desktop (no display: over SSH, a scope
-would end with the user's service manager at logout), with `HBSYNC_HOME` set, or without a
-systemd user session: they run where they were started. The launcher stays after Log out, as
+below it). Started from a terminal on a desktop, the tray, and the daemon a terminal starts
+(`hbsync setup`, `start`), move into a scope of the app's as the desktop's launchers do: the
+user's service manager makes `app-id.homebase.filesync-<random>.scope` for the running process
+(`StartTransientUnit` over D-Bus). The app is then listed as itself, not as the terminal. A
+tray started that way still ends with its terminal (`setsid` keeps it). Not away from a desktop
+(`XDG_SESSION_TYPE` neither `wayland` nor `x11`: over SSH a scope would end with the user's
+service manager at logout), nor with `HBSYNC_HOME` set; a move that fails leaves the process
+where it was. The launcher stays after Log out, as
 the way to log in again. Elsewhere the installer will do this (not built yet).
 
 `hbsync setup` turns autostart on, `logout` and `unlink` turn it off, `hbsync autostart on|off`

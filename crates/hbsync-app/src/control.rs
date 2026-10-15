@@ -194,9 +194,6 @@ pub fn start(paths: &Paths) -> Result<()> {
     let exe = autostart::daemon_exe()?;
     #[cfg(windows)]
     keep_std_handles_from_children();
-    #[cfg(target_os = "linux")]
-    let mut process = crate::unit::command(&exe).unwrap_or_else(|| Command::new(&exe));
-    #[cfg(not(target_os = "linux"))]
     let mut process = Command::new(&exe);
     process
         .stdin(Stdio::null())
@@ -212,6 +209,8 @@ pub fn start(paths: &Paths) -> Result<()> {
     let child = process
         .spawn()
         .map_err(|e| format!("can't start {}: {e}", exe.display()))?;
+    #[cfg(target_os = "linux")]
+    crate::unit::move_to_scope(child.id());
     wait_until_running(paths, Some(child))
 }
 
