@@ -223,6 +223,8 @@ struct Client {
     extra: HashMap<NodeId, BaseExtra>,
     /// Pending operations with their retry count.
     plan: VecDeque<(Op, u8)>,
+    /// What the pending plan removed to Recently deleted so far.
+    removed_by_plan: BTreeSet<NodeId>,
     /// Nodes parked under a temporary name, with their original (parent, name).
     parked: HashMap<NodeId, (NodeId, String)>,
     /// The local tree when the pending plan was made (for the fingerprint guard).
@@ -250,6 +252,7 @@ impl Client {
             base: Tree::new(),
             extra: HashMap::new(),
             plan: VecDeque::new(),
+            removed_by_plan: BTreeSet::new(),
             parked: HashMap::new(),
             planned_local: Tree::new(),
             planned_remote: Tree::new(),
@@ -301,6 +304,9 @@ pub struct Sim {
     role_folder_deleted_with: Vec<NodeId>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
+    /// The first folder a plan removed after something in it (node schema, Recently deleted:
+    /// what a folder's delete takes along is removed no earlier than the folder).
+    removed_after_contents: Option<String>,
     /// Clients that are two folders of one computer (the main folder, a role folder).
     computers: Vec<(usize, usize)>,
 }
@@ -335,6 +341,7 @@ impl Sim {
             deleted: BTreeSet::new(),
             role_folder_deleted_with: Vec::new(),
             scope_breach: None,
+            removed_after_contents: None,
             computers: Vec::new(),
         }
     }
@@ -455,7 +462,8 @@ impl Sim {
             .copied()
             .filter(|n| self.server.in_role_folder(*n))
             .collect();
-        for node in below.iter().copied().chain([docs]) {
+        // The folder first, then what is in it (node schema, Recently deleted).
+        for node in [docs].into_iter().chain(below.iter().copied()) {
             if let Some(mut n) = self.server.live.remove(&node) {
                 n.remote.version = VersionTag(self.server.uuid());
                 self.server.removed.insert(node, n);
@@ -862,6 +870,19 @@ impl Sim {
             .filter(|(id, _)| !client.coords.hides(**id))
             .map(|(id, n)| (*id, n.remote))
             .collect();
+        // The folders in Recently deleted that live nodes are in, as the engine's view has them.
+        input.removed = remote
+            .ids()
+            .filter_map(|n| remote.get(n).map(|s| s.parent))
+            .filter(|p| {
+                !p.is_root()
+                    && !remote.contains(*p)
+                    && self
+                        .server
+                        .removed
+                        .contains_key(&client.coords.to_drive(*p))
+            })
+            .collect();
         input.dirty = client
             .base
             .ids()
@@ -938,6 +959,7 @@ impl Sim {
         client.confirmed = confirmed.intersection(&deleting).copied().collect();
         client.held = plan.held.iter().map(Op::node).collect();
         client.plan = plan.ops.into_iter().map(|op| (op, 0)).collect();
+        client.removed_by_plan.clear();
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
     }
@@ -1358,6 +1380,20 @@ impl Sim {
                     if let Some(mut n) = self.server.live.remove(&node) {
                         n.remote.version = VersionTag(self.server.uuid());
                         self.server.removed.insert(node, n);
+                        let client = &mut self.clients[c];
+                        let after = client.removed_by_plan.iter().find(|r| {
+                            self.server
+                                .removed
+                                .get(r)
+                                .is_some_and(|n| n.state.parent == node)
+                        });
+                        if let Some(r) = after
+                            && self.removed_after_contents.is_none()
+                        {
+                            self.removed_after_contents =
+                                Some(format!("{} removed {node} after {r} in it", client.name));
+                        }
+                        client.removed_by_plan.insert(node);
                     }
                     self.clients[c].planned_remote.remove(node);
                     // Its tags go with it: a tag change loses to a delete (§11), and one brought
@@ -1713,6 +1749,9 @@ impl Sim {
         if !broken.is_empty() {
             return Err(format!("server: {broken:?}"));
         }
+        if let Some(what) = &self.removed_after_contents {
+            return Err(format!("a folder was removed after what is in it: {what}"));
+        }
         // No folder wrote outside its part of the drive.
         if let Some(op) = &self.scope_breach {
             return Err(format!(
@@ -1927,14 +1966,15 @@ fn tag_names(tags: &Tags) -> Vec<String> {
 }
 
 /// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
-/// from, plus its own writes since), as the executor checks them.
+/// from, plus its own writes since) and its plan, as the executor checks them.
 fn ready(client: &Client, op: &Op) -> bool {
     match op.requires() {
         None => true,
         Some(Requirement::RemoteFolder(folder)) => client.planned_remote.contains(folder),
-        Some(Requirement::NoRemoteChildren(node)) => {
-            client.planned_remote.children(node).next().is_none()
-        }
+        Some(Requirement::FolderFirst(folder)) => !client
+            .plan
+            .iter()
+            .any(|(o, _)| matches!(o, Op::RemoteDelete { node, .. } if *node == folder)),
     }
 }
 

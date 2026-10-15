@@ -199,6 +199,8 @@ pub struct Executor<'a> {
     queue: VecDeque<(Op, u8)>,
     /// The nodes with a `Forget` still to run in this run.
     forgetting: HashSet<NodeId>,
+    /// The nodes with a `RemoteDelete` still to run in this run (or to retry).
+    removing: HashSet<NodeId>,
     report: ExecReport,
     urgent: HashSet<NodeId>,
     /// Set when a test's crash point was reached: the run stops.
@@ -278,13 +280,16 @@ impl Batch {
     }
 
     /// Whether `op` must wait until the batch ran: it is about a node in it, or its server-side
-    /// order guard ([`Op::requires`]) waits on one: a folder created in it, or the children a
-    /// folder's delete waits for.
+    /// order guard ([`Op::requires`]) waits on one: a folder created in it, or the removal of
+    /// the folder a removal is in. A folder's removal waits for what the batch puts into the
+    /// folder or takes out of it.
     fn holds_up(&self, op: &Op) -> bool {
         self.nodes.contains(&op.node())
             || match op.requires() {
                 Some(Requirement::RemoteFolder(folder)) => self.created.contains(&folder),
-                Some(Requirement::NoRemoteChildren(folder)) => self.folders.contains(&folder),
+                Some(Requirement::FolderFirst(folder)) => {
+                    self.nodes.contains(&folder) || self.folders.contains(&op.node())
+                }
                 None => false,
             }
     }
@@ -331,6 +336,7 @@ impl<'a> Executor<'a> {
             cfg,
             queue: VecDeque::new(),
             forgetting: HashSet::new(),
+            removing: HashSet::new(),
             report: ExecReport::default(),
             urgent: HashSet::new(),
             crashed: false,
@@ -392,6 +398,11 @@ impl<'a> Executor<'a> {
         self.forgetting = ops
             .iter()
             .filter(|op| matches!(op, Op::Forget { .. }))
+            .map(Op::node)
+            .collect();
+        self.removing = ops
+            .iter()
+            .filter(|op| matches!(op, Op::RemoteDelete { .. }))
             .map(Op::node)
             .collect();
         let visible = ops.iter().filter(|op| activity::kind_of(op).is_some());
@@ -545,9 +556,7 @@ impl<'a> Executor<'a> {
             Some(Requirement::RemoteFolder(folder)) => {
                 self.db.read(|s| s.get_mirror(folder))?.is_some()
             }
-            Some(Requirement::NoRemoteChildren(node)) => {
-                self.db.read(|s| s.mirror_children(node))?.is_empty()
-            }
+            Some(Requirement::FolderFirst(folder)) => !self.removing.contains(&folder),
         };
         if met {
             Ok(())
@@ -570,10 +579,12 @@ impl<'a> Executor<'a> {
         ) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
-        if matches!(op, Op::Forget { .. })
-            && !matches!(outcome, Outcome::Retry(_) | Outcome::Backoff(_))
-        {
-            self.forgetting.remove(&op.node());
+        if !matches!(outcome, Outcome::Retry(_) | Outcome::Backoff(_)) {
+            match op {
+                Op::Forget { .. } => self.forgetting.remove(&op.node()),
+                Op::RemoteDelete { .. } => self.removing.remove(&op.node()),
+                _ => false,
+            };
         }
         match outcome {
             Outcome::Done => {
@@ -659,6 +670,7 @@ impl<'a> Executor<'a> {
             self.queue.push_back((op, attempts + 1));
         } else {
             self.forgetting.remove(&op.node());
+            self.removing.remove(&op.node());
             self.report.failed.push((op, why));
         }
     }
@@ -967,22 +979,6 @@ pub use settle::settle;
 pub(crate) use settle::update_meta;
 use settle::{recorded_name, restored_tags, write_tags, written_row};
 
-/// The node whose delete takes `node` along: its topmost synced ancestor that is gone here
-/// too (a folder deleted with everything in it), or `node` itself.
-fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
-    let Some(base) = s.get_base(node)? else {
-        return Ok(node);
-    };
-    // Up through the folders that went too: synced, and gone here.
-    let above = crate::walk::up::<_, StateError>(base.state.parent, |at| {
-        if s.local_by_node(at)?.is_some() {
-            return Ok(None);
-        }
-        Ok(s.get_base(at)?.map(|b| (at, b.state.parent)))
-    })?;
-    Ok(above.items.last().copied().unwrap_or(node))
-}
-
 // Every change the executor makes to a folder's entries goes through these two, which keep the
 // order the state DB needs with its durable commits (its docs on durability). Tags and times
 // written on an item aren't ordered: one lost reads as a change of those only.
@@ -1080,41 +1076,4 @@ fn renamed_row(root: &Path, old: &LocalRow, path: &RelPath) -> Option<LocalRow> 
         fingerprint: meta.fingerprint(),
         ..old.clone()
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use hbsync_state::{BaseRow, StateDb};
-    use hbsync_types::{ContentState, NodeState, RemoteFileId, RemoteRef, Uuid, VersionTag};
-
-    use super::*;
-
-    fn base(node: NodeId, parent: NodeId, name: &str) -> BaseRow {
-        BaseRow {
-            node,
-            state: NodeState::folder(parent, name),
-            remote: RemoteRef {
-                file_id: RemoteFileId(Uuid::new_v4()),
-                version: VersionTag(Uuid::new_v4()),
-            },
-            content_state: ContentState::Local,
-            local_name: None,
-            local_hash: None,
-        }
-    }
-
-    /// A cycle of bases, as a remote cycle leaves them, ends the walk instead of hanging it.
-    #[test]
-    fn the_removal_root_of_a_cycle_of_bases_is_found() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
-        db.write(|s| {
-            s.put_base(&base(a, b, "a"))?;
-            s.put_base(&base(b, a, "b"))?;
-            s.put_base(&base(c, a, "c"))
-        })?;
-        let root = db.read(|s| removal_root(s, c))?;
-        assert!(root == a || root == b, "{root:?}");
-        Ok(())
-    }
 }

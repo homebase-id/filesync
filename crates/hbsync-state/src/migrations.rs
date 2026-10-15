@@ -221,6 +221,12 @@ const MIGRATIONS: &[&str] = &[
     // as the feed gave it; NULL until known.
     "ALTER TABLE remote ADD COLUMN seal BLOB;
     ALTER TABLE removed ADD COLUMN seal BLOB;",
+    // 8: what was deleted with what goes by the removal times (node schema, Recently
+    // deleted); only an older writer's `rm` still names a root, NULL otherwise.
+    "DROP INDEX removed_root;
+    ALTER TABLE removed ADD COLUMN rm_root BLOB;
+    UPDATE removed SET rm_root = root;
+    ALTER TABLE removed DROP COLUMN root;",
 ];
 
 /// The version this client makes and reads.
@@ -307,6 +313,32 @@ mod tests {
             conn.query_row("SELECT seal FROM remote WHERE id = 1", [], |r| r.get(0))?;
         assert_eq!(seal, None);
         conn.execute("UPDATE removed SET seal = x'00'", [])?;
+        Ok(())
+    }
+
+    /// A DB of version 7 keeps the roots its rows had (from `rm`s), as an older writer's.
+    #[test]
+    fn version_7_keeps_its_roots_as_older_writers() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(MIGRATIONS[0])?;
+        conn.execute_batch(MIGRATIONS[1])?;
+        conn.pragma_update(None, "user_version", 7)?;
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at, \
+             root) VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5, x'01')",
+            [],
+        )?;
+        apply(&mut conn)?;
+        assert_eq!(user_version(&conn)?, VERSION);
+        let root: Option<Vec<u8>> =
+            conn.query_row("SELECT rm_root FROM removed", [], |r| r.get(0))?;
+        assert_eq!(root, Some(vec![1]));
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at) \
+             VALUES (x'05', x'06', x'07', x'04', 1, 'e', 6)",
+            [],
+        )?;
         Ok(())
     }
 

@@ -483,24 +483,33 @@ fn tombstone_in_the_feed(b: &Bench) -> Outcome {
     Ok(())
 }
 
-/// `meta` removed to Recently deleted (node schema: `archivalStatus` 2 and `rm`).
+/// `meta` removed to Recently deleted (node schema: `archivalStatus` 2; the time is the
+/// server's).
 pub fn removed(meta: &NodeMeta) -> NodeMeta {
     let mut content = meta.content.clone();
     content.set_removal(Some(Removal {
         at_ms: 1_700_000_000_456,
-        root: meta.node,
+        root: None,
     }));
     with(meta, content)
 }
 
 fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     let (f, w) = b.file("f", b"kept")?;
+    let (g, v) = b.file("g", b"later")?;
     let cursor = b.cursor_now()?;
     let gone = b.update(w, &removed(&f), None)?;
     let header = b.remote.header(w.file_id)?;
     ensure!(
-        header.removal() == removed(&f).content.removal() && header.state().is_none(),
+        header.removal().is_some_and(|r| r.root.is_none()) && header.state().is_none(),
         "not removed: {header:?}"
+    );
+    // The time is the server's, of the write: one removed later is no earlier.
+    b.update(v, &removed(&g), None)?;
+    let (first, then) = (header.removal(), b.remote.header(v.file_id)?.removal());
+    ensure!(
+        first.zip(then).is_some_and(|(f, t)| f.at_ms <= t.at_ms),
+        "removal times out of order: {first:?}, {then:?}"
     );
     ensure!(b.read(w.file_id, None)? == b"kept", "the bytes went");
     // The node id stays taken: a create of it is a retry that landed.

@@ -1142,34 +1142,101 @@ fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     Ok(())
 }
 
+/// A folder's delete removes the folder first, then what is in it (node schema, Recently
+/// deleted). A child whose removal failed follows later; meanwhile another client doesn't bring
+/// the folder back for it (§6.3), and the folder's restore brings both back.
 #[test]
-fn a_folder_is_not_deleted_remotely_while_a_child_delete_failed() -> R {
+fn a_folder_goes_first_and_a_child_that_failed_follows() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
     a.write("d/keep.txt", "k")?;
     a.write("d/other.txt", "o")?;
     a.write("stay.txt", "s")?; // not everything is deleted: no mass-delete hold
     a.sync()?;
+    b.sync()?;
     fs::remove_dir_all(a.root.join("d"))?;
     // The delete of one file keeps failing.
     a.remote.faults().fail_writes_named = Some("keep.txt".into());
     a.sync()?;
-    {
-        let srv = server.lock().map_err(|_| "poisoned")?;
-        let mut names = srv.live_names();
-        names.sort();
-        assert_eq!(
-            names,
-            ["d", "keep.txt", "stay.txt"],
-            "the folder stays while it has a child"
-        );
-    }
-    a.remote.faults().fail_writes_named = None;
-    a.sync()?;
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.live_names(),
-        ["stay.txt"]
+        ["keep.txt", "stay.txt"],
+        "the folder went first"
     );
+    // b sees the delete under way: its copies go, the folder stays deleted.
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = s"]);
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["stay.txt"],
+        "b removed the rest of it"
+    );
+    a.remote.faults().fail_writes_named = None;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["stay.txt = s"]);
+    // Everything was deleted with the folder: its restore brings it all back.
+    let d = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "d")
+        .ok_or("d")?;
+    assert_eq!(d.root, d.node);
+    assert_eq!(a.engine.drive().restore(&[d.node])?, 3);
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(a.read_text("d/keep.txt")?, "k");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// A folder's restore brings back what was deleted with it, not what was deleted from it
+/// before: that stays in Recently deleted, an item of its own.
+#[test]
+fn a_folders_restore_leaves_what_was_deleted_before_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Photos/a.jpg", "a")?;
+    a.write("Photos/b.jpg", "b")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("Photos/a.jpg"))?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    a.sync()?;
+    b.sync()?;
+    let listed = b.recently_deleted(10)?;
+    let item = |path: &str| {
+        listed
+            .iter()
+            .find(|i| i.path == path)
+            .ok_or(format!("{path} not listed"))
+    };
+    let (photos, a_jpg, b_jpg) = (
+        item("Photos")?,
+        item("Photos/a.jpg")?,
+        item("Photos/b.jpg")?,
+    );
+    assert_eq!(a_jpg.root, a_jpg.node, "deleted on its own");
+    assert_eq!(b_jpg.root, photos.node, "deleted with the folder");
+    assert!(a_jpg.removed_at_ms < photos.removed_at_ms);
+    assert!(
+        photos.removed_at_ms <= b_jpg.removed_at_ms,
+        "the folder went first"
+    );
+    assert_eq!(b.engine.drive().restore(&[photos.node])?, 2);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read_text("Photos/b.jpg")?, "b");
+    assert!(a.read_text("Photos/a.jpg").is_err());
+    let left: Vec<String> = a
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert_eq!(left, ["Photos/a.jpg"]);
     Ok(())
 }
 

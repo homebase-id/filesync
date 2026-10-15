@@ -1,12 +1,13 @@
 //! The reconciler: a pure function from (base, local, remote) to a plan of operations.
 //!
 //! Spec: `docs/spec/sync-semantics.md`. Steps:
-//! 1. classify each node's local and remote change against the base (§2);
+//! 1. classify each node's local and remote change against the base (§2), with what a folder's
+//!    removal takes along counted as deleted (§6.3);
 //! 2. merge per node into a target state (§4), forking a conflict copy for edit/edit (§5),
 //!    and the tags three-way on their own (§11);
 //! 3. repair the merged tree: orphans, cycles, duplicate names (§6);
 //! 4. diff the merged tree against each side into operations, ordered so parents exist
-//!    before children and deletes run bottom-up (§8);
+//!    before children, removals on the drive run top-down and deletes here bottom-up (§8);
 //! 5. hold deletes that trip the mass-delete guard (§7).
 //!
 //! Content comparisons stay within one side's representation: local hashes (BLAKE3) are
@@ -83,6 +84,8 @@ struct Reconciler<'a> {
     forks: BTreeMap<NodeId, NodeId>,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
+    /// Remote nodes a folder's removal takes along ([`merge::taken_along`]).
+    taken: HashSet<NodeId>,
     plan: Plan,
 }
 
@@ -97,6 +100,7 @@ impl<'a> Reconciler<'a> {
             origin: HashMap::new(),
             forks: BTreeMap::new(),
             deferred: BTreeSet::new(),
+            taken: merge::taken_along(input),
             plan: Plan::default(),
         }
     }

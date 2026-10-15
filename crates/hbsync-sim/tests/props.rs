@@ -1299,3 +1299,39 @@ fn regression_a_file_put_into_a_deleted_role_folder_stays_its() {
         panic!("{e}");
     }
 }
+
+/// One client removes a folder while the other, which synced a folder made in it, tags that
+/// folder and makes one in it. The removal would take the synced folder along (§6.3), but the
+/// new one keeps it alive: merged after all, it keeps its tag.
+#[test]
+fn regression_a_folder_kept_alive_in_a_removed_one_keeps_its_tag() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        plan(1),
+        step(1),
+        act(1, Delete { node: 0 }),
+        plan(0),
+        step(0),
+        plan(1),
+        act(0, CreateFolder { parent: 2, name: 0 }),
+        plan(0),
+        step(0),
+        act(0, Tag { node: 1, tag: 4 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        step(1),
+        act(
+            0,
+            CreateFolder {
+                parent: 10,
+                name: 0,
+            },
+        ),
+    ];
+    if let Err(e) = run_with(2, Some(1), |sim| sim, &events) {
+        panic!("{e}");
+    }
+}

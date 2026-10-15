@@ -206,6 +206,7 @@ impl Masks {
             local_unhashed,
             dirty,
             remote_complete: input.remote_complete,
+            removed: input.removed.clone(),
         };
         Masks {
             masked,

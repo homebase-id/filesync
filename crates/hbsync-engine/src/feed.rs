@@ -99,11 +99,15 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         return Ok(true);
     };
     // A version the store has already (this device's own write coming back, or a page applied
-    // again) changes nothing but its seal (a file this device created has none yet); the
-    // store marks the nodes that changed dirty where that concerns.
+    // again) changes nothing but its seal (a file this device created has none yet) and a
+    // removal's time (the server's, where this device wrote its own); the store marks the
+    // nodes that changed dirty where that concerns.
     let removal = header.removal();
     if s.has_version(row.remote_ref(), removal.is_some())? {
         s.set_seal(&row, removal.is_some())?;
+        if let Some(removal) = removal {
+            s.set_removed_at(row.file_id, removal.at_ms)?;
+        }
         return Ok(removal.is_none());
     }
     if let Some(removal) = removal {
@@ -251,12 +255,12 @@ mod tests {
                 s.dirty_count()
             })
         };
-        let mut gone = NodeContent::folder("d");
-        gone.set_removal(Some(Removal {
-            at_ms: 9,
-            root: node,
-        }));
-        for (version, content) in [(1, NodeContent::folder("d")), (2, gone)] {
+        let removed_at = |at_ms: i64| {
+            let mut gone = NodeContent::folder("d");
+            gone.set_removal(Some(Removal { at_ms, root: None }));
+            gone
+        };
+        for (version, content) in [(1, NodeContent::folder("d")), (2, removed_at(9))] {
             let h = header(version, content);
             assert_eq!(dirty_after(&mut db, &h)?, 1, "version {version} is news");
             assert_eq!(
@@ -265,6 +269,12 @@ mod tests {
                 "version {version} again isn't"
             );
         }
+        // A removal of this device's own coming back: the server's time replaces its own.
+        assert_eq!(dirty_after(&mut db, &header(2, removed_at(12)))?, 0);
+        let at = db
+            .read(|s| s.removed_by_node(node))?
+            .map(|r| r.removal.at_ms);
+        assert_eq!(at, Some(12));
         Ok(())
     }
 
@@ -288,7 +298,7 @@ mod tests {
         let mut gone = NodeContent::folder("d");
         let removal = Removal {
             at_ms: 9,
-            root: node,
+            root: None,
         };
         gone.set_removal(Some(removal));
         assert!(db.write(|s| apply(s, &live(NodeContent::folder("d"))))?);

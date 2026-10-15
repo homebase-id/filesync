@@ -44,12 +44,13 @@ impl Reconciler<'_> {
             // Remote side.
             let mut remote_ops = false;
             match (&target, remote) {
-                (None, Some(_)) => {
+                (None, Some(now)) => {
                     if let Some(r) = i.remote_refs.get(&node) {
                         deletes.push((
                             depth(&i.remote),
                             Op::RemoteDelete {
                                 node,
+                                parent: now.parent,
                                 file_id: r.file_id,
                                 expected: r.version,
                             },
@@ -210,13 +211,21 @@ impl Reconciler<'_> {
             }
         }
 
-        // Parents before children for creates, all folders before the files; children before
-        // parents for deletes; only the topmost local trash of a subtree is needed. The local
-        // operations come first (in deletes, among those of one depth: a folder's base is
-        // forgotten only after its children's deletes): the executor runs the others together
-        // on its pool, and each local one between them would end a batch.
+        // Parents before children for creates, all folders before the files; the local
+        // operations first: the executor runs the others together on its pool, and each local
+        // one between them would end a batch. Deletes: on the drive first, parents before
+        // children (what a folder's delete takes along is removed no earlier than the folder:
+        // node schema, Recently deleted); then here, children before parents (a folder's base is
+        // forgotten only after its children's deletes, on either side; only the topmost local
+        // trash of a subtree is needed).
         creates.sort_by_key(|(d, op)| (op.is_transfer(), op.pooled(), *d, op.node()));
-        deletes.sort_by_key(|(d, op)| (std::cmp::Reverse(*d), op.pooled(), op.node()));
+        deletes.sort_by_key(|(d, op)| {
+            let depth = *d as i64;
+            match op.pooled() {
+                true => (false, depth, op.node()),
+                false => (true, -depth, op.node()),
+            }
+        });
         moves.sort_by_key(Op::pooled);
         content.sort_by_key(Op::pooled);
         let trashed: HashSet<NodeId> = deletes.iter().filter_map(|(_, op)| op.trashes()).collect();

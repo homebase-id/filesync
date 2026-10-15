@@ -89,6 +89,9 @@ pub struct Input {
     /// drained and parents were looked up). Then a remote node whose parent is unknown
     /// everywhere is a true orphan and is moved to the root instead of waiting forever.
     pub remote_complete: bool,
+    /// The folders in Recently deleted that nodes of `remote` are in: a folder's delete removes
+    /// the folder first, then what is in it (§6.3).
+    pub removed: HashSet<NodeId>,
 }
 
 /// One step for the executor. Locations are (parent node, remote name); the executor turns
@@ -154,8 +157,11 @@ pub enum Op {
         expected: VersionTag,
         tags: Tags,
     },
+    /// Remove to Recently deleted, if the remote is still at `expected`; `parent`: its folder
+    /// on the drive.
     RemoteDelete {
         node: NodeId,
+        parent: NodeId,
         file_id: RemoteFileId,
         expected: VersionTag,
     },
@@ -277,8 +283,8 @@ impl Op {
         }
     }
 
-    /// What the server must already show (in the client's mirror) for this op to run; until
-    /// then it waits (sync-semantics §8a).
+    /// What must have happened on the server (in the client's mirror, or earlier in the plan)
+    /// for this op to run; until then it waits (sync-semantics §8a).
     pub fn requires(&self) -> Option<Requirement> {
         match self {
             Op::RemoteCreate { parent, .. } | Op::RemoteUpdate { parent, .. }
@@ -286,7 +292,7 @@ impl Op {
             {
                 Some(Requirement::RemoteFolder(*parent))
             }
-            Op::RemoteDelete { node, .. } => Some(Requirement::NoRemoteChildren(*node)),
+            Op::RemoteDelete { parent, .. } => Some(Requirement::FolderFirst(*parent)),
             _ => None,
         }
     }
@@ -298,9 +304,9 @@ pub enum Requirement {
     /// The folder exists remotely: nothing is created or moved into a folder whose own create
     /// failed, or other clients would see children pointing at nothing.
     RemoteFolder(NodeId),
-    /// The node has no remote children left: a folder goes only after its contents, so a child
-    /// whose delete failed is never left live under a tombstone.
-    NoRemoteChildren(NodeId),
+    /// The folder's removal, if the plan has one, ran first: what a folder's delete takes along
+    /// is removed no earlier than the folder (node schema, Recently deleted).
+    FolderFirst(NodeId),
 }
 
 /// Which attributes of a node both sides hold once an operation is done. Settling records

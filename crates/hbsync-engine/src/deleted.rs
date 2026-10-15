@@ -35,6 +35,7 @@ pub fn list(s: &Store<'_>, limit: usize) -> Result<Vec<Deleted>, StateError> {
         .chain(Role::ALL.iter().map(|r| r.node()))
         .collect();
     let mut known = HashMap::new();
+    let mut deleted_by = HashMap::new();
     s.list_removed(limit)?
         .into_iter()
         .map(|r| {
@@ -46,11 +47,54 @@ pub fn list(s: &Store<'_>, limit: usize) -> Result<Vec<Deleted>, StateError> {
                 kind: r.row.kind,
                 size: r.row.file.map(|f| f.size),
                 removed_at_ms: r.removal.at_ms,
-                root: r.removal.root,
+                root: deleted_by_item(s, &r, &mut deleted_by)?,
                 folder: folders.get(&top).cloned(),
             })
         })
         .collect()
+}
+
+/// Whether `r` was deleted with `folder`, the folder it is in, in Recently deleted too: removed
+/// no earlier than the folder (a folder's delete removes the folder first). Two removals an
+/// older writer made say it with their `rm`: the same root.
+fn deleted_with(r: &RemovedRow, folder: &RemovedRow) -> bool {
+    match (r.removal.root, folder.removal.root) {
+        (Some(root), Some(folders)) => root == folders,
+        _ => folder.removal.at_ms <= r.removal.at_ms,
+    }
+}
+
+/// The item of Recently deleted whose delete took `r` along: up through the folders it was
+/// deleted with, as far as they go (`r` itself, deleted on its own). Memoized in `known`.
+fn deleted_by_item(
+    s: &Store<'_>,
+    r: &RemovedRow,
+    known: &mut HashMap<NodeId, NodeId>,
+) -> Result<NodeId, StateError> {
+    let mut chain = vec![r.row.node];
+    let mut at = r.clone();
+    let top = loop {
+        if let Some(top) = known.get(&at.row.node) {
+            break *top;
+        }
+        match s.removed_by_node(at.row.parent)? {
+            // Each node once: removed rows may form a cycle (left by a remote one).
+            Some(folder) if deleted_with(&at, &folder) && !chain.contains(&folder.row.node) => {
+                chain.push(folder.row.node);
+                at = folder;
+            }
+            _ => break at.row.node,
+        }
+    };
+    known.extend(chain.into_iter().map(|n| (n, top)));
+    Ok(top)
+}
+
+/// Whether `r` is an item of its own in Recently deleted: not deleted with its folder.
+fn deleted_on_its_own(s: &Store<'_>, r: &RemovedRow) -> Result<bool, StateError> {
+    Ok(!s
+        .removed_by_node(r.row.parent)?
+        .is_some_and(|folder| deleted_with(r, &folder)))
 }
 
 /// The path of folder `at` below the top it is under (one of `tops`, else the drive's root:
@@ -161,21 +205,21 @@ struct RestorePlan {
 }
 
 /// `top` and what its delete took along below it: the removed items in it, level by level,
-/// whose delete is the same (`rm.root`). What was deleted from it before stays out.
+/// deleted with their folder ([`deleted_with`]). What was deleted from it before stays out.
 fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
-    let root = top.removal.root;
     // Each node once: removed rows may form a cycle (left by a remote one).
     let mut seen = HashSet::from([top.row.node]);
     let mut rows = vec![top];
     let mut next = 0;
     while next < rows.len() {
         if rows[next].row.kind == NodeKind::Folder {
-            let below = s.removed_children(rows[next].row.node)?;
-            rows.extend(
-                below
-                    .into_iter()
-                    .filter(|r| r.removal.root == root && seen.insert(r.row.node)),
-            );
+            let folder = &rows[next];
+            let with: Vec<RemovedRow> = s
+                .removed_children(folder.row.node)?
+                .into_iter()
+                .filter(|r| deleted_with(r, folder) && seen.insert(r.row.node))
+                .collect();
+            rows.extend(with);
         }
         next += 1;
     }
@@ -223,12 +267,12 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     Ok(Some(RestorePlan { rows, live, taken }))
 }
 
-/// Deletes for good what was removed before `before_ms` (Unix ms), files before their
+/// Deletes for good the items of Recently deleted removed before `before_ms` (Unix ms), each
+/// with what was deleted with it (a folder's delete goes as a whole), files before their
 /// folders, and empties every folder's trash (`.hbsync/trash`) of the same age. Returns how
 /// many items went.
 pub fn purge(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize, EngineError> {
-    let expired = db.read(|s| s.removed_before(before_ms))?;
-    let gone = delete_for_good(db, remote, &expired)?;
+    let gone = expire(db, remote, before_ms)?;
     for folder in db.read(|s| s.folders())? {
         if folder.path.is_empty() {
             continue;
@@ -261,11 +305,48 @@ pub fn empty(
     remote: &dyn Remote,
     nodes: &[NodeId],
 ) -> Result<usize, EngineError> {
-    let mut rows = db.read(|s| {
+    let tops = db.read(|s| {
         let mut tops = Vec::new();
         for &node in nodes {
             tops.extend(s.removed_by_node(node)?);
         }
+        Ok(tops)
+    })?;
+    delete_groups(db, remote, tops)
+}
+
+/// Deletes for good the items removed until `at_ms` (Unix ms), each with what was deleted with
+/// it: what the user saw when they asked. Returns how many items went.
+pub fn empty_until(
+    db: &mut StateDb,
+    remote: &dyn Remote,
+    at_ms: i64,
+) -> Result<usize, EngineError> {
+    expire(db, remote, at_ms.saturating_add(1))
+}
+
+/// Deletes for good the items of Recently deleted removed before `before_ms`, each with what
+/// was deleted with it.
+fn expire(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize, EngineError> {
+    let tops = db.read(|s| {
+        let mut tops = Vec::new();
+        for r in s.removed_before(before_ms)? {
+            if deleted_on_its_own(s, &r)? {
+                tops.push(r);
+            }
+        }
+        Ok(tops)
+    })?;
+    delete_groups(db, remote, tops)
+}
+
+/// Deletes for good `tops`, each with what was deleted with it: files before folders.
+fn delete_groups(
+    db: &mut StateDb,
+    remote: &dyn Remote,
+    tops: Vec<RemovedRow>,
+) -> Result<usize, EngineError> {
+    let mut rows = db.read(|s| {
         let mut rows = Vec::new();
         for top in tops {
             rows.extend(group(s, top)?);
@@ -274,17 +355,6 @@ pub fn empty(
     })?;
     rows.sort_by_key(|r| (r.row.kind == NodeKind::Folder, r.row.node));
     rows.dedup_by_key(|r| r.row.node);
-    delete_for_good(db, remote, &rows)
-}
-
-/// Deletes for good everything removed until `at_ms` (Unix ms): what the user saw when they
-/// asked, nothing removed since. Returns how many items went.
-pub fn empty_until(
-    db: &mut StateDb,
-    remote: &dyn Remote,
-    at_ms: i64,
-) -> Result<usize, EngineError> {
-    let rows = db.read(|s| s.removed_before(at_ms.saturating_add(1)))?;
     delete_for_good(db, remote, &rows)
 }
 
@@ -329,35 +399,85 @@ mod tests {
 
     use super::*;
 
-    fn removed(node: NodeId, parent: NodeId, root: NodeId) -> RemovedRow {
+    fn removed(node: NodeId, parent: NodeId, at_ms: i64, root: Option<NodeId>) -> RemovedRow {
         RemovedRow {
             row: MirrorRow {
                 file_id: RemoteFileId(Uuid::new_v4()),
                 version: VersionTag(Uuid::new_v4()),
                 node,
                 parent,
-                name: "d".into(),
+                name: node.0.to_string(),
                 kind: NodeKind::Folder,
                 file: None,
                 content_extra: None,
                 seal: None,
             },
-            removal: Removal { at_ms: 1, root },
+            removal: Removal { at_ms, root },
         }
     }
 
     /// Removed folders in a cycle (a remote one left them so) are restored once each, and the
-    /// plan ends.
+    /// plan ends; so does the walk to the item that took them along.
     #[test]
     fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
         let mut db = StateDb::open_in_memory()?;
         let (a, b) = (NodeId::new(), NodeId::new());
         db.write(|s| {
-            s.put_removed(&removed(a, b, a))?;
-            s.put_removed(&removed(b, a, a))
+            s.put_removed(&removed(a, b, 1, None))?;
+            s.put_removed(&removed(b, a, 1, None))
         })?;
         let plan = db.read(|s| plan_restore(s, a))?.map(|p| p.rows.len());
         assert_eq!(plan, Some(2));
+        let items = db.read(|s| list(s, 10))?;
+        assert_eq!(items.len(), 2);
+        Ok(())
+    }
+
+    /// A folder's restore brings back what was removed with it or after it, not what was removed
+    /// from it before; each such item is one of its own in Recently deleted.
+    #[test]
+    fn what_went_before_its_folder_stays() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let (f, early, with, deeper) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        db.write(|s| {
+            s.put_removed(&removed(early, f, 5, None))?;
+            s.put_removed(&removed(f, NodeId::ROOT, 10, None))?;
+            s.put_removed(&removed(with, f, 11, None))?;
+            s.put_removed(&removed(deeper, with, 12, None))
+        })?;
+        let plan: Option<Vec<NodeId>> = db
+            .read(|s| plan_restore(s, f))?
+            .map(|p| p.rows.iter().map(|r| r.row.node).collect());
+        assert_eq!(plan, Some(vec![f, with, deeper]));
+        let tops: HashMap<NodeId, NodeId> = db
+            .read(|s| list(s, 10))?
+            .into_iter()
+            .map(|d| (d.node, d.root))
+            .collect();
+        assert_eq!(tops[&early], early, "deleted on its own");
+        assert_eq!(
+            (tops[&with], tops[&deeper]),
+            (f, f),
+            "deleted with the folder"
+        );
+        Ok(())
+    }
+
+    /// An older writer's removals go by their `rm` roots: it removed what was in a folder before
+    /// the folder.
+    #[test]
+    fn older_writers_go_by_their_roots() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let (f, early, with) = (NodeId::new(), NodeId::new(), NodeId::new());
+        db.write(|s| {
+            s.put_removed(&removed(early, f, 5, Some(early)))?;
+            s.put_removed(&removed(with, f, 9, Some(f)))?;
+            s.put_removed(&removed(f, NodeId::ROOT, 10, Some(f)))
+        })?;
+        let plan: Option<Vec<NodeId>> = db
+            .read(|s| plan_restore(s, f))?
+            .map(|p| p.rows.iter().map(|r| r.row.node).collect());
+        assert_eq!(plan, Some(vec![f, with]));
         Ok(())
     }
 }

@@ -113,6 +113,14 @@ pub fn feed_query(cursor: Option<&str>, limit: usize) -> Value {
     })
 }
 
+/// When a node in Recently deleted went there: the header's `updated`, the server's time of
+/// the last write (odin-core's `record.modified`, **[verified]** `FileMetadata.cs`). Nobody
+/// writes to a removed node (node schema: also no sharing, reactions or local app data, which
+/// move it too). Everything that compares removals reads it from here.
+fn removed_at(meta: &FileMetadata) -> i64 {
+    meta.updated
+}
+
 /// A header as a [`RemoteHeader`], decrypted with `shared_secret`; `Err` says why it isn't a
 /// usable sync node.
 pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
@@ -142,16 +150,13 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 .map_err(|e| format!("file {id}: content: {e}"))?;
             let mut content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
-            // The status says whether it's removed; `rm` says when and with what. Another
-            // app's removal without one counts from the last change, as its own root.
-            match (meta.app_data.archival_status, content.removal()) {
-                (ARCHIVAL_REMOVED, None) => content.set_removal(Some(Removal {
-                    at_ms: meta.updated,
-                    root: NodeId(node),
-                })),
-                (ARCHIVAL_REMOVED, Some(_)) => {}
-                _ => content.set_removal(None),
-            }
+            // The status says whether it's removed, [`removed_at`] when. An older writer's `rm`
+            // adds what was deleted with it.
+            let removal = (meta.app_data.archival_status == ARCHIVAL_REMOVED).then(|| Removal {
+                at_ms: removed_at(meta),
+                root: content.removal().and_then(|r| r.root),
+            });
+            content.set_removal(removal);
             // The stored size of an encrypted payload isn't the file's: only `size` tells it.
             if kind == NodeKind::File && content.size.is_none() {
                 return Err(format!("file {id}: no size (node schema v1)"));
@@ -352,6 +357,11 @@ pub(crate) fn metadata(
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,
     };
+    // A removal is the status alone (node schema): the marker isn't sent, and an older
+    // writer's `rm` goes with it.
+    let removed = meta.content.removal().is_some();
+    let mut content = meta.content.clone();
+    content.set_removal(None);
     let plain = json!({
         "encryptedKeyHeader": key.seal(shared_secret, transfer_iv),
         "fileMetadata": {
@@ -363,9 +373,9 @@ pub(crate) fn metadata(
                 "groupId": meta.parent.0,
                 "fileType": file_type,
                 "dataType": 0,
-                "content": key.seal_text(&meta.content.to_json()),
+                "content": key.seal_text(&content.to_json()),
                 // Homebase sets a missing one to 0: a write that left it out would restore.
-                "archivalStatus": if meta.content.removal().is_some() { ARCHIVAL_REMOVED } else { 0 },
+                "archivalStatus": if removed { ARCHIVAL_REMOVED } else { 0 },
             },
             "versionTag": version.map(|v| v.0),
         },
@@ -460,12 +470,13 @@ mod tests {
         assert_eq!(folder.kind, NodeKind::Folder);
         assert!(folder.state().is_some());
 
+        // An older writer's removal: the time is the header's, the root its `rm`'s.
         let removed = to_remote(as_stored(fixture("removed-node.json"))?, &SS)?;
         assert_eq!(
             removed.removal(),
             Some(Removal {
                 at_ms: 1_759_920_005_000,
-                root: removed.node().ok_or("node")?,
+                root: Some(removed.node().ok_or("node")?),
             })
         );
         assert!(removed.state().is_none());
@@ -567,7 +578,7 @@ mod tests {
 
     #[test]
     fn the_status_decides_removal() -> R {
-        // Another app's removal, without `rm`: from the last change, as its own root.
+        // A removal without `rm` (this client's, another app's): from the last change.
         let mut other = fixture("file-node.json");
         other.file_metadata.app_data.archival_status = ARCHIVAL_REMOVED;
         let header = to_remote(as_stored(other)?, &SS)?;
@@ -575,7 +586,7 @@ mod tests {
             header.removal(),
             Some(Removal {
                 at_ms: 1_759_920_001_000,
-                root: header.node().ok_or("node")?,
+                root: None,
             })
         );
         // A restore by a writer that kept `rm`: the status wins.
@@ -644,18 +655,19 @@ mod tests {
         assert_eq!(app["groupId"], json!(NodeId::ROOT.0));
         assert_eq!(app["fileType"], FILE_TYPE_FILE);
         assert_eq!(app["archivalStatus"], 0);
+        // A removal is the status alone: the content goes as it is, without the marker.
         let mut gone = meta.clone();
         gone.content.set_removal(Some(Removal {
             at_ms: 1,
-            root: meta.node,
+            root: Some(meta.node),
         }));
         let sealed_gone = metadata(&gone, Some(version), &SS, &transfer_iv, &kh);
         let plain_gone: Value =
             serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed_gone)?)?;
-        assert_eq!(
-            plain_gone["fileMetadata"]["appData"]["archivalStatus"],
-            ARCHIVAL_REMOVED
-        );
+        let app_gone = &plain_gone["fileMetadata"]["appData"];
+        assert_eq!(app_gone["archivalStatus"], ARCHIVAL_REMOVED);
+        let content_gone = app_gone["content"].as_str().ok_or("content")?;
+        assert_eq!(kh.open_text(content_gone)?, meta.content.to_json());
         let key: SealedKeyHeader = serde_json::from_value(plain["encryptedKeyHeader"].clone())?;
         assert_eq!(KeyHeader::open(&key, &SS)?, kh);
         let content = app["content"].as_str().ok_or("content")?;

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use hbsync_fileio::hash_bytes;
-use hbsync_types::schema::NodeContent;
+use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Seal, Uuid, VersionTag};
 
 use crate::{
@@ -86,7 +86,8 @@ impl FakeServer {
             files: HashMap::new(),
             by_node: HashMap::new(),
             feed: BTreeMap::new(),
-            clock_ms: 1_000,
+            // A server's clock: removal times are compared with the purge's cut-off.
+            clock_ms: hbsync_types::unix_now_ms(),
             next_row: 1,
             next_id: 1,
         }))
@@ -107,6 +108,19 @@ impl FakeServer {
         // Deterministic, but with the version and variant bits of a v4 UUID so it looks like
         // one. The counter goes in the low 62 bits, below the variant bits, so no two ids meet.
         Uuid::from_u128(u128::from(self.next_id) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
+    }
+
+    /// `content` as stored: a removal's time is the write's, as Homebase's `updated` is (an
+    /// older writer's root stays).
+    fn stamped(&self, content: &NodeContent) -> NodeContent {
+        let mut content = content.clone();
+        if let Some(r) = content.removal() {
+            content.set_removal(Some(Removal {
+                at_ms: self.clock_ms,
+                ..r
+            }));
+        }
+        content
     }
 
     fn touch(&mut self, file_id: RemoteFileId) {
@@ -183,7 +197,7 @@ impl FakeServer {
             kind: node.kind,
             body: RemoteBody::Live {
                 node: node.node,
-                content: node.content.clone(),
+                content: self.stamped(&node.content),
                 payload: payload.as_ref().map(|(_, info)| *info),
             },
             seal: Some(seal_of(file_id)),
@@ -231,7 +245,7 @@ impl FakeServer {
                 meta.node, meta.kind
             )));
         }
-        let (parent, content) = (meta.parent, &meta.content);
+        let (parent, content) = (meta.parent, self.stamped(&meta.content));
         // Without an upload the payload stays.
         let new_payload = match upload {
             Some(upload) => self.receive(kind, Some(upload))?,
@@ -250,7 +264,7 @@ impl FakeServer {
         };
         f.header.body = RemoteBody::Live {
             node,
-            content: content.clone(),
+            content,
             payload,
         };
         self.touch(file_id);

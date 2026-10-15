@@ -18,18 +18,22 @@ pub const VERSION: u32 = 1;
 const CREATED: &str = "ct";
 /// The content key of the Finder tags ([`NodeContent::tags`]).
 const TAGS_KEY: &str = "tags";
-/// The content key of a removal ([`NodeContent::removal`]).
+/// The content key of a removal ([`NodeContent::removal`]): the client's own marker, never
+/// sent; older writers sent one (node schema, Recently deleted).
 pub const REMOVAL_KEY: &str = "rm";
 /// `appData.archivalStatus` of a node in Recently deleted (0 is a live one).
 pub const ARCHIVAL_REMOVED: i32 = 2;
 
-/// When a node went to Recently deleted, and the topmost node deleted with it (the node
-/// itself, or the folder whose delete took it along): restoring that one restores this one.
+/// A node in Recently deleted (`archivalStatus` 2): when it went there, and what an older
+/// writer's `rm` said was deleted with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Removal {
-    /// Unix ms.
+    /// Unix ms: the header's `updated`, the server's time of the write that removed it (this
+    /// device's own clock until that write comes back through the feed).
     pub at_ms: i64,
-    pub root: NodeId,
+    /// The topmost node an older writer's `rm` named (the node itself, or the folder whose
+    /// delete took it along); none from writers that send no `rm`.
+    pub root: Option<NodeId>,
 }
 
 /// The `appData.content` JSON of a node.
@@ -124,8 +128,9 @@ impl NodeContent {
         }
     }
 
-    /// The removal `rm` of a node in Recently deleted (`archivalStatus` 2), kept with the
-    /// unknown keys like `ct`; one that doesn't read (another writer's) is none.
+    /// The removal of a node in Recently deleted (`archivalStatus` 2), kept with the unknown
+    /// keys like `ct` under `rm`; one without a readable time is none. An older writer's `rm`
+    /// reads the same: its `root`, if any, is kept.
     pub fn removal(&self) -> Option<Removal> {
         let rm = self.unknown.get(REMOVAL_KEY)?;
         let at = &rm["at"];
@@ -135,16 +140,19 @@ impl NodeContent {
                     .filter(|f| f.is_finite())
                     .map(|f| f.round() as i64)
             })?,
-            root: NodeId(rm["root"].as_str()?.parse().ok()?),
+            root: rm["root"].as_str().and_then(|r| r.parse().ok()).map(NodeId),
         })
     }
 
     pub fn set_removal(&mut self, removal: Option<Removal>) {
         match removal {
-            Some(r) => self.unknown.insert(
-                REMOVAL_KEY.into(),
-                json!({"at": r.at_ms, "root": r.root.0.to_string()}),
-            ),
+            Some(r) => {
+                let mut rm = json!({ "at": r.at_ms });
+                if let Some(root) = r.root {
+                    rm["root"] = root.0.to_string().into();
+                }
+                self.unknown.insert(REMOVAL_KEY.into(), rm)
+            }
             None => self.unknown.remove(REMOVAL_KEY),
         };
     }
@@ -293,7 +301,8 @@ mod tests {
     #[test]
     fn a_removal_rides_with_the_unknown_keys() -> Result<(), serde_json::Error> {
         let mut c = NodeContent::file("a", 5, 1, false);
-        let root = NodeId::ROOT;
+        // An older writer's: a time and the root.
+        let root = Some(NodeId::ROOT);
         c.set_removal(Some(Removal { at_ms: 7, root }));
         let json = c.to_json();
         assert_eq!(
@@ -303,6 +312,15 @@ mod tests {
         assert_eq!(
             NodeContent::from_json(&json)?.removal(),
             Some(Removal { at_ms: 7, root })
+        );
+        // This client's own marker: a time, no root.
+        c.set_removal(Some(Removal {
+            at_ms: 8,
+            root: None,
+        }));
+        assert_eq!(
+            c.to_json(),
+            r#"{"v":1,"name":"a","mtime":5,"size":1,"rm":{"at":8}}"#
         );
         c.set_removal(None);
         assert_eq!(c.removal(), None);

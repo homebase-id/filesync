@@ -218,8 +218,9 @@ fn edits_and_moves_propagate() {
     assert!(plan.conflicts.is_empty());
 }
 
+/// A folder deleted here leaves the drive before what is in it (node schema, Recently deleted).
 #[test]
-fn local_folder_delete_goes_bottom_up() {
+fn local_folder_delete_goes_top_down() {
     let [d, f, g] = ids(3)[..] else {
         unreachable!()
     };
@@ -231,9 +232,9 @@ fn local_folder_delete_goes_bottom_up() {
     let plan = w.plan();
     assert_eq!(kinds(&plan.ops), ["delete", "delete", "delete"]);
     assert_eq!(
-        plan.ops.last().map(Op::node),
+        plan.ops.first().map(Op::node),
         Some(d),
-        "the folder goes last"
+        "the folder goes first"
     );
 }
 
@@ -842,7 +843,7 @@ fn what_a_new_rule_hides_leaves_the_drive_unless_another_device_added_to_it() {
     w.local(d, None).local(f, None);
     let plan = w.plan();
     assert_eq!(kinds(&plan.ops), ["delete", "delete"], "{plan:?}");
-    assert_eq!(plan.ops[0].node(), f);
+    assert_eq!(plan.ops[0].node(), d);
 
     // Another device added to the folder meanwhile: that stays, and so does the folder; only
     // what this device synced leaves, and the folder's base goes.
@@ -870,7 +871,7 @@ fn a_folder_deleted_here_stays_deleted_when_what_it_held_leaves_the_drive() {
     w.local(p, None).local(b, None).local(f, None);
     let plan = w.plan();
     assert_eq!(kinds(&plan.ops), ["delete", "delete", "delete"], "{plan:?}");
-    assert_eq!(plan.ops[2].node(), p);
+    assert_eq!(plan.ops[0].node(), p);
 }
 
 #[test]

@@ -99,7 +99,11 @@ impl Executor<'_> {
     }
 
     /// A delete: the node goes to Recently deleted (a metadata-only update setting its
-    /// removal), its bytes kept there until the purge.
+    /// removal), its bytes kept there until the purge. A folder goes before what is in it
+    /// (planned top-down, [`Batch::holds_up`]): what was deleted with it is no earlier.
+    ///
+    /// A batch endpoint setting only `archivalStatus` (`[{fileId, versionTag}]`, asked of
+    /// odin-core) would take these together: one job for the removals of a batch.
     pub(super) fn prepare_remove(
         &mut self,
         node: NodeId,
@@ -113,9 +117,10 @@ impl Executor<'_> {
         else {
             return Err(Outcome::Done); // already out of the tree
         };
+        // This device's time until the feed brings the server's.
         let removal = Removal {
             at_ms: hbsync_types::unix_now_ms(),
-            root: self.db.read(|s| removal_root(s, node))?,
+            root: None,
         };
         let mut content = mirror.content(&mirror.name);
         content.set_removal(Some(removal));

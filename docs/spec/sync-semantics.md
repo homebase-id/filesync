@@ -104,9 +104,13 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    - remote-deleted parent → restored remotely (still removed) or re-created with the same
      node id and its base name (deleted for good);
    - local-deleted parent → re-created locally.
-   Any live child keeps its folder alive. Deleting clients delete bottom-up, so a completed
-   delete never leaves live children, and a child that survives was added concurrently.
-4. **Folder delete propagation** deletes descendants bottom-up, then the folder.
+   Any live child keeps its folder alive, but one a folder's removal takes along doesn't: a
+   deleting client removes the folder first, then what is in it (node schema, Recently deleted),
+   so while it does, a removed folder holds live nodes. A remote node unchanged since the base, in
+   a folder in Recently deleted (or in one taken along itself), counts as remotely deleted with
+   it. One changed or added meanwhile keeps the folder alive: restored.
+4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
+   top-down; here it trashes the topmost folder (its base goes after its children's).
 
 ## 7. Delete safety
 
@@ -147,10 +151,11 @@ restores it). Outside plans: `restore` and `purge` (Recently deleted). Every op 
 node (create, upload, move, download, mkdir) writes its merged tags too; `tags` is for a change
 of tags alone.
 
-Ordering within one plan: folder creates top-down, then moves, then content, then deletes
-bottom-up; in each phase the local operations before the remote ones, for deletes among those
-at one depth (a folder's base is forgotten after its children's deletes), so that the remote
-ones run together (section 8a). A move whose target
+Ordering within one plan: folder creates top-down, then moves, then content, then deletes:
+first the remote ones top-down (a folder before what is in it: node schema, Recently deleted),
+then the local ones bottom-up (a folder's base is forgotten after its children's deletes, on
+either side). In the other phases the local operations come before the remote ones, so that
+the remote ones run together (section 8a). A move whose target
 name is occupied by a node that is itself moving away goes through a temporary name.
 
 Every operation is **idempotent**: a remote create that returns `ExistingFileWithUniqueId`
@@ -185,15 +190,17 @@ expected fingerprint is treated as done.
   whose create failed would look like an orphan to every other client. A remote move whose
   destination is inside the node on the drive (a nesting turned around) waits too, for the
   move that takes the destination out: the server doesn't check cycles either.
-- **Folders are deleted last.** A remote folder delete waits while the mirror still has a
-  child in it (a child delete that failed or was skipped, or a child just added): the folder
-  stays, and the next plan resurrects it if needed.
+- **Folders are removed first.** A remote delete waits while the plan still has the removal of
+  its folder to run (one retried goes to the back of the queue): what a folder's delete takes
+  along is removed no earlier than the folder (node schema, Recently deleted). A child whose
+  removal failed or was skipped stays live in the removed folder until a later plan removes it;
+  meanwhile §6.3 takes it as deleted with the folder, unless it changed.
 - **Together on the pool.** Transfers and remote writes (folder creates, renames, moves, tags,
   deletes) are collected and run together on the worker pool, in any order. An operation that
   depends on one collected waits until they all ran: a create or move into a folder created
   (or restored) in the batch, a move into a folder another move in the batch carries along (the two could
-  make a cycle on the drive), a folder's delete while the batch moves or deletes a child of
-  it, the same node twice. Anything else (local work, settling) runs on its own, after the
+  make a cycle on the drive), a folder's delete while the batch moves a node into or out of
+  it, a delete while the batch removes its folder, the same node twice. Anything else (local work, settling) runs on its own, after the
   batch. A remote outage starts no further writes; those failing together count as one
   failure, and the rest run again after the pause.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after

@@ -45,7 +45,15 @@ impl Reconciler<'_> {
             };
             match parent_state {
                 Some(state) if state.kind == NodeKind::Folder => {
-                    // A live child keeps its folder alive (§6.3).
+                    // A live child keeps its folder alive (§6.3); one a folder's removal took
+                    // along is merged after all, as if no removal had (its own changes count).
+                    if self.taken.remove(&parent) {
+                        self.merge_node(parent);
+                        if self.merged.exists(parent) {
+                            queue.push(parent);
+                            continue;
+                        }
+                    }
                     self.retarget(parent, state);
                     queue.push(parent);
                 }

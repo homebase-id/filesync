@@ -17,10 +17,11 @@ impl Store<'_> {
         };
         self.moved_folder(row.node, row.kind);
         let f = row.file.as_ref();
-        let root = self.coords()?.to_drive(removed.removal.root);
+        let c = self.coords()?;
+        let root = removed.removal.root.map(|root| c.to_drive(root));
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, root, seal) \
+                 hash, size, mtime_ms, executable, content_extra, removed_at, rm_root, seal) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?
         .execute(params![
@@ -36,7 +37,7 @@ impl Store<'_> {
             f.is_some_and(|f| f.executable),
             row.content_extra,
             removed.removal.at_ms,
-            root.0.as_bytes(),
+            root.as_ref().map(|r| r.0.as_bytes()),
             row.seal.as_ref().map(|s| &s.0[..]),
         ])?;
         self.fan_out(row.node, row.parent)
@@ -83,17 +84,20 @@ impl Store<'_> {
         )
     }
 
-    /// What was removed before `at_ms` (Unix ms), with the delete that took it along (its
-    /// root, if still removed): a folder's delete goes as a whole. Files before folders.
+    /// What was removed before `at_ms` (Unix ms), oldest first.
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
-            &format!(
-                "{REMOVED_SELECT} WHERE removed_at < ?1 AND NOT EXISTS \
-                 (SELECT 1 FROM removed r WHERE r.node = removed.root AND r.removed_at >= ?1) \
-                 ORDER BY kind, removed_at"
-            ),
+            &format!("{REMOVED_SELECT} WHERE removed_at < ?1 ORDER BY removed_at"),
             [at_ms],
         )
+    }
+
+    /// Sets the time of a removal this device made to the server's, once the feed brings it
+    /// back (the write's answer has none).
+    pub fn set_removed_at(&self, file_id: RemoteFileId, at_ms: i64) -> Result<()> {
+        self.prep("UPDATE removed SET removed_at = ?2 WHERE file_id = ?1 AND removed_at != ?2")?
+            .execute(params![file_id.0.as_bytes(), at_ms])?;
+        Ok(())
     }
 
     /// Forgets a node's removal (it was restored, or deleted for good); whether it had one.

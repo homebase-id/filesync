@@ -208,6 +208,19 @@ pub fn build_input(
             }
         }
     }
+    // The folders in Recently deleted that remote nodes are in: a folder's delete is under way
+    // (§6.3).
+    let remote = &b.input.remote;
+    let gone: HashSet<NodeId> = remote
+        .ids()
+        .filter_map(|n| remote.get(n).map(|s| s.parent))
+        .filter(|p| !p.is_root() && !remote.contains(*p))
+        .collect();
+    for folder in gone {
+        if s.removed_by_node(folder)?.is_some() {
+            b.input.removed.insert(folder);
+        }
+    }
     Ok(b.input)
 }
 

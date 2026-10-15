@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 7);
+    assert_eq!(db.schema_version()?, 8);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -273,7 +273,7 @@ mod mirror {
         let mut removed = file.clone();
         removed.set_removal(Some(Removal {
             at_ms: 1,
-            root: NodeId::new(),
+            root: Some(NodeId::new()),
         }));
         let (node, at) = (NodeId::new(), remote());
         let row = MirrorRow::from_content(
@@ -366,7 +366,7 @@ mod mirror {
 
         let removal = Removal {
             at_ms: 1,
-            root: sealed.node,
+            root: None,
         };
         let removed = |row: &MirrorRow| RemovedRow {
             row: row.clone(),
@@ -449,9 +449,9 @@ mod mirror {
             removal: Removal { at_ms, root },
         };
         let (rf, rd, ra) = (
-            with(&file, 8, folder.node),
-            with(&folder, 10, folder.node),
-            with(&alone, 20, alone.node),
+            with(&file, 8, None),
+            with(&folder, 10, Some(folder.node)),
+            with(&alone, 20, None),
         );
         db.write(|s| {
             s.put_removed(&rf)?;
@@ -467,15 +467,15 @@ mod mirror {
                 .map(|r| r.row.name)
                 .collect();
             assert_eq!(newest, ["g", "d", "f"]);
-            // Expired ones, files before folders.
-            let expired: Vec<_> = s
-                .removed_before(15)?
-                .into_iter()
-                .map(|r| r.row.name)
-                .collect();
-            assert_eq!(expired, ["f", "d"]);
-            // The file went before its folder, but goes when the folder's delete does.
-            assert!(s.removed_before(9)?.is_empty());
+            // Expired ones, oldest first (what goes with what is the engine's).
+            let expired = |before| -> hbsync_state::Result<Vec<String>> {
+                Ok(s.removed_before(before)?
+                    .into_iter()
+                    .map(|r| r.row.name)
+                    .collect())
+            };
+            assert_eq!(expired(15)?, ["f", "d"]);
+            assert_eq!(expired(9)?, ["f"]);
             Ok(())
         })?;
         db.write(|s| {
@@ -664,7 +664,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 7);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 8);
     Ok(())
 }
 
@@ -875,10 +875,10 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
             .write(|s| s.put_mirror(&row(NodeId::OUTSIDE, NodeId::ROOT, "x")))
             .is_err()
     );
-    // Recently deleted too.
+    // Recently deleted too, an older writer's root as well.
     let removal = Removal {
         at_ms: 1,
-        root: new,
+        root: Some(NodeId::ROOT),
     };
     let gone = main
         .read(|s| s.get_mirror(new))?
@@ -894,8 +894,9 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
         })
     })?;
     assert_eq!(
-        main.read(|s| s.removed_by_node(new))?.map(|r| r.row.parent),
-        Some(top)
+        main.read(|s| s.removed_by_node(new))?
+            .map(|r| (r.row.parent, r.removal.root)),
+        Some((top, Some(top)))
     );
     assert_eq!(docs_db.read(|s| s.removed_children(NodeId::ROOT))?.len(), 1);
     Ok(())

@@ -48,6 +48,7 @@ impl Executor<'_> {
                 node,
                 file_id,
                 expected,
+                ..
             } => self.prepare_remove(*node, *file_id, *expected),
             Op::RemoteUpdate {
                 node,

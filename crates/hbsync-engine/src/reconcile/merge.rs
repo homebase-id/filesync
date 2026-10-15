@@ -2,6 +2,62 @@
 
 use super::*;
 
+/// What the remote did to `node` since the base.
+fn remote_change(i: &Input, node: NodeId) -> Change {
+    match (i.base.get(node), i.remote.get(node)) {
+        (None, None) => Change::Absent,
+        (None, Some(_)) => Change::Created,
+        (Some(_), None) => Change::Deleted,
+        (Some(b), Some(r)) => {
+            let moved = !b.same_place(r);
+            let edited = match (&b.content, &r.content) {
+                (Some(bc), Some(rc)) => bc.hash != rc.hash || bc.executable != rc.executable,
+                _ => false,
+            };
+            if moved || edited {
+                Change::Changed { moved, edited }
+            } else {
+                Change::Unchanged
+            }
+        }
+    }
+}
+
+/// The remote nodes a folder's removal takes along (§6.3): unchanged since the base, in a
+/// folder in Recently deleted, or in one taken along itself. A folder's delete removes the folder
+/// first, then what is in it: until it has, they count as gone, and don't keep the folder alive.
+/// One changed or added meanwhile still does.
+pub(super) fn taken_along(i: &Input) -> HashSet<NodeId> {
+    let mut taken = HashSet::new();
+    if i.removed.is_empty() {
+        return taken;
+    }
+    let mut checked = HashSet::new();
+    for node in i.remote.ids() {
+        let mut chain = Vec::new();
+        let mut at = node;
+        // Up through unchanged nodes, each once (a cycle ends it), to a removed folder.
+        let found = loop {
+            if taken.contains(&at) {
+                break true;
+            }
+            if !checked.insert(at) || remote_change(i, at) != Change::Unchanged {
+                break false;
+            }
+            chain.push(at);
+            match i.remote.get(at).map(|s| s.parent) {
+                Some(parent) if i.removed.contains(&parent) => break true,
+                Some(parent) if i.remote.contains(parent) => at = parent,
+                _ => break false,
+            }
+        };
+        if found {
+            taken.extend(chain);
+        }
+    }
+    taken
+}
+
 impl Reconciler<'_> {
     // ---- 1–2: classify and merge ----
 
@@ -12,7 +68,7 @@ impl Reconciler<'_> {
             .ids()
             .chain(i.local.ids())
             .chain(i.remote.ids())
-            .filter(|n| !i.dirty.contains(n))
+            .filter(|n| !i.dirty.contains(n) && !self.taken.contains(n))
             .collect();
         for node in ids {
             if let Some(state) = i
@@ -80,25 +136,12 @@ impl Reconciler<'_> {
         }
     }
 
+    /// The remote change of `node`; one a folder's removal takes along is a delete.
     pub(super) fn remote_change(&self, node: NodeId) -> Change {
-        let i = self.input;
-        match (i.base.get(node), i.remote.get(node)) {
-            (None, None) => Change::Absent,
-            (None, Some(_)) => Change::Created,
-            (Some(_), None) => Change::Deleted,
-            (Some(b), Some(r)) => {
-                let moved = !b.same_place(r);
-                let edited = match (&b.content, &r.content) {
-                    (Some(bc), Some(rc)) => bc.hash != rc.hash || bc.executable != rc.executable,
-                    _ => false,
-                };
-                if moved || edited {
-                    Change::Changed { moved, edited }
-                } else {
-                    Change::Unchanged
-                }
-            }
+        if self.taken.contains(&node) {
+            return Change::Deleted;
         }
+        remote_change(self.input, node)
     }
 
     /// Leaves `node` for a later plan, keeping it in the merged tree where it is now, so that
