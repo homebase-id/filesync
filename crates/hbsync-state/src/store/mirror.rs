@@ -65,11 +65,11 @@ impl Store<'_> {
     /// Records a live remote node, and marks it dirty in the folders the change concerns
     /// ([`Store::fan_out`]). A row for the same node under an older file id (the node was
     /// deleted and re-created) is replaced. A version the mirror has already (this device's own
-    /// write coming back through the feed, or a page applied again) changes nothing but a seal
-    /// the row is missing.
+    /// write coming back through the feed, or a page applied again) changes nothing but the
+    /// row's seal ([`Store::set_seal`]).
     pub fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
         if self.has_version(row.remote_ref(), false)? {
-            return self.add_seal(row, false);
+            return self.set_seal(row, false);
         }
         let Some(row) = &self.on_drive(row)? else {
             return Ok(());
@@ -106,14 +106,16 @@ impl Store<'_> {
     }
 
     /// Gives the mirror's row of file `row` (with `removed`, Recently deleted's) the seal `row`
-    /// has, if it has none: no change of the node, so nothing to reconcile.
-    pub fn add_seal(&self, row: &MirrorRow, removed: bool) -> Result<()> {
+    /// has, from the feed: a file this device created has none yet, and one kept from an
+    /// earlier login may not open with this one's shared secret. No change of the node, so
+    /// nothing to reconcile.
+    pub fn set_seal(&self, row: &MirrorRow, removed: bool) -> Result<()> {
         let Some(seal) = &row.seal else {
             return Ok(());
         };
         let table = if removed { "removed" } else { "remote" };
         self.prep(&format!(
-            "UPDATE {table} SET seal = ?2 WHERE file_id = ?1 AND seal IS NULL"
+            "UPDATE {table} SET seal = ?2 WHERE file_id = ?1 AND seal IS NOT ?2"
         ))?
         .execute(params![row.file_id.0.as_bytes(), &seal.0[..]])?;
         Ok(())

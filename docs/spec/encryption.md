@@ -91,8 +91,10 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   in the state DB (`remote.seal`, `removed.seal`). It is the same key for every version, so one
   request does it; the version tag guards it (4160 if the file changed since; a deleted file
   4002). A file without a seal yet (a row an older client stored, until the file's next write
-  comes back through the feed) has its header read first, as before. A seal is only ever used
-  for its own file: another file's key would leave content no one can read.
+  comes back through the feed) has its header read first, as before; so does one whose seal
+  doesn't open (sealed for an earlier login's shared secret), and the feed's next row of the
+  file replaces it. A seal is only ever used for its own file: another file's key would leave
+  content no one can read.
 - **Every node is encrypted.** A live row that isn't is skipped as unreadable: no client has
   users with unencrypted nodes. (The server couldn't change `isEncrypted` on an update anyway **[verified]**,
   `homebase-api-notes.md`.)

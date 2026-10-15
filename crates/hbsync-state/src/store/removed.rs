@@ -6,11 +6,11 @@ impl Store<'_> {
     // ---- Recently deleted ----
 
     /// Records a removed node (replacing an older record of it), and marks it dirty where that
-    /// concerns ([`Store::fan_out`]); the same version again changes nothing but a missing
-    /// seal.
+    /// concerns ([`Store::fan_out`]); the same version again changes nothing but the seal
+    /// ([`Store::set_seal`]).
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         if self.has_version(removed.row.remote_ref(), true)? {
-            return self.add_seal(&removed.row, true);
+            return self.set_seal(&removed.row, true);
         }
         let Some(row) = &self.on_drive(&removed.row)? else {
             return Ok(());

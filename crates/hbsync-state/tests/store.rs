@@ -325,7 +325,7 @@ mod mirror {
     /// The feed brings back a version the mirror has (this device's own write) with the file's
     /// seal: the seal is kept, nothing else changes, and nothing needs reconciling.
     #[test]
-    fn a_known_version_adds_only_its_seal() -> R {
+    fn a_known_version_changes_only_its_seal() -> R {
         use hbsync_state::RemovedRow;
         use hbsync_types::schema::Removal;
         let mut db = StateDb::open_in_memory()?;
@@ -354,6 +354,15 @@ mod mirror {
             db.read(|s| s.get_mirror(sealed.node))?,
             Some(sealed.clone())
         );
+        // The feed's seal replaces one kept from before (an earlier login's).
+        let resealed = MirrorRow {
+            seal: Some(Seal([0xEE; Seal::LEN])),
+            ..sealed.clone()
+        };
+        db.write(|s| s.put_mirror(&resealed))?;
+        assert_eq!(db.read(|s| s.get_mirror(sealed.node))?, Some(resealed));
+        assert!(!db.read(|s| s.is_dirty(sealed.node))?);
+        db.write(|s| s.put_mirror(&sealed))?;
 
         let removal = Removal {
             at_ms: 1,

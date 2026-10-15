@@ -99,11 +99,11 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         return Ok(true);
     };
     // A version the store has already (this device's own write coming back, or a page applied
-    // again) changes nothing but the seal its row may lack (a file this device created); the
+    // again) changes nothing but its seal (a file this device created has none yet); the
     // store marks the nodes that changed dirty where that concerns.
     let removal = header.removal();
     if s.has_version(row.remote_ref(), removal.is_some())? {
-        s.add_seal(&row, removal.is_some())?;
+        s.set_seal(&row, removal.is_some())?;
         return Ok(removal.is_none());
     }
     if let Some(removal) = removal {
