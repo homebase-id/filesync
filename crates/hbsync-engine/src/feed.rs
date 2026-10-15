@@ -7,7 +7,7 @@
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
-use hbsync_state::{MirrorRow, REMOTE_CURSOR_KEY, RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::{NodeId, NodeKind, RemoteRef};
 
 #[derive(Debug, thiserror::Error)]
@@ -41,7 +41,7 @@ pub fn pull(
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
     loop {
-        let cursor = db.read(|s| s.account_kv(REMOTE_CURSOR_KEY))?;
+        let cursor = db.read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
         let page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
         db.write(|s| {
             for header in &page.entries {
@@ -51,7 +51,7 @@ pub fn pull(
                     report.deleted += 1;
                 }
             }
-            s.set_account_kv(REMOTE_CURSOR_KEY, &page.cursor)
+            s.set_account_kv(keys::REMOTE_CURSOR, &page.cursor)
         })?;
         report.pages += 1;
         if !page.has_more {

@@ -2,7 +2,6 @@
 //! the credentials, setting the app up on an identity, the sync runner, the control socket and
 //! the one-daemon lock, and starting the daemon at logon.
 
-pub mod accounts;
 pub mod autostart;
 pub mod config;
 pub mod control;

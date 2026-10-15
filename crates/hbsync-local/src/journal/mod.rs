@@ -14,13 +14,10 @@ use hbsync_platform::RelPath;
 pub use hbsync_platform::journal::{
     ChangeJournal, JournalDelta, JournalError, Touched, open_journal,
 };
-use hbsync_state::{StateDb, StateError};
+use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeKind;
 
 use crate::scan::{ScanOptions, ScanReport, rescan_dirs, scan};
-
-/// The state DB key of the stored journal position.
-pub const CURSOR_KEY: &str = "local.journal_cursor";
 
 /// How catch-up ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +42,7 @@ pub fn catch_up<J: ChangeJournal + ?Sized>(
     journal: Option<&mut J>,
     opts: &ScanOptions,
 ) -> Result<CatchUp, StateError> {
-    let stored = db.read(|s| s.get_kv(CURSOR_KEY))?;
+    let stored = db.read(|s| s.get_kv(keys::JOURNAL_CURSOR))?;
     let Some(journal) = journal else {
         let report = scan(db, root, opts)?;
         return Ok(CatchUp {
@@ -61,7 +58,7 @@ pub fn catch_up<J: ChangeJournal + ?Sized>(
             Ok(delta) if !delta.rescan_all => {
                 let dirs = resolve_touched(db, root, &delta.touched)?;
                 let report = rescan_dirs(db, root, &dirs, opts)?;
-                db.write(|s| s.set_kv(CURSOR_KEY, &delta.cursor))?;
+                db.write(|s| s.set_kv(keys::JOURNAL_CURSOR, &delta.cursor))?;
                 return Ok(CatchUp {
                     tier: Tier::Journal { dirs: dirs.len() },
                     report,
@@ -75,8 +72,8 @@ pub fn catch_up<J: ChangeJournal + ?Sized>(
     let position = journal.now();
     let report = scan(db, root, opts)?;
     db.write(|s| match &position {
-        Ok(cursor) => s.set_kv(CURSOR_KEY, cursor),
-        Err(_) => s.delete_kv(CURSOR_KEY),
+        Ok(cursor) => s.set_kv(keys::JOURNAL_CURSOR, cursor),
+        Err(_) => s.delete_kv(keys::JOURNAL_CURSOR),
     })?;
     Ok(CatchUp {
         tier: Tier::FullWalk { reason },
@@ -186,7 +183,7 @@ mod tests {
         assert!(matches!(first.tier, Tier::FullWalk { .. }));
         assert_eq!(first.report.added, 3);
         assert_eq!(
-            db.read(|s| s.get_kv(CURSOR_KEY))?.as_deref(),
+            db.read(|s| s.get_kv(keys::JOURNAL_CURSOR))?.as_deref(),
             Some("fake:7")
         );
 
@@ -205,7 +202,7 @@ mod tests {
         assert_eq!(second.tier, Tier::Journal { dirs: 1 });
         assert_eq!(second.report.added, 1);
         assert_eq!(
-            db.read(|s| s.get_kv(CURSOR_KEY))?.as_deref(),
+            db.read(|s| s.get_kv(keys::JOURNAL_CURSOR))?.as_deref(),
             Some("fake:8")
         );
 
@@ -229,7 +226,7 @@ mod tests {
         let fourth = catch_up(&mut db, root, Some(&mut journal), &opts(root))?;
         assert!(matches!(fourth.tier, Tier::FullWalk { reason } if reason.contains("wrapped")));
         assert_eq!(
-            db.read(|s| s.get_kv(CURSOR_KEY))?.as_deref(),
+            db.read(|s| s.get_kv(keys::JOURNAL_CURSOR))?.as_deref(),
             Some("fake:42")
         );
         Ok(())

@@ -130,11 +130,28 @@ impl Paths {
     pub fn config_file(&self) -> PathBuf {
         self.config.join("config.toml")
     }
+
+    /// The state DB of `identity`'s account: `<state>/accounts/<identity in lower case, : as
+    /// _>/state.db` ([`hbsync_engine::root::SyncRoot`]).
+    pub fn account_db(&self, identity: &str) -> PathBuf {
+        let key = identity.to_lowercase().replace(':', "_");
+        self.state.join("accounts").join(key).join("state.db")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_account_db_is_named_after_its_identity() {
+        let paths = Paths::under(Path::new("/h"));
+        assert!(
+            paths
+                .account_db("Anna.Example.com:8443")
+                .ends_with("accounts/anna.example.com_8443/state.db")
+        );
+    }
 
     /// The MSIX keeps these folders out of its virtualization (packaging/conveyor.conf), so the
     /// command line and the zip build see the same files.

@@ -17,6 +17,7 @@
 
 mod codec;
 mod coords;
+pub mod keys;
 mod migrations;
 mod store;
 
@@ -31,9 +32,6 @@ pub use coords::Coords;
 pub use store::{
     BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, RemovedRow, Store,
 };
-
-/// The state DB key of the remote change-feed cursor.
-pub const REMOTE_CURSOR_KEY: &str = "remote.cursor";
 
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {

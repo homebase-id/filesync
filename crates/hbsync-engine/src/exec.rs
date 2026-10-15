@@ -36,6 +36,7 @@ use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::view;
+use hbsync_local::layout;
 
 /// Where the executor works.
 #[derive(Debug, Clone)]
@@ -74,7 +75,7 @@ pub enum CrashPoint {
 /// (a leading dot hides it elsewhere). Done at every start, so folders from before are hidden
 /// too.
 pub fn ensure_state_dir(root: &Path) -> PathBuf {
-    let dir = root.join(hbsync_local::STATE_DIR);
+    let dir = layout::state_dir(root);
     let _ = fs::create_dir_all(&dir);
     // Only looks: a folder that can't be hidden still works.
     let _ = hbsync_platform::ops::set_hidden(&dir);
@@ -88,12 +89,6 @@ pub fn probe_case_insensitive(root: &Path) -> bool {
     match hbsync_platform::fskind::probe_case_sensitive(&dir) {
         Ok(sensitive) => !sensitive,
         Err(_) => cfg!(any(windows, target_os = "macos")),
-    }
-}
-
-impl ExecConfig {
-    pub fn state_dir(&self) -> PathBuf {
-        self.root.join(hbsync_local::STATE_DIR)
     }
 }
 
@@ -1002,7 +997,7 @@ impl<'a> Executor<'a> {
             size: file.size,
             mtime_ms: file.mtime_ms,
             executable: (self.cfg.os != Os::Windows).then_some(file.executable),
-            tmp_dir: self.cfg.state_dir().join(TMP_DIR),
+            tmp_dir: layout::tmp_dir(&self.cfg.root),
             key: download_key(node, &expected),
             local_algorithm: self.cfg.algorithm,
         });
@@ -1362,7 +1357,7 @@ impl<'a> Executor<'a> {
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
     fn move_to_trash(&self, path: &RelPath, node: NodeId) -> io::Result<()> {
         let stamp = hbsync_types::unix_now();
-        let dir = trash_dir(&self.cfg.state_dir()).join(format!("{stamp}-{}", node.0.simple()));
+        let dir = layout::trash_dir(&self.cfg.root).join(format!("{stamp}-{}", node.0.simple()));
         fs::create_dir_all(&dir)?;
         let name = path.name().unwrap_or("item");
         ops::rename_noreplace(&self.abs(path), &dir.join(name))
@@ -1617,11 +1612,6 @@ fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
     Ok(above.items.last().copied().unwrap_or(node))
 }
 
-/// The local trash: `<state dir>/trash/<Unix s>-<node>/<name>`.
-pub(crate) fn trash_dir(state_dir: &Path) -> PathBuf {
-    state_dir.join("trash")
-}
-
 /// When a trash entry (named by `move_to_trash`) went there, Unix s.
 pub(crate) fn trashed_at(entry: &str) -> Option<u64> {
     entry.split_once('-')?.0.parse().ok()
@@ -1815,9 +1805,6 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
     Ok(completed)
 }
 
-/// The temp folder for downloads, inside the state folder.
-const TMP_DIR: &str = "tmp";
-
 /// The temp file name stem of a download: node and content, so a partial file is resumed only
 /// for the same bytes.
 fn download_key(node: NodeId, expected: &hbsync_types::ContentHash) -> String {
@@ -1828,8 +1815,8 @@ fn download_key(node: NodeId, expected: &hbsync_types::ContentHash) -> String {
 /// the current remote content of a node that still needs syncing (interrupted downloads of
 /// content since replaced, files that were placed by other means, leftovers of other
 /// versions). Run before each plan, while no transfer is running.
-pub fn sweep_tmp(db: &mut StateDb, state_dir: &Path) -> Result<usize, StateError> {
-    let Ok(entries) = fs::read_dir(state_dir.join(TMP_DIR)) else {
+pub fn sweep_tmp(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+    let Ok(entries) = fs::read_dir(layout::tmp_dir(root)) else {
         return Ok(0);
     };
     let mut removed = 0;

@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use hbsync_app::Paths;
-use hbsync_app::accounts::FolderError;
 use hbsync_app::daemon::DaemonError;
 use hbsync_app::lock::LockError;
 use hbsync_app::runner::RunnerError;
+use hbsync_engine::root::RootError;
 use hbsync_state::StateError;
 
 fn main() -> ExitCode {
@@ -52,9 +52,9 @@ fn main() -> ExitCode {
         DaemonError::NotSetUp(_)
         | DaemonError::Lock(LockError::Held { .. })
         | DaemonError::Runner(RunnerError::Folder(
-            FolderError::Older(_)
-            | FolderError::Unknown(_)
-            | FolderError::State(StateError::TooOld { .. }),
+            RootError::Older(_)
+            | RootError::Unknown(_)
+            | RootError::State(StateError::TooOld { .. }),
         )) => {
             tracing::warn!("{e}");
             ExitCode::SUCCESS

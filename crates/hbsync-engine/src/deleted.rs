@@ -11,14 +11,15 @@ use std::path::Path;
 
 use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, Role};
 
 use crate::engine::EngineError;
-use crate::exec::{remove_all, trash_dir, trashed_at, update_meta};
+use crate::exec::{remove_all, trashed_at, update_meta};
 use crate::tree::restored_names;
 use crate::walk::End;
+use hbsync_local::layout;
 
 /// Recently deleted, newest first: the drive's, each item with the folder of this device it
 /// comes back to and its path below that folder's top.
@@ -241,16 +242,21 @@ pub fn purge(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<us
         }
         // Only what went there since the purge has been emptying it: older entries (from
         // before Recently deleted) may be the only copy left, and stay.
-        let since = db.write(|s| match s.folder_kv_of(folder.id, TRASH_SINCE_KEY)? {
-            Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
-            None => {
-                let now = hbsync_types::unix_now();
-                s.set_folder_kv_of(folder.id, TRASH_SINCE_KEY, &now.to_string())?;
-                Ok(now)
-            }
-        })?;
-        let state_dir = Path::new(&folder.path).join(hbsync_local::STATE_DIR);
-        empty_trash(&trash_dir(&state_dir), since, before_ms);
+        let since = db.write(
+            |s| match s.folder_kv_of(folder.id, keys::TRASH_PURGED_SINCE)? {
+                Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
+                None => {
+                    let now = hbsync_types::unix_now();
+                    s.set_folder_kv_of(folder.id, keys::TRASH_PURGED_SINCE, &now.to_string())?;
+                    Ok(now)
+                }
+            },
+        )?;
+        empty_trash(
+            &layout::trash_dir(Path::new(&folder.path)),
+            since,
+            before_ms,
+        );
     }
     Ok(gone)
 }
@@ -307,9 +313,6 @@ fn delete_for_good(
     }
     Ok(gone)
 }
-
-/// The folder's state DB key of when the purge started emptying its trash (Unix s).
-const TRASH_SINCE_KEY: &str = "trash.purged_since";
 
 /// Deletes the trash entries (`<Unix s>-<node>`) that went there from `since` (Unix s) until
 /// before `before_ms`. Best effort: one that can't go now goes at the next purge.

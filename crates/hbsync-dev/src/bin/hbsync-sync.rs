@@ -43,11 +43,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::fs::canonicalize(folder)?;
     let name = root.file_name().ok_or("the folder has no name")?;
     let db = root.with_file_name(format!("{}.state.db", name.to_string_lossy()));
-    use hbsync_app::accounts::{self, FolderError};
-    match accounts::open_folder(&db, identity, &root) {
+    use hbsync_engine::root::{RootError, SyncRoot};
+    match SyncRoot::open(&db, identity, &root) {
         Ok(_) => {}
-        Err(FolderError::NoMarker(_) | FolderError::Unknown(_) | FolderError::Older(_)) => {
-            accounts::add_folder(&db, identity, &root)?;
+        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
+            SyncRoot::create(&db, identity, &root)?;
         }
         Err(e) => return Err(e.into()),
     }

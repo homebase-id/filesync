@@ -6,12 +6,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, HomebaseError, app};
 use hbsync_local::STATE_DIR;
 use hbsync_remote::Remote;
 
-use crate::accounts::{self, FolderError};
 use crate::control;
 use crate::paths::home;
 use crate::{Config, CredentialStore, Location, Paths, Root, autostart};
@@ -213,9 +213,9 @@ fn folder_state(config: &Config, identity: &str, folder: &Path) -> Result<Folder
     }
     // Its marker says whose it is. Without one (an older Filesync's folder, or one half set
     // up) it is set up again, its files merged: identical ones are adopted, not copied.
-    match accounts::check_marker(folder, identity) {
+    match SyncRoot::check(folder, identity) {
         Ok(_) => return Ok(FolderState::Ours),
-        Err(e @ FolderError::OtherIdentity { .. }) => return Err(e.to_string()),
+        Err(e @ RootError::OtherIdentity { .. }) => return Err(e.to_string()),
         Err(_) => {}
     }
     match has_files(folder) {
@@ -380,14 +380,14 @@ pub fn set_up(
     }
 
     // The folder in the account's state DB, and its marker: kept if set up before.
-    let db = accounts::db_path(paths, identity);
+    let db = paths.account_db(identity);
     let has_files = has_files(&folder)?;
-    match accounts::open_folder(&db, identity, &folder) {
+    match SyncRoot::open(&db, identity, &folder) {
         Ok(_) => {}
         // Synced here before, its marker gone: an empty mount point, most likely. Setting it
         // up would start it over; only when asked to merge.
-        Err(FolderError::NoMarker(_))
-            if !checked.existing && accounts::knows_path(&db, identity, &folder)? =>
+        Err(RootError::NoMarker(_))
+            if !checked.existing && SyncRoot::knows_path(&db, identity, &folder)? =>
         {
             return Err(Refusal::No(format!(
                 "{} was synced here, but its .hbsync is gone: if it is on a disk, plug it in; \
@@ -397,11 +397,11 @@ pub fn set_up(
             .into());
         }
         // Its state is gone (or it was copied here): its files are merged, when asked to.
-        Err(FolderError::Unknown(_) | FolderError::Older(_)) if has_files && !checked.existing => {
+        Err(RootError::Unknown(_) | RootError::Older(_)) if has_files && !checked.existing => {
             return Err(Refusal::NeedsMerge(folder).into());
         }
-        Err(FolderError::NoMarker(_) | FolderError::Unknown(_) | FolderError::Older(_)) => {
-            accounts::add_folder(&db, identity, &folder)?;
+        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
+            SyncRoot::create(&db, identity, &folder)?;
         }
         Err(e) => return Err(e.into()),
     }

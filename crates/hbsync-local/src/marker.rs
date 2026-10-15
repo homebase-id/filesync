@@ -1,4 +1,4 @@
-//! The marker in a synced folder's [`STATE_DIR`]: which account's state DB holds the folder,
+//! The marker in a synced folder's [`crate::STATE_DIR`]: which account's state DB holds the folder,
 //! and which of its folders it is. The DB lives with the account, outside the folder; a folder
 //! without its marker is gone or not mounted, and one whose marker names another account isn't
 //! this one's.
@@ -6,10 +6,7 @@
 use std::io;
 use std::path::Path;
 
-use crate::STATE_DIR;
-
-/// The marker's file name in [`STATE_DIR`].
-pub const MARKER_FILE: &str = "folder";
+use crate::layout::marker_file;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Marker {
@@ -30,7 +27,7 @@ impl Marker {
 
     /// The marker of the folder at `root`; `None` if it has none.
     pub fn read(root: &Path) -> io::Result<Option<Marker>> {
-        let text = match std::fs::read_to_string(root.join(STATE_DIR).join(MARKER_FILE)) {
+        let text = match std::fs::read_to_string(marker_file(root)) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
@@ -50,10 +47,10 @@ impl Marker {
         }
     }
 
-    /// Writes it into the folder at `root` (making its [`STATE_DIR`]).
+    /// Writes it into the folder at `root` (making its [`crate::STATE_DIR`]).
     pub fn write(&self, root: &Path) -> io::Result<()> {
         let text = format!("identity {}\nmarker {}\n", self.identity, self.id);
-        hbsync_fileio::write_atomic(&root.join(STATE_DIR).join(MARKER_FILE), text.as_bytes())
+        hbsync_fileio::write_atomic(&marker_file(root), text.as_bytes())
     }
 }
 
@@ -68,7 +65,7 @@ mod tests {
         let m = Marker::new("anna.example.com");
         m.write(dir.path())?;
         assert_eq!(Marker::read(dir.path())?, Some(m));
-        std::fs::write(dir.path().join(STATE_DIR).join(MARKER_FILE), "junk")?;
+        std::fs::write(marker_file(dir.path()), "junk")?;
         assert!(Marker::read(dir.path()).is_err());
         Ok(())
     }

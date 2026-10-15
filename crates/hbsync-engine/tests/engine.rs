@@ -1828,7 +1828,10 @@ fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
         listed,
         [
             ("cv.txt".into(), None),
-            ("mine.txt".into(), Some(String::new()))
+            (
+                "mine.txt".into(),
+                Some(a.root.to_string_lossy().into_owned())
+            )
         ]
     );
     a.engine.drive().empty_until(i64::MAX - 1)?;

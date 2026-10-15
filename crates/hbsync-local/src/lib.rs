@@ -5,14 +5,16 @@
 
 pub mod filter;
 pub mod journal;
+pub mod layout;
 pub mod marker;
 pub mod scan;
 pub mod walk;
 pub mod watch;
 
-pub use filter::{Filter, FilterError, IGNORE_FILE, Verdict, is_junk};
+pub use filter::{Filter, FilterError, Verdict, is_junk};
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
-pub use marker::{MARKER_FILE, Marker};
+pub use layout::IGNORE_FILE;
+pub use marker::Marker;
 pub use scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
 pub use watch::{Debounce, LiveWatcher, LocalObserver, WatchBatch};
