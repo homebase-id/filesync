@@ -296,6 +296,8 @@ enum Ctx {
         /// The node's, given to the file once in place.
         created_ms: Option<i64>,
         tags: Tags,
+        /// Its write-ahead record (`recover_placements`).
+        record: Option<Box<Placing>>,
     },
     /// `from`: the folder on the drive an updated file is in now.
     Upload {
@@ -695,43 +697,22 @@ impl<'a> Executor<'a> {
         // change from run to run.
         let mut pending: BTreeMap<NodeId, Prepared> = BTreeMap::new();
         let mut jobs = Vec::new();
+        let mut records = Vec::new();
         for (job, p) in std::mem::take(batch).jobs {
+            if let Ctx::Download {
+                record: Some(r), ..
+            } = &p.ctx
+            {
+                records.push(Placing::clone(r));
+            }
             pending.insert(job.node(), p);
             jobs.push((self.urgent.contains(&job.node()), job));
         }
-        // Write-ahead: a download put in place whose DB update a crash loses is found there
-        // again by its record (`recover_placements`).
-        let downloads: Vec<(&Download, &RelPath)> = jobs
-            .iter()
-            .filter_map(|(_, job)| {
-                let Job::Download(d) = job else {
-                    return None;
-                };
-                let Ctx::Download { target, .. } = &pending.get(&d.node)?.ctx else {
-                    return None;
-                };
-                Some((d, target))
-            })
-            .collect();
-        if !downloads.is_empty() {
-            self.db.write(|s| {
-                for (d, target) in &downloads {
-                    // The version whose bytes the job fetches.
-                    let Some(m) = s.get_mirror(d.node)? else {
-                        continue;
-                    };
-                    if m.file.is_some_and(|f| f.hash == d.expected) {
-                        s.put_placing(&Placing {
-                            node: d.node,
-                            target: (*target).clone(),
-                            version: m.version,
-                            hash: d.expected,
-                            size: d.size,
-                        })?;
-                    }
-                }
-                Ok(())
-            })?;
+        // Write-ahead: a download put in place whose commit a crash loses is found there again
+        // by its record (`recover_placements`).
+        if !records.is_empty() {
+            self.db
+                .write(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -949,7 +930,7 @@ use recover::{complete_fork, download_key};
 pub use recover::{recover_forks, recover_placements, sweep_tmp};
 pub use settle::settle;
 pub(crate) use settle::update_meta;
-use settle::{restored_tags, write_tags, written_row};
+use settle::{recorded_name, restored_tags, write_tags, written_row};
 
 /// The node whose delete takes `node` along: its topmost synced ancestor that is gone here
 /// too (a folder deleted with everything in it), or `node` itself.

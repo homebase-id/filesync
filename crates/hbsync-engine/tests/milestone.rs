@@ -6,7 +6,6 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
-use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,7 +14,7 @@ use hbsync_engine::exec::Skip;
 use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_platform::name::name_key;
 use hbsync_remote::fake::FakeServer;
-use hbsync_state::testkit::{Hook, on_commit};
+use hbsync_state::testkit::Commit;
 
 mod common;
 
@@ -101,13 +100,36 @@ fn entries(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     (dirs, files)
 }
 
-fn name_free(root: &Path, dir: &Path, name: &str) -> bool {
+/// What holds `name` in `dir` (under any case), if anything.
+fn occupant(root: &Path, dir: &Path, name: &str) -> Option<PathBuf> {
     let key = name_key(name);
     fs::read_dir(root.join(dir))
         .into_iter()
         .flatten()
         .flatten()
-        .all(|e| name_key(&e.file_name().to_string_lossy()) != key)
+        .find(|e| name_key(&e.file_name().to_string_lossy()) == key)
+        .map(|e| dir.join(e.file_name()))
+}
+
+fn name_free(root: &Path, dir: &Path, name: &str) -> bool {
+    occupant(root, dir, name).is_none()
+}
+
+/// How many seeds the randomized tests run (`MILESTONE_SEEDS`).
+fn seeds() -> u64 {
+    std::env::var("MILESTONE_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12)
+}
+
+/// Two clients of `server` that may delete everything.
+fn pair(server: &Arc<Mutex<FakeServer>>) -> Res<[Client; 2]> {
+    let allow = |c: &mut EngineConfig| c.allow_mass_delete = true;
+    Ok([
+        Client::with_config(server, "a", allow)?,
+        Client::with_config(server, "b", allow)?,
+    ])
 }
 
 /// One random user action on `root`.
@@ -131,26 +153,18 @@ fn act(root: &Path, rng: &mut Rng, ledger: &mut Ledger) -> std::io::Result<()> {
                 return Ok(());
             }
             let item = all[rng.below(all.len())];
-            let to = root.join(dir).join(name);
             if dir.starts_with(item) {
                 return Ok(());
             }
-            if !name_free(root, dir, name) {
+            match occupant(root, dir, name) {
+                None => fs::rename(root.join(item), root.join(dir).join(name)),
                 // A file moved over another file (`mv c d` over `d`): d's bytes go.
-                let over = files.iter().find(|f| {
-                    f.parent() == Some(dir.as_path())
-                        && f.file_name()
-                            .is_some_and(|n| name_key(&n.to_string_lossy()) == name_key(name))
-                });
-                return match over {
-                    Some(over) if files.contains(item) && item != over => {
-                        ledger.superseded.insert(fs::read(root.join(over))?);
-                        fs::rename(root.join(item), root.join(over))
-                    }
-                    _ => Ok(()),
-                };
+                Some(over) if files.contains(item) && files.contains(&over) && *item != over => {
+                    ledger.superseded.insert(fs::read(root.join(&over))?);
+                    fs::rename(root.join(item), root.join(over))
+                }
+                Some(_) => Ok(()),
             }
-            fs::rename(root.join(item), to)
         }
         9 => {
             let all: Vec<&PathBuf> = dirs.iter().skip(1).chain(files.iter()).collect();
@@ -174,15 +188,10 @@ fn act(root: &Path, rng: &mut Rng, ledger: &mut Ledger) -> std::io::Result<()> {
 
 #[test]
 fn randomized_two_client_convergence() -> R {
-    let seeds: u64 = std::env::var("MILESTONE_SEEDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12);
+    let seeds = seeds();
     for seed in 0..seeds {
         let server = server();
-        let allow = |c: &mut EngineConfig| c.allow_mass_delete = true;
-        let mut a = Client::with_config(&server, "a", allow)?;
-        let mut b = Client::with_config(&server, "b", allow)?;
+        let [mut a, mut b] = pair(&server)?;
         let mut rng = Rng(seed);
         let mut ledger = Ledger::default();
         for _ in 0..30 {
@@ -240,54 +249,30 @@ fn converged(
     Ok(())
 }
 
-/// Syncs `c` until it crashes at its state DB's `at`-th commit (if it gets that far): just
-/// before it with `before` (that operation's DB changes are lost, what it did on disk or on the
-/// drive stays), else just after. Then starts it again. Returns whether it crashed. A crash
-/// between operations, or inside one; one between an operation's change on disk and a commit
-/// of its write-ahead record is that record's case (the `CrashPoint` tests).
-fn crash(c: &mut Client, at: usize, before: bool) -> Res<bool> {
-    let db = c.db_path();
-    let commits = AtomicUsize::new(0);
-    let hook = Hook(Arc::new(move |committed| {
-        if committed != before && commits.fetch_add(1, Ordering::SeqCst) == at {
-            std::panic::panic_any(Crash);
-        }
-    }));
-    on_commit(&db, Some(hook));
-    c.restart()?;
-    let synced = std::panic::catch_unwind(AssertUnwindSafe(|| c.sync()));
-    on_commit(&db, None);
-    let crashed = match synced {
-        Ok(synced) => {
-            synced?;
-            false
-        }
-        Err(e) if e.is::<Crash>() => true,
-        Err(e) => std::panic::resume_unwind(e),
+/// Crashes `c` at its state DB's `at`-th commit of a sync (if it gets that far), just before
+/// or after it. A crash between operations, or inside one; one between an operation's change on
+/// disk and a commit of its write-ahead record is that record's case (the `CrashPoint` tests).
+fn crash_at(c: &mut Client, at: usize, before: bool) -> Res<bool> {
+    let when = if before {
+        Commit::Before
+    } else {
+        Commit::After
     };
-    c.restart()?;
-    Ok(crashed)
+    let commits = AtomicUsize::new(0);
+    common::crash(c, move |now| {
+        now == when && commits.fetch_add(1, Ordering::SeqCst) == at
+    })
 }
-
-/// The panic that crashes a client.
-struct Crash;
 
 /// Crashes at any of the first 64 commits of a sync, just before or after one: the clients
 /// still converge, with nothing lost and nothing twice.
 #[test]
 fn randomized_crashes() -> R {
-    let seeds: u64 = std::env::var("MILESTONE_SEEDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12);
+    let seeds = seeds();
     let mut crashes = 0;
     for seed in 0..seeds {
         let server = server();
-        let allow = |c: &mut EngineConfig| c.allow_mass_delete = true;
-        let mut clients = [
-            Client::with_config(&server, "a", allow)?,
-            Client::with_config(&server, "b", allow)?,
-        ];
+        let mut clients = pair(&server)?;
         let mut rng = Rng(seed);
         let mut ledger = Ledger::default();
         // A client that crashed is down until it starts again: its first sync (the daemon's
@@ -313,7 +298,7 @@ fn randomized_crashes() -> R {
                     } else {
                         rng.below(64)
                     };
-                    down[i] = crash(&mut clients[i], at, rng.below(2) == 0)
+                    down[i] = crash_at(&mut clients[i], at, rng.below(2) == 0)
                         .map_err(|e| format!("seed {seed}: {e}"))?;
                     crashes += usize::from(down[i]);
                 }

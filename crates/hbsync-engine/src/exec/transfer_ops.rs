@@ -99,6 +99,20 @@ impl Executor<'_> {
         }
         let target = self.target_path(parent, name)?;
         let created_ms = mirror.created_ms();
+        // What its commit records, as the drive has it now: kept until then.
+        let record = mirror.state().map(|state| {
+            Box::new(Placing {
+                base: BaseRow {
+                    node,
+                    state,
+                    remote: mirror.remote_ref(),
+                    content_state: ContentState::Local,
+                    local_name: None,
+                    local_hash: None,
+                },
+                target: target.clone(),
+            })
+        });
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -118,6 +132,7 @@ impl Executor<'_> {
                 current,
                 created_ms,
                 tags: tags.clone(),
+                record,
             },
         ))
     }
@@ -243,6 +258,7 @@ impl Executor<'_> {
                     current,
                     created_ms,
                     tags,
+                    ..
                 },
                 _,
                 JobResult::Downloaded { file, local_hash },

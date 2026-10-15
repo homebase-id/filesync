@@ -1,6 +1,8 @@
 //! What a crash left behind: conflict copies half made, temporary files no download can use.
 
 use super::*;
+use crate::adopt;
+use hbsync_types::NodeState;
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
 pub(super) fn complete_fork(
@@ -47,52 +49,75 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
     Ok(completed)
 }
 
-/// Finds downloads that were put in place but whose DB update a crash lost: the scan took
-/// each for a new item. The file at a record's target, new to this device and holding the
-/// record's bytes, becomes that node again, settled as the lost update would have while the
-/// drive still has that version. Every record goes: the next batch writes its own. Run after
-/// the local catch-up and before the feed is pulled (the drive may have moved the node since).
+/// Finds downloads that were put in place but whose commit a crash lost: the file at a
+/// record's target holding its bytes (new to the scan, or the node's own file replaced) is
+/// that node, with the base the lost commit wrote. Later changes on the drive are then plain
+/// changes against that base, whenever the feed brings them. Every record goes: the next
+/// batch writes its own.
 pub fn recover_placements(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError> {
-    let records = db.read(|s| s.all_placing())?;
-    if records.is_empty() {
-        return Ok(0);
-    }
-    // The new file at each target (outside the write: a file may need hashing).
-    let mut found = Vec::new();
-    for p in &records {
-        let row = db.read(|s| {
-            if s.local_by_node(p.node)?.is_some() {
-                return Ok(None); // recorded after all
-            }
+    let found = db.read(|s| {
+        let mut found = Vec::new();
+        for p in s.all_placing()? {
+            let node = p.base.node;
             let Some(row) = s.get_local(&p.target)? else {
-                return Ok(None);
+                found.push((p, None));
+                continue;
             };
             let new = s.get_base(row.node)?.is_none() && s.get_mirror(row.node)?.is_none();
-            Ok((new && row.kind == NodeKind::File).then_some(row))
-        })?;
-        if let Some(row) = row
-            && crate::adopt::same_bytes(root, &row, &p.hash, p.size)
-        {
-            found.push((p, row));
+            let ours = row.node == node || (new && s.local_by_node(node)?.is_none());
+            found.push((p, ours.then_some(row)));
         }
+        Ok(found)
+    })?;
+    if found.is_empty() {
+        return Ok(0);
     }
+    // Outside the write: a file of another client's hash algorithm is hashed.
+    let found: Vec<(Placing, Option<LocalRow>)> = found
+        .into_iter()
+        .map(|(p, row)| {
+            let row = row.filter(|row| {
+                p.base.state.content.is_some_and(|c| {
+                    row.kind == NodeKind::File && adopt::same_bytes(root, row, &c.hash, c.size)
+                })
+            });
+            (p, row)
+        })
+        .collect();
+    let mut recovered = 0;
     db.write(|s| {
-        for p in &records {
-            s.delete_placing(p.node)?;
-        }
         for (p, row) in &found {
-            s.rekey_local(row.node, p.node)?;
-            s.clear_dirty(row.node)?;
-            s.mark_dirty(p.node)?;
-            if s.get_mirror(p.node)?
-                .is_some_and(|m| m.version == p.version)
-            {
-                settle(s, p.node, os, true)?;
+            let node = p.base.node;
+            s.delete_placing(node)?;
+            let Some(row) = row else {
+                continue;
+            };
+            if row.node != node {
+                adopt::take_over(s, row.node, node)?;
             }
+            let state = &p.base.state;
+            s.put_base(&BaseRow {
+                // What both sides have.
+                state: NodeState {
+                    tags: row
+                        .tags
+                        .as_ref()
+                        .map_or(state.tags.clone(), |t| t.intersection(&state.tags)),
+                    ..state.clone()
+                },
+                content_state: s
+                    .get_base(node)?
+                    .map_or(ContentState::Local, |b| b.content_state),
+                local_name: recorded_name(&row.path, &state.name, os),
+                local_hash: row.hash,
+                ..p.base.clone()
+            })?;
+            s.mark_dirty(node)?;
+            recovered += 1;
         }
         Ok(())
     })?;
-    Ok(found.len())
+    Ok(recovered)
 }
 
 /// The temp file name stem of a download: node and content, so a partial file is resumed only

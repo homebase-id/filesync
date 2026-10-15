@@ -197,18 +197,26 @@ const SCHEMA: &str = r#"
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
 const MIGRATIONS: &[&str] = &[
     // 6: per folder, downloads about to be put in place (written before a batch of them
-    // runs), so one whose DB update a crash lost is still known as its node.
+    // runs), each with the base its commit writes: one whose commit a crash lost is still
+    // known as its node, as of that version.
     "CREATE TABLE placing (
-        folder      INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-        id          INTEGER NOT NULL,              -- nodes.id
-        path        TEXT NOT NULL,                 -- where it goes
-        version_tag BLOB NOT NULL,                 -- the version being downloaded
-        hash        BLOB NOT NULL,                 -- its content hash (remote algorithm)
-        size        INTEGER NOT NULL,
+        folder         INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id             INTEGER NOT NULL,              -- nodes.id
+        path           TEXT NOT NULL,                 -- where it goes
+        parent         INTEGER NOT NULL,              -- nodes.id; the rest as in base
+        name           TEXT NOT NULL,
+        kind           INTEGER NOT NULL,
+        hash           BLOB,
+        size           INTEGER,
+        mtime_ms       INTEGER,
+        executable     INTEGER NOT NULL DEFAULT 0,
+        remote_file_id BLOB NOT NULL,
+        version_tag    BLOB NOT NULL,
+        tags           TEXT,
         PRIMARY KEY (id, folder)
     ) WITHOUT ROWID;
     CREATE TRIGGER placing_gone AFTER DELETE ON placing
-        BEGIN INSERT INTO gone VALUES (old.id); END;",
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;",
 ];
 
 /// The version this client makes and reads.

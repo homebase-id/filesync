@@ -65,18 +65,16 @@ impl Fixture {
                 let id = || hbsync_types::Uuid::new_v4();
                 s.put_base(&BaseRow {
                     node: row.node,
-                    state: NodeState {
-                        parent: NodeId::ROOT,
-                        name: row.path.name().unwrap_or_default().to_owned(),
-                        kind: NodeKind::File,
-                        content: Some(FileContent {
+                    state: NodeState::file(
+                        NodeId::ROOT,
+                        row.path.name().unwrap_or_default(),
+                        FileContent {
                             hash,
                             size: row.fingerprint.size,
                             mtime_ms: 0,
                             executable: false,
-                        }),
-                        tags: Default::default(),
-                    },
+                        },
+                    ),
                     remote: RemoteRef {
                         file_id: RemoteFileId(id()),
                         version: VersionTag(id()),

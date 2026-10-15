@@ -110,9 +110,16 @@ pub mod testkit {
     use super::*;
 
     /// Called around each commit to a DB file, in its turn (no other connection of this process
-    /// writes meanwhile): with `false` just before it, `true` just after.
+    /// writes meanwhile).
     #[derive(Clone)]
-    pub struct Hook(pub Arc<dyn Fn(bool) + Send + Sync>);
+    pub struct Hook(pub Arc<dyn Fn(Commit) + Send + Sync>);
+
+    /// When a [`Hook`] is called.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Commit {
+        Before,
+        After,
+    }
 
     impl std::fmt::Debug for Hook {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -262,12 +269,12 @@ impl StateDb {
         let touched = store.take_touched();
         #[cfg(feature = "testkit")]
         if let Some(hook) = &self.hook {
-            (hook.0)(false);
+            (hook.0)(testkit::Commit::Before);
         }
         tx.commit()?;
         #[cfg(feature = "testkit")]
         if let Some(hook) = &self.hook {
-            (hook.0)(true);
+            (hook.0)(testkit::Commit::After);
         }
         self.touched.extend(touched);
         Ok(out)

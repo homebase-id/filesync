@@ -216,11 +216,10 @@ expected fingerprint is treated as done.
   (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
   feed, and parked items come back from their records. A download placed but not recorded (a
   crash just before its commit) is found again: each batch of downloads is recorded before it
-  runs (node, target, version, bytes), and on the next start, after the local catch-up and
-  before the feed, a new file at a record's target holding its bytes becomes that node again,
-  settled as the lost commit would have while the drive still has that version; the records
-  go then. A file holding its node's bytes at its node's place is adopted, whatever the node's
-  history. A verified download that couldn't be
+  runs, with the base each commit writes (the node as the drive has it at that version) and its
+  target; on the next sync the file at a record's target holding its bytes, new to the scan or
+  the node's own file replaced, is that node with that base, and later changes on the drive are
+  plain changes against it. The records go then. A verified download that couldn't be
   placed stays in the temp folder for the retry; temp files no pending download wants are
   removed before each plan. The stored journal position never passes a change that isn't
   recorded: it is taken before waiting for events and stored only once the event queue has

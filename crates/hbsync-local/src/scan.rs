@@ -254,17 +254,16 @@ fn merge(
 /// onto yet another name, or swapped with this one) was moved onto this name. Where file ids
 /// are recycled, only with the bytes it had. Anything else at the same path is the node that
 /// was there: an editor's save through a temp file brings a new id (and the temp file, if a
-/// scan saw it, was never synced), one keeping a backup by renaming leaves the path. Returns
-/// the paths, and the hashes taken to tell.
-#[allow(clippy::type_complexity)]
+/// scan saw it, was never synced), one keeping a backup by renaming leaves the path. `hash`
+/// hashes what is at a path now.
 fn moved_onto(
     db: &mut StateDb,
     removed: &[LocalRow],
     changed: &[(LocalRow, LocalMeta)],
     opts: &ScanOptions,
     hash: &mut dyn FnMut(&RelPath, &LocalMeta) -> Option<ContentHash>,
-) -> Result<(HashSet<RelPath>, HashMap<RelPath, Option<ContentHash>>), StateError> {
-    let (mut onto, mut hashed) = (HashSet::new(), HashMap::new());
+) -> Result<HashSet<RelPath>, StateError> {
+    let mut onto = HashSet::new();
     let is_file = |m: &LocalMeta| kind_of(m) == NodeKind::File;
     let switched: Vec<&(LocalRow, LocalMeta)> = changed
         .iter()
@@ -273,7 +272,7 @@ fn moved_onto(
         })
         .collect();
     if switched.is_empty() || !opts.fs_family.has_stable_file_ids() {
-        return Ok((onto, hashed));
+        return Ok(onto);
     }
     // Files that left their path, by the id they had there.
     let mut left: HashMap<FileId, &LocalRow> = removed
@@ -303,9 +302,7 @@ fn moved_onto(
             };
             let synced = db.read(|s| s.get_base(from.node))?.is_some();
             let same = !opts.fs_family.reuses_file_ids() || {
-                let h = *hashed
-                    .entry(row.path.clone())
-                    .or_insert_with(|| hash(&row.path, meta));
+                let h = hash(&row.path, meta);
                 h.is_some() && h == from.hash
             };
             if synced && same {
@@ -315,7 +312,7 @@ fn moved_onto(
             }
         }
         if !more {
-            return Ok((onto, hashed));
+            return Ok(onto);
         }
     }
 }
@@ -468,9 +465,16 @@ fn resolve(
     // known path another synced file was moved onto (§3 rule 1, see `moved_onto`).
     let mut removed = diff.removed;
     let mut added = diff.added;
-    let (onto, mut hashed) = moved_onto(db, &removed, &diff.changed, opts, &mut |p, m| {
-        hash_now(p, m, report)
+    // Hashes taken to tell, used again below.
+    let mut hashed = HashMap::new();
+    let onto = moved_onto(db, &removed, &diff.changed, opts, &mut |p, m| {
+        *hashed
+            .entry(p.clone())
+            .or_insert_with(|| hash_now(p, m, report))
     })?;
+    let mut hash_of = |p: &RelPath, m: &LocalMeta, report: &mut ScanReport| {
+        hashed.remove(p).unwrap_or_else(|| hash_now(p, m, report))
+    };
     for (row, meta) in diff.changed {
         if kind_of(&meta) != row.kind || onto.contains(&row.path) {
             added.push((row.path.clone(), meta));
@@ -482,9 +486,7 @@ fn resolve(
         if row.kind == NodeKind::File
             && (row.fingerprint != meta.fingerprint() || row.hash.is_none())
         {
-            new.hash = hashed
-                .remove(&row.path)
-                .unwrap_or_else(|| hash_now(&row.path, &meta, report));
+            new.hash = hash_of(&row.path, &meta, report);
             content_changed = new.hash.is_none() || new.hash != row.hash;
         }
         let x_changed = row.kind == NodeKind::File
@@ -539,9 +541,7 @@ fn resolve(
                 && old.hash.is_some()
                 && (!opts.fs_family.reuses_file_ids() || moved_with_parent);
             if !trusted {
-                new.hash = hashed
-                    .remove(&path)
-                    .unwrap_or_else(|| hash_now(&path, &meta, report));
+                new.hash = hash_of(&path, &meta, report);
                 let content_changed = new.hash.is_none() || new.hash != old.hash;
                 if content_changed && opts.fs_family.reuses_file_ids() {
                     // Probably a recycled inode, not the same file: no identity from the id.

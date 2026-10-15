@@ -10,7 +10,7 @@ use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
-use hbsync_state::testkit::{Hook, on_commit};
+use hbsync_state::testkit::Commit;
 use hbsync_types::{NodeId, RemoteFileId, RemoteRef, VersionTag};
 
 mod common;
@@ -2179,16 +2179,8 @@ fn a_download_placed_but_not_recorded_is_found_again() -> R {
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     // b crashes just before the commit that records x.txt in place.
-    let (db, placed) = (b.db_path(), b.root.join("x.txt"));
-    let hook = Hook(Arc::new(move |committed| {
-        if !committed && placed.exists() {
-            std::panic::panic_any("crash");
-        }
-    }));
-    on_commit(&db, Some(hook));
-    b.restart()?;
-    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.sync())).is_err();
-    on_commit(&db, None);
+    let placed = b.root.join("x.txt");
+    let crashed = common::crash(&mut b, move |at| at == Commit::Before && placed.exists())?;
     assert!(crashed && b.read_text("x.txt")? == "the bytes");
     // Meanwhile a renames it.
     fs::rename(a.root.join("x.txt"), a.root.join("y.txt"))?;
