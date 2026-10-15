@@ -399,7 +399,11 @@ impl<'a> Executor<'a> {
     /// Runs a plan's operations, in order.
     pub fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
         let ran = self.run_ops(ops);
-        // Before the sync's closing flush, however the run ended.
+        // The next run (a plan's next page) doesn't know the places this one emptied: durable
+        // now if any. Otherwise the folders at least, before the sync's closing flush.
+        if ran.is_ok() && !self.emptied_places.is_empty() {
+            self.flush_db()?;
+        }
         self.sync_dirs();
         ran?;
         Ok(self.report)
