@@ -2180,7 +2180,7 @@ fn a_download_placed_but_not_recorded_is_found_again() -> R {
     let mut b = Client::new(&server, "b")?;
     // b crashes just before the commit that records x.txt in place.
     let placed = b.root.join("x.txt");
-    let crashed = common::crash(&mut b, false, move |at| {
+    let crashed = common::crash(&mut b, common::Kept::All, move |at| {
         at == Commit::Before && placed.exists()
     })?;
     assert!(crashed && b.read_text("x.txt")? == "the bytes");
@@ -2195,9 +2195,9 @@ fn a_download_placed_but_not_recorded_is_found_again() -> R {
     Ok(())
 }
 
-/// A folder deleted on the drive and a new one made under its name: the trash and the new
-/// folder land here in one sync. A power cut losing the trash's commit must not leave the DB
-/// taking the new folder for the old one.
+/// A folder deleted on the drive and a new one made under its name: here the old one is parked
+/// for the new one, then trashed, in one sync. A power cut losing the parking's commit must not
+/// leave the DB taking the new folder for the old one.
 #[test]
 fn a_power_cut_after_a_folder_was_replaced_keeps_the_new_folder() -> R {
     let server = server();
@@ -2213,7 +2213,7 @@ fn a_power_cut_after_a_folder_was_replaced_keeps_the_new_folder() -> R {
     a.sync()?;
     // b's power goes just before the first commit once the new folder is there.
     let (gone, f) = (std::sync::atomic::AtomicBool::new(false), b.root.join("F"));
-    let crashed = common::crash(&mut b, true, move |at| {
+    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at| {
         if !f.exists() {
             gone.store(true, Ordering::SeqCst);
         }
@@ -2223,6 +2223,71 @@ fn a_power_cut_after_a_folder_was_replaced_keeps_the_new_folder() -> R {
     b.sync()?;
     a.sync()?;
     assert_eq!(b.tree_text(""), ["F/", "F/new.txt = new", "keep.txt = k"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// An item detached here (edited here, moved where this device ignores) goes out under its
+/// new id once: a power cut after its upload doesn't make the next sync pick another id.
+#[test]
+fn a_power_cut_after_a_detach_uploads_the_item_once() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("build/\n"))?;
+    a.write("keep.txt", "k")?;
+    a.write("a.txt", "v1")?;
+    a.sync()?;
+    b.sync()?;
+    fs::create_dir_all(a.root.join("build"))?;
+    fs::rename(a.root.join("a.txt"), a.root.join("build/a.txt"))?;
+    a.sync()?;
+    b.write("a.txt", "b's edit")?;
+    // b's power goes right after the commit that follows its upload of the detached item.
+    let drive = server.clone();
+    let uploaded = move || drive.lock().is_ok_and(|s| s.live().count() == 4);
+    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at| {
+        at == Commit::After && uploaded()
+    })?;
+    assert!(crashed);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(b.tree_text(""), ["a.txt = b's edit", "keep.txt = k"]);
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "a.txt = b's edit",
+            "build/",
+            "build/a.txt = v1",
+            "keep.txt = k"
+        ]
+    );
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 4);
+    Ok(())
+}
+
+/// A folder deleted here and renamed elsewhere comes back here (the change wins): a power cut
+/// right after it is made doesn't make it a second folder.
+#[test]
+fn a_power_cut_after_a_folder_came_back_keeps_one() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    fs::create_dir_all(a.root.join("F"))?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    fs::remove_dir(b.root.join("F"))?;
+    fs::rename(a.root.join("F"), a.root.join("G"))?;
+    a.sync()?;
+    // Just before the commit that records it.
+    let g = b.root.join("G");
+    let crashed = common::crash(&mut b, common::Kept::Durable(None), move |at| {
+        at == Commit::Before && g.exists()
+    })?;
+    assert!(crashed);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(b.tree_text(""), ["G/", "keep.txt = k"]);
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }

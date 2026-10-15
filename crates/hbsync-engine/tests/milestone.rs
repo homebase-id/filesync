@@ -18,7 +18,7 @@ use hbsync_state::testkit::Commit;
 
 mod common;
 
-use common::{Client, Res, server};
+use common::{Client, Kept, Res, server};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -250,12 +250,12 @@ fn converged(
 }
 
 /// Crashes `c` at its state DB's `at`-th commit of a sync (if it gets that far), just before
-/// or after it; with `power_cut`, the DB loses what wasn't durable. A crash between operations,
+/// or after it, the DB keeping what `kept` says. A crash between operations,
 /// or inside one; one between an operation's change on disk and a commit of its write-ahead
 /// record is that record's case (the `CrashPoint` tests).
-fn crash_at(c: &mut Client, at: usize, before: bool, power_cut: bool) -> Res<bool> {
+fn crash_at(c: &mut Client, at: usize, before: bool, kept: Kept) -> Res<bool> {
     let commits = AtomicUsize::new(0);
-    common::crash(c, power_cut, move |now| {
+    common::crash(c, kept, move |now| {
         (now == Commit::Before) == before && commits.fetch_add(1, Ordering::SeqCst) == at
     })
 }
@@ -294,8 +294,13 @@ fn randomized_crashes() -> R {
                     } else {
                         rng.below(64)
                     };
-                    let (before, power_cut) = (rng.below(2) == 0, rng.below(2) == 0);
-                    down[i] = crash_at(&mut clients[i], at, before, power_cut)
+                    let before = rng.below(2) == 0;
+                    let kept = match rng.below(3) {
+                        0 => Kept::All,
+                        1 => Kept::Durable(None),
+                        _ => Kept::Durable(Some(rng.below(at + 1))),
+                    };
+                    down[i] = crash_at(&mut clients[i], at, before, kept)
                         .map_err(|e| format!("seed {seed}: {e}"))?;
                     crashes += usize::from(down[i]);
                 }

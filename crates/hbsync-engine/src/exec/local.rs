@@ -38,7 +38,7 @@ impl Executor<'_> {
             self.db.write(|s| s.delete_fork(node))?;
             return Ok(io_outcome(e));
         }
-        self.emptied(&row.path);
+        self.mark_emptied(&row.path);
         let moved = LocalRow {
             node: new_node,
             ..self.renamed(&row, &target).unwrap_or_else(|| LocalRow {
@@ -77,6 +77,30 @@ impl Executor<'_> {
                 return Ok(Outcome::Retry("name taken".into()));
             }
             self.filling(&target)?;
+            // Write-ahead for a folder this device synced before: with the commit lost, the
+            // scan would find it as a new folder, which adoption doesn't pair with a node that
+            // has a base (`recover_placements` does, by this record).
+            let record = self.db.read(|s| {
+                if s.get_base(node)?.is_none() {
+                    return Ok(None);
+                }
+                Ok(s.get_mirror(node)?.and_then(|m| {
+                    Some(Placing {
+                        base: BaseRow {
+                            node,
+                            state: m.state()?,
+                            remote: m.remote_ref(),
+                            content_state: ContentState::Local,
+                            local_name: None,
+                            local_hash: None,
+                        },
+                        target: target.clone(),
+                    })
+                }))
+            })?;
+            if let Some(record) = record {
+                self.write_ahead(|s| s.put_placing(&record))?;
+            }
             if let Err(e) = fs::create_dir(&abs) {
                 return Ok(io_outcome(e));
             }
@@ -91,6 +115,7 @@ impl Executor<'_> {
             Err(e) => return Ok(io_outcome(e)),
         };
         self.finish(&[(node, false)], |s| {
+            s.delete_placing(node)?;
             s.put_local(&LocalRow {
                 path: target.clone(),
                 node,
@@ -167,7 +192,7 @@ impl Executor<'_> {
         if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&target)) {
             return Ok(io_outcome(e));
         }
-        self.emptied(&row.path);
+        self.mark_emptied(&row.path);
         let refreshed = self.renamed(&row, &target);
         self.finish(&[(node, false)], |s| {
             s.move_local_subtree(&row.path, &target)?;
@@ -289,7 +314,7 @@ impl Executor<'_> {
                 }
             }
         };
-        self.finish(&[], |s| {
+        let detached = self.finish(&[], |s| {
             let below = s.local_subtree(&row.path)?;
             s.rekey_local(node, new_node)?;
             // The old node isn't synced here any more; a base left behind would read as a
@@ -301,7 +326,13 @@ impl Executor<'_> {
                 .iter()
                 .filter(|r| r.node != node)
                 .try_for_each(|r| s.mark_dirty(r.node))
-        })
+        });
+        // The new id goes out with the item in this run: durable first (a power cut must not
+        // make the next plan pick another).
+        if detached.is_ok() {
+            self.flush_db()?;
+        }
+        detached
     }
 
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).
@@ -326,7 +357,8 @@ impl Executor<'_> {
         fs::create_dir_all(&dir)?;
         let name = path.name().unwrap_or("item");
         ops::rename_noreplace(&self.abs(path), &dir.join(name))?;
-        self.emptied(path);
+        self.mark_emptied(path);
+        self.unsynced_dirs.insert(dir);
         Ok(())
     }
 }

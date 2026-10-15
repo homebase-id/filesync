@@ -170,7 +170,10 @@ pub mod testkit {
                     )?
                     .query_map([], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?;
-                for t in tables {
+                // `gone` last: the triggers of the others write to it.
+                let (gone, others): (Vec<String>, Vec<String>) =
+                    tables.into_iter().partition(|t| t == "gone");
+                for t in others.into_iter().chain(gone) {
                     tx.execute_batch(&format!(
                         "DELETE FROM main.\"{t}\"; \
                          INSERT INTO main.\"{t}\" SELECT * FROM copy.\"{t}\";"
@@ -277,6 +280,9 @@ impl StateDb {
         // disk) with each one synced.
         wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // A sync on macOS stops at the drive's cache unless it is a full one.
+        #[cfg(target_os = "macos")]
+        conn.pragma_update(None, "fullfsync", true)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(128);
@@ -328,6 +334,8 @@ impl StateDb {
         if durable {
             self.conn.pragma_update(None, "synchronous", "FULL")?;
         }
+        // A commit that writes nothing syncs nothing.
+        let changes = self.conn.total_changes();
         let committed = (|| -> Result<_> {
             let tx = self
                 .conn
@@ -347,7 +355,9 @@ impl StateDb {
             let _ = self.conn.pragma_update(None, "synchronous", "NORMAL");
         }
         let (out, touched) = committed?;
-        *unsynced = !durable;
+        if self.conn.total_changes() != changes {
+            *unsynced = !durable;
+        }
         #[cfg(feature = "testkit")]
         if let Some(hook) = &self.hook {
             (hook.0)(if durable {

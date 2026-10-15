@@ -216,7 +216,10 @@ pub struct Executor<'a> {
     /// Places on disk emptied since the last durable commit (by [`place_key`]). With the
     /// commits since lost (a power cut), what is put there next would be taken for what was
     /// there: before that, they are made durable ([`Executor::filling`]).
-    emptied: HashSet<String>,
+    emptied_places: HashSet<String>,
+    /// Folders whose entries this run changed and hasn't synced: synced before the DB records
+    /// the change durably ([`Executor::flush_db`]), so it can't hold one the disk lost.
+    unsynced_dirs: HashSet<PathBuf>,
 }
 
 /// A place on disk as [`Executor::emptied`] knows it (any case).
@@ -346,7 +349,8 @@ impl<'a> Executor<'a> {
             progress: Arc::default(),
             counted: HashSet::new(),
             full: false,
-            emptied: HashSet::new(),
+            emptied_places: HashSet::new(),
+            unsynced_dirs: HashSet::new(),
         }
     }
 
@@ -392,7 +396,7 @@ impl<'a> Executor<'a> {
     pub fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
         // What the plan was made from is durable before anything acts on it: the ids the scan
         // gave new items go out with them (a power cut must not make the scan give others).
-        self.db.flush()?;
+        self.flush_db()?;
         self.forgetting = ops
             .iter()
             .filter(|op| matches!(op, Op::Forget { .. }))
@@ -413,7 +417,7 @@ impl<'a> Executor<'a> {
                 if batch.jobs.is_empty() {
                     break;
                 }
-                self.flush(&mut batch)?;
+                self.run_batch(&mut batch)?;
                 continue;
             };
             // Everything else runs on its own, in order: after the batch.
@@ -424,7 +428,7 @@ impl<'a> Executor<'a> {
                     || batch.holds_up(&op)
                     || target.as_ref().is_some_and(|t| batch.crosses(op.node(), t)))
             {
-                self.flush(&mut batch)?;
+                self.run_batch(&mut batch)?;
                 if self.should_stop() {
                     break;
                 }
@@ -479,6 +483,8 @@ impl<'a> Executor<'a> {
                 return Err(StateError::Conflict("crash point reached".into()));
             }
         }
+        // Before the sync's closing flush.
+        self.sync_dirs();
         Ok(self.report)
     }
 
@@ -704,7 +710,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
-    fn flush(&mut self, batch: &mut Batch) -> Result<(), StateError> {
+    fn run_batch(&mut self, batch: &mut Batch) -> Result<(), StateError> {
         self.wait_out_backoff();
         // In node order: what didn't start goes back to the queue in an order that doesn't
         // change from run to run.
@@ -890,24 +896,49 @@ impl<'a> Executor<'a> {
         &mut self,
         f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
     ) -> Result<(), StateError> {
+        self.sync_dirs();
         self.db.write_durable(f)?;
-        self.emptied.clear();
+        self.emptied_places.clear();
         Ok(())
     }
 
-    /// `path` on disk was just emptied (moved or trashed from).
-    fn emptied(&mut self, path: &RelPath) {
-        self.emptied.insert(place_key(path));
+    /// Makes what this run did so far durable: the folders it changed, then the DB.
+    fn flush_db(&mut self) -> Result<(), StateError> {
+        self.sync_dirs();
+        self.db.flush()?;
+        self.emptied_places.clear();
+        Ok(())
     }
 
-    /// Before something is put at `path`: if it was emptied since the last durable commit, the
-    /// commits are made durable first, so a power cut can't leave the DB holding the old item
-    /// there while the new one is.
-    fn filling(&mut self, path: &RelPath) -> Result<(), StateError> {
-        if self.emptied.contains(&place_key(path)) {
-            self.db.flush()?;
-            self.emptied.clear();
+    /// Syncs the folders this run changed (best effort: one that is gone needs none).
+    fn sync_dirs(&mut self) {
+        for dir in self.unsynced_dirs.drain() {
+            let _ = ops::sync_dir(&dir);
         }
+    }
+
+    /// The entry of `path` on disk was just changed: its folder is synced before the next
+    /// durable commit.
+    fn changed_entry(&mut self, path: &RelPath) {
+        let parent = path.parent().unwrap_or_default();
+        let dir = self.abs(&parent);
+        self.unsynced_dirs.insert(dir);
+    }
+
+    /// `path` on disk was just emptied (moved or trashed from).
+    fn mark_emptied(&mut self, path: &RelPath) {
+        self.emptied_places.insert(place_key(path));
+        self.changed_entry(path);
+    }
+
+    /// Before something is put at `path`: if it was emptied since the last durable commit, that
+    /// is made durable first, so a power cut can't leave the DB holding the old item there
+    /// while the new one is.
+    fn filling(&mut self, path: &RelPath) -> Result<(), StateError> {
+        if self.emptied_places.contains(&place_key(path)) {
+            self.flush_db()?;
+        }
+        self.changed_entry(path);
         Ok(())
     }
 
@@ -942,7 +973,7 @@ impl<'a> Executor<'a> {
             self.db.write(|s| s.delete_parked(occupant.node))?;
             return Ok(false);
         }
-        self.emptied(&occupant.path);
+        self.mark_emptied(&occupant.path);
         if self.crash_here(CrashPoint::AfterParkRename) {
             return Ok(false);
         }

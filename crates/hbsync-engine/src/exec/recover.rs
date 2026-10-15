@@ -49,9 +49,10 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
     Ok(completed)
 }
 
-/// Finds downloads that were put in place but whose commit a crash lost: the file at a
-/// record's target holding its bytes (new to the scan, or the node's own file replaced) is
-/// that node, with the base the lost commit wrote. Later changes on the drive are then plain
+/// Finds downloads (and folders made again) that were put in place but whose commit a crash
+/// lost: the file at a record's target holding its bytes (new to the scan, or the node's own
+/// file replaced), or the folder there new to the scan, is that node, with the base the lost
+/// commit wrote. Later changes on the drive are then plain
 /// changes against that base, whenever the feed brings them. Every record goes: the next
 /// batch writes its own.
 pub fn recover_placements(db: &mut StateDb, root: &Path, os: Os) -> Result<usize, StateError> {
@@ -76,10 +77,11 @@ pub fn recover_placements(db: &mut StateDb, root: &Path, os: Os) -> Result<usize
     let found: Vec<(Placing, Option<LocalRow>)> = found
         .into_iter()
         .map(|(p, row)| {
-            let row = row.filter(|row| {
-                p.base.state.content.is_some_and(|c| {
+            let row = row.filter(|row| match &p.base.state.content {
+                Some(c) => {
                     row.kind == NodeKind::File && adopt::same_bytes(root, row, &c.hash, c.size)
-                })
+                }
+                None => row.kind == NodeKind::Folder,
             });
             (p, row)
         })

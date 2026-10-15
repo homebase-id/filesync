@@ -63,15 +63,25 @@ impl Client {
 /// The panic that crashes a client.
 struct Crash;
 
+/// How much of its state DB a crashed client keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// Every commit: the process crashed.
+    All,
+    /// Up to its last durable commit, or its `n`-th commit of the sync if later (`None`: no
+    /// other): an OS crash or a power cut, which keeps some of the commits since.
+    Durable(Option<usize>),
+}
+
 /// Syncs `c` until it crashes at a commit `when` picks (just before one: that operation's DB
-/// changes are lost, what it did on disk or on the drive stays), then starts it again. With
-/// `power_cut`, the DB also loses every commit after its last durable one, as with an OS crash
-/// or a power cut. Returns whether it crashed.
+/// changes are lost, what it did on disk or on the drive stays), the DB keeping what `kept`
+/// says, then starts it again. Returns whether it crashed.
 pub fn crash(
     c: &mut Client,
-    power_cut: bool,
+    kept: Kept,
     when: impl Fn(Commit) -> bool + Send + Sync + 'static,
 ) -> Res<bool> {
+    let power_cut = kept != Kept::All;
     let db = c.db_path();
     // What is on the disk: every sync ends durably.
     let durable = db.with_file_name("durable.db");
@@ -87,11 +97,16 @@ pub fn crash(
     if power_cut {
         keep();
     }
+    let commits = std::sync::atomic::AtomicUsize::new(0);
     let hook = Hook(Arc::new(move |at| {
         if when(at) {
             std::panic::panic_any(Crash);
         }
-        if power_cut && at == Commit::Durable {
+        if at == Commit::Before {
+            return;
+        }
+        let n = commits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if power_cut && (at == Commit::Durable || kept == Kept::Durable(Some(n))) {
             keep();
         }
     }));

@@ -317,10 +317,10 @@ impl Engine {
         // at most the sync in progress (sync semantics §8a).
         self.db.flush()?;
         let synced = self.sync_pass(date);
-        let flushed = self.db.flush();
-        let report = synced?;
-        flushed?;
-        Ok(report)
+        // Best effort: a failure here leaves what was done undone in no way, and the next
+        // sync's opening flush reports it.
+        let _ = self.db.flush();
+        synced
     }
 
     fn sync_pass(&mut self, date: &str) -> Result<SyncReport, EngineError> {
