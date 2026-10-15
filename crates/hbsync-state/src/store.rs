@@ -189,6 +189,8 @@ pub struct Store<'a> {
     /// [`Store::fan_out`]: the folder whose part of the drive a drive node is in, for the
     /// nodes walked through in this transaction (not those whose place isn't known).
     places: std::cell::RefCell<HashMap<NodeId, Place>>,
+    /// The folders [`Store::fan_out`] marked a node dirty in.
+    touched: std::cell::RefCell<std::collections::BTreeSet<i64>>,
 }
 
 /// A folder this account syncs here.
@@ -246,6 +248,7 @@ impl<'a> Store<'a> {
             folders: Default::default(),
             coords: Default::default(),
             places: Default::default(),
+            touched: Default::default(),
         }
     }
 
@@ -1103,23 +1106,37 @@ impl<'a> Store<'a> {
     pub fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
         let folders = self.folder_list()?;
         let id = self.key_or_insert(node)?;
-        if let [only] = &*folders {
-            return self.mark_dirty_in(only.id, id);
+        let mut marked: Vec<i64> = match &*folders {
+            [only] => vec![only.id],
+            _ => {
+                let mut holders = self
+                    .prep(
+                        "SELECT folder FROM base WHERE id = ?1 \
+                         UNION SELECT folder FROM local WHERE id = ?1",
+                    )?
+                    .query_map([id], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<i64>>>()?;
+                match self.place_of(place, &folders)? {
+                    Some(Place::Folder(folder)) => holders.push(folder),
+                    Some(Place::Unheld) => {}
+                    // A gap or a cycle: whose it is isn't known.
+                    None => holders.extend(folders.iter().map(|f| f.id)),
+                }
+                holders
+            }
+        };
+        marked.sort_unstable();
+        marked.dedup();
+        for folder in marked {
+            self.mark_dirty_in(folder, id)?;
+            self.touched.borrow_mut().insert(folder);
         }
-        self.prep(
-            "INSERT OR IGNORE INTO dirty (folder, id) \
-             SELECT folder, id FROM base WHERE id = ?1 \
-             UNION ALL SELECT folder, id FROM local WHERE id = ?1",
-        )?
-        .execute([id])?;
-        match self.place_of(place, &folders)? {
-            Some(Place::Folder(folder)) => self.mark_dirty_in(folder, id),
-            Some(Place::Unheld) => Ok(()),
-            // A gap or a cycle: whose it is isn't known.
-            None => folders
-                .iter()
-                .try_for_each(|f| self.mark_dirty_in(f.id, id)),
-        }
+        Ok(())
+    }
+
+    /// The folders [`Store::fan_out`] marked a node dirty in, so far.
+    pub(crate) fn take_touched(&self) -> std::collections::BTreeSet<i64> {
+        self.touched.take()
     }
 
     /// The place of the drive's folder `place` (the folder with the nearest top above it);

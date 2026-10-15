@@ -178,9 +178,6 @@ impl Remote for ScopedRemote {
     ) -> RemoteResult<u64> {
         self.inner.read(file_id, range, sink)
     }
-    fn take_skipped(&self) -> Vec<String> {
-        self.inner.take_skipped()
-    }
 }
 
 #[cfg(test)]

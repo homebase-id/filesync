@@ -6,6 +6,8 @@
 //! back) changes nothing. The feed is drained completely before planning, which is what
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
+use std::ops::DerefMut;
+
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::{NodeId, NodeKind, RemoteRef};
@@ -18,11 +20,13 @@ pub enum FeedError {
     State(#[from] StateError),
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FeedReport {
     pub pages: usize,
     pub live: usize,
     pub deleted: usize,
+    /// Rows the client can't read (not encrypted, another key, not a sync node), with why.
+    pub skipped: Vec<String>,
 }
 
 impl std::ops::AddAssign for FeedReport {
@@ -30,20 +34,23 @@ impl std::ops::AddAssign for FeedReport {
         self.pages += other.pages;
         self.live += other.live;
         self.deleted += other.deleted;
+        self.skipped.extend(other.skipped);
     }
 }
 
-/// Reads the feed from the stored cursor until it has no more rows.
-pub fn pull(
-    db: &mut StateDb,
+/// Reads the feed from the stored cursor until it has no more rows. The DB is taken from `db`
+/// for each step, and let go while a page is on its way: others use it meanwhile.
+pub fn pull<G: DerefMut<Target = StateDb>>(
+    db: impl Fn() -> G,
     remote: &dyn Remote,
     page_size: usize,
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
     loop {
-        let cursor = db.read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
+        let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
         let page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
-        db.write(|s| {
+        report.skipped.extend(page.skipped.iter().cloned());
+        db().write(|s| {
             for header in &page.entries {
                 if apply(s, header)? {
                     report.live += 1;

@@ -13,11 +13,11 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use hbsync_app::{HintSource, Runner, RunnerConfig, State};
+use hbsync_app::{Hint, Runner, RunnerConfig, State};
+use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::notify::Notifier;
+use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_local::{IGNORE_FILE, STATE_DIR};
-use hbsync_remote::Remote;
 
 fn main() {
     if let Err(e) = run() {
@@ -44,13 +44,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let name = root.file_name().ok_or("the folder has no name")?;
     let db = root.with_file_name(format!("{}.state.db", name.to_string_lossy()));
     use hbsync_engine::root::{RootError, SyncRoot};
-    match SyncRoot::open(&db, identity, &root) {
-        Ok(_) => {}
+    let sync_root = match SyncRoot::open(&db, identity, &root) {
+        Ok(found) => found,
         Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
-            SyncRoot::create(&db, identity, &root)?;
+            SyncRoot::create(&db, identity, &root)?
         }
         Err(e) => return Err(e.into()),
-    }
+    };
+    let drive = Drive::new(sync_root.account()?, remote.clone());
     let device = hbsync_platform::host::device_name();
     let mut cfg = RunnerConfig::new(&root, &db, identity, &device);
     cfg.once = args.iter().any(|a| a == "--once");
@@ -62,21 +63,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         root.display(),
         remote.drive().alias.simple(),
     );
-    let hints = if cfg.once {
-        HintSource::none()
-    } else {
-        let (tx, rx) = mpsc::channel();
-        HintSource {
-            notifier: Some(Notifier::spawn(client, remote.drive(), tx)),
-            events: rx,
-        }
-    };
-    let (handle, thread) = Runner::spawn(cfg, remote.clone(), hints)?;
+    // The identity's notifications, as the daemon's account passes them on.
+    let (hint, hints) = mpsc::channel();
+    let _notifier = (!cfg.once).then(|| {
+        let (tx, events) = mpsc::channel();
+        let notifier = Notifier::spawn(client, remote.drive(), tx);
+        std::thread::spawn(move || {
+            for event in events {
+                let sent = match event {
+                    Event::Connected => hint.send(Hint::Connected),
+                    Event::Changed => hint.send(Hint::Changed),
+                    Event::Lost(why) | Event::Refused(why) => {
+                        println!("notifications: {why}");
+                        Ok(())
+                    }
+                };
+                if sent.is_err() {
+                    return;
+                }
+            }
+        });
+        notifier
+    });
+    let (handle, thread) = Runner::spawn(cfg, drive, hints)?;
     while !thread.is_finished() {
         std::thread::sleep(Duration::from_millis(500));
-        for why in remote.take_skipped() {
-            println!("feed row skipped: {why}");
-        }
         if handle.status().state == State::Denied {
             break;
         }

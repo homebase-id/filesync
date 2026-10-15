@@ -25,8 +25,6 @@ fn the_contract_holds_on_a_live_drive() -> R {
     let cleanup = bench.cleanup();
     assert!(failed.is_empty(), "{failed:#?}");
     cleanup?;
-    let skipped = remote.take_skipped();
-    assert!(skipped.is_empty(), "feed rows skipped: {skipped:#?}");
     Ok(())
 }
 

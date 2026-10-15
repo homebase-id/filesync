@@ -7,7 +7,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hbsync_app::runner::RunnerError;
-use hbsync_app::{Command, FolderStatus, Handle, HintSource, Runner, RunnerConfig, State};
+use hbsync_app::{Command, FolderStatus, Handle, Runner, RunnerConfig, State};
+use hbsync_engine::Drive;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
@@ -33,8 +34,7 @@ impl Device {
         let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", name);
         cfg.poll = poll;
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
-        let remote = Arc::new(FakeRemote::new(server.clone()));
-        let (handle, thread) = Runner::spawn(cfg, remote, HintSource::none())?;
+        let (handle, thread) = spawn(cfg, server)?;
         Ok(Device {
             _dir: dir,
             root,
@@ -227,11 +227,17 @@ fn spawn_at(
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
     let mut cfg = RunnerConfig::new(root, &db_of(root), "test.example", "a");
     cfg.poll = Duration::from_millis(300);
-    Runner::spawn(
-        cfg,
-        Arc::new(FakeRemote::new(server.clone())),
-        HintSource::none(),
-    )
+    spawn(cfg, server)
+}
+
+/// The runner of `cfg`, on its account's drive on `server`, without notifications.
+fn spawn(
+    cfg: RunnerConfig,
+    server: &Arc<Mutex<FakeServer>>,
+) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
+    let account = SyncRoot::open_account(&cfg.db, &cfg.identity)?;
+    let drive = Drive::new(account, Arc::new(FakeRemote::new(server.clone())));
+    Runner::spawn(cfg, drive, std::sync::mpsc::channel().1)
 }
 
 #[test]
@@ -398,8 +404,7 @@ fn progress_shows_during_the_first_sync() -> R {
     let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
     cfg.poll = NO_POLL;
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
-    let remote = Arc::new(FakeRemote::new(server.clone()));
-    let (handle, _thread) = Runner::spawn(cfg, remote, HintSource::none())?;
+    let (handle, _thread) = spawn(cfg, &server)?;
     let mut seen = None;
     wait_until("progress shows", || {
         let status = handle.status();
@@ -422,8 +427,7 @@ fn progress_shows_while_a_transfer_runs() -> R {
     cfg.poll = NO_POLL;
     // 600 kB at 300 kB/s: two seconds to watch.
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
-    let remote = Arc::new(FakeRemote::new(server.clone()));
-    let (handle, _thread) = Runner::spawn(cfg, remote, HintSource::none())?;
+    let (handle, _thread) = spawn(cfg, &server)?;
     std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
     let mut seen = None;
     wait_until("progress shows", || {

@@ -26,7 +26,7 @@ pub use hbsync_homebase::app::{APP_NAME, files_online};
 pub use hbsync_homebase::local_http;
 pub use paths::{NoHome, Paths};
 pub use protocol::{Control, DaemonStatus, FolderStatus, State};
-pub use runner::{Command, Handle, HintSource, Runner, RunnerConfig};
+pub use runner::{Command, Handle, Hint, Runner, RunnerConfig};
 pub use secrets::{CredentialError, CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};

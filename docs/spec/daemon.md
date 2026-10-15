@@ -79,19 +79,28 @@ says so when it couldn't reach the keychain to remove the credentials there.
    ends, with the pid in `hbsyncd.pid`): a second daemon says which process runs and exits.
 2. Reads the config. Not set up: it says so and exits.
 3. Answers on the control socket from now on.
-4. Reads the credentials, waiting (backoff 5 s doubling to 5 min) while the keychain can't be
-   read. None: it says so and exits.
-5. Connects to the identity, retrying with the same backoff while it can't be reached
-   (`offline`); a refusal (the device revoked) shows as `denied` and is asked again every 5 min.
-   Meanwhile `pause` and `resume` work (kept in the config); other requests are refused.
-6. Runs the sync loop (`Runner`) until a stop request, SIGTERM or SIGINT.
+4. Starts each account (identity) of the config on a thread of its own
+   (`hbsync-app/src/daemon/account.rs`), which:
+   1. reads the credentials, waiting (backoff 5 s doubling to 5 min) while the keychain can't
+      be read. None: it says so and the daemon exits;
+   2. connects to the identity, retrying with the same backoff while it can't be reached
+      (`offline`); a refusal (the device revoked) shows as `denied` and is asked again every
+      5 min. Meanwhile `pause` and `resume` work (kept in the config); other requests are
+      refused;
+   3. opens the account's `Drive` and the notification socket, and runs a sync loop
+      (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the
+      notifications on to every folder's loop, reconnects the socket after a sleep, runs
+      Recently deleted's requests and its daily purge.
+
+   One account failing stops the daemon (it is restarted whole).
 
 Exit status: 0 when stopped or when there is nothing to do (not set up, already running), 1 on
 a failure (service managers restart it then).
 
 ### The sync loop
 
-- Syncs when the folder changes (live watcher), when the identity announces a change on the
+- Syncs when the folder changes (live watcher), when another folder's sync changed this one's
+  part of the drive, when the identity announces a change on the
   drive (notification socket; once its announcements have stopped for 1 s, at most 10 s
   after the first, so a burst of deletes from another device reaches the mass-delete guard
   whole), at least once a minute, and on request. After a failure it
@@ -100,7 +109,8 @@ a failure (service managers restart it then).
   in flight finish); nothing syncs until resume. The watcher keeps recording changes. A pause
   survives a restart (`paused` in the config).
 - **Sleep:** a wall-clock jump of more than 30 s across a 250 ms wait means the machine slept.
-  The loop syncs at once, forgets its backoff and reconnects the notification socket.
+  The loop syncs at once and forgets its backoff; the account reconnects the notification
+  socket.
 - **Network changes:** the reconnect backoff (at most 30 s) and the poll; no OS hooks yet.
 - **Ignore rules:** `.hbsync/ignore` is checked for an edit at every poll and on a sync
   request; an edit restarts the engine with the new rules (sync semantics §10).
@@ -122,11 +132,12 @@ a failure (service managers restart it then).
   more than 10 of one kind in one folder in one sync become one entry for the folder. The
   newest 500 are kept in the folder's state DB (table `synced`), so the list survives a restart.
 
-- **Recently deleted:** the folder's removed nodes (node schema, "Recently deleted"), kept in
-  its state DB (table `removed`), listed newest first with their path. Restore and Empty go
-  through the runner, at its next sync (kept in memory until then). Empty takes what the user
-  was shown: the items named, or everything removed until the newest one listed. Once a day
-  (the time is kept in the state DB) the runner deletes for good what was removed more than
+- **Recently deleted:** the account's removed nodes (node schema, "Recently deleted"), kept in
+  its state DB (table `removed`), listed newest first with their path and the folder each comes
+  back to. Restore and Empty are the account's: run on its thread when asked (once connected).
+  Empty takes what the user was shown: the items named, or everything removed until the newest
+  one listed. Once a day (the time is kept in the state DB) the account deletes for good what
+  was removed more than
   `keep_deleted_days` ago (a folder's delete as a whole), and empties `.hbsync/trash` of
   entries that old, from those made since the purge began (older ones, from before Recently
   deleted, may be the only copy and stay).

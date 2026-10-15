@@ -8,7 +8,6 @@ use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::Mutex;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
@@ -33,9 +32,6 @@ pub mod wire;
 /// The server counts the bytes of an upload in 32 bits: a larger one fails (#1893).
 const MAX_PAYLOAD: u64 = u32::MAX as u64;
 
-/// Skipped feed rows kept for [`HomebaseRemote::take_skipped`] at most.
-const MAX_SKIPPED: usize = 1000;
-
 /// The sync drive on an identity, as its alias and type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct TargetDrive {
@@ -49,8 +45,6 @@ pub struct TargetDrive {
 pub struct HomebaseRemote {
     client: Client,
     drive: TargetDrive,
-    /// Feed rows that aren't usable sync nodes, with the reason; for the caller to report.
-    skipped: Mutex<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -87,7 +81,6 @@ impl HomebaseRemote {
         Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
-            skipped: Mutex::new(Vec::new()),
         })
     }
 
@@ -334,10 +327,6 @@ impl<R: Read> Read for Tap<R> {
 
 impl Remote for HomebaseRemote {
     /// At most a thousand are kept between calls.
-    fn take_skipped(&self) -> Vec<String> {
-        std::mem::take(&mut *self.skipped.lock().unwrap_or_else(|e| e.into_inner()))
-    }
-
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let size = limit.max(1);
         let page: wire::QueryBatchResponse = self
@@ -358,11 +347,6 @@ impl Remote for HomebaseRemote {
                 Err(why) => skipped.push(why),
             }
         }
-        if !skipped.is_empty() {
-            let mut kept = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
-            let room = MAX_SKIPPED.saturating_sub(kept.len());
-            kept.extend(skipped.into_iter().take(room));
-        }
         Ok(ChangesPage {
             entries,
             // An empty page of an empty drive has no cursor yet: start from the beginning.
@@ -371,6 +355,7 @@ impl Remote for HomebaseRemote {
                 .or_else(|| cursor.map(str::to_owned))
                 .unwrap_or_default(),
             has_more: page.has_more_rows,
+            skipped,
         })
     }
 

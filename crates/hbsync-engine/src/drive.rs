@@ -2,6 +2,7 @@
 //! change feed (pulled once for all of them), and what is the whole drive's rather than a
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -63,7 +64,8 @@ impl Drive {
     /// Reads the feed until it has no more rows, into the mirror. One pull at a time: a caller
     /// that asked while another pull ran waits for it and pulls again only if that pull had
     /// started before it asked. Either way, what the drive had when it asked is in the mirror
-    /// when it returns. Wakes the engines of the folders but `from`'s when something changed.
+    /// when it returns. Wakes the engines of the folders the changes concern, but `from`'s.
+    /// The account's connection is free for others while a page is on its way.
     pub fn pull(&self, from: Option<i64>) -> Result<FeedReport, FeedError> {
         let ticket = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
         let mut answered = self.answered.lock().unwrap_or_else(|e| e.into_inner());
@@ -72,12 +74,11 @@ impl Drive {
         }
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
-        let report = feed::pull(&mut self.account(), self.remote(), FEED_PAGE)?;
+        let report = feed::pull(|| self.account(), self.remote(), FEED_PAGE)?;
         *answered = covers;
         drop(answered);
-        if report.live + report.deleted > 0 {
-            self.wake(from);
-        }
+        let touched = self.account().take_touched();
+        self.wake_folders(&touched, from);
         Ok(report)
     }
 
@@ -95,10 +96,20 @@ impl Drive {
     /// Wakes every folder's engine but `except`'s: the drive changed. Folders gone are
     /// forgotten.
     pub fn wake(&self, except: Option<i64>) {
+        self.wake_where(|folder| Some(folder) != except);
+    }
+
+    /// Wakes the engines of `folders` but `except`'s: changes marked nodes dirty there
+    /// ([`StateDb::take_touched`]).
+    pub fn wake_folders(&self, folders: &BTreeSet<i64>, except: Option<i64>) {
+        self.wake_where(|folder| Some(folder) != except && folders.contains(&folder));
+    }
+
+    fn wake_where(&self, wanted: impl Fn(i64) -> bool) {
         self.wakes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(folder, tx)| Some(*folder) == except || tx.send(()).is_ok());
+            .retain(|(folder, tx)| !wanted(*folder) || tx.send(()).is_ok());
     }
 
     /// Recently deleted, newest first, each item with the folder it would come back to.

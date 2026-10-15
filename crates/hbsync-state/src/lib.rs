@@ -80,6 +80,9 @@ pub struct StateDb {
     /// Shared by every connection of this process to the same file: writes take turns here
     /// instead of in SQLite's busy wait (which stays for other processes).
     gate: Arc<Mutex<()>>,
+    /// The folders writes through this connection marked a node dirty in
+    /// ([`StateDb::take_touched`]).
+    touched: std::collections::BTreeSet<i64>,
 }
 
 /// The write gate of the DB file at `path`, one per file in this process.
@@ -178,6 +181,7 @@ impl StateDb {
             folder: FIRST_FOLDER,
             path: path.map(Path::to_path_buf),
             gate: gate(path),
+            touched: Default::default(),
         })
     }
 
@@ -197,9 +201,18 @@ impl StateDb {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let out = f(&Store::new(&tx, self.folder))?;
+        let store = Store::new(&tx, self.folder);
+        let out = f(&store)?;
+        let touched = store.take_touched();
         tx.commit()?;
+        self.touched.extend(touched);
         Ok(out)
+    }
+
+    /// The folders whose dirty sets the writes since the last call marked nodes in, from
+    /// changes of the drive ([`Store::fan_out`]): the engines to wake.
+    pub fn take_touched(&mut self) -> std::collections::BTreeSet<i64> {
+        std::mem::take(&mut self.touched)
     }
 
     /// The schema version in use.

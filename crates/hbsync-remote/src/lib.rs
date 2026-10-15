@@ -115,6 +115,9 @@ pub struct ChangesPage {
     /// Opaque; persist it after the page is applied.
     pub cursor: String,
     pub has_more: bool,
+    /// Rows left out because they can't be read as nodes (another app's file, one that doesn't
+    /// decrypt), each with why.
+    pub skipped: Vec<String>,
 }
 
 /// A node's header as a client writes it, on create and on every update. Homebase replaces
@@ -254,12 +257,6 @@ pub trait Remote: Send + Sync {
         range: Option<std::ops::Range<u64>>,
         sink: &mut dyn Write,
     ) -> Result<u64>;
-
-    /// Rows of the change feed left out since the last call because they can't be read as
-    /// nodes (another app's file, one that doesn't decrypt), each with why.
-    fn take_skipped(&self) -> Vec<String> {
-        Vec::new()
-    }
 }
 
 /// A shared remote: the engine owns one handle, the caller keeps another (to read what the
@@ -298,9 +295,5 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         sink: &mut dyn Write,
     ) -> Result<u64> {
         (**self).read(file_id, range, sink)
-    }
-
-    fn take_skipped(&self) -> Vec<String> {
-        (**self).take_skipped()
     }
 }
