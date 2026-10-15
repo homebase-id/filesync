@@ -275,7 +275,7 @@ impl Runner {
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
         let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
-        let mut engine = Engine::new(sync_root.state()?, Arc::clone(&self.drive), cfg);
+        let mut engine = Engine::open(&sync_root, Arc::clone(&self.drive), cfg)?;
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
         let observer = LocalObserver::start(root, engine.scan_options().clone());

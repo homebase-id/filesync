@@ -75,8 +75,8 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         configure(&mut cfg)?;
         tweak(&mut cfg);
         let root = SyncRoot::open(&db_path(root), IDENTITY, root)?;
-        let drive = Drive::new(root.account()?, Arc::from(remote));
-        Ok(Engine::new(root.state()?, drive, cfg))
+        let drive = Drive::open(&db_path(root.path()), IDENTITY, Arc::from(remote))?;
+        Ok(Engine::open(&root, drive, cfg)?)
     }
 
     /// A new engine on the same state DB, as after a restart.

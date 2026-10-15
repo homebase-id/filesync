@@ -17,6 +17,7 @@ use crate::drive::Drive;
 use crate::exec::{ExecConfig, Executor, Stopped, recover};
 use crate::feed::{FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
+use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
 
@@ -174,6 +175,11 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
+    /// The engine of the folder `root`, on its account's `drive` ([`Engine::new`]).
+    pub fn open(root: &SyncRoot, drive: Arc<Drive>, cfg: EngineConfig) -> Result<Self, RootError> {
+        Ok(Engine::new(root.state()?, drive, cfg))
+    }
+
     /// The engine of the folder `db` sees, on the account's `drive`. The folder's top (the
     /// state DB's) decides which part of the drive it syncs: `cfg`'s scope is kept only when
     /// it has that top.

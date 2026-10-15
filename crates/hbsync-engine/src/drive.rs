@@ -2,6 +2,7 @@
 //! change feed (pulled once for all of them), and what is the whole drive's rather than a
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,6 +18,7 @@ use hbsync_types::{NodeKind, Role};
 use crate::deleted;
 use crate::engine::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
+use crate::root::{RootError, SyncRoot};
 
 /// Rows of the change feed read per request.
 pub const FEED_PAGE: usize = 500;
@@ -49,6 +51,16 @@ impl std::fmt::Debug for Drive {
 }
 
 impl Drive {
+    /// The drive of `identity`'s account, whose state DB is at `db` (made if new; refused if
+    /// another's).
+    pub fn open(
+        db: &Path,
+        identity: &str,
+        remote: Arc<dyn Remote>,
+    ) -> Result<Arc<Drive>, RootError> {
+        Ok(Drive::new(SyncRoot::open_account(db, identity)?, remote))
+    }
+
     /// The drive of the account whose state DB `account` is ([`StateDb::open_account`]).
     pub fn new(account: StateDb, remote: Arc<dyn Remote>) -> Arc<Drive> {
         Arc::new(Drive {

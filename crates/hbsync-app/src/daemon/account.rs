@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use hbsync_engine::Drive;
-use hbsync_engine::root::{AccountReader, SyncRoot};
+use hbsync_engine::root::AccountReader;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
@@ -307,11 +307,8 @@ impl Account {
         let (tx, events) = channel();
         let notifier = Notifier::spawn(client, remote.drive(), tx);
         lock(&self.status).hints = Hints::Connecting;
-        let drive = Drive::new(
-            SyncRoot::open_account(&self.db, &self.identity)
-                .map_err(|e| DaemonError::Runner(e.into()))?,
-            remote,
-        );
+        let drive = Drive::open(&self.db, &self.identity, remote)
+            .map_err(|e| DaemonError::Runner(e.into()))?;
         let mut notifications = Notifications::default();
         let mut runners: Vec<Running> = Vec::new();
         // A runner that couldn't start: the account stops its runners and ends with it, the
@@ -692,6 +689,7 @@ fn report_emptied(result: Result<usize, hbsync_engine::EngineError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hbsync_engine::root::SyncRoot;
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
     /// A runner that fails is to start again after a pause, unless its folder was removed or
@@ -705,10 +703,11 @@ mod tests {
         // Set up for another identity: its runner fails at once.
         SyncRoot::create(&home.path().join("other.db"), "other.example", &folder)?;
         let db = home.path().join("state.db");
-        let drive = Drive::new(
-            SyncRoot::open_account(&db, "a.example")?,
+        let drive = Drive::open(
+            &db,
+            "a.example",
             Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
-        );
+        )?;
         let failed = |removed: bool, ending: bool| -> Result<Running, Box<dyn std::error::Error>> {
             let cfg = RunnerConfig::new(&folder, &db, "a.example", "pc");
             let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;

@@ -182,37 +182,23 @@ impl SyncRoot {
     }
 
     /// The account DB at `db`, for `identity` (made if new; refused if another's).
-    pub fn open_account(db: &Path, identity: &str) -> Result<StateDb, RootError> {
+    pub(crate) fn open_account(db: &Path, identity: &str) -> Result<StateDb, RootError> {
         if let Some(dir) = db.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let mut account = StateDb::open_account(db)?;
         // Read first: a DB that has its identity is opened without writing.
-        let theirs = match account.read(|s| s.account_kv(keys::IDENTITY))? {
-            Some(theirs) => theirs,
-            None => {
-                account.write(|s| s.set_account_kv(keys::IDENTITY, identity))?;
-                identity.to_owned()
-            }
-        };
-        if theirs != identity {
-            return Err(RootError::OtherIdentity {
-                folder: db.to_path_buf(),
-                theirs,
-                ours: identity.to_owned(),
-            });
+        let theirs = account.read(|s| s.account_kv(keys::IDENTITY))?;
+        if theirs.is_none() {
+            account.write(|s| s.set_account_kv(keys::IDENTITY, identity))?;
         }
+        refuse_other(db, theirs, identity)?;
         Ok(account)
     }
 
     /// A connection to the account's DB seeing this folder.
-    pub fn state(&self) -> Result<StateDb, RootError> {
+    pub(crate) fn state(&self) -> Result<StateDb, RootError> {
         Ok(StateDb::open_folder(&self.db, self.folder)?)
-    }
-
-    /// A connection to the account's DB seeing no folder (for its [`crate::Drive`]).
-    pub fn account(&self) -> Result<StateDb, RootError> {
-        Self::open_account(&self.db, &self.identity)
     }
 
     pub fn path(&self) -> &Path {
@@ -234,6 +220,19 @@ impl SyncRoot {
     }
 }
 
+/// Refuses the DB at `db` if it is another identity's: `theirs`, the one it has (`None`: it
+/// has nothing yet, its identity is written on the first open).
+fn refuse_other(db: &Path, theirs: Option<String>, identity: &str) -> Result<(), RootError> {
+    match theirs {
+        Some(theirs) if theirs != identity => Err(RootError::OtherIdentity {
+            folder: db.to_path_buf(),
+            theirs,
+            ours: identity.to_owned(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// The account's DB for reading only, its identity checked: what is answered (Recent,
 /// Recently deleted) and checked (setup) while the daemon's engines may be writing it.
 #[derive(Debug)]
@@ -247,16 +246,7 @@ impl AccountReader {
         let Some(mut reader) = Reader::open(db)? else {
             return Ok(None);
         };
-        // One without an identity has nothing yet: it is written on the first open.
-        if let Some(theirs) = reader.read(|s| s.account_kv(keys::IDENTITY))?
-            && theirs != identity
-        {
-            return Err(RootError::OtherIdentity {
-                folder: db.to_path_buf(),
-                theirs,
-                ours: identity.to_owned(),
-            });
-        }
+        refuse_other(db, reader.read(|s| s.account_kv(keys::IDENTITY))?, identity)?;
         Ok(Some(AccountReader { db: reader }))
     }
 
@@ -306,7 +296,8 @@ mod tests {
         // Set up again: a new folder, the old one's rows gone.
         let again = SyncRoot::create(&db, anna, &root)?;
         assert_ne!(again.folder(), first);
-        assert_eq!(again.account()?.read(|s| s.folders())?.len(), 1);
+        let account = AccountReader::open(&db, anna)?.ok_or("no DB")?.folders()?;
+        assert_eq!(account.len(), 1);
         // Moved: found through its marker, its new place recorded.
         let moved = home.path().join("Moved");
         std::fs::rename(&root, &moved)?;
@@ -338,7 +329,10 @@ mod tests {
         let moved = home.path().join("Moved");
         std::fs::rename(&root, &moved)?;
         assert_eq!(SyncRoot::find(&db, anna, &moved)?.folder(), folder);
-        assert!(SyncRoot::knows_path(&db, anna, &root)?, "the old place stays");
+        assert!(
+            SyncRoot::knows_path(&db, anna, &root)?,
+            "the old place stays"
+        );
         assert!(!SyncRoot::knows_path(&db, anna, &moved)?);
         assert!(matches!(
             AccountReader::open(&db, "bob.example.com"),

@@ -286,11 +286,8 @@ impl DocsOnly {
             &root,
             Role::Documents.node(),
         )?;
-        let drive = Drive::new(
-            sync_root.account()?,
-            Arc::new(FakeRemote::new(server.clone())),
-        );
-        let engine = Engine::new(sync_root.state()?, drive, config(&root));
+        let drive = Drive::open(&db, "t.example", Arc::new(FakeRemote::new(server.clone())))?;
+        let engine = Engine::open(&sync_root, drive, config(&root))?;
         let observer = hbsync_local::LocalObserver::start(&root, engine.scan_options().clone());
         Ok(DocsOnly {
             _dir: dir,

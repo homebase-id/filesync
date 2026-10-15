@@ -358,16 +358,6 @@ impl StateDb {
         self.path.as_deref()
     }
 
-    /// From now on this connection sees folder `folder`.
-    pub fn see_folder(&mut self, folder: i64) {
-        self.folder = folder;
-    }
-
-    /// From now on this connection sees no folder: the account's ([`StateDb::open_account`]).
-    pub fn see_account(&mut self) {
-        self.folder = NO_FOLDER;
-    }
-
     /// This DB seen as folder `folder`: the same connection.
     pub fn with_folder(mut self, folder: i64) -> Self {
         self.folder = folder;
@@ -412,12 +402,7 @@ impl StateDb {
 
     /// Runs `f` in a read transaction (a consistent snapshot).
     pub fn read<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let out = f(&Store::new(&tx, self.folder))?;
-        tx.finish()?;
-        Ok(out)
+        read_in(&mut self.conn, self.folder, f)
     }
 
     /// Runs `f` in a write transaction, committed only if `f` succeeds. The commit reaches the
@@ -578,6 +563,18 @@ impl StateDb {
     pub fn schema_version(&self) -> Result<u32> {
         migrations::user_version(&self.conn)
     }
+}
+
+/// Runs `f` in a read transaction on `conn`, seeing folder `folder`.
+fn read_in<T>(
+    conn: &mut Connection,
+    folder: i64,
+    f: impl FnOnce(&Store<'_>) -> Result<T>,
+) -> Result<T> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let out = f(&Store::new(&tx, folder))?;
+    tx.finish()?;
+    Ok(out)
 }
 
 #[cfg(test)]

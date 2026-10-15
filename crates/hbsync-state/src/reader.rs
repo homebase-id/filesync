@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags};
 
 use crate::{BUSY_TIMEOUT, NO_FOLDER, Result, StateDb, Store, migrations};
 
@@ -50,12 +50,7 @@ impl Reader {
         folder: i64,
         f: impl FnOnce(&Store<'_>) -> Result<T>,
     ) -> Result<T> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let out = f(&Store::new(&tx, folder))?;
-        tx.finish()?;
-        Ok(out)
+        crate::read_in(&mut self.conn, folder, f)
     }
 }
 
