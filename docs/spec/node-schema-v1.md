@@ -172,10 +172,16 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   be now (the other keys as read), never a part of it. A client that doesn't keeps `tags` as
   read, like any other key.
 - **Every write** sends `archivalStatus`: Homebase sets a missing one to `0`.
-- **Role folders** (see above): never remove, move or rename one, and don't create one under
-  another parent; delete what is in it instead. Show them at the top, by their own icons.
+- **Role folders** (see above): keep them at the top: never move one into a folder (a computer
+  then leaves it out there), and never create one, under any parent (that is the computers'
+  job; restore one that is in Recently deleted). Renaming one changes only the drive's name:
+  computers know it by its id and keep their own folder's name. Deleting one lasts only if no
+  computer syncs it: one that does brings it back, with what was in it, at its next sync (sync
+  semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-15: the rules for role folders match the computers' (§12): renaming one is harmless,
+  deleting one lasts only where no computer syncs it, moving one into a folder is never done.
 - 2026-10-14: role folders: Documents, Pictures, Music, Videos and Downloads have fixed node ids
   at the top; computers sync them where they are, never inside the main folder.
 - 2026-10-12: `tags`, the Finder tags and colours (optional, files and folders), synced.
