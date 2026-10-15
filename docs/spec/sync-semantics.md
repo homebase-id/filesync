@@ -123,9 +123,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   the operation is skipped and the node is re-planned.
 - **Version guard.** Remote updates, moves and deletes carry the base `VersionTag`. A mismatch
   means the remote changed: the operation is dropped and the node is re-planned with the newer
-  remote state. Homebase's delete takes no VersionTag today (verified in odin-core
-  `V2DriveSingleFileWriteOperationsController.cs`), so the client reads the header right before
-  deleting and compares (a small race window remains until the server accepts a VersionTag).
+  remote state. Homebase's delete takes the VersionTag too (odin-core PR #1931, verified in
+  `V2DriveControllerBase.PerformFileDelete`); a delete refused because the file is already
+  deleted is a retry, and done.
 - **Mass-delete guard.** If one plan deletes more than `max(50, 25 % of synced files)` files on
   either side, or every file on a side, the deletes are held and the user must confirm. The
   rest of the plan proceeds. A confirmation names the held deletes the user was shown, node

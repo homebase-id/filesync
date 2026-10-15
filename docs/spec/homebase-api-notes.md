@@ -70,7 +70,7 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 |---|---|---|
 | Create | `POST /api/v2/drives/{d}/files` | multipart, plaintext request and response (`V2DriveCreateFileController.cs`). Parts: `instructions` first, `metadata` second, then `payload`* (filename = payload key, case-sensitive) and `thumbnail`* (`V1DriveUploadControllerBase.cs:205-270`). Duplicate UniqueId → 400 4105, also when the node holding it is only removed (`archivalStatus` 2, in Recently deleted: **[verified]** live), so a role folder in Recently deleted is restored, never created again. Response `{fileId, driveId, globalTransitId, recipientStatus, newVersionTag, payloads[{key, uid, lastModified}]}` |
 | Update | `PATCH /api/v2/drives/{d}/files/{fileId}` (or `/by-uid/{uid}`) | multipart, plaintext; `metadata` required. `fileMetadata.versionTag` required (4159), stale → 4160. Instructions need `locale: "local"` (missing → 500) and a `manifest`; `payloadDescriptors: []` is a header-only update that keeps the payloads. Ops `appendOrOverwrite` / `deletePayload`; unlisted payloads kept. Unknown fileId → 4106, deleted file → 4002 |
-| Delete (soft) | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: []}` (send it; an empty body likely fails binding **[inferred]**). **No versionTag** (odin-core #1903). Unknown file → 200 `localFileNotFound: true`. Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted` |
+| Delete (soft) | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: [], versionTag}` (send it; an empty body likely fails binding **[inferred]**). `versionTag` is optional (odin-core #1903, PR #1931, from v0.1.960; **[verified]** in `V2DriveControllerBase.PerformFileDelete`): the file is deleted only at that version, else 400 4160 and nothing is deleted or sent to recipients. Unknown file → 200 `localFileNotFound: true` (before the tag check). Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted`; with the tag the client had, it's refused instead (the tombstone has a version of its own) |
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
 | Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
@@ -210,9 +210,14 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - `docs/mandatory-slugs-and-app-ids-plan.md` calls `DriveSlug`/`DriveTypeSlug` required; the
   server derives a missing one instead (only the owner app insists on `ts`). odin-core #1901
   makes them mandatory with no derivation; tracked in filesync #7.
-- Delete has no VersionTag guard → a delete can wipe a concurrent edit. Filed as odin-core
-  #1903 (optional `versionTag` on delete, 4160 on mismatch; also: deleting a tombstone should
-  be a no-op). Until then the client reads the header and compares right before deleting.
+- Delete takes an optional `versionTag` since odin-core PR #1931 (#1903, release v0.1.960), so a
+  delete can't wipe an edit it hasn't seen. The client sends it: one request per delete. A 4160 is
+  either an edit since (the node is re-planned) or a retry (the tombstone has a version of its
+  own): the client reads the header once and takes `deleted` as done. Left out of the PR: deleting
+  a tombstone without a tag still rewrites it (not a no-op). `delete-batch/by-file-id` takes a
+  `versionTag` per request and checks them all before deleting any (**[verified]**); the client
+  doesn't use it yet (`by-group-id` takes none). A server older than v0.1.960 ignores the field (unknown JSON fields are skipped
+  **[inferred]**): the delete then goes through unguarded.
 - Payload reads were buffered whole in server memory (#1892) and ranges were `int` (#1893)
   until odin-core PR #1921 (merged 2026-10-11). The client is written for #1921: a read is one streamed
   request, whatever its size. Uploads over 4 GiB still fail (the `uint` byte count, the half of

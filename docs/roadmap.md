@@ -107,7 +107,7 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   - streamed payload reads (#1892, done in PR #1921)
   - 64-bit sizes and ranges (#1893: ranges done in PR #1921, the upload byte count still open)
   - payload hashes + per-drive "hashes required" setting (#1895, merged as PR #1899)
-  - guarded delete: optional `versionTag` (#1903)
+  - guarded delete: optional `versionTag` (#1903, merged as PR #1931, v0.1.960)
   - apps sign in by slug (#1902)
   - resumable upload (not filed yet)
   - "Files" drive type + reserved SyncFile / SyncFolder types (not filed yet)

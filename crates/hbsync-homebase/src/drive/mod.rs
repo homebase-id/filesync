@@ -382,22 +382,25 @@ impl Remote for HomebaseRemote {
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
-        // Check, then act: the server's delete takes no version (odin-core #1903). The raw
-        // header is enough: a row that doesn't decrypt can still be deleted.
-        let current = self.raw_header(file_id)?;
-        if current.file_state == "deleted" {
-            return Ok(()); // a retry; deleting again would rewrite the tombstone
-        }
-        if current.file_metadata.version_tag != expected.0 {
-            return Err(RemoteError::VersionMismatch);
-        }
-        let result: DeleteResult = self
-            .client
-            .post(
-                &format!("{}/delete", self.file(file_id)),
-                &json!({ "recipients": [] }),
-            )
-            .map_err(remote_error)?;
+        // The server deletes only at `expected` (odin-core #1903), else 4160.
+        let result: DeleteResult = match self.client.post(
+            &format!("{}/delete", self.file(file_id)),
+            &json!({ "recipients": [], "versionTag": expected.0 }),
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                return match remote_error(e) {
+                    // A retry: deleting gave the tombstone a version of its own. The raw
+                    // header is enough: a row that doesn't decrypt is still a tombstone.
+                    RemoteError::VersionMismatch
+                        if self.raw_header(file_id)?.file_state == "deleted" =>
+                    {
+                        Ok(())
+                    }
+                    e => Err(e),
+                };
+            }
+        };
         if result.local_file_not_found {
             return Err(RemoteError::NotFound);
         }

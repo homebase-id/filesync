@@ -14,7 +14,8 @@ WebSocket; two folders converge through a live identity. Facts and server bugs:
 `docs/spec/homebase-api-notes.md`. Large files need odin-core with PR #1921 (merged 2026-10-11: streamed,
 64-bit payload ranges): a server without it holds each read in memory and can't read past 2 GiB
 (**[verified]**, odin-core #1892, #1893). Uploads need odin-core v0.1.954 or newer (PR #1936, the deferred
-payload hash, #1935): the client sends a payload's hashes after it, reading the source once. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+payload hash, #1935): the client sends a payload's hashes after it, reading the source once. Deletes
+are guarded by their version from odin-core v0.1.960 (PR #1931, #1903). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up within a minute of an edit); an ignored item is kept on its device only.
 Finder tags and colours sync too (sync semantics §11: macOS, KDE on Linux; Windows keeps them). The

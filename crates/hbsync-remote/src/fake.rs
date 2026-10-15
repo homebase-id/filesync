@@ -257,13 +257,17 @@ impl FakeServer {
     }
 
     /// Homebase's delete: no version check.
-    pub fn delete(&mut self, file_id: RemoteFileId) -> Result<()> {
+    /// Deletes a file if it is still at `expected`. Deleting a tombstone is a no-op: Homebase
+    /// refuses it (the tombstone has a version of its own) and the client then finds it deleted.
+    pub fn delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
         let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
-        if let RemoteBody::Live { node, .. } = f.header.body {
-            self.by_node.remove(&node);
-        } else {
-            return Ok(()); // deleting a tombstone is a no-op
+        let RemoteBody::Live { node, .. } = f.header.body else {
+            return Ok(());
+        };
+        if f.header.version != expected {
+            return Err(RemoteError::VersionMismatch);
         }
+        self.by_node.remove(&node);
         let version = VersionTag(self.fresh_uuid());
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
@@ -552,18 +556,11 @@ impl Remote for FakeRemote {
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
-        // Check, then act: the server's delete has no version guard.
         self.gate()?;
-        let current = self.server().header(file_id)?;
-        let RemoteBody::Live { content, .. } = &current.body else {
-            return Ok(()); // already deleted: a retry
-        };
-        self.gate_name(&content.name)?;
-        if current.version != expected {
-            return Err(RemoteError::VersionMismatch);
+        if let RemoteBody::Live { content, .. } = self.server().header(file_id)?.body {
+            self.gate_name(&content.name)?;
         }
-        self.gate()?;
-        self.server().delete(file_id)
+        self.server().delete(file_id, expected)
     }
 
     fn read(
