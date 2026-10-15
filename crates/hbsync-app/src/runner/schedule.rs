@@ -1,6 +1,6 @@
-//! When a folder syncs: what asks for a sync (a change here, an announcement from the drive,
-//! a request, the poll) and what holds it back (a pause, the backoff after a failure, an
-//! announcement still going on). Pure: the runner tells it the time.
+//! When a folder syncs: what asks for a sync (a change here or in its part of the drive, a
+//! request, the poll) and what holds it back (a pause, the backoff after a failure); and when
+//! changes the drive announced are pulled ([`Announced`]). Pure: the caller tells the time.
 
 use std::time::{Duration, Instant};
 
@@ -36,6 +36,30 @@ impl Backoff {
     }
 }
 
+/// Changes the drive announced: pulled once they stop coming (a burst of deletes reaches the
+/// mass-delete guard whole), or [`REMOTE_MAX_WAIT`] after the first.
+#[derive(Debug, Default)]
+pub(crate) struct Announced(Option<(Instant, Instant)>);
+
+impl Announced {
+    /// The drive announced a change.
+    pub fn note(&mut self, now: Instant) {
+        let first = self.0.map_or(now, |(first, _)| first);
+        self.0 = Some((first, now + REMOTE_QUIET));
+    }
+
+    /// Whether announced changes are due to be pulled now: they are taken then.
+    pub fn due(&mut self, now: Instant) -> bool {
+        match self.0 {
+            Some((first, quiet)) if now >= quiet || now >= first + REMOTE_MAX_WAIT => {
+                self.0 = None;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Schedule {
     /// A sync at least this often.
@@ -45,10 +69,6 @@ pub(crate) struct Schedule {
     wanted: bool,
     /// No sync before then (a backoff, a folder that is gone).
     not_before: Instant,
-    /// Changes announced on the drive: the first, and when they are quiet. They are synced
-    /// once they stop coming (a burst of deletes is judged whole by the mass-delete guard), or
-    /// [`REMOTE_MAX_WAIT`] after the first.
-    announced: Option<(Instant, Instant)>,
     /// Paused: until then (Unix seconds), or until resumed (`None`).
     pause: Option<Until>,
     backoff: Backoff,
@@ -62,7 +82,6 @@ impl Schedule {
             next_poll: now + poll,
             wanted: true,
             not_before: now,
-            announced: None,
             pause,
             backoff: Backoff::new(),
         }
@@ -83,13 +102,6 @@ impl Schedule {
     pub fn woke(&mut self, now: Instant) {
         self.asked(now);
         self.backoff = Backoff::new();
-    }
-
-    /// The drive announced a change: synced once the announcements stop.
-    pub fn announced(&mut self, now: Instant) {
-        self.wanted = true;
-        let first = self.announced.map_or(now, |(first, _)| first);
-        self.announced = Some((first, now + REMOTE_QUIET));
     }
 
     pub fn pause(&mut self, until: Until) {
@@ -122,20 +134,9 @@ impl Schedule {
         true
     }
 
-    /// Whether to sync now: wanted, not paused, not backing off, no announcement still coming
-    /// in (an announcement is taken as the sync starts).
-    pub fn due(&mut self, now: Instant) -> bool {
-        if self.pause.is_some() || !self.wanted || now < self.not_before {
-            return false;
-        }
-        if self
-            .announced
-            .is_some_and(|(first, quiet)| now < quiet && now < first + REMOTE_MAX_WAIT)
-        {
-            return false;
-        }
-        self.announced = None;
-        true
+    /// Whether to sync now: wanted, not paused, not backing off.
+    pub fn due(&self, now: Instant) -> bool {
+        self.pause.is_none() && self.wanted && now >= self.not_before
     }
 
     /// Not now: tried again at the next poll (the folder gone, rules that don't parse).
@@ -196,25 +197,25 @@ mod tests {
         );
     }
 
-    /// Announcements are synced once they stop for a second, or ten seconds after the first.
+    /// Announcements are pulled once they stop for a second, or ten seconds after the first.
     #[test]
     fn announcements_wait_until_they_stop() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, POLL, None);
-        s.synced(false);
-        s.announced(t0);
-        assert!(!s.due(t0 + ms(500)));
-        s.announced(t0 + ms(800));
-        assert!(!s.due(t0 + ms(1500)), "still coming");
-        assert!(s.due(t0 + ms(1800)), "quiet for a second");
-        s.synced(false);
-        // A steady stream: synced after ten seconds all the same.
+        let mut a = Announced::default();
+        assert!(!a.due(t0), "nothing announced");
+        a.note(t0);
+        assert!(!a.due(t0 + ms(500)));
+        a.note(t0 + ms(800));
+        assert!(!a.due(t0 + ms(1500)), "still coming");
+        assert!(a.due(t0 + ms(1800)), "quiet for a second");
+        assert!(!a.due(t0 + ms(1900)), "taken");
+        // A steady stream: pulled after ten seconds all the same.
         let t1 = t0 + Duration::from_secs(100);
         for i in 0..20 {
-            s.announced(t1 + ms(i * 500));
+            a.note(t1 + ms(i * 500));
         }
-        assert!(!s.due(t1 + ms(9_999)));
-        assert!(s.due(t1 + ms(10_000)));
+        assert!(!a.due(t1 + ms(9_999)));
+        assert!(a.due(t1 + ms(10_000)));
     }
 
     #[test]

@@ -1106,8 +1106,12 @@ impl<'a> Store<'a> {
     pub fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
         let folders = self.folder_list()?;
         let id = self.key_or_insert(node)?;
-        let mut marked: Vec<i64> = match &*folders {
-            [only] => vec![only.id],
+        let marked: std::collections::BTreeSet<i64> = match &*folders {
+            [only] => {
+                self.mark_dirty_in(only.id, id)?;
+                self.touched.borrow_mut().insert(only.id);
+                return Ok(());
+            }
             _ => {
                 let mut holders = self
                     .prep(
@@ -1115,9 +1119,11 @@ impl<'a> Store<'a> {
                          UNION SELECT folder FROM local WHERE id = ?1",
                     )?
                     .query_map([id], |r| r.get(0))?
-                    .collect::<rusqlite::Result<Vec<i64>>>()?;
+                    .collect::<rusqlite::Result<std::collections::BTreeSet<i64>>>()?;
                 match self.place_of(place, &folders)? {
-                    Some(Place::Folder(folder)) => holders.push(folder),
+                    Some(Place::Folder(folder)) => {
+                        holders.insert(folder);
+                    }
                     Some(Place::Unheld) => {}
                     // A gap or a cycle: whose it is isn't known.
                     None => holders.extend(folders.iter().map(|f| f.id)),
@@ -1125,12 +1131,10 @@ impl<'a> Store<'a> {
                 holders
             }
         };
-        marked.sort_unstable();
-        marked.dedup();
-        for folder in marked {
+        for &folder in &marked {
             self.mark_dirty_in(folder, id)?;
-            self.touched.borrow_mut().insert(folder);
         }
+        self.touched.borrow_mut().extend(marked);
         Ok(())
     }
 

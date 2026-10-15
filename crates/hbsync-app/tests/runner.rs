@@ -237,7 +237,7 @@ fn spawn(
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
     let account = SyncRoot::open_account(&cfg.db, &cfg.identity)?;
     let drive = Drive::new(account, Arc::new(FakeRemote::new(server.clone())));
-    Runner::spawn(cfg, drive, std::sync::mpsc::channel().1)
+    Runner::spawn(cfg, drive)
 }
 
 #[test]

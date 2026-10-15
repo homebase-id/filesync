@@ -46,8 +46,8 @@ impl Server {
     /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
     /// newest first.
     pub(super) fn deleted_page(&self) -> String {
-        let list: Vec<_> = match control::deleted(&self.paths, usize::MAX) {
-            Ok(Some(list)) => list.into_iter().map(|item| item.deleted).collect(),
+        let items = match control::deleted(&self.paths, usize::MAX) {
+            Ok(Some(items)) => items,
             Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
             Err(e) => {
                 return format!(
@@ -56,7 +56,7 @@ impl Server {
                 );
             }
         };
-        if list.is_empty() {
+        if items.is_empty() {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
         let now = words::now();
@@ -66,9 +66,9 @@ impl Server {
             .map(|r| r.folder);
         // Shown: the items whose folder isn't in Recently deleted too; each with how many items
         // below it its restore brings back (those deleted with it).
-        let by_node: HashMap<_, _> = list.iter().map(|d| (d.node, d)).collect();
+        let by_node: HashMap<_, _> = items.iter().map(|i| (i.deleted.node, &i.deleted)).collect();
         let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
-        for d in &list {
+        for d in items.iter().map(|i| &i.deleted) {
             let mut up = d.parent;
             for _ in 0..256 {
                 let Some(folder) = by_node.get(&up) else {
@@ -83,21 +83,24 @@ impl Server {
                 up = folder.parent;
             }
         }
-        let rows: String = list
+        let rows: String = items
             .iter()
-            .filter(|d| !by_node.contains_key(&d.parent))
+            .filter(|i| !by_node.contains_key(&i.deleted.parent))
             .take(MAX_DELETED)
-            .map(|d| {
+            .map(|item| {
+                let d = &item.deleted;
                 let along = match along.get(&d.node).copied().unwrap_or(0) {
                     0 => String::new(),
                     n => format!(" <span class=small>with {n} items in it</span>"),
                 };
                 format!(
                     "<li><form method=post action=\"{url}\">\
-                     <input type=hidden name=node value=\"{node}\">{what}{along} \
+                     <input type=hidden name=node value=\"{node}\">\
+                     <input type=hidden name=identity value=\"{identity}\">{what}{along} \
                      <button class=secondary>Restore</button></form></li>",
                     url = self.pages.url("deleted/restore"),
                     node = d.node.0,
+                    identity = escape(&item.identity),
                     what = escape(&words::deleted(d, main.as_deref(), now)),
                 )
             })
@@ -111,9 +114,9 @@ impl Server {
              <button class=secondary>Empty now…</button></form>",
             days = self.keep_days(),
             empty = self.pages.url("deleted/empty"),
-            count = list.len(),
+            count = items.len(),
             // Newest first: what the user sees, nothing deleted after this look.
-            until = list[0].removed_at_ms,
+            until = items[0].deleted.removed_at_ms,
         )
     }
 
@@ -134,40 +137,46 @@ impl Server {
 
     /// Restores the item the form names.
     pub(super) fn restore(&self, form: &HashMap<String, String>) -> String {
-        let Some(node) = form
+        let node = form
             .get("node")
             .and_then(|n| n.parse().ok())
-            .map(hbsync_types::NodeId)
-        else {
+            .map(hbsync_types::NodeId);
+        let (Some(node), Some(identity)) = (node, form.get("identity")) else {
             return "Nothing was restored.".into();
         };
         self.ask_account(
+            identity,
             AccountControl::Restore { nodes: vec![node] },
             "Restoring: it comes back with the next sync, on every device.",
         )
     }
 
-    /// Empties Recently deleted of what the page showed (deleted until then).
+    /// Empties Recently deleted of what the page showed (deleted until then): every account's,
+    /// as anything deleted after the look is newer.
     pub(super) fn empty(&self, form: &HashMap<String, String>) -> String {
         let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
             return "Nothing was deleted.".into();
         };
-        self.ask_account(
-            AccountControl::EmptyDeletedUntil { at_ms },
-            "Emptying Recently deleted.",
-        )
+        let emptied = control::deleted(&self.paths, usize::MAX).and_then(|items| {
+            control::empty_deleted_until(&self.paths, &items.unwrap_or_default(), at_ms)
+        });
+        match emptied {
+            Ok(()) => {
+                (self.send)(Event::Wake);
+                "Emptying Recently deleted.".into()
+            }
+            Err(e) => format!("That didn't work: {e}"),
+        }
     }
 
-    /// Sends `control` to the account set up here; `done` if the daemon took it, else why not.
-    pub(super) fn ask_account(&self, control: AccountControl, done: &str) -> String {
-        let Ok(Some(root)) = control::configured(&self.paths) else {
-            return "That didn't work: Filesync isn't set up.".into();
-        };
-        let control = Control::Account {
-            identity: root.identity,
-            control,
-        };
-        match control::control(&self.paths, control) {
+    /// Sends `control` to the account `identity`; `done` if the daemon took it, else why not.
+    pub(super) fn ask_account(
+        &self,
+        identity: &str,
+        control: AccountControl,
+        done: &str,
+    ) -> String {
+        match control::account(&self.paths, identity, control) {
             Ok(()) => {
                 (self.send)(Event::Wake);
                 done.into()
@@ -202,15 +211,7 @@ impl Server {
         let (Some(token), Some(path)) = (form.get("token"), path) else {
             return "Nothing was confirmed.".into();
         };
-        match control::control(
-            &self.paths,
-            Control::Folder {
-                path,
-                control: FolderControl::ConfirmDeletes {
-                    token: token.clone(),
-                },
-            },
-        ) {
+        match control::confirm_deletes(&self.paths, &path, token.clone()) {
             Ok(()) => {
                 (self.send)(Event::Wake);
                 "Confirmed: the deletions go through now.".into()

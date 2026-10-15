@@ -131,6 +131,21 @@ impl Config {
             .map_err(|e| ConfigError::Io(path.to_owned(), e))
     }
 
+    /// Changes the config at `path` (an empty one when there is none) with `f`, and saves it
+    /// when `f` changed it. One change at a time in this process: the daemon's request threads
+    /// don't undo each other's.
+    pub fn update<T>(path: &Path, f: impl FnOnce(&mut Config) -> T) -> Result<T, ConfigError> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _turn = crate::runner::lock(&TURN);
+        let before = Config::load(path)?.unwrap_or_default();
+        let mut config = before.clone();
+        let out = f(&mut config);
+        if config != before {
+            config.save(path)?;
+        }
+        Ok(out)
+    }
+
     /// The main folder, if any (one at most, for now).
     pub fn root(&self) -> Result<Option<&Root>, ConfigError> {
         let mains: Vec<&Root> = self.roots.iter().filter(|r| r.role.is_none()).collect();

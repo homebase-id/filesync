@@ -13,10 +13,11 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use hbsync_app::{Hint, Runner, RunnerConfig, State};
+use hbsync_app::daemon::Notifications;
+use hbsync_app::{Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::notify::{Event, Notifier};
+use hbsync_homebase::notify::Notifier;
 use hbsync_local::{IGNORE_FILE, STATE_DIR};
 
 fn main() {
@@ -43,14 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::fs::canonicalize(folder)?;
     let name = root.file_name().ok_or("the folder has no name")?;
     let db = root.with_file_name(format!("{}.state.db", name.to_string_lossy()));
-    use hbsync_engine::root::{RootError, SyncRoot};
-    let sync_root = match SyncRoot::open(&db, identity, &root) {
-        Ok(found) => found,
-        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
-            SyncRoot::create(&db, identity, &root)?
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let sync_root = hbsync_engine::root::SyncRoot::open_or_create(&db, identity, &root)?;
     let drive = Drive::new(sync_root.account()?, remote.clone());
     let device = hbsync_platform::host::device_name();
     let mut cfg = RunnerConfig::new(&root, &db, identity, &device);
@@ -63,29 +57,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         root.display(),
         remote.drive().alias.simple(),
     );
-    // The identity's notifications, as the daemon's account passes them on.
-    let (hint, hints) = mpsc::channel();
+    // The identity's notifications, taken as the daemon's account takes them.
     let _notifier = (!cfg.once).then(|| {
         let (tx, events) = mpsc::channel();
         let notifier = Notifier::spawn(client, remote.drive(), tx);
+        let drive = Arc::clone(&drive);
         std::thread::spawn(move || {
-            for event in events {
-                let sent = match event {
-                    Event::Connected => hint.send(Hint::Connected),
-                    Event::Changed => hint.send(Hint::Changed),
-                    Event::Lost(why) | Event::Refused(why) => {
-                        println!("notifications: {why}");
-                        Ok(())
-                    }
-                };
-                if sent.is_err() {
-                    return;
+            let mut notifications = Notifications::default();
+            loop {
+                match events.recv_timeout(Duration::from_millis(200)) {
+                    Ok(event) => drop(notifications.event(event, &drive)),
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
+                notifications.tick(&drive, std::time::Instant::now());
             }
         });
         notifier
     });
-    let (handle, thread) = Runner::spawn(cfg, drive, hints)?;
+    let (handle, thread) = Runner::spawn(cfg, drive)?;
     while !thread.is_finished() {
         std::thread::sleep(Duration::from_millis(500));
         if handle.status().state == State::Denied {

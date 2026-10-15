@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
 use hbsync_app::protocol::{DaemonControl, RecentItem};
-use hbsync_app::{APP_NAME, Control, Paths, autostart, control, shell, words};
+use hbsync_app::{APP_NAME, Paths, autostart, control, shell, words};
 use hbsync_app::{FolderStatus, State};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -366,7 +366,7 @@ impl App {
     fn send_control(&self, c: DaemonControl) {
         let (paths, send) = (self.paths.clone(), self.send.clone());
         std::thread::spawn(move || {
-            if let Err(e) = control::control(&paths, Control::Daemon(c)) {
+            if let Err(e) = control::daemon(&paths, c) {
                 os::notify(APP_NAME.into(), e.to_string());
             }
             send(Event::Wake);

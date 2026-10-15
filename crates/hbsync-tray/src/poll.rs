@@ -69,7 +69,7 @@ impl Watcher {
 
     fn look(&mut self, paths: &Paths, send: &Sender) -> Daemon {
         let status = match control::status(paths) {
-            Ok(Some(status)) => status,
+            Ok(Some(status)) => Some(status),
             // Not running: started if a folder is set up.
             Ok(None) => {
                 return match control::configured(paths) {
@@ -82,15 +82,18 @@ impl Watcher {
                     Err(e) => Daemon::Starting(Some(e.to_string())),
                 };
             }
+            // One too old to tell its version.
+            Err(e) if e.is::<control::OlderDaemon>() => None,
             Err(e) => return Daemon::Starting(Some(e.to_string())),
         };
         self.start_failed = None;
         // Updated beside a daemon still running the old version. Not when this tray is the old
         // one (replaced on disk): the daemon may be the new one, and this tray goes first.
-        if status.version != hbsync_app::VERSION && !self.restarted && self.replaced.is_none() {
+        let version = status.as_ref().map(|s| s.version.as_str());
+        if version != Some(hbsync_app::VERSION) && !self.restarted && self.replaced.is_none() {
             tracing::info!(
                 "the daemon runs {:?}, this is {}: restarting it",
-                status.version,
+                version,
                 hbsync_app::VERSION
             );
             self.restarted = true;
@@ -99,6 +102,9 @@ impl Watcher {
             }
             return Daemon::Starting(None);
         }
+        let Some(status) = status else {
+            return Daemon::Starting(Some(control::OlderDaemon.to_string()));
+        };
         let synced_added = status.folders.iter().map(|f| f.synced_added).sum();
         if self.read_at != Some(synced_added)
             && let Ok(Some(list)) = control::recent(paths, RECENT_SHOWN)

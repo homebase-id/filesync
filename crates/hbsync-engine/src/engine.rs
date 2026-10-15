@@ -341,7 +341,12 @@ impl Engine {
                 here.saturating_sub(confirmed_here),
                 there.saturating_sub(confirmed_there.len() as u64),
             );
-            Ok((pending, s.base_file_count()?, still))
+            // Nothing dirty, nothing to plan: the guard has nothing to weigh against them.
+            let synced = match s.dirty_count()? {
+                0 => 0,
+                _ => s.base_file_count()?,
+            };
+            Ok((pending, synced, still))
         })?;
         self.confirmed = confirmed;
         let opts = Options {
@@ -401,8 +406,8 @@ impl Engine {
         }
         // Its writes changed other folders' parts of the drive (a move across them): their
         // engines look.
-        let touched = self.db.take_touched();
-        self.drive.wake_folders(&touched, Some(self.db.folder()));
+        let folder = self.db.folder();
+        self.drive.wake_touched(&mut self.db, Some(folder));
         Ok(report)
     }
 

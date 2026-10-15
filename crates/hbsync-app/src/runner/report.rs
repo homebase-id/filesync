@@ -15,8 +15,13 @@ const RECENT: usize = 50;
 /// Paths shown for held deletes.
 const EXAMPLES: usize = 10;
 
-/// Each conflict and failure of `report`, worded for people.
-pub(super) fn notes(engine: &mut Engine, report: &SyncReport) -> Result<Vec<String>, StateError> {
+/// Each conflict and failure of `report`, and the drive's rows the client couldn't read
+/// (`skipped`), worded for people.
+pub(super) fn notes(
+    engine: &mut Engine,
+    report: &SyncReport,
+    skipped: Vec<String>,
+) -> Result<Vec<String>, StateError> {
     let mut notes = Vec::new();
     for c in &report.conflicts {
         notes.push(describe_conflict(engine, c)?);
@@ -26,7 +31,7 @@ pub(super) fn notes(engine: &mut Engine, report: &SyncReport) -> Result<Vec<Stri
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
     // Drive rows the client can't read (not encrypted, another key, not a sync node).
-    for why in &report.feed.skipped {
+    for why in skipped {
         notes.push(format!("a file on Homebase can't be synced: {why}"));
     }
     Ok(notes)
@@ -46,10 +51,12 @@ impl Told {
     }
 }
 
-/// The deletes the guard held in `report`, as the status shows them; `None` when none were.
+/// The deletes the guard held in `report` (of `nodes`), as the status shows them; `None` when
+/// none were.
 pub(super) fn held(
     engine: &mut Engine,
     report: &SyncReport,
+    nodes: &[NodeId],
 ) -> Result<Option<HeldDeletes>, StateError> {
     if report.held.is_empty() {
         return Ok(None);
@@ -63,12 +70,11 @@ pub(super) fn held(
     for op in report.held.iter().take(EXAMPLES) {
         examples.extend(engine.path_of(op.node())?);
     }
-    let nodes: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
     Ok(Some(HeldDeletes {
         here,
         remotely: report.held.len() as u64 - here,
         examples,
-        token: held_token(&nodes),
+        token: held_token(nodes),
     }))
 }
 

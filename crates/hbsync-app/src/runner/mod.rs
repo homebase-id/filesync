@@ -1,7 +1,8 @@
 //! The sync loop for one folder, on its own thread: what the daemon runs.
 //!
-//! A sync runs when the folder changes (live watcher), when the identity announces a change
-//! on the drive (notification hints), at least once a minute regardless, and when asked. After
+//! A sync runs when the folder changes (live watcher), when its part of the drive changed (the
+//! drive wakes it: a change the identity announced, another folder's sync), at least once a
+//! minute regardless, and when asked. After
 //! a failed sync the runner waits, doubling up to five minutes. It is controlled through a
 //! [`Handle`] and publishes a [`FolderStatus`].
 //!
@@ -29,14 +30,13 @@ use hbsync_local::{Filter, FilterError, LocalObserver};
 use hbsync_remote::RemoteError;
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
-pub use hbsync_types::activity::Progress;
 use hbsync_types::unix_now;
 
 use crate::MassDelete;
 use crate::protocol::{FolderStatus, State, Until};
 
 mod report;
-mod schedule;
+pub(crate) mod schedule;
 
 pub(crate) use schedule::Backoff;
 use schedule::Schedule;
@@ -68,6 +68,8 @@ pub struct RunnerConfig {
     /// The account's state DB ([`crate::Paths::account_db`]).
     pub db: PathBuf,
     pub identity: String,
+    /// The role folder it is; `None` for the main folder.
+    pub role: Option<hbsync_types::Role>,
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
@@ -87,6 +89,7 @@ impl RunnerConfig {
             folder: folder.to_path_buf(),
             db: db.to_path_buf(),
             identity: identity.to_owned(),
+            role: None,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
             paused: None,
@@ -108,21 +111,12 @@ pub enum Command {
     },
     Resume,
     /// Let the held deletes the user was shown through: `token` is
-    /// [`HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
+    /// [`crate::protocol::HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
     ConfirmDeletes {
         token: String,
     },
     /// Stop the runner (between operations).
     Stop,
-}
-
-/// What the identity's notifications tell a folder's runner (passed on by its account).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Hint {
-    /// Connected (again): changes may have been missed meanwhile.
-    Connected,
-    /// The drive changed.
-    Changed,
 }
 
 /// Controls a running [`Runner`] from other threads.
@@ -166,7 +160,6 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub struct Runner {
     cfg: RunnerConfig,
     drive: Arc<Drive>,
-    hints: Receiver<Hint>,
     control: Receiver<Command>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
@@ -204,15 +197,16 @@ impl Parts {
 }
 
 impl Runner {
-    /// Starts syncing `cfg.folder` on its account's `drive` on a new thread, woken by `hints`.
+    /// Starts syncing `cfg.folder` on its account's `drive` on a new thread; the drive wakes it
+    /// when its part changed.
     pub fn spawn(
         cfg: RunnerConfig,
         drive: Arc<Drive>,
-        hints: Receiver<Hint>,
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
+        status.role = cfg.role;
         status.paused_until = cfg.paused.flatten();
         let status = Arc::new(Mutex::new(status));
         let progress = Arc::new(Counters::default());
@@ -225,7 +219,6 @@ impl Runner {
         let runner = Runner {
             cfg,
             drive,
-            hints,
             control: rx,
             stop,
             status,
@@ -303,7 +296,6 @@ impl Runner {
         let mut schedule = Schedule::new(Instant::now(), self.cfg.poll, self.cfg.paused);
         let mut started = false;
         let mut check_rules = false;
-        let mut hints_open = true;
         tracing::info!(
             "syncing {} with {}{}",
             self.cfg.folder.display(),
@@ -379,15 +371,7 @@ impl Runner {
                 }
             }
 
-            while hints_open {
-                match self.hints.try_recv() {
-                    Ok(Hint::Connected) => schedule.want(),
-                    Ok(Hint::Changed) => schedule.announced(Instant::now()),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => hints_open = false,
-                }
-            }
-            // Another folder's sync changed this one's part of the drive.
+            // A change in this folder's part of the drive (announced, or another folder's sync).
             if let Some(p) = &parts
                 && p.wake.try_iter().count() > 0
             {
@@ -431,7 +415,7 @@ impl Runner {
                         tracing::warn!("{GONE}: waiting for it to come back");
                     }
                     parts = None;
-                    self.failing(GONE.into(), schedule.later(Instant::now()));
+                    self.failing(State::Failing, GONE.into(), schedule.later(Instant::now()));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -446,7 +430,11 @@ impl Runner {
                     // Rules that don't parse: say so, and try again at the next poll.
                     Err(RunnerError::Filter(e)) if !self.cfg.once => {
                         tracing::warn!("{e}");
-                        self.failing(e.to_string(), schedule.later(Instant::now()));
+                        self.failing(
+                            State::Failing,
+                            e.to_string(),
+                            schedule.later(Instant::now()),
+                        );
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -455,6 +443,8 @@ impl Runner {
             if let Some(seen) = confirmed.take() {
                 p.engine.confirm_deletes(seen);
             }
+            // This sync pulls what woke it so far.
+            p.wake.try_iter().for_each(drop);
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.
             self.progress.reset();
@@ -469,11 +459,7 @@ impl Runner {
             let result = if started {
                 p.engine.sync_once(&today)
             } else {
-                p.engine.start_up(&mut p.observer, &today).map(|mut r| {
-                    // Its catch-up's feed too: what it skipped is told.
-                    r.sync.feed.skipped.extend(r.feed.skipped);
-                    r.sync
-                })
+                p.engine.start_up(&mut p.observer, &today).map(|r| r.sync)
             };
             match result {
                 Ok(report) => {
@@ -491,11 +477,7 @@ impl Runner {
                     };
                     let wait = schedule.failed(Instant::now(), state);
                     tracing::warn!("sync failed ({e}); trying again in {wait:?}");
-                    self.set(|s| {
-                        s.state = state;
-                        s.error = Some(e.to_string());
-                        s.retry_at = Some(unix_now() + wait.as_secs());
-                    });
+                    self.failing(state, e.to_string(), wait);
                 }
             }
             if self.cfg.once {
@@ -504,10 +486,10 @@ impl Runner {
         }
     }
 
-    /// Shows `why` nothing syncs, until another try after `wait`.
-    fn failing(&self, why: String, wait: Duration) {
+    /// Shows `why` nothing syncs (in `state`), until another try after `wait`.
+    fn failing(&self, state: State, why: String, wait: Duration) {
         self.set(|s| {
-            s.state = State::Failing;
+            s.state = state;
             s.error = Some(why);
             s.retry_at = Some(unix_now() + wait.as_secs());
         });
@@ -520,9 +502,10 @@ impl Runner {
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), RunnerError> {
-        let notes = self.told.fresh(report::notes(engine, report)?);
-        let held = report::held(engine, report)?;
+        let skipped = self.drive.take_skipped();
+        let notes = self.told.fresh(report::notes(engine, report, skipped)?);
         self.held = report.held.iter().map(|op| op.node()).collect();
+        let held = report::held(engine, report, &self.held)?;
         if report.ops_done > 0 || !notes.is_empty() {
             tracing::info!(
                 "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",

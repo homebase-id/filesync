@@ -37,6 +37,9 @@ impl Request {
 #[serde(rename_all = "snake_case")]
 pub enum Ask {
     Status,
+    /// Stop the daemon (between operations). The one request a daemon of any version takes,
+    /// whatever protocol it speaks: an update stops the daemon of the build before it.
+    Stop,
     Control(Control),
     /// The newest entries of the recently synced lists, every folder's.
     Recent {
@@ -56,7 +59,16 @@ pub enum Ask {
     RemoveFolder {
         path: PathBuf,
     },
+    /// The credentials of `identity` changed (logged in again): its account starts over with
+    /// them.
+    StartOver {
+        identity: String,
+    },
 }
+
+/// How a daemon refusing a request of another protocol starts its answer, its own protocol
+/// after it.
+pub const OTHER_PROTOCOL: &str = "this daemon speaks protocol ";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,8 +113,6 @@ pub enum DaemonControl {
         until: Until,
     },
     Resume,
-    /// Stop the daemon (between operations).
-    Stop,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,11 +160,6 @@ pub struct DaemonStatus {
 }
 
 impl DaemonStatus {
-    /// The account `identity`'s status.
-    pub fn account(&self, identity: &str) -> Option<&AccountStatus> {
-        self.accounts.iter().find(|a| a.identity == identity)
-    }
-
     /// The main folder (holding the drive's root) of the first account: the one the tray and
     /// the CLI show first.
     pub fn main_folder(&self) -> Option<&FolderStatus> {
