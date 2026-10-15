@@ -1300,6 +1300,72 @@ fn regression_a_file_put_into_a_deleted_role_folder_stays_its() {
     }
 }
 
+/// The Photos example: on Monday `Photos/a.jpg` is deleted on its own; on Tuesday the folder
+/// `Photos`, still holding `b.jpg` and a subfolder with a file. Restoring `Photos` brings back
+/// `b.jpg` and the subfolder's file, not `a.jpg`: that stays in Recently deleted, and comes back
+/// on its own, into `Photos`. (In the simulator's names: `Photos` is `d`, `a.jpg` `a`, `b.jpg`
+/// `b`, the subfolder `d/d` and its file `d/d/c.txt`.)
+#[test]
+fn regression_photos_restored_without_what_was_deleted_from_it_before() {
+    use Action::*;
+    use hbsync_types::NodeId;
+    let mut sim = Sim::new(2);
+    let act = |sim: &mut Sim, client, action| sim.run(&[Event::Act { client, action }]);
+    let settle = |sim: &mut Sim| assert!(sim.quiesce(30), "no convergence");
+    let folder = |sim: &Sim, path: &str| -> usize {
+        let node = if path.is_empty() {
+            NodeId::ROOT
+        } else {
+            sim.item(0, path).expect(path)
+        };
+        sim.pick(0, node, true).expect(path)
+    };
+    let (d, a, b, c_txt) = (5, 0, 1, 3); // NAMES: "d", "a", "b", "c.txt"
+    let parent = folder(&sim, "");
+    act(&mut sim, 0, CreateFolder { parent, name: d });
+    let parent = folder(&sim, "d");
+    act(&mut sim, 0, CreateFile { parent, name: a });
+    act(&mut sim, 0, CreateFile { parent, name: b });
+    act(&mut sim, 0, CreateFolder { parent, name: d });
+    let parent = folder(&sim, "d/d");
+    act(
+        &mut sim,
+        0,
+        CreateFile {
+            parent,
+            name: c_txt,
+        },
+    );
+    settle(&mut sim);
+    let (photos, a_jpg) = (
+        sim.item(0, "d").expect("d"),
+        sim.item(0, "d/a").expect("d/a"),
+    );
+
+    // Monday: a.jpg on its own. Tuesday: the folder.
+    let node = sim.pick(0, a_jpg, false).expect("a");
+    act(&mut sim, 0, Delete { node });
+    settle(&mut sim);
+    let node = sim.pick(0, photos, false).expect("d");
+    act(&mut sim, 0, Delete { node });
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), Vec::<String>::new());
+
+    // The other device restores the folder: b.jpg and the subfolder come back, a.jpg doesn't.
+    let node = sim.removed_pick(photos).expect("d removed");
+    act(&mut sim, 1, Restore { node });
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["d", "d/b", "d/d", "d/d/c.txt"]);
+    assert!(sim.is_removed(a_jpg), "a.jpg stays in Recently deleted");
+
+    // a.jpg on its own, into Photos.
+    let node = sim.removed_pick(a_jpg).expect("a removed");
+    act(&mut sim, 1, Restore { node });
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["d", "d/a", "d/b", "d/d", "d/d/c.txt"]);
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+}
+
 /// One client removes a folder while the other, which synced a folder made in it, tags that
 /// folder and makes one in it. The removal would take the synced folder along (§6.3), but the
 /// new one keeps it alive: merged after all, it keeps its tag.

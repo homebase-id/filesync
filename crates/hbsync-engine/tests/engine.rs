@@ -1190,23 +1190,27 @@ fn a_folder_goes_first_and_a_child_that_failed_follows() -> R {
     Ok(())
 }
 
-/// A folder's restore brings back what was deleted with it, not what was deleted from it
-/// before: that stays in Recently deleted, an item of its own.
+/// The Photos example: on Monday `Photos/a.jpg` is deleted on its own; on Tuesday the folder
+/// `Photos`, still holding `b.jpg` and a subfolder with a file. Restoring `Photos` brings back
+/// `b.jpg` and the subfolder's file, not `a.jpg`: that stays in Recently deleted, an item of its
+/// own, and comes back on its own, into `Photos`.
 #[test]
-fn a_folders_restore_leaves_what_was_deleted_before_it() -> R {
+fn photos_restored_without_what_was_deleted_from_it_before() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
     a.write("Photos/a.jpg", "a")?;
     a.write("Photos/b.jpg", "b")?;
+    a.write("Photos/2024/c.jpg", "c")?;
     a.write("keep.txt", "k")?;
     a.sync()?;
     b.sync()?;
-    fs::remove_file(a.root.join("Photos/a.jpg"))?;
+    fs::remove_file(a.root.join("Photos/a.jpg"))?; // Monday
     a.sync()?;
-    fs::remove_dir_all(a.root.join("Photos"))?;
+    fs::remove_dir_all(a.root.join("Photos"))?; // Tuesday
     a.sync()?;
     b.sync()?;
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
     let listed = b.recently_deleted(10)?;
     let item = |path: &str| {
         listed
@@ -1214,22 +1218,30 @@ fn a_folders_restore_leaves_what_was_deleted_before_it() -> R {
             .find(|i| i.path == path)
             .ok_or(format!("{path} not listed"))
     };
-    let (photos, a_jpg, b_jpg) = (
+    let (photos, a_jpg, b_jpg, c_jpg) = (
         item("Photos")?,
         item("Photos/a.jpg")?,
         item("Photos/b.jpg")?,
+        item("Photos/2024/c.jpg")?,
     );
     assert_eq!(a_jpg.root, a_jpg.node, "deleted on its own");
-    assert_eq!(b_jpg.root, photos.node, "deleted with the folder");
+    assert_eq!(
+        (b_jpg.root, c_jpg.root),
+        (photos.node, photos.node),
+        "deleted with the folder"
+    );
     assert!(a_jpg.removed_at_ms < photos.removed_at_ms);
     assert!(
         photos.removed_at_ms <= b_jpg.removed_at_ms,
         "the folder went first"
     );
-    assert_eq!(b.engine.drive().restore(&[photos.node])?, 2);
+
+    // b restores Photos: b.jpg and 2024/c.jpg come back, on both; a.jpg doesn't.
+    assert_eq!(b.engine.drive().restore(&[photos.node])?, 4);
     b.sync()?;
     a.sync()?;
     assert_eq!(a.read_text("Photos/b.jpg")?, "b");
+    assert_eq!(a.read_text("Photos/2024/c.jpg")?, "c");
     assert!(a.read_text("Photos/a.jpg").is_err());
     let left: Vec<String> = a
         .recently_deleted(10)?
@@ -1237,6 +1249,14 @@ fn a_folders_restore_leaves_what_was_deleted_before_it() -> R {
         .map(|i| i.path)
         .collect();
     assert_eq!(left, ["Photos/a.jpg"]);
+
+    // a.jpg on its own: back into Photos.
+    assert_eq!(a.engine.drive().restore(&[a_jpg.node])?, 1);
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read_text("Photos/a.jpg")?, "a");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert!(a.recently_deleted(10)?.is_empty());
     Ok(())
 }
 

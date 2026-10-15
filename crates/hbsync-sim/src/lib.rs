@@ -75,10 +75,10 @@ pub enum Action {
     },
     /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
     ToggleIgnore,
-    /// The user restores one item of Recently deleted, on the server at once: back in its
-    /// folder, or at the top if that is gone, under a free name. (The engine's restore also
-    /// brings back what was deleted with it and the folders above: each such step is one of
-    /// these.)
+    /// The user restores one item of Recently deleted, on the server at once, with what was
+    /// deleted with it (node schema: in it, removed no earlier than it), folders first: back in
+    /// its folder, or at the top if that is gone, under a free name. (The engine's restore also
+    /// brings back the folders above: each such step is one of these.)
     Restore {
         node: usize,
     },
@@ -165,6 +165,9 @@ struct Server {
     live: BTreeMap<NodeId, ServerNode>,
     /// Recently deleted: out of the tree, with their bytes, until restored or purged.
     removed: BTreeMap<NodeId, ServerNode>,
+    /// When each node went to Recently deleted (the server's clock: a header's `updated`).
+    removed_at: BTreeMap<NodeId, u64>,
+    clock: u64,
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     ever: BTreeSet<NodeId>,
@@ -176,6 +179,28 @@ impl Server {
     fn uuid(&mut self) -> Uuid {
         self.next += 1;
         Uuid::from_u128(self.next)
+    }
+
+    /// Puts `node` in Recently deleted, at the time of this write.
+    fn remove(&mut self, node: NodeId, n: ServerNode) {
+        self.clock += 1;
+        self.removed_at.insert(node, self.clock);
+        self.removed.insert(node, n);
+    }
+
+    /// The nodes in Recently deleted that were deleted with folder `node` (node schema): in it,
+    /// removed no earlier than it.
+    fn deleted_with(&self, node: NodeId) -> Vec<NodeId> {
+        let Some(at) = self.removed_at.get(&node) else {
+            return Vec::new();
+        };
+        self.removed
+            .iter()
+            .filter(|(n, r)| {
+                r.state.parent == node && self.removed_at.get(n).is_some_and(|t| t >= at)
+            })
+            .map(|(n, _)| *n)
+            .collect()
     }
 
     fn tree(&self) -> Tree {
@@ -455,18 +480,20 @@ impl Sim {
         if !self.server.live.contains_key(&docs) {
             return;
         }
-        let below: Vec<NodeId> = self
+        let mut below: Vec<NodeId> = self
             .server
             .live
             .keys()
             .copied()
             .filter(|n| self.server.in_role_folder(*n))
             .collect();
-        // The folder first, then what is in it (node schema, Recently deleted).
+        // The folder first, then what is in it, top-down (node schema, Recently deleted).
+        let tree = self.server.tree();
+        below.sort_by_key(|n| tree.ancestors(*n).len());
         for node in [docs].into_iter().chain(below.iter().copied()) {
             if let Some(mut n) = self.server.live.remove(&node) {
                 n.remote.version = VersionTag(self.server.uuid());
-                self.server.removed.insert(node, n);
+                self.server.remove(node, n);
                 // A tag change loses to a delete (§11).
                 self.deleted.insert(node);
             }
@@ -511,7 +538,7 @@ impl Sim {
             }
             (2, Some(file)) => {
                 if let Some(n) = self.server.live.remove(&file) {
-                    self.server.removed.insert(file, n);
+                    self.server.remove(file, n);
                     // A tag change loses to a delete (§11), the phone's too.
                     self.deleted.insert(file);
                 }
@@ -571,24 +598,77 @@ impl Sim {
 
     // ---- user actions ----
 
-    fn act(&mut self, c: usize, action: Action) {
-        let local = &self.clients[c].local;
+    /// The folders a create's `parent` picks from on client `c` (its root included).
+    fn folders_of(&self, c: usize) -> Vec<NodeId> {
         let mut folders: Vec<NodeId> = vec![NodeId::ROOT];
         folders.extend(
-            local
+            self.clients[c]
+                .local
                 .iter()
                 .filter(|(_, s)| s.kind == NodeKind::Folder)
                 .map(|(id, _)| id),
         );
         folders.sort();
+        folders
+    }
+
+    /// The items an action's `node` picks from on client `c`.
+    fn items_of(&self, c: usize) -> Vec<NodeId> {
+        let mut all: Vec<NodeId> = self.clients[c].local.ids().collect();
+        all.sort();
+        all
+    }
+
+    /// For scripted tests: the item at `path` on client `c`.
+    pub fn item(&self, c: usize, path: &str) -> Option<NodeId> {
+        let local = &self.clients[c].local;
+        local
+            .ids()
+            .find(|n| local.path(*n).is_some_and(|p| p.join("/") == path))
+    }
+
+    /// For scripted tests: what an action's `node` (a create's `parent` for a folder) is to pick
+    /// `node` on client `c`.
+    pub fn pick(&self, c: usize, node: NodeId, as_parent: bool) -> Option<usize> {
+        let list = if as_parent {
+            self.folders_of(c)
+        } else {
+            self.items_of(c)
+        };
+        list.iter().position(|n| *n == node)
+    }
+
+    /// For scripted tests: what `Restore`'s `node` is to pick `node` in Recently deleted.
+    pub fn removed_pick(&self, node: NodeId) -> Option<usize> {
+        self.server.removed.keys().position(|n| *n == node)
+    }
+
+    /// The paths of the server's live nodes, sorted.
+    pub fn server_paths(&self) -> Vec<String> {
+        let tree = self.server.tree();
+        let mut paths: Vec<String> = tree
+            .ids()
+            .filter_map(|n| tree.path(n).map(|p| p.join("/")))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// Whether `node` is in Recently deleted.
+    pub fn is_removed(&self, node: NodeId) -> bool {
+        self.server.removed.contains_key(&node)
+    }
+
+    fn act(&mut self, c: usize, action: Action) {
+        let folders = self.folders_of(c);
+        let all = self.items_of(c);
+        let local = &self.clients[c].local;
         let mut files: Vec<NodeId> = local
             .iter()
             .filter(|(_, s)| s.kind == NodeKind::File)
             .map(|(id, _)| id)
             .collect();
         files.sort();
-        let mut all: Vec<NodeId> = local.ids().collect();
-        all.sort();
         let name_free = |t: &Tree, parent: NodeId, name: &str, except: Option<NodeId>| {
             t.child_named(parent, name, except).is_none()
         };
@@ -671,6 +751,7 @@ impl Sim {
                 }
             }
             Action::Purge => {
+                self.server.removed_at.clear();
                 for (_, n) in std::mem::take(&mut self.server.removed) {
                     self.supersede(n.state.content);
                 }
@@ -765,7 +846,20 @@ impl Sim {
         else {
             return;
         };
-        self.restore_node(node);
+        self.restore_with(node);
+    }
+
+    /// Brings `node` back from Recently deleted with what was deleted with it, folders before
+    /// what is in them; what doesn't come back keeps what is in it there.
+    fn restore_with(&mut self, node: NodeId) {
+        let mut queue = VecDeque::from([node]);
+        while let Some(n) = queue.pop_front() {
+            let with = self.server.deleted_with(n);
+            self.restore_node(n);
+            if self.server.live.contains_key(&n) {
+                queue.extend(with);
+            }
+        }
     }
 
     /// Brings `node` back from Recently deleted: into its folder if that is live, else at the
@@ -1379,7 +1473,7 @@ impl Sim {
                 _ => {
                     if let Some(mut n) = self.server.live.remove(&node) {
                         n.remote.version = VersionTag(self.server.uuid());
-                        self.server.removed.insert(node, n);
+                        self.server.remove(node, n);
                         let client = &mut self.clients[c];
                         let after = client.removed_by_plan.iter().find(|r| {
                             self.server
