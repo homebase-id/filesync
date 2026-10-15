@@ -93,8 +93,8 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   `versionTag`. Any update decodes the content it read as a JSON object, changes only its own
   keys and writes the rest back, unknown keys included: rebuilding it from `FilesyncNodeContent`
   would drop `ct`, `x` and later keys for every device.
-- Delete: remove (`archivalStatus` 2, content as read, no `rm`): a folder first, by itself, then
-  everything in it, so all of it is removed no earlier than the folder (see "Recently deleted").
+- Delete: remove (`archivalStatus` 2, content as read), a folder first (node schema, "Recently
+  deleted").
   Desktop clients move local copies they lose to `.hbsync/trash/`, so a deletion from the phone
   can be recovered there.
 - A retry keeps the node id, including one the user asks for after a failure, so a retry that gets 4105
@@ -103,10 +103,9 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
 ## Recently deleted
 filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs`; the mini-app follows them exactly.
 - **Removed:** `archivalStatus` 2, at the header's `updated` (the server's time of the removal). Any other
-  status is live, even with an `rm` left behind.
+  status is live. An `rm` in the content (from before 2026-10-15) means nothing; leave it out when writing.
 - **Deleted with its folder:** a removed node whose folder is removed too, removed no earlier than the folder.
-  One removed before it was deleted on its own. Two nodes that both still carry an `rm` from before
-  2026-10-15 go by its `root` instead: the same root, deleted together.
+  One removed before it was deleted on its own.
 - **Lists:** the whole drive with `archivalStatus: [2]`. The items are the ones not deleted with their folder;
   each counts the items deleted with it, below it.
 - **Never write to a removed node** except to restore it: no rename, no sharing or sending to another
@@ -115,7 +114,7 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
 - **Restore** is a metadata-only update by fileId:
   - It uses the node's own key with a new IV, its `versionTag`, an empty manifest (the payload stays) and
     `archivalStatus` 0.
-  - The content is written back as read, unknown keys included, minus `rm`.
+  - The content is written back as read, unknown keys included, without an `rm`.
   - Order: the removed folders above the item first, outermost first, then the item, then what was deleted
     with it (not what was deleted from it before).
   - An item whose folder is gone for good goes to the top level; one whose folder didn't come back stays

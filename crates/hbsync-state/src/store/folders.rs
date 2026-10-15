@@ -41,8 +41,6 @@ impl Store<'_> {
             return Ok(None);
         };
         r.row = row;
-        let c = self.coords()?;
-        r.removal.root = r.removal.root.map(|root| c.from_drive(root));
         Ok(Some(r))
     }
 

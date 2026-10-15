@@ -5,14 +5,14 @@
 //! can run on a drive that holds other files. Everything they create is deleted by
 //! [`Bench::cleanup`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
-use hbsync_types::schema::{NodeContent, Removal};
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags};
+use hbsync_types::schema::NodeContent;
+use hbsync_types::{FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags, Target};
 
 use crate::{NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
 
@@ -26,6 +26,8 @@ pub struct Bench<'a> {
     /// millisecond are held back).
     settle: Duration,
     created: Mutex<Vec<RemoteFileId>>,
+    /// Each file's token from its last write, as the engine keeps it.
+    tokens: Mutex<HashMap<RemoteFileId, FileToken>>,
 }
 
 impl std::fmt::Debug for Bench<'_> {
@@ -76,7 +78,8 @@ impl<'a> Bench<'a> {
             remote,
             scratch: scratch.node,
             settle,
-            created: Mutex::new(vec![written.file_id]),
+            created: Mutex::new(vec![written.at.file_id]),
+            tokens: Mutex::default(),
         })
     }
 
@@ -110,8 +113,32 @@ impl<'a> Bench<'a> {
     /// A create, remembered for cleanup.
     pub fn create(&self, meta: &NodeMeta, data: Option<&[u8]>) -> Result<RemoteRef, RemoteError> {
         let written = with_upload(data, |upload| self.remote.create(meta, upload))?;
-        self.track(written.file_id);
-        Ok(written)
+        self.track(written.at.file_id);
+        Ok(self.keep(written))
+    }
+
+    /// Keeps a write's token for the next update of its file.
+    fn keep(&self, written: Target) -> RemoteRef {
+        let mut tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
+        match written.token {
+            Some(t) => tokens.insert(written.at.file_id, t),
+            None => tokens.remove(&written.at.file_id),
+        };
+        written.at
+    }
+
+    /// The token file `file_id`'s last write returned.
+    fn token(&self, file_id: RemoteFileId) -> Option<FileToken> {
+        let tokens = self.tokens.lock().unwrap_or_else(|e| e.into_inner());
+        tokens.get(&file_id).cloned()
+    }
+
+    /// The file at `at` to write again, with the token its last write returned.
+    pub fn target(&self, at: RemoteRef) -> Target {
+        Target {
+            at,
+            token: self.token(at.file_id),
+        }
     }
 
     /// Remembers a file created some other way, for cleanup.
@@ -135,22 +162,16 @@ impl<'a> Bench<'a> {
         Ok((meta, written))
     }
 
-    /// An update with the seal the file's header gives, as the engine has it from the feed.
+    /// An update with the token of the file's last write, as the engine has it.
     fn update(
         &self,
         at: RemoteRef,
         meta: &NodeMeta,
         data: Option<&[u8]>,
     ) -> Result<RemoteRef, RemoteError> {
-        let seal = match self.remote.header(at.file_id) {
-            Ok(header) => header.seal,
-            Err(RemoteError::NotFound) => None,
-            Err(e) => return Err(e),
-        };
-        with_upload(data, |upload| {
-            self.remote
-                .update(at.file_id, at.version, seal, meta, upload)
-        })
+        let target = self.target(at);
+        let written = with_upload(data, |upload| self.remote.update(&target, meta, upload))?;
+        Ok(self.keep(written))
     }
 
     fn read(
@@ -239,6 +260,7 @@ pub fn folder(name: &str, parent: NodeId) -> NodeMeta {
         parent,
         kind: NodeKind::Folder,
         content: NodeContent::folder(name),
+        removed: false,
     }
 }
 
@@ -248,6 +270,7 @@ pub fn file(name: &str, parent: NodeId, data: &[u8]) -> NodeMeta {
         parent,
         kind: NodeKind::File,
         content: NodeContent::file(name, 1_700_000_000_123, data.len() as u64, false),
+        removed: false,
     }
 }
 
@@ -323,6 +346,21 @@ fn create_read_and_feed(b: &Bench) -> Outcome {
         "feed order: {ids:?}"
     );
     ensure!(feed[1] == header, "the feed's header differs from header()");
+    // A write returns the token the header gives for its version, so the engine has it at
+    // once: one written, one updated.
+    ensure!(
+        header.token.is_some() && header.token == b.token(written.file_id),
+        "the create's token isn't the header's"
+    );
+    let renamed = b.update(
+        written,
+        &with(&f, NodeContent::file("b.txt", 1, 5, false)),
+        None,
+    )?;
+    ensure!(
+        b.remote.header(renamed.file_id)?.token == b.token(renamed.file_id),
+        "the update's token isn't the header's"
+    );
     Ok(())
 }
 
@@ -486,12 +524,10 @@ fn tombstone_in_the_feed(b: &Bench) -> Outcome {
 /// `meta` removed to Recently deleted (node schema: `archivalStatus` 2; the time is the
 /// server's).
 pub fn removed(meta: &NodeMeta) -> NodeMeta {
-    let mut content = meta.content.clone();
-    content.set_removal(Some(Removal {
-        at_ms: 1_700_000_000_456,
-        root: None,
-    }));
-    with(meta, content)
+    NodeMeta {
+        removed: true,
+        ..meta.clone()
+    }
 }
 
 fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
@@ -501,14 +537,14 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     let gone = b.update(w, &removed(&f), None)?;
     let header = b.remote.header(w.file_id)?;
     ensure!(
-        header.removal().is_some_and(|r| r.root.is_none()) && header.state().is_none(),
+        header.removed_at.is_some() && header.state().is_none(),
         "not removed: {header:?}"
     );
     // The time is the server's, of the write: one removed later is no earlier.
     b.update(v, &removed(&g), None)?;
-    let (first, then) = (header.removal(), b.remote.header(v.file_id)?.removal());
+    let (first, then) = (header.removed_at, b.remote.header(v.file_id)?.removed_at);
     ensure!(
-        first.zip(then).is_some_and(|(f, t)| f.at_ms <= t.at_ms),
+        first.zip(then).is_some_and(|(f, t)| f <= t),
         "removal times out of order: {first:?}, {then:?}"
     );
     ensure!(b.read(w.file_id, None)? == b"kept", "the bytes went");
@@ -517,14 +553,14 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     let feed = b.changes_to(&cursor, &[w.file_id])?;
     ensure!(
         feed.last()
-            .is_some_and(|h| h.node() == Some(f.node) && h.removal().is_some()),
+            .is_some_and(|h| h.node() == Some(f.node) && h.removed_at.is_some()),
         "the feed shows no removal: {feed:?}"
     );
     // A write that keeps the removal keeps it (every write sends the status).
     let renamed = removed(&with(&f, NodeContent::file("f2", 1, 4, false)));
     let gone = b.update(gone, &renamed, None)?;
     ensure!(
-        b.remote.header(w.file_id)?.removal().is_some(),
+        b.remote.header(w.file_id)?.removed_at.is_some(),
         "a rewrite restored it"
     );
     // Restore: the update back, here with new bytes (an edit that wins over the delete).
@@ -532,7 +568,7 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     b.update(gone, &edited, Some(b"edited"))?;
     let back = b.remote.header(w.file_id)?;
     ensure!(
-        back.removal().is_none() && back.state().is_some(),
+        back.removed_at.is_none() && back.state().is_some(),
         "not restored: {back:?}"
     );
     ensure!(b.read(w.file_id, None)? == b"edited", "the restore's bytes");
@@ -575,7 +611,7 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     };
     ensure_err!(
         b.remote
-            .update(at.file_id, at.version, None, &f, Some(lying)),
+            .update(&Target { at, token: None }, &f, Some(lying)),
         RemoteError::HashMismatch
     );
     ensure!(b.read(at.file_id, None)? == b"real", "the old bytes stay");

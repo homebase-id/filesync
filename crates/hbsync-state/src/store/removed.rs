@@ -6,23 +6,20 @@ impl Store<'_> {
     // ---- Recently deleted ----
 
     /// Records a removed node (replacing an older record of it), and marks it dirty where that
-    /// concerns ([`Store::fan_out`]); the same version again changes nothing but the seal
-    /// ([`Store::set_seal`]).
+    /// concerns ([`Store::fan_out`]); the same version again changes nothing.
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         if self.has_version(removed.row.remote_ref(), true)? {
-            return self.set_seal(&removed.row, true);
+            return Ok(());
         }
         let Some(row) = &self.on_drive(&removed.row)? else {
             return Ok(());
         };
         self.moved_folder(row.node, row.kind);
         let f = row.file.as_ref();
-        let c = self.coords()?;
-        let root = removed.removal.root.map(|root| c.to_drive(root));
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, rm_root, seal) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 hash, size, mtime_ms, executable, content_extra, removed_at, token) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?
         .execute(params![
             row.node.0.as_bytes(),
@@ -36,9 +33,8 @@ impl Store<'_> {
             f.map(|f| f.mtime_ms),
             f.is_some_and(|f| f.executable),
             row.content_extra,
-            removed.removal.at_ms,
-            root.as_ref().map(|r| r.0.as_bytes()),
-            row.seal.as_ref().map(|s| &s.0[..]),
+            removed.removed_at,
+            row.token.as_ref().map(|t| &t.0[..]),
         ])?;
         self.fan_out(row.node, row.parent)
     }
@@ -52,6 +48,16 @@ impl Store<'_> {
             Some(r) => self.seen_removed(r),
             None => Ok(None),
         }
+    }
+
+    /// Whether `node` is in Recently deleted, as this folder sees it.
+    pub fn is_removed(&self, node: NodeId) -> Result<bool> {
+        if self.coords()?.hides(node) {
+            return Ok(false);
+        }
+        Ok(self
+            .prep("SELECT 1 FROM removed WHERE node = ?1")?
+            .exists([node.0.as_bytes()])?)
     }
 
     /// Rows of Recently deleted as this folder sees them.
@@ -90,14 +96,6 @@ impl Store<'_> {
             &format!("{REMOVED_SELECT} WHERE removed_at < ?1 ORDER BY removed_at"),
             [at_ms],
         )
-    }
-
-    /// Sets the time of a removal this device made to the server's, once the feed brings it
-    /// back (the write's answer has none).
-    pub fn set_removed_at(&self, file_id: RemoteFileId, at_ms: i64) -> Result<()> {
-        self.prep("UPDATE removed SET removed_at = ?2 WHERE file_id = ?1 AND removed_at != ?2")?
-            .execute(params![file_id.0.as_bytes(), at_ms])?;
-        Ok(())
     }
 
     /// Forgets a node's removal (it was restored, or deleted for good); whether it had one.

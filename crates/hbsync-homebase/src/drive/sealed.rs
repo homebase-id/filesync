@@ -11,7 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use cbc::cipher::block_padding::{Padding, Pkcs7};
 use cbc::cipher::{Array, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
-use hbsync_types::{ContentHash, HashAlgorithm, Seal};
+use hbsync_types::{ContentHash, FileToken, HashAlgorithm};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zeroize::Zeroize;
@@ -20,6 +20,9 @@ use crate::HomebaseError;
 use crate::crypto::{Envelope, Key, aes_cbc_decrypt, aes_cbc_encrypt, random};
 
 const BLOCK: usize = 16;
+
+/// A sealed key header as bytes: the wrap IV (16), then the encrypted IV and key (48).
+const SEALED_LEN: usize = 64;
 
 /// Streams are encrypted and decrypted this many bytes at a time.
 const CHUNK: usize = 64 * 1024;
@@ -67,35 +70,31 @@ impl SealedKeyHeader {
         let bytes = STANDARD
             .decode(b64.trim())
             .map_err(|_| crypto("the key header isn't base64"))?;
-        if bytes.len() != Seal::LEN + 4 {
+        if bytes.len() != SEALED_LEN + 4 {
             return Err(crypto(format!("a key header of {} bytes", bytes.len())));
         }
-        Ok(Self::from_bytes(&bytes[..Seal::LEN]))
+        Self::from_token(&FileToken(bytes[..SEALED_LEN].into()))
+            .ok_or_else(|| crypto("a key header that isn't one"))
     }
 
-    /// As sync keeps it: the wrap IV (16), then the encrypted IV and key (48). `None` if it
-    /// isn't that.
-    pub fn to_seal(&self) -> Option<Seal> {
-        let iv = STANDARD.decode(&self.iv).ok()?;
-        let key = STANDARD.decode(&self.encrypted_aes_key).ok()?;
-        let mut seal = [0; Seal::LEN];
-        if iv.len() != BLOCK || key.len() != Seal::LEN - BLOCK {
-            return None;
-        }
-        seal[..BLOCK].copy_from_slice(&iv);
-        seal[BLOCK..].copy_from_slice(&key);
-        Some(Seal(seal))
+    /// As sync keeps it, a file's token: the wrap IV, then the encrypted IV and key. `None` if
+    /// it isn't that.
+    pub fn to_token(&self) -> Option<FileToken> {
+        let mut bytes = STANDARD
+            .decode(&self.iv)
+            .ok()
+            .filter(|iv| iv.len() == BLOCK)?;
+        bytes.extend(STANDARD.decode(&self.encrypted_aes_key).ok()?);
+        (bytes.len() == SEALED_LEN).then(|| FileToken(bytes.into()))
     }
 
-    pub fn from_seal(seal: &Seal) -> Self {
-        Self::from_bytes(&seal.0)
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        SealedKeyHeader {
+    /// A token back as a sealed key header; `None` if it isn't one.
+    pub fn from_token(token: &FileToken) -> Option<Self> {
+        let bytes = &token.0;
+        (bytes.len() == SEALED_LEN).then(|| SealedKeyHeader {
             iv: STANDARD.encode(&bytes[..BLOCK]),
-            encrypted_aes_key: STANDARD.encode(&bytes[BLOCK..Seal::LEN]),
-        }
+            encrypted_aes_key: STANDARD.encode(&bytes[BLOCK..]),
+        })
     }
 }
 
@@ -130,6 +129,20 @@ impl KeyHeader {
             "iv": STANDARD.encode(wrap_iv),
             "encryptedAesKey": STANDARD.encode(sealed),
         })
+    }
+
+    /// The token the server will give for this key header once written: it seals it under
+    /// `shared_secret` with the header's own IV as the wrap IV (**[verified]** odin-core
+    /// `DriveFileUtility.CreateClientFileHeader`, the stored `EncryptedKeyHeader.Iv` being the
+    /// key header's, `DriveStorageServiceBase.EncryptKeyHeader`).
+    pub fn token(&self, shared_secret: &Key) -> FileToken {
+        let mut plain = [0u8; 32];
+        plain[..16].copy_from_slice(&self.iv);
+        plain[16..].copy_from_slice(&self.key);
+        let mut bytes = self.iv.to_vec();
+        bytes.extend(aes_cbc_encrypt(shared_secret, &self.iv, &plain));
+        plain.zeroize();
+        FileToken(bytes.into())
     }
 
     /// Opens a key header sealed with `shared_secret`.
@@ -553,13 +566,14 @@ mod tests {
         assert_eq!(KeyHeader::open(&sealed, &shared)?, kh);
         // A wrong shared secret never gives the key back.
         assert!(KeyHeader::open(&sealed, &random::<16>()?).map_or(true, |k| k != kh));
-        // As sync keeps it, a seal: the same key back.
-        let seal = sealed.to_seal().ok_or_else(|| crypto("no seal"))?;
-        assert_eq!(
-            KeyHeader::open(&SealedKeyHeader::from_seal(&seal), &shared)?,
-            kh
-        );
-        assert!(SealedKeyHeader::default().to_seal().is_none());
+        // As sync keeps it, a token: the same key back.
+        let token = sealed.to_token().ok_or_else(|| crypto("no token"))?;
+        let back = SealedKeyHeader::from_token(&token).ok_or_else(|| crypto("not one"))?;
+        assert_eq!(KeyHeader::open(&back, &shared)?, kh);
+        assert!(SealedKeyHeader::default().to_token().is_none());
+        // The token a write computes is the server's, sealed with the header's own IV.
+        let server: SealedKeyHeader = serde_json::from_value(kh.seal(&shared, &kh.iv))?;
+        assert_eq!(server.to_token(), Some(kh.token(&shared)));
 
         // The response header's binary form: IV, encrypted key, version.
         let mut binary = STANDARD.decode(&sealed.iv).map_err(|_| crypto("iv"))?;

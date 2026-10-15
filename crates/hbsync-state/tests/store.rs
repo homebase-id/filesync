@@ -2,8 +2,8 @@ use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_state::{BaseRow, LocalRow, StateDb, StateError, keys};
 use hbsync_types::RemoteRef;
 use hbsync_types::{
-    ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Seal, Tag,
-    Tags, Uuid, VersionTag,
+    ContentState, FileContent, FileToken, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId,
+    Tag, Tags, Uuid, VersionTag,
 };
 
 type R = Result<(), StateError>;
@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 8);
+    assert_eq!(db.schema_version()?, 7);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -259,10 +259,10 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
 mod mirror {
     use super::*;
     use hbsync_state::{MirrorFile, MirrorRow};
-    use hbsync_types::schema::{NodeContent, Removal};
+    use hbsync_types::schema::NodeContent;
 
     /// A node's content survives its mirror row, unknown keys, creation time and tags
-    /// included; the removal stays out (the `removed` table has it in columns).
+    /// included.
     #[test]
     fn content_round_trips_through_the_row() {
         let c = content(b"x");
@@ -270,20 +270,9 @@ mod mirror {
         file.unknown.insert("future".into(), 1.into());
         file.set_created_ms(Some(1_451_606_400_123));
         file.set_tags(&Tags::new([Tag::new("Red", 6)]));
-        let mut removed = file.clone();
-        removed.set_removal(Some(Removal {
-            at_ms: 1,
-            root: Some(NodeId::new()),
-        }));
         let (node, at) = (NodeId::new(), remote());
-        let row = MirrorRow::from_content(
-            at,
-            node,
-            NodeId::ROOT,
-            NodeKind::File,
-            &removed,
-            Some(c.hash),
-        );
+        let row =
+            MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::File, &file, Some(c.hash));
         assert_eq!(row.remote_ref(), at);
         assert_eq!(row.content("f"), file);
         assert_eq!(row.file.map(|f| (f.hash, f.size)), Some((c.hash, c.size)));
@@ -318,69 +307,66 @@ mod mirror {
             },
             file,
             content_extra: Some(r#"{"future":1}"#.into()),
-            seal: Some(Seal([node.0.as_bytes()[15]; Seal::LEN])),
+            token: Some(FileToken(node.0.as_bytes().as_slice().into())),
         }
     }
 
-    /// The feed brings back a version the mirror has (this device's own write) with the file's
-    /// seal: the seal is kept, nothing else changes, and nothing needs reconciling.
+    /// A version the mirror has already, again, changes nothing; the feed's refresh takes its
+    /// token (a file this device created has none yet; an earlier login's may not open) and its
+    /// removal's time, and nothing needs reconciling.
     #[test]
-    fn a_known_version_changes_only_its_seal() -> R {
+    fn a_known_version_takes_only_a_refresh() -> R {
         use hbsync_state::RemovedRow;
-        use hbsync_types::schema::Removal;
         let mut db = StateDb::open_in_memory()?;
-        let sealed = row(NodeId::new(), NodeId::ROOT, "d", None);
-        let unsealed = MirrorRow {
-            seal: None,
-            ..sealed.clone()
+        let with_token = row(NodeId::new(), NodeId::ROOT, "d", None);
+        let without = MirrorRow {
+            token: None,
+            ..with_token.clone()
         };
+        let node = with_token.node;
         db.write(|s| {
-            s.put_mirror(&unsealed)?;
-            s.clear_dirty(sealed.node)
+            s.put_mirror(&without)?;
+            s.clear_dirty(node)
         })?;
         let renamed = MirrorRow {
             name: "other".into(),
-            ..sealed.clone()
+            ..with_token.clone()
         };
         db.write(|s| s.put_mirror(&renamed))?;
+        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(without.clone()));
+        db.write(|s| s.refresh(&with_token, None))?;
         assert_eq!(
-            db.read(|s| s.get_mirror(sealed.node))?,
-            Some(sealed.clone()),
-            "the seal only"
+            db.read(|s| s.get_mirror(node))?,
+            Some(with_token.clone()),
+            "the token only"
         );
-        assert!(!db.read(|s| s.is_dirty(sealed.node))?);
-        db.write(|s| s.put_mirror(&unsealed))?;
-        assert_eq!(
-            db.read(|s| s.get_mirror(sealed.node))?,
-            Some(sealed.clone())
-        );
-        // The feed's seal replaces one kept from before (an earlier login's).
-        let resealed = MirrorRow {
-            seal: Some(Seal([0xEE; Seal::LEN])),
-            ..sealed.clone()
+        assert!(!db.read(|s| s.is_dirty(node))?);
+        // An earlier login's is replaced; none keeps the one there.
+        let other = MirrorRow {
+            token: Some(FileToken(vec![0xEE; 16].into())),
+            ..with_token.clone()
         };
-        db.write(|s| s.put_mirror(&resealed))?;
-        assert_eq!(db.read(|s| s.get_mirror(sealed.node))?, Some(resealed));
-        assert!(!db.read(|s| s.is_dirty(sealed.node))?);
-        db.write(|s| s.put_mirror(&sealed))?;
+        db.write(|s| s.refresh(&other, None))?;
+        db.write(|s| s.refresh(&without, None))?;
+        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(other.clone()));
 
-        let removal = Removal {
-            at_ms: 1,
-            root: None,
-        };
-        let removed = |row: &MirrorRow| RemovedRow {
+        // Removed: this device's time until the server's comes back.
+        let removed = |row: &MirrorRow, removed_at| RemovedRow {
             row: row.clone(),
-            removal,
+            removed_at,
         };
         db.write(|s| {
-            s.delete_mirror(sealed.file_id)?;
-            s.put_removed(&removed(&unsealed))?;
-            s.put_removed(&removed(&sealed))
+            s.delete_mirror(with_token.file_id)?;
+            s.put_removed(&removed(&without, 1))?;
+            s.clear_dirty(node)
         })?;
+        db.write(|s| s.refresh(&with_token, Some(5)))?;
+        db.write(|s| s.refresh(&without, Some(5)))?;
         assert_eq!(
-            db.read(|s| s.removed_by_node(sealed.node))?,
-            Some(removed(&sealed))
+            db.read(|s| s.removed_by_node(node))?,
+            Some(removed(&with_token, 5))
         );
+        assert!(!db.read(|s| s.is_dirty(node))?);
         Ok(())
     }
 
@@ -428,7 +414,6 @@ mod mirror {
     #[test]
     fn recently_deleted_lists_finds_and_forgets() -> R {
         use hbsync_state::RemovedRow;
-        use hbsync_types::schema::Removal;
         let mut db = StateDb::open_in_memory()?;
         let folder = row(NodeId::new(), NodeId::ROOT, "d", None);
         let c = content(b"x");
@@ -444,15 +429,11 @@ mod mirror {
             }),
         );
         let alone = row(NodeId::new(), NodeId::ROOT, "g", None);
-        let with = |row: &MirrorRow, at_ms, root| RemovedRow {
+        let with = |row: &MirrorRow, removed_at| RemovedRow {
             row: row.clone(),
-            removal: Removal { at_ms, root },
+            removed_at,
         };
-        let (rf, rd, ra) = (
-            with(&file, 8, None),
-            with(&folder, 10, Some(folder.node)),
-            with(&alone, 20, None),
-        );
+        let (rf, rd, ra) = (with(&file, 8), with(&folder, 10), with(&alone, 20));
         db.write(|s| {
             s.put_removed(&rf)?;
             s.put_removed(&rd)?;
@@ -664,7 +645,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 8);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 7);
     Ok(())
 }
 
@@ -757,7 +738,7 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,
-        seal: None,
+        token: None,
     };
     let dirty = |db: &mut StateDb, node| db.read(|s| s.is_dirty(node));
     // The role folders' tops, then a folder inside Documents: only docs is concerned.
@@ -804,7 +785,6 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
 #[test]
 fn a_role_folder_sees_its_top_as_the_root() -> R {
     use hbsync_state::{MirrorRow, RemovedRow};
-    use hbsync_types::schema::Removal;
     let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
     let db_path = dir.path().join("state.db");
     let mut main = StateDb::open(&db_path)?;
@@ -820,7 +800,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,
-        seal: None,
+        token: None,
     };
     let (inside, elsewhere) = (NodeId::new(), NodeId::new());
     main.write(|s| {
@@ -875,11 +855,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
             .write(|s| s.put_mirror(&row(NodeId::OUTSIDE, NodeId::ROOT, "x")))
             .is_err()
     );
-    // Recently deleted too, an older writer's root as well.
-    let removal = Removal {
-        at_ms: 1,
-        root: Some(NodeId::ROOT),
-    };
+    // Recently deleted too.
     let gone = main
         .read(|s| s.get_mirror(new))?
         .ok_or(StateError::Corrupt("no".into()))?;
@@ -890,13 +866,12 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
                 parent: NodeId::ROOT,
                 ..gone.clone()
             },
-            removal,
+            removed_at: 1,
         })
     })?;
     assert_eq!(
-        main.read(|s| s.removed_by_node(new))?
-            .map(|r| (r.row.parent, r.removal.root)),
-        Some((top, Some(top)))
+        main.read(|s| s.removed_by_node(new))?.map(|r| r.row.parent),
+        Some(top)
     );
     assert_eq!(docs_db.read(|s| s.removed_children(NodeId::ROOT))?.len(), 1);
     Ok(())

@@ -81,7 +81,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 | `mtime` | int | files | local modification time, Unix ms |
 | `size` | int | files | plaintext size in bytes |
 | `x` | bool | no | executable bit; omitted when false |
-| `rm` | object | no longer written | from before 2026-10-15: `{"at": <Unix ms>, "root": "<node id>"}` on a removed node, the topmost node of what was deleted with it in `root`. Readers may still meet it on nodes in Recently deleted (see there); a restore drops it |
+| `rm` | object | no longer written | from before 2026-10-15: `{"at": <Unix ms>, "root": "<node id>"}` on a removed node. Readers ignore it (the header says what is removed and when, see Recently deleted); the next write drops it |
 | `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime`. Readers round a fractional value and take anything else as none (and keep it) |
 | `tags` | array | no | Finder tags (files and folders): `[{"n": <name>, "c": <colour>}, …]`. `n` is the tag's name (NFC, not empty, one entry per name); `c` is Finder's colour, `1` grey, `2` green, `3` purple, `4` blue, `5` yellow, `6` red, `7` orange, left out when none. Order doesn't matter (this client sorts by name). No key means no tags. Synced: adding or removing a tag, or changing its colour, reaches every device (sync-semantics §11). Readers skip an entry without a string `n` and read any other `c` as none |
 
@@ -143,9 +143,9 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 - **Deleted with its folder:** a removed node whose folder is removed too was deleted with it if
   it was removed no earlier than the folder; one removed before was deleted on its own. A
   Recently deleted view lists the items deleted on their own, each with what was deleted with
-  it. Two removals that both carry an `rm` from before 2026-10-15 tell it by their `rm.root`
-  (the same root: deleted together; those writers removed what was in a folder first).
-- Restore is the update back: `archivalStatus` `0`, without `rm` (and new bytes, when an edit
+  it. (Writers from before 2026-10-15 removed what was in a folder first: their folder deletes
+  list as separate items until they expire.)
+- Restore is the update back: `archivalStatus` `0` (and new bytes, when an edit
   restores it). Restoring a folder also restores the removed nodes below it that were deleted
   with it (not what was deleted from it before); a node whose parent is removed brings the
   parent back first, and one whose parent is gone for good comes back at the top. If a folder
@@ -179,8 +179,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   If a client can't keep unknown keys, it doesn't update nodes.
 - **Read:** ignore keys you don't use. Showing `ct` and `tags` is optional. Leave nodes with
   `archivalStatus` `2` out of the folder tree (a "Recently deleted" view may show them).
-- **Delete:** remove (set `archivalStatus` `2`; no `rm`), never delete a live node outright. A
-  folder first, by itself, then everything in it.
+- **Delete:** remove (set `archivalStatus` `2`), never delete a live node outright; a folder
+  first (Recently deleted).
 - **A removed node** is never written to except to restore it: its `updated` is its removal
   time. That also rules out what odin-core counts as a change of it **[verified]**
   `TableDriveMainIndex.cs` (`UpdateReactionSummaryAsync`, `UpdateTransferSummaryAsync`,
@@ -201,7 +201,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
 - 2026-10-15: Recently deleted by time: a delete sets only `archivalStatus` `2` (no `rm`), a
   folder before what is in it; the removal time is the header's `updated`, and what was deleted
   with a folder is what was removed no earlier than it. Nothing writes to a removed node: no
-  sharing, reactions or local app data either. An `rm` from before is still read.
+  sharing, reactions or local app data either. An `rm` from before is ignored, and the next
+  write drops it.
 - 2026-10-15: the rules for role folders match the computers' (§12): renaming one is harmless,
   deleting one lasts only where no computer syncs it, moving one into a folder is never done.
 - 2026-10-14: role folders: Documents, Pictures, Music, Videos and Downloads have fixed node ids

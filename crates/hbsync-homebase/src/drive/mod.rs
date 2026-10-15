@@ -14,7 +14,7 @@ use hbsync_remote::{
     ChangesPage, NodeMeta, Paced, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{NodeContent, PAYLOAD_KEY};
-use hbsync_types::{ContentHash, RemoteFileId, RemoteRef, Seal, VersionTag};
+use hbsync_types::{ContentHash, RemoteFileId, RemoteRef, Target, VersionTag};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -109,19 +109,20 @@ impl HomebaseRemote {
             .map_err(remote_error)
     }
 
-    /// Creates a file, or with `target` updates that file at that version (its key from `seal`
-    /// if given), in one multipart request, encrypted. An update keeps the file's key, with a
-    /// new header IV.
+    /// Creates a file, or with `target` updates that file at its version (the key from its
+    /// token, if given), in one multipart request, encrypted. An update keeps the file's key,
+    /// with a new header IV. Returns the file as written, with the token the server will give
+    /// for this version.
     fn write(
         &self,
-        target: Option<RemoteRef>,
-        seal: Option<Seal>,
+        target: Option<&Target>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef> {
+    ) -> Result<Target> {
+        let at = target.map(|t| t.at);
         let key = match target {
             None => KeyHeader::random().map_err(remote_error)?,
-            Some(at) => self.update_key(at, seal)?,
+            Some(t) => self.update_key(t)?,
         };
         let transfer_iv = sealed::strong().map_err(remote_error)?;
         // The payload as sent: read once, hashed, encrypted under a new payload IV, hashed
@@ -155,7 +156,7 @@ impl HomebaseRemote {
                 })
             }
         };
-        let version = target.map(|t| t.version);
+        let version = at.map(|t| t.version);
         let instructions = wire::instructions(
             &transfer_iv,
             sending.as_ref().map(|s| &s.descriptor),
@@ -187,7 +188,7 @@ impl HomebaseRemote {
                 hash_part,
             ));
         }
-        let (method, path) = match target {
+        let (method, path) = match at {
             None => (UploadMethod::Post, self.files()),
             Some(at) => (UploadMethod::Patch, self.file(at.file_id)),
         };
@@ -199,15 +200,18 @@ impl HomebaseRemote {
             Ok(WriteResult {
                 file_id,
                 new_version_tag,
-            }) => Ok(RemoteRef {
-                file_id: RemoteFileId(file_id),
-                version: VersionTag(new_version_tag),
+            }) => Ok(Target {
+                at: RemoteRef {
+                    file_id: RemoteFileId(file_id),
+                    version: VersionTag(new_version_tag),
+                },
+                token: Some(key.token(self.client.key())),
             }),
             // odin-core answers a content update of a file deleted since `update_key` looked
             // with 500 (a null payload list in `ProcessAppendOrOverwrite`, odin-core #1904)
             // instead of 4002: look again before retrying.
             Err(HomebaseError::Api { ref error, .. }) if error.status == 500 => {
-                if let Some(at) = target {
+                if let Some(at) = at {
                     self.current(at)?;
                 }
                 Err(RemoteError::Transient(format!("{path}: {error}")))
@@ -228,14 +232,19 @@ impl HomebaseRemote {
         Ok(header)
     }
 
-    /// The key an update of `at` sends: the file's own, with a new header IV. From its `seal`
-    /// when that opens: the server's version guard (4160) refuses the write if the file
+    /// The key an update of `target` sends: the file's own, with a new header IV. From its
+    /// token when that opens: the server's version guard (4160) refuses the write if the file
     /// changed since. Else from its header, read first.
-    fn update_key(&self, at: RemoteRef, seal: Option<Seal>) -> Result<KeyHeader> {
+    fn update_key(&self, target: &Target) -> Result<KeyHeader> {
         let shared = self.client.key();
-        let key = match seal.map(|s| KeyHeader::open(&SealedKeyHeader::from_seal(&s), shared)) {
-            Some(Ok(key)) => key,
-            _ => self.current(at)?.key(shared).map_err(remote_error)?,
+        let opened = target
+            .token
+            .as_ref()
+            .and_then(SealedKeyHeader::from_token)
+            .and_then(|sealed| KeyHeader::open(&sealed, shared).ok());
+        let key = match opened {
+            Some(key) => key,
+            None => self.current(target.at)?.key(shared).map_err(remote_error)?,
         };
         key.with_new_iv().map_err(remote_error)
     }
@@ -368,23 +377,17 @@ impl Remote for HomebaseRemote {
         wire::to_remote(self.raw_header(file_id)?, self.client.key()).map_err(RemoteError::Fatal)
     }
 
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
-        self.write(None, None, node, payload)
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
+        self.write(None, node, payload)
     }
 
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
-        seal: Option<Seal>,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef> {
-        let at = RemoteRef {
-            file_id,
-            version: expected,
-        };
-        self.write(Some(at), seal, meta, payload)
+    ) -> Result<Target> {
+        self.write(Some(target), meta, payload)
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {

@@ -65,11 +65,10 @@ impl Store<'_> {
     /// Records a live remote node, and marks it dirty in the folders the change concerns
     /// ([`Store::fan_out`]). A row for the same node under an older file id (the node was
     /// deleted and re-created) is replaced. A version the mirror has already (this device's own
-    /// write coming back through the feed, or a page applied again) changes nothing but the
-    /// row's seal ([`Store::set_seal`]).
+    /// write coming back through the feed, or a page applied again) changes nothing.
     pub fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
         if self.has_version(row.remote_ref(), false)? {
-            return self.set_seal(row, false);
+            return Ok(());
         }
         let Some(row) = &self.on_drive(row)? else {
             return Ok(());
@@ -82,11 +81,11 @@ impl Store<'_> {
         let f = row.file.as_ref();
         self.prep(
             "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, seal) \
+                 hash, size, mtime_ms, executable, content_extra, token) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
                  ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
                  kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
-                 content_extra = ?11, seal = ?12",
+                 content_extra = ?11, token = ?12",
         )?
         .execute(params![
             id,
@@ -100,24 +99,29 @@ impl Store<'_> {
             f.map(|f| f.mtime_ms),
             f.is_some_and(|f| f.executable),
             row.content_extra,
-            row.seal.as_ref().map(|s| &s.0[..]),
+            row.token.as_ref().map(|t| &t.0[..]),
         ])?;
         self.fan_out(row.node, row.parent)
     }
 
-    /// Gives the mirror's row of file `row` (with `removed`, Recently deleted's) the seal `row`
-    /// has, from the feed: a file this device created has none yet, and one kept from an
-    /// earlier login may not open with this one's shared secret. No change of the node, so
-    /// nothing to reconcile.
-    pub fn set_seal(&self, row: &MirrorRow, removed: bool) -> Result<()> {
-        let Some(seal) = &row.seal else {
-            return Ok(());
+    /// A version the store has already, as the feed brings it back: its token (one kept from
+    /// an earlier login may not open with this one's shared secret) and, `removed_at` it, the
+    /// server's time of its removal (this device wrote its own). Written only where they
+    /// differ; no change of the node, so nothing to reconcile.
+    pub fn refresh(&self, row: &MirrorRow, removed_at: Option<i64>) -> Result<()> {
+        let token = row.token.as_ref().map(|t| &t.0[..]);
+        match removed_at {
+            None if token.is_some() => self
+                .prep("UPDATE remote SET token = ?2 WHERE file_id = ?1 AND token IS NOT ?2")?
+                .execute(params![row.file_id.0.as_bytes(), token])?,
+            None => 0,
+            Some(at) => self
+                .prep(
+                    "UPDATE removed SET token = coalesce(?2, token), removed_at = ?3 \
+                     WHERE file_id = ?1 AND (token IS NOT coalesce(?2, token) OR removed_at != ?3)",
+                )?
+                .execute(params![row.file_id.0.as_bytes(), token, at])?,
         };
-        let table = if removed { "removed" } else { "remote" };
-        self.prep(&format!(
-            "UPDATE {table} SET seal = ?2 WHERE file_id = ?1 AND seal IS NOT ?2"
-        ))?
-        .execute(params![row.file_id.0.as_bytes(), &seal.0[..]])?;
         Ok(())
     }
 
@@ -242,6 +246,6 @@ fn outside_row() -> MirrorRow {
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,
-        seal: None,
+        token: None,
     }
 }

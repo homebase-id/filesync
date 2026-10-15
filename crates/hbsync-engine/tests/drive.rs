@@ -18,6 +18,7 @@ fn folder(name: &str) -> NodeMeta {
         parent: NodeId::ROOT,
         kind: NodeKind::Folder,
         content: NodeContent::folder(name),
+        removed: false,
     }
 }
 
@@ -65,11 +66,11 @@ fn pulls_asked_at_once_are_merged() -> R {
     };
     assert!((1..=2).contains(&reads), "{reads} feed reads for 8 asks");
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
-    assert!(db.read(|s| s.mirror_by_file(made.file_id))?.is_some());
+    assert!(db.read(|s| s.mirror_by_file(made.at.file_id))?.is_some());
     // An ask after a pull finished pulls again: the drive may have changed since.
     let later = remote.create(&folder("Later"), None)?;
     drive.pull(None)?;
-    assert!(db.read(|s| s.mirror_by_file(later.file_id))?.is_some());
+    assert!(db.read(|s| s.mirror_by_file(later.at.file_id))?.is_some());
     Ok(())
 }
 

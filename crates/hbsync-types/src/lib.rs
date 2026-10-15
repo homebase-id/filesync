@@ -102,20 +102,24 @@ pub struct RemoteRef {
     pub version: VersionTag,
 }
 
-/// What a remote needs to write a file again without reading it first, opaque to sync and the
-/// same for every version of the file. Homebase: the file's key header as the server keeps it,
-/// sealed with the app's shared secret (wrap IV, then the encrypted IV and key).
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Seal(pub [u8; Seal::LEN]);
+/// Opaque bytes a remote attaches to a file so it can write it again without reading it first
+/// (Homebase: the file's key header as the server hands it out, sealed with the app's shared
+/// secret). It belongs to one file: never written with another.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct FileToken(pub Box<[u8]>);
 
-impl Seal {
-    pub const LEN: usize = 64;
+impl fmt::Debug for FileToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FileToken(..)")
+    }
 }
 
-impl fmt::Debug for Seal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Seal(..)")
-    }
+/// A file to write: where it is, the version a guarded write names, and its token if known.
+/// A create or update returns the file as written: the target of the next write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub at: RemoteRef,
+    pub token: Option<FileToken>,
 }
 
 /// The last 8 hex digits: UUIDv7 ids share their leading timestamp digits.

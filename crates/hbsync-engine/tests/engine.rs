@@ -11,7 +11,7 @@ use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
-use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Seal, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, Target, VersionTag};
 
 mod common;
 
@@ -39,11 +39,11 @@ fn upload_then_download() -> R {
     Ok(())
 }
 
-/// Once the feed has brought a file back, its updates carry its seal (on Homebase: one request,
-/// no header read first), whether this device or another wrote it; the fake refuses another
-/// file's seal.
+/// A file's updates carry its token (on Homebase: one request, no header read first), from the
+/// write that made it or from the feed, whether this device or another wrote it; the fake
+/// refuses another file's token.
 #[test]
-fn updates_carry_the_files_seal() -> R {
+fn updates_carry_the_files_token() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
@@ -52,8 +52,8 @@ fn updates_carry_the_files_seal() -> R {
     a.write("three.txt", "3")?;
     a.sync()?;
     b.sync()?;
-    a.remote.faults().unsealed_updates = 0;
-    b.remote.faults().unsealed_updates = 0;
+    a.remote.faults().updates_without_token = 0;
+    b.remote.faults().updates_without_token = 0;
 
     fs::rename(a.root.join("three.txt"), a.root.join("four.txt"))?;
     a.write("x/one.txt", "1 edited")?;
@@ -65,8 +65,8 @@ fn updates_carry_the_files_seal() -> R {
     assert_eq!(a.tree_text(""), b.tree_text(""));
     assert_eq!(b.read_text("four.txt")?, "3");
     assert!(b.read_text("x/one.txt").is_err());
-    assert_eq!(a.remote.faults().unsealed_updates, 0);
-    assert_eq!(b.remote.faults().unsealed_updates, 0);
+    assert_eq!(a.remote.faults().updates_without_token, 0);
+    assert_eq!(b.remote.faults().updates_without_token, 0);
     Ok(())
 }
 
@@ -100,7 +100,7 @@ fn edits_moves_and_deletes_propagate() -> R {
         .lock()
         .map_err(|_| "poisoned")?
         .removed()
-        .filter_map(|h| h.removal().map(|r| (h.node(), r.root)))
+        .filter_map(|h| h.removed_at.map(|at| (h.node(), at)))
         .collect();
     assert_eq!(removed.len(), 1, "{removed:?}");
     // And here, the local copy went to the trash (emptied by the purge).
@@ -233,7 +233,7 @@ impl Remote for StopAfterCreates {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         let made = self.inner.create(node, payload);
         if self.creates.fetch_add(1, Ordering::SeqCst) + 1 == self.after {
             self.stop.store(true, Ordering::SeqCst);
@@ -242,13 +242,11 @@ impl Remote for StopAfterCreates {
     }
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
-        seal: Option<Seal>,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> RemoteResult<RemoteRef> {
-        self.inner.update(file_id, expected, seal, meta, payload)
+    ) -> RemoteResult<Target> {
+        self.inner.update(target, meta, payload)
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
@@ -334,20 +332,16 @@ impl Remote for SlowWrites {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         self.write(|| self.unless_down(|| self.inner.create(node, payload)))
     }
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
-        seal: Option<Seal>,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> RemoteResult<RemoteRef> {
-        self.write(|| {
-            self.unless_down(|| self.inner.update(file_id, expected, seal, meta, payload))
-        })
+    ) -> RemoteResult<Target> {
+        self.write(|| self.unless_down(|| self.inner.update(target, meta, payload)))
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
@@ -2005,6 +1999,7 @@ fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
             parent: hbsync_types::NodeId::ROOT,
             kind: hbsync_types::NodeKind::File,
             content,
+            removed: false,
         };
         srv.update(written.file_id, written.version, &meta, None)?;
     }
@@ -2149,6 +2144,7 @@ fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
                     parent: h.parent,
                     kind: h.kind,
                     content,
+                    removed: false,
                 });
                 srv.update(h.file_id, h.version, &meta, None)?;
             }

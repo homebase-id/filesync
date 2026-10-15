@@ -21,8 +21,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
 use hbsync_remote::{NodeMeta, Pace, Remote, RemoteError, Upload};
-use hbsync_state::MirrorRow;
-use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Seal};
+use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -140,32 +139,6 @@ pub struct Download {
     pub local_algorithm: HashAlgorithm,
 }
 
-/// The file a write updates: where it is and the version it must still be at, and that file's
-/// [`Seal`] if known (never another file's: it would be written under the wrong key).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Target {
-    pub at: RemoteRef,
-    pub seal: Option<Seal>,
-}
-
-impl Target {
-    /// The file `row` is, at the version it has.
-    pub fn of(row: &MirrorRow) -> Target {
-        Target {
-            at: row.remote_ref(),
-            seal: row.seal,
-        }
-    }
-
-    /// File `at`, with the seal `row` has if `row` is that file.
-    pub fn at(at: RemoteRef, row: Option<&MirrorRow>) -> Target {
-        Target {
-            at,
-            seal: row.filter(|r| r.file_id == at.file_id).and_then(|r| r.seal),
-        }
-    }
-}
-
 /// The byte-moving half of a transfer.
 #[derive(Debug, Clone)]
 pub enum Job {
@@ -211,7 +184,7 @@ pub enum JobResult {
         local_hash: ContentHash,
     },
     /// An upload or a [`Job::Meta`] landed.
-    Written(RemoteRef),
+    Written(Target),
     Failed(JobError),
 }
 
@@ -348,12 +321,12 @@ impl Queue {
 fn write(
     remote: &dyn Remote,
     meta: &NodeMeta,
-    target: Option<Target>,
+    target: Option<&Target>,
     upload: Option<Upload<'_>>,
-) -> Result<RemoteRef, RemoteError> {
+) -> Result<Target, RemoteError> {
     match target {
         None => remote.create(meta, upload),
-        Some(t) => remote.update(t.at.file_id, t.at.version, t.seal, meta, upload),
+        Some(t) => remote.update(t, meta, upload),
     }
 }
 
@@ -378,9 +351,14 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
                 reader: &mut file,
                 pace: Some(meter),
             });
-            Ok(JobResult::Written(write(remote, meta, *target, upload)?))
+            Ok(JobResult::Written(write(
+                remote,
+                meta,
+                target.as_ref(),
+                upload,
+            )?))
         })(),
-        Job::Meta { meta, target } => write(remote, meta, *target, None)
+        Job::Meta { meta, target } => write(remote, meta, target.as_ref(), None)
             .map(JobResult::Written)
             .map_err(JobError::Remote),
     };

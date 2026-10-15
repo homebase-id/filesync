@@ -7,11 +7,11 @@
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::{
-    Keys, NodeContent, Removal, keys_from_str, tags_from_str, tags_in_keys, tags_to_string,
+    Keys, NodeContent, keys_from_str, tags_from_str, tags_in_keys, tags_to_string,
 };
 use hbsync_types::{
-    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Seal, Tags, VersionTag,
+    ContentHash, ContentState, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId,
+    RemoteRef, Tags, Target, VersionTag,
 };
 use std::collections::HashMap;
 
@@ -106,15 +106,16 @@ pub struct MirrorRow {
     /// Content keys sync carries without acting on them (JSON object: unknown keys, the
     /// creation time `ct` and the tags), written back unchanged.
     pub content_extra: Option<String>,
-    /// The file's [`Seal`], once the feed has given it.
-    pub seal: Option<Seal>,
+    /// The file's [`FileToken`], once a write or the feed has given it.
+    pub token: Option<FileToken>,
 }
 
-/// A remote node in Recently deleted: its row as it was, and its removal.
+/// A remote node in Recently deleted: its row as it was, and when it went there (Unix ms, the
+/// server's time; this device's own until its removal comes back through the feed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedRow {
     pub row: MirrorRow,
-    pub removal: Removal,
+    pub removed_at: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,7 +157,7 @@ impl MirrorRow {
                     executable: content.x,
                 }),
             content_extra: content.carried_json(),
-            seal: None,
+            token: None,
         }
     }
 
@@ -188,6 +189,22 @@ impl MirrorRow {
             file_id: self.file_id,
             version: self.version,
         }
+    }
+
+    /// This file to write at `version` (the one a plan saw), with its token.
+    pub fn target_at(&self, version: VersionTag) -> Target {
+        Target {
+            at: RemoteRef {
+                file_id: self.file_id,
+                version,
+            },
+            token: self.token.clone(),
+        }
+    }
+
+    /// This file to write at the version this row has.
+    pub fn target(&self) -> Target {
+        self.target_at(self.version)
     }
 
     /// The node state, if complete (files need their [`MirrorFile`]).
@@ -260,9 +277,9 @@ const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size
      b.tags FROM base b JOIN nodes n ON n.id = b.id AND b.folder = $F \
      JOIN nodes p ON p.id = b.parent";
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
-     mtime_ms, executable, content_extra, seal, removed_at, rm_root FROM removed";
+     mtime_ms, executable, content_extra, token, removed_at FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
-     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.seal \
+     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
 /// The columns [`RawLocal`] reads, from `local l JOIN nodes n`.
 const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, l.volume, \
@@ -405,13 +422,7 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
 fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
     Ok(RemovedRow {
         row: mirror_row(r)?,
-        removal: Removal {
-            at_ms: r.get(12)?,
-            root: r
-                .get::<_, Option<Vec<u8>>>(13)?
-                .map(|b| codec::node(&b))
-                .transpose()?,
-        },
+        removed_at: r.get(12)?,
     })
 }
 
@@ -435,9 +446,8 @@ fn mirror_row(r: &Row<'_>) -> Result<MirrorRow> {
         kind,
         file,
         content_extra: r.get(10)?,
-        seal: r
+        token: r
             .get::<_, Option<Vec<u8>>>(11)?
-            .map(|b| codec::seal(&b))
-            .transpose()?,
+            .map(|b| FileToken(b.into())),
     })
 }

@@ -3,8 +3,7 @@
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::activity::SyncedKind;
 use hbsync_types::{
-    ContentHash, ContentState, HashAlgorithm, NodeId, NodeKind, RemoteFileId, Seal, Uuid,
-    VersionTag,
+    ContentHash, ContentState, HashAlgorithm, NodeId, NodeKind, RemoteFileId, Uuid, VersionTag,
 };
 
 use crate::{Result, StateError};
@@ -20,13 +19,6 @@ pub fn node(bytes: &[u8]) -> Result<NodeId> {
 
 pub fn remote_file(bytes: &[u8]) -> Result<RemoteFileId> {
     uuid_from(bytes).map(RemoteFileId)
-}
-
-pub fn seal(bytes: &[u8]) -> Result<Seal> {
-    bytes
-        .try_into()
-        .map(Seal)
-        .map_err(|_| StateError::Corrupt(format!("bad seal ({} bytes)", bytes.len())))
 }
 
 pub fn version(bytes: &[u8]) -> Result<VersionTag> {

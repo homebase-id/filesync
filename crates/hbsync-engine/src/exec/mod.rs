@@ -29,12 +29,12 @@ use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Synced;
-use hbsync_types::schema::{NodeContent, Removal};
-use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
+use hbsync_types::schema::NodeContent;
+use hbsync_types::{ContentState, NodeId, NodeKind, Tags, Target};
 
 use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
-use crate::transfer::{Download, Job, JobError, JobResult, Target, TransferConfig, run_jobs_while};
+use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::view;
 use hbsync_local::layout;
 
@@ -279,17 +279,16 @@ impl Batch {
         self.under.contains(&node) || target.iter().any(|n| self.moved.contains(n))
     }
 
-    /// Whether `op` must wait until the batch ran: it is about a node in it, or its server-side
-    /// order guard ([`Op::requires`]) waits on one: a folder created in it, or the removal of
-    /// the folder a removal is in. A folder's removal waits for what the batch puts into the
-    /// folder or takes out of it.
+    /// Whether `op` must wait until the batch ran: it is about a node in it, its server-side
+    /// order guard ([`Op::requires`]) waits on one (a folder created in it, or the removal of
+    /// the folder a removal is in), or it removes a folder the batch puts a node into or takes
+    /// one from.
     fn holds_up(&self, op: &Op) -> bool {
         self.nodes.contains(&op.node())
+            || matches!(op, Op::RemoteDelete { .. }) && self.folders.contains(&op.node())
             || match op.requires() {
                 Some(Requirement::RemoteFolder(folder)) => self.created.contains(&folder),
-                Some(Requirement::FolderFirst(folder)) => {
-                    self.nodes.contains(&folder) || self.folders.contains(&op.node())
-                }
+                Some(Requirement::FolderFirst(folder)) => self.nodes.contains(&folder),
                 None => false,
             }
     }
@@ -395,16 +394,13 @@ impl<'a> Executor<'a> {
     }
 
     fn run_ops(&mut self, ops: Vec<Op>) -> Result<(), StateError> {
-        self.forgetting = ops
-            .iter()
-            .filter(|op| matches!(op, Op::Forget { .. }))
-            .map(Op::node)
-            .collect();
-        self.removing = ops
-            .iter()
-            .filter(|op| matches!(op, Op::RemoteDelete { .. }))
-            .map(Op::node)
-            .collect();
+        self.forgetting.clear();
+        self.removing.clear();
+        for op in &ops {
+            if let Some(pending) = self.pending(op) {
+                pending.insert(op.node());
+            }
+        }
         let visible = ops.iter().filter(|op| activity::kind_of(op).is_some());
         self.progress
             .files_total
@@ -549,6 +545,16 @@ impl<'a> Executor<'a> {
         self.crashed
     }
 
+    /// The nodes with operations like `op` still to run in this run (or to retry), where others
+    /// wait for them: a folder's `Forget` for its children's, a removal for its folder's.
+    fn pending(&mut self, op: &Op) -> Option<&mut HashSet<NodeId>> {
+        match op {
+            Op::Forget { .. } => Some(&mut self.forgetting),
+            Op::RemoteDelete { .. } => Some(&mut self.removing),
+            _ => None,
+        }
+    }
+
     /// The server-side order guards ([`Op::requires`]), checked against the mirror.
     fn ready(&mut self, op: &Op) -> Step<()> {
         let met = match op.requires() {
@@ -579,12 +585,10 @@ impl<'a> Executor<'a> {
         ) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
-        if !matches!(outcome, Outcome::Retry(_) | Outcome::Backoff(_)) {
-            match op {
-                Op::Forget { .. } => self.forgetting.remove(&op.node()),
-                Op::RemoteDelete { .. } => self.removing.remove(&op.node()),
-                _ => false,
-            };
+        if !matches!(outcome, Outcome::Retry(_) | Outcome::Backoff(_))
+            && let Some(pending) = self.pending(&op)
+        {
+            pending.remove(&op.node());
         }
         match outcome {
             Outcome::Done => {
@@ -669,8 +673,9 @@ impl<'a> Executor<'a> {
         if attempts + 1 < self.cfg.attempts {
             self.queue.push_back((op, attempts + 1));
         } else {
-            self.forgetting.remove(&op.node());
-            self.removing.remove(&op.node());
+            if let Some(pending) = self.pending(&op) {
+                pending.remove(&op.node());
+            }
             self.report.failed.push((op, why));
         }
     }

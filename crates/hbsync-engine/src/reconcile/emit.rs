@@ -221,10 +221,11 @@ impl Reconciler<'_> {
         creates.sort_by_key(|(d, op)| (op.is_transfer(), op.pooled(), *d, op.node()));
         deletes.sort_by_key(|(d, op)| {
             let depth = *d as i64;
-            match op.pooled() {
-                true => (false, depth, op.node()),
-                false => (true, -depth, op.node()),
-            }
+            (
+                !op.pooled(),
+                if op.pooled() { depth } else { -depth },
+                op.node(),
+            )
         });
         moves.sort_by_key(Op::pooled);
         content.sort_by_key(Op::pooled);

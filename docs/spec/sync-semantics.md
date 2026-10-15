@@ -190,11 +190,10 @@ expected fingerprint is treated as done.
   whose create failed would look like an orphan to every other client. A remote move whose
   destination is inside the node on the drive (a nesting turned around) waits too, for the
   move that takes the destination out: the server doesn't check cycles either.
-- **Folders are removed first.** A remote delete waits while the plan still has the removal of
-  its folder to run (one retried goes to the back of the queue): what a folder's delete takes
-  along is removed no earlier than the folder (node schema, Recently deleted). A child whose
-  removal failed or was skipped stays live in the removed folder until a later plan removes it;
-  meanwhile §6.3 takes it as deleted with the folder, unless it changed.
+- **Folders are removed first** (node schema, Recently deleted). A remote delete waits while
+  the plan still has the removal of its folder to run (one retried goes to the back of the
+  queue). A child whose removal failed or was skipped stays live in the removed folder until a
+  later plan removes it; meanwhile §6.3 takes it as deleted with the folder, unless it changed.
 - **Together on the pool.** Transfers and remote writes (folder creates, renames, moves, tags,
   deletes) are collected and run together on the worker pool, in any order. An operation that
   depends on one collected waits until they all ran: a create or move into a folder created

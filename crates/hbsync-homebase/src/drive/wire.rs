@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hbsync_remote::{NodeMeta, PayloadInfo, RemoteBody, RemoteHeader};
 use hbsync_types::schema::{
-    ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY, Removal,
+    ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY,
 };
 use hbsync_types::{ContentHash, HashAlgorithm, NodeId, NodeKind, RemoteFileId, VersionTag};
 use serde::Deserialize;
@@ -113,14 +113,6 @@ pub fn feed_query(cursor: Option<&str>, limit: usize) -> Value {
     })
 }
 
-/// When a node in Recently deleted went there: the header's `updated`, the server's time of
-/// the last write (odin-core's `record.modified`, **[verified]** `FileMetadata.cs`). Nobody
-/// writes to a removed node (node schema: also no sharing, reactions or local app data, which
-/// move it too). Everything that compares removals reads it from here.
-fn removed_at(meta: &FileMetadata) -> i64 {
-    meta.updated
-}
-
 /// A header as a [`RemoteHeader`], decrypted with `shared_secret`; `Err` says why it isn't a
 /// usable sync node.
 pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
@@ -132,7 +124,8 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         other => return Err(format!("file {id}: file type {other} isn't a sync node")),
     };
     let group = meta.app_data.group_id.map(NodeId);
-    let (parent, body, seal) = match header.file_state.as_str() {
+    let mut removed_at = None;
+    let (parent, body, token) = match header.file_state.as_str() {
         // A tombstone always comes through: dropping it would keep a deleted node alive. Its
         // parent isn't used, only its file id.
         "deleted" => (group.unwrap_or(NodeId::ROOT), RemoteBody::Deleted, None),
@@ -148,15 +141,14 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
             let content = key
                 .open_text(meta.app_data.content.as_deref().unwrap_or_default())
                 .map_err(|e| format!("file {id}: content: {e}"))?;
-            let mut content = NodeContent::from_json(&content)
+            let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
-            // The status says whether it's removed, [`removed_at`] when. An older writer's `rm`
-            // adds what was deleted with it.
-            let removal = (meta.app_data.archival_status == ARCHIVAL_REMOVED).then(|| Removal {
-                at_ms: removed_at(meta),
-                root: content.removal().and_then(|r| r.root),
-            });
-            content.set_removal(removal);
+            // The status says whether it's removed; the header's `updated` when: the server's
+            // time of the last write (odin-core's `record.modified`, **[verified]**
+            // `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no
+            // sharing, reactions or local app data, which move it too).
+            removed_at =
+                (meta.app_data.archival_status == ARCHIVAL_REMOVED).then_some(meta.updated);
             // The stored size of an encrypted payload isn't the file's: only `size` tells it.
             if kind == NodeKind::File && content.size.is_none() {
                 return Err(format!("file {id}: no size (node schema v1)"));
@@ -175,12 +167,12 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 content,
                 payload,
             };
-            // The key opened: the header it came in is the file's seal.
-            let seal = header
+            // The key opened: the header it came in is the file's token.
+            let token = header
                 .shared_secret_encrypted_key_header
                 .as_ref()
-                .and_then(SealedKeyHeader::to_seal);
-            (parent, body, seal)
+                .and_then(SealedKeyHeader::to_token);
+            (parent, body, token)
         }
         other => return Err(format!("file {id}: file state {other:?}")),
     };
@@ -190,7 +182,8 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         parent,
         kind,
         body,
-        seal,
+        removed_at,
+        token,
     })
 }
 
@@ -357,11 +350,6 @@ pub(crate) fn metadata(
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,
     };
-    // A removal is the status alone (node schema): the marker isn't sent, and an older
-    // writer's `rm` goes with it.
-    let removed = meta.content.removal().is_some();
-    let mut content = meta.content.clone();
-    content.set_removal(None);
     let plain = json!({
         "encryptedKeyHeader": key.seal(shared_secret, transfer_iv),
         "fileMetadata": {
@@ -373,9 +361,9 @@ pub(crate) fn metadata(
                 "groupId": meta.parent.0,
                 "fileType": file_type,
                 "dataType": 0,
-                "content": key.seal_text(&content.to_json()),
+                "content": key.seal_text(&meta.content.to_json()),
                 // Homebase sets a missing one to 0: a write that left it out would restore.
-                "archivalStatus": if removed { ARCHIVAL_REMOVED } else { 0 },
+                "archivalStatus": if meta.removed { ARCHIVAL_REMOVED } else { 0 },
             },
             "versionTag": version.map(|v| v.0),
         },
@@ -470,16 +458,14 @@ mod tests {
         assert_eq!(folder.kind, NodeKind::Folder);
         assert!(folder.state().is_some());
 
-        // An older writer's removal: the time is the header's, the root its `rm`'s.
+        // An older writer's removal: the time is the header's, its `rm` is dropped.
         let removed = to_remote(as_stored(fixture("removed-node.json"))?, &SS)?;
-        assert_eq!(
-            removed.removal(),
-            Some(Removal {
-                at_ms: 1_759_920_005_000,
-                root: Some(removed.node().ok_or("node")?),
-            })
-        );
+        assert_eq!(removed.removed_at, Some(1_759_920_005_000));
         assert!(removed.state().is_none());
+        let RemoteBody::Live { content, .. } = &removed.body else {
+            return Err("not live".into());
+        };
+        assert!(content.unknown.is_empty(), "{content:?}");
 
         let tomb = to_remote(fixture("tombstone.json"), &SS)?;
         assert!(tomb.is_deleted());
@@ -582,18 +568,12 @@ mod tests {
         let mut other = fixture("file-node.json");
         other.file_metadata.app_data.archival_status = ARCHIVAL_REMOVED;
         let header = to_remote(as_stored(other)?, &SS)?;
-        assert_eq!(
-            header.removal(),
-            Some(Removal {
-                at_ms: 1_759_920_001_000,
-                root: None,
-            })
-        );
+        assert_eq!(header.removed_at, Some(1_759_920_001_000));
         // A restore by a writer that kept `rm`: the status wins.
         let mut restored = fixture("removed-node.json");
         restored.file_metadata.app_data.archival_status = 0;
         let header = to_remote(as_stored(restored)?, &SS)?;
-        assert!(header.removal().is_none() && header.state().is_some());
+        assert!(header.removed_at.is_none() && header.state().is_some());
         Ok(())
     }
 
@@ -643,6 +623,7 @@ mod tests {
             parent: NodeId::ROOT,
             kind: NodeKind::File,
             content: NodeContent::file("Résumé.txt", 1, 1, false),
+            removed: false,
         };
         let version = VersionTag(Uuid::from_u128(5));
         let sealed = metadata(&meta, Some(version), &SS, &transfer_iv, &kh);
@@ -655,12 +636,11 @@ mod tests {
         assert_eq!(app["groupId"], json!(NodeId::ROOT.0));
         assert_eq!(app["fileType"], FILE_TYPE_FILE);
         assert_eq!(app["archivalStatus"], 0);
-        // A removal is the status alone: the content goes as it is, without the marker.
-        let mut gone = meta.clone();
-        gone.content.set_removal(Some(Removal {
-            at_ms: 1,
-            root: Some(meta.node),
-        }));
+        // A removal is the status alone: the content goes as it is.
+        let gone = NodeMeta {
+            removed: true,
+            ..meta.clone()
+        };
         let sealed_gone = metadata(&gone, Some(version), &SS, &transfer_iv, &kh);
         let plain_gone: Value =
             serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed_gone)?)?;

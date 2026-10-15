@@ -621,10 +621,7 @@ impl Sim {
 
     /// For scripted tests: the item at `path` on client `c`.
     pub fn item(&self, c: usize, path: &str) -> Option<NodeId> {
-        let local = &self.clients[c].local;
-        local
-            .ids()
-            .find(|n| local.path(*n).is_some_and(|p| p.join("/") == path))
+        at_path(&self.clients[c].local, path)
     }
 
     /// For scripted tests: what an action's `node` (a create's `parent` for a folder) is to pick
@@ -966,15 +963,12 @@ impl Sim {
             .collect();
         // The folders in Recently deleted that live nodes are in, as the engine's view has them.
         input.removed = remote
-            .ids()
-            .filter_map(|n| remote.get(n).map(|s| s.parent))
+            .missing_parents()
+            .into_iter()
             .filter(|p| {
-                !p.is_root()
-                    && !remote.contains(*p)
-                    && self
-                        .server
-                        .removed
-                        .contains_key(&client.coords.to_drive(*p))
+                self.server
+                    .removed
+                    .contains_key(&client.coords.to_drive(*p))
             })
             .collect();
         input.dirty = client
@@ -1772,9 +1766,7 @@ impl Sim {
     /// The tags (`name:colour`) of the server's item at `path` (`/`-separated), if it has one.
     pub fn server_tags(&self, path: &str) -> Option<Vec<String>> {
         let tree = self.server.tree();
-        let (_, state) = tree
-            .iter()
-            .find(|(id, _)| tree.path(*id).is_some_and(|p| p.join("/") == path))?;
+        let state = tree.get(at_path(&tree, path)?)?;
         Some(tag_names(&state.tags))
     }
 
@@ -2050,6 +2042,12 @@ fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
     for (n, state) in changed {
         view.insert(n, state);
     }
+}
+
+/// The node at `path` (`/`-separated) in `tree`.
+fn at_path(tree: &Tree, path: &str) -> Option<NodeId> {
+    tree.ids()
+        .find(|n| tree.path(*n).is_some_and(|p| p.join("/") == path))
 }
 
 /// Tags as `name:colour`.

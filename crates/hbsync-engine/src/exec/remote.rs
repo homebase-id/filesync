@@ -10,10 +10,7 @@ pub(super) enum After {
     /// Renamed, moved or tagged.
     Updated,
     /// Moved to Recently deleted: its mirror row (`file_id`) goes, its removed row comes.
-    Removed {
-        file_id: hbsync_types::RemoteFileId,
-        removal: Removal,
-    },
+    Removed { file_id: hbsync_types::RemoteFileId },
 }
 
 impl Executor<'_> {
@@ -51,8 +48,9 @@ impl Executor<'_> {
             parent,
             kind: NodeKind::Folder,
             content,
+            removed: false,
         };
-        let target = removed.map(|r| Target::of(&r.row));
+        let target = removed.map(|r| r.row.target());
         Ok(meta_job(meta, target, None, None, After::Created))
     }
 
@@ -66,7 +64,11 @@ impl Executor<'_> {
         place: Option<(NodeId, &str)>,
         tags: &Tags,
     ) -> Step<(Job, Ctx)> {
-        let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
+        let Some(mirror) = self
+            .db
+            .read(|s| s.get_mirror(node))?
+            .filter(|m| m.file_id == file_id)
+        else {
             return Err(Outcome::stale("gone remotely"));
         };
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
@@ -83,15 +85,12 @@ impl Executor<'_> {
             parent,
             kind: mirror.kind,
             content,
-        };
-        let at = RemoteRef {
-            file_id,
-            version: expected,
+            removed: false,
         };
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
-            Some(Target::at(at, Some(&mirror))),
+            Some(mirror.target_at(expected)),
             hash,
             Some(mirror.parent),
             After::Updated,
@@ -99,11 +98,8 @@ impl Executor<'_> {
     }
 
     /// A delete: the node goes to Recently deleted (a metadata-only update setting its
-    /// removal), its bytes kept there until the purge. A folder goes before what is in it
-    /// (planned top-down, [`Batch::holds_up`]): what was deleted with it is no earlier.
-    ///
-    /// A batch endpoint setting only `archivalStatus` (`[{fileId, versionTag}]`, asked of
-    /// odin-core) would take these together: one job for the removals of a batch.
+    /// removal), its bytes kept there until the purge. A folder goes first (node schema,
+    /// Recently deleted; [`Batch::holds_up`]).
     pub(super) fn prepare_remove(
         &mut self,
         node: NodeId,
@@ -117,55 +113,47 @@ impl Executor<'_> {
         else {
             return Err(Outcome::Done); // already out of the tree
         };
-        // This device's time until the feed brings the server's.
-        let removal = Removal {
-            at_ms: hbsync_types::unix_now_ms(),
-            root: None,
-        };
-        let mut content = mirror.content(&mirror.name);
-        content.set_removal(Some(removal));
         let meta = NodeMeta {
             node,
             parent: mirror.parent,
             kind: mirror.kind,
-            content,
-        };
-        let at = RemoteRef {
-            file_id,
-            version: expected,
+            content: mirror.content(&mirror.name),
+            removed: true,
         };
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
-            Some(Target::at(at, Some(&mirror))),
+            Some(mirror.target_at(expected)),
             hash,
             Some(mirror.parent),
-            After::Removed { file_id, removal },
+            After::Removed { file_id },
         ))
     }
 
-    /// Records a metadata write of `target` that landed (`written`), or a removal the drive no
-    /// longer needed (`None`: deleted for good meanwhile).
+    /// Records a metadata write that landed (`written`), or a removal the drive no longer
+    /// needed (`None`: deleted for good meanwhile).
     pub(super) fn commit_meta(
         &mut self,
         meta: NodeMeta,
-        target: Option<Target>,
         hash: Option<hbsync_types::ContentHash>,
         after: After,
-        written: Option<RemoteRef>,
+        written: Option<Target>,
     ) -> Step {
         let node = meta.node;
-        let row = written.map(|w| written_row(w, target, &meta, hash));
+        let row = written.map(|w| written_row(w, &meta, hash));
         self.finish(&[(node, false)], |s| match after {
             After::Created => {
                 s.delete_removed(node)?;
                 row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
             After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
-            After::Removed { file_id, removal } => {
+            After::Removed { file_id } => {
                 s.delete_mirror(file_id)?;
                 if let Some(row) = row {
-                    s.put_removed(&RemovedRow { row, removal })?;
+                    // This device's time until the feed brings the server's: the write's
+                    // answer has none.
+                    let removed_at = hbsync_types::unix_now_ms();
+                    s.put_removed(&RemovedRow { row, removed_at })?;
                 }
                 s.mark_dirty(node)
             }

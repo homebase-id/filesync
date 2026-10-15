@@ -9,9 +9,9 @@
 
 use std::io::{Read, Write};
 
-use hbsync_types::schema::{NodeContent, Removal};
+use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    ContentHash, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Seal,
+    ContentHash, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId, Target,
     VersionTag,
 };
 
@@ -28,14 +28,16 @@ pub struct RemoteHeader {
     /// From `FileType`: kept on tombstones.
     pub kind: NodeKind,
     pub body: RemoteBody,
-    /// The file's [`Seal`], where the remote has one (a tombstone has none).
-    pub seal: Option<Seal>,
+    /// A live node in Recently deleted (`archivalStatus` 2 on Homebase): when it went there,
+    /// Unix ms, the server's time of the write that removed it (Homebase's `updated`).
+    pub removed_at: Option<i64>,
+    /// The file's [`FileToken`], where the remote has one (a tombstone has none).
+    pub token: Option<FileToken>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemoteBody {
-    /// A node, in the tree or, with a removal in its content (`archivalStatus` 2 on
-    /// Homebase), in Recently deleted.
+    /// A node, in the tree or, with [`RemoteHeader::removed_at`], in Recently deleted.
     Live {
         /// `UniqueId`.
         node: NodeId,
@@ -69,14 +71,6 @@ impl RemoteHeader {
         matches!(self.body, RemoteBody::Deleted)
     }
 
-    /// In Recently deleted: out of the tree, restorable.
-    pub fn removal(&self) -> Option<Removal> {
-        match &self.body {
-            RemoteBody::Live { content, .. } => content.removal(),
-            RemoteBody::Deleted => None,
-        }
-    }
-
     /// The node state, if the header is in the tree (and, for a file, has its payload).
     pub fn state(&self) -> Option<NodeState> {
         let RemoteBody::Live {
@@ -85,7 +79,7 @@ impl RemoteHeader {
         else {
             return None;
         };
-        if content.removal().is_some() {
+        if self.removed_at.is_some() {
             return None;
         }
         let state = match self.kind {
@@ -131,6 +125,8 @@ pub struct NodeMeta {
     pub parent: NodeId,
     pub kind: NodeKind,
     pub content: NodeContent,
+    /// In Recently deleted (`archivalStatus` 2): the server stamps when.
+    pub removed: bool,
 }
 
 /// Payload bytes to upload, with the hash they must have.
@@ -239,21 +235,20 @@ pub trait Remote: Send + Sync {
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader>;
 
     /// Creates a node. Fails with [`RemoteError::AlreadyExists`] if a live file already has
-    /// this node id (a retry of a create that landed).
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef>;
+    /// this node id (a retry of a create that landed). Returns the file as written, with the
+    /// token its header will give for this version.
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target>;
 
-    /// Rewrites the header (parent and content; node id and kind stay what they are) and, with
-    /// a payload, replaces the bytes, if the file is still at `expected`. `seal`: the file's
-    /// own, as its header gave it, if known (it saves reading the file first); never another
-    /// file's.
+    /// Rewrites the header (parent, content and removal; node id and kind stay what they are)
+    /// and, with a payload, replaces the bytes, if the file is still at `target`'s version. Its
+    /// token, if known, saves reading the file first. Returns the file as written, as
+    /// [`Remote::create`] does.
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
-        seal: Option<Seal>,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef>;
+    ) -> Result<Target>;
 
     /// Deletes (tombstones) a file if it is still at `expected`.
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()>;
@@ -279,19 +274,17 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         (**self).header(file_id)
     }
 
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
         (**self).create(node, payload)
     }
 
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
-        seal: Option<Seal>,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef> {
-        (**self).update(file_id, expected, seal, meta, payload)
+    ) -> Result<Target> {
+        (**self).update(target, meta, payload)
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
