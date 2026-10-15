@@ -83,6 +83,13 @@ pub struct StateDb {
     /// The folders writes through this connection marked a node dirty in
     /// ([`StateDb::take_touched`]).
     touched: std::collections::BTreeSet<i64>,
+    #[cfg(feature = "testkit")]
+    hook: Option<testkit::Hook>,
+}
+
+/// The DB file at `path` as one key, whatever the spelling.
+fn file_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// The write gate of the DB file at `path`, one per file in this process.
@@ -92,9 +99,42 @@ fn gate(path: Option<&Path>) -> Arc<Mutex<()>> {
     let Some(path) = path else {
         return Arc::default();
     };
-    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut gates = GATES.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(gates.entry(key).or_default())
+    Arc::clone(gates.entry(file_key(path)).or_default())
+}
+
+/// Watching commits, for tests that crash a client at one (feature `testkit`).
+#[cfg(feature = "testkit")]
+pub mod testkit {
+    use super::*;
+
+    /// Called after each commit to a DB file, still in its turn (no other connection of this
+    /// process writes meanwhile).
+    #[derive(Clone)]
+    pub struct Hook(pub Arc<dyn Fn() + Send + Sync>);
+
+    impl std::fmt::Debug for Hook {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Hook")
+        }
+    }
+
+    static HOOKS: LazyLock<Mutex<HashMap<PathBuf, Hook>>> = LazyLock::new(Default::default);
+
+    /// Connections opened from now on to the DB at `path` call `hook` after each commit
+    /// (none with `None`).
+    pub fn on_commit(path: &Path, hook: Option<Hook>) {
+        let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        match hook {
+            Some(hook) => hooks.insert(file_key(path), hook),
+            None => hooks.remove(&file_key(path)),
+        };
+    }
+
+    pub(crate) fn hook(path: Option<&Path>) -> Option<Hook> {
+        let hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.get(&file_key(path?)).cloned()
+    }
 }
 
 /// The folder a DB opened with [`StateDb::open`] sees: the first one, made on first use for the
@@ -179,7 +219,8 @@ impl StateDb {
         // the DB is never more than the one step in flight behind the disk. The executor's
         // crash handling (write-ahead records, the scan's identity rules) relies on that, so
         // speed comes from fewer commits (an operation and its settling are one), not from
-        // weaker ones.
+        // weaker ones. (NORMAL, ~70x cheaper a commit, was tried: then every effect on the disk
+        // or the drive needs a durable record of its own first, an operation log.)
         wal(&conn)?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -192,6 +233,8 @@ impl StateDb {
             path: path.map(Path::to_path_buf),
             gate: gate(path),
             touched: Default::default(),
+            #[cfg(feature = "testkit")]
+            hook: testkit::hook(path),
         })
     }
 
@@ -215,6 +258,10 @@ impl StateDb {
         let out = f(&store)?;
         let touched = store.take_touched();
         tx.commit()?;
+        #[cfg(feature = "testkit")]
+        if let Some(hook) = &self.hook {
+            (hook.0)();
+        }
         self.touched.extend(touched);
         Ok(out)
     }

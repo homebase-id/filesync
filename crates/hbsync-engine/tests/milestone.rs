@@ -6,11 +6,16 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use hbsync_engine::exec::Skip;
 use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_platform::name::name_key;
+use hbsync_remote::fake::FakeServer;
+use hbsync_state::testkit::{Hook, on_commit};
 
 mod common;
 
@@ -176,32 +181,108 @@ fn randomized_two_client_convergence() -> R {
                 }
             }
         }
-        settle_all(&mut a, &mut b).map_err(|e| format!("seed {seed}: {e}"))?;
-        let (ta, tb) = (a.entries(""), b.entries(""));
-        assert_eq!(ta, tb, "seed {seed}: clients diverged");
-        let present: HashSet<&Vec<u8>> = ta.iter().map(|(_, c)| c).collect();
-        let lost: Vec<String> = ledger
-            .written
-            .iter()
-            .filter(|c| !ledger.superseded.contains(*c) && !present.contains(c))
-            .map(|c| String::from_utf8_lossy(c).into_owned())
-            .collect();
-        assert!(lost.is_empty(), "seed {seed}: lost {lost:?}\ntree: {ta:?}");
-        // Every write has bytes of its own, and nothing copies a file: bytes twice are an item
-        // taken for another one.
-        let mut seen = HashSet::new();
-        let twice: Vec<&String> = ta
-            .iter()
-            .filter(|(path, c)| !path.ends_with('/') && !seen.insert(c))
-            .map(|(path, _)| path)
-            .collect();
-        assert!(
-            twice.is_empty(),
-            "seed {seed}: copies {twice:?}\ntree: {ta:?}"
-        );
-        // The server holds the same tree.
-        let live = server.lock().map_err(|_| "poisoned")?.live().count();
-        assert_eq!(live, ta.len(), "seed {seed}: server differs");
+        converged(seed, &mut a, &mut b, &ledger, &server)?;
+    }
+    Ok(())
+}
+
+/// Settles both clients, then checks that they and the server hold the same tree, that no
+/// content was lost that a user didn't replace or delete, and none is there twice.
+fn converged(
+    seed: u64,
+    a: &mut Client,
+    b: &mut Client,
+    ledger: &Ledger,
+    server: &Arc<Mutex<FakeServer>>,
+) -> R {
+    settle_all(a, b).map_err(|e| format!("seed {seed}: {e}"))?;
+    let (ta, tb) = (a.entries(""), b.entries(""));
+    assert_eq!(ta, tb, "seed {seed}: clients diverged");
+    let present: HashSet<&Vec<u8>> = ta.iter().map(|(_, c)| c).collect();
+    let lost: Vec<String> = ledger
+        .written
+        .iter()
+        .filter(|c| !ledger.superseded.contains(*c) && !present.contains(c))
+        .map(|c| String::from_utf8_lossy(c).into_owned())
+        .collect();
+    assert!(lost.is_empty(), "seed {seed}: lost {lost:?}\ntree: {ta:?}");
+    // Every write has bytes of its own, and nothing copies a file: bytes twice are an item
+    // taken for another one.
+    let mut seen = HashSet::new();
+    let twice: Vec<&String> = ta
+        .iter()
+        .filter(|(path, c)| !path.ends_with('/') && !seen.insert(c))
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        twice.is_empty(),
+        "seed {seed}: copies {twice:?}\ntree: {ta:?}"
+    );
+    // The server holds the same tree.
+    let live = server.lock().map_err(|_| "poisoned")?.live().count();
+    assert_eq!(live, ta.len(), "seed {seed}: server differs");
+    Ok(())
+}
+
+/// Syncs `c` until it crashes, right after its state DB's `at`-th commit (if it gets that far),
+/// then starts it again: what it did before the crash stays done, on disk, on the drive and in
+/// the DB. A crash between operations, or between the commits of one; inside one, between its
+/// change on disk and its commit, is the write-ahead records' case (the `CrashPoint` tests).
+fn crash(c: &mut Client, at: usize) -> R {
+    let db = c.db_path();
+    let commits = AtomicUsize::new(0);
+    let hook = Hook(Arc::new(move || {
+        if commits.fetch_add(1, Ordering::SeqCst) == at {
+            std::panic::panic_any(Crash);
+        }
+    }));
+    on_commit(&db, Some(hook));
+    c.restart()?;
+    let synced = std::panic::catch_unwind(AssertUnwindSafe(|| c.sync()));
+    on_commit(&db, None);
+    match synced {
+        Ok(synced) => {
+            synced?;
+        }
+        Err(e) if e.is::<Crash>() => {}
+        Err(e) => std::panic::resume_unwind(e),
+    }
+    c.restart()?;
+    Ok(())
+}
+
+/// The panic that crashes a client.
+struct Crash;
+
+/// Crashes at any commit: the clients still converge, with nothing lost and nothing twice.
+#[test]
+fn randomized_crashes() -> R {
+    let seeds: u64 = std::env::var("MILESTONE_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12);
+    for seed in 0..seeds {
+        let server = server();
+        let allow = |c: &mut EngineConfig| c.allow_mass_delete = true;
+        let mut a = Client::with_config(&server, "a", allow)?;
+        let mut b = Client::with_config(&server, "b", allow)?;
+        let mut rng = Rng(seed);
+        let mut ledger = Ledger::default();
+        for _ in 0..30 {
+            match rng.below(6) {
+                0 => act(&a.root, &mut rng, &mut ledger)?,
+                1 => act(&b.root, &mut rng, &mut ledger)?,
+                2 => {
+                    a.sync()?;
+                }
+                3 => {
+                    b.sync()?;
+                }
+                4 => crash(&mut a, rng.below(24)).map_err(|e| format!("seed {seed}: {e}"))?,
+                _ => crash(&mut b, rng.below(24)).map_err(|e| format!("seed {seed}: {e}"))?,
+            }
+        }
+        converged(seed, &mut a, &mut b, &ledger, &server)?;
     }
     Ok(())
 }
