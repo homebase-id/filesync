@@ -210,14 +210,11 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - `docs/mandatory-slugs-and-app-ids-plan.md` calls `DriveSlug`/`DriveTypeSlug` required; the
   server derives a missing one instead (only the owner app insists on `ts`). odin-core #1901
   makes them mandatory with no derivation; tracked in filesync #7.
-- Delete takes an optional `versionTag` since odin-core PR #1931 (#1903, release v0.1.960), so a
-  delete can't wipe an edit it hasn't seen. The client sends it: one request per delete. A 4160 is
-  either an edit since (the node is re-planned) or a retry (the tombstone has a version of its
-  own): the client reads the header once and takes `deleted` as done. Left out of the PR: deleting
-  a tombstone without a tag still rewrites it (not a no-op). `delete-batch/by-file-id` takes a
-  `versionTag` per request and checks them all before deleting any (**[verified]**); the client
-  doesn't use it yet (`by-group-id` takes none). A server older than v0.1.960 ignores the field (unknown JSON fields are skipped
-  **[inferred]**): the delete then goes through unguarded.
+- Delete takes an optional `versionTag` since odin-core PR #1931 (#1903, v0.1.960; see the
+  Delete row): one request per delete. A 4160 is an edit since (the node is re-planned) or a
+  retry (the tombstone has a version of its own): the client reads the header once and takes
+  `deleted` as done. `delete-batch/by-file-id` takes a `versionTag` per request and checks them
+  all before deleting any (**[verified]**); not used yet.
 - Payload reads were buffered whole in server memory (#1892) and ranges were `int` (#1893)
   until odin-core PR #1921 (merged 2026-10-11). The client is written for #1921: a read is one streamed
   request, whatever its size. Uploads over 4 GiB still fail (the `uint` byte count, the half of

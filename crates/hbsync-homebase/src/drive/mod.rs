@@ -383,23 +383,23 @@ impl Remote for HomebaseRemote {
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
         // The server deletes only at `expected` (odin-core #1903), else 4160.
-        let result: DeleteResult = match self.client.post(
-            &format!("{}/delete", self.file(file_id)),
-            &json!({ "recipients": [], "versionTag": expected.0 }),
-        ) {
+        let result: DeleteResult = match self
+            .client
+            .post(
+                &format!("{}/delete", self.file(file_id)),
+                &json!({ "recipients": [], "versionTag": expected.0 }),
+            )
+            .map_err(remote_error)
+        {
             Ok(result) => result,
-            Err(e) => {
-                return match remote_error(e) {
-                    // A retry: deleting gave the tombstone a version of its own. The raw
-                    // header is enough: a row that doesn't decrypt is still a tombstone.
-                    RemoteError::VersionMismatch
-                        if self.raw_header(file_id)?.file_state == "deleted" =>
-                    {
-                        Ok(())
-                    }
-                    e => Err(e),
-                };
+            // A retry: deleting gave the tombstone a version of its own. The raw header is
+            // enough: a row that doesn't decrypt is still a tombstone.
+            Err(RemoteError::VersionMismatch)
+                if self.raw_header(file_id)?.file_state == "deleted" =>
+            {
+                return Ok(());
             }
+            Err(e) => return Err(e),
         };
         if result.local_file_not_found {
             return Err(RemoteError::NotFound);

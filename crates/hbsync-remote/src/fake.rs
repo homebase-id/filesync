@@ -5,7 +5,7 @@
 //! - creating a live file with an existing `UniqueId` fails (4105); tombstones don't count;
 //! - updates are `VersionTag`-guarded (4160); every write gets a new tag;
 //! - a delete tombstones the file: `UniqueId`, content and payload are dropped, `fileId`,
-//!   `GroupId` and `FileType` stay; **the server's delete takes no version**;
+//!   `GroupId` and `FileType` stay; deletes are `VersionTag`-guarded too;
 //! - the change feed is `anyChangeDate` + `oldestFirst`, resumes after the last row seen, and
 //!   only returns rows modified strictly before "now" (a row written in the current
 //!   millisecond shows up once the clock moves on);
@@ -256,7 +256,6 @@ impl FakeServer {
         Ok(RemoteRef { file_id, version })
     }
 
-    /// Homebase's delete: no version check.
     /// Deletes a file if it is still at `expected`. Deleting a tombstone is a no-op: Homebase
     /// refuses it (the tombstone has a version of its own) and the client then finds it deleted.
     pub fn delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
