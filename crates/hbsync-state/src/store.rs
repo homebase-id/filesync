@@ -166,6 +166,11 @@ impl<'a> Store<'a> {
             .optional()?)
     }
 
+    /// Whether this DB knows `node`: anywhere, or until its id is collected.
+    pub fn knows_node(&self, node: NodeId) -> Result<bool> {
+        Ok(self.key(node)?.is_some())
+    }
+
     /// The integer id of `node`, assigned on first use.
     fn key_or_insert(&self, node: NodeId) -> Result<i64> {
         if let Some(id) = self.key(node)? {

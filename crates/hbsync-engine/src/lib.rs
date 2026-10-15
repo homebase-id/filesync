@@ -9,6 +9,7 @@ pub mod exec;
 pub mod feed;
 pub mod mask;
 pub mod reconcile;
+pub mod scope;
 pub mod transfer;
 pub mod tree;
 pub mod view;

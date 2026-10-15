@@ -245,7 +245,7 @@ An item inside a filtered folder is filtered too.
 2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
    never downloaded, and never deleted by this device, with one exception: a node this device
    synced at a place it now filters (a rule was added) is leaving per rule 1, and is deleted
-   remotely unless the remote changed it since (a folder: unless it holds anything that isn't
+   remotely unless the remote changed it since: its place, bytes or tags (a folder: unless it holds anything that isn't
    leaving, such as another device's new file; then only its base is dropped, once the bases
    below it are gone or go in the same run). If the user brings the local item back into view first (moves it out of
    the ignored place), it syncs as usual, and its local place wins over a remote move (the
@@ -318,3 +318,29 @@ the item changes again. A tag change makes the scan read the file again (the cha
 part of the fingerprint, to catch writes that keep the modification time). An item that becomes
 a new node on a device that can't hold all its tags (detached on Windows, §10) goes up with
 the tags that device has.
+
+## 12. Scopes
+A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where
+they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"). Each
+local folder has an engine and a state DB of its own, scoped to a part of the drive:
+- the main folder's scope is the drive's top **without the role folders**, on every device,
+  whether it syncs them or not: a role folder appears only where it is synced in place, never
+  inside `~/Homebase`;
+- a role folder's scope is that folder (to come: the engine syncing it).
+
+What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
+never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
+syncs it. A role folder at the top that the engine holds nothing of isn't planned at all; no
+version ever synced one into the main folder, so a device holds one only through a bug, and
+then lets go of it as of anything masked. A role folder moved into a folder (against the node
+schema's rules) is masked there and keeps that folder alive (§6.3).
+
+A role folder holds no name for the scope: a plain folder of the same name at the top keeps it
+(two at the top, told apart by their ids). A new scope plans the folders it, or the last one,
+left out again, from their tops; it needs no walk, as only the remote view changed. Recently
+deleted is listed, restored and emptied per scope; the purge, by age, is the whole drive's
+(the main folder's engine runs it).
+
+A detached item's new id is fixed for the node and the device, so a replan picks the same one,
+but never one in use here: the same node detached again while its first copy lives gets the
+next.

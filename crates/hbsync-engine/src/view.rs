@@ -19,6 +19,7 @@ use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
 
 use crate::exec::parked_name;
 use crate::reconcile::{BaseExtra, Input};
+use crate::scope::Scope;
 
 /// The local state of one node, as the reconciler sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,12 +116,14 @@ pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, St
     Ok(row.path.parent().unwrap_or_default().join(&name).ok())
 }
 
-/// Loads everything the reconciler needs for `dirty`; `filter` is this device's (§10).
+/// Loads everything the reconciler needs for `dirty`; `filter` is this device's (§10), `scope`
+/// the engine's (§12).
 pub fn build_input(
     s: &Store<'_>,
     dirty: &[NodeId],
     os: Os,
     filter: &Filter,
+    scope: &Scope,
 ) -> Result<Input, StateError> {
     let mut b = Builder {
         s,
@@ -152,12 +155,12 @@ pub fn build_input(
     // A folder that is gone remotely (or masked) but present locally may be trashed or
     // detached: load all of it.
     // Each folder once: a dirty folder inside one already loaded is in it.
-    let masked = crate::mask::masked(&b.input.remote, filter);
+    let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !loaded.contains(&node)
             && b.input.base.contains(node)
-            && (!b.input.remote.contains(node) || masked.contains(&node))
+            && (!b.input.remote.contains(node) || hidden.contains(&node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)
@@ -170,6 +173,7 @@ pub fn build_input(
     }
     // Whether a masked folder synced here leaves the drive depends on everything in it
     // remotely (§10): load all of it.
+    let masked = crate::mask::masked(&b.input.remote, filter);
     let mut expanded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !(masked.contains(&node) && b.input.base.contains(node)) {
@@ -184,6 +188,24 @@ pub fn build_input(
             }
             b.load_children(folder)?;
             folders.extend(b.input.remote.children(folder));
+        }
+    }
+    // A role folder at the top that this device holds nothing of (always, but for a bug) isn't
+    // the plan's at all: nothing to mask. One moved into a folder stays, masked, and keeps that
+    // folder alive (§6.3).
+    let top: Vec<NodeId> = scope
+        .outside
+        .iter()
+        .copied()
+        .filter(|n| b.input.remote.get(*n).is_some_and(|s| s.parent.is_root()))
+        .collect();
+    let held = |n: &NodeId| b.input.base.contains(*n) || b.input.local.contains(*n);
+    for folder in top {
+        let subtree = b.input.remote.subtree(folder);
+        if !subtree.iter().any(held) {
+            for node in subtree {
+                b.input.remote.remove(node);
+            }
         }
     }
     Ok(b.input)

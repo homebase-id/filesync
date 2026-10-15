@@ -29,6 +29,27 @@ reserved in odin-core.
 - Root node id: `2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e`, the same on every drive.
 - The root is never stored as a file. A node with `groupId == root id` is top level.
 
+## Role folders
+Folders at the top a device can sync where they are, from the folder the OS has for the role
+(Windows Known Folders, the macOS home folders, Linux's XDG user dirs). Each has a fixed node id,
+the same on every drive: devices that add one join it.
+
+| Role | `uniqueId` | Name when created | Suggested icon (Fluent UI System Icons, MIT) |
+|---|---|---|---|
+| Documents | `0274575b-c2cf-4ac7-b39b-d56b2c121b75` | `Documents` | Folder Document |
+| Pictures | `c2c9af9b-4873-48d8-a8ff-4779802f038f` | `Pictures` | Image |
+| Music | `0f4cd8f9-a914-476d-86d0-b1d1a5215a85` | `Music` | Music Note 2 |
+| Videos | `b133291b-9309-46c5-9bfd-ac6c81669049` | `Videos` | Video Clip |
+| Downloads | `5290e709-bc6d-4e12-827e-96d6dd006403` | `Downloads` | Arrow Download |
+
+- Recognise a role folder by its `uniqueId`, never by its name: a plain folder may be called
+  `Documents`, and a role folder may be renamed.
+- They are ordinary folders otherwise (content `v`, `name`). On a computer, a role folder is
+  synced only where the user chose it, and never inside the main folder (sync semantics §12).
+- A plain folder may share a role folder's name at the top: both are shown.
+- A role folder in Recently deleted still holds its `uniqueId` (Homebase refuses a second live
+  one, inferred): restore it rather than create it.
+
 ## File header fields
 
 | Field | Folder | File |
@@ -151,8 +172,12 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   be now (the other keys as read), never a part of it. A client that doesn't keeps `tags` as
   read, like any other key.
 - **Every write** sends `archivalStatus`: Homebase sets a missing one to `0`.
+- **Role folders** (see above): never remove, move or rename one, and don't create one under
+  another parent; delete what is in it instead. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-14: role folders: Documents, Pictures, Music, Videos and Downloads have fixed node ids
+  at the top; computers sync them where they are, never inside the main folder.
 - 2026-10-12: `tags`, the Finder tags and colours (optional, files and folders), synced.
 - 2026-10-12: Recently deleted: a delete sets `archivalStatus` `2` and `rm`, kept 30 days.
 - 2026-10-12: other apps find the drive by slug too (the alias also works); readers keep a file

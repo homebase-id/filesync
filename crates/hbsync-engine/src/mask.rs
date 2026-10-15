@@ -25,6 +25,10 @@
 //! local item back into view instead, it isn't masked at all, and its local place wins over a
 //! remote move (which would take it out of view again). The names masked nodes hold stay taken
 //! for this device's own items.
+//!
+//! What lies outside the engine's scope (§12: the role folders, for the main folder) is masked
+//! the same way, but is never leaving or brought back: it is synced elsewhere, by another
+//! engine or another device. A role folder's name stays free for the scope's own items.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -33,6 +37,7 @@ use hbsync_platform::name::name_key;
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::reconcile::Input;
+use crate::scope::Scope;
 use crate::tree::Tree;
 
 /// The masks of one plan.
@@ -56,9 +61,20 @@ pub struct Masks {
 }
 
 impl Masks {
-    pub fn of(input: &Input, filter: &Filter, device: &str) -> Masks {
-        let mut masked = masked(&input.remote, filter);
-        if masked.is_empty() {
+    pub fn of(
+        input: &Input,
+        filter: &Filter,
+        scope: &Scope,
+        device: &str,
+        taken: &HashSet<NodeId>,
+    ) -> Masks {
+        let outside = scope.out_of_scope(&input.remote);
+        // The filter's masks, on what the scope keeps; the rules below are the filter's (§10).
+        let mut masked: HashSet<NodeId> = masked(&input.remote, filter)
+            .into_iter()
+            .filter(|m| !outside.contains(m))
+            .collect();
+        if masked.is_empty() && outside.is_empty() {
             return Masks::default();
         }
         // A node synced at a place this device filters now, whose local item the user brought
@@ -70,21 +86,17 @@ impl Masks {
             .filter(|m| filtered_base.contains(m) && input.local.contains(*m))
             .collect();
         masked.retain(|m| !brought_back.contains(m));
-        if masked.is_empty() {
-            return Masks {
-                brought_back,
-                ..Masks::default()
-            };
-        }
         let leaving: HashSet<NodeId> = masked
             .iter()
             .copied()
             .filter(|m| filtered_base.contains(m))
             .filter(|m| match (input.base.get(*m), input.remote.get(*m)) {
+                // Unchanged remotely since it synced here: place, bytes and tags (§11).
                 (Some(b), Some(r)) => {
                     b.same_place(r)
                         && b.content.map(|c| (c.hash, c.executable))
                             == r.content.map(|c| (c.hash, c.executable))
+                        && b.tags == r.tags
                 }
                 _ => false,
             })
@@ -92,6 +104,18 @@ impl Masks {
         // Leaving is an ordinary local delete: the scanner no longer reports the item.
         let leaving = only_whole_folders(&input.remote, leaving);
         masked.retain(|m| !leaving.contains(m));
+        // The names the filter's masks hold stay taken; a role folder holds none for the scope:
+        // a plain folder of the same name keeps it (two at the top, told apart by id).
+        let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        for m in &masked {
+            if let Some(state) = input.remote.get(*m) {
+                names
+                    .entry(state.parent)
+                    .or_default()
+                    .insert(name_key(&state.name));
+            }
+        }
+        masked.extend(outside);
         if masked.is_empty() {
             return Masks {
                 brought_back,
@@ -142,7 +166,7 @@ impl Masks {
         }
         let detached: BTreeMap<NodeId, NodeId> = detach
             .into_iter()
-            .map(|n| (n, detach_id(n, device)))
+            .map(|n| (n, detach_id(n, device, taken)))
             .collect();
 
         let mut local = Tree::new();
@@ -180,15 +204,6 @@ impl Masks {
             dirty,
             remote_complete: input.remote_complete,
         };
-        let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        for m in &masked {
-            if let Some(state) = input.remote.get(*m) {
-                names
-                    .entry(state.parent)
-                    .or_default()
-                    .insert(name_key(&state.name));
-            }
-        }
         Masks {
             masked,
             keep_alive,
@@ -198,6 +213,14 @@ impl Masks {
             input: Some(view),
         }
     }
+}
+
+/// What this device doesn't sync of `remote`: what `filter` matches (see [`masked`]) and what
+/// lies outside `scope`.
+pub fn hidden(remote: &Tree, filter: &Filter, scope: &Scope) -> HashSet<NodeId> {
+    let mut hidden = masked(remote, filter);
+    hidden.extend(scope.out_of_scope(remote));
+    hidden
 }
 
 /// `leaving` without the folders that hold anything else remotely (another device added it):
@@ -284,21 +307,54 @@ fn folder_path(
 }
 
 /// The new id of a detached item: fixed for the node and the device, so a replan before the
-/// detach ran picks the same one, and two devices detaching the same node don't collide.
-fn detach_id(node: NodeId, device: &str) -> NodeId {
-    let mut bytes = *node.0.as_bytes();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in device.bytes().chain(*b"detach") {
-        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+/// detach ran picks the same one, and two devices detaching the same node don't collide. A
+/// hash, never a mix that undoes itself: an item detached twice must not get its first id back
+/// (that id is still live remotely, maybe where this device doesn't sync). Nor one in `taken`:
+/// the node detached here before, whose first copy holds that id still.
+fn detach_id(node: NodeId, device: &str, taken: &HashSet<NodeId>) -> NodeId {
+    let candidate = |round: u32| {
+        let mut bytes = [0u8; 16];
+        for (half, out) in bytes.chunks_mut(8).enumerate() {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ half as u64;
+            let again = (round > 0).then(|| round.to_le_bytes());
+            for b in node
+                .0
+                .as_bytes()
+                .iter()
+                .chain(device.as_bytes())
+                .chain(b"detach")
+                .chain(again.iter().flatten())
+            {
+                h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+            }
+            out.copy_from_slice(&h.to_le_bytes());
+        }
+        bytes[6] = (bytes[6] & 0x0F) | 0x40; // a well-formed v4 UUID
+        bytes[8] = (bytes[8] & 0x3F) | 0x80;
+        NodeId(hbsync_types::Uuid::from_bytes(bytes))
+    };
+    (0..)
+        .map(candidate)
+        .find(|id| !taken.contains(id))
+        .unwrap_or_else(NodeId::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detaching_twice_never_gives_the_first_id_back() {
+        let none = HashSet::new();
+        let node = NodeId::new();
+        let once = detach_id(node, "a", &none);
+        assert_ne!(once, node);
+        assert_ne!(detach_id(once, "a", &none), node);
+        assert_eq!(detach_id(node, "a", &none), once);
+        assert_ne!(detach_id(node, "b", &none), once);
+        // The same node detached here again, its first copy still around: another id.
+        let again = detach_id(node, "a", &HashSet::from([once]));
+        assert!(again != once && again != node);
+        assert_eq!(again, detach_id(node, "a", &HashSet::from([once])));
     }
-    let mix = h
-        .to_le_bytes()
-        .into_iter()
-        .chain(h.rotate_left(29).to_le_bytes());
-    for (b, x) in bytes.iter_mut().zip(mix) {
-        *b ^= x;
-    }
-    bytes[6] = (bytes[6] & 0x0F) | 0x40; // a well-formed v4 UUID
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-    NodeId(hbsync_types::Uuid::from_bytes(bytes))
 }

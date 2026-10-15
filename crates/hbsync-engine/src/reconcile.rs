@@ -27,6 +27,7 @@ use hbsync_types::{
 };
 
 use crate::mask::Masks;
+use crate::scope::Scope;
 use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
 
 /// Per-node facts about the base that aren't part of [`NodeState`].
@@ -64,6 +65,10 @@ pub struct Options {
     pub pending_deletes: (usize, usize),
     /// What this device never syncs: remote nodes it matches are masked (§10).
     pub filter: Arc<Filter>,
+    /// The part of the drive this engine syncs: what is outside it is masked (§12).
+    pub scope: Arc<Scope>,
+    /// Ids a detach must not give: already known here (an earlier detach of the same node).
+    pub taken: Arc<HashSet<NodeId>>,
 }
 
 impl Default for Options {
@@ -78,6 +83,8 @@ impl Default for Options {
             confirmed: Arc::default(),
             pending_deletes: (0, 0),
             filter: Arc::default(),
+            scope: Arc::new(Scope::main()),
+            taken: Arc::default(),
         }
     }
 }
@@ -393,7 +400,7 @@ enum Origin {
 }
 
 pub fn reconcile(input: &Input, opts: &Options) -> Plan {
-    let masks = Masks::of(input, &opts.filter, &opts.device);
+    let masks = Masks::of(input, &opts.filter, &opts.scope, &opts.device, &opts.taken);
     let input = masks.input.as_ref().unwrap_or(input);
     Reconciler::new(input, opts, &masks).run()
 }
@@ -1231,4 +1238,35 @@ fn fork_id(
 
 fn content_changed(c: Change) -> bool {
     matches!(c, Change::Created | Change::Changed { edited: true, .. })
+}
+
+/// [`reconcile`], planned again while a detach gives an id `known` says is in use (the same
+/// node detached here before, its first copy still around): each time with that id taken.
+pub fn reconcile_with_known(
+    input: &Input,
+    opts: &Options,
+    mut known: impl FnMut(NodeId) -> bool,
+) -> Plan {
+    let mut plan = reconcile(input, opts);
+    let mut opts = opts.clone();
+    // Bounded: each round takes at least one more id.
+    for _ in 0..8 {
+        let taken: Vec<NodeId> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::LocalDetach { new_node, .. } => Some(*new_node),
+                _ => None,
+            })
+            .filter(|n| !opts.taken.contains(n) && known(*n))
+            .collect();
+        if taken.is_empty() {
+            break;
+        }
+        let mut all = (*opts.taken).clone();
+        all.extend(taken);
+        opts.taken = Arc::new(all);
+        plan = reconcile(input, &opts);
+    }
+    plan
 }

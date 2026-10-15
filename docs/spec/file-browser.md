@@ -34,6 +34,18 @@ Every file and folder is one Homebase file:
     chips and filters on them, and writes them back as read.
   - Ignore keys you don't know. If `v` > 1, show the item but don't change it.
 
+## Role folders
+Five top-level folders have fixed node ids, the same on every drive: Documents
+`0274575b-c2cf-4ac7-b39b-d56b2c121b75`, Pictures `c2c9af9b-4873-48d8-a8ff-4779802f038f`, Music
+`0f4cd8f9-a914-476d-86d0-b1d1a5215a85`, Videos `b133291b-9309-46c5-9bfd-ac6c81669049`, Downloads
+`5290e709-bc6d-4e12-827e-96d6dd006403` (node schema, "Role folders"). A computer syncs each one in
+place, from its own Documents folder and so on, never inside the main folder.
+- Recognise them by `uniqueId`, never by name: show the role's icon (the schema suggests Fluent UI
+  System Icons), perhaps listed first at the top. A plain folder with the same name is listed too.
+- Otherwise they are ordinary folders: list, open, upload into them, rename and delete them as any other.
+- Never create one with a new random id: if the role's id is in Recently deleted, restore it
+  (Homebase refuses a second node with the same `uniqueId`). Creating them is the desktops' job.
+
 ## Listing a folder
 - One `query-batch` with `groupId: [<folder's node id>]`, `fileType: [7101, 7102]`,
   `fileState: [active]` and `archivalStatus: [0]`, in pages. A deleted node is only removed:
