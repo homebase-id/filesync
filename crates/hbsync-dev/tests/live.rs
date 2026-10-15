@@ -220,6 +220,7 @@ fn throughput() -> R {
             remote.update(
                 at.file_id,
                 at.version,
+                None,
                 &with(meta, content),
                 Some(upload(&mut source)),
             )?;

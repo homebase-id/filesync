@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use hbsync_fileio::hash_bytes;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Uuid, VersionTag};
+use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Seal, Uuid, VersionTag};
 
 use crate::{
     ChangesPage, NodeMeta, PayloadInfo, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
@@ -186,6 +186,7 @@ impl FakeServer {
                 content: node.content.clone(),
                 payload: payload.as_ref().map(|(_, info)| *info),
             },
+            seal: Some(seal_of(file_id)),
         };
         self.files.insert(
             file_id,
@@ -270,6 +271,7 @@ impl FakeServer {
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
+        f.header.seal = None;
         f.bytes = None;
         self.touch(file_id);
         Ok(())
@@ -382,6 +384,15 @@ impl FakeServer {
     }
 }
 
+/// The fake's seal of a file: its id, four times. A file's own and no other.
+pub fn seal_of(file_id: RemoteFileId) -> Seal {
+    let mut seal = [0; Seal::LEN];
+    for chunk in seal.chunks_mut(16) {
+        chunk.copy_from_slice(file_id.0.as_bytes());
+    }
+    Seal(seal)
+}
+
 fn parse_cursor(c: &str) -> Result<(i64, u64)> {
     if c.is_empty() {
         return Ok((i64::MIN, 0));
@@ -416,6 +427,8 @@ pub struct Faults {
     pub requests: usize,
     /// Payload bytes handed out by `read`, for assertions about resumed downloads.
     pub served: u64,
+    /// Updates that came without a seal (on Homebase: a header read first), for assertions.
+    pub unsealed_updates: usize,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -542,9 +555,20 @@ impl Remote for FakeRemote {
         &self,
         file_id: RemoteFileId,
         expected: VersionTag,
+        seal: Option<Seal>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
+        // On Homebase another file's seal would write content no one can read.
+        match seal {
+            Some(s) if s != seal_of(file_id) => {
+                return Err(RemoteError::Fatal(format!(
+                    "update of {file_id:?} with another file's seal"
+                )));
+            }
+            Some(_) => {}
+            None => self.faults().unsealed_updates += 1,
+        }
         self.gate()?;
         self.gate_name(&meta.content.name)?;
         let received = self.receive(payload)?;

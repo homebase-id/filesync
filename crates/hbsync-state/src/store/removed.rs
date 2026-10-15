@@ -6,10 +6,11 @@ impl Store<'_> {
     // ---- Recently deleted ----
 
     /// Records a removed node (replacing an older record of it), and marks it dirty where that
-    /// concerns ([`Store::fan_out`]); the same version again changes nothing.
+    /// concerns ([`Store::fan_out`]); the same version again changes nothing but a missing
+    /// seal.
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         if self.has_version(removed.row.remote_ref(), true)? {
-            return Ok(());
+            return self.add_seal(&removed.row, true);
         }
         let Some(row) = &self.on_drive(&removed.row)? else {
             return Ok(());
@@ -19,8 +20,8 @@ impl Store<'_> {
         let root = self.coords()?.to_drive(removed.removal.root);
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, root) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 hash, size, mtime_ms, executable, content_extra, removed_at, root, seal) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?
         .execute(params![
             row.node.0.as_bytes(),
@@ -36,6 +37,7 @@ impl Store<'_> {
             row.content_extra,
             removed.removal.at_ms,
             root.0.as_bytes(),
+            row.seal.as_ref().map(|s| &s.0[..]),
         ])?;
         self.fan_out(row.node, row.parent)
     }

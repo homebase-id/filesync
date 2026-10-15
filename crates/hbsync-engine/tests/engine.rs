@@ -11,7 +11,7 @@ use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
-use hbsync_types::{NodeId, RemoteFileId, RemoteRef, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Seal, VersionTag};
 
 mod common;
 
@@ -36,6 +36,37 @@ fn upload_then_download() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(""), a.tree_text(""));
     assert_eq!(b.read_text("Docs/deep/nested.bin")?, "bytes");
+    Ok(())
+}
+
+/// Once the feed has brought a file back, its updates carry its seal (on Homebase: one request,
+/// no header read first), whether this device or another wrote it; the fake refuses another
+/// file's seal.
+#[test]
+fn updates_carry_the_files_seal() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("x/one.txt", "1")?;
+    a.write("x/two.txt", "2")?;
+    a.write("three.txt", "3")?;
+    a.sync()?;
+    b.sync()?;
+    a.remote.faults().unsealed_updates = 0;
+    b.remote.faults().unsealed_updates = 0;
+
+    fs::rename(a.root.join("three.txt"), a.root.join("four.txt"))?;
+    a.write("x/one.txt", "1 edited")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(b.root.join("x"))?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.read_text("four.txt")?, "3");
+    assert!(b.read_text("x/one.txt").is_err());
+    assert_eq!(a.remote.faults().unsealed_updates, 0);
+    assert_eq!(b.remote.faults().unsealed_updates, 0);
     Ok(())
 }
 
@@ -213,10 +244,11 @@ impl Remote for StopAfterCreates {
         &self,
         file_id: RemoteFileId,
         expected: VersionTag,
+        seal: Option<Seal>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> RemoteResult<RemoteRef> {
-        self.inner.update(file_id, expected, meta, payload)
+        self.inner.update(file_id, expected, seal, meta, payload)
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
@@ -309,10 +341,13 @@ impl Remote for SlowWrites {
         &self,
         file_id: RemoteFileId,
         expected: VersionTag,
+        seal: Option<Seal>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> RemoteResult<RemoteRef> {
-        self.write(|| self.unless_down(|| self.inner.update(file_id, expected, meta, payload)))
+        self.write(|| {
+            self.unless_down(|| self.inner.update(file_id, expected, seal, meta, payload))
+        })
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)

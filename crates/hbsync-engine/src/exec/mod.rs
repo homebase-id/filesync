@@ -34,7 +34,7 @@ use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
 
 use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
-use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
+use crate::transfer::{Download, Job, JobError, JobResult, Target, TransferConfig, run_jobs_while};
 use crate::view;
 use hbsync_local::layout;
 

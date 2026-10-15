@@ -135,14 +135,21 @@ impl<'a> Bench<'a> {
         Ok((meta, written))
     }
 
+    /// An update with the seal the file's header gives, as the engine has it from the feed.
     fn update(
         &self,
         at: RemoteRef,
         meta: &NodeMeta,
         data: Option<&[u8]>,
     ) -> Result<RemoteRef, RemoteError> {
+        let seal = match self.remote.header(at.file_id) {
+            Ok(header) => header.seal,
+            Err(RemoteError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
         with_upload(data, |upload| {
-            self.remote.update(at.file_id, at.version, meta, upload)
+            self.remote
+                .update(at.file_id, at.version, seal, meta, upload)
         })
     }
 
@@ -558,7 +565,8 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
         ..upload(&mut reader)
     };
     ensure_err!(
-        b.remote.update(at.file_id, at.version, &f, Some(lying)),
+        b.remote
+            .update(at.file_id, at.version, None, &f, Some(lying)),
         RemoteError::HashMismatch
     );
     ensure!(b.read(at.file_id, None)? == b"real", "the old bytes stay");

@@ -49,11 +49,29 @@ fn an_update_keeps_node_id_and_kind() -> R {
     };
     for wrong in [other_node, other_kind] {
         assert!(matches!(
-            r.update(w.file_id, w.version, &wrong, None),
+            r.update(w.file_id, w.version, None, &wrong, None),
             Err(RemoteError::Fatal(_))
         ));
     }
     assert_eq!(r.header(w.file_id)?.node(), Some(f.node));
+    Ok(())
+}
+
+/// The seal a header gives is the one an update takes; another file's is refused (on Homebase
+/// it would write content under the wrong key).
+#[test]
+fn an_update_takes_only_the_files_own_seal() -> R {
+    let r = remote();
+    let (f, g) = (file("f", NodeId::ROOT, b"1"), file("g", NodeId::ROOT, b"2"));
+    let (wf, wg) = (create_file(&r, &f, b"1")?, create_file(&r, &g, b"2")?);
+    let (own, other) = (r.header(wf.file_id)?.seal, r.header(wg.file_id)?.seal);
+    assert!(own.is_some() && own != other);
+    assert!(matches!(
+        r.update(wf.file_id, wf.version, other, &f, None),
+        Err(RemoteError::Fatal(_))
+    ));
+    let w2 = r.update(wf.file_id, wf.version, own, &f, None)?;
+    assert_eq!(r.header(w2.file_id)?.seal, own, "a file keeps its seal");
     Ok(())
 }
 

@@ -11,7 +11,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use cbc::cipher::block_padding::{Padding, Pkcs7};
 use cbc::cipher::{Array, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
-use hbsync_types::{ContentHash, HashAlgorithm};
+use hbsync_types::{ContentHash, HashAlgorithm, Seal};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use zeroize::Zeroize;
@@ -67,13 +67,35 @@ impl SealedKeyHeader {
         let bytes = STANDARD
             .decode(b64.trim())
             .map_err(|_| crypto("the key header isn't base64"))?;
-        if bytes.len() != 16 + 48 + 4 {
+        if bytes.len() != Seal::LEN + 4 {
             return Err(crypto(format!("a key header of {} bytes", bytes.len())));
         }
-        Ok(SealedKeyHeader {
-            iv: STANDARD.encode(&bytes[..16]),
-            encrypted_aes_key: STANDARD.encode(&bytes[16..64]),
-        })
+        Ok(Self::from_bytes(&bytes[..Seal::LEN]))
+    }
+
+    /// As sync keeps it: the wrap IV (16), then the encrypted IV and key (48). `None` if it
+    /// isn't that.
+    pub fn to_seal(&self) -> Option<Seal> {
+        let iv = STANDARD.decode(&self.iv).ok()?;
+        let key = STANDARD.decode(&self.encrypted_aes_key).ok()?;
+        let mut seal = [0; Seal::LEN];
+        if iv.len() != BLOCK || key.len() != Seal::LEN - BLOCK {
+            return None;
+        }
+        seal[..BLOCK].copy_from_slice(&iv);
+        seal[BLOCK..].copy_from_slice(&key);
+        Some(Seal(seal))
+    }
+
+    pub fn from_seal(seal: &Seal) -> Self {
+        Self::from_bytes(&seal.0)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        SealedKeyHeader {
+            iv: STANDARD.encode(&bytes[..BLOCK]),
+            encrypted_aes_key: STANDARD.encode(&bytes[BLOCK..Seal::LEN]),
+        }
     }
 }
 
@@ -531,6 +553,13 @@ mod tests {
         assert_eq!(KeyHeader::open(&sealed, &shared)?, kh);
         // A wrong shared secret never gives the key back.
         assert!(KeyHeader::open(&sealed, &random::<16>()?).map_or(true, |k| k != kh));
+        // As sync keeps it, a seal: the same key back.
+        let seal = sealed.to_seal().ok_or_else(|| crypto("no seal"))?;
+        assert_eq!(
+            KeyHeader::open(&SealedKeyHeader::from_seal(&seal), &shared)?,
+            kh
+        );
+        assert!(SealedKeyHeader::default().to_seal().is_none());
 
         // The response header's binary form: IV, encrypted key, version.
         let mut binary = STANDARD.decode(&sealed.iv).map_err(|_| crypto("iv"))?;

@@ -11,7 +11,8 @@ use std::io::{Read, Write};
 
 use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{
-    ContentHash, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
+    ContentHash, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Seal,
+    VersionTag,
 };
 
 pub mod contract;
@@ -27,6 +28,8 @@ pub struct RemoteHeader {
     /// From `FileType`: kept on tombstones.
     pub kind: NodeKind,
     pub body: RemoteBody,
+    /// The file's [`Seal`], where the remote has one (a tombstone has none).
+    pub seal: Option<Seal>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -240,11 +243,14 @@ pub trait Remote: Send + Sync {
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef>;
 
     /// Rewrites the header (parent and content; node id and kind stay what they are) and, with
-    /// a payload, replaces the bytes, if the file is still at `expected`.
+    /// a payload, replaces the bytes, if the file is still at `expected`. `seal`: the file's
+    /// own, as its header gave it, if known (it saves reading the file first); never another
+    /// file's.
     fn update(
         &self,
         file_id: RemoteFileId,
         expected: VersionTag,
+        seal: Option<Seal>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<RemoteRef>;
@@ -281,10 +287,11 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         &self,
         file_id: RemoteFileId,
         expected: VersionTag,
+        seal: Option<Seal>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
-        (**self).update(file_id, expected, meta, payload)
+        (**self).update(file_id, expected, seal, meta, payload)
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {

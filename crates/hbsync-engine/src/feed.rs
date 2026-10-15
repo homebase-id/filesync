@@ -99,9 +99,11 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         return Ok(true);
     };
     // A version the store has already (this device's own write coming back, or a page applied
-    // again) changes nothing; the store marks the nodes that changed dirty where that concerns.
+    // again) changes nothing but the seal its row may lack (a file this device created); the
+    // store marks the nodes that changed dirty where that concerns.
     let removal = header.removal();
     if s.has_version(row.remote_ref(), removal.is_some())? {
+        s.add_seal(&row, removal.is_some())?;
         return Ok(removal.is_none());
     }
     if let Some(removal) = removal {
@@ -148,7 +150,10 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
         version: header.version,
     };
     let hash = payload.map(|p| p.hash);
-    let mut row = MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash);
+    let mut row = MirrorRow {
+        seal: header.seal,
+        ..MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash)
+    };
     // A content without its size (another client's) has the payload's.
     if let (Some(file), Some(p), None) = (&mut row.file, payload, content.size) {
         file.size = p.bytes;
@@ -182,6 +187,7 @@ mod tests {
                     bytes: 1,
                 }),
             },
+            seal: None,
         };
         assert!(db.write(|s| apply(s, &header))?);
         if let RemoteBody::Live { payload, .. } = &mut header.body {
@@ -214,6 +220,7 @@ mod tests {
                     bytes: 3,
                 }),
             },
+            seal: None,
         };
         let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
         assert_eq!(size, Some(3));
@@ -235,6 +242,7 @@ mod tests {
                 content,
                 payload: None,
             },
+            seal: None,
         };
         let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
             db.write(|s| {
@@ -275,6 +283,7 @@ mod tests {
                 content,
                 payload: None,
             },
+            seal: None,
         };
         let mut gone = NodeContent::folder("d");
         let removal = Removal {

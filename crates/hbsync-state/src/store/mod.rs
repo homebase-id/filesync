@@ -11,7 +11,7 @@ use hbsync_types::schema::{
 };
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Tags, VersionTag,
+    Seal, Tags, VersionTag,
 };
 use std::collections::HashMap;
 
@@ -106,6 +106,8 @@ pub struct MirrorRow {
     /// Content keys sync carries without acting on them (JSON object: unknown keys, the
     /// creation time `ct` and the tags), written back unchanged.
     pub content_extra: Option<String>,
+    /// The file's [`Seal`], once the feed has given it.
+    pub seal: Option<Seal>,
 }
 
 /// A remote node in Recently deleted: its row as it was, and its removal.
@@ -154,6 +156,7 @@ impl MirrorRow {
                     executable: content.x,
                 }),
             content_extra: content.carried_json(),
+            seal: None,
         }
     }
 
@@ -257,9 +260,9 @@ const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size
      b.tags FROM base b JOIN nodes n ON n.id = b.id AND b.folder = $F \
      JOIN nodes p ON p.id = b.parent";
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
-     mtime_ms, executable, content_extra, removed_at, root FROM removed";
+     mtime_ms, executable, content_extra, seal, removed_at, root FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
-     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra \
+     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.seal \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
 /// The columns [`RawLocal`] reads, from `local l JOIN nodes n`.
 const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, l.volume, \
@@ -403,8 +406,8 @@ fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
     Ok(RemovedRow {
         row: mirror_row(r)?,
         removal: Removal {
-            at_ms: r.get(11)?,
-            root: codec::node(&r.get::<_, Vec<u8>>(12)?)?,
+            at_ms: r.get(12)?,
+            root: codec::node(&r.get::<_, Vec<u8>>(13)?)?,
         },
     })
 }
@@ -429,5 +432,9 @@ fn mirror_row(r: &Row<'_>) -> Result<MirrorRow> {
         kind,
         file,
         content_extra: r.get(10)?,
+        seal: r
+            .get::<_, Option<Vec<u8>>>(11)?
+            .map(|b| codec::seal(&b))
+            .transpose()?,
     })
 }

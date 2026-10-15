@@ -2,8 +2,8 @@ use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_state::{BaseRow, LocalRow, StateDb, StateError, keys};
 use hbsync_types::RemoteRef;
 use hbsync_types::{
-    ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Tag, Tags,
-    Uuid, VersionTag,
+    ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Seal, Tag,
+    Tags, Uuid, VersionTag,
 };
 
 type R = Result<(), StateError>;
@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 6);
+    assert_eq!(db.schema_version()?, 7);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -318,7 +318,61 @@ mod mirror {
             },
             file,
             content_extra: Some(r#"{"future":1}"#.into()),
+            seal: Some(Seal([node.0.as_bytes()[15]; Seal::LEN])),
         }
+    }
+
+    /// The feed brings back a version the mirror has (this device's own write) with the file's
+    /// seal: the seal is kept, nothing else changes, and nothing needs reconciling.
+    #[test]
+    fn a_known_version_adds_only_its_seal() -> R {
+        use hbsync_state::RemovedRow;
+        use hbsync_types::schema::Removal;
+        let mut db = StateDb::open_in_memory()?;
+        let sealed = row(NodeId::new(), NodeId::ROOT, "d", None);
+        let unsealed = MirrorRow {
+            seal: None,
+            ..sealed.clone()
+        };
+        db.write(|s| {
+            s.put_mirror(&unsealed)?;
+            s.clear_dirty(sealed.node)
+        })?;
+        let renamed = MirrorRow {
+            name: "other".into(),
+            ..sealed.clone()
+        };
+        db.write(|s| s.put_mirror(&renamed))?;
+        assert_eq!(
+            db.read(|s| s.get_mirror(sealed.node))?,
+            Some(sealed.clone()),
+            "the seal only"
+        );
+        assert!(!db.read(|s| s.is_dirty(sealed.node))?);
+        db.write(|s| s.put_mirror(&unsealed))?;
+        assert_eq!(
+            db.read(|s| s.get_mirror(sealed.node))?,
+            Some(sealed.clone())
+        );
+
+        let removal = Removal {
+            at_ms: 1,
+            root: sealed.node,
+        };
+        let removed = |row: &MirrorRow| RemovedRow {
+            row: row.clone(),
+            removal,
+        };
+        db.write(|s| {
+            s.delete_mirror(sealed.file_id)?;
+            s.put_removed(&removed(&unsealed))?;
+            s.put_removed(&removed(&sealed))
+        })?;
+        assert_eq!(
+            db.read(|s| s.removed_by_node(sealed.node))?,
+            Some(removed(&sealed))
+        );
+        Ok(())
     }
 
     #[test]
@@ -601,7 +655,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 6);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 7);
     Ok(())
 }
 
@@ -694,6 +748,7 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,
+        seal: None,
     };
     let dirty = |db: &mut StateDb, node| db.read(|s| s.is_dirty(node));
     // The role folders' tops, then a folder inside Documents: only docs is concerned.
@@ -756,6 +811,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,
+        seal: None,
     };
     let (inside, elsewhere) = (NodeId::new(), NodeId::new());
     main.write(|s| {

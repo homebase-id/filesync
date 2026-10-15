@@ -217,6 +217,10 @@ const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;
     CREATE TRIGGER placing_gone AFTER DELETE ON placing
         BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;",
+    // 7: each file's seal (what the remote needs to write it again without reading it first),
+    // as the feed gave it; NULL until known.
+    "ALTER TABLE remote ADD COLUMN seal BLOB;
+    ALTER TABLE removed ADD COLUMN seal BLOB;",
 ];
 
 /// The version this client makes and reads.
@@ -282,6 +286,27 @@ mod tests {
         let value: String =
             conn.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))?;
         assert_eq!(value, "v");
+        Ok(())
+    }
+
+    /// A DB of 0.6.0 (version 6) gets the seal columns, its rows without one.
+    #[test]
+    fn version_6_gets_seals() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(MIGRATIONS[0])?;
+        conn.pragma_update(None, "user_version", 6)?;
+        conn.execute(
+            "INSERT INTO remote (id, file_id, version_tag, parent, kind, name) \
+             VALUES (1, x'01', x'02', 0, 1, 'd')",
+            [],
+        )?;
+        apply(&mut conn)?;
+        assert_eq!(user_version(&conn)?, VERSION);
+        let seal: Option<Vec<u8>> =
+            conn.query_row("SELECT seal FROM remote WHERE id = 1", [], |r| r.get(0))?;
+        assert_eq!(seal, None);
+        conn.execute("UPDATE removed SET seal = x'00'", [])?;
         Ok(())
     }
 

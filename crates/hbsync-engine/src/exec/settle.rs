@@ -56,33 +56,40 @@ pub(super) fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String
         .map(str::to_owned)
 }
 
-/// The mirror row of a node written as `meta` at `written` (a file with its content `hash`).
+/// The mirror row of a node written as `meta` at `written` (a file with its content `hash`),
+/// an update of `target`: it keeps the file's seal (a new file's comes with the feed).
 pub(super) fn written_row(
     written: hbsync_types::RemoteRef,
+    target: Option<Target>,
     meta: &NodeMeta,
     hash: Option<hbsync_types::ContentHash>,
 ) -> MirrorRow {
-    MirrorRow::from_content(
-        written,
-        meta.node,
-        meta.parent,
-        meta.kind,
-        &meta.content,
-        hash,
-    )
+    MirrorRow {
+        seal: target
+            .filter(|t| t.at.file_id == written.file_id)
+            .and_then(|t| t.seal),
+        ..MirrorRow::from_content(
+            written,
+            meta.node,
+            meta.parent,
+            meta.kind,
+            &meta.content,
+            hash,
+        )
+    }
 }
 
-/// A metadata-only update of a node to `meta` if it's still at `expected` (its payload, of
+/// A metadata-only update of a node to `meta` if it's still at `target` (its payload, of
 /// content `hash`, stays); its mirror row after.
 pub(crate) fn update_meta(
     remote: &dyn Remote,
-    file_id: hbsync_types::RemoteFileId,
-    expected: hbsync_types::VersionTag,
+    target: Target,
     meta: &NodeMeta,
     hash: Option<hbsync_types::ContentHash>,
 ) -> Result<MirrorRow, RemoteError> {
-    let written = remote.update(file_id, expected, meta, None)?;
-    Ok(written_row(written, meta, hash))
+    let (at, seal) = (target.at, target.seal);
+    let written = remote.update(at.file_id, at.version, seal, meta, None)?;
+    Ok(written_row(written, Some(target), meta, hash))
 }
 
 /// Gives the item at `path` these tags and returns what it holds now. Tags are no reason to

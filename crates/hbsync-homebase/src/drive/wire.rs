@@ -124,10 +124,10 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         other => return Err(format!("file {id}: file type {other} isn't a sync node")),
     };
     let group = meta.app_data.group_id.map(NodeId);
-    let (parent, body) = match header.file_state.as_str() {
+    let (parent, body, seal) = match header.file_state.as_str() {
         // A tombstone always comes through: dropping it would keep a deleted node alive. Its
         // parent isn't used, only its file id.
-        "deleted" => (group.unwrap_or(NodeId::ROOT), RemoteBody::Deleted),
+        "deleted" => (group.unwrap_or(NodeId::ROOT), RemoteBody::Deleted, None),
         "active" => {
             let parent = group.ok_or_else(|| format!("file {id}: no parent (groupId)"))?;
             let node = meta
@@ -170,7 +170,12 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 content,
                 payload,
             };
-            (parent, body)
+            // The key opened: the header it came in is the file's seal.
+            let seal = header
+                .shared_secret_encrypted_key_header
+                .as_ref()
+                .and_then(SealedKeyHeader::to_seal);
+            (parent, body, seal)
         }
         other => return Err(format!("file {id}: file state {other:?}")),
     };
@@ -180,6 +185,7 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         parent,
         kind,
         body,
+        seal,
     })
 }
 

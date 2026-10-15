@@ -176,7 +176,7 @@ impl Executor<'_> {
             None if let Some(r) = &removed => {
                 content.unknown = r.row.carried_keys();
                 tags = restored_tags(base.as_ref(), &tags, r);
-                Some(r.row.remote_ref())
+                Some(Target::of(&r.row))
             }
             // A new node: the file's own creation time, kept from then on.
             None => {
@@ -192,7 +192,7 @@ impl Executor<'_> {
                 if content.created_ms().is_none() {
                     content.set_created_ms(ops::created_ms(&path));
                 }
-                Some(RemoteRef { file_id, version })
+                Some(Target::at(RemoteRef { file_id, version }, Some(mirror)))
             }
         };
         content.set_tags(&tags);
@@ -220,8 +220,8 @@ impl Executor<'_> {
     /// Records what a job did: `job` is the one that ran, given back by the pool.
     pub(super) fn commit(&mut self, ctx: Ctx, job: Job, result: JobResult) -> Step {
         match (ctx, job, result) {
-            (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }, JobResult::Written(w)) => {
-                self.commit_meta(meta, hash, after, Some(w))
+            (Ctx::Meta { hash, after, .. }, Job::Meta { meta, target }, JobResult::Written(w)) => {
+                self.commit_meta(meta, target, hash, after, Some(w))
             }
             // Deleted for good meanwhile: out of the tree all the same.
             (
@@ -230,9 +230,9 @@ impl Executor<'_> {
                     after: after @ remote::After::Removed { .. },
                     ..
                 },
-                Job::Meta { meta, .. },
+                Job::Meta { meta, target },
                 JobResult::Failed(JobError::Remote(RemoteError::NotFound)),
-            ) => self.commit_meta(meta, hash, after, None),
+            ) => self.commit_meta(meta, target, hash, after, None),
             (_, _, JobResult::Failed(e)) => Ok(match e {
                 JobError::Remote(RemoteError::AlreadyExists) => Outcome::Done, // an earlier try landed
                 JobError::Remote(r) => remote_outcome(r),
@@ -251,9 +251,13 @@ impl Executor<'_> {
                 _,
                 JobResult::Downloaded { file, local_hash },
             ) => self.place_download(node, &target, current, created_ms, &tags, file, local_hash),
-            (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
+            (
+                Ctx::Upload { hash, .. },
+                Job::Upload { meta, target, .. },
+                JobResult::Written(written),
+            ) => {
                 let node = meta.node;
-                let row = written_row(written, &meta, Some(hash));
+                let row = written_row(written, target, &meta, Some(hash));
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 self.finish(&[(node, true)], |s| {
                     s.delete_removed(node)?;

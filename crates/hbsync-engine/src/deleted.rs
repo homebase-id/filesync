@@ -17,6 +17,7 @@ use hbsync_types::{NodeId, NodeKind, Role};
 
 use crate::engine::EngineError;
 use crate::exec::{remove_all, trashed_at, update_meta};
+use crate::transfer::Target;
 use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
@@ -130,13 +131,7 @@ pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<us
             kind: row.kind,
             content: row.content(&name),
         };
-        let back = match update_meta(
-            remote,
-            row.file_id,
-            row.version,
-            &meta,
-            row.file.map(|f| f.hash),
-        ) {
+        let back = match update_meta(remote, Target::of(row), &meta, row.file.map(|f| f.hash)) {
             Ok(back) => back,
             // Changed or deleted for good meanwhile: the feed tells what it is now.
             Err(RemoteError::VersionMismatch | RemoteError::NotFound) => continue,
@@ -345,6 +340,7 @@ mod tests {
                 kind: NodeKind::Folder,
                 file: None,
                 content_extra: None,
+                seal: None,
             },
             removal: Removal { at_ms: 1, root },
         }

@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
 use hbsync_remote::{NodeMeta, Pace, Remote, RemoteError, Upload};
-use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef};
+use hbsync_state::MirrorRow;
+use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Seal};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -139,6 +140,32 @@ pub struct Download {
     pub local_algorithm: HashAlgorithm,
 }
 
+/// The file a write updates: where it is and the version it must still be at, and that file's
+/// [`Seal`] if known (never another file's: it would be written under the wrong key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub at: RemoteRef,
+    pub seal: Option<Seal>,
+}
+
+impl Target {
+    /// The file `row` is, at the version it has.
+    pub fn of(row: &MirrorRow) -> Target {
+        Target {
+            at: row.remote_ref(),
+            seal: row.seal,
+        }
+    }
+
+    /// File `at`, with the seal `row` has if `row` is that file.
+    pub fn at(at: RemoteRef, row: Option<&MirrorRow>) -> Target {
+        Target {
+            at,
+            seal: row.filter(|r| r.file_id == at.file_id).and_then(|r| r.seal),
+        }
+    }
+}
+
 /// The byte-moving half of a transfer.
 #[derive(Debug, Clone)]
 pub enum Job {
@@ -147,7 +174,7 @@ pub enum Job {
     /// file at that version.
     Upload {
         meta: NodeMeta,
-        target: Option<RemoteRef>,
+        target: Option<Target>,
         path: PathBuf,
         hash: ContentHash,
         size: u64,
@@ -156,7 +183,7 @@ pub enum Job {
     /// version (a folder restored, a rename or move, tags, a removal).
     Meta {
         meta: NodeMeta,
-        target: Option<RemoteRef>,
+        target: Option<Target>,
     },
 }
 
@@ -321,12 +348,12 @@ impl Queue {
 fn write(
     remote: &dyn Remote,
     meta: &NodeMeta,
-    target: Option<RemoteRef>,
+    target: Option<Target>,
     upload: Option<Upload<'_>>,
 ) -> Result<RemoteRef, RemoteError> {
     match target {
         None => remote.create(meta, upload),
-        Some(at) => remote.update(at.file_id, at.version, meta, upload),
+        Some(t) => remote.update(t.at.file_id, t.at.version, t.seal, meta, upload),
     }
 }
 

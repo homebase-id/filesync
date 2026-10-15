@@ -52,10 +52,7 @@ impl Executor<'_> {
             kind: NodeKind::Folder,
             content,
         };
-        let target = removed.map(|r| RemoteRef {
-            file_id: r.row.file_id,
-            version: r.row.version,
-        });
+        let target = removed.map(|r| Target::of(&r.row));
         Ok(meta_job(meta, target, None, None, After::Created))
     }
 
@@ -87,14 +84,14 @@ impl Executor<'_> {
             kind: mirror.kind,
             content,
         };
-        let target = RemoteRef {
+        let at = RemoteRef {
             file_id,
             version: expected,
         };
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
-            Some(target),
+            Some(Target::at(at, Some(&mirror))),
             hash,
             Some(mirror.parent),
             After::Updated,
@@ -128,31 +125,32 @@ impl Executor<'_> {
             kind: mirror.kind,
             content,
         };
-        let target = RemoteRef {
+        let at = RemoteRef {
             file_id,
             version: expected,
         };
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
-            Some(target),
+            Some(Target::at(at, Some(&mirror))),
             hash,
             Some(mirror.parent),
             After::Removed { file_id, removal },
         ))
     }
 
-    /// Records a metadata write that landed (`written`), or a removal the drive no longer
-    /// needed (`None`: deleted for good meanwhile).
+    /// Records a metadata write of `target` that landed (`written`), or a removal the drive no
+    /// longer needed (`None`: deleted for good meanwhile).
     pub(super) fn commit_meta(
         &mut self,
         meta: NodeMeta,
+        target: Option<Target>,
         hash: Option<hbsync_types::ContentHash>,
         after: After,
         written: Option<RemoteRef>,
     ) -> Step {
         let node = meta.node;
-        let row = written.map(|w| written_row(w, &meta, hash));
+        let row = written.map(|w| written_row(w, target, &meta, hash));
         self.finish(&[(node, false)], |s| match after {
             After::Created => {
                 s.delete_removed(node)?;
@@ -174,7 +172,7 @@ impl Executor<'_> {
 /// (its parent on the drive now), if any.
 fn meta_job(
     meta: NodeMeta,
-    target: Option<RemoteRef>,
+    target: Option<Target>,
     hash: Option<hbsync_types::ContentHash>,
     from: Option<NodeId>,
     after: After,
