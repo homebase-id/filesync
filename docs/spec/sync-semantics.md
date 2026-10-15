@@ -50,11 +50,13 @@ merged three-way whatever else changed (section 11): a tag change is never an `e
 A local scan yields entries `(path, file id, fingerprint, hash?)`. They are matched to node ids
 in this order, and the first rule that matches wins:
 1. **Same path** as a base node with the same kind → that node. A changed file id with the same
-   path is an edit (editors that save through a temp file and a rename do this; one that keeps
-   a backup by renaming leaves the path to the document), unless the new file id is that of a
-   base file whose path is no longer present, unchanged by the move: that file was moved onto
-   this name (`mv c d` over `d`) and keeps its node, and the node that was here is gone, or
-   moved on by its own file id (rule 2).
+   path is an edit (editors that save through a temp file and a rename do this, even when a
+   scan saw the temp file; one that keeps a backup by renaming leaves the path to the
+   document), unless the new file id is that of a base file that left its path (no longer
+   present, itself moved onto another name, or swapped with this one): that file was moved
+   onto this name (`mv c d` over `d`) and keeps its node, and the node that was here is gone,
+   or moved on by its own file id (rule 2). Where file ids are recycled, only with the bytes
+   it had. Files only.
 2. **Same file id** as a base node whose path is no longer present → that node, moved.
 3. **Same content hash and size** as exactly one base file that is missing locally → that node,
    moved. Ambiguous candidates → no match.
@@ -214,10 +216,11 @@ expected fingerprint is treated as done.
   (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
   feed, and parked items come back from their records. A download placed but not recorded (a
   crash just before its commit) is found again: each batch of downloads is recorded before it
-  runs, and on the next start the one new file holding a record's bytes, wherever it was moved
-  since, becomes that node again, with the base the lost commit wrote while the drive still has
-  that version; a file holding its node's bytes at its node's place is adopted, whatever the
-  node's history. A verified download that couldn't be
+  runs (node, target, version, bytes), and on the next start, after the local catch-up and
+  before the feed, a new file at a record's target holding its bytes becomes that node again,
+  settled as the lost commit would have while the drive still has that version; the records
+  go then. A file holding its node's bytes at its node's place is adopted, whatever the node's
+  history. A verified download that couldn't be
   placed stays in the temp folder for the retry; temp files no pending download wants are
   removed before each plan. The stored journal position never passes a change that isn't
   recorded: it is taken before waiting for events and stored only once the event queue has

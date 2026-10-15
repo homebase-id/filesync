@@ -13,7 +13,7 @@
 //! 5. **One transaction** updates the `local` rows and marks every node whose local state changed
 //!    as dirty.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -249,6 +249,77 @@ fn merge(
     Ok(diff)
 }
 
+/// The known paths another synced file now stands at (§3 rule 1): a file at a known path
+/// whose new file id is that of a synced file which left its own path (gone from it, moved
+/// onto yet another name, or swapped with this one) was moved onto this name. Where file ids
+/// are recycled, only with the bytes it had. Anything else at the same path is the node that
+/// was there: an editor's save through a temp file brings a new id (and the temp file, if a
+/// scan saw it, was never synced), one keeping a backup by renaming leaves the path. Returns
+/// the paths, and the hashes taken to tell.
+#[allow(clippy::type_complexity)]
+fn moved_onto(
+    db: &mut StateDb,
+    removed: &[LocalRow],
+    changed: &[(LocalRow, LocalMeta)],
+    opts: &ScanOptions,
+    hash: &mut dyn FnMut(&RelPath, &LocalMeta) -> Option<ContentHash>,
+) -> Result<(HashSet<RelPath>, HashMap<RelPath, Option<ContentHash>>), StateError> {
+    let (mut onto, mut hashed) = (HashSet::new(), HashMap::new());
+    let is_file = |m: &LocalMeta| kind_of(m) == NodeKind::File;
+    let switched: Vec<&(LocalRow, LocalMeta)> = changed
+        .iter()
+        .filter(|(r, m)| {
+            r.kind == NodeKind::File && is_file(m) && m.file_id != r.fingerprint.file_id
+        })
+        .collect();
+    if switched.is_empty() || !opts.fs_family.has_stable_file_ids() {
+        return Ok((onto, hashed));
+    }
+    // Files that left their path, by the id they had there.
+    let mut left: HashMap<FileId, &LocalRow> = removed
+        .iter()
+        .filter(|r| r.kind == NodeKind::File)
+        .map(|r| (r.fingerprint.file_id, r))
+        .collect();
+    // Known paths that hold another file now, by the id they had: two holding each other's
+    // file swapped.
+    let held: HashMap<FileId, &(LocalRow, LocalMeta)> = switched
+        .iter()
+        .map(|&pair| (pair.0.fingerprint.file_id, pair))
+        .collect();
+    loop {
+        let mut more = false;
+        for &(row, meta) in &switched {
+            if onto.contains(&row.path) {
+                continue;
+            }
+            let from = left.get(&meta.file_id).copied().or_else(|| {
+                held.get(&meta.file_id)
+                    .filter(|(_, m)| m.file_id == row.fingerprint.file_id)
+                    .map(|(r, _)| r)
+            });
+            let Some(from) = from else {
+                continue;
+            };
+            let synced = db.read(|s| s.get_base(from.node))?.is_some();
+            let same = !opts.fs_family.reuses_file_ids() || {
+                let h = *hashed
+                    .entry(row.path.clone())
+                    .or_insert_with(|| hash(&row.path, meta));
+                h.is_some() && h == from.hash
+            };
+            if synced && same {
+                onto.insert(row.path.clone());
+                left.insert(row.fingerprint.file_id, row);
+                more = true;
+            }
+        }
+        if !more {
+            return Ok((onto, hashed));
+        }
+    }
+}
+
 fn differs(row: &LocalRow, meta: &LocalMeta) -> bool {
     kind_of(meta) != row.kind
         || row.fingerprint != meta.fingerprint()
@@ -393,39 +464,15 @@ fn resolve(
         (row_from(path, node, meta, hash, tags), changed)
     };
 
-    // Changed in place. A kind change (file ↔ folder) is a delete plus a create. So is a file
-    // whose new file id is that of a file whose path is gone, unchanged by the move (hashed
-    // where ids are recycled): that file was moved onto this name, and what was here is gone,
-    // or moved on by its own id (§3 rule 1). Anything else at the same path is the same node:
-    // an editor's save through a temp file brings a new id, a backup rename leaves the path.
+    // Changed in place. A kind change (file ↔ folder) is a delete plus a create, and so is a
+    // known path another synced file was moved onto (§3 rule 1, see `moved_onto`).
     let mut removed = diff.removed;
     let mut added = diff.added;
-    let gone_files: HashMap<FileId, &LocalRow> = if opts.fs_family.has_stable_file_ids() {
-        removed
-            .iter()
-            .filter(|r| r.kind == NodeKind::File)
-            .map(|r| (r.fingerprint.file_id, r))
-            .collect()
-    } else {
-        HashMap::new()
-    };
-    let mut moved_onto = Vec::new();
-    for (row, meta) in &diff.changed {
-        let Some(from) = gone_files.get(&meta.file_id) else {
-            continue;
-        };
-        let onto = row.kind == NodeKind::File
-            && kind_of(meta) == NodeKind::File
-            && meta.file_id != row.fingerprint.file_id
-            && from.fingerprint.same_after_rename(meta)
-            && (!opts.fs_family.reuses_file_ids()
-                || (from.hash.is_some() && hash_now(&row.path, meta, report) == from.hash));
-        if onto {
-            moved_onto.push(row.path.clone());
-        }
-    }
+    let (onto, mut hashed) = moved_onto(db, &removed, &diff.changed, opts, &mut |p, m| {
+        hash_now(p, m, report)
+    })?;
     for (row, meta) in diff.changed {
-        if kind_of(&meta) != row.kind || moved_onto.contains(&row.path) {
+        if kind_of(&meta) != row.kind || onto.contains(&row.path) {
             added.push((row.path.clone(), meta));
             removed.push(row);
             continue;
@@ -435,7 +482,9 @@ fn resolve(
         if row.kind == NodeKind::File
             && (row.fingerprint != meta.fingerprint() || row.hash.is_none())
         {
-            new.hash = hash_now(&row.path, &meta, report);
+            new.hash = hashed
+                .remove(&row.path)
+                .unwrap_or_else(|| hash_now(&row.path, &meta, report));
             content_changed = new.hash.is_none() || new.hash != row.hash;
         }
         let x_changed = row.kind == NodeKind::File
@@ -490,7 +539,9 @@ fn resolve(
                 && old.hash.is_some()
                 && (!opts.fs_family.reuses_file_ids() || moved_with_parent);
             if !trusted {
-                new.hash = hash_now(&path, &meta, report);
+                new.hash = hashed
+                    .remove(&path)
+                    .unwrap_or_else(|| hash_now(&path, &meta, report));
                 let content_changed = new.hash.is_none() || new.hash != old.hash;
                 if content_changed && opts.fs_family.reuses_file_ids() {
                     // Probably a recycled inode, not the same file: no identity from the id.

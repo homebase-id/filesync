@@ -45,6 +45,17 @@ pub struct BaseRow {
     pub local_hash: Option<hbsync_types::ContentHash>,
 }
 
+/// A download about to be put in place (written before its batch runs): `size` bytes of
+/// content `hash` (the remote's algorithm) at `version`, going to `target`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placing {
+    pub node: NodeId,
+    pub target: RelPath,
+    pub version: VersionTag,
+    pub hash: ContentHash,
+    pub size: u64,
+}
+
 /// What the last observation saw at one local path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalRow {

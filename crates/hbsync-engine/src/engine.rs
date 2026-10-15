@@ -257,6 +257,15 @@ impl Engine {
     ) -> Result<StartupReport, EngineError> {
         self.apply_filter_change()?;
         let (drive, folder) = (Arc::clone(&self.drive), self.db.folder());
+        // Downloads a crash kept from being recorded are found after the catch-up and before
+        // the pull (see recover_placements): then the two run one after the other.
+        if !self.db.read(|s| s.all_placing())?.is_empty() {
+            let local = observer.catch_up(&mut self.db)?;
+            recover_placements(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
+            let feed = drive.pull(Some(folder))?;
+            let sync = self.sync_once(date)?;
+            return Ok(StartupReport { local, feed, sync });
+        }
         let db = &mut self.db;
         let (local, feed) = std::thread::scope(|scope| {
             let local =
@@ -319,7 +328,7 @@ impl Engine {
         unpark(&mut self.db, &self.cfg.exec)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.root)?;
         // Before the pull: see recover_placements.
-        recover_placements(&mut self.db, &self.cfg.exec.root)?;
+        recover_placements(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
         report.feed = self.drive.pull(Some(self.db.folder()))?;
         // A role folder's top on the drive: joined, restored, or made.
         if let Some(role) = hbsync_types::Role::of(self.cfg.scope.top) {

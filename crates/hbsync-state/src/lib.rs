@@ -30,7 +30,8 @@ use rusqlite::{Connection, TransactionBehavior};
 
 pub use coords::Coords;
 pub use store::{
-    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, RemovedRow, Store,
+    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing,
+    RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]

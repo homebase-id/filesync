@@ -284,37 +284,42 @@ fn randomized_crashes() -> R {
     for seed in 0..seeds {
         let server = server();
         let allow = |c: &mut EngineConfig| c.allow_mass_delete = true;
-        let mut a = Client::with_config(&server, "a", allow)?;
-        let mut b = Client::with_config(&server, "b", allow)?;
+        let mut clients = [
+            Client::with_config(&server, "a", allow)?,
+            Client::with_config(&server, "b", allow)?,
+        ];
         let mut rng = Rng(seed);
         let mut ledger = Ledger::default();
+        // A client that crashed is down until it starts again: its first sync (the daemon's
+        // start-up) comes before its user can do anything there; the other one goes on.
+        let mut down = [false; 2];
         for _ in 0..30 {
-            let c = match rng.below(6) {
+            let i = rng.below(2);
+            match rng.below(3) {
                 0 => {
-                    act(&a.root, &mut rng, &mut ledger)?;
-                    continue;
+                    if std::mem::take(&mut down[i]) {
+                        clients[i].sync()?;
+                    }
+                    act(&clients[i].root, &mut rng, &mut ledger)?;
                 }
                 1 => {
-                    act(&b.root, &mut rng, &mut ledger)?;
-                    continue;
+                    down[i] = false;
+                    clients[i].sync()?;
                 }
-                2 => {
-                    a.sync()?;
-                    continue;
+                _ => {
+                    // Few syncs have many commits: the cut lands early more often.
+                    let at = if rng.below(2) == 0 {
+                        rng.below(8)
+                    } else {
+                        rng.below(64)
+                    };
+                    down[i] = crash(&mut clients[i], at, rng.below(2) == 0)
+                        .map_err(|e| format!("seed {seed}: {e}"))?;
+                    crashes += usize::from(down[i]);
                 }
-                3 => {
-                    b.sync()?;
-                    continue;
-                }
-                4 => &mut a,
-                _ => &mut b,
-            };
-            // Few syncs have many commits: the cut lands early more often.
-            let at = rng.below(8) * rng.below(8);
-            let crashed =
-                crash(c, at, rng.below(2) == 0).map_err(|e| format!("seed {seed}: {e}"))?;
-            crashes += usize::from(crashed);
+            }
         }
+        let [mut a, mut b] = clients;
         converged(seed, &mut a, &mut b, &ledger, &server)?;
     }
     assert!(crashes as u64 >= seeds, "only {crashes} crashes");

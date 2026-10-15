@@ -201,6 +201,7 @@ const MIGRATIONS: &[&str] = &[
     "CREATE TABLE placing (
         folder      INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
         id          INTEGER NOT NULL,              -- nodes.id
+        path        TEXT NOT NULL,                 -- where it goes
         version_tag BLOB NOT NULL,                 -- the version being downloaded
         hash        BLOB NOT NULL,                 -- its content hash (remote algorithm)
         size        INTEGER NOT NULL,

@@ -5,8 +5,10 @@ use std::sync::Arc;
 use hbsync_fileio::HashAlgorithm;
 use hbsync_local::{Filter, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_platform::RelPath;
-use hbsync_state::StateDb;
-use hbsync_types::NodeId;
+use hbsync_state::{BaseRow, StateDb};
+use hbsync_types::{
+    ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, VersionTag,
+};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -51,6 +53,42 @@ impl Fixture {
             Ok(nodes)
         })?;
         Ok((report, dirty))
+    }
+
+    /// Records every local file as synced (a base row), as a sync would.
+    fn synced(&mut self) -> R {
+        self.db.write(|s| {
+            for row in s.local_subtree(&RelPath::root())? {
+                let Some(hash) = row.hash.filter(|_| row.kind == NodeKind::File) else {
+                    continue;
+                };
+                let id = || hbsync_types::Uuid::new_v4();
+                s.put_base(&BaseRow {
+                    node: row.node,
+                    state: NodeState {
+                        parent: NodeId::ROOT,
+                        name: row.path.name().unwrap_or_default().to_owned(),
+                        kind: NodeKind::File,
+                        content: Some(FileContent {
+                            hash,
+                            size: row.fingerprint.size,
+                            mtime_ms: 0,
+                            executable: false,
+                        }),
+                        tags: Default::default(),
+                    },
+                    remote: RemoteRef {
+                        file_id: RemoteFileId(id()),
+                        version: VersionTag(id()),
+                    },
+                    content_state: ContentState::Local,
+                    local_name: None,
+                    local_hash: Some(hash),
+                })?;
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 
     fn node(&mut self, rel: &str) -> Result<NodeId, Box<dyn std::error::Error>> {
@@ -139,62 +177,86 @@ fn rename_keeps_node_without_rehash() -> R {
 }
 
 /// A new file id at a known path is the same node, edited (an editor's save through a temp
-/// file; one keeping a backup by renaming), unless a file whose path is gone was moved onto the
-/// name: then that file keeps its node there, and the one that was there is gone, or moved on.
+/// file, even one a scan saw; one keeping a backup by renaming), unless another synced file was
+/// moved onto the name: then that file keeps its node there (from a path that is gone, along a
+/// chain of such moves, or swapped), and the one that was there is gone, or moved on.
 #[test]
-fn a_new_file_id_at_a_path_is_an_edit_unless_a_file_was_moved_onto_it() -> R {
+fn a_new_file_id_at_a_path_is_an_edit_unless_a_synced_file_was_moved_onto_it() -> R {
     let mut f = Fixture::new()?;
     if !f.opts.fs_family.has_stable_file_ids() {
         return Ok(());
     }
-    for name in ["doc.txt", "notes.txt", "notes.txt~", "c", "d", "e", "x"] {
+    let names = [
+        "doc.txt",
+        "doc2.txt",
+        "notes.txt",
+        "notes.txt~",
+        "a",
+        "b",
+        "c",
+        "d",
+    ];
+    for name in names.iter().chain(&["e", "x", "f", "g", "h"]) {
         f.write(name, name.as_bytes())?;
     }
     f.scan()?;
-    let node = |f: &mut Fixture, n: &str| f.node(n);
-    let (doc, notes, backup) = (
-        node(&mut f, "doc.txt")?,
-        node(&mut f, "notes.txt")?,
-        node(&mut f, "notes.txt~")?,
-    );
-    let (c, d, e, x) = (
-        node(&mut f, "c")?,
-        node(&mut f, "d")?,
-        node(&mut f, "e")?,
-        node(&mut f, "x")?,
-    );
+    f.synced()?;
+    let mut nodes = std::collections::HashMap::new();
+    for name in names.iter().chain(&["e", "x", "f", "g", "h"]) {
+        nodes.insert(*name, f.node(name)?);
+    }
+    // An editor's temp file, seen by a scan before it replaces doc2.txt.
+    f.write(".doc2.txt.tmp", b"doc2 v2")?;
+    f.scan()?;
     let root = f.root().to_path_buf();
-    // d steps aside to y, and c takes its name; e is moved over x (x is gone).
-    fs::rename(root.join("d"), root.join("y"))?;
-    fs::rename(root.join("c"), root.join("d"))?;
-    fs::rename(root.join("e"), root.join("x"))?;
+    let mv = |from: &str, to: &str| fs::rename(root.join(from), root.join(to));
+    mv(".doc2.txt.tmp", "doc2.txt")?;
+    mv("d", "y")?; // d steps aside, and c takes its name
+    mv("c", "d")?;
+    mv("e", "x")?; // e is moved over x: x is gone
+    mv("a", "t")?; // a and b swap
+    mv("b", "a")?;
+    mv("t", "b")?;
+    mv("g", "h")?; // g over h, then f over g
+    mv("f", "g")?;
     // Last, so no file made after them gets an id they freed: a save through a temp file, and
     // one keeping a backup by renaming over the old backup.
     f.write(".doc.txt.tmp", b"doc v2")?;
-    fs::rename(root.join(".doc.txt.tmp"), root.join("doc.txt"))?;
-    fs::rename(root.join("notes.txt"), root.join("notes.txt~"))?;
+    mv(".doc.txt.tmp", "doc.txt")?;
+    mv("notes.txt", "notes.txt~")?;
     f.write("notes.txt", b"notes v2")?;
     let (report, _) = f.scan()?;
 
-    assert_eq!(node(&mut f, "doc.txt")?, doc, "a save is an edit");
-    assert_eq!(
-        (node(&mut f, "notes.txt")?, node(&mut f, "notes.txt~")?),
-        (notes, backup),
-        "a save keeping a backup edits both"
-    );
-    assert_eq!(
-        (node(&mut f, "d")?, node(&mut f, "y")?),
-        (c, d),
-        "moved onto a name"
-    );
-    assert_eq!(node(&mut f, "x")?, e, "moved over x");
-    assert!(
-        f.db.read(|s| Ok(s.local_by_node(x)?.is_none()))?,
-        "x is gone"
-    );
+    let mut expect = |path: &str, was: &str| -> R {
+        assert_eq!(f.node(path)?, nodes[was], "{path} holds {was}");
+        Ok(())
+    };
+    for (path, was) in [
+        ("doc.txt", "doc.txt"),
+        ("doc2.txt", "doc2.txt"),
+        ("notes.txt", "notes.txt"),
+        ("notes.txt~", "notes.txt~"),
+        ("y", "d"),
+        ("d", "c"),
+        ("x", "e"),
+        ("a", "b"),
+        ("b", "a"),
+        ("g", "f"),
+        ("h", "g"),
+    ] {
+        expect(path, was)?;
+    }
+    for gone in ["x", "h"] {
+        let node = nodes[gone];
+        assert!(
+            f.db.read(|s| s.local_by_node(node))?.is_none(),
+            "{gone} is gone"
+        );
+    }
+    // Moved: d, c, e, a, b, f, g. Removed: x, h and the temp file.
     assert_eq!(
         (report.moved, report.added, report.removed),
-        (3, 0, 1),
+        (7, 0, 3),
         "{report:?}"
     );
     Ok(())

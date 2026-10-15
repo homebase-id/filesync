@@ -10,6 +10,7 @@ use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
+use hbsync_state::testkit::{Hook, on_commit};
 use hbsync_types::{NodeId, RemoteFileId, RemoteRef, VersionTag};
 
 mod common;
@@ -2164,5 +2165,38 @@ fn a_full_drive_holds_uploads_and_lets_the_rest_through() -> R {
     let report = a.sync()?;
     assert!(!report.full, "{report:?}");
     assert_eq!(live_names()?, ["new.txt"]);
+    Ok(())
+}
+
+/// A download put in place whose commit a crash lost is the node again on the next start,
+/// where it was put, even after the drive moved the node meanwhile: no second copy.
+#[test]
+fn a_download_placed_but_not_recorded_is_found_again() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("x.txt", "the bytes")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    // b crashes just before the commit that records x.txt in place.
+    let (db, placed) = (b.db_path(), b.root.join("x.txt"));
+    let hook = Hook(Arc::new(move |committed| {
+        if !committed && placed.exists() {
+            std::panic::panic_any("crash");
+        }
+    }));
+    on_commit(&db, Some(hook));
+    b.restart()?;
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.sync())).is_err();
+    on_commit(&db, None);
+    assert!(crashed && b.read_text("x.txt")? == "the bytes");
+    // Meanwhile a renames it.
+    fs::rename(a.root.join("x.txt"), a.root.join("y.txt"))?;
+    a.sync()?;
+    b.restart()?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(b.tree_text(""), ["keep.txt = k", "y.txt = the bytes"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }

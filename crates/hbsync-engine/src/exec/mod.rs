@@ -27,7 +27,7 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
@@ -699,25 +699,38 @@ impl<'a> Executor<'a> {
             pending.insert(job.node(), p);
             jobs.push((self.urgent.contains(&job.node()), job));
         }
-        // Write-ahead: a download put in place whose DB update a crash loses is found again by
-        // its record (`recover_placements`), wherever it was moved since.
-        let downloads: Vec<&Download> = jobs
+        // Write-ahead: a download put in place whose DB update a crash loses is found there
+        // again by its record (`recover_placements`).
+        let downloads: Vec<(&Download, &RelPath)> = jobs
             .iter()
-            .filter_map(|(_, job)| match job {
-                Job::Download(d) => Some(d),
-                _ => None,
+            .filter_map(|(_, job)| {
+                let Job::Download(d) = job else {
+                    return None;
+                };
+                let Ctx::Download { target, .. } = &pending.get(&d.node)?.ctx else {
+                    return None;
+                };
+                Some((d, target))
             })
             .collect();
         if !downloads.is_empty() {
             self.db.write(|s| {
-                downloads
-                    .iter()
-                    .try_for_each(|d| match s.get_mirror(d.node)? {
-                        Some(m) => {
-                            s.put_placing(d.node, m.remote_ref().version, &d.expected, d.size)
-                        }
-                        None => Ok(()),
-                    })
+                for (d, target) in &downloads {
+                    // The version whose bytes the job fetches.
+                    let Some(m) = s.get_mirror(d.node)? else {
+                        continue;
+                    };
+                    if m.file.is_some_and(|f| f.hash == d.expected) {
+                        s.put_placing(&Placing {
+                            node: d.node,
+                            target: (*target).clone(),
+                            version: m.version,
+                            hash: d.expected,
+                            size: d.size,
+                        })?;
+                    }
+                }
+                Ok(())
             })?;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
