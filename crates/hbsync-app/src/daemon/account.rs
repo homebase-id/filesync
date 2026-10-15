@@ -19,7 +19,7 @@ use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_state::{StateDb, StateError};
 
-use super::{DaemonError, join_finished};
+use super::DaemonError;
 use crate::protocol::{
     AccountControl, AccountStatus, DeletedItem, FolderStatus, Hints, RecentItem, State, Until,
 };
@@ -313,8 +313,9 @@ impl Account {
         );
         let mut notifications = Notifications::default();
         let mut runners: Vec<Running> = Vec::new();
-        // The first failure (a runner that ended with an error, or didn't start): the account
-        // stops its runners and ends with it, the daemon with it (restarted whole).
+        // A runner that couldn't start: the account stops its runners and ends with it, the
+        // daemon with it (restarted whole). One that ended with an error is started again after a
+        // pause, its folder showing why meanwhile; the others sync on.
         let mut result: Result<(), DaemonError> = Ok(());
         {
             // Under the lock: no pause or folder gets lost between the two phases.
@@ -379,6 +380,7 @@ impl Account {
                         for r in runners.iter_mut().filter(|r| r.path == folder) {
                             r.handle.send(Command::Stop);
                             r.removed = true;
+                            r.restart_at = None;
                         }
                         changed = true;
                     }
@@ -395,13 +397,26 @@ impl Account {
                     Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
                 }
             }
-            // A runner that ended takes its folder out; the account ends with the last.
+            // A runner that ended takes its folder out, unless it failed: then it starts again
+            // after a pause. The account ends with the last.
             let before = runners.len();
-            if let Err(e) = join_finished(&mut runners, |r| r.thread.is_finished(), |r| r.thread)
-                && result.is_ok()
-            {
-                result = Err(DaemonError::Runner(e));
+            let ending = self.stopping(stop) || result.is_err();
+            for r in &mut runners {
+                r.ended(ending);
+                if r.restart_at.is_some_and(|at| Instant::now() >= at) {
+                    let now = Config::load(&paths.config_file())?.unwrap_or_default();
+                    match self.start(&drive, &now, &r.path) {
+                        Ok(new) => {
+                            *r = Running {
+                                backoff: r.backoff,
+                                ..new
+                            }
+                        }
+                        Err(e) => result = Err(e.into()),
+                    }
+                }
             }
+            runners.retain(|r| r.thread.is_some() || r.restart_at.is_some() && !ending);
             if changed || runners.len() != before {
                 *lock(&self.phase) = Phase::Running(shown(&runners));
             }
@@ -430,8 +445,11 @@ impl Account {
         Ok(Running {
             path: folder.to_path_buf(),
             handle,
-            thread,
+            thread: Some(thread),
             removed: false,
+            started: Instant::now(),
+            restart_at: None,
+            backoff: Backoff::new(),
         })
     }
 
@@ -546,9 +564,40 @@ impl Notifications {
 struct Running {
     path: PathBuf,
     handle: Handle,
-    thread: JoinHandle<Result<(), RunnerError>>,
+    /// `None` once it ended.
+    thread: Option<JoinHandle<Result<(), RunnerError>>>,
     /// Asked to stop for good (its folder removed): it no longer shows.
     removed: bool,
+    started: Instant,
+    /// Failed: when to start it again.
+    restart_at: Option<Instant>,
+    backoff: Backoff,
+}
+
+/// A runner that ran this long without failing starts over with short pauses.
+const RAN_WELL: Duration = Duration::from_secs(3600);
+
+impl Running {
+    /// Joins the runner if it ended; one that failed is to start again after a pause, unless
+    /// its folder was removed or the account is `ending`.
+    fn ended(&mut self, ending: bool) {
+        if !self.thread.as_ref().is_some_and(JoinHandle::is_finished) {
+            return;
+        }
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        let result = thread.join().unwrap_or(Err(RunnerError::Panicked));
+        if result.is_ok() || self.removed || ending {
+            return;
+        }
+        if self.started.elapsed() >= RAN_WELL {
+            self.backoff = Backoff::new();
+        }
+        let pause = self.backoff.after(State::Failing);
+        tracing::info!("syncing {} again in {pause:?}", self.path.display());
+        self.restart_at = Some(Instant::now() + pause);
+    }
 }
 
 /// The runners the status shows.
@@ -576,5 +625,57 @@ fn report_emptied(result: Result<usize, hbsync_engine::EngineError>) {
     match result {
         Ok(n) => tracing::info!("{n} items deleted for good"),
         Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+
+    /// A runner that fails is to start again after a pause, unless its folder was removed or
+    /// the account is ending.
+    #[test]
+    fn a_failed_runner_starts_again_unless_its_folder_went()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let folder = home.path().join("Homebase");
+        std::fs::create_dir_all(&folder)?;
+        // Set up for another identity: its runner fails at once.
+        SyncRoot::create(&home.path().join("other.db"), "other.example", &folder)?;
+        let db = home.path().join("state.db");
+        let drive = Drive::new(
+            SyncRoot::open_account(&db, "a.example")?,
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        );
+        let failed = |removed: bool, ending: bool| -> Result<Running, Box<dyn std::error::Error>> {
+            let cfg = RunnerConfig::new(&folder, &db, "a.example", "pc");
+            let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
+            let mut r = Running {
+                path: folder.clone(),
+                handle,
+                thread: Some(thread),
+                removed,
+                started: Instant::now(),
+                restart_at: None,
+                backoff: Backoff::new(),
+            };
+            while r.thread.is_some() {
+                std::thread::sleep(Duration::from_millis(10));
+                r.ended(ending);
+            }
+            Ok(r)
+        };
+        let r = failed(false, false)?;
+        assert!(r.restart_at.is_some());
+        let status = r.handle.status();
+        assert_eq!(status.state, State::Failing);
+        assert!(status.error.is_some());
+        assert!(failed(true, false)?.restart_at.is_none(), "removed");
+        assert!(
+            failed(false, true)?.restart_at.is_none(),
+            "the account ends"
+        );
+        Ok(())
     }
 }

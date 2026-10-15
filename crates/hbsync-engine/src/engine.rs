@@ -118,6 +118,8 @@ pub struct SyncReport {
     pub stopped: bool,
     /// What was done, for people, oldest first (also kept in the state DB).
     pub synced: Vec<Synced>,
+    /// The drive is out of storage: uploads wait until there is room (the server's words).
+    pub full: Option<String>,
 }
 
 impl SyncReport {
@@ -139,6 +141,7 @@ impl SyncReport {
         self.adopted += later.adopted;
         self.stopped = later.stopped;
         self.synced.extend(later.synced);
+        self.full = later.full.or(self.full.take());
     }
 }
 
@@ -251,6 +254,12 @@ impl Engine {
         date: &str,
     ) -> Result<StartupReport, EngineError> {
         self.apply_filter_change()?;
+        // A role folder's top on the drive: joined, restored, or made.
+        let top = self.cfg.scope.top;
+        if !top.is_root() {
+            let name = hbsync_types::Role::of(top).map_or("Folder", hbsync_types::Role::name);
+            self.drive.ensure_top(top, name)?;
+        }
         let (drive, folder) = (Arc::clone(&self.drive), self.db.folder());
         let db = &mut self.db;
         let (local, feed) = std::thread::scope(|scope| {
@@ -452,6 +461,7 @@ impl Engine {
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
+        report.full = exec.full.or(report.full.take());
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
         self.db.write(|s| s.add_synced(&synced, activity::KEEP))?;
         report.synced.extend(synced);

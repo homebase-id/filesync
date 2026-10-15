@@ -49,6 +49,9 @@ pub struct ServerConfig {
     /// Advance the clock by 1 ms after every write, so a write is visible in the feed right
     /// after the next write. With `false`, tests call [`FakeServer::tick`].
     pub auto_tick: bool,
+    /// The payload bytes the drive holds at most: an upload past it is refused
+    /// ([`RemoteError::Full`], Homebase's 507).
+    pub quota: Option<u64>,
 }
 
 impl Default for ServerConfig {
@@ -56,6 +59,7 @@ impl Default for ServerConfig {
         ServerConfig {
             require_hashes: true,
             auto_tick: true,
+            quota: None,
         }
     }
 }
@@ -89,6 +93,11 @@ impl FakeServer {
     }
 
     /// Advances the server clock, making writes from the previous millisecond visible.
+    /// Sets [`ServerConfig::quota`].
+    pub fn set_quota(&mut self, quota: Option<u64>) {
+        self.config.quota = quota;
+    }
+
     pub fn tick(&mut self) {
         self.clock_ms += 1;
     }
@@ -135,6 +144,17 @@ impl FakeServer {
                 upload.reader.read_to_end(&mut bytes)?;
                 if hash_bytes(&bytes, upload.hash.algorithm) != upload.hash {
                     return Err(RemoteError::HashMismatch);
+                }
+                if let Some(quota) = self.config.quota {
+                    let held: u64 = self
+                        .files
+                        .values()
+                        .filter_map(|f| f.bytes.as_ref())
+                        .map(|b| b.len() as u64)
+                        .sum();
+                    if held + bytes.len() as u64 > quota {
+                        return Err(RemoteError::Full(format!("{quota} bytes at most")));
+                    }
                 }
                 let info = PayloadInfo {
                     hash: upload.hash,

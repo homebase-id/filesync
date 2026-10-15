@@ -39,6 +39,11 @@ pub(super) fn notes(
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
+    if report.full.is_some() {
+        notes.push(
+            "Homebase is out of storage: new and changed files wait until there is room".into(),
+        );
+    }
     // Drive rows the client can't read (not encrypted, another key, not a sync node).
     for why in rows {
         notes.push(format!("a file on Homebase can't be synced: {why}"));

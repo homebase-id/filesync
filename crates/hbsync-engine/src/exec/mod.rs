@@ -104,6 +104,8 @@ pub struct ExecReport {
     pub rescan: Vec<RelPath>,
     /// Why the run stopped early, leaving the rest dirty for a later sync.
     pub stopped: Option<Stopped>,
+    /// The drive is out of storage: the run's uploads from then on were held (left dirty).
+    pub full: Option<String>,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
 }
@@ -139,6 +141,8 @@ enum Outcome {
     Skip(Skip),
     /// The remote refused access: stop the run.
     Stop(String),
+    /// The drive is out of storage: hold this and every later upload of the run.
+    Full(String),
 }
 
 impl Outcome {
@@ -434,7 +438,10 @@ impl<'a> Executor<'a> {
         outcome: Outcome,
         gone: Option<String>,
     ) -> Result<(), StateError> {
-        if matches!(outcome, Outcome::Done | Outcome::Settled | Outcome::Skip(_)) {
+        if matches!(
+            outcome,
+            Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full(_)
+        ) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
         if matches!(op, Op::Forget { .. })
@@ -475,6 +482,11 @@ impl<'a> Executor<'a> {
                 let node = op.node();
                 self.db.write(|s| s.mark_dirty(node))?;
                 self.report.stopped.get_or_insert(Stopped::Denied(why));
+            }
+            Outcome::Full(why) => {
+                let node = op.node();
+                self.db.write(|s| s.mark_dirty(node))?;
+                self.report.full.get_or_insert(why);
             }
         }
         Ok(())
@@ -863,6 +875,7 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         // The local source or sink failed: worth another try, but no reason to pause.
         RemoteError::Io(_) => Outcome::Retry(e.to_string()),
         RemoteError::Denied(_) => Outcome::Stop(e.to_string()),
+        RemoteError::Full(_) => Outcome::Full(e.to_string()),
         // The drive won't take it as it is: retrying the same won't help.
         RemoteError::Fatal(_) | RemoteError::InvalidHash | RemoteError::HashRequired => {
             Outcome::unsyncable(e.to_string())

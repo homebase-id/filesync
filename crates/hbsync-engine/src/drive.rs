@@ -6,10 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use hbsync_remote::Remote;
+use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeId;
+use hbsync_types::NodeKind;
 use hbsync_types::activity::Deleted;
+use hbsync_types::schema::NodeContent;
 
 use crate::deleted;
 use crate::engine::EngineError;
@@ -122,6 +124,40 @@ impl Drive {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(folder, tx)| !wanted(*folder) || tx.send(()).is_ok());
+    }
+
+    /// Makes sure the drive has the folder `top` (a role folder: whichever device adds it first
+    /// makes it): kept if it is there, back from Recently deleted (with what was deleted with it)
+    /// if it is there, else made at the drive's top as `name`. Before its folder's engine
+    /// starts.
+    pub fn ensure_top(&self, top: NodeId, name: &str) -> Result<(), EngineError> {
+        self.pull(None)?;
+        let (live, removed) = self.account().read(|s| {
+            Ok((
+                s.get_mirror(top)?.is_some(),
+                s.removed_by_node(top)?.is_some(),
+            ))
+        })?;
+        if live {
+            return Ok(());
+        }
+        if removed {
+            self.restore(&[top])?;
+            return Ok(());
+        }
+        let meta = NodeMeta {
+            node: top,
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder(name),
+        };
+        match self.remote().create(&meta, None) {
+            // Another device made it meanwhile.
+            Ok(_) | Err(RemoteError::AlreadyExists) => {}
+            Err(e) => return Err(EngineError::Remote(e)),
+        }
+        self.pull(None)?;
+        Ok(())
     }
 
     /// Recently deleted, newest first, each item with the folder it would come back to.

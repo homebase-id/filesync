@@ -337,8 +337,19 @@ impl Sim {
     /// (one more client, last, in the role folder's coordinates). Both folders converge to
     /// their parts of the drive; the user moves files between them ([`Action::MoveAcross`]).
     pub fn with_role_device(self) -> Self {
-        let mut sim = self.with_role_folder();
-        let first = &sim.clients[0];
+        self.with_role_folder().with_documents_on(0)
+    }
+
+    /// No role folder on the drive; client 0's and client 1's computers each add Documents (one
+    /// more client each, last): the first to sync makes it on the drive, the other joins it,
+    /// merging what both hold (plan E1).
+    pub fn with_new_role_devices(self) -> Self {
+        self.with_documents_on(0).with_documents_on(1)
+    }
+
+    /// Client `main`'s computer syncs Documents too: one more client, last, in its coordinates.
+    fn with_documents_on(mut self, main: usize) -> Self {
+        let first = &self.clients[main];
         let docs = Client::new(
             format!("{}-docs", first.name),
             first.os,
@@ -347,9 +358,9 @@ impl Sim {
                 top: Role::Documents.node(),
             },
         );
-        sim.clients.push(docs);
-        sim.computers.push((0, sim.clients.len() - 1));
-        sim
+        self.clients.push(docs);
+        self.computers.push((main, self.clients.len() - 1));
+        self
     }
 
     /// The server as client `c`'s folder sees it ([`Coords`]).
@@ -462,6 +473,8 @@ impl Sim {
             (2, Some(file)) => {
                 if let Some(n) = self.server.live.remove(&file) {
                     self.server.removed.insert(file, n);
+                    // A tag change loses to a delete (§11), the phone's too.
+                    self.deleted.insert(file);
                 }
             }
             (_, Some(file)) => {
@@ -739,6 +752,13 @@ impl Sim {
     // ---- sync ----
 
     fn plan(&mut self, c: usize) {
+        // A role folder the drive doesn't have yet is made by the first of its devices to sync
+        // (as `Drive::ensure_top`), named like the users' items.
+        let top = self.clients[c].coords.top;
+        if !top.is_root() && !self.server.ever.contains(&top) {
+            self.server
+                .put(top, NodeState::folder(NodeId::ROOT, NAMES[0]));
+        }
         self.unpark(c);
         self.release_filtered(c);
         let remote = self.server_view(c);

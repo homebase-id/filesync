@@ -1891,3 +1891,44 @@ fn a_role_folder_moved_into_a_folder_keeps_it_alive() -> R {
     assert_eq!(names, ["Archive", "Documents", "cv.txt", "readme.txt"]);
     Ok(())
 }
+
+/// A full drive holds what goes up, without a note per file; the rest of the sync goes on, and
+/// once there is room the held file goes up.
+#[test]
+fn a_full_drive_holds_uploads_and_lets_the_rest_through() -> R {
+    let server = server();
+    let live_names = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        Ok(srv
+            .live()
+            .filter_map(|h| match &h.body {
+                hbsync_remote::RemoteBody::Live { content, .. } => Some(content.name.clone()),
+                _ => None,
+            })
+            .collect())
+    };
+    let mut a = Client::new(&server, "a")?;
+    a.write("old.txt", vec![b'o'; 600])?;
+    a.sync()?;
+    server.lock().map_err(|_| "poisoned")?.set_quota(Some(1000));
+    a.write("new.txt", vec![b'n'; 600])?;
+    std::fs::remove_file(a.root.join("old.txt"))?;
+    let report = a.sync()?;
+    assert!(report.full.is_some(), "{report:?}");
+    assert!(
+        report.skipped.is_empty() && report.failed.is_empty(),
+        "{report:?}"
+    );
+    assert!(report.pending > 0);
+    assert_eq!(
+        live_names()?,
+        Vec::<String>::new(),
+        "the delete went through"
+    );
+
+    server.lock().map_err(|_| "poisoned")?.set_quota(None);
+    let report = a.sync()?;
+    assert!(report.full.is_none(), "{report:?}");
+    assert_eq!(live_names()?, ["new.txt"]);
+    Ok(())
+}

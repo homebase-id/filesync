@@ -95,8 +95,10 @@ says so when it couldn't reach the keychain to remove the credentials there.
       notifications on to every folder's loop, reconnects the socket after a sleep, runs
       Recently deleted's requests and its daily purge (not while paused).
 
-   One folder's loop failing stops its account, and an account failing stops the daemon (it
-   is restarted whole).
+   One folder's loop failing is started again after a pause (from 5 s, doubling up to 5 min,
+   reset after an hour without failing), the folder showing `failing` with its error
+   meanwhile; the account's other folders sync on. A loop that can't start stops its account, and an account
+   failing stops the daemon (it is restarted whole).
 
 Exit status: 0 when stopped or when there is nothing to do (not set up, already running), 1 on
 a failure (service managers restart it then).
@@ -132,7 +134,9 @@ a failure (service managers restart it then).
   is planned again quietly, and told only when it keeps being skipped for ten minutes
   (something holds it back that the plan can't see: a file written all the time, one that can't
   be read). One waiting for another operation (a folder's base for its children's) isn't told:
-  that one says why. A row on the drive the
+  that one says why. A full drive (Homebase's 507) is one note, "Homebase is out of storage":
+  the sync holds every upload from then on and does the rest (downloads, moves, deletes); the
+  next sync tries again. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
   transfers, done and to do.

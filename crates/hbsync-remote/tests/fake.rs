@@ -80,8 +80,8 @@ fn hash_rules() -> R {
 #[test]
 fn rows_of_the_current_millisecond_are_not_visible_yet() -> R {
     let server = FakeServer::new(ServerConfig {
-        require_hashes: true,
         auto_tick: false,
+        ..ServerConfig::default()
     });
     let r = FakeRemote::new(server.clone());
     r.create(&folder("now", NodeId::ROOT), None)?;

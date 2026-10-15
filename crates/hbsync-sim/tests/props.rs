@@ -123,6 +123,14 @@ proptest! {
     fn role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(4), 0..120)) {
         run_with(3, None, Sim::with_role_device, &events)?;
     }
+
+    /// Two computers add Documents, which the drive doesn't have yet: the first to sync makes
+    /// it, the other joins it, merging what both hold, while the users work in both folders of
+    /// both computers and the phone works in it once it is there (plan E1).
+    #[test]
+    fn new_role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(5), 0..120)) {
+        run_with(3, None, Sim::with_new_role_devices, &events)?;
+    }
 }
 
 #[test]

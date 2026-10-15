@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use hbsync_engine::root::SyncRoot;
-use hbsync_types::Role;
+use hbsync_types::{NodeId, Role};
 
 use crate::{Config, Paths, Root};
 
@@ -13,26 +13,33 @@ pub use crate::control::Error;
 
 /// Sets the folder at `path` up for `identity` (kept as it was if it is already: its marker
 /// names it), and lists it in the config. `hbsync setup` has checked that this is what the
-/// user wants (a folder whose state is gone is merged only when asked). An identity has one
-/// main folder: another one is refused.
+/// user wants (a folder whose state is gone is merged only when asked). With `role`, it syncs
+/// that role folder of the drive (joined if the drive has it, back from Recently deleted, or
+/// made when the folder first syncs). An identity has one main folder and one of each role;
+/// a folder inside another synced folder, or holding one, is refused.
 pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Result<(), Error> {
-    if role.is_some() {
-        return Err("role folders can't be added yet".into());
-    }
     let config_path = paths.config_file();
     let config = Config::load(&config_path)?.unwrap_or_default();
-    if let Some(other) = config
-        .roots
-        .iter()
-        .find(|r| r.identity == identity && r.role.is_none() && r.folder != path)
-    {
-        return Err(format!(
-            "{identity} is synced with {} already: unlink it first",
-            other.folder.display()
-        )
-        .into());
+    for other in config.roots.iter().filter(|r| r.folder != path) {
+        if other.identity == identity && other.role == role {
+            let what = role.map_or("its main folder", |r| r.name());
+            return Err(format!(
+                "{identity} syncs {what} with {} already: remove it first",
+                other.folder.display()
+            )
+            .into());
+        }
+        if path.starts_with(&other.folder) || other.folder.starts_with(path) {
+            return Err(format!(
+                "{} and {} can't both be synced: one holds the other",
+                path.display(),
+                other.folder.display()
+            )
+            .into());
+        }
     }
-    SyncRoot::open_or_create(&paths.account_db(identity), identity, path)?;
+    let top = role.map_or(NodeId::ROOT, Role::node);
+    SyncRoot::open_or_create_for(&paths.account_db(identity), identity, path, top)?;
     Config::update(&config_path, |config| {
         if !config.roots.iter().any(|r| r.folder == path) {
             config.roots.push(Root {
@@ -69,12 +76,22 @@ mod tests {
         assert_eq!(hbsync_local::Marker::read(&folder)?, marker, "kept");
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
         assert_eq!(config.roots, [Root::main("a.example", &folder)]);
-        assert!(add(&paths, "a.example", &folder, Some(Role::Documents)).is_err());
+        assert!(
+            add(&paths, "a.example", &folder, Some(Role::Documents)).is_err(),
+            "set up as the main folder"
+        );
         let other = home.path().join("Other");
         std::fs::create_dir_all(&other)?;
         assert!(
             add(&paths, "a.example", &other, None).is_err(),
             "one main folder per identity"
+        );
+
+        let inside = folder.join("Documents");
+        std::fs::create_dir_all(&inside)?;
+        assert!(
+            add(&paths, "b.example", &inside, None).is_err(),
+            "not inside another synced folder"
         );
 
         assert_eq!(
@@ -86,6 +103,46 @@ mod tests {
             hbsync_local::layout::state_dir(&folder).exists(),
             "its state stays"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_role_folder_is_set_up_once_per_identity() -> Result<(), Error> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let (main, docs, more) = (
+            home.path().join("Homebase"),
+            home.path().join("Documents"),
+            home.path().join("More documents"),
+        );
+        for f in [&main, &docs, &more] {
+            std::fs::create_dir_all(f)?;
+        }
+        add(&paths, "a.example", &main, None)?;
+        add(&paths, "a.example", &docs, Some(Role::Documents))?;
+        add(&paths, "a.example", &docs, Some(Role::Documents))?;
+        assert!(
+            add(&paths, "a.example", &more, Some(Role::Documents)).is_err(),
+            "one Documents per identity"
+        );
+        add(&paths, "b.example", &more, Some(Role::Documents))?;
+        let config = Config::load(&paths.config_file())?.ok_or("no config")?;
+        let roles: Vec<_> = config
+            .roots
+            .iter()
+            .map(|r| (r.identity.as_str(), r.role))
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                ("a.example", None),
+                ("a.example", Some(Role::Documents)),
+                ("b.example", Some(Role::Documents))
+            ]
+        );
+        // Its DB knows it as the role folder: set up as another, it is refused.
+        remove(&paths, &docs)?;
+        assert!(add(&paths, "a.example", &docs, Some(Role::Pictures)).is_err());
         Ok(())
     }
 }
