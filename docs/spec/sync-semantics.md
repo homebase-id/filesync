@@ -50,7 +50,9 @@ merged three-way whatever else changed (section 11): a tag change is never an `e
 A local scan yields entries `(path, file id, fingerprint, hash?)`. They are matched to node ids
 in this order, and the first rule that matches wins:
 1. **Same path** as a base node with the same kind → that node. A changed file id with the same
-   path is an edit (editors that save through a temp file and a rename do this).
+   path is an edit (editors that save through a temp file and a rename do this), unless the old
+   file id turns up at another path: then the node moved there (rule 2) and the item at its old
+   path is another one (a swap of two names, or a move followed by a move into the freed name).
 2. **Same file id** as a base node whose path is no longer present → that node, moved.
 3. **Same content hash and size** as exactly one base file that is missing locally → that node,
    moved. Ambiguous candidates → no match.

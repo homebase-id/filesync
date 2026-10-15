@@ -12,7 +12,7 @@
 //! 5. **One transaction** updates the `local` rows and marks every node whose local state changed
 //!    as dirty.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -392,11 +392,22 @@ fn resolve(
         (row_from(path, node, meta, hash, tags), changed)
     };
 
-    // Changed in place. A kind change (file ↔ folder) is a delete plus a create.
+    // Changed in place. A kind change (file ↔ folder) is a delete plus a create, and so is a
+    // new file id where the old one turns up at another path: the item moved there and another
+    // took its place (§3 rule 1; an editor's save through a temp file leaves no old id behind).
     let mut removed = diff.removed;
     let mut added = diff.added;
+    let ids_seen: HashSet<FileId> = if opts.fs_family.has_stable_file_ids() {
+        (added.iter().map(|(_, m)| m.file_id))
+            .chain(diff.changed.iter().map(|(_, m)| m.file_id))
+            .collect()
+    } else {
+        HashSet::new()
+    };
     for (row, meta) in diff.changed {
-        if kind_of(&meta) != row.kind {
+        let moved_away =
+            row.fingerprint.file_id != meta.file_id && ids_seen.contains(&row.fingerprint.file_id);
+        if kind_of(&meta) != row.kind || moved_away {
             added.push((row.path.clone(), meta));
             removed.push(row);
             continue;

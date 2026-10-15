@@ -138,6 +138,48 @@ fn rename_keeps_node_without_rehash() -> R {
     Ok(())
 }
 
+/// An editor's save through a temp file gives the path a new file id: still the same node,
+/// edited. A move away and another item moved into the freed name is two moves; so is a swap.
+#[test]
+fn a_new_file_id_at_a_path_is_an_edit_unless_the_old_one_moved() -> R {
+    let mut f = Fixture::new()?;
+    if !f.opts.fs_family.has_stable_file_ids() {
+        return Ok(());
+    }
+    f.write("doc.txt", b"v1")?;
+    f.write("a", b"a")?;
+    f.write("b", b"b")?;
+    f.write("c", b"c")?;
+    f.scan()?;
+    let (doc, a, b, c) = (f.node("doc.txt")?, f.node("a")?, f.node("b")?, f.node("c")?);
+
+    // Saved through a temp file.
+    f.write(".doc.txt.tmp", b"v2")?;
+    fs::rename(f.root().join(".doc.txt.tmp"), f.root().join("doc.txt"))?;
+    // a and b swap names; c moves away and a new file takes its name... from d.
+    let (root, tmp) = (f.root().to_path_buf(), f.root().join("swap"));
+    fs::rename(root.join("a"), &tmp)?;
+    fs::rename(root.join("b"), root.join("a"))?;
+    fs::rename(&tmp, root.join("b"))?;
+    fs::rename(root.join("c"), root.join("e"))?;
+    f.write("c", b"new c")?;
+    let (report, _) = f.scan()?;
+
+    assert_eq!(f.node("doc.txt")?, doc, "an edit");
+    assert_eq!((f.node("a")?, f.node("b")?), (b, a), "swapped");
+    assert_eq!(f.node("e")?, c, "moved away");
+    assert!(
+        ![doc, a, b, c].contains(&f.node("c")?),
+        "a new item in its place"
+    );
+    assert_eq!(
+        (report.moved, report.added, report.removed),
+        (3, 1, 0),
+        "{report:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn folder_rename_dirties_only_the_folder() -> R {
     let mut f = Fixture::new()?;

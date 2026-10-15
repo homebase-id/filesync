@@ -187,6 +187,18 @@ fn randomized_two_client_convergence() -> R {
             .map(|c| String::from_utf8_lossy(c).into_owned())
             .collect();
         assert!(lost.is_empty(), "seed {seed}: lost {lost:?}\ntree: {ta:?}");
+        // Every write has bytes of its own, and nothing copies a file: bytes twice are an item
+        // taken for another one.
+        let mut seen = HashSet::new();
+        let twice: Vec<&String> = ta
+            .iter()
+            .filter(|(path, c)| !path.ends_with('/') && !seen.insert(c))
+            .map(|(path, _)| path)
+            .collect();
+        assert!(
+            twice.is_empty(),
+            "seed {seed}: copies {twice:?}\ntree: {ta:?}"
+        );
         // The server holds the same tree.
         let live = server.lock().map_err(|_| "poisoned")?.live().count();
         assert_eq!(live, ta.len(), "seed {seed}: server differs");
