@@ -13,9 +13,9 @@
 //!   payloads need `contentHash == storedHash` (here: one hash), and a drive can require
 //!   hashes (4177).
 //!
-//! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter will:
-//! `delete` reads the header, compares the version, then deletes (a check-then-act race the
-//! real server can't close yet). Faults and latency are injected per client.
+//! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter does:
+//! a delete refused for its version (4160) is read once more and counts as done when the file
+//! is deleted (a retry). Faults and latency are injected per client.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
@@ -256,17 +256,16 @@ impl FakeServer {
         Ok(RemoteRef { file_id, version })
     }
 
-    /// Deletes a file if it is still at `expected`. Deleting a tombstone is a no-op: Homebase
-    /// refuses it (the tombstone has a version of its own) and the client then finds it deleted.
+    /// Deletes a file if it is still at `expected` (4160 otherwise). Like Homebase, deleting a
+    /// tombstone at its own version rewrites it: a new version and a new feed row.
     pub fn delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
         let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
-        let RemoteBody::Live { node, .. } = f.header.body else {
-            return Ok(());
-        };
         if f.header.version != expected {
             return Err(RemoteError::VersionMismatch);
         }
-        self.by_node.remove(&node);
+        if let RemoteBody::Live { node, .. } = f.header.body {
+            self.by_node.remove(&node);
+        }
         let version = VersionTag(self.fresh_uuid());
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
@@ -556,10 +555,23 @@ impl Remote for FakeRemote {
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
         self.gate()?;
-        if let RemoteBody::Live { content, .. } = self.server().header(file_id)?.body {
+        let body = self.server().header(file_id)?.body;
+        if let RemoteBody::Live { content, .. } = body {
             self.gate_name(&content.name)?;
         }
-        self.server().delete(file_id, expected)
+        let result = self.server().delete(file_id, expected);
+        match result {
+            // A retry, as the Homebase adapter takes it.
+            Err(RemoteError::VersionMismatch)
+                if self
+                    .server()
+                    .header(file_id)
+                    .is_ok_and(|h| h.body == RemoteBody::Deleted) =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     fn read(

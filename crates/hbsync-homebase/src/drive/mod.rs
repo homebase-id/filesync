@@ -393,9 +393,12 @@ impl Remote for HomebaseRemote {
         {
             Ok(result) => result,
             // A retry: deleting gave the tombstone a version of its own. The raw header is
-            // enough: a row that doesn't decrypt is still a tombstone.
+            // enough: a row that doesn't decrypt is still a tombstone. A header that can't be
+            // read keeps the server's answer.
             Err(RemoteError::VersionMismatch)
-                if self.raw_header(file_id)?.file_state == "deleted" =>
+                if self
+                    .raw_header(file_id)
+                    .is_ok_and(|h| h.file_state == "deleted") =>
             {
                 return Ok(());
             }

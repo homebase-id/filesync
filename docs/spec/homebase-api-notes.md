@@ -70,7 +70,7 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 |---|---|---|
 | Create | `POST /api/v2/drives/{d}/files` | multipart, plaintext request and response (`V2DriveCreateFileController.cs`). Parts: `instructions` first, `metadata` second, then `payload`* (filename = payload key, case-sensitive) and `thumbnail`* (`V1DriveUploadControllerBase.cs:205-270`). Duplicate UniqueId → 400 4105, also when the node holding it is only removed (`archivalStatus` 2, in Recently deleted: **[verified]** live), so a role folder in Recently deleted is restored, never created again. Response `{fileId, driveId, globalTransitId, recipientStatus, newVersionTag, payloads[{key, uid, lastModified}]}` |
 | Update | `PATCH /api/v2/drives/{d}/files/{fileId}` (or `/by-uid/{uid}`) | multipart, plaintext; `metadata` required. `fileMetadata.versionTag` required (4159), stale → 4160. Instructions need `locale: "local"` (missing → 500) and a `manifest`; `payloadDescriptors: []` is a header-only update that keeps the payloads. Ops `appendOrOverwrite` / `deletePayload`; unlisted payloads kept. Unknown fileId → 4106, deleted file → 4002 |
-| Delete (soft) | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: [], versionTag}` (send it; an empty body likely fails binding **[inferred]**). `versionTag` is optional (odin-core #1903, PR #1931, from v0.1.960; **[verified]** in `V2DriveControllerBase.PerformFileDelete`): the file is deleted only at that version, else 400 4160 and nothing is deleted or sent to recipients. Unknown file → 200 `localFileNotFound: true` (before the tag check). Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted`; with the tag the client had, it's refused instead (the tombstone has a version of its own) |
+| Delete (soft) | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: [], versionTag}` (send it; an empty body likely fails binding **[inferred]**). `versionTag` is optional (odin-core #1903, PR #1931, from v0.1.960; **[verified]** in `V2DriveControllerBase.PerformFileDelete`): the file is deleted only at that version, else 400 4160 and nothing is deleted or sent to recipients. Unknown file → 200 `localFileNotFound: true` (before the tag check). Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted`; with the tag the client had, it's refused instead (the tombstone has a version of its own, **[verified]** `UpsertAllButReactionsAndTransferAsync`) |
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
 | Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
@@ -214,7 +214,10 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   Delete row): one request per delete. A 4160 is an edit since (the node is re-planned) or a
   retry (the tombstone has a version of its own): the client reads the header once and takes
   `deleted` as done. `delete-batch/by-file-id` takes a `versionTag` per request and checks them
-  all before deleting any (**[verified]**); not used yet.
+  all before deleting any (**[verified]** `DeleteFileIdBatchInternal`); not used yet. A retried
+  batch whose files were partly deleted fails whole (their tombstones have new tags), and 4160
+  doesn't say which: re-read the headers. Deleting a tombstone at its own tag rewrites it (new
+  version, feed row and `fileDeleted`, **[verified]** `UpsertAllButReactionsAndTransferAsync`).
 - Payload reads were buffered whole in server memory (#1892) and ranges were `int` (#1893)
   until odin-core PR #1921 (merged 2026-10-11). The client is written for #1921: a read is one streamed
   request, whatever its size. Uploads over 4 GiB still fail (the `uint` byte count, the half of

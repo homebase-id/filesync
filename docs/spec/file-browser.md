@@ -117,8 +117,9 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
     extension.
   - A `VersionTagMismatch` or not-found skips the item: another device changed it.
 - **Delete forever:** only what the user saw.
-  - Re-read each item first, and leave it if its `versionTag` changed. The batch delete itself has no
-    version guard, so a change in the moment between the re-read and the delete isn't caught.
+  - Send each item's `versionTag` with it (`delete-batch/by-file-id` takes one per request, from
+    odin-core v0.1.960): an item changed since isn't deleted. One stale tag refuses the whole batch
+    (4160) without saying which: re-read the items, leave the changed ones, send the rest again.
   - Delete files before folders (`delete-batch/by-file-id`), which leaves tombstones.
   - The 30-day purge is the desktops' job; the phone never purges on its own.
 - **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.
