@@ -7,20 +7,24 @@ impl Executor<'_> {
 
     pub(super) fn fork(&mut self, node: NodeId, new_node: NodeId, name: &str) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
-            return Ok(Outcome::Skip("gone".into()));
+            return Ok(Outcome::stale("gone"));
         };
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let parent = row.path.parent().unwrap_or_default();
         let Ok(local) = to_local(name, self.cfg.os) else {
-            return Ok(Outcome::Skip("bad name".into()));
+            return Ok(Outcome::unsyncable(
+                "the conflict copy's name can't be used here",
+            ));
         };
         let Ok(target) = parent.join(&local.name) else {
-            return Ok(Outcome::Skip("bad name".into()));
+            return Ok(Outcome::unsyncable(
+                "the conflict copy's path is too long here",
+            ));
         };
         if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
-            return Ok(Outcome::Skip("conflict copy id already in use".into()));
+            return Ok(Outcome::stale("conflict copy id already in use"));
         }
         // The name may be held by something that stays: the copy can exist remotely already,
         // made by another device with the same bytes, named to fit its folder there. Then a
@@ -57,7 +61,7 @@ impl Executor<'_> {
 
     pub(super) fn mkdir(&mut self, node: NodeId, parent: NodeId, name: &str, tags: &Tags) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
-            return Ok(Outcome::Skip("already local".into()));
+            return Ok(Outcome::stale("already local"));
         }
         let target = self.target_path(parent, name)?;
         let abs = self.abs(&target);
@@ -111,7 +115,7 @@ impl Executor<'_> {
     /// Gives the local item of `node` these tags, if it is still what the plan saw.
     pub(super) fn local_tags(&mut self, node: NodeId, tags: &Tags) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
-            return Ok(Outcome::Skip("gone".into()));
+            return Ok(Outcome::stale("gone"));
         };
         let abs = self.abs(&row.path);
         // A file's guard takes in the change time a tag write moves; a folder's is its file id
@@ -145,7 +149,7 @@ impl Executor<'_> {
 
     pub(super) fn local_move(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
-            return Ok(Outcome::Skip("gone".into()));
+            return Ok(Outcome::stale("gone"));
         };
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
@@ -192,8 +196,8 @@ impl Executor<'_> {
         let mut nodes: Vec<NodeId> = rows.iter().map(|r| r.node).collect();
         nodes.sort();
         if nodes != expected {
-            return Ok(Outcome::Skip(
-                "the folder holds something the plan didn't expect".into(),
+            return Ok(Outcome::stale(
+                "the folder holds something the plan didn't expect",
             ));
         }
         // Everything on disk must be known and unchanged; otherwise rescan first.
@@ -264,7 +268,7 @@ impl Executor<'_> {
             return Ok(if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
                 Outcome::Settled // an earlier try did it
             } else {
-                Outcome::Skip("gone locally".into())
+                Outcome::stale("gone locally")
             });
         };
         // A parked item's temporary name carries its old id: it gets a real one first, its
@@ -277,7 +281,7 @@ impl Executor<'_> {
                 }
                 let is_dir = row.kind == NodeKind::Folder;
                 let Some(to) = release_place(self.db, self.cfg, &original, is_dir)? else {
-                    return Ok(Outcome::Skip("no free name to leave the parked one".into()));
+                    return Ok(Outcome::unsyncable("no free name to leave the parked one"));
                 };
                 match restore_parked(self.db, &self.cfg.root, &row, &to)? {
                     Ok(row) => row,
@@ -303,14 +307,14 @@ impl Executor<'_> {
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).
     pub(super) fn forget_base(&mut self, node: NodeId) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
-            return Ok(Outcome::Skip("still here".into()));
+            return Ok(Outcome::stale("still here"));
         }
         // The base stays a tree: a child's base may still be needed (its delete held or failed),
         // unless the child is forgotten in this run too (children go first; in a cycle of
         // bases, as a remote cycle leaves them, one must go before the others).
         let children = self.db.read(|s| s.base_children(node))?;
         if children.iter().any(|c| !self.forgetting.contains(&c.node)) {
-            return Ok(Outcome::Skip("its children first".into()));
+            return Ok(Outcome::stale("its children first"));
         }
         self.finish(&[], |s| s.delete_base(node).map(drop))
     }

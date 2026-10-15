@@ -96,8 +96,8 @@ pub fn probe_case_insensitive(root: &Path) -> bool {
 #[derive(Debug, Default)]
 pub struct ExecReport {
     pub done: usize,
-    /// Dropped because the world changed since planning; the next plan decides again.
-    pub skipped: Vec<(Op, String)>,
+    /// Left for the next plan, and why.
+    pub skipped: Vec<(Op, Skip)>,
     /// Gave up after retries (transient errors, locked files, ordering).
     pub failed: Vec<(Op, String)>,
     /// Local folders whose contents differ from the DB: rescan them before planning again.
@@ -135,12 +135,55 @@ enum Outcome {
     Retry(String),
     /// A transient remote error: retry after a pause.
     Backoff(String),
-    Skip(String),
+    /// Left for the next plan.
+    Skip(Skip),
     /// The remote refused access: stop the run.
     Stop(String),
 }
 
 /// A DB error inside an operation is retried like any transient failure.
+impl Outcome {
+    fn stale(why: impl Into<String>) -> Outcome {
+        Outcome::Skip(Skip::Stale(why.into()))
+    }
+
+    fn unsyncable(why: impl Into<String>) -> Outcome {
+        Outcome::Skip(Skip::Unsyncable(why.into()))
+    }
+}
+
+/// Why an operation was left for the next plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Skip {
+    /// The world moved on since the plan (an item changed or went, on either side, or what the
+    /// operation needed isn't so any more): the next plan decides again. Nothing to tell.
+    Stale(String),
+    /// This device can't do it as planned (a name or path it can't hold, access denied, the
+    /// drive refusing it): it stays as it is until something changes. The user is told.
+    Unsyncable(String),
+}
+
+impl Skip {
+    /// Whether the user is told: something they may act on.
+    pub fn tells(&self) -> bool {
+        matches!(self, Skip::Unsyncable(_))
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Skip::Stale(why) | Skip::Unsyncable(why) => why,
+        }
+    }
+}
+
+impl std::fmt::Display for Skip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Skip::Stale(why) | Skip::Unsyncable(why) => f.write_str(why),
+        }
+    }
+}
+
 impl From<StateError> for Outcome {
     fn from(e: StateError) -> Self {
         Outcome::Retry(e.to_string())
@@ -643,7 +686,8 @@ impl<'a> Executor<'a> {
                 _ => return Err(Outcome::Retry("parent not local yet".into())),
             }
         };
-        let unspellable = |e: NameIssue| Outcome::Skip(format!("name can't be used here: {e}"));
+        let unspellable =
+            |e: NameIssue| Outcome::unsyncable(format!("name can't be used here: {e}"));
         let local = to_local(name, self.cfg.os).map_err(unspellable)?;
         parent_path.join(&local.name).map_err(unspellable)
     }
@@ -805,14 +849,14 @@ fn matches_row(row: &LocalRow, meta: &hbsync_platform::LocalMeta) -> bool {
 
 fn rescan(report: &mut ExecReport, path: &RelPath) -> Outcome {
     report.rescan.push(path.parent().unwrap_or_default());
-    Outcome::Skip(format!("{path} changed on disk"))
+    Outcome::stale(format!("{path} changed on disk"))
 }
 
 fn io_outcome(e: io::Error) -> Outcome {
     match classify(&e) {
         IoClass::Locked | IoClass::DiskFull | IoClass::Other => Outcome::Retry(e.to_string()),
         IoClass::Raced => Outcome::Retry(format!("raced: {e}")),
-        IoClass::Denied | IoClass::TooLong => Outcome::Skip(e.to_string()),
+        IoClass::Denied | IoClass::TooLong => Outcome::unsyncable(e.to_string()),
     }
 }
 
@@ -822,8 +866,12 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         // The local source or sink failed: worth another try, but no reason to pause.
         RemoteError::Io(_) => Outcome::Retry(e.to_string()),
         RemoteError::Denied(_) => Outcome::Stop(e.to_string()),
+        // The drive won't take it as it is: retrying the same won't help.
+        RemoteError::Fatal(_) | RemoteError::InvalidHash | RemoteError::HashRequired => {
+            Outcome::unsyncable(e.to_string())
+        }
         // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
-        _ => Outcome::Skip(e.to_string()),
+        _ => Outcome::stale(e.to_string()),
     }
 }
 
