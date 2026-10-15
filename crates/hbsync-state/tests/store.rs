@@ -835,3 +835,62 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
     assert_eq!(docs_db.read(|s| s.removed_children(NodeId::ROOT))?.len(), 1);
     Ok(())
 }
+
+/// Folder paths and ids found in a transaction are kept for it, and forgotten by every local
+/// write that changes them: a move, a rekey, a delete.
+#[test]
+fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    db.write(|s| {
+        let a = local("a", NodeKind::Folder, 1);
+        s.put_local(&a)?;
+        let x = local("a/x", NodeKind::File, 2);
+        s.put_local(&x)?;
+        // Both ways in: a's id by its path, and its path by its id.
+        assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("a/x")));
+        s.move_local_subtree(&path("a"), &path("b"))?;
+        assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("b/x")));
+        s.put_local(&local("b/y", NodeKind::File, 3))?;
+        assert!(
+            s.put_local(&local("a/z", NodeKind::File, 4)).is_err(),
+            "a went"
+        );
+
+        let renewed = NodeId::new();
+        s.rekey_local(a.node, renewed)?;
+        let y = s
+            .get_local(&path("b/y"))?
+            .ok_or_else(|| StateError::Corrupt("b/y missing".into()))?;
+        assert_eq!(s.local_parent(y.node)?, Some(renewed));
+        s.delete_local_subtree(&path("b"))?;
+        assert!(
+            s.put_local(&local("b/w", NodeKind::File, 5)).is_err(),
+            "b went"
+        );
+
+        let c = local("c", NodeKind::Folder, 6);
+        s.put_local(&c)?;
+        assert!(s.local_children(&path("c"))?.is_empty());
+        assert!(s.delete_local(c.node)?);
+        assert!(
+            s.put_local(&local("c/v", NodeKind::File, 7)).is_err(),
+            "c went"
+        );
+
+        // A folder that became a file, then went.
+        let d = local("d", NodeKind::Folder, 8);
+        s.put_local(&d)?;
+        let d = LocalRow {
+            kind: NodeKind::File,
+            ..d
+        };
+        s.put_local(&d)?;
+        assert!(s.delete_local(d.node)?);
+        assert!(
+            s.put_local(&local("d/u", NodeKind::File, 9)).is_err(),
+            "d went"
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
