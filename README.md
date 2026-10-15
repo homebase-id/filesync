@@ -15,7 +15,7 @@ Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
    - **Ubuntu, Debian**: `sudo apt install ./homebase-filesync_amd64.deb` (or `_arm64`).
      Updates come with `apt upgrade` (the package adds its repository).
    - **Fedora, openSUSE**: `sudo dnf install ./homebase-filesync-*.x86_64.rpm` (or
-     `.aarch64`). Updates by hand, for now.
+     `.aarch64`; `sudo zypper install` on openSUSE). Updates by hand, for now.
    - **Other Linux, servers**: `homebase-filesync-*-linux-amd64.tar.gz` (or `-aarch64`), static
      programs. Updates by hand.
 2. **Start Homebase Filesync.** Installing doesn't start it, and it has no window, only an icon:
@@ -24,8 +24,9 @@ Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
    - **macOS**: open **Homebase Filesync** from Applications. Its icon is in the menu bar.
    - **Linux**: open **Homebase Filesync** from the app menu (Activities on Ubuntu), or run
      `homebase-filesync` in a terminal (from the tarball:
-     `homebase-filesync-*/bin/homebase-filesync`); it carries on when the terminal closes. Its
-     icon is in the top bar or panel; GNOME needs the AppIndicator extension, which Ubuntu has.
+     `homebase-filesync-*/bin/homebase-filesync`); with systemd it carries on when the terminal
+     closes (without, start it with `setsid`). Its icon is in the top bar or panel; GNOME needs
+     the AppIndicator extension, which Ubuntu has.
 3. **Choose Log in to Homebase…** from that icon. Your browser opens so you can approve this
    computer, and the folder `~/Homebase` starts syncing (or pick another). From then on it
    starts by itself when you log in.

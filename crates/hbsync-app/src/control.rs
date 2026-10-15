@@ -181,24 +181,22 @@ pub fn running(paths: &Paths) -> std::result::Result<bool, IpcError> {
 /// A private instance (`HBSYNC_HOME`): tests, development. It leaves the user's logon entry
 /// alone unless asked by `hbsync autostart`.
 pub fn dev_home() -> bool {
-    std::env::var_os("HBSYNC_HOME").is_some()
+    std::env::var_os("HBSYNC_HOME").is_some_and(|h| !h.is_empty())
 }
 
 /// Starts the daemon and waits until it answers: through the service manager when it starts
 /// the daemon at logon (so that it supervises it), else `hbsyncd` beside this program, on its
-/// own (on Linux, in a unit of the app's unless this program runs in one: [`crate::unit`]).
+/// own (on a Linux desktop, in a scope of the app's: [`crate::unit`]).
 pub fn start(paths: &Paths) -> Result<()> {
     if !dev_home() && autostart::installed()? && autostart::start()? {
         return wait_until_running(paths, None);
     }
     let exe = autostart::daemon_exe()?;
-    // Started from a terminal, say: in a unit of the app's, not the terminal's.
-    #[cfg(target_os = "linux")]
-    if crate::unit::relaunch(&exe, &[]) {
-        return wait_until_running(paths, None);
-    }
     #[cfg(windows)]
     keep_std_handles_from_children();
+    #[cfg(target_os = "linux")]
+    let mut process = crate::unit::command(&exe).unwrap_or_else(|| Command::new(&exe));
+    #[cfg(not(target_os = "linux"))]
     let mut process = Command::new(&exe);
     process
         .stdin(Stdio::null())

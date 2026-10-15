@@ -73,14 +73,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Linux, started from a terminal (say): again, in a unit of the app's ([`hbsync_app::unit`]).
     #[cfg(target_os = "linux")]
-    if let Ok(exe) = autostart::program_of(PROGRAM) {
-        let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-        if hbsync_app::unit::relaunch(&exe, &args) {
-            tracing::info!("started again in a unit of its own");
-            return ExitCode::SUCCESS;
-        }
+    if started_in_scope() {
+        return ExitCode::SUCCESS;
     }
     let _lock = match InstanceLock::acquire_for(&paths, PROGRAM) {
         Ok(lock) => lock,
@@ -127,6 +122,48 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Linux, started from a terminal (say): the tray starts again in a scope of the app's
+/// ([`hbsync_app::unit`]), and this process ends. True when it did. One that fails at once
+/// (systemd-run, or the new tray's own start) leaves it to this one, here.
+#[cfg(target_os = "linux")]
+fn started_in_scope() -> bool {
+    use std::process::Stdio;
+    let Some(mut again) = autostart::program_of(PROGRAM)
+        .ok()
+        .and_then(|exe| hbsync_app::unit::command(&exe))
+    else {
+        return false;
+    };
+    again
+        .args(std::env::args_os().skip(1))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // Out of the terminal's foreground group: its hangup doesn't reach it.
+    std::os::unix::process::CommandExt::process_group(&mut again, 0);
+    let mut child = match again.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::info!("systemd-run: {e}");
+            return false;
+        }
+    };
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while std::time::Instant::now() < until {
+        match child.try_wait() {
+            Ok(Some(status)) if !status.success() => {
+                tracing::info!("not in a scope of its own: it exited ({status})");
+                return false;
+            }
+            // Another tray runs (the new one said so in the log).
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    tracing::info!("started again in a scope of its own");
+    true
 }
 
 /// The tray's state, on the main thread.
