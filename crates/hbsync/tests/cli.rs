@@ -198,3 +198,22 @@ fn a_role_folder_is_added_and_removed_without_a_daemon() -> R {
     assert!(home.ok(&["remove", "documents"])?.contains("isn't synced"));
     Ok(())
 }
+
+#[test]
+fn a_role_folder_is_added_for_an_identity_set_up_only() -> R {
+    let home = Home::new()?;
+    home.set_up()?;
+    let docs = home.path().join("Docs");
+    std::fs::create_dir_all(&docs)?;
+    let out = home.hbsync(&[
+        "add",
+        "documents",
+        "--identity",
+        "typo.example",
+        "--folder",
+        &docs.to_string_lossy(),
+    ])?;
+    assert!(!out.status.success());
+    assert!(text(&out).contains("isn't set up"), "{}", text(&out));
+    Ok(())
+}

@@ -5,13 +5,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeId;
-use hbsync_types::NodeKind;
 use hbsync_types::activity::Deleted;
 use hbsync_types::schema::NodeContent;
+use hbsync_types::{NodeKind, Role};
 
 use crate::deleted;
 use crate::engine::EngineError;
@@ -34,7 +35,12 @@ pub struct Drive {
     wakes: Mutex<Vec<(i64, Sender<()>)>>,
     /// Feed rows the client can't read, whoever pulled them, until taken.
     skipped: Mutex<Vec<String>>,
+    /// The drive refused an upload, out of storage: until when uploads are held.
+    full: Mutex<Option<Instant>>,
 }
+
+/// How long uploads are held after the drive said it is full: then one is tried again.
+const FULL_HOLD: Duration = Duration::from_secs(600);
 
 impl std::fmt::Debug for Drive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -52,7 +58,24 @@ impl Drive {
             answered: Mutex::new(0),
             wakes: Mutex::default(),
             skipped: Mutex::default(),
+            full: Mutex::default(),
         })
+    }
+
+    /// Whether uploads are held: the drive said it is full lately.
+    pub fn full(&self) -> bool {
+        let full = self.full.lock().unwrap_or_else(|e| e.into_inner());
+        full.is_some_and(|until| Instant::now() < until)
+    }
+
+    /// Tries uploads again at once (the user asked for a sync: they may have made room).
+    pub fn clear_full(&self) {
+        *self.full.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// The drive refused an upload, out of storage: hold uploads for a while, in every folder.
+    pub fn set_full(&self) {
+        *self.full.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + FULL_HOLD);
     }
 
     fn remote(&self) -> &dyn Remote {
@@ -126,37 +149,38 @@ impl Drive {
             .retain(|(folder, tx)| !wanted(*folder) || tx.send(()).is_ok());
     }
 
-    /// Makes sure the drive has the folder `top` (a role folder: whichever device adds it first
-    /// makes it): kept if it is there, back from Recently deleted (with what was deleted with it)
-    /// if it is there, else made at the drive's top as `name`. Before its folder's engine
-    /// starts.
-    pub fn ensure_top(&self, top: NodeId, name: &str) -> Result<(), EngineError> {
-        self.pull(None)?;
-        let (live, removed) = self.account().read(|s| {
-            Ok((
-                s.get_mirror(top)?.is_some(),
-                s.removed_by_node(top)?.is_some(),
-            ))
-        })?;
-        if live {
-            return Ok(());
-        }
-        if removed {
-            self.restore(&[top])?;
-            return Ok(());
-        }
-        let meta = NodeMeta {
-            node: top,
-            parent: NodeId::ROOT,
-            kind: NodeKind::Folder,
-            content: NodeContent::folder(name),
+    /// Makes sure the drive has `role`'s folder, just pulled: kept if it is there, back from
+    /// Recently deleted (with what was deleted with it), else made at the drive's top (whichever
+    /// device syncing it gets there first). Before every sync of the role's folder: nothing may
+    /// be synced into a folder that isn't on the drive, where it would land in Recently deleted.
+    pub fn ensure_role(&self, role: Role) -> Result<(), EngineError> {
+        let top = role.node();
+        let live = |drive: &Drive| -> Result<bool, StateError> {
+            drive.account().read(|s| Ok(s.get_mirror(top)?.is_some()))
         };
-        match self.remote().create(&meta, None) {
-            // Another device made it meanwhile.
-            Ok(_) | Err(RemoteError::AlreadyExists) => {}
-            Err(e) => return Err(EngineError::Remote(e)),
+        if live(self)? {
+            return Ok(());
         }
-        self.pull(None)?;
+        if self.restore(&[top])? == 0 {
+            let meta = NodeMeta {
+                node: top,
+                parent: NodeId::ROOT,
+                kind: NodeKind::Folder,
+                content: NodeContent::folder(role.name()),
+            };
+            match self.remote().create(&meta, None) {
+                // Another device made it (or deleted it) meanwhile: seen below.
+                Ok(_) | Err(RemoteError::AlreadyExists) => {}
+                Err(e) => return Err(EngineError::Remote(e)),
+            }
+            self.pull(None)?;
+        }
+        if !live(self)? {
+            return Err(EngineError::Remote(RemoteError::Transient(format!(
+                "{} isn't on the drive yet",
+                role.name()
+            ))));
+        }
         Ok(())
     }
 

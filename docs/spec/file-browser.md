@@ -45,6 +45,8 @@ place, from its own Documents folder and so on, never inside the main folder.
 - Otherwise they are ordinary folders: list, open, upload into them, rename and delete them as any other.
 - Never create one with a new random id: if the role's id is in Recently deleted, restore it
   (Homebase refuses a second node with the same `uniqueId`). Creating them is the desktops' job.
+- Deleting one while a computer syncs it doesn't last: that computer brings it back, with what
+  was in it, at its next sync. Say so before deleting one; don't upload into a deleted one.
 
 ## Listing a folder
 - One `query-batch` with `groupId: [<folder's node id>]`, `fileType: [7101, 7102]`,

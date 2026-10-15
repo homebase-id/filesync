@@ -92,12 +92,12 @@ impl FakeServer {
         }))
     }
 
-    /// Advances the server clock, making writes from the previous millisecond visible.
     /// Sets [`ServerConfig::quota`].
     pub fn set_quota(&mut self, quota: Option<u64>) {
         self.config.quota = quota;
     }
 
+    /// Advances the server clock, making writes from the previous millisecond visible.
     pub fn tick(&mut self) {
         self.clock_ms += 1;
     }

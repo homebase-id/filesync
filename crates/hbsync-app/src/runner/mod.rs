@@ -235,13 +235,14 @@ impl Runner {
                 let status = Arc::clone(&runner.status);
                 let result = runner.run();
                 // Its account starts a failed runner again after a pause.
-                lock(&status).state = State::Stopped;
+                let mut status = lock(&status);
+                status.state = State::Stopped;
                 if let Err(e) = &result {
-                    let mut status = lock(&status);
                     status.state = State::Failing;
                     status.error = Some(e.to_string());
                     tracing::error!("the sync of {} stopped: {e}", status.path.display());
                 }
+                drop(status);
                 result
             })?;
         Ok((handle, thread))
@@ -342,6 +343,8 @@ impl Runner {
                     Ok(Command::SyncNow) => {
                         schedule.asked(Instant::now());
                         check_rules = true;
+                        // The user may have made room on the drive.
+                        self.drive.clear_full();
                     }
                     Ok(Command::Pause { until }) => {
                         schedule.pause(until);

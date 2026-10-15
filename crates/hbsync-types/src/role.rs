@@ -59,6 +59,18 @@ impl Role {
         }
     }
 
+    /// The folder of the user's it is synced with (where the OS keeps it).
+    pub const fn user_dir(self) -> hbsync_platform::user_dirs::UserDir {
+        use hbsync_platform::user_dirs::UserDir;
+        match self {
+            Role::Documents => UserDir::Documents,
+            Role::Pictures => UserDir::Pictures,
+            Role::Music => UserDir::Music,
+            Role::Videos => UserDir::Videos,
+            Role::Downloads => UserDir::Downloads,
+        }
+    }
+
     /// How config files and the command line name it.
     pub const fn key(self) -> &'static str {
         match self {

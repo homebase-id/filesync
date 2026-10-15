@@ -345,7 +345,8 @@ pub fn unlink(paths: &Paths) -> Result<Option<Unlinked>> {
     config.paused = false;
     let roots = std::mem::take(&mut config.roots);
     config.save(&path)?;
-    for root in &roots {
+    // Only the main folder was decorated: a role folder's shortcuts are the user's own.
+    for root in roots.iter().filter(|r| r.role.is_none()) {
         crate::shell::undecorate(paths, &root.folder, &root.identity);
     }
     Ok(Some(Unlinked {

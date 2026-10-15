@@ -131,6 +131,12 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   Credential Manager or the Secret Service, a user-only file when there is none
 - **Filters** (done 2026-10-09, sync semantics §10): built-in junk, per-device ignore rules in
   `.hbsync/ignore`, remote nodes masked per device, local-only semantics for ignored items
+- **Role folders** (2026-10-14, node schema "Role folders", sync semantics §12): one state DB
+  per account shared by its folders (`Drive`); besides the main folder, a computer syncs the
+  user's own Documents, Pictures, Music, Videos and Downloads where they are (`hbsync add
+  <role>`, the tray's Folders page), joined if another device syncs them, restored from
+  Recently deleted, or made; a folder another app syncs (OneDrive, iCloud) is refused. Next:
+  a setup wizard offering them, then backups
 - **Observability**: structured logs, per-item status, diagnostics bundle
 - **Packaging** (2026-10-11, `docs/spec/packaging.md`, `RELEASING.md`): Conveyor installers
   that update themselves (MSIX, Mac apps and `.dmg`, `.deb` with its apt repository), an `.rpm`,
@@ -144,8 +150,8 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **macOS File Provider extension**: the OS owns the folder and becomes a tier-A local observation source. Keep this in mind from Layer 2 on: retrofitting it is structural.
 - **Tray / menubar UI**: status, conflicts, selective sync. The v0.1 tray is built
   (2026-10-11, `crates/hbsync-tray`: status and progress, recently synced, problems, timed
-  pause, logging in, held deletes, notifications, folder icon and shortcut); selective sync
-  and several folders come next
+  pause, logging in, held deletes, notifications, folder icon and shortcut; the Folders page
+  since 2026-10-14); selective sync comes next
 - **Linux FUSE mount** (later)
 
 ## Continuous: hardening
