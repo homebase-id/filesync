@@ -13,7 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use hbsync_engine::Drive;
-use hbsync_engine::root::AccountReader;
+use hbsync_engine::root::{AccountReader, RootError};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
@@ -258,13 +258,31 @@ impl Account {
     }
 
     /// `f` on the answers' connection, which only reads, opened on first use; `None` when the
-    /// DB isn't there yet or `f` failed.
+    /// DB isn't there yet (or not brought up to date yet: the drive does as it opens) or `f`
+    /// failed, which drops the connection.
     fn read<T>(&self, f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>) -> Option<T> {
         let mut reader = lock(&self.reader);
         if reader.is_none() {
-            *reader = AccountReader::open(&self.db, &self.identity).ok().flatten();
+            *reader = match AccountReader::open(&self.db, &self.identity) {
+                Ok(opened) => opened,
+                Err(RootError::State(e @ StateError::Behind { .. })) => {
+                    tracing::debug!("{}: {e}", self.identity);
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("{}: can't read its state DB: {e}", self.identity);
+                    None
+                }
+            };
         }
-        f(reader.as_mut()?).ok()
+        match f(reader.as_mut()?) {
+            Ok(answer) => Some(answer),
+            Err(e) => {
+                tracing::warn!("{}: can't read its state DB: {e}", self.identity);
+                *reader = None;
+                None
+            }
+        }
     }
 
     fn waiting(&self, to: State, why: String) {

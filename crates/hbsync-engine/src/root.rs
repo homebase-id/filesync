@@ -53,7 +53,13 @@ impl SyncRoot {
     /// The folder at `path` of `identity`'s DB at `db`, which its marker must name. A folder
     /// moved since is found all the same, and its new place recorded.
     pub fn open(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
-        let (root, recorded) = Self::locate(db, identity, path)?;
+        let (root, recorded) = match Self::locate(db, identity, path) {
+            Err(RootError::State(StateError::Behind { .. })) => {
+                Self::upgrade(db, identity)?;
+                Self::locate(db, identity, path)?
+            }
+            found => found?,
+        };
         let text = path.to_string_lossy();
         if recorded != text {
             Self::open_account(db, identity)?.write(|s| s.set_folder_path(root.folder, &text))?;
@@ -62,7 +68,9 @@ impl SyncRoot {
     }
 
     /// [`SyncRoot::open`] without writing anything (a moved folder's new place isn't
-    /// recorded), for a check while the daemon may be syncing.
+    /// recorded), for a check while the daemon may be syncing. A DB of an older schema is
+    /// refused ([`StateError::Behind`]) rather than brought up to date: see
+    /// [`SyncRoot::upgrade`].
     pub fn find(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
         Ok(Self::locate(db, identity, path)?.0)
     }
@@ -179,6 +187,13 @@ impl SyncRoot {
         };
         let text = path.to_string_lossy();
         Ok(account.folders()?.iter().any(|f| f.path == text))
+    }
+
+    /// Brings `identity`'s DB at `db` up to date (made if new; refused if another's), for
+    /// what only looks next ([`SyncRoot::find`], [`AccountReader`]). Only while nothing else
+    /// may write it: an older daemon would find a schema it doesn't know.
+    pub fn upgrade(db: &Path, identity: &str) -> Result<(), RootError> {
+        Self::open_account(db, identity).map(drop)
     }
 
     /// The account DB at `db`, for `identity` (made if new; refused if another's).

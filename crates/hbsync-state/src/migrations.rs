@@ -227,7 +227,7 @@ pub(crate) fn user_version(conn: &Connection) -> Result<u32> {
 }
 
 /// Refuses a DB this client can't use (0 is a new one).
-fn check(version: u32) -> Result<()> {
+pub(crate) fn check(version: u32) -> Result<()> {
     if version > VERSION {
         Err(StateError::TooNew {
             found: version,

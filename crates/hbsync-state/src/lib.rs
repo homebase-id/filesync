@@ -72,6 +72,12 @@ pub enum StateError {
         "state DB schema version {found} is from an older Filesync (one DB per folder) and isn't upgraded: set the folder up again"
     )]
     TooOld { found: u32 },
+    /// Older than this client's, and a [`Reader`] can't bring it up to date: a writer does
+    /// (the daemon of this version as it starts).
+    #[error(
+        "state DB schema version {found} is older than this client's ({supported}): it is brought up to date when this version's daemon starts (restart a running one)"
+    )]
+    Behind { found: u32, supported: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
 }
@@ -557,6 +563,11 @@ impl StateDb {
     /// changes of the drive ([`Store::fan_out`]): the engines to wake.
     pub fn take_touched(&mut self) -> std::collections::BTreeSet<i64> {
         std::mem::take(&mut self.touched)
+    }
+
+    /// Whether `other` is a connection to the same DB file.
+    pub fn same_file(&self, other: &StateDb) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
     }
 
     /// The schema version in use.

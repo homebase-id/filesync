@@ -413,6 +413,11 @@ pub fn set_up(
     // here, set up by the daemon (or here, when it isn't running).
     let db = paths.account_db(identity);
     let has_files = has_files(&folder)?;
+    let running = control::running(paths)?;
+    if !running && db.exists() {
+        // Nothing else writes it: brought up to date here, for the checks (which only look).
+        SyncRoot::upgrade(&db, identity)?;
+    }
     match SyncRoot::find(&db, identity, &folder) {
         Ok(_) => {}
         // Synced here before, its marker gone: an empty mount point, most likely. Setting it
@@ -434,7 +439,6 @@ pub fn set_up(
         Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {}
         Err(e) => return Err(e.into()),
     }
-    let running = control::running(paths)?;
     if running && authorized {
         control::start_over(paths, identity)?;
     }

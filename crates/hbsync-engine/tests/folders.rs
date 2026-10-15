@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use hbsync_engine::root::{AccountReader, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, SyncReport};
 use hbsync_fileio::HashAlgorithm;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
@@ -252,7 +253,9 @@ fn a_file_moved_across_the_folders_here_is_kept() -> R {
         parent_on_server(&server, "notes.txt"),
         Some(Role::Documents.node())
     );
-    let deleted = pc.main.drive().recently_deleted(10)?;
+    let deleted = AccountReader::open(&pc.main_root.with_file_name("state.db"), "t.example")?
+        .ok_or("no state DB")?
+        .recently_deleted(10)?;
     assert_eq!(
         deleted.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
         ["notes.txt"]
@@ -415,5 +418,21 @@ fn documents_deleted_on_the_drive_while_synced_comes_back() -> R {
         ),
         "Documents is live again"
     );
+    Ok(())
+}
+
+/// A folder's engine keeps its state in its drive's DB: one on another DB is refused.
+#[test]
+fn an_engine_on_another_drives_db_is_refused() -> R {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("Homebase");
+    std::fs::create_dir_all(&root)?;
+    let db = dir.path().join("a.db");
+    let sync_root = SyncRoot::create(&db, "t.example", &root)?;
+    let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+    let other = Drive::open(&dir.path().join("b.db"), "t.example", remote.clone())?;
+    assert!(Engine::open(&sync_root, other, config(&root)).is_err());
+    let ours = Drive::open(&db, "t.example", remote)?;
+    assert!(Engine::open(&sync_root, ours, config(&root)).is_ok());
     Ok(())
 }

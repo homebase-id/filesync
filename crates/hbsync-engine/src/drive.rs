@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeId;
-use hbsync_types::activity::Deleted;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeKind, Role};
 
@@ -96,6 +95,11 @@ impl Drive {
 
     pub fn shared_remote(&self) -> Arc<dyn Remote> {
         Arc::clone(&self.remote)
+    }
+
+    /// Whether `db` is a connection to the drive's DB file.
+    pub(crate) fn same_file(&self, db: &StateDb) -> bool {
+        self.account().same_file(db)
     }
 
     fn account(&self) -> MutexGuard<'_, StateDb> {
@@ -194,11 +198,6 @@ impl Drive {
             ))));
         }
         Ok(())
-    }
-
-    /// Recently deleted, newest first, each item with the folder it would come back to.
-    pub fn recently_deleted(&self, limit: usize) -> Result<Vec<Deleted>, StateError> {
-        self.account().read(|s| deleted::list(s, limit))
     }
 
     /// Restores these items of Recently deleted (each with what was deleted with it); the

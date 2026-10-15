@@ -9,7 +9,7 @@ use std::sync::Arc;
 use hbsync_local::STATE_DIR;
 use hbsync_remote::Remote;
 
-use crate::root::SyncRoot;
+use crate::root::{AccountReader, SyncRoot};
 use crate::{Drive, Engine, EngineConfig, SyncReport};
 
 /// The identity test clients sync with.
@@ -74,8 +74,9 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         let mut cfg = EngineConfig::new(root, name);
         configure(&mut cfg)?;
         tweak(&mut cfg);
-        let root = SyncRoot::open(&db_path(root), IDENTITY, root)?;
-        let drive = Drive::open(&db_path(root.path()), IDENTITY, Arc::from(remote))?;
+        let db = db_path(root);
+        let root = SyncRoot::open(&db, IDENTITY, root)?;
+        let drive = Drive::open(&db, IDENTITY, Arc::from(remote))?;
         Ok(Engine::open(&root, drive, cfg)?)
     }
 
@@ -98,6 +99,12 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
     /// The state DB file (for a second connection).
     pub fn db_path(&self) -> PathBuf {
         db_path(&self.root)
+    }
+
+    /// Recently deleted, as the daemon answers it (a connection that only reads).
+    pub fn recently_deleted(&self, limit: usize) -> Res<Vec<hbsync_types::activity::Deleted>> {
+        let mut reader = AccountReader::open(&self.db_path(), IDENTITY)?.ok_or("no state DB")?;
+        Ok(reader.recently_deleted(limit)?)
     }
 
     /// Scan, then sync until idle (six passes at most), `before` each pass; every pass's

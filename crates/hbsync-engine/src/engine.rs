@@ -175,9 +175,17 @@ impl std::fmt::Debug for Engine {
 }
 
 impl Engine {
-    /// The engine of the folder `root`, on its account's `drive` ([`Engine::new`]).
+    /// The engine of the folder `root`, on its account's `drive` ([`Engine::new`]), which
+    /// must keep its state in the same DB.
     pub fn open(root: &SyncRoot, drive: Arc<Drive>, cfg: EngineConfig) -> Result<Self, RootError> {
-        Ok(Engine::new(root.state()?, drive, cfg))
+        let db = root.state()?;
+        if !drive.same_file(&db) {
+            return Err(RootError::State(StateError::Conflict(format!(
+                "{}: its drive keeps its state in another DB",
+                root.path().display()
+            ))));
+        }
+        Ok(Engine::new(db, drive, cfg))
     }
 
     /// The engine of the folder `db` sees, on the account's `drive`. The folder's top (the
