@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use hbsync_engine::testkit::TestClient;
 use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+use hbsync_state::StateDb;
 use hbsync_state::testkit::{Commit, Hook, on_commit};
 
 pub use hbsync_engine::testkit::Res;
@@ -63,13 +64,35 @@ impl Client {
 struct Crash;
 
 /// Syncs `c` until it crashes at a commit `when` picks (just before one: that operation's DB
-/// changes are lost, what it did on disk or on the drive stays), then starts it again.
-/// Returns whether it crashed.
-pub fn crash(c: &mut Client, when: impl Fn(Commit) -> bool + Send + Sync + 'static) -> Res<bool> {
+/// changes are lost, what it did on disk or on the drive stays), then starts it again. With
+/// `power_cut`, the DB also loses every commit after its last durable one, as with an OS crash
+/// or a power cut. Returns whether it crashed.
+pub fn crash(
+    c: &mut Client,
+    power_cut: bool,
+    when: impl Fn(Commit) -> bool + Send + Sync + 'static,
+) -> Res<bool> {
     let db = c.db_path();
+    // What is on the disk: every sync ends durably.
+    let durable = db.with_file_name("durable.db");
+    let keep = {
+        let (db, durable) = (db.clone(), durable.clone());
+        move || {
+            let _ = std::fs::remove_file(&durable);
+            StateDb::open_account(&db)
+                .and_then(|mut db| db.copy_to(&durable))
+                .expect("copying the state DB");
+        }
+    };
+    if power_cut {
+        keep();
+    }
     let hook = Hook(Arc::new(move |at| {
         if when(at) {
             std::panic::panic_any(Crash);
+        }
+        if power_cut && at == Commit::Durable {
+            keep();
         }
     }));
     on_commit(&db, Some(hook));
@@ -84,6 +107,9 @@ pub fn crash(c: &mut Client, when: impl Fn(Commit) -> bool + Send + Sync + 'stat
         Err(e) if e.is::<Crash>() => true,
         Err(e) => std::panic::resume_unwind(e),
     };
+    if crashed && power_cut {
+        StateDb::open_account(&db)?.restore_from(&durable)?;
+    }
     c.restart()?;
     Ok(crashed)
 }

@@ -309,6 +309,7 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
+                self.filling(target)?;
                 match self.move_to_trash(&row.path, node) {
                     Ok(()) => done.persist_new(&self.abs(target), created_ms),
                     Err(e) => {
@@ -322,6 +323,7 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
+                self.filling(target)?;
                 done.persist_new(&self.abs(target), created_ms)
             }
         };

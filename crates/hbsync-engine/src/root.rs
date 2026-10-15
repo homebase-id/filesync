@@ -91,7 +91,8 @@ impl SyncRoot {
         let marker = Marker::new(identity);
         let mut account = Self::open_account(db, identity)?;
         let text = path.to_string_lossy();
-        let folder = account.write(|s| {
+        // Durable before the marker exists: a marker the DB lost would be refused as foreign.
+        let folder = account.write_durable(|s| {
             for old in s.folders()?.into_iter().filter(|f| f.top == top) {
                 s.remove_folder(old.id)?;
             }

@@ -2180,7 +2180,9 @@ fn a_download_placed_but_not_recorded_is_found_again() -> R {
     let mut b = Client::new(&server, "b")?;
     // b crashes just before the commit that records x.txt in place.
     let placed = b.root.join("x.txt");
-    let crashed = common::crash(&mut b, move |at| at == Commit::Before && placed.exists())?;
+    let crashed = common::crash(&mut b, false, move |at| {
+        at == Commit::Before && placed.exists()
+    })?;
     assert!(crashed && b.read_text("x.txt")? == "the bytes");
     // Meanwhile a renames it.
     fs::rename(a.root.join("x.txt"), a.root.join("y.txt"))?;
@@ -2189,6 +2191,38 @@ fn a_download_placed_but_not_recorded_is_found_again() -> R {
     b.sync()?;
     a.sync()?;
     assert_eq!(b.tree_text(""), ["keep.txt = k", "y.txt = the bytes"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// A folder deleted on the drive and a new one made under its name: the trash and the new
+/// folder land here in one sync. A power cut losing the trash's commit must not leave the DB
+/// taking the new folder for the old one.
+#[test]
+fn a_power_cut_after_a_folder_was_replaced_keeps_the_new_folder() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("F/old.txt", "old")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("F"))?;
+    a.sync()?;
+    a.write("F/new.txt", "new")?;
+    a.sync()?;
+    // b's power goes just before the first commit once the new folder is there.
+    let (gone, f) = (std::sync::atomic::AtomicBool::new(false), b.root.join("F"));
+    let crashed = common::crash(&mut b, true, move |at| {
+        if !f.exists() {
+            gone.store(true, Ordering::SeqCst);
+        }
+        at == Commit::Before && gone.load(Ordering::SeqCst) && f.exists()
+    })?;
+    assert!(crashed);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(b.tree_text(""), ["F/", "F/new.txt = new", "keep.txt = k"]);
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }

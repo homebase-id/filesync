@@ -213,6 +213,15 @@ pub struct Executor<'a> {
     counted: HashSet<NodeId>,
     /// The drive is full: uploads are held (from the start, when it was lately).
     full: bool,
+    /// Places on disk emptied since the last durable commit (by [`place_key`]). With the
+    /// commits since lost (a power cut), what is put there next would be taken for what was
+    /// there: before that, they are made durable ([`Executor::filling`]).
+    emptied: HashSet<String>,
+}
+
+/// A place on disk as [`Executor::emptied`] knows it (any case).
+fn place_key(path: &RelPath) -> String {
+    name_key(path.as_str())
 }
 
 /// An operation whose guards passed, its job waiting for a worker.
@@ -337,6 +346,7 @@ impl<'a> Executor<'a> {
             progress: Arc::default(),
             counted: HashSet::new(),
             full: false,
+            emptied: HashSet::new(),
         }
     }
 
@@ -380,6 +390,9 @@ impl<'a> Executor<'a> {
 
     /// Runs a plan's operations, in order.
     pub fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
+        // What the plan was made from is durable before anything acts on it: the ids the scan
+        // gave new items go out with them (a power cut must not make the scan give others).
+        self.db.flush()?;
         self.forgetting = ops
             .iter()
             .filter(|op| matches!(op, Op::Forget { .. }))
@@ -711,8 +724,7 @@ impl<'a> Executor<'a> {
         // Write-ahead: a download put in place whose commit a crash loses is found there again
         // by its record (`recover_placements`).
         if !records.is_empty() {
-            self.db
-                .write(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
+            self.write_ahead(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -873,6 +885,32 @@ impl<'a> Executor<'a> {
         occupant(self.db, self.cfg.case_insensitive, target)
     }
 
+    /// Writes a record of what is about to happen on disk, durably (with every commit before).
+    fn write_ahead(
+        &mut self,
+        f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
+    ) -> Result<(), StateError> {
+        self.db.write_durable(f)?;
+        self.emptied.clear();
+        Ok(())
+    }
+
+    /// `path` on disk was just emptied (moved or trashed from).
+    fn emptied(&mut self, path: &RelPath) {
+        self.emptied.insert(place_key(path));
+    }
+
+    /// Before something is put at `path`: if it was emptied since the last durable commit, the
+    /// commits are made durable first, so a power cut can't leave the DB holding the old item
+    /// there while the new one is.
+    fn filling(&mut self, path: &RelPath) -> Result<(), StateError> {
+        if self.emptied.contains(&place_key(path)) {
+            self.db.flush()?;
+            self.emptied.clear();
+        }
+        Ok(())
+    }
+
     /// Frees `target` if a node that the plan is about to move away holds it: that node is
     /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
     /// The mover itself may hold it under another case (a case-only rename).
@@ -899,12 +937,12 @@ impl<'a> Executor<'a> {
         // item under its temporary name, and this record maps it back to its real place (a
         // record counts only while the item carries that name), so the temporary name can't
         // reach the remote as a rename.
-        self.db
-            .write(|s| s.put_parked(occupant.node, &occupant.path))?;
+        self.write_ahead(|s| s.put_parked(occupant.node, &occupant.path))?;
         if ops::rename_noreplace(&self.abs(&occupant.path), &self.abs(&parked)).is_err() {
             self.db.write(|s| s.delete_parked(occupant.node))?;
             return Ok(false);
         }
+        self.emptied(&occupant.path);
         if self.crash_here(CrashPoint::AfterParkRename) {
             return Ok(false);
         }

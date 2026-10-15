@@ -250,22 +250,18 @@ fn converged(
 }
 
 /// Crashes `c` at its state DB's `at`-th commit of a sync (if it gets that far), just before
-/// or after it. A crash between operations, or inside one; one between an operation's change on
-/// disk and a commit of its write-ahead record is that record's case (the `CrashPoint` tests).
-fn crash_at(c: &mut Client, at: usize, before: bool) -> Res<bool> {
-    let when = if before {
-        Commit::Before
-    } else {
-        Commit::After
-    };
+/// or after it; with `power_cut`, the DB loses what wasn't durable. A crash between operations,
+/// or inside one; one between an operation's change on disk and a commit of its write-ahead
+/// record is that record's case (the `CrashPoint` tests).
+fn crash_at(c: &mut Client, at: usize, before: bool, power_cut: bool) -> Res<bool> {
     let commits = AtomicUsize::new(0);
-    common::crash(c, move |now| {
-        now == when && commits.fetch_add(1, Ordering::SeqCst) == at
+    common::crash(c, power_cut, move |now| {
+        (now == Commit::Before) == before && commits.fetch_add(1, Ordering::SeqCst) == at
     })
 }
 
-/// Crashes at any of the first 64 commits of a sync, just before or after one: the clients
-/// still converge, with nothing lost and nothing twice.
+/// Crashes and power cuts at any of the first 64 commits of a sync, just before or after one:
+/// the clients still converge, with nothing lost and nothing twice.
 #[test]
 fn randomized_crashes() -> R {
     let seeds = seeds();
@@ -298,7 +294,8 @@ fn randomized_crashes() -> R {
                     } else {
                         rng.below(64)
                     };
-                    down[i] = crash_at(&mut clients[i], at, rng.below(2) == 0)
+                    let (before, power_cut) = (rng.below(2) == 0, rng.below(2) == 0);
+                    down[i] = crash_at(&mut clients[i], at, before, power_cut)
                         .map_err(|e| format!("seed {seed}: {e}"))?;
                     crashes += usize::from(down[i]);
                 }

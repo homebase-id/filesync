@@ -312,6 +312,18 @@ impl Engine {
     /// Pulls remote changes, then plans and executes until nothing is left to do (or the
     /// round limit is hit). `date` (`YYYY-MM-DD`) is used for conflict-copy names.
     pub fn sync_once(&mut self, date: &str) -> Result<SyncReport, EngineError> {
+        // What earlier syncs did is durable before this one puts anything back on disk
+        // (unpark), and what this one did is when it ends, however it ends: a power cut loses
+        // at most the sync in progress (sync semantics §8a).
+        self.db.flush()?;
+        let synced = self.sync_pass(date);
+        let flushed = self.db.flush();
+        let report = synced?;
+        flushed?;
+        Ok(report)
+    }
+
+    fn sync_pass(&mut self, date: &str) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
         self.progress.reset();
         // After the scan, before planning: see recover_forks.
