@@ -983,8 +983,9 @@ fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
     Ok(above.items.last().copied().unwrap_or(node))
 }
 
-// Every change the executor makes on disk goes through these two, which keep the order the
-// state DB needs with its durable commits (its docs on durability).
+// Every change the executor makes to a folder's entries goes through these two, which keep the
+// order the state DB needs with its durable commits (its docs on durability). Tags and times
+// written on an item aren't ordered: one lost reads as a change of those only.
 
 /// Puts something at `at` on disk with `put`: once the place can take it
 /// ([`StateDb::filling`]), its folder noted as changed after.

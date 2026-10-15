@@ -22,12 +22,17 @@
 //! commit before it. What the client does on disk is ordered against that here, for every
 //! connection of the process to the DB file:
 //! - the folders whose entries changed ([`StateDb::changed`], [`StateDb::emptied`]) are synced
-//!   before any commit is made durable, so the DB never durably holds a change the disk lost;
+//!   before any commit is made durable, so a durable commit never holds a change the disk lost;
 //! - a place emptied since the last durable commit is made durable before something else is
 //!   put there ([`StateDb::filling`]), so a power cut can't leave the DB holding the old item
 //!   where the new one is;
 //! - SQLite checkpoints (which put every commit on the disk) only after those folders are synced
-//!   too: once the log holds [`CHECKPOINT_PAGES`], not by itself or as a connection closes.
+//!   too: once the log holds [`CHECKPOINT_PAGES`], not by itself or as a connection closes;
+//! - a process starts as if its commits weren't durable: one that died may have left some.
+//!
+//! What isn't ordered: the system writing the log out on its own, between syncs. A power cut
+//! may then keep a commit whose change on disk it lost (rare: file systems mostly write their
+//! journal of folder changes first); the scan finds the item where it is, as a local change.
 //!
 //! Losing the commits since the last durable one is then like a crash just after it, with what
 //! was done on disk since still there: the executor's write-ahead records and the scan's rules
@@ -132,6 +137,9 @@ struct Gate {
     unsynced: bool,
     /// Folders whose entries changed since the last durable commit or checkpoint.
     dirs: HashSet<PathBuf>,
+    /// The log's size at which the next checkpoint is tried, past [`CHECKPOINT_PAGES`] while a
+    /// reader keeps the last one from emptying it.
+    checkpoint_at: i32,
 }
 
 /// See [`StateDb::emptied`].
@@ -143,6 +151,15 @@ struct Emptied {
     committed: HashSet<String>,
 }
 
+/// What a commit is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Plain,
+    Durable,
+    /// Durable, writing only to be one: it records no emptied place.
+    Flush,
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -152,8 +169,11 @@ fn place_key(path: &Path) -> String {
     hbsync_platform::name::name_key(&path.to_string_lossy())
 }
 
-/// The log's size (pages) at which it is copied into the DB file: SQLite's own default.
-pub const CHECKPOINT_PAGES: i32 = 1000;
+/// The log's size (pages) at which it is copied into the DB file, 8 MB.
+pub const CHECKPOINT_PAGES: i32 = 2000;
+
+/// What the log's file is cut back to once it is copied (it keeps its largest size otherwise).
+const LOG_LIMIT: i64 = 16 << 20;
 
 thread_local! {
     /// The log's size after the last commit on this thread ([`wal_size`]).
@@ -172,7 +192,17 @@ fn shared(key: Option<&Path>) -> Arc<Shared> {
     let Some(key) = key else {
         return Arc::default();
     };
-    Arc::clone(lock(&SHARED).entry(key.to_path_buf()).or_default())
+    Arc::clone(lock(&SHARED).entry(key.to_path_buf()).or_insert_with(|| {
+        // A process that used the file before may have died with commits not durable.
+        let gate = Gate {
+            unsynced: true,
+            ..Gate::default()
+        };
+        Arc::new(Shared {
+            gate: Mutex::new(gate),
+            durable: Mutex::new(()),
+        })
+    }))
 }
 
 /// Watching commits, for tests that crash a client at one (feature `testkit`).
@@ -205,7 +235,7 @@ pub mod testkit {
     /// Connections opened from now on to the DB at `path` call `hook` around each commit (none
     /// with `None`).
     pub fn on_commit(path: &Path, hook: Option<Hook>) {
-        let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut hooks = lock(&HOOKS);
         match hook {
             Some(hook) => hooks.insert(file_key(path), hook),
             None => hooks.remove(&file_key(path)),
@@ -262,7 +292,7 @@ pub mod testkit {
 
     /// The hook of the DB file `key` ([`file_key`]).
     pub(crate) fn hook(key: Option<&Path>) -> Option<Hook> {
-        let hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        let hooks = lock(&HOOKS);
         hooks.get(key?).cloned()
     }
 }
@@ -352,6 +382,7 @@ impl StateDb {
         wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.wal_hook(Some(wal_size));
+        conn.pragma_update(None, "journal_size_limit", LOG_LIMIT)?;
         conn.set_db_config(
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
             true,
@@ -390,28 +421,28 @@ impl StateDb {
     /// disk soon, not at once: an OS crash or a power cut can lose it (the crate's docs on
     /// durability).
     pub fn write<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        self.commit(false, f)
+        self.commit(Kind::Plain, f)
     }
 
     /// [`StateDb::write`], on the disk when it returns, with every commit before it.
     pub fn write_durable<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        self.commit(true, f)
+        self.commit(Kind::Durable, f)
     }
 
     /// Puts every commit so far on the disk (nothing to do when they are).
     pub fn flush(&mut self) -> Result<()> {
         if lock(&self.shared.gate).unsynced {
             // A commit syncs only when it writes something.
-            self.write_durable(|s| s.count_flush())?;
+            self.commit(Kind::Flush, |s| s.count_flush())?;
         } else {
             self.emptied.committed.clear();
         }
         Ok(())
     }
 
-    /// The item at `path` on disk just left it (moved away or trashed), which a commit through
-    /// this connection records next. Before something else is put there
-    /// ([`StateDb::filling`]), that commit is made durable.
+    /// The item at `path` on disk just left it (moved away or trashed), which the next write
+    /// through this connection records. Before something else is put there
+    /// ([`StateDb::filling`]), that write is made durable.
     pub fn emptied(&mut self, path: &Path) {
         self.emptied.fresh.insert(place_key(path));
         self.changed(path);
@@ -428,13 +459,9 @@ impl StateDb {
     /// connection since its last durable commit, every commit is made durable first. Call
     /// [`StateDb::changed`] once it is there.
     pub fn filling(&mut self, path: &Path) -> Result<()> {
-        let Emptied { fresh, committed } = &self.emptied;
-        if fresh.is_empty() && committed.is_empty() {
-            return Ok(());
-        }
-        let key = place_key(path);
-        if fresh.contains(&key) || committed.contains(&key) {
-            self.write_durable(|s| s.count_flush())?;
+        // One emptied and not recorded yet can't be helped here: its record is still to come.
+        if !self.emptied.committed.is_empty() && self.emptied.committed.contains(&place_key(path)) {
+            self.commit(Kind::Flush, |s| s.count_flush())?;
         }
         Ok(())
     }
@@ -454,21 +481,24 @@ impl StateDb {
         f(self, &mut gate)
     }
 
-    fn commit<T>(&mut self, durable: bool, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
-        let (out, pages) = if durable {
-            self.with_folders_synced(|db, gate| db.commit_in(gate, true, f))?
-        } else {
+    fn commit<T>(&mut self, kind: Kind, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
+        let (out, pages) = if kind == Kind::Plain {
             let shared = Arc::clone(&self.shared);
             let mut gate = lock(&shared.gate);
-            self.commit_in(&mut gate, false, f)?
+            self.commit_in(&mut gate, kind, f)?
+        } else {
+            self.with_folders_synced(|db, gate| db.commit_in(gate, kind, f))?
         };
         if pages >= CHECKPOINT_PAGES {
             // Copies the log into the DB file, which puts every commit on the disk. Best
-            // effort: a reader in the way leaves the rest for the next commit.
-            self.with_folders_synced(|db, _| {
-                let _ = db
-                    .conn
-                    .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+            // effort: a reader in the way leaves the rest for a later try.
+            self.with_folders_synced(|db, gate| {
+                if pages >= gate.checkpoint_at {
+                    let _ = db
+                        .conn
+                        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+                    gate.checkpoint_at = pages + CHECKPOINT_PAGES;
+                }
             });
         }
         Ok(out)
@@ -478,15 +508,17 @@ impl StateDb {
     fn commit_in<T>(
         &mut self,
         gate: &mut Gate,
-        durable: bool,
+        kind: Kind,
         f: impl FnOnce(&Store<'_>) -> Result<T>,
     ) -> Result<(T, i32)> {
+        let durable = kind != Kind::Plain;
         if durable {
             self.conn.pragma_update(None, "synchronous", "FULL")?;
         }
         // A commit that writes nothing syncs nothing.
         let changes = self.conn.total_changes();
-        WAL_PAGES.set(0);
+        // Unknown unless the commit writes to the log.
+        WAL_PAGES.set(-1);
         let committed = (|| -> Result<_> {
             let tx = self
                 .conn
@@ -508,11 +540,18 @@ impl StateDb {
         let (out, touched) = committed?;
         if self.conn.total_changes() != changes {
             gate.unsynced = !durable;
-            let fresh = std::mem::take(&mut self.emptied.fresh);
-            self.emptied.committed.extend(fresh);
+            if kind != Kind::Flush {
+                let fresh = std::mem::take(&mut self.emptied.fresh);
+                self.emptied.committed.extend(fresh);
+            }
         }
         if !gate.unsynced {
             self.emptied.committed.clear();
+        }
+        let pages = WAL_PAGES.get();
+        if (0..CHECKPOINT_PAGES).contains(&pages) {
+            // The log started over: a checkpoint emptied it.
+            gate.checkpoint_at = CHECKPOINT_PAGES;
         }
         #[cfg(feature = "testkit")]
         if let Some(hook) = &self.hook {
@@ -523,7 +562,7 @@ impl StateDb {
             });
         }
         self.touched.extend(touched);
-        Ok((out, WAL_PAGES.get()))
+        Ok((out, pages))
     }
 
     /// The folders whose dirty sets the writes since the last call marked nodes in, from
@@ -574,11 +613,22 @@ mod tests {
         write(&mut a, "y")?;
         a.filling(&place)?;
         assert_eq!(flushes(&mut a)?.as_deref(), Some("2"));
+
+        // Nor can the flush before filling another place, made between emptying this one and
+        // recording that.
+        a.emptied(&other);
+        write(&mut a, "z")?;
+        a.emptied(&place);
+        a.filling(&other)?;
+        assert_eq!(flushes(&mut a)?.as_deref(), Some("3"));
+        write(&mut a, "w")?;
+        a.filling(&place)?;
+        assert_eq!(flushes(&mut a)?.as_deref(), Some("4"));
         Ok(())
     }
 
     /// Commits reach the DB file only by this crate's checkpoints, once the log is big enough:
-    /// not by SQLite's own, nor as the last connection closes.
+    /// not by SQLite's own (at 1000 pages), nor as the last connection closes.
     #[test]
     fn the_log_is_copied_into_the_db_file_only_once_it_is_big() -> Result<()> {
         let dir = tempfile::tempdir().map_err(|e| StateError::Conflict(e.to_string()))?;
@@ -586,16 +636,18 @@ mod tests {
         let len = || std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let mut db = StateDb::open(&path)?;
         let before = len();
-        // Each commit adds a few pages to the log: well short of a checkpoint.
-        for i in 0..100 {
+        let mut i = 0;
+        while WAL_PAGES.get() < 1500 {
             write(&mut db, &format!("{i:0>8000}"))?;
+            i += 1;
         }
         db.flush()?;
         drop(db);
         assert_eq!(len(), before);
         let mut db = StateDb::open(&path)?;
-        for i in 0..CHECKPOINT_PAGES {
+        while len() == before && WAL_PAGES.get() < 2 * CHECKPOINT_PAGES {
             write(&mut db, &format!("{i:0>8000}"))?;
+            i += 1;
         }
         assert!(len() > before);
         Ok(())

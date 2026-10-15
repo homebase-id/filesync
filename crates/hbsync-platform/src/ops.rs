@@ -33,47 +33,39 @@ pub fn replace(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Syncs each of `dirs`, so the changes of their entries (made, renamed, removed) are on the
-/// disk (best effort: one that is gone needs none). On macOS as far as the drive's cache: a
-/// full sync after them (the state DB's durable commit) flushes it once for all. Many on one
-/// volume in one call where the system has one (Linux: `syncfs`).
+/// disk (best effort: one that is gone needs none). Many on one volume in one call where the
+/// system has one (Linux: `syncfs`); on macOS each as far as the drive's cache, which is then
+/// flushed once per volume.
 pub fn sync_dirs(dirs: impl IntoIterator<Item = PathBuf>) {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
-        const MANY: usize = 32;
-        let mut volumes: std::collections::HashMap<u64, Vec<PathBuf>> = Default::default();
+        let mut volumes: std::collections::HashMap<u64, Vec<fs::File>> = Default::default();
         for dir in dirs {
-            if let Ok(meta) = fs::metadata(&dir) {
-                volumes.entry(meta.dev()).or_default().push(dir);
+            if let Ok(file) = fs::File::open(&dir)
+                && let Ok(meta) = file.metadata()
+            {
+                volumes.entry(meta.dev()).or_default().push(file);
             }
         }
-        for dirs in volumes.into_values() {
-            if dirs.len() > MANY && sync_fd(&dirs[0], libc::syncfs).is_ok() {
+        for files in volumes.into_values() {
+            // SAFETY (each call): a valid open descriptor.
+            #[cfg(target_os = "linux")]
+            if files.len() > 32 && unsafe { libc::syncfs(files[0].as_raw_fd()) } == 0 {
                 continue;
             }
-            for dir in &dirs {
-                let _ = sync_fd(dir, libc::fsync);
+            for file in &files {
+                unsafe { libc::fsync(file.as_raw_fd()) };
             }
+            #[cfg(target_os = "macos")]
+            unsafe {
+                libc::fcntl(files[0].as_raw_fd(), libc::F_FULLFSYNC)
+            };
         }
-    }
-    #[cfg(all(unix, not(target_os = "linux")))]
-    for dir in dirs {
-        let _ = sync_fd(&dir, libc::fsync);
     }
     #[cfg(windows)]
     drop(dirs);
-}
-
-/// Calls `sync` (`fsync`, `syncfs`) on `path` opened.
-#[cfg(unix)]
-fn sync_fd(path: &Path, sync: unsafe extern "C" fn(libc::c_int) -> libc::c_int) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let file = fs::File::open(path)?;
-    // SAFETY: a valid open descriptor.
-    if unsafe { sync(file.as_raw_fd()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 /// Sets the modification time of a file or directory, in nanoseconds since the Unix epoch.

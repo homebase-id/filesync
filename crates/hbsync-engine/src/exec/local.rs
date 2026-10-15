@@ -334,10 +334,8 @@ impl Executor<'_> {
     ) -> Result<io::Result<()>, StateError> {
         let trash = layout::trash_dir(&self.cfg.root);
         let dir = trash.join(format!("{}-{}", hbsync_types::unix_now(), node.0.simple()));
-        if !trash.exists() {
-            let _ = fs::create_dir_all(&trash);
-            self.db.changed(&trash);
-        }
+        // The trash folder too, made with the first item in it.
+        self.db.changed(&trash);
         if let Err(e) = put_ordered(self.db, &dir, |dir| fs::create_dir_all(dir))? {
             return Ok(Err(e));
         }

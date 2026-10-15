@@ -234,10 +234,13 @@ expected fingerprint is treated as done.
   where an item was moved or trashed from since the last durable commit, the commits are made
   durable (with that record lost, the scan would take the newcomer for the old item); and the
   folders whose entries were changed are synced before any durable commit to the account's DB,
-  whichever folder's engine makes it (macOS: full syncs), and so are they before the DB copies
-  its log into its file (which makes every commit durable), so the DB never holds a change the
-  disk lost. The state DB keeps this order itself. What the lost commits did is then found again
-  as after a crash. The engine's randomized crash test cuts the power too, keeping any commits
+  whichever folder's engine makes it (macOS: a full sync per volume), and so are they before
+  the DB copies its log into its file (which makes every commit durable), so a durable commit
+  never holds a change the disk lost. The state DB keeps this order itself, and a new process
+  takes the DB as not durable (one before it may have died). Not ordered: the system writing
+  the log out on its own between syncs, and tags or times written on an item; a commit kept
+  without its change on disk reads as a local change. What the lost commits did is then found
+  again as after a crash. The engine's randomized crash test cuts the power too, keeping any commits
   since the last durable one.
 
 ## 9. Properties the simulator checks
