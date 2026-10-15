@@ -23,7 +23,7 @@ use hbsync_engine::activity::Counters;
 use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
 use hbsync_engine::root::{RootError, SyncRoot};
-use hbsync_engine::{Conflict, Drive, Engine, EngineConfig, EngineError, SyncReport};
+use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_local::watch::Debounce;
 use hbsync_local::{Filter, FilterError, LocalObserver};
 use hbsync_remote::RemoteError;
@@ -33,41 +33,18 @@ pub use hbsync_types::activity::Progress;
 use hbsync_types::unix_now;
 
 use crate::MassDelete;
-use crate::protocol::{FolderStatus, HeldDeletes, LastSync, Note, State, Until};
+use crate::protocol::{FolderStatus, State, Until};
 
-/// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
-const FIRST_BACKOFF: Duration = Duration::from_secs(5);
-const MAX_BACKOFF: Duration = Duration::from_secs(300);
+mod report;
+mod schedule;
 
-/// How long to wait after each failure in a row.
-#[derive(Debug)]
-pub(crate) struct Backoff(Duration);
+pub(crate) use schedule::Backoff;
+use schedule::Schedule;
 
-impl Backoff {
-    pub(crate) fn new() -> Backoff {
-        Backoff(FIRST_BACKOFF)
-    }
-
-    /// The wait after a failure that left `state`. A refusal won't change until this device is
-    /// authorized again: ask rarely.
-    pub(crate) fn after(&mut self, state: State) -> Duration {
-        let wait = if state == State::Denied {
-            MAX_BACKOFF
-        } else {
-            self.0
-        };
-        self.0 = (self.0 * 2).min(MAX_BACKOFF);
-        wait
-    }
-}
 /// How long the loop waits for local changes before looking at everything else.
 const TICK: Duration = Duration::from_millis(250);
 /// A wall-clock gap this much longer than a tick means the machine slept.
 const SLEPT: Duration = Duration::from_secs(30);
-/// Entries kept in [`FolderStatus::recent`].
-const RECENT: usize = 50;
-/// Paths shown for held deletes.
-const EXAMPLES: usize = 10;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -118,22 +95,6 @@ impl RunnerConfig {
             tweak: None,
         }
     }
-}
-
-/// A sync announced by the drive waits until its changes have stopped coming this long...
-const REMOTE_QUIET: Duration = Duration::from_millis(1000);
-/// ...but no longer than this after the first.
-const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
-
-/// The token of the held deletes of `nodes`, a hash of their sorted ids (made and checked by
-/// one daemon process).
-fn held_token(nodes: &[NodeId]) -> String {
-    use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut sorted = nodes.to_vec();
-    sorted.sort();
-    let mut hasher = DefaultHasher::new();
-    sorted.hash(&mut hasher);
-    format!("{:016x}-{}", hasher.finish(), sorted.len())
 }
 
 /// Requests to the runner.
@@ -213,7 +174,7 @@ pub struct Runner {
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
     /// The conflicts and failures of the last sync, to tell each one only once.
-    last_notes: std::collections::HashSet<String>,
+    told: report::Told,
 }
 
 impl std::fmt::Debug for Runner {
@@ -270,7 +231,7 @@ impl Runner {
             status,
             progress,
             held: Vec::new(),
-            last_notes: Default::default(),
+            told: Default::default(),
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -339,23 +300,19 @@ impl Runner {
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
-        // Changes announced on the drive: synced once they stop coming (a burst of deletes is
-        // judged whole by the mass-delete guard), or after REMOTE_MAX_WAIT.
-        // (the first announcement, quiet from then on)
-        let mut announced: Option<(Instant, Instant)> = None;
-        let mut pause = self.cfg.paused;
+        let mut schedule = Schedule::new(Instant::now(), self.cfg.poll, self.cfg.paused);
         let mut started = false;
-        let mut wanted = true;
         let mut check_rules = false;
         let mut hints_open = true;
-        let mut next_poll = Instant::now() + self.cfg.poll;
-        let mut not_before = Instant::now();
-        let mut backoff = Backoff::new();
         tracing::info!(
             "syncing {} with {}{}",
             self.cfg.folder.display(),
             self.cfg.identity,
-            if pause.is_some() { " (paused)" } else { "" }
+            if schedule.paused().is_some() {
+                " (paused)"
+            } else {
+                ""
+            }
         );
         loop {
             // Local changes: the watcher's batches are recorded in the DB as they come.
@@ -367,7 +324,7 @@ impl Runner {
                         .poll(p.engine.db(), TICK, Debounce::default())?
                         .is_some()
                     {
-                        wanted = true;
+                        schedule.want();
                         worked = true;
                     }
                 }
@@ -379,20 +336,17 @@ impl Runner {
                 worked,
             ) {
                 tracing::info!("the machine woke up: syncing now");
-                wanted = true;
-                backoff = Backoff::new();
-                not_before = Instant::now();
+                schedule.woke(Instant::now());
             }
 
             loop {
                 match self.control.try_recv() {
                     Ok(Command::SyncNow) => {
-                        wanted = true;
+                        schedule.asked(Instant::now());
                         check_rules = true;
-                        not_before = Instant::now();
                     }
                     Ok(Command::Pause { until }) => {
-                        pause = Some(until);
+                        schedule.pause(until);
                         self.set(|s| s.paused_until = until);
                         match until {
                             Some(t) => tracing::info!(
@@ -403,22 +357,19 @@ impl Runner {
                         }
                     }
                     Ok(Command::Resume) => {
-                        if pause.take().is_some() {
+                        if schedule.resume(Instant::now()) {
                             tracing::info!("resumed");
                         }
-                        wanted = true;
-                        not_before = Instant::now();
                         self.resume();
                     }
                     Ok(Command::ConfirmDeletes { token }) => {
-                        if token != held_token(&self.held) {
+                        if token != report::held_token(&self.held) {
                             tracing::warn!("a confirmation of deletes that changed since: ignored");
                             continue;
                         }
                         tracing::info!("{} held deletes confirmed", self.held.len());
                         confirmed = Some(self.held.clone());
-                        wanted = true;
-                        not_before = Instant::now();
+                        schedule.asked(Instant::now());
                     }
                     Ok(Command::Stop) | Err(TryRecvError::Disconnected) => {
                         tracing::info!("stopped");
@@ -430,13 +381,8 @@ impl Runner {
 
             while hints_open {
                 match self.hints.try_recv() {
-                    Ok(Hint::Connected) => wanted = true,
-                    Ok(Hint::Changed) => {
-                        wanted = true;
-                        let now = Instant::now();
-                        let first = announced.map_or(now, |(first, _)| first);
-                        announced = Some((first, now + REMOTE_QUIET));
-                    }
+                    Ok(Hint::Connected) => schedule.want(),
+                    Ok(Hint::Changed) => schedule.announced(Instant::now()),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => hints_open = false,
                 }
@@ -445,24 +391,18 @@ impl Runner {
             if let Some(p) = &parts
                 && p.wake.try_iter().count() > 0
             {
-                wanted = true;
+                schedule.want();
             }
 
-            if pause.flatten().is_some_and(|t| unix_now() >= t) {
+            let now = Instant::now();
+            if schedule.pause_over(now, unix_now()) {
                 tracing::info!("the pause is over: resuming");
-                pause = None;
-                wanted = true;
-                not_before = Instant::now();
                 self.resume();
             }
-            let now = Instant::now();
-            if now >= next_poll {
-                // At every poll, whether the syncs succeed or back off.
-                next_poll = now + self.cfg.poll;
-                wanted = true;
+            if schedule.poll_due(now) {
                 check_rules = true;
                 if let Some(p) = &mut parts
-                    && pause.is_none()
+                    && schedule.paused().is_none()
                     && !p.observer.has_watcher()
                     && let Err(e) = p.engine.scan_local()
                 {
@@ -476,16 +416,11 @@ impl Runner {
             {
                 tracing::info!("the ignore rules changed: starting over");
                 parts = None;
-                wanted = true;
+                schedule.want();
             }
-            if pause.is_some() || !wanted || now < not_before {
+            if !schedule.due(now) {
                 continue;
             }
-            if announced.is_some_and(|(first, quiet)| now < quiet && now < first + REMOTE_MAX_WAIT)
-            {
-                continue;
-            }
-            announced = None;
             match SyncRoot::check(&self.cfg.folder, &self.cfg.identity) {
                 Ok(_) => {}
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
@@ -496,12 +431,7 @@ impl Runner {
                         tracing::warn!("{GONE}: waiting for it to come back");
                     }
                     parts = None;
-                    not_before = Instant::now() + self.cfg.poll;
-                    self.set(|s| {
-                        s.state = State::Failing;
-                        s.error = Some(GONE.into());
-                        s.retry_at = Some(unix_now() + self.cfg.poll.as_secs());
-                    });
+                    self.failing(GONE.into(), schedule.later(Instant::now()));
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -516,12 +446,7 @@ impl Runner {
                     // Rules that don't parse: say so, and try again at the next poll.
                     Err(RunnerError::Filter(e)) if !self.cfg.once => {
                         tracing::warn!("{e}");
-                        not_before = Instant::now() + self.cfg.poll;
-                        self.set(|s| {
-                            s.state = State::Failing;
-                            s.error = Some(e.to_string());
-                            s.retry_at = Some(unix_now() + self.cfg.poll.as_secs());
-                        });
+                        self.failing(e.to_string(), schedule.later(Instant::now()));
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -553,15 +478,8 @@ impl Runner {
             match result {
                 Ok(report) => {
                     started = true;
-                    backoff = Backoff::new();
+                    schedule.synced(report.stopped);
                     self.record(&mut p.engine, &report, began.elapsed())?;
-                    // Stopped by a pause (or a stop): the rest waits for resume.
-                    if !report.stopped {
-                        wanted = false;
-                    }
-                    if self.cfg.once {
-                        return Ok(());
-                    }
                 }
                 Err(e) => {
                     let state = if e.is_denied() {
@@ -571,20 +489,28 @@ impl Runner {
                     } else {
                         State::Failing
                     };
-                    let wait = backoff.after(state);
+                    let wait = schedule.failed(Instant::now(), state);
                     tracing::warn!("sync failed ({e}); trying again in {wait:?}");
-                    not_before = Instant::now() + wait;
                     self.set(|s| {
                         s.state = state;
                         s.error = Some(e.to_string());
                         s.retry_at = Some(unix_now() + wait.as_secs());
                     });
-                    if self.cfg.once {
-                        return Ok(());
-                    }
                 }
             }
+            if self.cfg.once {
+                return Ok(());
+            }
         }
+    }
+
+    /// Shows `why` nothing syncs, until another try after `wait`.
+    fn failing(&self, why: String, wait: Duration) {
+        self.set(|s| {
+            s.state = State::Failing;
+            s.error = Some(why);
+            s.retry_at = Some(unix_now() + wait.as_secs());
+        });
     }
 
     /// Publishes a finished sync.
@@ -594,44 +520,9 @@ impl Runner {
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), RunnerError> {
-        let at = unix_now();
-        // Each conflict and failure, worded for people. One that keeps coming back sync after
-        // sync (a file that can't be read) is told once, not every minute.
-        let mut notes = Vec::new();
-        for c in &report.conflicts {
-            notes.push(describe_conflict(engine, c)?);
-        }
-        for (op, why) in report.failed.iter().chain(&report.skipped) {
-            let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
-            notes.push(format!("{path}: {} ({why})", op.kind()));
-        }
-        // Drive rows the client can't read (not encrypted, another key, not a sync node).
-        for why in &report.feed.skipped {
-            notes.push(format!("a file on Homebase can't be synced: {why}"));
-        }
-        let seen = std::mem::take(&mut self.last_notes);
-        self.last_notes = notes.iter().cloned().collect();
-        notes.retain(|n| !seen.contains(n));
+        let notes = self.told.fresh(report::notes(engine, report)?);
+        let held = report::held(engine, report)?;
         self.held = report.held.iter().map(|op| op.node()).collect();
-        let held = if report.held.is_empty() {
-            None
-        } else {
-            let here = report
-                .held
-                .iter()
-                .filter(|op| matches!(op, hbsync_engine::Op::RemoteDelete { .. }))
-                .count() as u64;
-            let mut examples = Vec::new();
-            for op in report.held.iter().take(EXAMPLES) {
-                examples.extend(engine.path_of(op.node())?);
-            }
-            Some(HeldDeletes {
-                here,
-                remotely: report.held.len() as u64 - here,
-                examples,
-                token: held_token(&self.held),
-            })
-        };
         if report.ops_done > 0 || !notes.is_empty() {
             tracing::info!(
                 "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",
@@ -651,26 +542,7 @@ impl Runner {
                 h.remotely
             );
         }
-        self.set(|s| {
-            s.state = State::Idle;
-            s.error = None;
-            s.retry_at = None;
-            s.pending = report.pending;
-            s.held_deletes = held;
-            s.last_sync = Some(LastSync {
-                at,
-                millis: took.as_millis() as u64,
-                done: report.ops_done,
-                downloaded_changes: report.feed.live + report.feed.deleted,
-                adopted: report.adopted,
-            });
-            s.notes_added += notes.len() as u64;
-            s.recent
-                .extend(notes.into_iter().map(|text| Note { at, text }));
-            let excess = s.recent.len().saturating_sub(RECENT);
-            s.recent.drain(..excess);
-            s.synced_added += report.synced.len() as u64;
-        });
+        self.set(|s| report::record(s, report, notes, held, took, unix_now()));
         Ok(())
     }
 }
@@ -695,37 +567,6 @@ fn is_offline(e: &EngineError) -> bool {
         }
         _ => false,
     }
-}
-
-fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateError> {
-    let mut path = |node| -> Result<String, StateError> {
-        Ok(engine.path_of(node)?.unwrap_or_else(|| "?".into()))
-    };
-    Ok(match c {
-        Conflict::EditEdit { node, copy } => format!(
-            "{}: edited on two devices; this device's version is kept as {}",
-            path(*node)?,
-            path(*copy)?
-        ),
-        Conflict::MoveMove { node } => {
-            format!("{}: moved on two devices; the other move won", path(*node)?)
-        }
-        Conflict::EditDelete { node } => format!(
-            "{}: deleted on one device and edited on another; the edit was kept",
-            path(*node)?
-        ),
-        Conflict::NameClash { node } => {
-            format!("{}: renamed, as the name was taken", path(*node)?)
-        }
-        Conflict::Cycle { node } => format!(
-            "{}: a move that would have put a folder inside itself was undone",
-            path(*node)?
-        ),
-        Conflict::Orphan { node } => format!(
-            "{}: its folder was deleted everywhere; it was moved to the top folder",
-            path(*node)?
-        ),
-    })
 }
 
 #[cfg(test)]
