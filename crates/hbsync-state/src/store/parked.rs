@@ -1,4 +1,4 @@
-//! Items parked under a temporary name, and conflict copies being made.
+//! Items parked under a temporary name, conflict copies being made, downloads being placed.
 
 use super::*;
 
@@ -84,6 +84,65 @@ impl Store<'_> {
     pub fn delete_fork(&self, node: NodeId) -> Result<()> {
         self.change(
             &format!("DELETE FROM forks WHERE folder = $F AND id = {ID_OF}"),
+            node.0.as_bytes(),
+        )?;
+        Ok(())
+    }
+
+    // ---- downloads being placed ----
+
+    /// Records, before a batch of downloads runs, that `node` is being downloaded at
+    /// `version`: `size` bytes of content `hash` (remote algorithm).
+    pub fn put_placing(
+        &self,
+        node: NodeId,
+        version: VersionTag,
+        hash: &ContentHash,
+        size: u64,
+    ) -> Result<()> {
+        let id = self.key_or_insert(node)?;
+        self.prep(
+            "INSERT OR REPLACE INTO placing (folder, id, version_tag, hash, size) \
+             VALUES ($F, ?1, ?2, ?3, ?4)",
+        )?
+        .execute(params![
+            id,
+            version.0.as_bytes(),
+            codec::hash_to(hash),
+            size as i64
+        ])?;
+        Ok(())
+    }
+
+    /// `(node, version, hash, size)` of every download being placed.
+    pub fn all_placing(&self) -> Result<Vec<(NodeId, VersionTag, ContentHash, u64)>> {
+        let mut stmt = self.prep(
+            "SELECT n.uuid, p.version_tag, p.hash, p.size FROM placing p \
+             JOIN nodes n ON n.id = p.id WHERE p.folder = $F",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (node, version, hash, size) = r?;
+            Ok((
+                codec::node(&node)?,
+                codec::version(&version)?,
+                codec::hash_from(&hash)?,
+                size as u64,
+            ))
+        })
+        .collect()
+    }
+
+    pub fn delete_placing(&self, node: NodeId) -> Result<()> {
+        self.change(
+            &format!("DELETE FROM placing WHERE folder = $F AND id = {ID_OF}"),
             node.0.as_bytes(),
         )?;
         Ok(())

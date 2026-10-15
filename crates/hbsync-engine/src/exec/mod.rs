@@ -699,6 +699,27 @@ impl<'a> Executor<'a> {
             pending.insert(job.node(), p);
             jobs.push((self.urgent.contains(&job.node()), job));
         }
+        // Write-ahead: a download put in place whose DB update a crash loses is found again by
+        // its record (`recover_placements`), wherever it was moved since.
+        let downloads: Vec<&Download> = jobs
+            .iter()
+            .filter_map(|(_, job)| match job {
+                Job::Download(d) => Some(d),
+                _ => None,
+            })
+            .collect();
+        if !downloads.is_empty() {
+            self.db.write(|s| {
+                downloads
+                    .iter()
+                    .try_for_each(|d| match s.get_mirror(d.node)? {
+                        Some(m) => {
+                            s.put_placing(d.node, m.remote_ref().version, &d.expected, d.size)
+                        }
+                        None => Ok(()),
+                    })
+            })?;
+        }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
         let new_bytes: u64 = jobs
@@ -912,7 +933,7 @@ mod transfer_ops;
 use park::{numbered_place, occupant, release_place, restore_parked};
 pub use park::{parked_name, unpark};
 use recover::{complete_fork, download_key};
-pub use recover::{recover_forks, sweep_tmp};
+pub use recover::{recover_forks, recover_placements, sweep_tmp};
 pub use settle::settle;
 pub(crate) use settle::update_meta;
 use settle::{restored_tags, write_tags, written_row};

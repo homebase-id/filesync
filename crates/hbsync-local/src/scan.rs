@@ -4,15 +4,16 @@
 //!    DB side is read folder by folder, depth first). Unchanged entries cost one comparison;
 //!    only differences are kept in memory.
 //! 2. **Identity** (sync-semantics §3): a vanished path whose file id or (for files) content
-//!    hash shows up at a new path is a move and keeps its node id; everything else new gets a
-//!    fresh node id.
+//!    hash shows up at a new path is a move and keeps its node id, and so is a vanished file's
+//!    id showing up at a known path (moved onto that name); everything else new gets a fresh
+//!    node id.
 //! 3. **Hashing** only for files whose fingerprint changed (never at start for unchanged files).
 //! 4. **Tags** are read with the metadata of every new or changed item (a tag change moves the
 //!    change time).
 //! 5. **One transaction** updates the `local` rows and marks every node whose local state changed
 //!    as dirty.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -392,22 +393,39 @@ fn resolve(
         (row_from(path, node, meta, hash, tags), changed)
     };
 
-    // Changed in place. A kind change (file ↔ folder) is a delete plus a create, and so is a
-    // new file id where the old one turns up at another path: the item moved there and another
-    // took its place (§3 rule 1; an editor's save through a temp file leaves no old id behind).
+    // Changed in place. A kind change (file ↔ folder) is a delete plus a create. So is a file
+    // whose new file id is that of a file whose path is gone, unchanged by the move (hashed
+    // where ids are recycled): that file was moved onto this name, and what was here is gone,
+    // or moved on by its own id (§3 rule 1). Anything else at the same path is the same node:
+    // an editor's save through a temp file brings a new id, a backup rename leaves the path.
     let mut removed = diff.removed;
     let mut added = diff.added;
-    let ids_seen: HashSet<FileId> = if opts.fs_family.has_stable_file_ids() {
-        (added.iter().map(|(_, m)| m.file_id))
-            .chain(diff.changed.iter().map(|(_, m)| m.file_id))
+    let gone_files: HashMap<FileId, &LocalRow> = if opts.fs_family.has_stable_file_ids() {
+        removed
+            .iter()
+            .filter(|r| r.kind == NodeKind::File)
+            .map(|r| (r.fingerprint.file_id, r))
             .collect()
     } else {
-        HashSet::new()
+        HashMap::new()
     };
+    let mut moved_onto = Vec::new();
+    for (row, meta) in &diff.changed {
+        let Some(from) = gone_files.get(&meta.file_id) else {
+            continue;
+        };
+        let onto = row.kind == NodeKind::File
+            && kind_of(meta) == NodeKind::File
+            && meta.file_id != row.fingerprint.file_id
+            && from.fingerprint.same_after_rename(meta)
+            && (!opts.fs_family.reuses_file_ids()
+                || (from.hash.is_some() && hash_now(&row.path, meta, report) == from.hash));
+        if onto {
+            moved_onto.push(row.path.clone());
+        }
+    }
     for (row, meta) in diff.changed {
-        let moved_away =
-            row.fingerprint.file_id != meta.file_id && ids_seen.contains(&row.fingerprint.file_id);
-        if kind_of(&meta) != row.kind || moved_away {
+        if kind_of(&meta) != row.kind || moved_onto.contains(&row.path) {
             added.push((row.path.clone(), meta));
             removed.push(row);
             continue;

@@ -47,6 +47,64 @@ pub fn recover_forks(db: &mut StateDb, root: &Path) -> Result<usize, StateError>
     Ok(completed)
 }
 
+/// Finds downloads that were put in place but whose DB update a crash lost: the scan took
+/// each for a new item, here or wherever the user moved it since. Its record names the node
+/// and the bytes; the one new file holding them becomes that node again, with the base the
+/// lost update wrote while the mirror still has that version. Run after the scan and before
+/// the feed is pulled (the mirror is then the one the downloads were planned from).
+pub fn recover_placements(db: &mut StateDb, root: &Path) -> Result<usize, StateError> {
+    let records = db.read(|s| s.all_placing())?;
+    if records.is_empty() {
+        return Ok(0);
+    }
+    let unpaired = db.read(|s| s.unpaired_local())?;
+    let mut recovered = 0;
+    for (node, version, hash, size) in &records {
+        // Two downloads of the same bytes can't tell their files apart.
+        let twin = records
+            .iter()
+            .any(|(other, _, h, _)| other != node && h == hash);
+        let mut found = unpaired
+            .iter()
+            .filter(|r| r.kind == NodeKind::File && crate::adopt::same_bytes(root, r, hash, *size));
+        let found = match (twin, found.next(), found.next()) {
+            (false, Some(row), None) => Some(row),
+            _ => None,
+        };
+        db.write(|s| {
+            let mirror = s.get_mirror(*node)?;
+            let current = mirror
+                .as_ref()
+                .is_some_and(|m| m.remote_ref().version == *version);
+            if let Some(row) = found
+                && s.local_by_node(*node)?.is_none()
+            {
+                s.rekey_local(row.node, *node)?;
+                s.clear_dirty(row.node)?;
+                s.mark_dirty(*node)?;
+                if let Some(m) = mirror.filter(|_| current)
+                    && let Some(state) = m.state()
+                {
+                    s.put_base(&BaseRow {
+                        node: *node,
+                        state,
+                        remote: m.remote_ref(),
+                        content_state: ContentState::Local,
+                        local_name: None,
+                        local_hash: row.hash,
+                    })?;
+                }
+                recovered += 1;
+            } else if current && s.local_by_node(*node)?.is_none() {
+                // Not placed yet, or not scanned yet: still wanted, decided next time.
+                return Ok(());
+            }
+            s.delete_placing(*node)
+        })?;
+    }
+    Ok(recovered)
+}
+
 /// The temp file name stem of a download: node and content, so a partial file is resumed only
 /// for the same bytes.
 pub(super) fn download_key(node: NodeId, expected: &hbsync_types::ContentHash) -> String {

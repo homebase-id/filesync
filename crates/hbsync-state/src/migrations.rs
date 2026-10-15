@@ -195,7 +195,20 @@ const SCHEMA: &str = r#"
 "#;
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
-const MIGRATIONS: &[&str] = &[];
+const MIGRATIONS: &[&str] = &[
+    // 6: per folder, downloads about to be put in place (written before a batch of them
+    // runs), so one whose DB update a crash lost is still known as its node.
+    "CREATE TABLE placing (
+        folder      INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id          INTEGER NOT NULL,              -- nodes.id
+        version_tag BLOB NOT NULL,                 -- the version being downloaded
+        hash        BLOB NOT NULL,                 -- its content hash (remote algorithm)
+        size        INTEGER NOT NULL,
+        PRIMARY KEY (id, folder)
+    ) WITHOUT ROWID;
+    CREATE TRIGGER placing_gone AFTER DELETE ON placing
+        BEGIN INSERT INTO gone VALUES (old.id); END;",
+];
 
 /// The version this client makes and reads.
 const VERSION: u32 = BASE + MIGRATIONS.len() as u32;

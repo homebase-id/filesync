@@ -1,7 +1,7 @@
 //! Adoption: recognizing that a local item and a remote node are the same thing.
 //!
 //! On a first run over an existing copy (or after a crash between placing a download and
-//! recording it), the scan gives local items fresh node ids, while the remote already has
+//! recording it, whatever the node's history), the scan gives local items fresh node ids, while the remote already has
 //! nodes at the same places. Left alone, the reconciler would see two different nodes with the
 //! same name and keep both. Adoption instead hands the local item the remote node's id when
 //! they agree on parent, name (under [`name_key`]), kind and, for files, content. The
@@ -20,7 +20,7 @@ use hbsync_namemap::to_remote;
 use hbsync_platform::Os;
 use hbsync_platform::name::name_key;
 use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError};
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_types::{ContentHash, NodeId, NodeKind};
 
 use crate::scope::Scope;
 
@@ -92,6 +92,22 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usi
     Ok(adopted)
 }
 
+/// Whether the local file of `row` holds `size` bytes of content `hash` (another client's
+/// algorithm, maybe: then this one file is hashed the same way).
+pub(crate) fn same_bytes(root: &Path, row: &LocalRow, hash: &ContentHash, size: u64) -> bool {
+    let Some(local) = row.hash else {
+        return false;
+    };
+    if row.fingerprint.size != size {
+        false
+    } else if local.algorithm == hash.algorithm {
+        local == *hash
+    } else {
+        hash_file(&row.path.to_native(root), hash.algorithm)
+            .is_ok_and(|h| h.hash == *hash && h.meta.fingerprint() == row.fingerprint)
+    }
+}
+
 /// The remote node `row` is a copy of, if any, and whether equality was proven across hash
 /// algorithms (which only this function can know). `siblings` are the remote children of the
 /// row's parent by [`name_key`].
@@ -116,9 +132,12 @@ fn find_match(
         if remote.kind != row.kind || claimed.contains(&remote.node) {
             continue;
         }
-        // Only a remote node that has no local copy and no history yet.
+        // Only a remote node that has no local copy; a folder with no history either. A file
+        // with one is adopted by its bytes: the local copy went, and the same bytes came back
+        // to its place (a download a crash kept from being recorded), which changes nothing.
         let taken = db.read(|s| {
-            Ok(s.get_base(remote.node)?.is_some() || s.local_by_node(remote.node)?.is_some())
+            Ok(s.local_by_node(remote.node)?.is_some()
+                || (row.kind == NodeKind::Folder && s.get_base(remote.node)?.is_some()))
         })?;
         if taken {
             continue;
@@ -126,26 +145,15 @@ fn find_match(
         if row.kind == NodeKind::Folder {
             return Ok(Some((remote.node, false)));
         }
-        let (Some(local_hash), Some(file)) = (row.hash, remote.file) else {
+        let Some(file) = remote.file else {
             continue;
         };
-        let remote_hash = file.hash;
-        if file.size != row.fingerprint.size {
-            continue;
-        }
-        let cross = local_hash.algorithm != remote_hash.algorithm;
+        let cross = row.hash.is_some_and(|h| h.algorithm != file.hash.algorithm);
         // Recorded as agreed at once (see `adopt`), so the place must match exactly.
         if cross && remote.name != name {
             continue;
         }
-        let same = if !cross {
-            local_hash == remote_hash
-        } else {
-            // Another client's algorithm: hash this one file the same way.
-            hash_file(&row.path.to_native(root), remote_hash.algorithm)
-                .is_ok_and(|h| h.hash == remote_hash && h.meta.fingerprint() == row.fingerprint)
-        };
-        if same {
+        if same_bytes(root, row, &file.hash, file.size) {
             return Ok(Some((remote.node, cross)));
         }
     }

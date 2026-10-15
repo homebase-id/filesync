@@ -92,15 +92,15 @@ fn file_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The write gate of the DB file at `path`, one per file in this process.
-fn gate(path: Option<&Path>) -> Arc<Mutex<()>> {
+/// The write gate of the DB file `key` ([`file_key`]), one per file in this process.
+fn gate(key: Option<&Path>) -> Arc<Mutex<()>> {
     static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
         LazyLock::new(Default::default);
-    let Some(path) = path else {
+    let Some(key) = key else {
         return Arc::default();
     };
     let mut gates = GATES.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(gates.entry(file_key(path)).or_default())
+    Arc::clone(gates.entry(key.to_path_buf()).or_default())
 }
 
 /// Watching commits, for tests that crash a client at one (feature `testkit`).
@@ -108,10 +108,10 @@ fn gate(path: Option<&Path>) -> Arc<Mutex<()>> {
 pub mod testkit {
     use super::*;
 
-    /// Called after each commit to a DB file, still in its turn (no other connection of this
-    /// process writes meanwhile).
+    /// Called around each commit to a DB file, in its turn (no other connection of this process
+    /// writes meanwhile): with `false` just before it, `true` just after.
     #[derive(Clone)]
-    pub struct Hook(pub Arc<dyn Fn() + Send + Sync>);
+    pub struct Hook(pub Arc<dyn Fn(bool) + Send + Sync>);
 
     impl std::fmt::Debug for Hook {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -121,8 +121,8 @@ pub mod testkit {
 
     static HOOKS: LazyLock<Mutex<HashMap<PathBuf, Hook>>> = LazyLock::new(Default::default);
 
-    /// Connections opened from now on to the DB at `path` call `hook` after each commit
-    /// (none with `None`).
+    /// Connections opened from now on to the DB at `path` call `hook` around each commit (none
+    /// with `None`).
     pub fn on_commit(path: &Path, hook: Option<Hook>) {
         let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
         match hook {
@@ -131,9 +131,10 @@ pub mod testkit {
         };
     }
 
-    pub(crate) fn hook(path: Option<&Path>) -> Option<Hook> {
+    /// The hook of the DB file `key` ([`file_key`]).
+    pub(crate) fn hook(key: Option<&Path>) -> Option<Hook> {
         let hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
-        hooks.get(&file_key(path?)).cloned()
+        hooks.get(key?).cloned()
     }
 }
 
@@ -227,14 +228,15 @@ impl StateDb {
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(128);
         migrations::apply(&mut conn)?;
+        let key = path.map(file_key);
         Ok(StateDb {
             conn,
             folder: FIRST_FOLDER,
             path: path.map(Path::to_path_buf),
-            gate: gate(path),
+            gate: gate(key.as_deref()),
             touched: Default::default(),
             #[cfg(feature = "testkit")]
-            hook: testkit::hook(path),
+            hook: testkit::hook(key.as_deref()),
         })
     }
 
@@ -257,10 +259,14 @@ impl StateDb {
         let store = Store::new(&tx, self.folder);
         let out = f(&store)?;
         let touched = store.take_touched();
+        #[cfg(feature = "testkit")]
+        if let Some(hook) = &self.hook {
+            (hook.0)(false);
+        }
         tx.commit()?;
         #[cfg(feature = "testkit")]
         if let Some(hook) = &self.hook {
-            (hook.0)();
+            (hook.0)(true);
         }
         self.touched.extend(touched);
         Ok(out)

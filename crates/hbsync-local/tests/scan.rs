@@ -138,43 +138,63 @@ fn rename_keeps_node_without_rehash() -> R {
     Ok(())
 }
 
-/// An editor's save through a temp file gives the path a new file id: still the same node,
-/// edited. A move away and another item moved into the freed name is two moves; so is a swap.
+/// A new file id at a known path is the same node, edited (an editor's save through a temp
+/// file; one keeping a backup by renaming), unless a file whose path is gone was moved onto the
+/// name: then that file keeps its node there, and the one that was there is gone, or moved on.
 #[test]
-fn a_new_file_id_at_a_path_is_an_edit_unless_the_old_one_moved() -> R {
+fn a_new_file_id_at_a_path_is_an_edit_unless_a_file_was_moved_onto_it() -> R {
     let mut f = Fixture::new()?;
     if !f.opts.fs_family.has_stable_file_ids() {
         return Ok(());
     }
-    f.write("doc.txt", b"v1")?;
-    f.write("a", b"a")?;
-    f.write("b", b"b")?;
-    f.write("c", b"c")?;
+    for name in ["doc.txt", "notes.txt", "notes.txt~", "c", "d", "e", "x"] {
+        f.write(name, name.as_bytes())?;
+    }
     f.scan()?;
-    let (doc, a, b, c) = (f.node("doc.txt")?, f.node("a")?, f.node("b")?, f.node("c")?);
-
-    // Saved through a temp file.
-    f.write(".doc.txt.tmp", b"v2")?;
-    fs::rename(f.root().join(".doc.txt.tmp"), f.root().join("doc.txt"))?;
-    // a and b swap names; c moves away and a new file takes its name... from d.
-    let (root, tmp) = (f.root().to_path_buf(), f.root().join("swap"));
-    fs::rename(root.join("a"), &tmp)?;
-    fs::rename(root.join("b"), root.join("a"))?;
-    fs::rename(&tmp, root.join("b"))?;
-    fs::rename(root.join("c"), root.join("e"))?;
-    f.write("c", b"new c")?;
+    let node = |f: &mut Fixture, n: &str| f.node(n);
+    let (doc, notes, backup) = (
+        node(&mut f, "doc.txt")?,
+        node(&mut f, "notes.txt")?,
+        node(&mut f, "notes.txt~")?,
+    );
+    let (c, d, e, x) = (
+        node(&mut f, "c")?,
+        node(&mut f, "d")?,
+        node(&mut f, "e")?,
+        node(&mut f, "x")?,
+    );
+    let root = f.root().to_path_buf();
+    // d steps aside to y, and c takes its name; e is moved over x (x is gone).
+    fs::rename(root.join("d"), root.join("y"))?;
+    fs::rename(root.join("c"), root.join("d"))?;
+    fs::rename(root.join("e"), root.join("x"))?;
+    // Last, so no file made after them gets an id they freed: a save through a temp file, and
+    // one keeping a backup by renaming over the old backup.
+    f.write(".doc.txt.tmp", b"doc v2")?;
+    fs::rename(root.join(".doc.txt.tmp"), root.join("doc.txt"))?;
+    fs::rename(root.join("notes.txt"), root.join("notes.txt~"))?;
+    f.write("notes.txt", b"notes v2")?;
     let (report, _) = f.scan()?;
 
-    assert_eq!(f.node("doc.txt")?, doc, "an edit");
-    assert_eq!((f.node("a")?, f.node("b")?), (b, a), "swapped");
-    assert_eq!(f.node("e")?, c, "moved away");
+    assert_eq!(node(&mut f, "doc.txt")?, doc, "a save is an edit");
+    assert_eq!(
+        (node(&mut f, "notes.txt")?, node(&mut f, "notes.txt~")?),
+        (notes, backup),
+        "a save keeping a backup edits both"
+    );
+    assert_eq!(
+        (node(&mut f, "d")?, node(&mut f, "y")?),
+        (c, d),
+        "moved onto a name"
+    );
+    assert_eq!(node(&mut f, "x")?, e, "moved over x");
     assert!(
-        ![doc, a, b, c].contains(&f.node("c")?),
-        "a new item in its place"
+        f.db.read(|s| Ok(s.local_by_node(x)?.is_none()))?,
+        "x is gone"
     );
     assert_eq!(
         (report.moved, report.added, report.removed),
-        (3, 1, 0),
+        (3, 0, 1),
         "{report:?}"
     );
     Ok(())

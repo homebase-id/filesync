@@ -322,6 +322,7 @@ impl Executor<'_> {
                 s.delete_local(row.node)?;
             }
             s.delete_parked(node)?;
+            s.delete_placing(node)?;
             s.put_local(&LocalRow {
                 path: target.clone(),
                 node,
