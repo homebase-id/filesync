@@ -234,18 +234,23 @@ another version), and **Quit stops the daemon too**. One tray per user (`homebas
   starting included), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
-  in the file manager), Problems (the status notes), Review N deletions…, Recently deleted…, Log
+  in the file manager), Problems (the status notes), Review N deletions…, Recently deleted…, Folders…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
   at login, Open logs, Log out, Quit.
 - **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the
   OS's picker, merging a folder with files only when ticked), reviewing held deletes and
   Recently deleted (the topmost items: path, size, date, how many items their restore brings
-  back, Restore; Empty now, after a confirmation) are
+  back, Restore; Empty now, after a confirmation), and the folders (each role where this
+  computer keeps it, how many files and bytes it holds, counted for 2 s at most; Sync, or why
+  it can't be: another app syncs it, a synced folder holds it; Stop syncing; Downloads marked
+  not recommended; on macOS the folder is read once on Sync, so the system asks for access
+  while the user is there) are
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a
   minute.
-- **The folder:** the tray gives it the Filesync icon (`desktop.ini` on Windows, Finder's custom
+- **The folder:** the tray gives the main folder (not a role folder: it is the user's own) the
+  Filesync icon (`desktop.ini` on Windows, Finder's custom
   icon on macOS, `.directory` and GIO metadata on Linux) and, on Linux, a shortcut (GTK
   bookmarks and KDE places; Finder's sidebar has no public interface). The shortcut once per
   folder, so one the user removed stays removed; the icon again when a new version brings

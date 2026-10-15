@@ -87,6 +87,7 @@ pub enum Action {
     SyncNow,
     ReviewDeletions,
     RecentlyDeleted,
+    Folders,
     StartAtLogin,
     LogOut,
     OpenLogs,
@@ -199,6 +200,7 @@ pub fn menu(view: &View) -> Vec<Item> {
             Action::RecentlyDeleted,
             "Recently deleted…".into(),
         ));
+        items.push(Item::Action(Action::Folders, "Folders…".into()));
         if s.state == State::Denied {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
