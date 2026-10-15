@@ -1,9 +1,10 @@
 //! A finished sync as people see it: its conflicts and failures worded, the held deletes, and
 //! the folder's status after it.
 
-use std::collections::HashSet;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
+use hbsync_engine::exec::Skip;
 use hbsync_engine::{Conflict, Engine, Op, SyncReport};
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
@@ -15,42 +16,101 @@ const RECENT: usize = 50;
 /// Paths shown for held deletes.
 const EXAMPLES: usize = 10;
 
-/// Each conflict and failure of `report`, and the drive's rows the client couldn't read
-/// (`skipped`), worded for people.
+/// A stale skip is told when it keeps coming back this long: something holds it back that the
+/// plan can't see (a file written all the time, one this device can't read).
+const STALLED_FOR: Duration = Duration::from_secs(600);
+/// ...and at least this often within that time.
+const STALLED_SKIPS: u32 = 3;
+
+/// Each conflict, failure and told skip of `report` (`skips`, [`Stalled::told`]), and the
+/// drive's rows the client couldn't read (`rows`), worded for people.
 pub(super) fn notes(
     engine: &mut Engine,
     report: &SyncReport,
-    skipped: Vec<String>,
+    skips: &[&(Op, Skip)],
+    rows: Vec<String>,
 ) -> Result<Vec<String>, StateError> {
     let mut notes = Vec::new();
     for c in &report.conflicts {
         notes.push(describe_conflict(engine, c)?);
     }
-    // What stalled since the plan is planned again quietly; what this device can't do is told.
-    let told = report.skipped.iter().filter(|(_, why)| why.tells());
     let failed = report.failed.iter().map(|(op, why)| (op, why.as_str()));
-    for (op, why) in failed.chain(told.map(|(op, why)| (op, why.as_str()))) {
+    for (op, why) in failed.chain(skips.iter().map(|(op, why)| (op, why.as_str()))) {
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
     // Drive rows the client can't read (not encrypted, another key, not a sync node).
-    for why in skipped {
+    for why in rows {
         notes.push(format!("a file on Homebase can't be synced: {why}"));
     }
     Ok(notes)
 }
 
 /// Notes told once: one that keeps coming back sync after sync (a file that can't be read)
-/// isn't told again until it has gone away.
+/// isn't told again until it has gone away; one that comes twice in a sync (a node planned
+/// again in a later sweep), once.
 #[derive(Debug, Default)]
 pub(super) struct Told(HashSet<String>);
 
 impl Told {
-    /// The notes of the last sync that weren't in the one before.
+    /// The notes of the last sync that weren't in the one before, each once.
     pub fn fresh(&mut self, mut notes: Vec<String>) -> Vec<String> {
-        let before = std::mem::replace(&mut self.0, notes.iter().cloned().collect());
-        notes.retain(|n| !before.contains(n));
+        let before = std::mem::take(&mut self.0);
+        notes.retain(|n| self.0.insert(n.clone()) && !before.contains(n));
         notes
+    }
+}
+
+/// Stale skips sync after sync: per operation (node and kind), when it was first skipped and
+/// how often since, until it isn't skipped any more.
+#[derive(Debug, Default)]
+pub(super) struct Stalled(HashMap<(NodeId, &'static str), Streak>);
+
+#[derive(Debug, Clone, Copy)]
+struct Streak {
+    first: Instant,
+    last: Instant,
+    skips: u32,
+    told: bool,
+}
+
+impl Stalled {
+    /// The skips of a sync ended at `now` to tell, each operation once: those this device can't
+    /// do, and stale ones skipped [`STALLED_SKIPS`] times over [`STALLED_FOR`] (once a streak).
+    /// One waiting for another operation isn't told: that one says why.
+    pub fn told<'r>(&mut self, skipped: &'r [(Op, Skip)], now: Instant) -> Vec<&'r (Op, Skip)> {
+        let mut seen = HashSet::new();
+        let mut told = Vec::new();
+        for item in skipped {
+            let (op, why) = item;
+            let key = (op.node(), op.kind());
+            if !seen.insert(key) {
+                continue;
+            }
+            let tell = match why {
+                Skip::Unsyncable(_) => true,
+                Skip::Waiting(_) => false,
+                Skip::Stale(_) => {
+                    let streak = self.0.entry(key).or_insert(Streak {
+                        first: now,
+                        last: now,
+                        skips: 0,
+                        told: false,
+                    });
+                    streak.last = now;
+                    streak.skips += 1;
+                    let stalled =
+                        streak.skips >= STALLED_SKIPS && now >= streak.first + STALLED_FOR;
+                    stalled && !std::mem::replace(&mut streak.told, stalled)
+                }
+            };
+            if tell {
+                told.push(item);
+            }
+        }
+        // A streak ends once the operation wasn't skipped for a while (settled, or not planned).
+        self.0.retain(|_, s| now < s.last + STALLED_FOR);
+        told
     }
 }
 
@@ -199,6 +259,50 @@ mod tests {
         assert_eq!(s.recent.last().map(|n| n.text.as_str()), Some("note 59"));
         let last = s.last_sync.ok_or("no last sync");
         assert_eq!(last.map(|l| (l.done, l.millis)), Ok((3, 1500)));
+    }
+
+    #[test]
+    fn stale_skips_are_told_only_when_they_keep_coming_back() {
+        let (stuck, waiting, bad) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let settle = |node| Op::Settle { node };
+        let sync = vec![
+            (settle(stuck), Skip::Stale("changed on disk".into())),
+            (settle(stuck), Skip::Stale("changed on disk".into())),
+            (settle(waiting), Skip::Waiting("its children first".into())),
+            (
+                settle(bad),
+                Skip::Unsyncable("name can't be used here".into()),
+            ),
+        ];
+        let nodes =
+            |told: Vec<&(Op, Skip)>| told.iter().map(|(op, _)| op.node()).collect::<Vec<_>>();
+        let mut stalled = Stalled::default();
+        let t0 = Instant::now();
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            nodes(stalled.told(&sync, t0)),
+            [bad],
+            "only what can't be done, once"
+        );
+        // Skipped again and again within seconds (a file written all the time): not yet.
+        for i in 1..20 {
+            assert_eq!(
+                nodes(stalled.told(&sync[..1], t0 + Duration::from_secs(i))),
+                Vec::<NodeId>::new()
+            );
+        }
+        // Still skipped after ten minutes: told, once.
+        assert_eq!(nodes(stalled.told(&sync[..1], t0 + 10 * minute)), [stuck]);
+        assert_eq!(
+            nodes(stalled.told(&sync[..1], t0 + 11 * minute)),
+            Vec::<NodeId>::new()
+        );
+        // Not skipped for ten minutes: the streak ended, a new one starts.
+        assert!(stalled.told(&[], t0 + 22 * minute).is_empty());
+        assert_eq!(
+            nodes(stalled.told(&sync[..1], t0 + 23 * minute)),
+            Vec::<NodeId>::new()
+        );
     }
 
     #[test]

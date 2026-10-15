@@ -129,7 +129,10 @@ a failure (service managers restart it then).
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access
   denied, the drive refusing it); one that went stale since the plan (the item changed or went)
-  is planned again quietly. A row on the drive the
+  is planned again quietly, and told only when it keeps being skipped for ten minutes
+  (something holds it back that the plan can't see: a file written all the time, one that can't
+  be read). One waiting for another operation (a folder's base for its children's) isn't told:
+  that one says why. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
   transfers, done and to do.
