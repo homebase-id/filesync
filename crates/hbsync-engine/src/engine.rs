@@ -3,8 +3,9 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use hbsync_local::{CatchUp, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
+use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::{DirtyCursor, StateDb, StateError, keys};
 use hbsync_types::NodeId;
@@ -228,6 +229,18 @@ impl Engine {
         self.urgent = nodes.into_iter().collect();
     }
 
+    /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
+    /// them ([`LocalObserver::poll`]). `None` if nothing happened.
+    pub fn observe(
+        &mut self,
+        observer: &mut LocalObserver,
+        timeout: Duration,
+    ) -> Result<Option<ScanReport>, StateError> {
+        observer.poll(&mut self.db, timeout, Debounce::default())
+    }
+
+    /// The engine's connection, for tests that set up what a crash leaves behind.
+    #[cfg(feature = "testkit")]
     pub fn db(&mut self) -> &mut StateDb {
         &mut self.db
     }

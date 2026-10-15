@@ -186,7 +186,7 @@ impl Drive {
 
     /// Recently deleted, newest first, each item with the folder it would come back to.
     pub fn recently_deleted(&self, limit: usize) -> Result<Vec<Deleted>, StateError> {
-        deleted::list(&mut self.account(), limit)
+        self.account().read(|s| deleted::list(s, limit))
     }
 
     /// Restores these items of Recently deleted (each with what was deleted with it); the

@@ -413,7 +413,7 @@ pub fn set_up(
     // here, set up by the daemon (or here, when it isn't running).
     let db = paths.account_db(identity);
     let has_files = has_files(&folder)?;
-    match SyncRoot::open(&db, identity, &folder) {
+    match SyncRoot::find(&db, identity, &folder) {
         Ok(_) => {}
         // Synced here before, its marker gone: an empty mount point, most likely. Setting it
         // up would start it over; only when asked to merge.

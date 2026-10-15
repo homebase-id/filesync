@@ -23,35 +23,33 @@ use hbsync_local::layout;
 
 /// Recently deleted, newest first: the drive's, each item with the folder of this device it
 /// comes back to and its path below that folder's top.
-pub fn list(db: &mut StateDb, limit: usize) -> Result<Vec<Deleted>, StateError> {
-    db.read(|s| {
-        // Where a walk up stops: a folder's top (here or not), the role folders whether
-        // synced here or not; above them all, the main folder's top (the drive's root).
-        let folders: HashMap<NodeId, String> =
-            s.folders()?.into_iter().map(|f| (f.top, f.path)).collect();
-        let tops: HashSet<NodeId> = folders
-            .keys()
-            .copied()
-            .chain(Role::ALL.iter().map(|r| r.node()))
-            .collect();
-        let mut known = HashMap::new();
-        s.list_removed(limit)?
-            .into_iter()
-            .map(|r| {
-                let (path, top) = place(s, &tops, r.row.parent, &mut known)?;
-                Ok(Deleted {
-                    node: r.row.node,
-                    parent: r.row.parent,
-                    path: join(&path, &r.row.name),
-                    kind: r.row.kind,
-                    size: r.row.file.map(|f| f.size),
-                    removed_at_ms: r.removal.at_ms,
-                    root: r.removal.root,
-                    folder: folders.get(&top).cloned(),
-                })
+pub fn list(s: &Store<'_>, limit: usize) -> Result<Vec<Deleted>, StateError> {
+    // Where a walk up stops: a folder's top (here or not), the role folders whether
+    // synced here or not; above them all, the main folder's top (the drive's root).
+    let folders: HashMap<NodeId, String> =
+        s.folders()?.into_iter().map(|f| (f.top, f.path)).collect();
+    let tops: HashSet<NodeId> = folders
+        .keys()
+        .copied()
+        .chain(Role::ALL.iter().map(|r| r.node()))
+        .collect();
+    let mut known = HashMap::new();
+    s.list_removed(limit)?
+        .into_iter()
+        .map(|r| {
+            let (path, top) = place(s, &tops, r.row.parent, &mut known)?;
+            Ok(Deleted {
+                node: r.row.node,
+                parent: r.row.parent,
+                path: join(&path, &r.row.name),
+                kind: r.row.kind,
+                size: r.row.file.map(|f| f.size),
+                removed_at_ms: r.removal.at_ms,
+                root: r.removal.root,
+                folder: folders.get(&top).cloned(),
             })
-            .collect()
-    })
+        })
+        .collect()
 }
 
 /// The path of folder `at` below the top it is under (one of `tops`, else the drive's root:

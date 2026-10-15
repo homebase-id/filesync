@@ -14,7 +14,8 @@
 //!   - **folder_kv**: the folder's cursors and settings; **kv** has the account's.
 //!
 //! Every access runs inside a transaction ([`StateDb::read`], [`StateDb::write`]); a write
-//! closure that returns an error rolls everything back.
+//! closure that returns an error rolls everything back. What only reads while others write
+//! (answers, checks) uses a [`Reader`], which can't write.
 //!
 //! **Durability.** A commit reaches the disk soon, not at once: an OS crash or a power cut can
 //! lose the last ones, in order, never one in the middle. A durable commit
@@ -42,6 +43,7 @@ mod codec;
 mod coords;
 pub mod keys;
 mod migrations;
+mod reader;
 mod store;
 
 use std::collections::{HashMap, HashSet};
@@ -52,6 +54,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, TransactionBehavior};
 
 pub use coords::Coords;
+pub use reader::Reader;
 pub use store::{
     BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing,
     RemovedRow, Store,

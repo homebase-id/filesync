@@ -13,11 +13,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use hbsync_engine::Drive;
-use hbsync_engine::root::SyncRoot;
+use hbsync_engine::root::{AccountReader, SyncRoot};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
-use hbsync_state::{StateDb, StateError};
+use hbsync_state::StateError;
 
 use super::DaemonError;
 use crate::protocol::{
@@ -48,7 +48,7 @@ pub(crate) struct Account {
     ended: AtomicBool,
     /// A connection to its DB for the control socket's answers (recent, deleted), opened on
     /// first use.
-    reader: Mutex<Option<StateDb>>,
+    reader: Mutex<Option<AccountReader>>,
 }
 
 /// What the account's thread is asked to do.
@@ -226,18 +226,19 @@ impl Account {
         let folders = self.folders();
         self.read(|db| {
             let mut items = Vec::new();
-            for f in db.read(|s| s.folders())? {
+            for f in db.folders()? {
                 let path = PathBuf::from(&f.path);
                 if !folders.contains(&path) {
                     continue;
                 }
-                db.see_folder(f.id);
-                let synced = db.read(|s| s.recent_synced(limit));
-                db.see_account();
-                items.extend(synced?.into_iter().map(|synced| RecentItem {
-                    folder: path.clone(),
-                    synced,
-                }));
+                items.extend(
+                    db.recent_synced(f.id, limit)?
+                        .into_iter()
+                        .map(|synced| RecentItem {
+                            folder: path.clone(),
+                            synced,
+                        }),
+                );
             }
             Ok(items)
         })
@@ -246,7 +247,7 @@ impl Account {
 
     /// The newest `limit` items of its Recently deleted, newest first.
     pub fn deleted(&self, limit: usize) -> Vec<DeletedItem> {
-        self.read(|db| hbsync_engine::deleted::list(db, limit))
+        self.read(|db| db.recently_deleted(limit))
             .unwrap_or_default()
             .into_iter()
             .map(|deleted| DeletedItem {
@@ -256,12 +257,12 @@ impl Account {
             .collect()
     }
 
-    /// `f` on the answers' connection (seeing no folder), opened on first use; `None` when the
+    /// `f` on the answers' connection, which only reads, opened on first use; `None` when the
     /// DB isn't there yet or `f` failed.
-    fn read<T>(&self, f: impl FnOnce(&mut StateDb) -> Result<T, StateError>) -> Option<T> {
+    fn read<T>(&self, f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>) -> Option<T> {
         let mut reader = lock(&self.reader);
-        if reader.is_none() && self.db.exists() {
-            *reader = StateDb::open_account(&self.db).ok();
+        if reader.is_none() {
+            *reader = AccountReader::open(&self.db, &self.identity).ok().flatten();
         }
         f(reader.as_mut()?).ok()
     }
