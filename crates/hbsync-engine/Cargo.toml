@@ -21,7 +21,7 @@ thiserror.workspace = true
 
 [features]
 # A test client (`testkit`) for the engine's tests and the live ones.
-testkit = ["dep:tempfile"]
+testkit = ["dep:tempfile", "hbsync-state/testkit"]
 
 [dev-dependencies]
 hbsync-engine = { path = ".", features = ["testkit"] }

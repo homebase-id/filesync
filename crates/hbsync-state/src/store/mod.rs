@@ -45,6 +45,14 @@ pub struct BaseRow {
     pub local_hash: Option<hbsync_types::ContentHash>,
 }
 
+/// A download about to be put in place (written before its batch runs): the base its commit
+/// writes (the node as the drive has it at the version fetched), and where it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Placing {
+    pub base: BaseRow,
+    pub target: RelPath,
+}
+
 /// What the last observation saw at one local path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalRow {

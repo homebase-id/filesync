@@ -47,18 +47,20 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
     row.state = state;
     row.remote = mirror.remote_ref();
     if agreed.place {
-        // The local spelling is recorded when the name map wouldn't give it back.
-        row.local_name = local
-            .row
-            .path
-            .name()
-            .filter(|ln| to_remote(ln, os).as_deref() != Ok(r.name.as_str()))
-            .map(str::to_owned);
+        row.local_name = recorded_name(&local.row.path, &r.name, os);
     }
     if agreed.content {
         row.local_hash = l.content.map(|c| c.hash);
     }
     s.put_base(&row)
+}
+
+/// The local spelling of `path`'s name, recorded in the base when the name map wouldn't give it
+/// back from the remote `name`.
+pub(super) fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String> {
+    path.name()
+        .filter(|ln| to_remote(ln, os).as_deref() != Ok(name))
+        .map(str::to_owned)
 }
 
 /// The mirror row of a node written as `meta` at `written` (a file with its content `hash`).

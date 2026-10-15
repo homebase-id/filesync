@@ -19,8 +19,8 @@ use hbsync_fileio::hash_file;
 use hbsync_namemap::to_remote;
 use hbsync_platform::Os;
 use hbsync_platform::name::name_key;
-use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError};
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError, Store};
+use hbsync_types::{ContentHash, NodeId, NodeKind};
 
 use crate::scope::Scope;
 
@@ -76,9 +76,7 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usi
         }
         db.write(|s| {
             for (row, remote_node, proven_equal) in &matches {
-                s.rekey_local(row.node, *remote_node)?;
-                s.clear_dirty(row.node)?;
-                s.mark_dirty(*remote_node)?;
+                take_over(s, row.node, *remote_node)?;
                 // A match proven by hashing with the remote's algorithm is recorded right away:
                 // the reconciler can't compare hashes of different algorithms by itself.
                 if *proven_equal {
@@ -90,6 +88,29 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usi
         adopted += matches.len();
     }
     Ok(adopted)
+}
+
+/// Hands the local item of `local` to `node`: it is that node from now on, to be planned.
+pub(crate) fn take_over(s: &Store<'_>, local: NodeId, node: NodeId) -> Result<(), StateError> {
+    s.rekey_local(local, node)?;
+    s.clear_dirty(local)?;
+    s.mark_dirty(node)
+}
+
+/// Whether the local file of `row` holds `size` bytes of content `hash` (another client's
+/// algorithm, maybe: then this one file is hashed the same way).
+pub(crate) fn same_bytes(root: &Path, row: &LocalRow, hash: &ContentHash, size: u64) -> bool {
+    let Some(local) = row.hash else {
+        return false;
+    };
+    if row.fingerprint.size != size {
+        false
+    } else if local.algorithm == hash.algorithm {
+        local == *hash
+    } else {
+        hash_file(&row.path.to_native(root), hash.algorithm)
+            .is_ok_and(|h| h.hash == *hash && h.meta.fingerprint() == row.fingerprint)
+    }
 }
 
 /// The remote node `row` is a copy of, if any, and whether equality was proven across hash
@@ -126,26 +147,15 @@ fn find_match(
         if row.kind == NodeKind::Folder {
             return Ok(Some((remote.node, false)));
         }
-        let (Some(local_hash), Some(file)) = (row.hash, remote.file) else {
+        let Some(file) = remote.file else {
             continue;
         };
-        let remote_hash = file.hash;
-        if file.size != row.fingerprint.size {
-            continue;
-        }
-        let cross = local_hash.algorithm != remote_hash.algorithm;
+        let cross = row.hash.is_some_and(|h| h.algorithm != file.hash.algorithm);
         // Recorded as agreed at once (see `adopt`), so the place must match exactly.
         if cross && remote.name != name {
             continue;
         }
-        let same = if !cross {
-            local_hash == remote_hash
-        } else {
-            // Another client's algorithm: hash this one file the same way.
-            hash_file(&row.path.to_native(root), remote_hash.algorithm)
-                .is_ok_and(|h| h.hash == remote_hash && h.meta.fingerprint() == row.fingerprint)
-        };
-        if same {
+        if same_bytes(root, row, &file.hash, file.size) {
             return Ok(Some((remote.node, cross)));
         }
     }

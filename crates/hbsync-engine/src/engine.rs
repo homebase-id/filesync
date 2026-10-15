@@ -13,7 +13,9 @@ use hbsync_types::activity::Synced;
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
 use crate::drive::Drive;
-use crate::exec::{ExecConfig, Executor, Stopped, recover_forks, sweep_tmp, unpark};
+use crate::exec::{
+    ExecConfig, Executor, Stopped, recover_forks, recover_placements, sweep_tmp, unpark,
+};
 use crate::feed::{FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
 use crate::scope::Scope;
@@ -316,6 +318,7 @@ impl Engine {
         recover_forks(&mut self.db, &self.cfg.exec.root)?;
         unpark(&mut self.db, &self.cfg.exec)?;
         sweep_tmp(&mut self.db, &self.cfg.exec.root)?;
+        recover_placements(&mut self.db, &self.cfg.exec.root, self.cfg.exec.os)?;
         report.feed = self.drive.pull(Some(self.db.folder()))?;
         // A role folder's top on the drive: joined, restored, or made.
         if let Some(role) = hbsync_types::Role::of(self.cfg.scope.top) {

@@ -13,6 +13,10 @@ hbsync-types.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 
+[features]
+# Watching commits, for tests that crash a client at one (`testkit`).
+testkit = []
+
 [dev-dependencies]
 hbsync-fileio.workspace = true
 tempfile.workspace = true

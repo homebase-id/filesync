@@ -27,7 +27,7 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
@@ -296,6 +296,8 @@ enum Ctx {
         /// The node's, given to the file once in place.
         created_ms: Option<i64>,
         tags: Tags,
+        /// Its write-ahead record (`recover_placements`).
+        record: Option<Box<Placing>>,
     },
     /// `from`: the folder on the drive an updated file is in now.
     Upload {
@@ -695,9 +697,22 @@ impl<'a> Executor<'a> {
         // change from run to run.
         let mut pending: BTreeMap<NodeId, Prepared> = BTreeMap::new();
         let mut jobs = Vec::new();
+        let mut records = Vec::new();
         for (job, p) in std::mem::take(batch).jobs {
+            if let Ctx::Download {
+                record: Some(r), ..
+            } = &p.ctx
+            {
+                records.push(Placing::clone(r));
+            }
             pending.insert(job.node(), p);
             jobs.push((self.urgent.contains(&job.node()), job));
+        }
+        // Write-ahead: a download put in place whose commit a crash loses is found there again
+        // by its record (`recover_placements`).
+        if !records.is_empty() {
+            self.db
+                .write(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -912,10 +927,10 @@ mod transfer_ops;
 use park::{numbered_place, occupant, release_place, restore_parked};
 pub use park::{parked_name, unpark};
 use recover::{complete_fork, download_key};
-pub use recover::{recover_forks, sweep_tmp};
+pub use recover::{recover_forks, recover_placements, sweep_tmp};
 pub use settle::settle;
 pub(crate) use settle::update_meta;
-use settle::{restored_tags, write_tags, written_row};
+use settle::{recorded_name, restored_tags, write_tags, written_row};
 
 /// The node whose delete takes `node` along: its topmost synced ancestor that is gone here
 /// too (a folder deleted with everything in it), or `node` itself.

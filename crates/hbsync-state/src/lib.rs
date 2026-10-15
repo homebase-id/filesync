@@ -30,7 +30,8 @@ use rusqlite::{Connection, TransactionBehavior};
 
 pub use coords::Coords;
 pub use store::{
-    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, RemovedRow, Store,
+    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing,
+    RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -83,18 +84,66 @@ pub struct StateDb {
     /// The folders writes through this connection marked a node dirty in
     /// ([`StateDb::take_touched`]).
     touched: std::collections::BTreeSet<i64>,
+    #[cfg(feature = "testkit")]
+    hook: Option<testkit::Hook>,
 }
 
-/// The write gate of the DB file at `path`, one per file in this process.
-fn gate(path: Option<&Path>) -> Arc<Mutex<()>> {
+/// The DB file at `path` as one key, whatever the spelling.
+fn file_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The write gate of the DB file `key` ([`file_key`]), one per file in this process.
+fn gate(key: Option<&Path>) -> Arc<Mutex<()>> {
     static GATES: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
         LazyLock::new(Default::default);
-    let Some(path) = path else {
+    let Some(key) = key else {
         return Arc::default();
     };
-    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut gates = GATES.lock().unwrap_or_else(|e| e.into_inner());
-    Arc::clone(gates.entry(key).or_default())
+    Arc::clone(gates.entry(key.to_path_buf()).or_default())
+}
+
+/// Watching commits, for tests that crash a client at one (feature `testkit`).
+#[cfg(feature = "testkit")]
+pub mod testkit {
+    use super::*;
+
+    /// Called around each commit to a DB file, in its turn (no other connection of this process
+    /// writes meanwhile).
+    #[derive(Clone)]
+    pub struct Hook(pub Arc<dyn Fn(Commit) + Send + Sync>);
+
+    /// When a [`Hook`] is called.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Commit {
+        Before,
+        After,
+    }
+
+    impl std::fmt::Debug for Hook {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Hook")
+        }
+    }
+
+    static HOOKS: LazyLock<Mutex<HashMap<PathBuf, Hook>>> = LazyLock::new(Default::default);
+
+    /// Connections opened from now on to the DB at `path` call `hook` around each commit (none
+    /// with `None`).
+    pub fn on_commit(path: &Path, hook: Option<Hook>) {
+        let mut hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        match hook {
+            Some(hook) => hooks.insert(file_key(path), hook),
+            None => hooks.remove(&file_key(path)),
+        };
+    }
+
+    /// The hook of the DB file `key` ([`file_key`]).
+    pub(crate) fn hook(key: Option<&Path>) -> Option<Hook> {
+        let hooks = HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        hooks.get(key?).cloned()
+    }
 }
 
 /// The folder a DB opened with [`StateDb::open`] sees: the first one, made on first use for the
@@ -179,19 +228,23 @@ impl StateDb {
         // the DB is never more than the one step in flight behind the disk. The executor's
         // crash handling (write-ahead records, the scan's identity rules) relies on that, so
         // speed comes from fewer commits (an operation and its settling are one), not from
-        // weaker ones.
+        // weaker ones. (NORMAL, ~70x cheaper a commit, was tried: then every effect on the disk
+        // or the drive needs a durable record of its own first, an operation log.)
         wal(&conn)?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(128);
         migrations::apply(&mut conn)?;
+        let key = path.map(file_key);
         Ok(StateDb {
             conn,
             folder: FIRST_FOLDER,
             path: path.map(Path::to_path_buf),
-            gate: gate(path),
+            gate: gate(key.as_deref()),
             touched: Default::default(),
+            #[cfg(feature = "testkit")]
+            hook: testkit::hook(key.as_deref()),
         })
     }
 
@@ -214,7 +267,15 @@ impl StateDb {
         let store = Store::new(&tx, self.folder);
         let out = f(&store)?;
         let touched = store.take_touched();
+        #[cfg(feature = "testkit")]
+        if let Some(hook) = &self.hook {
+            (hook.0)(testkit::Commit::Before);
+        }
         tx.commit()?;
+        #[cfg(feature = "testkit")]
+        if let Some(hook) = &self.hook {
+            (hook.0)(testkit::Commit::After);
+        }
         self.touched.extend(touched);
         Ok(out)
     }

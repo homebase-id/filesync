@@ -175,7 +175,8 @@ impl Store<'_> {
              AND NOT EXISTS (SELECT 1 FROM remote WHERE parent = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM dirty WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM parked WHERE id = nodes.id) \
-             AND NOT EXISTS (SELECT 1 FROM forks WHERE id = nodes.id OR new_node = nodes.id)",
+             AND NOT EXISTS (SELECT 1 FROM forks WHERE id = nodes.id OR new_node = nodes.id) \
+             AND NOT EXISTS (SELECT 1 FROM placing WHERE id = nodes.id OR parent = nodes.id)",
             )?
             .execute([])?;
         self.prep("DELETE FROM gone")?.execute([])?;
