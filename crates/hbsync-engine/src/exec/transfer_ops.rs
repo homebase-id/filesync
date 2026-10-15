@@ -289,33 +289,28 @@ impl Executor<'_> {
         // take that for the user removing them.
         let tags = write_tags(done.path(), tags);
         let placed = match &current {
-            Some(row) if &row.path == target => {
-                done.persist_over(&self.abs(target), &row.fingerprint, created_ms)
-            }
+            Some(row) if &row.path == target => self.put(target, |at| {
+                done.persist_over(at, &row.fingerprint, created_ms)
+            })?,
             Some(row) => {
                 if !self.on_disk_unchanged(row) || !self.free_target(target, Some(node))? {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                self.filling(target)?;
-                match self.move_to_trash(&row.path, node) {
-                    Ok(()) => done.persist_new(&self.abs(target), created_ms),
-                    Err(e) => {
-                        done.keep_for_retry();
-                        return Ok(io_outcome(e));
-                    }
+                if let Err(e) = self.move_to_trash(&row.path, node)? {
+                    done.keep_for_retry();
+                    return Ok(io_outcome(e));
                 }
+                self.put(target, |at| done.persist_new(at, created_ms))?
             }
             None => {
                 if !self.free_target(target, Some(node))? {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
-                self.filling(target)?;
-                done.persist_new(&self.abs(target), created_ms)
+                self.put(target, |at| done.persist_new(at, created_ms))?
             }
         };
-        self.changed_entry(target);
         let meta = match placed {
             Ok(m) => m,
             Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, target)),

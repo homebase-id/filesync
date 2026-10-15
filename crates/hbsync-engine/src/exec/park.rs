@@ -77,11 +77,9 @@ pub(super) fn restore_parked(
     row: &LocalRow,
     to: &RelPath,
 ) -> Result<io::Result<LocalRow>, StateError> {
-    if let Err(e) = ops::rename_noreplace(&row.path.to_native(root), &to.to_native(root)) {
+    if let Err(e) = rename_ordered(db, &row.path.to_native(root), &to.to_native(root))? {
         return Ok(Err(e));
     }
-    // Synced before its record goes (a rare move): the DB never holds one the disk lost.
-    let _ = ops::sync_dir(&to.parent().unwrap_or_default().to_native(root));
     let refreshed = renamed_row(root, row, to);
     db.write(|s| {
         s.move_local_subtree(&row.path, to)?;
@@ -105,8 +103,7 @@ pub fn parked_name(node: NodeId) -> String {
 /// no longer apply (the item was renamed, by us or by the user). Run before each plan.
 /// An original name this device now filters (§10) may be held by an item it doesn't track, which
 /// would keep the parked item away for good: it takes the first free numbered name instead.
-pub fn unpark(db: &mut StateDb, cfg: &ExecConfig) -> Result<usize, StateError> {
-    let mut restored = 0;
+pub(super) fn unpark(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), StateError> {
     for node in db.read(|s| s.all_parked())? {
         let place = db.read(|s| {
             let Some(row) = s.local_by_node(node)? else {
@@ -125,11 +122,10 @@ pub fn unpark(db: &mut StateDb, cfg: &ExecConfig) -> Result<usize, StateError> {
         } else {
             release_place(db, cfg, &original, is_dir)?
         };
-        if let Some(to) = to
-            && restore_parked(db, &cfg.root, &current, &to)?.is_ok()
-        {
-            restored += 1;
+        if let Some(to) = to {
+            // One that can't move stays parked for the next time.
+            let _ = restore_parked(db, &cfg.root, &current, &to)?;
         }
     }
-    Ok(restored)
+    Ok(())
 }

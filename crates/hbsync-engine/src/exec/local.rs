@@ -33,12 +33,11 @@ impl Executor<'_> {
         };
         // Write-ahead: if we crash after the rename, recovery completes the fork instead of a
         // scan mistaking it for the user renaming the original.
-        self.write_ahead(|s| s.put_fork(node, new_node, &target))?;
-        if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&target)) {
+        self.write_durable(|s| s.put_fork(node, new_node, &target))?;
+        if let Err(e) = self.rename(&row.path, &target)? {
             self.db.write(|s| s.delete_fork(node))?;
             return Ok(io_outcome(e));
         }
-        self.mark_emptied(&row.path);
         let moved = LocalRow {
             node: new_node,
             ..self.renamed(&row, &target).unwrap_or_else(|| LocalRow {
@@ -79,15 +78,13 @@ impl Executor<'_> {
             // Write-ahead for a folder this device synced before: with the commit lost, the
             // scan would find it as a new folder, which adoption doesn't pair with a node that
             // has a base (`recover_placements` does, by this record).
-            match mirror
+            if let Some(record) = mirror
                 .filter(|_| synced_before)
                 .and_then(|m| Placing::of(&m, target.clone()))
             {
-                Some(record) => self.write_ahead(|s| s.put_placing(&record))?,
-                None => self.filling(&target)?,
+                self.write_durable(|s| s.put_placing(&record))?;
             }
-            self.changed_entry(&target);
-            if let Err(e) = fs::create_dir(&abs) {
+            if let Err(e) = self.put(&target, |at| fs::create_dir(at))? {
                 return Ok(io_outcome(e));
             }
         }
@@ -174,11 +171,9 @@ impl Executor<'_> {
         if !self.free_target(&target, Some(node))? {
             return Ok(Outcome::Retry("name taken".into()));
         }
-        self.filling(&target)?;
-        if let Err(e) = ops::rename_noreplace(&self.abs(&row.path), &self.abs(&target)) {
+        if let Err(e) = self.rename(&row.path, &target)? {
             return Ok(io_outcome(e));
         }
-        self.mark_emptied(&row.path);
         let refreshed = self.renamed(&row, &target);
         self.finish(&[(node, false)], |s| {
             s.move_local_subtree(&row.path, &target)?;
@@ -214,7 +209,7 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         };
         if holding.is_empty() {
-            if let Err(e) = self.move_to_trash(&row.path, node) {
+            if let Err(e) = self.move_to_trash(&row.path, node)? {
                 return Ok(io_outcome(e));
             }
         } else {
@@ -231,7 +226,7 @@ impl Executor<'_> {
                 let in_holder = r.path.parent().is_some_and(|p| holders.contains(&p));
                 if in_holder
                     && !holders.contains(&r.path)
-                    && let Err(e) = self.move_to_trash(&r.path, r.node)
+                    && let Err(e) = self.move_to_trash(&r.path, r.node)?
                 {
                     self.report.rescan.push(row.path.clone());
                     return Ok(io_outcome(e));
@@ -248,9 +243,8 @@ impl Executor<'_> {
             parked.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.depth()));
             for (r, original) in parked {
                 if let Some(to) = release_place(self.db, self.cfg, &original, true)? {
-                    self.filling(&to)?;
                     // Best effort: if it fails, the item keeps its name and the scan finds it there.
-                    let _ = ops::rename_noreplace(&self.abs(&r.path), &self.abs(&to));
+                    let _ = self.rename(&r.path, &to)?;
                 }
             }
             self.report
@@ -293,7 +287,6 @@ impl Executor<'_> {
                 let Some(to) = release_place(self.db, self.cfg, &original, is_dir)? else {
                     return Ok(Outcome::unsyncable("no free name to leave the parked one"));
                 };
-                self.filling(&to)?;
                 match restore_parked(self.db, &self.cfg.root, &row, &to)? {
                     Ok(row) => row,
                     Err(e) => return Ok(io_outcome(e)),
@@ -302,20 +295,18 @@ impl Executor<'_> {
         };
         // The new id goes out with the item in this run: durable at once (a power cut must not
         // make the next plan pick another).
-        self.durably(|db| {
-            db.write_durable(|s| {
-                let below = s.local_subtree(&row.path)?;
-                s.rekey_local(node, new_node)?;
-                // The old node isn't synced here any more; a base left behind would read as a
-                // local delete once it is back in view.
-                s.delete_base(node)?;
-                s.mark_dirty(node)?;
-                s.mark_dirty(new_node)?;
-                below
-                    .iter()
-                    .filter(|r| r.node != node)
-                    .try_for_each(|r| s.mark_dirty(r.node))
-            })
+        self.write_durable(|s| {
+            let below = s.local_subtree(&row.path)?;
+            s.rekey_local(node, new_node)?;
+            // The old node isn't synced here any more; a base left behind would read as a
+            // local delete once it is back in view.
+            s.delete_base(node)?;
+            s.mark_dirty(node)?;
+            s.mark_dirty(new_node)?;
+            below
+                .iter()
+                .filter(|r| r.node != node)
+                .try_for_each(|r| s.mark_dirty(r.node))
         })?;
         Ok(Outcome::Settled)
     }
@@ -336,14 +327,19 @@ impl Executor<'_> {
     }
 
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
-    pub(super) fn move_to_trash(&mut self, path: &RelPath, node: NodeId) -> io::Result<()> {
-        let stamp = hbsync_types::unix_now();
-        let dir = layout::trash_dir(&self.cfg.root).join(format!("{stamp}-{}", node.0.simple()));
-        fs::create_dir_all(&dir)?;
-        let name = path.name().unwrap_or("item");
-        ops::rename_noreplace(&self.abs(path), &dir.join(name))?;
-        self.mark_emptied(path);
-        self.unsynced_dirs.insert(dir);
-        Ok(())
+    pub(super) fn move_to_trash(
+        &mut self,
+        path: &RelPath,
+        node: NodeId,
+    ) -> Result<io::Result<()>, StateError> {
+        let trash = layout::trash_dir(&self.cfg.root);
+        let dir = trash.join(format!("{}-{}", hbsync_types::unix_now(), node.0.simple()));
+        // The trash folder too, made with the first item in it.
+        self.db.changed(&trash);
+        if let Err(e) = put_ordered(self.db, &dir, |dir| fs::create_dir_all(dir))? {
+            return Ok(Err(e));
+        }
+        let to = dir.join(path.name().unwrap_or("item"));
+        rename_ordered(self.db, &self.abs(path), &to)
     }
 }

@@ -3,11 +3,11 @@
 //! - [`rename_noreplace`] never overwrites: a user file that appeared at the target in the
 //!   meantime is never clobbered. This is the default for moves.
 //! - [`replace`] atomically swaps a fully written temp file over the target.
-//! - [`sync_dir`] makes a rename durable (Unix; a no-op on Windows, where NTFS journals it).
+//! - [`sync_dirs`] makes renames durable (Unix; a no-op on Windows, where NTFS journals them).
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::meta;
 
@@ -32,37 +32,40 @@ pub fn replace(from: &Path, to: &Path) -> io::Result<()> {
     fs::rename(from, to)
 }
 
-/// Flushes a directory entry change (create, rename, delete) to disk.
-pub fn sync_dir(dir: &Path) -> io::Result<()> {
+/// Syncs each of `dirs`, so the changes of their entries (made, renamed, removed) are on the
+/// disk (best effort: one that is gone needs none). Many on one volume in one call where the
+/// system has one (Linux: `syncfs`); on macOS each as far as the drive's cache, which is then
+/// flushed once per volume.
+pub fn sync_dirs(dirs: impl IntoIterator<Item = PathBuf>) {
     #[cfg(unix)]
     {
-        fs::File::open(dir)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Ok(())
-    }
-}
-
-/// Flushes everything the file system holding `path` has written (`syncfs`): one call instead
-/// of many [`sync_dir`]s. `false` where there is none (only Linux has one).
-pub fn sync_volume(path: &Path) -> io::Result<bool> {
-    #[cfg(target_os = "linux")]
-    {
         use std::os::fd::AsRawFd;
-        let dir = fs::File::open(path)?;
-        // SAFETY: a valid open descriptor.
-        if unsafe { libc::syncfs(dir.as_raw_fd()) } != 0 {
-            return Err(io::Error::last_os_error());
+        use std::os::unix::fs::MetadataExt;
+        let mut volumes: std::collections::HashMap<u64, Vec<fs::File>> = Default::default();
+        for dir in dirs {
+            if let Ok(file) = fs::File::open(&dir)
+                && let Ok(meta) = file.metadata()
+            {
+                volumes.entry(meta.dev()).or_default().push(file);
+            }
         }
-        Ok(true)
+        for files in volumes.into_values() {
+            // SAFETY (each call): a valid open descriptor.
+            #[cfg(target_os = "linux")]
+            if files.len() > 32 && unsafe { libc::syncfs(files[0].as_raw_fd()) } == 0 {
+                continue;
+            }
+            for file in &files {
+                unsafe { libc::fsync(file.as_raw_fd()) };
+            }
+            #[cfg(target_os = "macos")]
+            unsafe {
+                libc::fcntl(files[0].as_raw_fd(), libc::F_FULLFSYNC)
+            };
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = path;
-        Ok(false)
-    }
+    #[cfg(windows)]
+    drop(dirs);
 }
 
 /// Sets the modification time of a file or directory, in nanoseconds since the Unix epoch.
@@ -400,7 +403,7 @@ mod tests {
         fs::write(&target, b"old")?;
         fs::write(&tmp, b"new")?;
         replace(&tmp, &target)?;
-        sync_dir(dir.path())?;
+        sync_dirs([dir.path().to_path_buf()]);
         assert_eq!(fs::read(&target)?, b"new");
         assert!(!tmp.exists());
         Ok(())
