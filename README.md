@@ -23,10 +23,9 @@ Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
      notification area at the right of the taskbar (behind the **^** arrow at first).
    - **macOS**: open **Homebase Filesync** from Applications. Its icon is in the menu bar.
    - **Linux**: open **Homebase Filesync** from the app menu (Activities on Ubuntu), or run
-     `homebase-filesync` in a terminal (from the tarball:
-     `homebase-filesync-*/bin/homebase-filesync`); with systemd it carries on when the terminal
-     closes (without, start it with `setsid`). Its icon is in the top bar or panel; GNOME needs
-     the AppIndicator extension, which Ubuntu has.
+     `setsid homebase-filesync` in a terminal (from the tarball:
+     `setsid homebase-filesync-*/bin/homebase-filesync`). Its icon is in the top bar or panel;
+     GNOME needs the AppIndicator extension, which Ubuntu has.
 3. **Choose Log in to Homebase…** from that icon. Your browser opens so you can approve this
    computer, and the folder `~/Homebase` starts syncing (or pick another). From then on it
    starts by itself when you log in.
