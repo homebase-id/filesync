@@ -21,6 +21,8 @@ pub mod words;
 
 pub use config::{Config, ConfigError, MassDelete, Root};
 pub use hbsync_homebase::app::{APP_NAME, files_online};
+/// The local pages' HTTP (login callback, the tray's pages), and `escape` for HTML and XML.
+pub use hbsync_homebase::local_http;
 pub use paths::{NoHome, Paths};
 pub use runner::{Control, Handle, HintSource, Runner, RunnerConfig, State, Status};
 pub use secrets::{CredentialError, CredentialStore, Location};

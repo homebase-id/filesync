@@ -14,7 +14,6 @@
 //! folder = "/home/anna/Homebase"
 //! ```
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -112,14 +111,8 @@ impl Config {
     /// Writes the config to `path` in one step: a crash leaves the old file or the new one.
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
         let text = toml::to_string_pretty(self)?;
-        let io = |e| ConfigError::Io(path.to_owned(), e);
-        let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir).map_err(io)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io)?;
-        tmp.write_all(text.as_bytes()).map_err(io)?;
-        tmp.as_file().sync_all().map_err(io)?;
-        tmp.persist(path).map_err(|e| io(e.error))?;
-        Ok(())
+        hbsync_fileio::write_atomic(path, text.as_bytes())
+            .map_err(|e| ConfigError::Io(path.to_owned(), e))
     }
 
     /// The one folder to sync, if any.

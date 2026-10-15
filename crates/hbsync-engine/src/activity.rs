@@ -77,9 +77,10 @@ pub fn path_of(s: &Store<'_>, node: NodeId) -> Result<Option<String>, StateError
             .map(|b| (b.local_name.unwrap_or(b.state.name), b.state.parent)))
     })?;
     // Only a path that reaches the top is one: a gap or a cycle gives none.
-    let crate::walk::Up::Top(mut names) = up else {
+    if up.end != crate::walk::End::Top {
         return Ok(None);
-    };
+    }
+    let mut names = up.items;
     names.reverse();
     Ok(Some(names.join("/")))
 }

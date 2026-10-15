@@ -30,7 +30,9 @@
 //! the same way, but is never leaving or brought back: it is synced elsewhere, by another
 //! engine or another device. A role folder's name stays free for the scope's own items.
 
+use hbsync_fileio::{FNV1A64_OFFSET, fnv1a64_from};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::convert::Infallible;
 
 use hbsync_local::Filter;
 use hbsync_platform::name::name_key;
@@ -39,6 +41,7 @@ use hbsync_types::{NodeId, NodeKind};
 use crate::reconcile::Input;
 use crate::scope::Scope;
 use crate::tree::Tree;
+use crate::walk::End;
 
 /// The masks of one plan.
 #[derive(Debug, Default)]
@@ -273,22 +276,17 @@ fn folder_path(
     memo: &mut HashMap<NodeId, Option<(String, bool)>>,
 ) -> Option<(String, bool)> {
     // Up to the nearest folder already known, then down again.
-    let mut chain: Vec<NodeId> = Vec::new();
-    let mut current = folder;
-    let mut known = loop {
-        if let Some(known) = memo.get(&current) {
-            break known.clone();
-        }
-        if chain.contains(&current) {
-            break None; // a cycle
-        }
-        chain.push(current);
-        match remote.get(current) {
-            Some(state) => current = state.parent,
-            None => break None,
-        }
+    let Ok(up) = crate::walk::up::<_, Infallible>(folder, |n| {
+        Ok((!memo.contains_key(&n))
+            .then(|| remote.get(n).map(|state| (n, state.parent)))
+            .flatten())
+    });
+    let mut known = match up.end {
+        End::Top => Some((String::new(), false)),
+        End::At(n) => memo.get(&n).cloned().flatten(),
+        End::Cycle => None,
     };
-    while let Some(node) = chain.pop() {
+    for node in up.items.into_iter().rev() {
         known = match (known, remote.get(node)) {
             (Some((path, masked)), Some(state)) => {
                 let masked = masked || !filter.in_folder(&path, &state.name, true).is_sync();
@@ -315,17 +313,12 @@ fn detach_id(node: NodeId, device: &str, taken: &HashSet<NodeId>) -> NodeId {
     let candidate = |round: u32| {
         let mut bytes = [0u8; 16];
         for (half, out) in bytes.chunks_mut(8).enumerate() {
-            let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ half as u64;
-            let again = (round > 0).then(|| round.to_le_bytes());
-            for b in node
-                .0
-                .as_bytes()
-                .iter()
-                .chain(device.as_bytes())
-                .chain(b"detach")
-                .chain(again.iter().flatten())
-            {
-                h = (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+            let mut h = FNV1A64_OFFSET ^ half as u64;
+            for part in [node.0.as_bytes().as_slice(), device.as_bytes(), b"detach"] {
+                h = fnv1a64_from(h, part);
+            }
+            if round > 0 {
+                h = fnv1a64_from(h, &round.to_le_bytes());
             }
             out.copy_from_slice(&h.to_le_bytes());
         }
@@ -342,6 +335,20 @@ fn detach_id(node: NodeId, device: &str, taken: &HashSet<NodeId>) -> NodeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Detach ids are stored and on the drive: the hash must never change.
+    #[test]
+    fn detach_ids_are_stable() {
+        let node = NodeId(
+            "0274575b-c2cf-4ac7-b39b-d56b2c121b75"
+                .parse()
+                .expect("uuid"),
+        );
+        let once = detach_id(node, "laptop", &HashSet::new());
+        let again = detach_id(node, "laptop", &HashSet::from([once]));
+        assert_eq!(once.0.to_string(), "3e8e761e-85ca-4e8a-9333-e7ec35797e2e");
+        assert_eq!(again.0.to_string(), "afd5a7ee-1160-42a3-b291-7c3f5baf8433");
+    }
 
     #[test]
     fn detaching_twice_never_gives_the_first_id_back() {

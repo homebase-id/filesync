@@ -27,9 +27,7 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{
-    BaseRow, LocalRow, MirrorFile, MirrorRow, RemovedRow, StateDb, StateError, Store,
-};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::{NodeContent, Removal};
 use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
@@ -37,7 +35,7 @@ use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
 use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
-use crate::{feed, view};
+use crate::view;
 
 /// Where the executor works.
 #[derive(Debug, Clone)]
@@ -205,19 +203,6 @@ enum Ctx {
     },
 }
 
-/// Operations that move file bytes and run on the worker pool.
-fn is_transfer(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::LocalDownload { .. }
-            | Op::RemoteCreate {
-                kind: NodeKind::File,
-                ..
-            }
-            | Op::RemoteUpdate { upload: true, .. }
-    )
-}
-
 impl std::fmt::Debug for Executor<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Executor")
@@ -306,7 +291,7 @@ impl<'a> Executor<'a> {
                 self.handle(op, attempts, wait, None)?;
                 continue;
             }
-            if is_transfer(&op) {
+            if op.is_transfer() {
                 // Transfers are collected and run together on the worker pool.
                 match self.prepare(&op) {
                     Ok((job, ctx)) => batch.push(Prepared {
@@ -430,7 +415,7 @@ impl<'a> Executor<'a> {
                 self.record(&op, gone)?;
                 self.report.done += 1;
                 let os = self.cfg.os;
-                let same_bytes = is_transfer(&op);
+                let same_bytes = op.is_transfer();
                 self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
             }
             Outcome::Settled => {
@@ -517,7 +502,7 @@ impl<'a> Executor<'a> {
     fn count_bytes(&mut self, ops: &[Op]) -> Result<(), StateError> {
         let sizes = self.db.read(|s| {
             let mut sizes = Vec::new();
-            for op in ops.iter().filter(|op| is_transfer(op)) {
+            for op in ops.iter().filter(|op| op.is_transfer()) {
                 let node = op.node();
                 let size = match op {
                     Op::LocalDownload { .. } => {
@@ -830,7 +815,7 @@ impl<'a> Executor<'a> {
             self.db
                 .read(|s| s.get_mirror(node))?
                 .as_ref()
-                .and_then(feed::created_ms)
+                .and_then(MirrorRow::created_ms)
         } else {
             None
         };
@@ -1009,7 +994,7 @@ impl<'a> Executor<'a> {
             return Err(rescan(&mut self.report, &row.path));
         }
         let target = self.target_path(parent, name)?;
-        let created_ms = feed::created_ms(&mirror);
+        let created_ms = mirror.created_ms();
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -1078,7 +1063,7 @@ impl<'a> Executor<'a> {
         let target = match existing {
             // In Recently deleted: restored with these bytes (an edit wins over the delete).
             None if let Some(r) = &removed => {
-                content.unknown = feed::unknown_keys(&r.row);
+                content.unknown = r.row.carried_keys();
                 tags = restored_tags(base.as_ref(), &tags, r);
                 Some(r.row.remote_ref())
             }
@@ -1091,7 +1076,7 @@ impl<'a> Executor<'a> {
                 let Some(mirror) = &mirror else {
                     return Err(Outcome::Skip("gone remotely".into()));
                 };
-                content.unknown = feed::unknown_keys(mirror);
+                content.unknown = mirror.carried_keys();
                 // A node from before creation times, or from a client that sends none.
                 if content.created_ms().is_none() {
                     content.set_created_ms(ops::created_ms(&path));
@@ -1152,7 +1137,8 @@ impl<'a> Executor<'a> {
                 },
                 JobResult::Uploaded(written),
             ) => {
-                let row = mirror_from(node, parent, kind, &content, Some(hash), written);
+                let row =
+                    MirrorRow::from_content(written, node, parent, kind, &content, Some(hash));
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 self.finish(&[(node, true)], |s| {
                     s.delete_removed(node)?;
@@ -1404,7 +1390,7 @@ impl<'a> Executor<'a> {
         match &removed {
             // In Recently deleted: restored, keeping its keys (`ct`).
             Some(r) => {
-                content.unknown = feed::unknown_keys(&r.row);
+                content.unknown = r.row.carried_keys();
                 let base = self.db.read(|s| s.get_base(node))?;
                 content.set_tags(&restored_tags(base.as_ref(), tags, r));
             }
@@ -1430,7 +1416,7 @@ impl<'a> Executor<'a> {
         };
         self.finish(&[(node, false)], |s| {
             s.delete_removed(node)?;
-            s.put_mirror(&mirror_from(node, parent, kind, &content, None, written))
+            s.put_mirror(&written_row(written, &new, None))
         })
     }
 
@@ -1448,7 +1434,7 @@ impl<'a> Executor<'a> {
             return Ok(Outcome::Skip("gone remotely".into()));
         };
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
-        let mut content = content_of(&mirror, name);
+        let mut content = mirror.content(name);
         content.set_tags(tags);
         // A node from before creation times, or from a client that sends none.
         if content.created_ms().is_none()
@@ -1462,12 +1448,11 @@ impl<'a> Executor<'a> {
             kind: mirror.kind,
             content,
         };
-        let written = match self.remote.update(file_id, expected, &meta, None) {
-            Ok(w) => w,
+        let hash = mirror.file.map(|f| f.hash);
+        let row = match update_meta(self.remote, file_id, expected, &meta, hash) {
+            Ok(row) => row,
             Err(e) => return Ok(remote_outcome(e)),
         };
-        let hash = mirror.file.map(|f| f.hash);
-        let row = mirror_from(node, parent, mirror.kind, &meta.content, hash, written);
         self.finish(&[(node, false)], |s| s.put_mirror(&row))
     }
 
@@ -1490,7 +1475,7 @@ impl<'a> Executor<'a> {
             at_ms: hbsync_types::unix_now_ms(),
             root: self.db.read(|s| removal_root(s, node))?,
         };
-        let mut content = content_of(&mirror, &mirror.name);
+        let mut content = mirror.content(&mirror.name);
         content.set_removal(Some(removal));
         let meta = NodeMeta {
             node,
@@ -1498,15 +1483,9 @@ impl<'a> Executor<'a> {
             kind: mirror.kind,
             content,
         };
-        let removed = match self.remote.update(file_id, expected, &meta, None) {
-            Ok(written) => Some(RemovedRow {
-                row: MirrorRow {
-                    file_id: written.file_id,
-                    version: written.version,
-                    ..mirror
-                },
-                removal,
-            }),
+        let hash = mirror.file.map(|f| f.hash);
+        let removed = match update_meta(self.remote, file_id, expected, &meta, hash) {
+            Ok(row) => Some(RemovedRow { row, removal }),
             Err(RemoteError::NotFound) => None, // deleted for good meanwhile
             Err(e) => return Ok(remote_outcome(e)),
         };
@@ -1579,39 +1558,33 @@ pub fn settle(s: &Store<'_>, node: NodeId, os: Os, content_hint: bool) -> Result
     s.put_base(&row)
 }
 
-fn mirror_from(
-    node: NodeId,
-    parent: NodeId,
-    kind: NodeKind,
-    content: &NodeContent,
-    hash: Option<hbsync_types::ContentHash>, // `Some` for files
+/// The mirror row of a node written as `meta` at `written` (a file with its content `hash`).
+fn written_row(
     written: hbsync_types::RemoteRef,
+    meta: &NodeMeta,
+    hash: Option<hbsync_types::ContentHash>,
 ) -> MirrorRow {
-    MirrorRow {
-        file_id: written.file_id,
-        version: written.version,
-        node,
-        parent,
-        name: content.name.clone(),
-        kind,
-        file: hash.map(|hash| MirrorFile {
-            hash,
-            size: content.size.unwrap_or(0),
-            mtime_ms: content.mtime.unwrap_or(0),
-            executable: content.x,
-        }),
-        content_extra: feed::content_extra(content),
-    }
+    MirrorRow::from_content(
+        written,
+        meta.node,
+        meta.parent,
+        meta.kind,
+        &meta.content,
+        hash,
+    )
 }
 
-/// The content of a node as `row` has it, under `name`, with the keys sync carries along.
-pub(crate) fn content_of(row: &MirrorRow, name: &str) -> NodeContent {
-    let mut content = match (&row.kind, &row.file) {
-        (NodeKind::File, Some(f)) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
-        _ => NodeContent::folder(name),
-    };
-    content.unknown = feed::unknown_keys(row);
-    content
+/// A metadata-only update of a node to `meta` if it's still at `expected` (its payload, of
+/// content `hash`, stays); its mirror row after.
+pub(crate) fn update_meta(
+    remote: &dyn Remote,
+    file_id: hbsync_types::RemoteFileId,
+    expected: hbsync_types::VersionTag,
+    meta: &NodeMeta,
+    hash: Option<hbsync_types::ContentHash>,
+) -> Result<MirrorRow, RemoteError> {
+    let written = remote.update(file_id, expected, meta, None)?;
+    Ok(written_row(written, meta, hash))
 }
 
 /// Gives the item at `path` these tags and returns what it holds now. Tags are no reason to
@@ -1641,7 +1614,7 @@ fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
         }
         Ok(s.get_base(at)?.map(|b| (at, b.state.parent)))
     })?;
-    Ok(above.items().last().copied().unwrap_or(node))
+    Ok(above.items.last().copied().unwrap_or(node))
 }
 
 /// The local trash: `<state dir>/trash/<Unix s>-<node>/<name>`.
@@ -1703,19 +1676,13 @@ fn numbered_place(
     let (Some(name), folder) = (target.name(), target.parent().unwrap_or_default()) else {
         return Ok(None);
     };
-    let mut filtered = None;
-    for candidate in crate::tree::numbered_names(name) {
-        let Ok(candidate) = folder.join(&candidate) else {
-            break;
-        };
-        if is_free(db, cfg, &candidate)? {
-            if cfg.filter.path(&candidate, is_dir).is_sync() {
-                return Ok(Some(candidate));
-            }
-            filtered.get_or_insert(candidate);
-        }
-    }
-    Ok(filtered)
+    // Up to the first name the folder can't join (too long): the later ones are longer.
+    let places = crate::tree::numbered_names(name).map_while(|n| folder.join(&n).ok());
+    crate::tree::first_free(
+        places,
+        |p| is_free(db, cfg, p),
+        |p| cfg.filter.path(p, is_dir).is_sync(),
+    )
 }
 
 /// A real name for a parked item that leaves its temporary one: its `original` place if that is

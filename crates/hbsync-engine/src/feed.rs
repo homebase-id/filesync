@@ -2,15 +2,13 @@
 //!
 //! Pages are applied in feed order, each in one transaction together with the cursor, so a
 //! crash replays at most one page (and applying a page twice is harmless). Every node a page
-//! touches is marked dirty. The feed is drained completely before planning, which is what
+//! changes is marked dirty; a version the mirror has already (this device's own write coming
+//! back) changes nothing. The feed is drained completely before planning, which is what
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
 use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
-use hbsync_state::{
-    MirrorFile, MirrorRow, REMOTE_CURSOR_KEY, RemovedRow, StateDb, StateError, Store,
-};
-use hbsync_types::NodeKind;
-use hbsync_types::schema::{NodeContent, REMOVAL_KEY};
+use hbsync_state::{MirrorRow, REMOTE_CURSOR_KEY, RemovedRow, StateDb, StateError, Store};
+use hbsync_types::{NodeKind, RemoteRef};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -85,11 +83,21 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         gone(s, header)?;
         return Ok(false);
     }
+    let removal = header.removal();
+    // A version the mirror has already: the echo of this device's own write (the executor
+    // stored the row it wrote), or a page applied again. Nothing changes.
+    let at = RemoteRef {
+        file_id: header.file_id,
+        version: header.version,
+    };
+    if s.has_version(at, removal.is_some())? {
+        return Ok(removal.is_none());
+    }
     // A live file without its payload changes nothing: it must never read as a delete.
     let Some(row) = mirror_row(header) else {
         return Ok(true);
     };
-    if let Some(removal) = header.removal() {
+    if let Some(removal) = removal {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
         gone(s, header)?;
         s.put_removed(&RemovedRow { row, removal })?;
@@ -123,52 +131,22 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     else {
         return None;
     };
-    let file = match header.kind {
+    let payload = match header.kind {
         NodeKind::Folder => None,
-        NodeKind::File => {
-            let info = payload.as_ref()?; // `Remote`s refuse such rows
-
-            Some(MirrorFile {
-                hash: info.hash,
-                size: content.size.unwrap_or(info.bytes),
-                mtime_ms: content.mtime.unwrap_or(0),
-                executable: content.x,
-            })
-        }
+        // `Remote`s refuse such rows.
+        NodeKind::File => Some(payload.as_ref()?),
     };
-    Some(MirrorRow {
+    let at = RemoteRef {
         file_id: header.file_id,
         version: header.version,
-        node: *node,
-        parent: header.parent,
-        name: content.name.clone(),
-        kind: header.kind,
-        file,
-        content_extra: content_extra(content),
-    })
-}
-
-/// What a mirror row keeps of `content` beyond its columns: the keys sync carries without
-/// acting on them (unknown ones, and the creation time), read back by [`unknown_keys`]. Not
-/// the removal: the `removed` table has it in columns.
-pub(crate) fn content_extra(content: &NodeContent) -> Option<String> {
-    let mut unknown = content.unknown.clone();
-    unknown.remove(REMOVAL_KEY);
-    (!unknown.is_empty()).then(|| serde_json::Value::Object(unknown).to_string())
-}
-
-/// The content keys of `row` this client carries without acting on them (stored by
-/// [`mirror_row`]), to be written back unchanged.
-pub(crate) fn unknown_keys(row: &MirrorRow) -> serde_json::Map<String, serde_json::Value> {
-    row.content_extra
-        .as_deref()
-        .and_then(|extra| serde_json::from_str(extra).ok())
-        .unwrap_or_default()
-}
-
-/// The creation time `row`'s node carries, Unix ms.
-pub(crate) fn created_ms(row: &MirrorRow) -> Option<i64> {
-    NodeContent::created_ms_in(&unknown_keys(row))
+    };
+    let hash = payload.map(|p| p.hash);
+    let mut row = MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash);
+    // A content without its size (another client's) has the payload's.
+    if let (Some(file), Some(p), None) = (&mut row.file, payload, content.size) {
+        file.size = p.bytes;
+    }
+    Some(row)
 }
 
 #[cfg(test)]
@@ -208,6 +186,70 @@ mod tests {
             1,
             "the mirror keeps the file"
         );
+        Ok(())
+    }
+
+    /// Another client's file without `size` in its content has its payload's.
+    #[test]
+    fn a_file_without_a_size_has_its_payloads() {
+        let mut content = NodeContent::file("f", 0, 1, false);
+        content.size = None;
+        let header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            body: RemoteBody::Live {
+                node: NodeId::new(),
+                content,
+                payload: Some(PayloadInfo {
+                    hash: hash_bytes(b"xyz", HashAlgorithm::Blake3),
+                    bytes: 3,
+                }),
+            },
+        };
+        let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
+        assert_eq!(size, Some(3));
+    }
+
+    /// The feed brings this device's own writes back: a version the mirror has is no change.
+    #[test]
+    fn a_known_version_marks_nothing() -> Result<(), StateError> {
+        use hbsync_types::schema::Removal;
+        let mut db = StateDb::open_in_memory()?;
+        let node = NodeId::new();
+        let header = |version: u128, content: NodeContent| RemoteHeader {
+            file_id: RemoteFileId(Uuid::from_u128(1)),
+            version: VersionTag(Uuid::from_u128(version)),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            body: RemoteBody::Live {
+                node,
+                content,
+                payload: None,
+            },
+        };
+        let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
+            db.write(|s| {
+                s.clear_dirty(node)?;
+                apply(s, h)?;
+                s.dirty_count()
+            })
+        };
+        let mut gone = NodeContent::folder("d");
+        gone.set_removal(Some(Removal {
+            at_ms: 9,
+            root: node,
+        }));
+        for (version, content) in [(1, NodeContent::folder("d")), (2, gone)] {
+            let h = header(version, content);
+            assert_eq!(dirty_after(&mut db, &h)?, 1, "version {version} is news");
+            assert_eq!(
+                dirty_after(&mut db, &h)?,
+                0,
+                "version {version} again isn't"
+            );
+        }
         Ok(())
     }
 

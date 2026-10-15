@@ -1548,6 +1548,7 @@ version = "0.5.3"
 dependencies = [
  "apple-native-keyring-store",
  "hbsync-engine",
+ "hbsync-fileio",
  "hbsync-homebase",
  "hbsync-local",
  "hbsync-platform",
@@ -1600,6 +1601,7 @@ dependencies = [
 name = "hbsync-engine"
 version = "0.5.3"
 dependencies = [
+ "hbsync-engine",
  "hbsync-fileio",
  "hbsync-local",
  "hbsync-namemap",
@@ -1632,6 +1634,7 @@ dependencies = [
  "aes",
  "base64",
  "cbc",
+ "form_urlencoded",
  "getrandom 0.3.4",
  "hbsync-fileio",
  "hbsync-remote",
@@ -1643,7 +1646,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tempfile",
  "thiserror 2.0.21",
  "tungstenite",
  "ureq",
@@ -1727,7 +1729,6 @@ dependencies = [
 name = "hbsync-tray"
 version = "0.5.3"
 dependencies = [
- "form_urlencoded",
  "hbsync-app",
  "hbsync-types",
  "notify-rust",

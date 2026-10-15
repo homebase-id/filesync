@@ -390,28 +390,10 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
 }
 
 fn print_status(s: &Status) {
-    let state = match s.state {
-        // As the tray says it: start-up's first sync shows as syncing once it has a plan.
-        State::Starting if s.progress.is_none() => "catching up",
-        State::Starting => "syncing",
-        State::Syncing => "syncing",
-        State::Idle if s.pending == 0 => "up to date",
-        State::Idle => "idle",
-        State::Paused => "paused",
-        State::Offline => "offline",
-        State::Failing => "failing",
-        State::Denied => "refused by the identity",
-        State::Stopped => "stopped",
-    };
-    println!("Homebase Filesync: {state}");
+    println!("Homebase Filesync: {}", words::status_line(s, words::now()));
     println!("  {} <-> {}", s.identity, s.folder.display());
-    if let Some(p) = &s.progress {
-        println!("  {}", words::progress(p));
-    }
-    if let Some(until) = s.paused_until {
-        println!("  syncing again {}", when(until));
-    }
-    if let Some(e) = &s.error {
+    // The status line has the progress, the pause, the next try and a failure's problem.
+    if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {
         println!("  problem: {e}");
     }
     if s.state == State::Denied {
@@ -420,7 +402,7 @@ fn print_status(s: &Status) {
             s.identity
         );
     }
-    if let Some(at) = s.retry_at {
+    if let Some(at) = s.retry_at.filter(|_| s.state != State::Offline) {
         println!("  next try {}", when(at));
     }
     if let Some(last) = &s.last_sync {
@@ -431,8 +413,9 @@ fn print_status(s: &Status) {
             last.millis as f64 / 1000.0
         );
     }
-    if s.pending > 0 {
-        println!("  {} items not synced yet", s.pending);
+    if s.pending > 0 && s.state != State::Idle {
+        let items = if s.pending == 1 { "item" } else { "items" };
+        println!("  {} {items} not synced yet", words::count(s.pending));
     }
     if let Some(h) = &s.held_deletes {
         println!(

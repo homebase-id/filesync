@@ -176,7 +176,7 @@ fn randomized_two_client_convergence() -> R {
             }
         }
         settle_all(&mut a, &mut b).map_err(|e| format!("seed {seed}: {e}"))?;
-        let (ta, tb) = (a.tree(), b.tree());
+        let (ta, tb) = (a.entries(""), b.entries(""));
         assert_eq!(ta, tb, "seed {seed}: clients diverged");
         let present: HashSet<&Vec<u8>> = ta.iter().map(|(_, c)| c).collect();
         let lost: Vec<String> = ledger
@@ -204,7 +204,7 @@ fn unicode_and_case_clashes() -> R {
     a.write("Re\u{301}sume\u{301}.txt", b"from a")?;
     a.sync()?;
     b.sync()?;
-    let names: Vec<String> = b.tree().into_iter().map(|(p, _)| p).collect();
+    let names: Vec<String> = b.entries("").into_iter().map(|(p, _)| p).collect();
     assert_eq!(names.len(), 1);
     assert_eq!(hbsync_platform::nfc(&names[0]), "Résumé.txt");
 
@@ -217,7 +217,7 @@ fn unicode_and_case_clashes() -> R {
     // The user's own (decomposed) spelling stays on a; b has the canonical NFC name.
     let nfc_tree = |c: &Client| -> Vec<(String, Vec<u8>)> {
         let mut t: Vec<_> = c
-            .tree()
+            .entries("")
             .into_iter()
             .map(|(p, d)| (hbsync_platform::nfc(&p), d))
             .collect();
@@ -225,7 +225,7 @@ fn unicode_and_case_clashes() -> R {
         t
     };
     assert_eq!(nfc_tree(&a), nfc_tree(&b));
-    let contents: Vec<Vec<u8>> = b.tree().into_iter().map(|(_, c)| c).collect();
+    let contents: Vec<Vec<u8>> = b.entries("").into_iter().map(|(_, c)| c).collect();
     assert!(contents.contains(&b"upper".to_vec()) && contents.contains(&b"lower".to_vec()));
     Ok(())
 }
@@ -262,7 +262,7 @@ fn windows_illegal_names_are_mapped_locally_only() -> R {
     let mut win =
         Client::with_config(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
     assert_clean(&win.sync()?);
-    let names: BTreeSet<String> = win.tree().into_iter().map(|(p, _)| p).collect();
+    let names: BTreeSet<String> = win.entries("").into_iter().map(|(p, _)| p).collect();
     assert_eq!(
         names,
         BTreeSet::from(["CON\u{F02A}".to_owned(), "what\u{F025}.txt".to_owned()])
@@ -334,7 +334,7 @@ fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
             .any(|(_, why)| why.starts_with("name can't be used here")),
         "{report:?}"
     );
-    let names: Vec<String> = win.tree().into_iter().map(|(p, _)| p).collect();
+    let names: Vec<String> = win.entries("").into_iter().map(|(p, _)| p).collect();
     assert_eq!(names, ["fine.txt"]);
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.live().count(),
@@ -478,7 +478,7 @@ fn a_confirmed_folder_trash_does_not_hold_other_deletes() -> R {
     a.sync()?;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
-    assert_eq!(b.tree().len(), 121);
+    assert_eq!(b.entries("").len(), 121);
 
     // Deleted elsewhere: trashing it here is held (60 of 120 files, over the limit of 50).
     fs::remove_dir_all(a.root.join("dir"))?;
@@ -648,7 +648,7 @@ fn creation_times_travel_and_stay() -> R {
     )?;
     settle_all(&mut a, &mut b)?;
     assert_eq!(on_server("doc.txt")?, sent, "the node keeps its time");
-    assert_eq!(a.read("Folder/doc.txt")?, "second");
+    assert_eq!(a.read_text("Folder/doc.txt")?, "second");
     if ops::CAN_SET_CREATED {
         assert_eq!(ops::created_ms(&a.root.join("Folder/doc.txt")), Some(y2016));
     }

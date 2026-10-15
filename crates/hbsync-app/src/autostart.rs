@@ -80,7 +80,7 @@ pub fn launchd_plist(program: &Program, env: &[(String, String)]) -> String {
         Program::Tray(_) => (program.label(), "Interactive"),
         Program::Daemon(_) => (program.label(), "Background"),
     };
-    let esc = crate::words::escape_xml;
+    let esc = crate::local_http::escape;
     let mut env_xml = String::new();
     if !env.is_empty() {
         env_xml.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
@@ -275,10 +275,7 @@ mod os {
     pub fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
         let path = plist(&program.label())?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, launchd_plist(program, &passed_env()))?;
+        hbsync_fileio::write_if_changed(&path, launchd_plist(program, &passed_env()).as_bytes())?;
         // The tray asks for this itself, running: launchd loads the agent at the next logon.
         if matches!(program, Program::Tray(_)) {
             return Ok(());
@@ -354,19 +351,13 @@ mod os {
         uninstall()?;
         let daemon = match program {
             Program::Tray(tray) => {
-                let path = desktop()?;
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                return std::fs::write(&path, desktop_entry(tray, &passed_env()));
+                let entry = desktop_entry(tray, &passed_env());
+                return hbsync_fileio::write_if_changed(&desktop()?, entry.as_bytes()).map(drop);
             }
             Program::Daemon(daemon) => daemon,
         };
         let path = unit()?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, systemd_unit(daemon, &passed_env()))?;
+        hbsync_fileio::write_if_changed(&path, systemd_unit(daemon, &passed_env()).as_bytes())?;
         systemctl(&["daemon-reload"])
             .and_then(|()| systemctl(&["enable", UNIT]))
             // A unit systemd didn't take mustn't look installed.
@@ -600,15 +591,7 @@ fn write_launcher(
     icon_png: &[u8],
     packaged: bool,
 ) -> io::Result<()> {
-    let write = |path: &Path, bytes: &[u8]| -> io::Result<()> {
-        if std::fs::read(path).is_ok_and(|old| old == bytes) {
-            return Ok(());
-        }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(path, bytes)
-    };
+    let write = |path: &Path, bytes: &[u8]| hbsync_fileio::write_if_changed(path, bytes).map(drop);
     let entry = desktop_entry(tray, &passed_env());
     let icon = data
         .join("icons/hicolor/256x256/apps")

@@ -24,6 +24,7 @@
 //! ignored item, kept on its client only, counts as present for the no-loss check.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_engine::exec::parked_name;
@@ -32,7 +33,7 @@ use hbsync_engine::reconcile::{
     Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile_with_known,
 };
 use hbsync_engine::scope::Scope;
-use hbsync_engine::tree::{Tree, numbered_names, restored_names};
+use hbsync_engine::tree::{Tree, first_free, numbered_names, restored_names};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::{Filter, Verdict};
 use hbsync_platform::Os;
@@ -188,18 +189,13 @@ impl Server {
     /// Whether `node` is the role folder or lies in it.
     fn in_role_folder(&self, node: NodeId) -> bool {
         let docs = Role::Documents.node();
-        let mut up = node;
-        // Bounded: a cycle ends it.
-        for _ in 0..=self.live.len() {
-            if up == docs {
-                return true;
-            }
-            match self.live.get(&up) {
-                Some(n) => up = n.state.parent,
-                None => return false,
-            }
-        }
-        false
+        // Up to the role folder, if it's above.
+        let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(node, |at| {
+            Ok((at != docs)
+                .then(|| self.live.get(&at).map(|n| ((), n.state.parent)))
+                .flatten())
+        });
+        up.end == hbsync_engine::walk::End::At(docs)
     }
 }
 
@@ -1554,20 +1550,12 @@ fn numbered_name(
     name: &str,
     is_dir: bool,
 ) -> Option<String> {
-    let mut filtered = None;
-    for candidate in numbered_names(name) {
-        if client
-            .local
-            .child_named(parent, &candidate, except)
-            .is_none()
-        {
-            if syncs_at(client, parent, &candidate, is_dir) {
-                return Some(candidate);
-            }
-            filtered.get_or_insert(candidate);
-        }
-    }
-    filtered
+    let free =
+        |c: &String| Ok::<_, Infallible>(client.local.child_named(parent, c, except).is_none());
+    let Ok(name) = first_free(numbered_names(name), free, |c| {
+        syncs_at(client, parent, c, is_dir)
+    });
+    name
 }
 
 /// Whether the client syncs an item `name` in its folder `parent`.

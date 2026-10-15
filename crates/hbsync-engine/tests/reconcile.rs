@@ -150,6 +150,25 @@ fn local_creates_go_up_parents_first() {
     assert_eq!(kinds(&plan.ops), ["create", "create"]);
 }
 
+/// All folders first, then the files, which the executor uploads together on its pool.
+#[test]
+fn local_creates_make_every_folder_before_any_file() {
+    let [top, a, b, f, g] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.local(a, Some(folder(ROOT, "A")))
+        .local(top, Some(file(ROOT, "top.txt", "t")))
+        .local(b, Some(folder(a, "B")))
+        .local(f, Some(file(a, "f.txt", "f")))
+        .local(g, Some(file(b, "g.txt", "g")));
+    let plan = w.plan();
+    assert_eq!(
+        plan.ops.iter().map(Op::node).collect::<Vec<_>>(),
+        [a, b, top, f, g]
+    );
+}
+
 #[test]
 fn remote_creates_come_down() {
     let [d, f] = ids(2)[..] else { unreachable!() };

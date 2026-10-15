@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 hbsync-engine.workspace = true
+hbsync-fileio.workspace = true
 hbsync-homebase.workspace = true
 hbsync-local.workspace = true
 interprocess = "2.4"
@@ -20,7 +21,6 @@ hbsync-remote.workspace = true
 hbsync-state.workspace = true
 hbsync-types.workspace = true
 serde.workspace = true
-tempfile.workspace = true
 thiserror.workspace = true
 toml = "1.1"
 tracing = "0.1.44"
@@ -47,6 +47,9 @@ libc = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -149,6 +149,15 @@ impl NodeContent {
         };
     }
 
+    /// The keys sync carries without acting on them, as a JSON object (read back by
+    /// [`keys_from_str`]): the unknown ones, the creation time and the tags. Not the removal,
+    /// which the state DB keeps in columns.
+    pub fn carried_json(&self) -> Option<String> {
+        let mut keys = self.unknown.clone();
+        keys.remove(REMOVAL_KEY);
+        (!keys.is_empty()).then(|| Value::Object(keys).to_string())
+    }
+
     /// A reader that finds a newer version treats the node as read-only.
     pub fn is_writable(&self) -> bool {
         self.v <= VERSION
@@ -175,6 +184,14 @@ fn tags_from_value(value: &Value) -> Tags {
         let colour = t["c"].as_u64().and_then(|c| u8::try_from(c).ok());
         Some(Tag::new(t["n"].as_str()?, colour.unwrap_or(0)))
     }))
+}
+
+/// Content keys as JSON: [`NodeContent::unknown`] and what's kept of it.
+pub type Keys = Map<String, Value>;
+
+/// Reads [`NodeContent::carried_json`]; anything else reads as none.
+pub fn keys_from_str(keys: &str) -> Keys {
+    serde_json::from_str(keys).unwrap_or_default()
 }
 
 /// The tags among content keys kept as a JSON object (a client's unknown keys).

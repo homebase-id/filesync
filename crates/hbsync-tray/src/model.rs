@@ -116,37 +116,7 @@ pub fn status_line(view: &View) -> String {
         Daemon::NotSetUp => "Not connected".into(),
         Daemon::Starting(None) => "Starting…".into(),
         Daemon::Starting(Some(why)) => cut(&format!("Can't start: {why}")),
-        Daemon::Running(s) => match s.state {
-            State::Starting if s.progress.is_none() => "Catching up…".into(),
-            // Start-up's first sync shows its progress like any other: on a new install it can
-            // take hours.
-            State::Starting | State::Syncing => match &s.progress {
-                Some(p) => format!("Syncing {}", words::progress(p)),
-                None => "Syncing…".into(),
-            },
-            State::Idle if s.pending > 0 => format!("{} items waiting", s.pending),
-            State::Idle => match &s.last_sync {
-                Some(last) => format!(
-                    "Up to date · synced {}",
-                    words::when_roughly(last.at, view.now)
-                ),
-                None => "Up to date".into(),
-            },
-            State::Paused => match s.paused_until {
-                Some(until) => format!("Paused · syncing again {}", words::when(until, view.now)),
-                None => "Paused".into(),
-            },
-            State::Offline => match s.retry_at {
-                Some(at) => format!("Offline · trying again {}", words::when(at, view.now)),
-                None => "Offline".into(),
-            },
-            State::Failing => cut(&format!(
-                "Problem: {}",
-                s.error.as_deref().unwrap_or("syncing failed")
-            )),
-            State::Denied => "Homebase no longer accepts this computer".into(),
-            State::Stopped => "Stopped".into(),
-        },
+        Daemon::Running(s) => cut(&words::status_line(s, view.now)),
     }
 }
 

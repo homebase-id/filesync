@@ -225,6 +225,25 @@ impl Tree {
     }
 }
 
+/// The first of `candidates` that `is_free`, preferring one `syncs` says this device syncs
+/// (§10); `None` if none is free. How the executor and the simulator pick a numbered name.
+pub fn first_free<T, E>(
+    candidates: impl IntoIterator<Item = T>,
+    mut is_free: impl FnMut(&T) -> Result<bool, E>,
+    mut syncs: impl FnMut(&T) -> bool,
+) -> Result<Option<T>, E> {
+    let mut filtered = None;
+    for candidate in candidates {
+        if is_free(&candidate)? {
+            if syncs(&candidate) {
+                return Ok(Some(candidate));
+            }
+            filtered.get_or_insert(candidate);
+        }
+    }
+    Ok(filtered)
+}
+
 /// The numbered variants of `name` tried for a free one, in order: a hundred at most.
 pub fn numbered_names(name: &str) -> impl Iterator<Item = String> + '_ {
     (1..=100).map(move |n| numbered_conflict_name(name, n))
@@ -393,6 +412,23 @@ mod tests {
                 proptest::prop_assert_eq!(indexed, t.len());
             }
         }
+    }
+
+    #[test]
+    fn the_first_free_name_one_that_syncs_if_any() {
+        let names = || ["a", "b", "c", "d"].map(String::from);
+        let free = |n: &String| Ok::<_, ()>(n != "a");
+        assert_eq!(first_free(names(), free, |_| true), Ok(Some("b".into())));
+        assert_eq!(
+            first_free(names(), free, |n| n == "c"),
+            Ok(Some("c".into()))
+        );
+        assert_eq!(first_free(names(), free, |_| false), Ok(Some("b".into())));
+        assert_eq!(
+            first_free(names(), |_| Ok::<_, ()>(false), |_| true),
+            Ok(None)
+        );
+        assert_eq!(first_free(names(), |_| Err("db"), |_| true), Err("db"));
     }
 
     #[test]

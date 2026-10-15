@@ -10,6 +10,8 @@ pub mod feed;
 pub mod mask;
 pub mod reconcile;
 pub mod scope;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 pub mod transfer;
 pub mod tree;
 pub mod view;

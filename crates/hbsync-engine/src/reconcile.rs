@@ -208,6 +208,19 @@ impl Op {
         }
     }
 
+    /// Whether it moves file bytes: the executor runs these together on its worker pool.
+    pub fn is_transfer(&self) -> bool {
+        matches!(
+            self,
+            Op::LocalDownload { .. }
+                | Op::RemoteCreate {
+                    kind: NodeKind::File,
+                    ..
+                }
+                | Op::RemoteUpdate { upload: true, .. }
+        )
+    }
+
     pub fn is_delete(&self) -> bool {
         self.deletes().is_some()
     }
@@ -855,19 +868,15 @@ impl<'a> Reconciler<'a> {
                     let Some(mut state) = self.merged.get(loser).cloned() else {
                         continue;
                     };
-                    let base_name = state.name.clone();
-                    let mut n = 1;
-                    let new_name = loop {
-                        let candidate = numbered_conflict_name(&base_name, n);
-                        if self
-                            .merged
-                            .child_named(parent, &candidate, Some(loser))
-                            .is_none()
-                            && !taken(&name_key(&candidate))
-                        {
-                            break candidate;
-                        }
-                        n += 1;
+                    // Unbounded, and syncing or not: some numbered name is always free.
+                    let Some(new_name) = (1..)
+                        .map(|n| numbered_conflict_name(&state.name, n))
+                        .find(|c| {
+                            self.merged.child_named(parent, c, Some(loser)).is_none()
+                                && !taken(&name_key(c))
+                        })
+                    else {
+                        continue;
                     };
                     state.name = new_name;
                     self.retarget(loser, state);
@@ -1086,9 +1095,10 @@ impl<'a> Reconciler<'a> {
             }
         }
 
-        // Parents before children for creates; children before parents for deletes; only the
-        // topmost local trash of a subtree is needed.
-        creates.sort_by_key(|(d, op)| (*d, op.node()));
+        // Parents before children for creates, all folders before the files (which the executor
+        // uploads together on its pool, until a folder create stops it); children before parents
+        // for deletes; only the topmost local trash of a subtree is needed.
+        creates.sort_by_key(|(d, op)| (op.is_transfer(), *d, op.node()));
         deletes.sort_by_key(|(d, op)| (std::cmp::Reverse(*d), op.node()));
         let trashed: HashSet<NodeId> = deletes.iter().filter_map(|(_, op)| op.trashes()).collect();
         let deletes: Vec<Op> = deletes

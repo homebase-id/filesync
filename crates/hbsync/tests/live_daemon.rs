@@ -7,21 +7,25 @@
 //! the test deletes at the end.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, Instant};
 
-type Res<T> = Result<T, Box<dyn std::error::Error>>;
+use common::Res;
 
 const PATIENCE: Duration = Duration::from_secs(90);
 
+mod common;
+
+use common::{Home, text};
+
 struct Computer {
-    home: tempfile::TempDir,
+    home: Home,
     folder: PathBuf,
 }
 
 impl Computer {
     fn set_up(identity: &str, run: &str) -> Res<Computer> {
-        let home = tempfile::tempdir()?;
+        let home = Home::new()?;
         let credentials = home.path().join("credentials");
         std::fs::create_dir_all(&credentials)?;
         std::fs::copy(
@@ -48,19 +52,11 @@ impl Computer {
     }
 
     fn hbsync(&self, args: &[&str]) -> std::io::Result<Output> {
-        Command::new(env!("CARGO_BIN_EXE_hbsync"))
-            .args(args)
-            .env("HBSYNC_HOME", self.home.path())
-            .env("HBSYNC_CREDENTIALS", "file")
-            .output()
+        self.home.hbsync(args)
     }
 
     fn ok(&self, args: &[&str]) -> Res<String> {
-        let out = self.hbsync(args)?;
-        if !out.status.success() {
-            return Err(format!("hbsync {}: {}", args.join(" "), text(&out)).into());
-        }
-        Ok(text(&out))
+        self.home.ok(args)
     }
 
     fn status(&self) -> Res<serde_json::Value> {
@@ -113,24 +109,10 @@ impl Computer {
     }
 }
 
-impl Drop for Computer {
-    fn drop(&mut self) {
-        let _ = self.hbsync(&["stop"]);
-    }
-}
-
 /// The last lines of a log.
 fn tail(log: &str) -> String {
     let lines: Vec<&str> = log.lines().collect();
     lines[lines.len().saturating_sub(40)..].join("\n")
-}
-
-fn text(out: &Output) -> String {
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    )
 }
 
 fn exists(p: &Path) -> Res<bool> {

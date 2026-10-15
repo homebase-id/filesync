@@ -16,9 +16,15 @@ hbsync-remote.workspace = true
 hbsync-state.workspace = true
 hbsync-types.workspace = true
 serde_json.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 
+[features]
+# A test client (`testkit`) for the engine's tests and the live ones.
+testkit = ["dep:tempfile"]
+
 [dev-dependencies]
+hbsync-engine = { path = ".", features = ["testkit"] }
 proptest.workspace = true
 tempfile.workspace = true
 

@@ -12,6 +12,7 @@ publish.workspace = true
 aes = { version = "0.9.3", features = ["zeroize"] }
 base64 = "0.23.1"
 cbc = { version = "0.2.1", features = ["alloc", "zeroize"] }
+form_urlencoded = "1.2"
 getrandom = "0.3"
 hbsync-fileio.workspace = true
 hbsync-remote.workspace = true
@@ -23,7 +24,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.11.0"
-tempfile.workspace = true
 thiserror.workspace = true
 tungstenite = { version = "0.28.0", default-features = false, features = ["handshake"] }
 ureq = { version = "3.4.2", features = ["json"] }

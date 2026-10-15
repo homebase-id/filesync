@@ -259,6 +259,50 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
 mod mirror {
     use super::*;
     use hbsync_state::{MirrorFile, MirrorRow};
+    use hbsync_types::schema::{NodeContent, Removal};
+
+    /// A node's content survives its mirror row, unknown keys, creation time and tags
+    /// included; the removal stays out (the `removed` table has it in columns).
+    #[test]
+    fn content_round_trips_through_the_row() {
+        let c = content(b"x");
+        let mut file = NodeContent::file("f", c.mtime_ms, c.size, true);
+        file.unknown.insert("future".into(), 1.into());
+        file.set_created_ms(Some(1_451_606_400_123));
+        file.set_tags(&Tags::new([Tag::new("Red", 6)]));
+        let mut removed = file.clone();
+        removed.set_removal(Some(Removal {
+            at_ms: 1,
+            root: NodeId::new(),
+        }));
+        let (node, at) = (NodeId::new(), remote());
+        let row = MirrorRow::from_content(
+            at,
+            node,
+            NodeId::ROOT,
+            NodeKind::File,
+            &removed,
+            Some(c.hash),
+        );
+        assert_eq!(row.remote_ref(), at);
+        assert_eq!(row.content("f"), file);
+        assert_eq!(row.file.map(|f| (f.hash, f.size)), Some((c.hash, c.size)));
+        assert_eq!(row.created_ms(), Some(1_451_606_400_123));
+        assert_eq!(row.tags(), file.tags());
+
+        // A folder has no payload, whatever it's given.
+        let folder = NodeContent::folder("d");
+        let row = MirrorRow::from_content(
+            at,
+            node,
+            NodeId::ROOT,
+            NodeKind::Folder,
+            &folder,
+            Some(c.hash),
+        );
+        assert_eq!((row.file, row.content_extra.clone()), (None, None));
+        assert_eq!(row.content("d"), folder);
+    }
 
     fn row(node: NodeId, parent: NodeId, name: &str, file: Option<MirrorFile>) -> MirrorRow {
         MirrorRow {

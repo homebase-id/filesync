@@ -6,10 +6,12 @@
 
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::activity::Synced;
-use hbsync_types::schema::{Removal, tags_from_str, tags_in_keys, tags_to_string};
+use hbsync_types::schema::{
+    Keys, NodeContent, Removal, keys_from_str, tags_from_str, tags_in_keys, tags_to_string,
+};
 use hbsync_types::{
-    ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Tags,
-    VersionTag,
+    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
+    Tags, VersionTag,
 };
 use std::collections::HashMap;
 
@@ -82,6 +84,58 @@ pub struct MirrorFile {
 pub struct DirtyCursor(i64);
 
 impl MirrorRow {
+    /// The row of a node written as `content`, now at `at`. A file has its payload's content
+    /// hash; a file without one has no [`MirrorFile`].
+    pub fn from_content(
+        at: RemoteRef,
+        node: NodeId,
+        parent: NodeId,
+        kind: NodeKind,
+        content: &NodeContent,
+        hash: Option<ContentHash>,
+    ) -> MirrorRow {
+        MirrorRow {
+            file_id: at.file_id,
+            version: at.version,
+            node,
+            parent,
+            name: content.name.clone(),
+            kind,
+            file: hash
+                .filter(|_| kind == NodeKind::File)
+                .map(|hash| MirrorFile {
+                    hash,
+                    size: content.size.unwrap_or(0),
+                    mtime_ms: content.mtime.unwrap_or(0),
+                    executable: content.x,
+                }),
+            content_extra: content.carried_json(),
+        }
+    }
+
+    /// The node's content as this row has it, under `name`, with the keys sync carries along.
+    pub fn content(&self, name: &str) -> NodeContent {
+        let mut content = match &self.file {
+            Some(f) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
+            None => NodeContent::folder(name),
+        };
+        content.unknown = self.carried_keys();
+        content
+    }
+
+    /// The content keys this client carries without acting on them, to write back unchanged.
+    pub fn carried_keys(&self) -> Keys {
+        self.content_extra
+            .as_deref()
+            .map(keys_from_str)
+            .unwrap_or_default()
+    }
+
+    /// The creation time the node carries, Unix ms.
+    pub fn created_ms(&self) -> Option<i64> {
+        NodeContent::created_ms_in(&self.carried_keys())
+    }
+
     pub fn remote_ref(&self) -> RemoteRef {
         RemoteRef {
             file_id: self.file_id,
@@ -770,6 +824,18 @@ impl<'a> Store<'a> {
             node.0.as_bytes(),
             mirror_row,
         )
+    }
+
+    /// Whether the mirror has file `at` at that version (the node is the file's), or, with
+    /// `removed`, Recently deleted has.
+    pub fn has_version(&self, at: RemoteRef, removed: bool) -> Result<bool> {
+        let table = if removed { "removed" } else { "remote" };
+        Ok(self
+            .conn
+            .prepare_cached(&format!(
+                "SELECT 1 FROM {table} WHERE file_id = ?1 AND version_tag = ?2"
+            ))?
+            .exists([at.file_id.0.as_bytes(), at.version.0.as_bytes()])?)
     }
 
     pub fn mirror_by_file(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
