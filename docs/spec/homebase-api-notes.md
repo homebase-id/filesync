@@ -205,6 +205,17 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - Server frames: `{isEncrypted, payload}`, `payload` an envelope string of
   `{notificationType, data}`. `fileAdded`, `fileModified`, `fileDeleted` carry the header.
   Reaction updates also send `fileModified`: treat all of them as a hint to read the feed.
+- `resultShape` in the subscription (odin-core #1970, not released yet; **[verified]** at
+  9087c252c, frodo measured at 4774657bb: `EstablishConnectionOptions`, `ClientDriveNotification.For`,
+  `AppNotificationHandler`): `"minimal"` makes every drive event (the subscriber's own writes
+  included) carry `fileRef` and, for a delete, `previousFileRef` (the rows of a minimal
+  `query-batch`) instead of `header`/`previousServerFileHeader`, which stay as `null`;
+  `"noContent"` sends the headers without `appData.content`; left out, the full headers. An
+  unknown value is a client error, then the socket is closed. This client subscribes
+  `"minimal"` (it reads only the type). Measured on frodo (`notification_sizes`, 2,000 files):
+  an add or update event 4,515 B full → 1,473 B minimal, a delete 7,439 → 2,335 B (text frames
+  as received; the decrypted body is 688 B: the rest is the envelope's base64 and `data` sent as
+  a JSON string). A minimal event still repeats `targetDrive`.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

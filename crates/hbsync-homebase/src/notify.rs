@@ -8,7 +8,10 @@
 //! - client frames are envelopes of `{command, data}` (`data` a JSON string); the drive
 //!   subscription is `establishConnectionRequest`, answered by `deviceHandshakeSuccess`;
 //! - server frames are `{isEncrypted, payload}`; drive changes are `fileAdded`,
-//!   `fileModified`, `fileDeleted` (reactions also send `fileModified`).
+//!   `fileModified`, `fileDeleted` (reactions also send `fileModified`);
+//! - the subscription asks for `resultShape: "minimal"` (odin-core #1970):
+//!   a drive event then carries `fileRef`/`previousFileRef` (a minimal query-batch row) instead
+//!   of the full headers (`header` stays, `null`). Only the type is read here.
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -51,6 +54,9 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A refused subscription isn't asked again sooner (the sync's own refusals wait as long).
 const REFUSED_PAUSE: Duration = Duration::from_secs(300);
+/// How drive events describe their file: a minimal row, not the full header (only the type is
+/// read here).
+const SHAPE: &str = "minimal";
 
 /// The notification connection, on its own thread. Stops when dropped: the thread ends at
 /// its next check (it isn't waited for, as it may be in the middle of connecting).
@@ -156,17 +162,7 @@ fn session(
     connected: &mut bool,
     refused: &mut bool,
 ) -> Result<(), String> {
-    let mut socket = connect(client)?;
-    send(
-        &mut socket,
-        client,
-        "establishConnectionRequest",
-        &json!({ "drives": [{
-            "alias": drive.alias.simple().to_string(),
-            "type": drive.drive_type.simple().to_string(),
-        }]})
-        .to_string(),
-    )?;
+    let mut socket = subscribe(client, drive, Some(SHAPE))?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
     loop {
@@ -221,6 +217,71 @@ fn session(
             last_ping = Instant::now();
         }
     }
+}
+
+/// A connection subscribed to `drive`, its events in `shape` (`None`: the server's default,
+/// full headers).
+fn subscribe(client: &Client, drive: TargetDrive, shape: Option<&str>) -> Result<Socket, String> {
+    let mut socket = connect(client)?;
+    let mut options = json!({ "drives": [{
+        "alias": drive.alias.simple().to_string(),
+        "type": drive.drive_type.simple().to_string(),
+    }]});
+    if let Some(shape) = shape {
+        options["resultShape"] = json!(shape);
+    }
+    send(
+        &mut socket,
+        client,
+        "establishConnectionRequest",
+        &options.to_string(),
+    )?;
+    Ok(socket)
+}
+
+/// A frame [`watch`] received: its body (when it decodes), its size as received (the text
+/// frame: the encrypted envelope) and when.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct Seen {
+    pub body: Option<Value>,
+    pub bytes: usize,
+    pub at: Instant,
+}
+
+/// Every frame on a subscription in `shape` until `stop`, for live measurements.
+#[doc(hidden)]
+pub fn watch(
+    client: &Client,
+    drive: TargetDrive,
+    shape: Option<&str>,
+    stop: &AtomicBool,
+) -> Result<Vec<Seen>, String> {
+    let mut socket = subscribe(client, drive, shape)?;
+    let (mut seen, mut last_ping) = (Vec::new(), Instant::now());
+    while !stop.load(Ordering::Relaxed) {
+        match socket.read() {
+            Ok(Message::Text(text)) => seen.push(Seen {
+                body: body(client, text.as_str()),
+                bytes: text.len(),
+                at: Instant::now(),
+            }),
+            Ok(Message::Close(frame)) => return Err(format!("closed by the server: {frame:?}")),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        if last_ping.elapsed() > PING_EVERY {
+            send(&mut socket, client, "ping", "ping")?;
+            last_ping = Instant::now();
+        }
+    }
+    let _ = socket.close(None);
+    Ok(seen)
 }
 
 fn connect(client: &Client) -> Result<Socket, String> {
@@ -318,16 +379,18 @@ struct Frame {
 
 /// What a server frame says; [`Notification::Other`] if it can't be read.
 fn notification(client: &Client, text: &str) -> Notification {
-    let body = || -> Option<Value> {
-        let frame: Frame = serde_json::from_str(text).ok()?;
-        if frame.is_encrypted {
-            let envelope: Envelope = serde_json::from_str(&frame.payload).ok()?;
-            serde_json::from_slice(&envelope.open(client.key()).ok()?).ok()
-        } else {
-            serde_json::from_str(&frame.payload).ok()
-        }
-    };
-    body().map_or(Notification::Other, |b| classify(&b))
+    body(client, text).map_or(Notification::Other, |b| classify(&b))
+}
+
+/// A server frame's body, opened if encrypted.
+fn body(client: &Client, text: &str) -> Option<Value> {
+    let frame: Frame = serde_json::from_str(text).ok()?;
+    if frame.is_encrypted {
+        let envelope: Envelope = serde_json::from_str(&frame.payload).ok()?;
+        serde_json::from_slice(&envelope.open(client.key()).ok()?).ok()
+    } else {
+        serde_json::from_str(&frame.payload).ok()
+    }
 }
 
 fn classify(body: &Value) -> Notification {
@@ -358,6 +421,12 @@ mod tests {
         );
         assert_eq!(
             n(json!({"notificationType": "fileModified", "data": "{}"})),
+            Notification::Changed
+        );
+        // A minimal event: `header` null, the file as a ref.
+        assert_eq!(
+            n(json!({"notificationType": "fileDeleted",
+                "data": "{\"header\":null,\"fileRef\":{\"fileId\":\"x\"}}"})),
             Notification::Changed
         );
         assert_eq!(n(json!({"notificationType": "pong"})), Notification::Other);

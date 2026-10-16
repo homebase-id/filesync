@@ -16,7 +16,8 @@ WebSocket; two folders converge through a live identity. Facts and server bugs:
 (**[verified]**, odin-core #1892, #1893). Uploads need odin-core v0.1.954 or newer (PR #1936, the deferred
 payload hash, #1935): the client sends a payload's hashes after it, reading the source once. Deletes
 are guarded by their version from odin-core v0.1.960 (PR #1931, #1903; **[verified]**). The feed
-needs odin-core v0.1.962 or newer (PR #1967, minimal `query-batch`). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+needs odin-core v0.1.962 or newer (PR #1967, minimal `query-batch`); the notification socket's
+minimal events need odin-core #1970 (not released yet). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up within a minute of an edit); an ignored item is kept on its device only.
 Finder tags and colours sync too (sync semantics §11: macOS, KDE on Linux; Windows keeps them). The
