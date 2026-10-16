@@ -199,6 +199,10 @@ struct Harness {
     created: Mutex<Vec<RemoteFileId>>,
     /// Each computer's copy of the feed's cursor, from before the scenario being checked.
     cursors: Mutex<Vec<String>>,
+    /// Each computer's events checked so far: a scenario's check takes every event since,
+    /// as its feed rows are every row since the cursor (an event of a write made before a
+    /// scenario, as the run's folder, may arrive before it starts).
+    checked: Mutex<Vec<usize>>,
     conflicts: AtomicUsize,
     report: Mutex<String>,
     problems: Mutex<Vec<String>>,
@@ -227,6 +231,7 @@ impl Harness {
         let top = folder(run, NodeId::ROOT);
         let h = Harness {
             cursors: Mutex::new(vec![cursor; computers.len()]),
+            checked: Mutex::new(vec![0; computers.len()]),
             computers,
             top: top.clone(),
             log: Mutex::new(Vec::new()),
@@ -282,7 +287,8 @@ impl Harness {
 
     /// Rewrites `node` as `meta` (with a new payload `data`), from the version last known to
     /// this run; a version changed meanwhile (another computer's write: a conflict) is read and
-    /// written over once, as a client does after planning again.
+    /// written over, as a client does after planning again (a few times: the other computer may
+    /// write it again meanwhile).
     fn update(
         &self,
         by: usize,
@@ -292,7 +298,8 @@ impl Harness {
         route: Route,
     ) -> Res<Target> {
         let mut target = self.doc(node)?.target;
-        for attempt in 0..2 {
+        const TRIES: usize = 5;
+        for attempt in 0..TRIES {
             let result = match data {
                 Some(d) => self
                     .remote(by)
@@ -311,7 +318,7 @@ impl Harness {
                     );
                     return Ok(written);
                 }
-                Err(RemoteError::VersionMismatch) if attempt == 0 => {
+                Err(RemoteError::VersionMismatch) if attempt + 1 < TRIES => {
                     self.conflicts.fetch_add(1, Ordering::Relaxed);
                     let header = self.remote(by).header(target.at.file_id)?;
                     target = Target {
@@ -326,7 +333,7 @@ impl Harness {
                 Err(e) => return Err(e.into()),
             }
         }
-        Err("conflicted twice".into())
+        Err(format!("conflicted {TRIES} times").into())
     }
 
     /// Deletes `node` (a tombstone, the client's delete for good) at its last known version.
@@ -413,7 +420,7 @@ impl Harness {
     fn mark(&self) -> Mark {
         Mark {
             log: lock(&self.log).len(),
-            heard: self.computers.iter().map(Computer::heard_count).collect(),
+            heard: lock(&self.checked).clone(),
             started: Instant::now(),
         }
     }
@@ -458,10 +465,14 @@ impl Harness {
             let _ = writeln!(out, "   {} wrote {n}", self.computers[*by].name);
         }
         for (x, c) in self.computers.iter().enumerate() {
-            let heard: Vec<(Instant, Event)> = lock(&c.heard)[mark.heard[x]..]
-                .iter()
-                .map(|h| (h.at, h.event.clone()))
-                .collect();
+            let heard: Vec<(Instant, Event)> = {
+                let all = lock(&c.heard);
+                lock(&self.checked)[x] = all.len();
+                all[mark.heard[x]..]
+                    .iter()
+                    .map(|h| (h.at, h.event.clone()))
+                    .collect()
+            };
             let mut announced: HashMap<Key, Instant> = HashMap::new();
             let (mut unsaid, mut foreign, mut lost) = (0, 0, Vec::new());
             for (at, e) in &heard {
@@ -483,16 +494,6 @@ impl Harness {
             for w in writes {
                 let event = announced.get(&w.key);
                 if w.by == x {
-                    if let Some(at) = event {
-                        echoes.push(format!(
-                            "ECHO at {}: {:?} v{} by its own {} ({:+} ms)",
-                            c.name,
-                            w.key.0,
-                            w.key.1.0,
-                            w.route.http(),
-                            ms(*at, w.at)
-                        ));
-                    }
                     continue;
                 }
                 expected += 1;
@@ -508,6 +509,19 @@ impl Harness {
                         w.route.http(),
                         w.at.elapsed()
                     )),
+                }
+            }
+            // Any event for one of its own writes, this scenario's or an earlier one's.
+            for (key, at) in &announced {
+                if let Some(w) = by_key.get(key).filter(|w| w.by == x) {
+                    echoes.push(format!(
+                        "ECHO at {}: {:?} v{} by its own {} ({:+} ms)",
+                        c.name,
+                        key.0,
+                        key.1.0,
+                        w.route.http(),
+                        ms(*at, w.at)
+                    ));
                 }
             }
             // The feed from the harness's own copy of the cursor: every row of the run's
