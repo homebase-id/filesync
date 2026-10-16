@@ -31,7 +31,7 @@ pub struct Credentials {
     pub client_auth_token: String,
     /// The shared secret, base64: the key of every request and response envelope.
     pub shared_secret: String,
-    /// The app's own circle, once created.
+    /// The app's own circle (slug `filesync`), once found.
     #[serde(default)]
     pub circle_id: Option<uuid::Uuid>,
 }

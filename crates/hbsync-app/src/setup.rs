@@ -48,23 +48,23 @@ pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, Homeba
 #[derive(Debug)]
 pub struct Prepared {
     pub remote: HomebaseRemote,
-    /// The app's circle, created now (`creds` changed, and were saved).
-    pub circle_created: Option<uuid::Uuid>,
+    /// The app's circle ([`app::app_circle`]).
+    pub circle: uuid::Uuid,
     /// Changes on the first page of the drive's feed: it answers.
     pub feed_entries: usize,
 }
 
-/// Gets the identity ready for syncing once this device is authorized: finds the sync drive,
-/// creates the app's circle once, and reads the drive's change feed. `save` keeps `creds` as
-/// soon as they change (the circle created), before anything else can fail: otherwise the
-/// next try would create a second circle.
+/// Gets the identity ready for syncing once this device is authorized: finds the sync drive, finds
+/// the app's circle by its slug (installing the app created it; made now if not), and reads the
+/// drive's change feed. `save` keeps `creds` when the circle's id in them changes.
 pub fn prepare<E: std::fmt::Display>(
     creds: &mut Credentials,
     save: impl FnOnce(&Credentials) -> Result<(), E>,
 ) -> Result<Prepared, HomebaseError> {
     let remote = HomebaseRemote::connect(Client::new(creds)?)?;
-    let circle_created = app::ensure_circle(&remote, creds)?;
-    if circle_created.is_some() {
+    let circle = app::app_circle(&remote)?;
+    if creds.circle_id != Some(circle) {
+        creds.circle_id = Some(circle);
         save(creds).map_err(|e| HomebaseError::Protocol(format!("saving the credentials: {e}")))?;
     }
     let feed_entries = remote
@@ -74,7 +74,7 @@ pub fn prepare<E: std::fmt::Display>(
         .len();
     Ok(Prepared {
         remote,
-        circle_created,
+        circle,
         feed_entries,
     })
 }
