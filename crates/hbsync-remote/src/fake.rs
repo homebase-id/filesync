@@ -219,15 +219,17 @@ impl FakeServer {
     // ---- server operations (the HTTP API) ----
 
     pub fn create(&mut self, node: &NodeMeta, upload: Option<Upload<'_>>) -> Result<RemoteRef> {
-        self.create_by(None, node, upload)
+        self.create_by(None, node, upload).map(|w| w.at)
     }
 
+    /// A create by `writer`, answered as Homebase answers it: the file as written, with its
+    /// token and the write's time (`updated`, odin-core #1971).
     fn create_by(
         &mut self,
         writer: Option<ClientId>,
         node: &NodeMeta,
         upload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef> {
+    ) -> Result<Target> {
         if self.by_node.contains_key(&node.node) {
             return Err(RemoteError::AlreadyExists);
         }
@@ -261,8 +263,9 @@ impl FakeServer {
         );
         self.feed.insert((0, row), file_id);
         self.by_node.insert(node.node, file_id);
+        let at = self.clock_ms;
         self.touch(file_id, writer);
-        Ok(RemoteRef { file_id, version })
+        Ok(written(RemoteRef { file_id, version }, at))
     }
 
     pub fn update(
@@ -273,8 +276,10 @@ impl FakeServer {
         upload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
         self.update_by(None, file_id, expected, meta, upload)
+            .map(|w| w.at)
     }
 
+    /// An update by `writer`, answered as [`FakeServer::create_by`] is.
     fn update_by(
         &mut self,
         writer: Option<ClientId>,
@@ -282,7 +287,7 @@ impl FakeServer {
         expected: VersionTag,
         meta: &NodeMeta,
         upload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef> {
+    ) -> Result<Target> {
         let current = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
         if current.header.version != expected {
             return Err(RemoteError::VersionMismatch);
@@ -328,8 +333,9 @@ impl FakeServer {
             content: meta.content.clone(),
             payload,
         };
+        let at = self.clock_ms;
         self.touch(file_id, writer);
-        Ok(RemoteRef { file_id, version })
+        Ok(written(RemoteRef { file_id, version }, at))
     }
 
     /// Deletes a file if it is still at `expected` (4160 otherwise). Like Homebase, deleting a
@@ -653,11 +659,12 @@ impl FakeRemote {
     }
 }
 
-/// The file written at `at`, with its token.
-fn written(at: RemoteRef) -> Target {
+/// The file written at `at` at server time `changed_at`, with its token.
+fn written(at: RemoteRef, changed_at: i64) -> Target {
     Target {
         at,
         token: Some(token_of(at.file_id)),
+        changed_at: Some(changed_at),
     }
 }
 
@@ -708,10 +715,9 @@ impl Remote for FakeRemote {
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
-        let at = replay(received, |upload| {
+        replay(received, |upload| {
             self.server().create_by(Some(self.client), node, upload)
-        })?;
-        Ok(written(at))
+        })
     }
 
     fn update(
@@ -734,11 +740,10 @@ impl Remote for FakeRemote {
         self.gate()?;
         self.gate_name(&meta.content.name)?;
         let received = self.receive(payload)?;
-        let at = replay(received, |upload| {
+        replay(received, |upload| {
             self.server()
                 .update_by(Some(self.client), file_id, target.at.version, meta, upload)
-        })?;
-        Ok(written(at))
+        })
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {

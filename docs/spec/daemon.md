@@ -134,16 +134,32 @@ a failure (service managers restart it then).
   account as for its folders.
 - **Own writes aren't announced** (`excludeOwnWrites`, odin-core #1971): the socket leaves
   out the writes made with this computer's own token (its client registration), so what is
-  announced is another computer's (or the phone's) doing. Nothing waits for an echo: the
-  executor records each write from its answer (version, token), and the feed page the sync
-  reads after its writes (a slim one: every row known) brings the server's times, an own
-  removal's among them (Recently deleted's order, the purge). A sync stopped or failed
-  between the writes and that read leaves the removal's time open (shown as just now, never
-  purged) until the account's next pull: the next sync of any of its folders, a reconnect.
-  The account's other folders hear of the writes through the account's drive, which they
-  share, not the socket. Two computers on one token (a copied credentials file, a restored
-  backup) don't hear each other's writes; each catches up on the other's only at a reconnect
-  or with a change from elsewhere it doesn't know.
+  announced is another computer's (or the phone's) doing. Nothing waits for an echo, and no
+  feed is read for them: the executor records each write from its answer (version, token,
+  and `updated`, the server's time the feed shows for it: a version's time, an own
+  removal's for Recently deleted and the purge). An answer without `updated` (null: only
+  for a peer-only update, which this client never makes) leaves that time unknown, a
+  removal's shown as just now and never purged, until a feed read the client makes anyway
+  passes that row; it never asks for a read. The rows of its own writes stay in the feed
+  ahead of the cursor and are read slim (versions it has) at its next read. The account's
+  other folders hear of the writes through the account's drive, which they share, not the
+  socket. Two computers on one token (a copied credentials file, a restored backup) don't
+  hear each other's writes; each catches up on the other's only at a reconnect or with a
+  change from elsewhere it doesn't know.
+- **When the feed is read**, and only then:
+  - at a folder's start (and once more if its local catch-up, a walk, took long);
+  - when the notifications connect (again): the account pulls, as changes made meanwhile
+    weren't announced;
+  - when an announced version isn't known, or an event didn't say which file;
+  - every 5 min while the notifications aren't connected;
+  - by a sync while the account's picture isn't current: the notifications aren't connected,
+    or its last pull failed (the folders' syncs then read for it);
+  - by a sync the user asked for (sync now, a resume, confirming held deletes) or the
+    machine waking up;
+  - before Recently deleted's restore, emptying and the daily purge, while not current;
+  - when this device makes a role folder that another device made meanwhile.
+  A sync woken by a local change or by the account's drive reads nothing while current,
+  and none reads after its own writes.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start

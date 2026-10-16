@@ -57,11 +57,16 @@ struct DriveAnswer {
     target_drive: TargetDrive,
 }
 
+/// A create's or update's answer (`CreateFileResult`, `UpdateFileResult`): the version written
+/// and its time, the one the feed shows for it (`updated`, odin-core #1971; null only for a
+/// peer-only update, which this client never makes).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WriteResult {
     file_id: Uuid,
     new_version_tag: Uuid,
+    #[serde(default)]
+    updated: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -205,12 +210,14 @@ impl HomebaseRemote {
             Ok(WriteResult {
                 file_id,
                 new_version_tag,
+                updated,
             }) => Ok(Target {
                 at: RemoteRef {
                     file_id: RemoteFileId(file_id),
                     version: VersionTag(new_version_tag),
                 },
                 token: Some(key.token(self.client.key())),
+                changed_at: updated,
             }),
             // odin-core answers a content update of a file deleted meanwhile with 500 (a null
             // payload list in `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002: look

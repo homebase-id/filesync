@@ -120,6 +120,9 @@ impl fmt::Debug for FileToken {
 pub struct Target {
     pub at: RemoteRef,
     pub token: Option<FileToken>,
+    /// The server's time of this version (Unix ms, Homebase's `updated`, what the feed shows for
+    /// it), when the write's answer gave it; not known in a target the client makes to write to.
+    pub changed_at: Option<i64>,
 }
 
 /// The last 8 hex digits: UUIDv7 ids share their leading timestamp digits.

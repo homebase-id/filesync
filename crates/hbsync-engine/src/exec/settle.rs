@@ -309,7 +309,7 @@ pub(super) fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String
 }
 
 /// The mirror row of a node written as `meta` (a file with its content `hash`): the file as
-/// written, with its token.
+/// written, with its token and the server's time of the version (the write's answer has both).
 pub(super) fn written_row(
     written: Target,
     meta: &NodeMeta,
@@ -317,6 +317,7 @@ pub(super) fn written_row(
 ) -> MirrorRow {
     MirrorRow {
         token: written.token,
+        changed_at: written.changed_at,
         ..MirrorRow::from_content(
             written.at,
             meta.node,

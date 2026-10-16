@@ -320,6 +320,7 @@ impl Harness {
                             version: header.version,
                         },
                         token: header.token,
+                        changed_at: None,
                     };
                 }
                 Err(e) => return Err(e.into()),
@@ -360,6 +361,7 @@ impl Harness {
                         version: tomb.version,
                     },
                     token: None,
+                    changed_at: None,
                 },
             },
         );

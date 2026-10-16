@@ -316,6 +316,7 @@ fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
         let stale = Target {
             at,
             token: Some(FileToken(vec![0x5a; 64].into())),
+            changed_at: None,
         };
         let renamed = with(&meta, NodeContent::file("g.txt", 1, 3, false));
         let written = remote.update(&stale, &renamed, None)?;

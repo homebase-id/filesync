@@ -123,8 +123,9 @@ pub struct MirrorRow {
     pub token: Option<FileToken>,
     /// When this version was written, the server's time (Unix ms, the feed's header): whether
     /// the node went with a removed folder it is in depends on it (node schema, Recently
-    /// deleted). `None` for this device's own write until the feed brings it back where that
-    /// matters ([`Store::refresh`]); a removed node's is its removal time.
+    /// deleted). This device's own write has it from the write's answer; `None` where neither
+    /// an answer nor the feed gave it ([`Store::refresh_time`]); a removed node's is its
+    /// removal time.
     pub changed_at: Option<i64>,
 }
 
@@ -132,9 +133,9 @@ pub struct MirrorRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedRow {
     pub row: MirrorRow,
-    /// Unix ms, the server's time of the removal. Open (`None`) for this device's own removal
-    /// until the feed brings it back: never this device's clock, and the newest of all where
-    /// times are compared ([`RemovedRow::time`]).
+    /// Unix ms, the server's time of the removal (this device's own from the write's answer).
+    /// Open (`None`) where no answer or feed row gave it yet: never this device's clock, and
+    /// the newest of all where times are compared ([`RemovedRow::time`]).
     pub removed_at: Option<i64>,
 }
 
@@ -238,6 +239,7 @@ impl MirrorRow {
                 version,
             },
             token: self.token.clone(),
+            changed_at: None,
         }
     }
 

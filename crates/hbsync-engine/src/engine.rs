@@ -308,7 +308,7 @@ impl Engine {
         if pulled.elapsed() > FRESH_PULL {
             feed += drive.pull(Some(folder))?;
         }
-        let sync = self.sync_with(date, Some(feed))?;
+        let sync = self.sync_with(date, Pull::Done(feed))?;
         Ok(StartupReport { local, sync })
     }
 
@@ -354,15 +354,19 @@ impl Engine {
     /// Pulls remote changes, then plans and executes until nothing is left to do (or the
     /// round limit is hit). `date` (`YYYY-MM-DD`) is used for conflict-copy names.
     pub fn sync_once(&mut self, date: &str) -> Result<SyncReport, EngineError> {
-        self.sync_with(date, None)
+        self.sync_with(date, Pull::Now)
     }
 
-    /// [`Engine::sync_once`], with the feed `pulled` just before if it was.
-    fn sync_with(
-        &mut self,
-        date: &str,
-        pulled: Option<FeedReport>,
-    ) -> Result<SyncReport, EngineError> {
+    /// [`Engine::sync_once`], reading the feed first only if `read` (asked for: sync now, a
+    /// resume, a wake-up) or the account's picture isn't [`Drive::current`]: while the
+    /// notifications are connected, the drive's changes reach the account through them, and
+    /// this device's own writes are recorded from their answers.
+    pub fn sync(&mut self, date: &str, read: bool) -> Result<SyncReport, EngineError> {
+        self.sync_with(date, if read { Pull::Now } else { Pull::IfBehind })
+    }
+
+    /// [`Engine::sync_once`], with the feed read as `pulled` says.
+    fn sync_with(&mut self, date: &str, pulled: Pull) -> Result<SyncReport, EngineError> {
         // What earlier syncs did is durable before this one puts anything back on disk
         // (unpark), and what this one did is when it ends, however it ends: a power cut loses
         // at most the sync in progress (sync semantics §8a).
@@ -374,19 +378,17 @@ impl Engine {
         synced
     }
 
-    fn sync_pass(
-        &mut self,
-        date: &str,
-        pulled: Option<FeedReport>,
-    ) -> Result<SyncReport, EngineError> {
+    fn sync_pass(&mut self, date: &str, pulled: Pull) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
         self.progress.reset();
         self.rescanned.clear();
         self.rescan_records()?;
         recover(&mut self.db, &self.cfg.exec)?;
+        let folder = Some(self.db.folder());
         report.feed = match pulled {
-            Some(feed) => feed,
-            None => self.drive.pull(Some(self.db.folder()))?,
+            Pull::Done(feed) => feed,
+            Pull::Now => self.drive.pull(folder)?,
+            Pull::IfBehind => self.drive.catch_up(folder)?,
         };
         // A role folder's top on the drive: joined, restored, or made.
         if let Some(role) = hbsync_types::Role::of(self.cfg.exec.scope.top) {
@@ -515,8 +517,9 @@ impl Engine {
         Ok(())
     }
 
-    /// Plans one page of dirty nodes and executes the plan; then pulls the feed again.
-    /// Returns the deletes the mass-delete guard held.
+    /// Plans one page of dirty nodes and executes the plan. No feed read after it: each write
+    /// is recorded from its answer (version, token, the server's time), and the notifications
+    /// leave this device's own writes out. Returns the deletes the mass-delete guard held.
     fn plan_and_execute(
         &mut self,
         dirty: &[NodeId],
@@ -583,8 +586,15 @@ impl Engine {
             }
             Some(stopped) => return Err(stopped.into()),
         }
-        let more = self.drive.pull(Some(self.db.folder()))?;
-        report.feed += more;
         Ok(plan.held)
     }
+}
+
+/// Whether a sync reads the feed first.
+enum Pull {
+    /// Read just before (start-up): its report.
+    Done(FeedReport),
+    Now,
+    /// Only if the account's picture isn't [`Drive::current`].
+    IfBehind,
 }

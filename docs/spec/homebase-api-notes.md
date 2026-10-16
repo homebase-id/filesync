@@ -246,13 +246,18 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   (one pong), and 2.6, 2.5 and 1.2 MB in all. The feed reads are the same either way (8 slim
   pages for each of the first two phases, 1 for the last, none whole): the echoes were taken
   as known versions and never needed the feed.
-- **Write answers carry no time** **[verified]** (`UploadResult`, `UpdateFileResult`,
-  `DeleteFileResultV2`): create and update answer `fileId`, `newVersionTag`, `globalTransitId`,
-  `recipientStatus` and per payload `{key, uid, lastModified}` (the payload's, not the
-  header's `updated`); a delete `localFileDeleted`, `localFileNotFound`, `fileId`,
-  `recipientStatus`. The server's time of a write (`updated`, what Recently deleted orders
-  by) comes only from a header, a feed row or an event: the client takes it from the slim
-  feed page it reads after its writes.
+- **Write answers carry the write's time** (odin-core #1971 at fcfc3b422; **[verified]**
+  `CreateFileResult.Updated`, `UpdateFileResult.Updated`, `DeleteFileResultV2.Updated`,
+  `UpdateArchivalStatusResultV2.Updated`, all set from `GetUpdatedAfterWrite`, the header's
+  `updated` read after the whole write; `UnixTimeUtc` serializes as Unix ms): create and update
+  answer `updated` next to `fileId` and `newVersionTag` (null only for a peer-only update);
+  a delete (single, batch, by group) the tombstone's time, null when `localFileNotFound`; the
+  archival-status batch per result, null with an `errorCode`. Hard-delete-batch answers none.
+  It is the time the feed shows for that write (odin-core `WriteResponseUpdatedTests`). The
+  client records a version's and a removal's time from it (`drive::HomebaseRemote`'s
+  `Target::changed_at`) and reads no feed after its writes. It doesn't read a delete's: a
+  tombstone isn't kept. Before #1971 the answers had no time (`payloads[].lastModified` is
+  the payload's, not the header's `updated`).
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

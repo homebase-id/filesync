@@ -18,8 +18,8 @@ payload hash, #1935): the client sends a payload's hashes after it, reading the 
 are guarded by their version from odin-core v0.1.960 (PR #1931, #1903; **[verified]**). The feed
 needs odin-core v0.1.962 or newer (PR #1967, minimal `query-batch`); the notification socket's
 minimal events need odin-core #1970 (not released yet), and leaving out this client's own writes
-(`excludeOwnWrites`) odin-core #1971 (not merged yet; a client registration per computer, so two
-computers sharing one token don't hear each other). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+(`excludeOwnWrites`, with the write's time in every write answer) odin-core #1971 (not merged yet;
+a client registration per computer, so two computers sharing one token don't hear each other). Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up within a minute of an edit); an ignored item is kept on its device only.
 Finder tags and colours sync too (sync semantics §11: macOS, KDE on Linux; Windows keeps them). The

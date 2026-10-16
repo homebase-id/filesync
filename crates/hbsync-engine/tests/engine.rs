@@ -2761,8 +2761,8 @@ fn own_writes_come_back_slim() -> R {
 
 /// With the notifications leaving out a client's own writes (`excludeOwnWrites`, odin-core
 /// #1971), nothing of a's own comes back to it, and nothing needs it to: a's removal has the
-/// server's time once its sync ends (the feed it reads after its writes), and another
-/// computer's change is still announced, which a's drive doesn't know yet and reads.
+/// server's time once its sync ends (from the write's answer), and another computer's change
+/// is still announced, which a's drive doesn't know yet and reads.
 #[test]
 fn own_writes_need_no_echo() -> R {
     let server = server();
@@ -2809,5 +2809,91 @@ fn own_writes_need_no_echo() -> R {
     assert_eq!(announced.len(), 1);
     assert_eq!(announced[0].at(), made.at);
     assert!(!a.engine.drive().announced(&announced)?, "news: read");
+    Ok(())
+}
+
+/// With the notifications connected (the account's picture current), a sync of this device's
+/// own changes reads no feed at all: each write is recorded from its answer, with the
+/// server's time (odin-core #1971), a version's and a removal's alike. Another computer's
+/// change, announced and unknown, is what reads the feed.
+#[test]
+fn own_writes_are_recorded_from_their_answers() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.sync()?; // start: reads the feed, as at every start
+    a.engine.drive().set_announcing(true);
+    let pages = |a: &Client| {
+        let f = a.remote.faults();
+        f.ref_pages + f.full_pages
+    };
+    let before = pages(&a);
+    let sync = |a: &mut Client| -> R {
+        for _ in 0..6 {
+            a.engine.scan_local()?;
+            if a.engine.sync("2026-10-16", false)?.ops_done == 0 {
+                return Ok(());
+            }
+        }
+        Err("not idle".into())
+    };
+    a.write("doc.txt", "x")?;
+    a.write("dir/in.txt", "y")?;
+    sync(&mut a)?;
+    fs::rename(a.root.join("doc.txt"), a.root.join("renamed.txt"))?;
+    sync(&mut a)?;
+    assert_eq!(pages(&a), before, "a's own writes read the feed");
+
+    // Each version's time is the server's.
+    let mut db = StateDb::open_account(&a.db_path())?;
+    let headers: Vec<RemoteHeader> = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        s.live().cloned().collect()
+    };
+    assert_eq!(headers.len(), 3, "dir, in.txt, renamed.txt: {headers:?}");
+    for h in &headers {
+        let row = db
+            .read(|s| s.mirror_by_file(h.file_id))?
+            .ok_or("not in the mirror")?;
+        assert_eq!(row.version, h.version);
+        assert_eq!(row.changed_at, h.changed_at, "{h:?}");
+    }
+
+    // A removal's time too, without a feed read.
+    fs::remove_dir_all(a.root.join("dir"))?;
+    fs::remove_file(a.root.join("renamed.txt"))?;
+    sync(&mut a)?;
+    assert_eq!(pages(&a), before, "a's own removals read the feed");
+    let on_server: HashMap<RemoteFileId, Option<i64>> = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        s.removed().map(|h| (h.file_id, h.removed_at)).collect()
+    };
+    assert_eq!(on_server.len(), 3);
+    for d in a.recently_deleted(10)? {
+        let row = db
+            .read(|s| s.removed_by_node(d.node))?
+            .ok_or("not removed")?;
+        assert!(d.removed_at_ms.is_some(), "{} open", d.path);
+        assert_eq!(d.removed_at_ms, on_server[&row.row.file_id], "{}", d.path);
+    }
+
+    // Another computer's write, announced: news, so the feed is read for it.
+    let b = FakeRemote::new(server.clone());
+    let heard = a.remote.subscribe(true);
+    b.create(
+        &NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: hbsync_types::NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder("from b"),
+            removed: false,
+        },
+        None,
+    )?;
+    let announced: Vec<_> = heard.try_iter().collect();
+    assert!(!a.engine.drive().announced(&announced)?);
+    a.engine.drive().pull(None)?;
+    assert!(pages(&a) > before, "the news is read");
+    sync(&mut a)?;
+    assert!(a.root.join("from b").is_dir());
     Ok(())
 }

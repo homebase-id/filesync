@@ -141,6 +141,7 @@ impl Executor<'_> {
         written: Option<Target>,
     ) -> Step {
         let node = meta.node;
+        let at = written.as_ref().and_then(|w| w.changed_at);
         let row = written.map(|w| written_row(w, &meta, hash));
         self.finish(&[Settle::node(node)], |s| match after {
             After::Created => {
@@ -148,15 +149,14 @@ impl Executor<'_> {
                 row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
             After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
-            // Out of the tree, into Recently deleted with its time open: the write's answer has
-            // none, and this device's clock isn't the server's. The feed brings the time back
-            // (by the end of the sync at the latest); it knows that version meanwhile.
+            // Out of the tree, into Recently deleted at the server's time of the write, which
+            // its answer has (`updated`, odin-core #1971). Never this device's clock.
             After::Removed { file_id } => {
                 s.delete_mirror(file_id)?;
                 if let Some(row) = row {
                     s.put_removed(&RemovedRow {
                         row,
-                        removed_at: None,
+                        removed_at: at,
                     })?;
                 }
                 s.mark_dirty(node)

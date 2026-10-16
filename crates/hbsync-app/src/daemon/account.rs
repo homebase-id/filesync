@@ -709,6 +709,7 @@ impl Notifications {
         match event {
             Event::Connected => {
                 self.connected = true;
+                self.puller.drive.set_announcing(true);
                 // Changes made while not connected weren't announced: the feed is read, now
                 // or by every folder's sync at the resume; it brings what was gathered too.
                 self.announced = Announced::default();
@@ -754,6 +755,7 @@ impl Notifications {
     }
 
     fn disconnected(&mut self, now: Instant) {
+        self.puller.drive.set_announcing(false);
         if std::mem::take(&mut self.connected) {
             self.next_read = now + UNANNOUNCED_READ;
         }

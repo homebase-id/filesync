@@ -80,6 +80,9 @@ pub(crate) struct Schedule {
     next_look: Instant,
     /// Something asked for a sync since the last one.
     wanted: bool,
+    /// The next sync reads the feed first, whatever the notifications say: it was asked for
+    /// (sync now, a resume, a wake-up).
+    read: bool,
     /// No sync before then (a failure's backoff, a folder that is gone).
     not_before: Instant,
     /// Paused: until then (Unix seconds), or until resumed (`None`).
@@ -98,6 +101,7 @@ impl Schedule {
             look,
             next_look: now + look,
             wanted: true,
+            read: false,
             not_before: now,
             pause,
             backoff: Backoff::new(),
@@ -111,10 +115,18 @@ impl Schedule {
         self.wanted = true;
     }
 
-    /// A sync asked for now (sync now, a confirmation): without waiting out a backoff.
+    /// A sync asked for now (sync now, a confirmation, a resume, a wake-up): without waiting
+    /// out a backoff, reading the feed first.
     pub fn asked(&mut self, now: Instant) {
         self.wanted = true;
+        self.read = true;
         self.not_before = now;
+    }
+
+    /// Whether the sync starting now reads the feed first whatever the notifications say;
+    /// asked once.
+    pub fn take_read(&mut self) -> bool {
+        std::mem::take(&mut self.read)
     }
 
     /// The machine woke up: sync now, the backoff forgotten.

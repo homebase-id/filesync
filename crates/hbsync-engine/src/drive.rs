@@ -3,7 +3,7 @@
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -38,6 +38,10 @@ pub struct Drive {
     skipped: Mutex<Vec<String>>,
     /// The drive refused an upload, out of storage: until when uploads are held.
     full: Mutex<Option<Instant>>,
+    /// The identity announces the drive's changes (the notifications are connected).
+    announcing: AtomicBool,
+    /// The last pull failed: changes may have been announced and not taken.
+    behind: AtomicBool,
 }
 
 /// How long uploads are held after the drive said it is full: then one is tried again.
@@ -70,7 +74,30 @@ impl Drive {
             wakes: Mutex::default(),
             skipped: Mutex::default(),
             full: Mutex::default(),
+            announcing: AtomicBool::new(false),
+            behind: AtomicBool::new(false),
         })
+    }
+
+    /// Whether the identity announces the drive's changes from now on (the notifications
+    /// connected; `false`: they are lost, refused, never were).
+    pub fn set_announcing(&self, on: bool) {
+        self.announcing.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the account's picture of the drive is as current as the announcements make it:
+    /// they are connected and the last pull worked. Then nothing needs reading the feed to
+    /// sync (this device's own writes are recorded from their answers); else a sync reads it.
+    pub fn current(&self) -> bool {
+        self.announcing.load(Ordering::Relaxed) && !self.behind.load(Ordering::Relaxed)
+    }
+
+    /// Reads the feed ([`Drive::pull`]) unless the picture is [`Drive::current`].
+    pub fn catch_up(&self, from: Option<i64>) -> Result<FeedReport, FeedError> {
+        if self.current() {
+            return Ok(FeedReport::default());
+        }
+        self.pull(from)
     }
 
     /// Whether uploads are held: the drive said it is full lately.
@@ -120,6 +147,7 @@ impl Drive {
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
         let pulled = feed::pull(|| self.account(), self.remote(), FEED_PAGE);
+        self.behind.store(pulled.is_err(), Ordering::Relaxed);
         if pulled.is_ok() {
             *answered = covers;
         }
@@ -207,11 +235,30 @@ impl Drive {
                 removed: false,
             };
             match self.remote().create(&meta, None) {
-                // Another device made it (or deleted it) meanwhile: seen below.
-                Ok(_) | Err(RemoteError::AlreadyExists) => {}
+                // Recorded from the answer, as the executor records its writes.
+                Ok(written) => {
+                    let row = hbsync_state::MirrorRow {
+                        token: written.token,
+                        changed_at: written.changed_at,
+                        ..hbsync_state::MirrorRow::from_content(
+                            written.at,
+                            meta.node,
+                            meta.parent,
+                            meta.kind,
+                            &meta.content,
+                            None,
+                        )
+                    };
+                    let mut db = self.account();
+                    db.write(|s| s.put_mirror(&row))?;
+                    self.wake_touched(&mut db, None);
+                }
+                // Another device made it (or deleted it) meanwhile: read it.
+                Err(RemoteError::AlreadyExists) => {
+                    self.pull(None)?;
+                }
                 Err(e) => return Err(EngineError::Remote(e)),
             }
-            self.pull(None)?;
         }
         if !live(self)? {
             return Err(EngineError::Remote(RemoteError::Transient(format!(
@@ -240,7 +287,7 @@ impl Drive {
     /// Restores these items of Recently deleted (each with what was deleted with it); the
     /// next syncs bring them back. Returns how many items came back.
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        self.pull(None)?;
+        self.catch_up(None)?;
         let mut restored = 0;
         for &node in nodes {
             restored += deleted::restore(&mut self.account(), self.remote(), node)?;
@@ -251,21 +298,21 @@ impl Drive {
 
     /// Deletes these items of Recently deleted for good, each with what was deleted with it.
     pub fn empty(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        self.pull(None)?;
+        self.catch_up(None)?;
         deleted::empty(&mut self.account(), self.remote(), nodes)
     }
 
     /// Deletes for good what a listing of Recently deleted saw ([`deleted::empty_listed`]),
     /// nothing recorded since.
     pub fn empty_listed(&self, listed: &deleted::Listed) -> Result<usize, EngineError> {
-        self.pull(None)?;
+        self.catch_up(None)?;
         deleted::empty_listed(&mut self.account(), self.remote(), listed)
     }
 
     /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted, and
     /// the trash of every folder.
     pub fn purge(&self, before_ms: i64) -> Result<usize, EngineError> {
-        self.pull(None)?;
+        self.catch_up(None)?;
         deleted::purge(&mut self.account(), self.remote(), before_ms)
     }
 

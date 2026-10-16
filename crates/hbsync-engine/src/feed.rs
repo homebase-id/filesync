@@ -44,8 +44,8 @@ impl std::ops::AddAssign for FeedReport {
 ///
 /// A page is read slim first ([`Remote::change_refs`]: which version of which file changed).
 /// If the store knows every row (a version it has: this device's own writes coming back; a
-/// tombstone), the page is applied from them alone; this device's own removals are known from
-/// their write on, their time open until the feed confirms it. A page with anything new is
+/// tombstone), the page is applied from them alone (this device's own writes are known, with
+/// their times, from their answers; a time an answer didn't give comes from the row). A page with anything new is
 /// read again whole from the same cursor, and the feed continues from that page's cursor (a
 /// file changed in between has moved further along the feed). Changes from elsewhere come in
 /// runs, so after a page with something new the next is read whole at once, as is a first read

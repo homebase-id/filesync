@@ -218,7 +218,8 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
 
 /// Each computer is told of the other's writes and not of its own (`excludeOwnWrites`): a
 /// change made on one reaches the other through its announcement alone, and the writer's own
-/// syncs need none (an own removal gets its time from the feed its sync reads).
+/// syncs read no feed at all (each write, an own removal's time included, is recorded from
+/// its answer); the feed is read for the other's news.
 #[test]
 fn another_computers_changes_are_announced_and_own_ones_not() -> R {
     let server = server();
@@ -235,12 +236,33 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
             .find(|h| matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == name))
             .map(|h| h.file_id)
     };
+    let idle = |d: &Device| {
+        wait_until("idle", || {
+            let s = d.status();
+            s.state == State::Idle && s.pending == 0
+        })
+    };
+    let pages = |d: &Device| {
+        let f = d.remote.faults();
+        f.ref_pages + f.full_pages
+    };
+    // The reads at connecting done.
+    std::thread::sleep(Duration::from_millis(300));
+    idle(&a)?;
+    let quiet = pages(&a);
     a.write("from-a.txt", "a")?;
     wait_until("b has from-a.txt", || b.has("from-a.txt"))?;
+    idle(&a)?;
+    assert_eq!(pages(&a), quiet, "a's own upload read the feed");
     b.write("from-b.txt", "b")?;
     wait_until("a has from-b.txt", || a.has("from-b.txt"))?;
+    idle(&a)?;
+    let news = pages(&a);
+    assert!(news > quiet, "b's news was read");
     std::fs::remove_file(a.root.join("from-a.txt"))?;
     wait_until("b lost from-a.txt", || !b.has("from-a.txt"))?;
+    idle(&a)?;
+    assert_eq!(pages(&a), news, "a's own removal read the feed");
     for d in [&a, &b] {
         wait_until("idle", || {
             let s = d.status();
@@ -253,7 +275,7 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
     );
     assert_eq!(heard_a.files(), HashSet::from([theirs]), "a heard only b's");
     assert_eq!(heard_b.files(), HashSet::from([ours]), "b heard only a's");
-    // a's removal has the server's time, though it never heard of it.
+    // a's removal has the server's time, from its answer.
     let deleted: Vec<_> = AccountReader::open(&db_of(&a.root), "test.example")?
         .ok_or("no state DB")?
         .all_deleted()?
@@ -327,7 +349,6 @@ fn the_drive_is_read_on_a_timer_only_while_not_connected() -> R {
     assert!(!b.has("x.txt"), "too soon, or paused");
     n.tick(t0 + UNANNOUNCED_READ, false);
     wait_until("b read the drive", || b.has("x.txt"))?;
-    // The sync that brought it reads the feed once more at its end: done before y.txt.
     wait_until("b is idle", || b.status().state == State::Idle)?;
 
     // Connected (while paused: no pull either): no timer any more.
