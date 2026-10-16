@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 8);
+    assert_eq!(db.schema_version()?, 9);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -356,6 +356,7 @@ mod mirror {
             s.put_removed(&RemovedRow {
                 row: without.clone(),
                 removed_at: Some(5),
+                seq: 0,
             })?;
             s.clear_dirty(node)
         })?;
@@ -382,10 +383,12 @@ mod mirror {
             s.put_removed(&RemovedRow {
                 row: earlier.clone(),
                 removed_at: Some(5),
+                seq: 0,
             })?;
             s.put_removed(&RemovedRow {
                 row: own.clone(),
                 removed_at: None,
+                seq: 0,
             })
         })?;
         let listed = db.read(|s| s.list_removed(10))?;
@@ -437,6 +440,7 @@ mod mirror {
             s.put_removed(&RemovedRow {
                 row: folder.clone(),
                 removed_at: Some(5),
+                seq: 0,
             })
         })?;
         db.write(|s| s.refresh(&echo, false))?;
@@ -507,14 +511,16 @@ mod mirror {
             }),
         );
         let alone = row(NodeId::new(), NodeId::ROOT, "g", None);
-        let with = |row: &MirrorRow, removed_at| RemovedRow {
+        // Each with the place it is recorded in.
+        let with = |row: &MirrorRow, removed_at, seq| RemovedRow {
             row: row.clone(),
             removed_at,
+            seq,
         };
         let (rf, rd, ra) = (
-            with(&file, Some(8)),
-            with(&folder, Some(10)),
-            with(&alone, Some(20)),
+            with(&file, Some(8), 1),
+            with(&folder, Some(10), 2),
+            with(&alone, Some(20), 3),
         );
         db.write(|s| {
             s.put_removed(&rf)?;
@@ -539,7 +545,35 @@ mod mirror {
             };
             assert_eq!(expired(15)?, ["f", "d"]);
             assert_eq!(expired(9)?, ["f"]);
+            let upto = |seq| -> hbsync_state::Result<Vec<String>> {
+                Ok(s.removed_upto(seq)?
+                    .into_iter()
+                    .map(|r| r.row.name)
+                    .collect())
+            };
+            assert_eq!(upto(2)?, ["f", "d"]);
+            assert_eq!(s.removed_seq()?, 3);
             Ok(())
+        })?;
+        // Recorded again (another version of the same removal) it keeps its place; restored and
+        // deleted again it gets the next.
+        let mut again = with(&folder, Some(10), 0);
+        again.row.version = VersionTag(Uuid::new_v4());
+        db.write(|s| {
+            s.put_removed(&again)?;
+            s.delete_removed(alone.node)?;
+            s.put_removed(&with(&alone, Some(30), 0))
+        })?;
+        db.read(|s| {
+            let seq = |node| -> hbsync_state::Result<Option<u64>> {
+                Ok(s.removed_by_node(node)?.map(|r| r.seq))
+            };
+            assert_eq!((seq(folder.node)?, seq(alone.node)?), (Some(2), Some(4)));
+            Ok(())
+        })?;
+        db.write(|s| {
+            s.delete_removed(alone.node)?;
+            s.put_removed(&ra).map(drop)
         })?;
         db.write(|s| {
             assert!(s.delete_removed(alone.node)?);
@@ -547,7 +581,13 @@ mod mirror {
             assert!(!s.delete_removed(file.node)?);
             Ok(())
         })?;
-        assert_eq!(db.read(|s| s.list_removed(10))?, [rd]);
+        assert_eq!(
+            db.read(|s| s.list_removed(10))?,
+            [RemovedRow {
+                row: again.row,
+                ..rd
+            }]
+        );
         Ok(())
     }
 
@@ -727,7 +767,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 8);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 9);
     Ok(())
 }
 
@@ -951,6 +991,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
                 ..gone.clone()
             },
             removed_at: Some(1),
+            seq: 0,
         })
     })?;
     assert_eq!(

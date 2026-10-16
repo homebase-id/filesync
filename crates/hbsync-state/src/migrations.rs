@@ -252,7 +252,22 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE removed_new RENAME TO removed;
     CREATE INDEX removed_at ON removed(removed_at);
     CREATE INDEX removed_parent ON removed(parent);",
+    // 9: each removal's place in this device's order of recording them (`seq`), and the
+    // counter (kv `deleted.seq`): emptying Recently deleted as listed takes exactly the rows up
+    // to the largest one the listing saw. The rows there get theirs in a stable order.
+    "ALTER TABLE removed ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
+    CREATE TEMP TABLE removed_order AS
+        SELECT node FROM removed ORDER BY removed_at IS NULL, removed_at, node;
+    CREATE INDEX temp.removed_order_node ON removed_order(node);
+    UPDATE removed SET seq = (SELECT o.rowid FROM temp.removed_order o WHERE o.node = removed.node);
+    INSERT OR REPLACE INTO kv (key, value)
+        SELECT 'deleted.seq', CAST(COUNT(*) AS TEXT) FROM removed;
+    DROP TABLE temp.removed_order;
+    CREATE INDEX removed_seq ON removed(seq);",
 ];
+
+/// Migration 8, which [`repair_early_8`] runs again.
+const MIGRATION_8: &str = MIGRATIONS[(8 - BASE - 1) as usize];
 
 /// The version this client makes and reads.
 pub(crate) const VERSION: u32 = BASE + MIGRATIONS.len() as u32;
@@ -278,8 +293,11 @@ pub(crate) fn check(version: u32) -> Result<()> {
 pub fn apply(conn: &mut Connection) -> Result<()> {
     let seen = user_version(conn)?;
     check(seen)?;
+    if seen >= 8 {
+        repair_early_8(conn)?;
+    }
     if seen == VERSION {
-        return repair_early_8(conn);
+        return Ok(());
     }
     // Another connection may be creating or migrating the same DB: decide again under the
     // write lock.
@@ -320,7 +338,7 @@ fn repair_early_8(conn: &mut Connection) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if early(&tx)? {
         tx.execute_batch("DROP TABLE pending;")?;
-        tx.execute_batch(MIGRATIONS[MIGRATIONS.len() - 1])?;
+        tx.execute_batch(MIGRATION_8)?;
     }
     tx.commit()?;
     Ok(())
@@ -441,6 +459,40 @@ mod tests {
         )?;
         // Opened again: nothing more to do.
         apply(&mut conn)?;
+        Ok(())
+    }
+
+    /// A DB at version 8 gives each removal there a place in its order of recording (oldest
+    /// removal first, an open one last), and its counter the largest.
+    #[test]
+    fn version_8_numbers_its_removals() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        for sql in &MIGRATIONS[..3] {
+            conn.execute_batch(sql)?;
+        }
+        conn.pragma_update(None, "user_version", 8)?;
+        for (node, at) in [("01", Some(9)), ("02", None), ("03", Some(4))] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, \
+                     removed_at) VALUES (x'{node}', x'11{node}', x'22{node}', x'00', 1, 'n', ?1)"
+                ),
+                [at],
+            )?;
+        }
+        apply(&mut conn)?;
+        assert_eq!(user_version(&conn)?, VERSION);
+        let seqs: Vec<(Vec<u8>, i64)> = conn
+            .prepare("SELECT node, seq FROM removed ORDER BY seq")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        assert_eq!(seqs, [(vec![3], 1), (vec![1], 2), (vec![2], 3)]);
+        let counter: String =
+            conn.query_row("SELECT value FROM kv WHERE key = 'deleted.seq'", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(counter, "3");
         Ok(())
     }
 

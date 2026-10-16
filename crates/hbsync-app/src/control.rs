@@ -152,10 +152,7 @@ pub fn empty_listed(paths: &Paths, accounts: &[DeletedAccount]) -> Result<()> {
     let refused: Vec<String> = accounts
         .iter()
         .filter_map(|a| {
-            let control = AccountControl::EmptyListed {
-                until: a.until,
-                mark: a.mark,
-            };
+            let control = AccountControl::EmptyListed { seq: a.seq };
             account(paths, &a.identity, control)
                 .err()
                 .map(|e| format!("{}: {e}", a.identity))
@@ -167,12 +164,12 @@ pub fn empty_listed(paths: &Paths, accounts: &[DeletedAccount]) -> Result<()> {
     }
 }
 
-/// `accounts` as a form field (what emptying all of them takes): `identity/until/mark`,
+/// `accounts` as a form field (what emptying all of them takes): `identity/seq`,
 /// comma-separated.
 pub fn listed_field(accounts: &[DeletedAccount]) -> String {
     let parts: Vec<String> = accounts
         .iter()
-        .map(|a| format!("{}/{}/{}", a.identity, a.until, a.mark))
+        .map(|a| format!("{}/{}", a.identity, a.seq))
         .collect();
     parts.join(",")
 }
@@ -182,15 +179,12 @@ pub fn listed_from_field(field: &str) -> Vec<DeletedAccount> {
     field
         .split(',')
         .filter_map(|part| {
-            let mut it = part.rsplitn(3, '/');
-            let mark = it.next()?.parse().ok()?;
-            let until = it.next()?.parse().ok()?;
+            let (identity, seq) = part.rsplit_once('/')?;
             Some(DeletedAccount {
-                identity: it.next()?.to_owned(),
+                identity: identity.to_owned(),
                 deletes: 0,
                 items: 0,
-                until,
-                mark,
+                seq: seq.parse().ok()?,
             })
         })
         .collect()
@@ -443,14 +437,13 @@ mod tests {
     /// What emptying everything takes goes through the tray's form field and back.
     #[test]
     fn the_listed_accounts_go_through_a_form_field() {
-        let a = |identity: &str, until, mark| DeletedAccount {
+        let a = |identity: &str, seq| DeletedAccount {
             identity: identity.into(),
             deletes: 0,
             items: 0,
-            until,
-            mark,
+            seq,
         };
-        let accounts = [a("a.example", 9, 3), a("b/c.example", 0, 4)];
+        let accounts = [a("a.example", 9), a("b/c.example", 4)];
         assert_eq!(listed_from_field(&listed_field(&accounts)), accounts);
         assert_eq!(listed_from_field(""), []);
     }

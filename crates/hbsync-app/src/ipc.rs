@@ -23,11 +23,11 @@ use crate::protocol::{Ask, OTHER_PROTOCOL, PROTOCOL, Reply, Request};
 
 /// How long either side waits for the other's line.
 const PATIENCE: Duration = Duration::from_secs(10);
-/// Longer requests are refused by the daemon (the largest names a few items).
-const MAX_REQUEST: u64 = 1 << 20;
-/// Longer replies are refused by a client: the daemon is this user's, and its longest line is a
-/// list (about 300 bytes a delete of Recently deleted, listed by deletes).
-const MAX_REPLY: u64 = 64 << 20;
+/// Longer lines are refused, both ways. Only this user can connect (see above: a socket in a
+/// `0700` folder of this user's, a pipe for its owner and SYSTEM), so a bound only stops a
+/// runaway line: requests name tens of thousands of items to restore or empty, and the longest
+/// reply is a list (about 300 bytes a delete of Recently deleted, listed by deletes).
+const MAX_LINE: u64 = 64 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpcError {
@@ -48,7 +48,7 @@ pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
     patience(&stream)?;
     let mut stream = BufReader::new(stream);
     stream.get_mut().write_all(format!("{line}\n").as_bytes())?;
-    let reply = read_line(&mut stream, MAX_REPLY)?.ok_or(IpcError::Protocol("no answer".into()))?;
+    let reply = read_line(&mut stream)?.ok_or(IpcError::Protocol("no answer".into()))?;
     serde_json::from_str(&reply).map_err(|e| IpcError::Protocol(e.to_string()))
 }
 
@@ -101,7 +101,7 @@ pub fn serve(listener: Listener, answer: impl Fn(Request) -> Reply + Send + Sync
 fn handle(conn: Stream, answer: &(dyn Fn(Request) -> Reply + Sync)) -> Result<(), IpcError> {
     patience(&conn)?;
     let mut conn = BufReader::new(conn);
-    let Some(line) = read_line(&mut conn, MAX_REQUEST)? else {
+    let Some(line) = read_line(&mut conn)? else {
         return Ok(());
     };
     // The version first: a request of another protocol may not parse here.
@@ -136,10 +136,10 @@ fn patience(stream: &Stream) -> io::Result<()> {
     }
 }
 
-/// One line of at most `max` bytes, without its end; `None` at the end of the stream.
-fn read_line(stream: &mut BufReader<Stream>, max: u64) -> Result<Option<String>, IpcError> {
+/// One line of at most [`MAX_LINE`] bytes, without its end; `None` at the end of the stream.
+fn read_line(stream: &mut BufReader<Stream>) -> Result<Option<String>, IpcError> {
     let mut line = String::new();
-    let n = stream.by_ref().take(max).read_line(&mut line)?;
+    let n = stream.by_ref().take(MAX_LINE).read_line(&mut line)?;
     if n == 0 {
         return Ok(None);
     }
@@ -306,7 +306,7 @@ mod tests {
                     let _ = tx.lock().map(|tx| tx.send(c));
                     Reply::Done
                 }
-                // A large reply: one line far over a request's bound.
+                // A large reply: megabytes in one line.
                 Ask::Deleted { limit } => Reply::Deleted(crate::protocol::DeletedList {
                     items: (0..limit).map(deleted).collect(),
                     accounts: Vec::new(),
@@ -407,9 +407,9 @@ mod tests {
         assert_eq!(
             json(Ask::Control(Control::Account {
                 identity: "a.example".into(),
-                control: AccountControl::EmptyListed { until: 7, mark: 3 }
+                control: AccountControl::EmptyListed { seq: 7 }
             }))?,
-            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"until":7,"mark":3}}}}}}"#
+            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"seq":7}}}}}}"#
         );
         assert_eq!(
             json(Ask::Recent { limit: 10 })?,

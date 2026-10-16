@@ -15,11 +15,21 @@ impl Store<'_> {
             return Ok(());
         };
         self.moved_folder(row.node, row.kind);
+        // The same removal recorded again (its server time confirmed, its row as the feed has
+        // it) keeps its place; another one (a restore, then a delete again) gets the next.
+        let recorded: Option<(i64, Option<i64>)> = self
+            .prep("SELECT seq, removed_at FROM removed WHERE node = ?1")?
+            .query_row([row.node.0.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let seq = match recorded {
+            Some((seq, at)) if same_removal(at, removed.removed_at) => seq,
+            _ => self.next_removed_seq()?,
+        };
         let f = row.file.as_ref();
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, token) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 hash, size, mtime_ms, executable, content_extra, removed_at, token, seq) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?
         .execute(params![
             row.node.0.as_bytes(),
@@ -35,8 +45,32 @@ impl Store<'_> {
             row.content_extra,
             removed.removed_at,
             row.token.as_ref().map(|t| &t.0[..]),
+            seq,
         ])?;
         self.fan_out(row.node, row.parent)
+    }
+
+    /// The largest [`RemovedRow::seq`] given so far (0: none): no row has a larger one.
+    pub fn removed_seq(&self) -> Result<u64> {
+        Ok(self
+            .account_kv(crate::keys::REMOVED_SEQ)?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0))
+    }
+
+    fn next_removed_seq(&self) -> Result<i64> {
+        let next = self.removed_seq()? + 1;
+        self.set_account_kv(crate::keys::REMOVED_SEQ, &next.to_string())?;
+        Ok(next as i64)
+    }
+
+    /// Recently deleted's rows recorded up to `seq` ([`RemovedRow::seq`]): what a listing that
+    /// saw up to it saw.
+    pub fn removed_upto(&self, seq: u64) -> Result<Vec<RemovedRow>> {
+        self.removed_rows(
+            &format!("{REMOVED_SELECT} WHERE seq <= ?1"),
+            [i64::try_from(seq).unwrap_or(i64::MAX)],
+        )
     }
 
     /// Records the server's time of a removal this device made, open until now
@@ -159,4 +193,10 @@ impl Store<'_> {
     pub fn mirror_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM remote")
     }
+}
+
+/// Whether a removal recorded with time `recorded` and one arriving with `arriving` are the
+/// same: an open time (this device's own, before the server's comes back) or the same time.
+fn same_removal(recorded: Option<i64>, arriving: Option<i64>) -> bool {
+    recorded.is_none() || arriving.is_none() || recorded == arriving
 }

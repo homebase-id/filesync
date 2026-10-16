@@ -16,6 +16,8 @@ pub const IDENTITY: AccountKey = AccountKey("account.identity");
 pub const REMOTE_CURSOR: AccountKey = AccountKey("remote.cursor");
 /// When Recently deleted was last purged (Unix s).
 pub const PURGED_AT: AccountKey = AccountKey("deleted.purged_at");
+/// The last removal's place in this device's order of recording them ([`crate::RemovedRow::seq`]).
+pub(crate) const REMOVED_SEQ: AccountKey = AccountKey("deleted.seq");
 /// Which login the stored file tokens are sealed under (a fingerprint of its key).
 pub const TOKENS_SEALED_BY: AccountKey = AccountKey("remote.tokens_sealed_by");
 /// How often the DB was flushed to the disk on purpose (the write such a commit syncs).

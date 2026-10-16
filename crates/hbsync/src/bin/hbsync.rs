@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop};
 use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Taken};
-use hbsync_app::protocol::{DaemonControl, DaemonStatus, FolderStatus, Hints};
+use hbsync_app::protocol::{DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints};
 use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
@@ -249,16 +249,9 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Deleted { limit } => match daemon::deleted(&paths, limit)?.map(|l| l.items) {
             Some(list) if list.is_empty() => println!("Recently deleted is empty."),
             Some(list) => {
-                let now = words::now();
-                let main = daemon::configured(&paths)?.map(|r| r.folder);
                 // Each item deleted on its own, with how many its delete took along.
-                for item in &list {
-                    let along = match item.along {
-                        0 => String::new(),
-                        n => format!(" (with {n} items in it)"),
-                    };
-                    let what = words::deleted(&item.deleted, main.as_deref(), now);
-                    println!("{}  {what}{along}", item.deleted.node.0);
+                for (item, what) in list.iter().zip(described(&paths, &list)?) {
+                    println!("{}  {what}", item.deleted.node.0);
                 }
             }
             None => return Ok(not_running()),
@@ -274,7 +267,13 @@ fn run(command: Command) -> Res<ExitCode> {
             let Some(found) = daemon::find_deleted(&paths, items.clone())? else {
                 return Ok(not_running());
             };
-            if !yes && !ask_yes(&format!("Delete {} for good?", items.join(", ")))? {
+            // What was found, as `hbsync deleted` shows it: the user's words may name another.
+            let question = format!(
+                "In Recently deleted:\n  {}\nDelete {} for good?",
+                described(&paths, &found)?.join("\n  "),
+                if found.len() == 1 { "it" } else { "them" }
+            );
+            if !yes && !ask_yes(&question)? {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
@@ -410,6 +409,26 @@ fn run(command: Command) -> Res<ExitCode> {
 
 fn parse_role(s: &str) -> Result<Role, String> {
     s.parse()
+}
+
+/// Items of Recently deleted as `hbsync deleted` shows them: where, when deleted, and how many
+/// items each delete took along.
+fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
+    let now = words::now();
+    let main = daemon::configured(paths)?.map(|r| r.folder);
+    Ok(items
+        .iter()
+        .map(|item| {
+            let along = match item.along {
+                0 => String::new(),
+                n => format!(" (with {n} items in it)"),
+            };
+            format!(
+                "{}{along}",
+                words::deleted(&item.deleted, main.as_deref(), now)
+            )
+        })
+        .collect())
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.

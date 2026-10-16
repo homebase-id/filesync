@@ -156,6 +156,7 @@ impl Executor<'_> {
                     s.put_removed(&RemovedRow {
                         row,
                         removed_at: None,
+                        seq: 0,
                     })?;
                 }
                 s.mark_dirty(node)

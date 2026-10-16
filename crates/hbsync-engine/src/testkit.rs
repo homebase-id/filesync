@@ -115,6 +115,13 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
             .collect())
     }
 
+    /// What a listing of Recently deleted now saw ([`crate::deleted::DeletedSummary::seq`]): what
+    /// emptying it as listed takes.
+    pub fn listed_seq(&self) -> Res<u64> {
+        let mut reader = AccountReader::open(&self.db_path(), IDENTITY)?.ok_or("no state DB")?;
+        Ok(reader.deletes(0)?.1.seq)
+    }
+
     /// Scan, then sync until idle (six passes at most), `before` each pass; every pass's
     /// report together.
     pub fn sync_until_idle(&mut self, today: &str, mut before: impl FnMut()) -> Res<SyncReport> {

@@ -2,7 +2,7 @@
 //! requests routed to the daemon, an account or a folder.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -46,9 +46,10 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             Reply::Deleted(list)
         }
         Ask::FindDeleted { items } => {
-            let main = match crate::control::configured(&daemon.paths) {
-                Ok(root) => root.map(|r| r.folder),
-                Err(e) => return Reply::Refused(format!("reading the config: {e}")),
+            // The main folder names places: read only when a place is to be found.
+            let main = || match crate::control::configured(&daemon.paths) {
+                Ok(root) => Ok(root.map(|r| r.folder)),
+                Err(e) => Err(format!("reading the config: {e}")),
             };
             let by_node = |nodes: &[NodeId]| {
                 accounts
@@ -57,7 +58,7 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
                     .collect()
             };
             let every = || accounts.iter().flat_map(|a| a.all_deleted()).collect();
-            match find_deleted(by_node, every, &items, main.as_deref()) {
+            match find_deleted(by_node, every, &items, main) {
                 Ok(found) => Reply::Found(found),
                 Err(why) => Reply::Refused(why),
             }
@@ -91,16 +92,16 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
 }
 
 /// The items of Recently deleted, any account's, that `picks` name: a node id, or the place
-/// [`words::deleted_place`] shows (a delete, or an item a delete took along; a place deleted
-/// more than once names the newest, as `hbsync deleted` shows it); refused naming the first one
-/// that isn't there. `by_node` gives the items that are those nodes; `every` all of them, asked
-/// only when a pick names a place (a pick shaped like a node id that isn't one is tried as a
-/// place too).
+/// [`words::deleted_place`] shows. A place names what `hbsync deleted` lists there: a delete
+/// (the newest, if there are more); only where none is, an item a delete took along. Refused
+/// naming the first pick that isn't there. `by_node` gives the items that are those nodes;
+/// `every` all of them, and `main` the main folder (it names places), both asked only when a
+/// pick names a place (a pick shaped like a node id that isn't one is tried as a place too).
 fn find_deleted(
     by_node: impl Fn(&[NodeId]) -> Vec<DeletedItem>,
     every: impl Fn() -> Vec<DeletedItem>,
     picks: &[String],
-    main: Option<&Path>,
+    main: impl Fn() -> Result<Option<PathBuf>, String>,
 ) -> Result<Vec<DeletedItem>, String> {
     let ids: Vec<NodeId> = picks
         .iter()
@@ -112,14 +113,20 @@ fn find_deleted(
     }
     let place = |p: &String| p.trim_end_matches('/').to_owned();
     let found = |p: &String| p.parse().ok().map(NodeId).and_then(|id| by_id.get(&id));
+    // Each place's item: a delete before an item taken along, the newest of either.
     let mut by_place: HashMap<String, DeletedItem> = HashMap::new();
     if picks.iter().any(|p| found(p).is_none()) {
+        let main = main()?;
         let mut all = every();
-        // Newest first: the first item at a place is the one it names.
-        all.sort_by_key(|i| std::cmp::Reverse(i.deleted.time()));
+        all.sort_by_key(|i| {
+            (
+                i.deleted.root != i.deleted.node,
+                std::cmp::Reverse(i.deleted.time()),
+            )
+        });
         for item in all {
             by_place
-                .entry(words::deleted_place(&item.deleted, main))
+                .entry(words::deleted_place(&item.deleted, main.as_deref()))
                 .or_insert(item);
         }
     }
@@ -231,14 +238,26 @@ mod tests {
         }
     }
 
-    /// A pick by node id asks only for those nodes; a place asks for everything once and names
-    /// the newest item there; a node-id-shaped name that isn't one is tried as a place.
+    /// An item a delete took along: `root`'s.
+    fn along(n: u128, path: &str, at: i64, root: u128) -> DeletedItem {
+        let mut i = item("anna.example", n, path, at, 0);
+        i.deleted.root = NodeId(Uuid::from_u128(root));
+        i
+    }
+
+    /// A pick by node id asks only for those nodes, and needs no config; a place asks for
+    /// everything once and names what `hbsync deleted` lists there: the newest delete, an item
+    /// taken along only where no delete is; a node-id-shaped name that isn't one is tried as a
+    /// place.
     #[test]
     fn picks_are_found_by_id_or_place_in_any_account() {
         let uuid_name = Uuid::from_u128(77).to_string();
         let all = [
             item("anna.example", 1, "Photos", 30, 2),
             item("anna.example", 3, "Photos", 10, 0),
+            // Newer, but taken along by another delete: a delete at the same place wins.
+            along(5, "Photos", 40, 9),
+            along(6, "Old/x.txt", 40, 9),
             item("bob.example", 2, "notes.txt", 20, 0),
             item("bob.example", 4, &uuid_name, 5, 0),
         ];
@@ -253,26 +272,40 @@ mod tests {
             everything.set(everything.get() + 1);
             all.to_vec()
         };
-        let main = Some(Path::new("/home/a/Homebase"));
+        let main = || Ok(Some(PathBuf::from("/home/a/Homebase")));
+        let broken = || Err("reading the config: bad".to_owned());
         let picks = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let node = |n: u128| NodeId(Uuid::from_u128(n));
 
         let id = Uuid::from_u128(2).to_string();
-        let found = find_deleted(by_node, every, &picks(&[&id]), main).expect("found");
+        let found = find_deleted(by_node, every, &picks(&[&id]), broken).expect("found");
         assert_eq!(found[0].identity, "bob.example");
-        assert_eq!(everything.get(), 0, "a node id needs no listing");
+        assert_eq!(
+            everything.get(),
+            0,
+            "a node id needs no listing and no config"
+        );
 
         let found = find_deleted(by_node, every, &picks(&["Photos/", &uuid_name]), main);
         let found = found.expect("found");
-        assert_eq!(
-            (found[0].deleted.node, found[0].along),
-            (NodeId(Uuid::from_u128(1)), 2)
-        );
-        assert_eq!(found[1].deleted.node, NodeId(Uuid::from_u128(4)));
+        assert_eq!((found[0].deleted.node, found[0].along), (node(1), 2));
+        assert_eq!(found[1].deleted.node, node(4));
         assert_eq!(everything.get(), 1, "one listing for every place");
+
+        let found = find_deleted(by_node, every, &picks(&["Old/x.txt"]), main).expect("found");
+        assert_eq!(
+            found[0].deleted.node,
+            node(6),
+            "taken along, where no delete is"
+        );
 
         assert_eq!(
             find_deleted(by_node, every, &picks(&["Photos", "gone.txt"]), main),
             Err("gone.txt isn't in Recently deleted".to_owned())
+        );
+        assert_eq!(
+            find_deleted(by_node, every, &picks(&["Photos"]), broken),
+            Err("reading the config: bad".to_owned())
         );
     }
 }

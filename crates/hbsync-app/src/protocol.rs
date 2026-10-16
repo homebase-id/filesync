@@ -130,10 +130,10 @@ pub enum AccountControl {
     Restore { nodes: Vec<NodeId> },
     /// Delete these items of Recently deleted for good, each with what was deleted with it.
     EmptyDeleted { nodes: Vec<NodeId> },
-    /// Delete for good everything Recently deleted held when it was listed ([`DeletedAccount`]:
-    /// removed until `until`, and the removals still open then, noted by the daemon as
-    /// `mark`), nothing removed since. Refused when the daemon no longer has that mark.
-    EmptyListed { until: i64, mark: u64 },
+    /// Delete for good everything Recently deleted held when it was listed: every removal this
+    /// device recorded up to `seq` ([`DeletedAccount::seq`]), nothing recorded since. Refused
+    /// for a `seq` the account never gave.
+    EmptyListed { seq: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,11 +176,9 @@ pub struct DeletedAccount {
     pub deletes: usize,
     /// Every item, the ones its deletes took along too.
     pub items: usize,
-    /// The newest removal time the server confirmed then (Unix ms).
-    pub until: i64,
-    /// The daemon's note of the removals still open then (this device's own, newer than any
-    /// confirmed one).
-    pub mark: u64,
+    /// The largest place in this device's order of recording removals that the listing saw:
+    /// what emptying all of it as listed takes ([`AccountControl::EmptyListed`]).
+    pub seq: u64,
 }
 
 /// An item of an account's Recently deleted.

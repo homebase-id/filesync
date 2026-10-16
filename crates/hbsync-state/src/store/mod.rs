@@ -123,6 +123,11 @@ pub struct RemovedRow {
     /// until the feed brings it back: never this device's clock, and the newest of all where
     /// times are compared ([`RemovedRow::time`]).
     pub removed_at: Option<i64>,
+    /// When this device first recorded the removal, in its own order: the account's counter
+    /// at the time ([`Store::removed_seq`]). Given by [`Store::put_removed`] (a removal recorded
+    /// again keeps it; a new one, after a restore too, gets the next): what is written here is
+    /// ignored. What a listing saw is what has a `seq` up to the largest one it saw.
+    pub seq: u64,
 }
 
 impl RemovedRow {
@@ -294,7 +299,7 @@ const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size
      JOIN nodes p ON p.id = b.parent";
 /// A removed row has no `changed_at` of its own: its removal is its last write.
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
-     mtime_ms, executable, content_extra, token, NULL, removed_at FROM removed";
+     mtime_ms, executable, content_extra, token, NULL, removed_at, seq FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
      m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token, m.changed_at \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
@@ -440,6 +445,7 @@ fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
     Ok(RemovedRow {
         row: mirror_row(r)?,
         removed_at: r.get(13)?,
+        seq: r.get::<_, i64>(14)? as u64,
     })
 }
 

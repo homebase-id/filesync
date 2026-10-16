@@ -292,6 +292,12 @@ impl AccountReader {
         self.db.read(|s| crate::deleted::find(s, nodes))
     }
 
+    /// The largest place in this device's order of recording removals given so far
+    /// ([`hbsync_state::RemovedRow::seq`]).
+    pub fn removed_seq(&mut self) -> Result<u64, StateError> {
+        self.db.read(|s| s.removed_seq())
+    }
+
     /// Every item of Recently deleted ([`crate::deleted::all`]).
     pub fn all_deleted(&mut self) -> Result<Vec<(Deleted, usize)>, StateError> {
         self.db.read(crate::deleted::all)
