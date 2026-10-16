@@ -265,50 +265,65 @@ fn randomized_crashes() -> R {
     let seeds = seeds();
     let mut crashes = 0;
     for seed in 0..seeds {
-        let server = server();
-        let mut clients = pair(&server)?;
-        let mut rng = Rng(seed);
-        let mut ledger = Ledger::default();
-        // A client that crashed is down until it starts again: its first sync (the daemon's
-        // start-up) comes before its user can do anything there; the other one goes on.
-        let mut down = [false; 2];
-        for _ in 0..30 {
-            let i = rng.below(2);
-            match rng.below(3) {
-                0 => {
-                    if std::mem::take(&mut down[i]) {
-                        clients[i].sync()?;
-                    }
-                    act(&clients[i].root, &mut rng, &mut ledger)?;
-                }
-                1 => {
-                    down[i] = false;
-                    clients[i].sync()?;
-                }
-                _ => {
-                    // Few syncs have many commits: the cut lands early more often.
-                    let at = if rng.below(2) == 0 {
-                        rng.below(8)
-                    } else {
-                        rng.below(64)
-                    };
-                    let before = rng.below(2) == 0;
-                    let kept = match rng.below(3) {
-                        0 => Kept::All,
-                        1 => Kept::Durable(None),
-                        _ => Kept::Durable(Some(rng.below(at + 1))),
-                    };
-                    down[i] = crash_at(&mut clients[i], at, before, kept)
-                        .map_err(|e| format!("seed {seed}: {e}"))?;
-                    crashes += usize::from(down[i]);
-                }
-            }
-        }
-        let [mut a, mut b] = clients;
-        converged(seed, &mut a, &mut b, &ledger, &server)?;
+        crashes += crashes_of(seed)?;
     }
     assert!(crashes as u64 >= seeds, "only {crashes} crashes");
     Ok(())
+}
+
+/// Seed 291 of [`randomized_crashes`]: a download's commit lost, and recovered with the local
+/// spelling of a conflict copy recorded for the drive's name although the two places differ.
+/// The item was then moved, again and again, to where it already was: no convergence.
+#[test]
+fn regression_crash_seed_291() -> R {
+    crashes_of(291).map(drop)
+}
+
+/// One seed of [`randomized_crashes`]: how many crashes it had.
+fn crashes_of(seed: u64) -> Res<usize> {
+    let server = server();
+    let mut clients = pair(&server)?;
+    let mut rng = Rng(seed);
+    let mut ledger = Ledger::default();
+    let mut crashes = 0;
+    // A client that crashed is down until it starts again: its first sync (the daemon's
+    // start-up) comes before its user can do anything there; the other one goes on.
+    let mut down = [false; 2];
+    for _ in 0..30 {
+        let i = rng.below(2);
+        match rng.below(3) {
+            0 => {
+                if std::mem::take(&mut down[i]) {
+                    clients[i].sync()?;
+                }
+                act(&clients[i].root, &mut rng, &mut ledger)?;
+            }
+            1 => {
+                down[i] = false;
+                clients[i].sync()?;
+            }
+            _ => {
+                // Few syncs have many commits: the cut lands early more often.
+                let at = if rng.below(2) == 0 {
+                    rng.below(8)
+                } else {
+                    rng.below(64)
+                };
+                let before = rng.below(2) == 0;
+                let kept = match rng.below(3) {
+                    0 => Kept::All,
+                    1 => Kept::Durable(None),
+                    _ => Kept::Durable(Some(rng.below(at + 1))),
+                };
+                down[i] = crash_at(&mut clients[i], at, before, kept)
+                    .map_err(|e| format!("seed {seed}: {e}"))?;
+                crashes += usize::from(down[i]);
+            }
+        }
+    }
+    let [mut a, mut b] = clients;
+    converged(seed, &mut a, &mut b, &ledger, &server)?;
+    Ok(crashes)
 }
 
 // ---- cross-OS cases ----

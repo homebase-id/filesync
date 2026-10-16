@@ -36,7 +36,7 @@ impl Executor<'_> {
             Some(r) => {
                 content.unknown = r.row.carried_keys();
                 let base = self.db.read(|s| s.get_base(node))?;
-                content.set_tags(&restored_tags(base.as_ref(), tags, r));
+                content.set_tags(&merged_with_drive(base.as_ref(), tags, &r.row.tags()));
             }
             None => {
                 content.set_created_ms(ops::created_ms(&self.abs(&row.path)));
@@ -73,7 +73,8 @@ impl Executor<'_> {
         };
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
         let mut content = mirror.content(name);
-        content.set_tags(tags);
+        let base = self.db.read(|s| s.get_base(node))?;
+        content.set_tags(&merged_with_drive(base.as_ref(), tags, &mirror.tags()));
         // A node from before creation times, or from a client that sends none.
         if content.created_ms().is_none()
             && let Some(row) = self.db.read(|s| s.local_by_node(node))?
@@ -141,7 +142,7 @@ impl Executor<'_> {
     ) -> Step {
         let node = meta.node;
         let row = written.map(|w| written_row(w, &meta, hash));
-        self.finish(&[(node, false)], |s| match after {
+        self.finish(&[Settle::node(node)], |s| match after {
             After::Created => {
                 s.delete_removed(node)?;
                 row.map_or(Ok(()), |row| s.put_mirror(&row))

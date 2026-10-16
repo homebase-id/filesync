@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 10);
+    assert_eq!(db.schema_version()?, 11);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -253,6 +253,48 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
         StateDb::open(&db_path),
         Err(StateError::TooNew { found: 99, .. })
     ));
+    Ok(())
+}
+
+/// A placement record says which base its plan saw, none included; one written before that was
+/// kept (its column empty) reads as not checked, never as "no base".
+#[test]
+fn a_placement_record_keeps_the_base_its_plan_saw() -> R {
+    use hbsync_state::{Placing, PlannedBase};
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let record = |base_at| Placing {
+        base: base(NodeState::folder(NodeId::ROOT, "d")),
+        target: path("d"),
+        placed_tags: None,
+        prior_tags: Some(Tags::new([Tag::new("Red", 0)])),
+        base_at,
+        placed_ms: 0,
+    };
+    let (absent, at) = (
+        record(PlannedBase::Absent),
+        record(PlannedBase::At(remote().version)),
+    );
+    let mut db = StateDb::open(&db_path)?;
+    db.write(|s| {
+        s.put_placing(&absent)?;
+        s.put_placing(&at)
+    })?;
+    let mut read = db.read(|s| s.all_placing())?;
+    read.sort_by_key(|p| p.base.node);
+    let mut want = vec![absent.clone(), at.clone()];
+    want.sort_by_key(|p| p.base.node);
+    assert_eq!(read, want);
+    assert!(db.read(|s| s.is_placing(at.base.node))?);
+    drop(db);
+
+    // As a row from before the column held anything.
+    let conn = rusqlite::Connection::open(&db_path)?;
+    conn.execute("UPDATE placing SET base_at = NULL", [])?;
+    drop(conn);
+    let mut db = StateDb::open(&db_path)?;
+    let read = db.read(|s| s.all_placing())?;
+    assert!(read.iter().all(|p| p.base_at == PlannedBase::Unchecked));
     Ok(())
 }
 
@@ -831,7 +873,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 10);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 11);
     Ok(())
 }
 

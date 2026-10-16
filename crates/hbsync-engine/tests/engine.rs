@@ -670,6 +670,111 @@ fn parked_item_from_a_crash_is_put_back() -> R {
     Ok(())
 }
 
+/// b deletes what a changes meanwhile (`gone`), so b's next sync puts it back (a folder with
+/// only what was added to it), and a adds g;
+/// b's placements then fail their commit once their item is in place, all through that sync,
+/// a round per node. The next recovery (of a round, or of the next sync, before any scan) looks
+/// at the disk first: an item put in place but not committed is there to settle, though no
+/// scan has seen it. Taken for absent, its
+/// record went, and the next scan found the item as new: a node with a base it isn't paired
+/// with, so it went up as a duplicate.
+fn a_placement_whose_commit_failed_is_kept(
+    setup: impl Fn(&Client) -> std::io::Result<()>,
+    gone: Option<&str>,
+    change: impl Fn(&Client) -> std::io::Result<()>,
+    placed: &str,
+    names: &[&str],
+) -> R {
+    let server = server();
+    let faults = Arc::new(AtomicUsize::new(0));
+    let mut a = Client::new(&server, "a")?;
+    let failing = Arc::clone(&faults);
+    let mut b = Client::with_config(&server, "b", move |c| {
+        c.batch = 1;
+        c.exec.fail_commits = Arc::clone(&failing);
+    })?;
+    setup(&a)?;
+    a.sync()?;
+    b.sync()?;
+    if let Some(gone) = gone {
+        let path = b.root.join(gone);
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    change(&a)?;
+    a.write("g", "new")?;
+    a.sync()?;
+    faults.store(usize::MAX, Ordering::Relaxed);
+    b.engine.scan_local()?;
+    b.engine.sync_once("2026-10-08")?;
+    faults.store(0, Ordering::Relaxed);
+    // The next sync, before any scan: its recovery looks at the disk itself, and takes the
+    // item for its node.
+    b.engine.sync_once("2026-10-08")?;
+    let path = hbsync_platform::RelPath::new(placed)?;
+    let taken = b.engine.db().read(|s| {
+        Ok(match s.get_local(&path)? {
+            Some(row) => s.get_base(row.node)?.is_some(),
+            None => false,
+        })
+    })?;
+    assert!(taken, "{placed} isn't its node's");
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    let mut live = server.lock().map_err(|_| "poisoned")?.live_names();
+    live.sort();
+    assert_eq!(live, names, "a duplicate went up");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+#[test]
+fn a_download_whose_commit_failed_leaves_no_duplicate() -> R {
+    a_placement_whose_commit_failed_is_kept(
+        |a| a.write("f", "one"),
+        Some("f"),
+        |a| a.write("f", "two"),
+        "f",
+        &["f", "g"],
+    )
+}
+
+/// The drive moves a file to another folder and edits it: b's download puts the new version in
+/// place there and the old one in the trash, from the folder it was in. That folder is
+/// rescanned too: the node's row there was stale, and recovery took the new file for another
+/// item's.
+#[test]
+fn a_download_into_another_folder_whose_commit_failed_leaves_no_duplicate() -> R {
+    a_placement_whose_commit_failed_is_kept(
+        |a| {
+            a.write("p1/f", "one")?;
+            a.write("p2/k", "k")
+        },
+        None,
+        |a| {
+            fs::rename(a.root.join("p1/f"), a.root.join("p2/f"))?;
+            a.write("p2/f", "two")
+        },
+        "p2/f",
+        &["f", "g", "k", "p1", "p2"],
+    )
+}
+
+#[test]
+fn a_folder_whose_commit_failed_leaves_no_duplicate() -> R {
+    a_placement_whose_commit_failed_is_kept(
+        |a| a.write("d/x", "x"),
+        Some("d"),
+        |a| a.write("d/y", "y"),
+        "d",
+        &["d", "g", "y"],
+    )
+}
+
 #[test]
 fn crash_right_after_parking_leaks_no_temporary_name() -> R {
     let server = server();

@@ -48,76 +48,158 @@ impl Executor<'_> {
         if self.crash_here(CrashPoint::AfterForkRename) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        self.finish(&[(new_node, false), (node, false)], |s| {
+        self.finish(&[Settle::node(new_node), Settle::node(node)], |s| {
             complete_fork(s, node, &moved)
         })
     }
 
-    pub(super) fn mkdir(&mut self, node: NodeId, parent: NodeId, name: &str, tags: &Tags) -> Step {
+    pub(super) fn mkdir(
+        &mut self,
+        node: NodeId,
+        parent: NodeId,
+        name: &str,
+        tags: &Tags,
+        drive: Option<&DriveVersion>,
+    ) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
             return Ok(Outcome::stale("already local"));
         }
+        if self.placing_earlier(node)? {
+            return Ok(Outcome::stale("an earlier placement isn't settled yet"));
+        }
         let target = self.target_path(parent, name)?;
         let abs = self.abs(&target);
-        let (mirror, synced_before) = self
-            .db
-            .read(|s| Ok((s.get_mirror(node)?, s.get_base(node)?.is_some())))?;
+        let (mirror, base_at) = self.db.read(|s| {
+            Ok((
+                s.get_mirror(node)?,
+                s.get_base(node)?.map(|b| b.remote.version),
+            ))
+        })?;
+        let synced_before = base_at.is_some();
         let created_ms = if ops::CAN_SET_CREATED {
             mirror.as_ref().and_then(MirrorRow::created_ms)
         } else {
             None
         };
+        // What it acts on: the drive's version the plan saw (for one synced before, the
+        // mirror's if the plan saw none, for the record). The base settles against it.
+        let acted = drive.cloned().or_else(|| {
+            let m = mirror.as_ref().filter(|_| synced_before)?;
+            Some(DriveVersion {
+                state: m.state()?,
+                at: m.remote_ref(),
+                base_at,
+            })
+        });
+        // Its write-ahead record, kept for a folder this device synced before: with the commit
+        // lost, the scan would find it as a new folder, which adoption doesn't pair with a node
+        // that has a base (`recover_placements` does, by this record). Its base is the version
+        // it acts on. Made without tags, it holds none as soon as it is made: so it claims, if
+        // it is to hold none; tags to write are not known until written.
+        //
         // Idempotent: a folder left by an interrupted run, unknown to the DB (under any case),
-        // is adopted. One the DB tracks for another node is never taken over.
+        // is adopted, with the tags it holds (what was there before the write). One the DB
+        // tracks for another node is never taken over.
         let adopt = self.occupant(&target)?.is_none()
             && fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+        let prior = if adopt {
+            tags::read(&abs)
+        } else {
+            Some(Tags::default())
+        };
+        let none = tags.held_by(self.cfg.os).is_empty();
+        let mut record = acted.as_ref().map(|a| Placing {
+            base: BaseRow::new(node, a.state.clone(), a.at),
+            target: target.clone(),
+            placed_tags: none.then(Tags::default),
+            prior_tags: prior,
+            base_at: a.base_at.into(),
+            placed_ms: hbsync_types::unix_now_ms(),
+        });
+        let kept = !adopt && synced_before;
         if !adopt {
             if !self.free_target(&target, None)? {
                 return Ok(Outcome::Retry("name taken".into()));
             }
-            // Write-ahead for a folder this device synced before: with the commit lost, the
-            // scan would find it as a new folder, which adoption doesn't pair with a node that
-            // has a base (`recover_placements` does, by this record).
-            if let Some(record) = mirror
-                .filter(|_| synced_before)
-                .and_then(|m| Placing::of(&m, target.clone()))
-            {
-                self.write_durable(|s| s.put_placing(&record))?;
+            if kept && let Some(r) = &record {
+                self.write_durable(|s| s.put_placing(r))?;
+                self.records.insert(node);
             }
             if let Err(e) = self.put(&target, |at| fs::create_dir(at))? {
                 return Ok(io_outcome(e));
             }
         }
+        self.placed(node);
+        if !adopt && self.crash_here(CrashPoint::AfterPlaced) {
+            return Ok(Outcome::Retry("crash point reached".into()));
+        }
         let tags = write_tags(&abs, tags);
+        // Tags written: the record claims what the folder holds now, before its commit. A
+        // folder taken over held its own: a failed write left those, not known (none claimed).
+        if (adopt || !none)
+            && let Some(r) = &mut record
+        {
+            r.placed_tags = tags.clone();
+            if kept && tags.is_some() {
+                self.write_durable(|s| s.put_placing(r))?;
+            }
+        }
         // Only shown, never synced on: a file system that won't take it is no failure.
         if let Some(ct) = created_ms {
             let _ = ops::set_created(&abs, ct);
         }
+        // Its commit fails once it is in place: one with a record is recovery's then; a new
+        // folder's retry takes it over, as an interrupted run's.
+        if self.commit_fails() {
+            return match kept {
+                true => self.placed_not_committed(node),
+                false => Ok(Outcome::Retry("its commit failed".into())),
+            };
+        }
         let meta = match hbsync_platform::stat(&abs) {
             Ok(m) => m,
-            Err(e) => return Ok(io_outcome(e)),
+            Err(e) => {
+                let outcome = io_outcome(e);
+                return match outcome {
+                    Outcome::Skip(Skip::Unsyncable(_)) => Ok(outcome),
+                    _ if kept => self.placed_not_committed(node),
+                    _ => Ok(outcome),
+                };
+            }
         };
-        self.finish(&[(node, false)], |s| {
-            s.delete_placing(node)?;
-            s.put_local(&LocalRow {
-                path: target.clone(),
-                node,
-                kind: NodeKind::Folder,
-                fingerprint: meta.fingerprint(),
-                executable: None,
-                hash: None,
-                tags,
-            })?;
-            // What's in it may have been put aside unseen (in a folder this device ignores,
-            // which this one was moved out of): it comes along, a level per folder made.
-            s.mirror_children(node)?
-                .iter()
-                .try_for_each(|child| s.mark_dirty(child.node))
-        })
+        let row = LocalRow {
+            path: target.clone(),
+            node,
+            kind: NodeKind::Folder,
+            fingerprint: meta.fingerprint(),
+            executable: None,
+            hash: None,
+            tags,
+        };
+        let os = self.cfg.os;
+        let at = match &record {
+            Some(r) => self.db.write(|s| {
+                s.put_local(&row)?;
+                settle_placement(s, r, os)
+            })?,
+            None => self.db.write(|s| {
+                s.put_local(&row)?;
+                let at = settle(s, Settle::placed(node, None, TagWrite::Agreed), os)?;
+                mark_children(s, node)?;
+                Ok(at)
+            })?,
+        };
+        self.note([(node, at)]);
+        Ok(Outcome::Settled)
     }
 
     /// Gives the local item of `node` these tags, if it is still what the plan saw.
-    pub(super) fn local_tags(&mut self, node: NodeId, tags: &Tags) -> Step {
+    pub(super) fn local_tags(
+        &mut self,
+        node: NodeId,
+        tags: &Tags,
+        drive: Option<&DriveVersion>,
+    ) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::stale("gone"));
         };
@@ -143,15 +225,28 @@ impl Executor<'_> {
         if !same {
             return Ok(rescan(&mut self.report, &row.path));
         }
+        let before = row.tags.clone();
         let row = LocalRow {
             fingerprint: meta.fingerprint(),
             tags: read,
             ..row
         };
-        self.finish(&[(node, false)], |s| s.put_local(&row))
+        // What it changed, where both are known; nothing claimed otherwise.
+        let wrote = match (&before, &row.tags) {
+            (Some(before), Some(written)) => TagWrite::Wrote { before, written },
+            _ => TagWrite::Nothing,
+        };
+        // Tags put nothing in place: no base from the drive's place on content alone.
+        self.finish(&[Settle::acted(node, drive, wrote)], |s| s.put_local(&row))
     }
 
-    pub(super) fn local_move(&mut self, node: NodeId, parent: NodeId, name: &str) -> Step {
+    pub(super) fn local_move(
+        &mut self,
+        node: NodeId,
+        parent: NodeId,
+        name: &str,
+        drive: Option<&DriveVersion>,
+    ) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::stale("gone"));
         };
@@ -160,8 +255,10 @@ impl Executor<'_> {
         }
         let target = self.target_path(parent, name)?;
         if target == row.path {
-            self.db.write(|s| s.delete_parked(node))?;
-            return Ok(Outcome::Done);
+            // Already there: nothing was put in place.
+            return self.finish(&[Settle::acted(node, drive, TagWrite::Nothing)], |s| {
+                s.delete_parked(node)
+            });
         }
         if target.starts_with(&row.path) {
             return Ok(Outcome::Retry(
@@ -175,7 +272,8 @@ impl Executor<'_> {
             return Ok(io_outcome(e));
         }
         let refreshed = self.renamed(&row, &target);
-        self.finish(&[(node, false)], |s| {
+        // A move takes the item's tags along: it writes none.
+        self.finish(&[Settle::placed(node, drive, TagWrite::Nothing)], |s| {
             s.move_local_subtree(&row.path, &target)?;
             s.delete_parked(node)?;
             refreshed.as_ref().map_or(Ok(()), |r| s.put_local(r))
@@ -251,7 +349,7 @@ impl Executor<'_> {
                 .rescan
                 .push(row.path.parent().unwrap_or_default());
         }
-        self.finish(&[(node, false)], |s| {
+        self.finish(&[Settle::node(node)], |s| {
             for r in s.delete_local_subtree(&row.path)? {
                 s.delete_parked(r.node)?;
                 if r.node != node {

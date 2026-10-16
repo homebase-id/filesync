@@ -267,6 +267,15 @@ const MIGRATIONS: &[&str] = &[
     // 10: file ids deleted for good (a tombstone or an announced hard delete taken): Homebase
     // never gives one back, so no row may put one back in the mirror or Recently deleted.
     "CREATE TABLE gone_files (file_id BLOB PRIMARY KEY) WITHOUT ROWID;",
+    // 11: what a placement's item holds of tags (NULL: not known), and what it held before
+    // (NULL: not known): the base records what the write changed, in recovery as in its commit.
+    // And the base's version its plan saw, which recovery checks as the commit does (empty: no
+    // base; NULL: a record from before, not checked). And when the record was written: one
+    // whose file can't be hashed yet holds its node only so long.
+    "ALTER TABLE placing ADD COLUMN placed_tags TEXT;
+    ALTER TABLE placing ADD COLUMN prior_tags TEXT;
+    ALTER TABLE placing ADD COLUMN base_at BLOB;
+    ALTER TABLE placing ADD COLUMN placed_ms INTEGER;",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.

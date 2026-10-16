@@ -1,4 +1,5 @@
 use hbsync_sim::{Action, Event, Sim};
+use hbsync_types::NodeId;
 use proptest::prelude::*;
 
 fn action() -> impl Strategy<Value = Action> {
@@ -38,6 +39,14 @@ fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
     prop_oneof![
         8 => event(clients),
         1 => (0..clients).prop_map(|client| Event::Confirm { client }),
+    ]
+}
+
+/// Events with a client dying now and then ([`Event::Crash`]).
+fn crashing_event(clients: usize) -> impl Strategy<Value = Event> {
+    prop_oneof![
+        8 => event(clients),
+        1 => (0..clients).prop_map(|client| Event::Crash { client }),
     ]
 }
 
@@ -156,6 +165,18 @@ proptest! {
     #[test]
     fn new_role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(5), 0..120)) {
         run_with(3, None, Sim::with_new_role_devices, &events)?;
+    }
+
+    /// A download fetches, then puts in place and commits a step later: meanwhile the drive
+    /// moves on or removes the node, the users work, the folder's other device syncs; and a
+    /// client dies between a download put in place and its commit, recovering at its next
+    /// sync. Each commit, and each recovered one, settles against the version it acted on with
+    /// the bytes it fetched: the clients converge without loss.
+    #[test]
+    fn downloads_that_race_the_drive_or_crash_converge_without_loss(
+        events in proptest::collection::vec(crashing_event(3), 0..120),
+    ) {
+        run_with(3, None, Sim::with_split_downloads, &events)?;
     }
 }
 
@@ -920,6 +941,199 @@ fn regression_edit_over_a_version_deleted_elsewhere() {
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// The file is deleted on the drive between a download's fetch and its commit: the commit
+/// settles against the version it fetched, so the delete reaches the client. Settled against
+/// the drive (nothing there), the file had no base, and the client put it back.
+#[test]
+fn regression_a_delete_during_a_download_is_taken() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(2).with_split_downloads();
+    sim.run(&[
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    let file = sim.item(0, "a").expect("the file");
+    sim.run(&[
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 }, // fetched
+        act(0, Delete { node: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 }, // removed on the drive
+        Event::Step { client: 1 }, // in place, committed
+    ]);
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert!(sim.is_removed(file), "the file came back on the drive");
+    assert_eq!(sim.item(1, "a"), None);
+}
+
+/// The drive renames a file and tags it red (client 0): client 1's plan moves it and tags it,
+/// two writes on the node, the second checking the base at the version the first settled it to.
+/// Then client 1's user removes red: it stays removed. (Checked against the plan's version, the
+/// second write's base was left alone, red unagreed, and the next plan wrote red back.)
+#[test]
+fn regression_a_tag_removed_after_a_rename_and_tag_stays_removed() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(2);
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    assert!(sim.quiesce(10));
+    let file = sim.item(0, "a").expect("the file");
+    let root = sim.pick(0, NodeId::ROOT, true).expect("the root");
+    let it = sim.pick(0, file, false).expect("on client 0");
+    sim.run(&[
+        act(
+            0,
+            Move {
+                node: it,
+                parent: root,
+                name: 1,
+            },
+        ), // b
+        act(0, Tag { node: it, tag: 0 }), // Red
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 1 },
+    ]);
+    assert_eq!(sim.local_tags(1, "b"), Some(vec!["Red:0".to_owned()]));
+    let it = sim.pick(1, file, false).expect("on client 1");
+    sim.run(&[act(1, Tag { node: it, tag: 0 })]); // Red removed
+    assert!(sim.quiesce(10));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.server_tags("b"), Some(Vec::new()));
+}
+
+/// A download put in place, its commit lost, and the next sync's scan doesn't hash the file yet
+/// (the first crash leaves it so): recovery keeps the record and the plan defers the node; the
+/// sync after settles it. A record kept holds its node off placements, never for good.
+#[test]
+fn a_record_kept_past_recovery_is_settled_later() {
+    use Action::*;
+    let mut sim = Sim::new(2).with_split_downloads();
+    sim.run(&[
+        Event::Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },  // fetched
+        Event::Crash { client: 1 }, // put in place, its commit lost
+        Event::Plan { client: 1 },  // the record kept
+    ]);
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Client 1's plan downloads both files a changed; the user edits b there after the plan, and
+/// the download of a fails its commit once in place. Recovery settles a by its own item alone:
+/// b's download still finds the edit, which isn't lost (the engine's recovery rescanned the
+/// folder, and b's next guard passed on the edit).
+#[test]
+fn a_sibling_edit_survives_a_failed_commit() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(2);
+    sim.run(&[
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 1 }),
+    ]);
+    assert!(sim.quiesce(10));
+    let (a, b) = (sim.item(0, "a").expect("a"), sim.item(0, "b").expect("b"));
+    let (a0, b0) = (
+        sim.file_pick(0, a).expect("a on 0"),
+        sim.file_pick(0, b).expect("b on 0"),
+    );
+    sim.run(&[
+        act(0, Edit { file: a0 }),
+        act(0, Edit { file: b0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+    ]);
+    let b1 = sim.file_pick(1, b).expect("b on 1");
+    sim.run(&[act(1, Edit { file: b1 })]);
+    sim.fail_next_commit();
+    sim.run(&[Event::Step { client: 1 }, Event::Step { client: 1 }]);
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// A tagged folder is deleted here while another device adds to it: the delete loses, and the
+/// folder is made again, with its record (synced before). The client dies once it is made,
+/// before its tags are written: the record claims none, so recovery takes only what the folder
+/// and the drive both have, and the next plan writes the drive's tags on the folder. A record
+/// that claimed them up front took the bare folder for agreed: the next plan removed them from
+/// the drive.
+#[test]
+fn regression_a_folder_made_again_keeps_its_tags() {
+    use Action::*;
+    let (c0, c1) = (|| 0, || 1);
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(2);
+    sim.run(&[
+        act(c0(), CreateFolder { parent: 0, name: 0 }),
+        act(c0(), Tag { node: 0, tag: 0 }), // Red
+    ]);
+    assert!(sim.quiesce(10));
+    let folder = sim.item(0, "a").expect("the folder");
+    let into = sim.pick(1, folder, true).expect("on client 1");
+    let it = sim.pick(0, folder, false).expect("on client 0");
+    sim.run(&[
+        act(
+            c1(),
+            CreateFile {
+                parent: into,
+                name: 1,
+            },
+        ),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(c0(), Delete { node: it }),
+        Event::Plan { client: 0 },
+        Event::Crash { client: 0 },
+    ]);
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.server_tags("a"), Some(vec!["Red:6".to_owned()]));
+}
+
+/// Found by a 150,000-case run: client 1 starts ignoring `d` between planning its download and
+/// running it, and stops again before its next plan. A rule change counts from the next run
+/// (the executor holds one filter for its run): the download settles, and a tag removed on the
+/// drive later stays removed. Settled with the new rule, `d` had no base, and its next plan
+/// merged the tags as if both sides had made the file.
+#[test]
+fn regression_a_rule_change_counts_from_the_next_plan() {
+    use Action::*;
+    let (c0, c1) = (|| 0, || 1);
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(c1(), ToggleIgnore), // client 1 syncs `d`
+        act(c0(), CreateFile { parent: 0, name: 5 }),
+        act(c0(), Tag { node: 0, tag: 1 }), // Work
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        act(c1(), ToggleIgnore),
+        Event::Step { client: 1 },
+        act(c1(), ToggleIgnore),
+        act(c0(), Tag { node: 0, tag: 1 }), // Work removed
+        act(c0(), Edit { file: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+    ];
+    run(2, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
 /// Deleted on one client, restored (onto a name taken meanwhile), then purged: the clients
 /// converge at each step.
 #[test]
@@ -1111,11 +1325,10 @@ fn regression_two_devices_fork_to_one_copy_id() {
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// Found by a 150,000-case run (2026-10-16), failing on main and on sim-role-fixes (d998bb4)
-/// too: a tag added on client 1 is lost ("lost tag \"Red\"") with clients that sync only when
-/// asked and the guard at 1. The class sim-role-fixes works on; kept for it.
+/// Found by a 150,000-case run (2026-10-16), failing on main: a tag added on client 1 was lost
+/// ("lost tag \"Red\"") with clients that sync only when asked and the guard at 1. Passes
+/// with sim-role-fixes' tag fixes.
 #[test]
-#[ignore = "a lost tag, failing on main: for sim-role-fixes"]
 fn regression_a_tag_lost_when_syncing_only_when_asked() {
     use hbsync_sim::Action::*;
     use hbsync_sim::Event::*;
@@ -2106,4 +2319,231 @@ fn regression_a_file_written_into_a_removed_folder_of_the_role_folder_brings_it_
     if let Err(e) = run_with(3, None, Sim::with_new_role_devices, &events) {
         panic!("{e}");
     }
+}
+
+/// A synced folder is moved into another and tagged; a client that had it at its old place
+/// only by a download that landed after that, removes the other folder: unchanged here, the
+/// folder goes with it, into Recently deleted with its tag (the drive's), on no computer.
+#[test]
+fn regression_a_folder_taken_along_goes_with_its_tag() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let mut sim = Sim::new(3).with_new_role_devices();
+    sim.run(&[act(1, CreateFolder { parent: 0, name: 6 })]);
+    let folder = sim.item_named(1, ".txt").expect("the folder");
+    sim.run(&[
+        act(0, CreateFolder { parent: 0, name: 8 }),
+        plan(0),
+        step(0),
+        plan(1),
+        act(0, Delete { node: 0 }),
+        step(1),
+        step(1),
+        act(
+            1,
+            Move {
+                node: 2,
+                parent: 1,
+                name: 0,
+            },
+        ),
+        act(1, Tag { node: 8, tag: 0 }),
+        plan(1),
+        plan(0),
+        step(1),
+        step(0),
+        step(0),
+    ]);
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert!(sim.is_removed(folder), "{:?}", sim.server_paths());
+    assert!(
+        sim.removed_tags(folder)
+            .iter()
+            .any(|t| t.starts_with("Red")),
+        "Recently deleted keeps Red"
+    );
+}
+
+/// A synced folder is moved into another and tagged on one computer; the other, which hadn't
+/// seen that yet, removes the other folder, taking it along, and renames its copy: the rename
+/// brings it back with the tag the drive had, which this computer never saw (§11).
+#[test]
+fn regression_a_folder_brought_back_from_a_removal_keeps_the_drives_tag() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let mut sim = Sim::new(3).with_new_role_devices();
+    sim.run(&[
+        act(1, CreateFolder { parent: 0, name: 6 }),
+        act(0, CreateFolder { parent: 0, name: 8 }),
+    ]);
+    assert!(sim.quiesce(10));
+    let folder = sim.item_named(1, ".txt").expect("the folder");
+    let other = sim.item(0, "a").expect("the other folder");
+    let pick = |sim: &Sim, c, n, parent| sim.pick(c, n, parent).expect("picked");
+    let (f1, a1, a0) = (
+        pick(&sim, 1, folder, false),
+        pick(&sim, 1, other, true),
+        pick(&sim, 0, other, false),
+    );
+    sim.run(&[
+        act(
+            1,
+            Move {
+                node: f1,
+                parent: a1,
+                name: 1,
+            },
+        ),
+        act(1, Tag { node: f1, tag: 0 }),
+        act(0, Delete { node: a0 }),
+        plan(1),
+        plan(0),
+        step(1),
+        step(0),
+    ]);
+    // Client 0 renames its copy, which it still has at the top.
+    let (f0, top) = (
+        pick(&sim, 0, folder, false),
+        pick(&sim, 0, NodeId::ROOT, true),
+    );
+    sim.run(&[act(
+        0,
+        Move {
+            node: f0,
+            parent: top,
+            name: 1,
+        },
+    )]);
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    let red =
+        |tags: Option<Vec<String>>| tags.is_some_and(|t| t.iter().any(|t| t.starts_with("Red")));
+    assert!(
+        red(sim.server_tags("b")),
+        "the drive keeps Red: {:?}",
+        sim.server_paths()
+    );
+    // The Mac and the Linux computer; Windows holds no tags (the drive keeps them, §11).
+    for c in 0..2 {
+        assert!(red(sim.local_tags(c, "b")), "computer {c} keeps Red");
+    }
+}
+
+/// Documents removes a folder, then a file in it; in between the role folder is deleted and
+/// the folder restored to the top, and the file's removal decided in Documents still runs.
+#[test]
+fn regression_a_restore_during_a_folder_delete_isnt_a_write_outside() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let mut sim = Sim::new(3).with_new_role_devices();
+    sim.run(&[
+        act(3, CreateFile { parent: 0, name: 0 }),
+        act(4, CreateFolder { parent: 0, name: 0 }),
+        act(4, CreateFile { parent: 2, name: 0 }),
+    ]);
+    let file = sim.item(4, "a/a").expect("Documents' a/a");
+    sim.run(&[
+        act(0, CreateFile { parent: 0, name: 1 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(4),
+        act(4, CreateJunk { parent: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        step(4),
+        step(4),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(4, Delete { node: 3 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(4),
+        step(4),
+        act(0, DeleteRoleFolder),
+        act(0, Restore { node: 0 }),
+        step(4),
+    ]);
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    let paths = sim.server_paths();
+    assert!(
+        paths.iter().any(|p| p == "a"),
+        "the restored folder: {paths:?}"
+    );
+    assert!(!paths.iter().any(|p| p == "a/a"), "{paths:?}");
+    assert!(sim.is_removed(file), "the file is in Recently deleted");
+}
+
+/// A folder restored from Recently deleted, made here before its RemoteCreate runs, has no base:
+/// a tag another device removes meanwhile comes back. Kept until that is fixed.
+#[test]
+#[ignore = "the restored folder's LocalMkdir before its RemoteCreate leaves no base, so a removed tag comes back"]
+fn regression_a_tag_removed_while_a_restored_folder_has_no_base() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 0, name: 0 },
+        },
+        Act {
+            client: 1,
+            action: Tag { node: 0, tag: 9 },
+        },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 1, name: 5 },
+        },
+        Plan { client: 0 },
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 7, name: 0 },
+        },
+        Step { client: 0 },
+        Act {
+            client: 1,
+            action: Move {
+                node: 3,
+                parent: 13,
+                name: 3,
+            },
+        },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 2, name: 0 },
+        },
+        Plan { client: 1 },
+        Plan { client: 0 },
+        Step { client: 1 },
+        Step { client: 0 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: CreateJunk { parent: 0 },
+        },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Act {
+            client: 0,
+            action: Tag { node: 0, tag: 5 },
+        },
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
 }

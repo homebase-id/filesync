@@ -21,6 +21,33 @@ The **root** is implicit: it has the fixed id from the node schema and is never 
 
 **Three trees.** For every sync root the client keeps three views keyed by node id:
 - **Base**: the last state both sides agreed on. Written only after an operation succeeds.
+  Tags count one by one: one both sides agree on (both hold it, or both lack it) takes that
+  value, one they differ on keeps the base's. A local write settles against the drive's version
+  it acted on (the one the plan saw; a download runs only while the mirror still holds that
+  version, and is planned again otherwise), not a later one, even where the mirror has moved on
+  or lost the node since; the base records that version. Its tags record exactly what it wrote,
+  tag by tag, never a recomputation: each tag the write changed on the item takes the written
+  value where that version holds it, and every other tag keeps the base's. A write that writes
+  no tags (a move, a folder made with none over none) leaves them as they are; a download or a
+  folder made sets the item's whole set, changing each tag the item held otherwise before (none
+  where there was no item; where what it wrote isn't known, the base's tags start afresh, each
+  one the item holds and the version holds too). This holds whatever moved since: the next plan
+  compares the drive's newer value with the written one, and the scan reports what the user
+  changed after the write. A tag this device can't hold at all the item never held: what a
+  write leaves of it is the drive's value, which the base takes. The commit, recovery and the
+  simulator settle tags alike.
+  Its content, place and version settle only if the base is still at the version its plan saw,
+  or, for a write that doesn't put a node in place from a record, where the run's own earlier
+  operations on the node settled it (compare and set): where anything else moved it since
+  (another folder, the feed, recovery), they stay as they are and the node dirty, for the next
+  plan. Where the run's own remote write moved the node past the version a local write acted
+  on, its content, place and version settle against the remote write's version, while the
+  mirror holds it. A download or a folder made from its record settles by the record alone, so
+  its commit and its recovery settle it the same way. Where the drive moved on from the version
+  a write settles against, the node stays dirty too (an operation can come for a node that
+  wasn't). Without a base, a write that put the item in place
+  (made, fetched or moved it) makes that version the base where the bytes agree; a tag change
+  alone doesn't, nor a move to where the item already is.
 - **Local**: what the local file system holds now, after identity matching (section 3).
 - **Remote**: the client's mirror of the drive, fed by the change cursor.
 
@@ -163,7 +190,8 @@ the remote ones run together (section 8a). A move whose target
 name is occupied by a node that is itself moving away goes through a temporary name.
 
 Every operation is **idempotent**: a remote create that returns `ExistingFileWithUniqueId`
-(4105) is treated as already done; a local move whose source is gone and whose target holds the
+(4105) is treated as already done, with the bytes the file had then: they count as agreed only
+where the drive's hash is the local one, so an edit since goes up; a local move whose source is gone and whose target holds the
 expected fingerprint is treated as done.
 
 ## 8a. Execution rules (found necessary by the simulator)
@@ -225,12 +253,38 @@ expected fingerprint is treated as done.
   child created while another client deleted its folder) is moved to the root.
 - **Crash recovery** needs no operation log: every operation is idempotent or detectable
   (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
-  feed, and parked items come back from their records. A download placed but not recorded (a
-  crash just before its commit) is found again: each batch of downloads is recorded before it
-  runs, with the base each commit writes (the node as the drive has it at that version) and its
-  target; on the next sync the file at a record's target holding its bytes, new to the scan or
-  the node's own file replaced, is that node with that base, and later changes on the drive are
-  plain changes against it. The records go then. A verified download that couldn't be
+  feed, and parked items come back from their records. A download (or a folder synced before,
+  made again) placed but not recorded (a crash just before its commit) is found again: each
+  batch of downloads is recorded before it runs, with the base each commit writes (the node as
+  the drive has it at that version), its target, what the item holds of tags and what the item
+  there held before (none: not known), and the base's version its plan saw (recovery checks it as the commit does; a record
+  from before records said so is settled against the base as it is). A download claims the tags it writes on the file before moving it into place, the
+  empty set too, as they read back (not known where the volume keeps none, learned when a tag
+  write finds it unsupported); where the write turns out otherwise, the record says so durably before the move,
+  so only a failure costs a commit. A folder is made without tags: it claims the empty set if it
+  is to hold none, and otherwise claims what was written once written, durably before its
+  commit. On the next sync the item at a record's target holding its bytes, new to the scan or
+  the node's own file replaced, is that node, settled as its commit settles it (one function for
+  both, against the same version), its tags as the record says the write changed them, a tag
+  the user changed since being their change; where it claims none, the base's tags start
+  afresh, each one the item holds and the drive holds too, so a tag only the drive has is
+  written on the item and one only the item has goes up. A folder's recovery, like its commit, marks what is in it on
+  the drive dirty. Later changes on the drive are plain changes against it. A record goes once
+  its base is written, by the commit or by recovery, or when the operation that wrote it, in
+  that run, fails before its own item is in place, or its batch stops before it starts (so no
+  item the user puts at that place is ever taken for it); one whose item is in place stays
+  through a failed commit (the operation ends there, and recovery settles it right away by
+  that item alone, read off the disk, no other item read again: the one way an item put in
+  place settles then; a folder new here, without a record, is taken over by its retry), and
+  one whose item can't be read as a node yet (its file can't be hashed yet, say: locked), for
+  ten minutes from when it was put in place at most, then dropped. Recovery runs
+  at the start of a sync and of each of its rounds, and first rescans the folders its records
+  go into and those their nodes' items are in (each record's once a sync), so it judges what
+  is on disk: the item there with the record's bytes is settled, a
+  record whose target holds nothing goes, and one whose target holds something else is left to
+  adoption. A record never goes only because no scan has seen its item yet. No operation writes over a
+  record it didn't write: it is left for the next plan, the node dirty, until recovery settles
+  the record. A verified download that couldn't be
   placed stays in the temp folder for the retry; temp files no pending download wants are
   removed before each plan. The stored journal position never passes a change that isn't
   recorded: it is taken before waiting for events and stored only once the event queue has
@@ -355,8 +409,10 @@ a colour comes from the side that changed it, the remote's if both did. Never a 
 
 **A tag change is not an edit.** Against a delete on the other side the delete wins (the item
 is in Recently deleted, with its tags); it never makes a conflict copy. A conflict copy keeps
-the local file's tags, and an edit that restores a removed node merges the removed version's
-tags in (it may hold tags this device never saw).
+the local file's tags. Every write over a drive version merges that version's tags in (it may
+hold tags this device never saw): a restore from Recently deleted, bringing back a node a
+folder's removal took along (§6.3), any update; a version detached as a new item writes over
+none, and keeps the local tags.
 
 **Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
 then reads the tags. Tags that couldn't be read are tried again at the next scan.

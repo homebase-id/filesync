@@ -93,6 +93,21 @@ impl Tags {
         )
     }
 
+    /// A base's tags after settling, per tag: one `local` and `remote` agree on (both hold it,
+    /// in one colour, or both lack it) takes that value; one they differ on keeps `base`'s.
+    pub fn agreed(base: &Tags, local: &Tags, remote: &Tags) -> Tags {
+        let names: std::collections::BTreeSet<&str> = base
+            .iter()
+            .chain(local.iter())
+            .chain(remote.iter())
+            .map(|t| t.name.as_str())
+            .collect();
+        Tags::new(names.into_iter().filter_map(|name| {
+            let (l, r) = (local.get(name), remote.get(name));
+            if l == r { l } else { base.get(name) }.cloned()
+        }))
+    }
+
     /// The three-way merge of a node's tags (sync-semantics §11): what either side added is
     /// in, what either side removed is out; a colour comes from the side that changed it (the
     /// remote's if both did).
@@ -246,6 +261,24 @@ pub fn read(path: &Path) -> Option<Tags> {
 /// tags can't be kept ([`CAN_TAG`], a file system without them) it does nothing and returns
 /// `None`, as [`read`] would.
 pub fn write(path: &Path, tags: &Tags) -> io::Result<Option<Tags>> {
+    Ok(match write_on(path, tags)? {
+        Written::Unsupported => None,
+        Written::Done(read) => read,
+    })
+}
+
+/// What [`write_on`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    /// The volume keeps no tags (or this OS none): nothing written.
+    Unsupported,
+    /// Written; what reads back (`None`: it couldn't be read, or is too large to sync).
+    Done(Option<Tags>),
+}
+
+/// [`write`], telling a volume that keeps no tags from a write that failed (an error) or read
+/// back as nothing to go by.
+pub fn write_on(path: &Path, tags: &Tags) -> io::Result<Written> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         #[cfg(target_os = "macos")]
@@ -258,15 +291,15 @@ pub fn write(path: &Path, tags: &Tags) -> io::Result<Option<Tags>> {
             xattr::remove(path, attr)
         };
         match done {
-            Err(e) if e.kind() == io::ErrorKind::Unsupported => return Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::Unsupported => return Ok(Written::Unsupported),
             done => done?,
         }
-        Ok(read(path))
+        Ok(Written::Done(read(path)))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (path, tags);
-        Ok(None)
+        Ok(Written::Unsupported)
     }
 }
 
@@ -422,6 +455,19 @@ mod tests {
         assert_eq!(
             t.intersection(&tags(&[("a", 0), ("b", 2)])),
             tags(&[("a", 0)])
+        );
+    }
+
+    #[test]
+    fn a_base_takes_each_tag_both_sides_agree_on_and_keeps_the_rest() {
+        let base = tags(&[("kept", 1), ("dropped", 2), ("recoloured", 3)]);
+        let local = tags(&[("added", 4), ("kept", 1), ("recoloured", 5), ("mine", 6)]);
+        let remote = tags(&[("added", 4), ("kept", 1), ("recoloured", 7)]);
+        assert_eq!(
+            Tags::agreed(&base, &local, &remote),
+            // Both added, both kept, both dropped; a colour they differ on and a tag only one
+            // side added keep the base's (none for `mine`).
+            tags(&[("added", 4), ("kept", 1), ("recoloured", 3)])
         );
     }
 
