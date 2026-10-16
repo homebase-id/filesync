@@ -1199,10 +1199,11 @@ fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
 
 /// The device deleting a folder stops after the folder's removal: what is in it is still live,
 /// unmarked, taken along by the folder's removal (node schema, Recently deleted). Emptying the
-/// folder from Recently deleted, on another device, deletes it for good with everything taken
-/// along: nothing is left to turn up at the top.
+/// folder from Recently deleted, on another device, deletes for good only what is removed: the
+/// folder stays while it holds live nodes, which emptying never deletes for good (the purge
+/// marks them removed first). Taken along, they show nowhere.
 #[test]
-fn emptying_a_folder_deletes_what_its_delete_took_along() -> R {
+fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
     a.write("Photos/x.txt", "x")?;
@@ -1226,8 +1227,14 @@ fn emptying_a_folder_deletes_what_its_delete_took_along() -> R {
         .ok_or("Photos not listed")?;
     // Another device, which never synced, empties it.
     let mut b = Client::new(&server, "b")?;
-    assert_eq!(b.engine.drive().empty(&[photos.node])?, 4);
-    assert_eq!(live(&server), 0, "nothing taken along is left");
+    assert_eq!(b.engine.drive().empty(&[photos.node])?, 1, "x.txt");
+    assert_eq!(live(&server), 2, "2024 and y.txt stay");
+    let left: Vec<String> = b
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert_eq!(left, ["Photos"]);
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
     Ok(())

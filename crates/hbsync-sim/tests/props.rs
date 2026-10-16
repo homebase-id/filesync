@@ -951,14 +951,11 @@ fn restore_and_purge_converge() {
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// Tags meet on every device: a Mac's tag and colour change, a Linux tag (Linux keeps no
-/// colours, and keeps the Mac's), and a Windows device, which has no tags, keeps them through
-/// its own edit and rename. A tag removed anywhere goes everywhere.
 /// Emptying Recently deleted as listed while other devices work: after the listing a listed
-/// folder comes back, and (or not) the phone saves an edit of a file a listed
-/// folder's delete took along (its own removal still on its way). What was listed goes, with
-/// what it took along; the edit, written after, stays with its folder, which comes back;
-/// nothing written is lost, and the clients converge.
+/// folder comes back, and (or not) the phone saves an edit of a file a listed folder's delete
+/// took along (its own removal still on its way). What was listed goes, but never a live node:
+/// the folder holding the file stays, and comes back with the edit; nothing written is lost,
+/// and the clients converge.
 #[test]
 fn emptying_as_listed_spares_what_came_after_the_listing() {
     use Action::*;
@@ -1009,11 +1006,7 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
             sim.run(&[act(0, EditTaken { pick: 0 })]);
         }
         sim.run(&[act(0, EmptyListed)]);
-        assert_eq!(
-            sim.is_removed(node_a),
-            edited,
-            "`a` stays only with the edit"
-        );
+        assert!(sim.is_removed(node_a), "`a` holds a live node: it stays");
         assert!(sim.quiesce(30), "no convergence");
         if let Err(e) = sim.check() {
             panic!("edited {edited}: {e}");
@@ -1204,6 +1197,9 @@ fn regression_a_tag_lost_when_syncing_only_when_asked() {
     .unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// Tags meet on every device: a Mac's tag and colour change, a Linux tag (Linux keeps no
+/// colours, and keeps the Mac's), and a Windows device, which has no tags, keeps them through
+/// its own edit and rename. A tag removed anywhere goes everywhere.
 #[test]
 fn tags_meet_across_macos_linux_and_windows() {
     use Action::*;

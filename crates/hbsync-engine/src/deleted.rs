@@ -28,8 +28,8 @@ use hbsync_local::layout;
 pub struct DeletedSummary {
     /// The items deleted on their own.
     pub deletes: usize,
-    /// What emptying all of it now deletes for good: every item, those its deletes took along
-    /// too (live ones included), but a folder holding anything that stays ([`empty_listed`]).
+    /// What emptying all of it now deletes for good ([`select`]): every item, those its deletes
+    /// took along too, but a folder holding a live node or a removal that stays.
     pub items: usize,
     /// What the listing saw: [`empty_listed`] with it empties exactly that.
     pub listed: Listed,
@@ -50,10 +50,9 @@ pub fn deletes(
     limit: usize,
 ) -> Result<(Vec<(Deleted, usize)>, DeletedSummary), StateError> {
     let mut listing = Listing::read(s)?;
-    let rows = listing.rows.rows[..listing.roots.len()].to_vec();
     let summary = DeletedSummary {
         deletes: listing.deletes().count(),
-        items: going(s, rows)?.len(),
+        items: listing.going,
         listed: Listed {
             db: s.db_id()?,
             seq: s.removed_seq()?,
@@ -89,6 +88,10 @@ struct Listing<'a, 's> {
     rows: RemovedRows<'a, 's>,
     /// For each of the first rows (the listed ones), its item: itself, deleted on its own.
     roots: Vec<NodeId>,
+    /// Of the listed rows, how many emptying all of them deletes for good, and of those, how many
+    /// each delete took along.
+    going: usize,
+    along: HashMap<NodeId, usize>,
     folders: HashMap<NodeId, String>,
     /// Where a walk up stops: a folder's top (here or not), the role folders whether synced
     /// here or not; above them all, the main folder's top (the drive's root).
@@ -109,6 +112,8 @@ impl<'a, 's> Listing<'a, 's> {
         Ok(Listing {
             rows: RemovedRows::new(s, Vec::new()),
             roots: Vec::new(),
+            going: 0,
+            along: HashMap::new(),
             folders,
             tops,
             places: HashMap::new(),
@@ -128,6 +133,23 @@ impl<'a, 's> Listing<'a, 's> {
                 deleted_by_item(&mut listing.rows, node, &mut deleted_by)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // What emptying all of it deletes: from the rows read, and one query.
+        let rows = &listing.rows.rows[..count];
+        let mut holdings = Holdings {
+            live: s.removed_holding_live()?,
+            removed: HashMap::new(),
+        };
+        for r in rows {
+            *holdings.removed.entry(r.row.parent).or_default() += 1;
+        }
+        let chosen: Vec<Chosen> = rows.iter().map(Chosen::of).collect();
+        let going: HashSet<NodeId> = select(&chosen, &holdings).into_iter().collect();
+        listing.going = going.len();
+        for (r, root) in rows.iter().zip(&listing.roots) {
+            if *root != r.row.node && going.contains(&r.row.node) {
+                *listing.along.entry(*root).or_default() += 1;
+            }
+        }
         Ok(listing)
     }
 
@@ -138,8 +160,12 @@ impl<'a, 's> Listing<'a, 's> {
             return Ok(None);
         };
         let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
+        // What emptying it deletes, but itself.
         let along = match root == node {
-            true => group(self.rows.s, top, true)?.len() - 1,
+            true => {
+                let going = going(self.rows.s, group(self.rows.s, top, false)?)?;
+                going.iter().filter(|r| r.row.node != node).count()
+            }
             false => 0,
         };
         let i = self.rows.index[&node].unwrap_or_default();
@@ -152,15 +178,14 @@ impl<'a, 's> Listing<'a, 's> {
         (0..self.roots.len()).filter(|&i| self.roots[i] == self.rows.rows[i].row.node)
     }
 
-    /// Rows `picked`, described, each with how many items it took along: the removed ones,
-    /// and the live ones its delete took along ([`taken_along`]).
+    /// Rows `picked`, described, each with how many items it took along that emptying deletes.
     fn with_along(&mut self, picked: Vec<usize>) -> Result<Vec<(Deleted, usize)>, StateError> {
         picked
             .into_iter()
             .map(|i| {
                 let d = self.describe(i)?;
                 let n = match d.root == d.node {
-                    true => group(self.rows.s, self.rows.rows[i].clone(), true)?.len() - 1,
+                    true => self.along.get(&d.node).copied().unwrap_or(0),
                     false => 0,
                 };
                 Ok((d, n))
@@ -258,17 +283,13 @@ fn deleted_by_item(
     })?;
     let item = match up.end {
         End::At(at) => known.get(&at).copied().unwrap_or(at),
-        // At the top, or past any depth a path may have: the last row walked.
+        // At the top, or past any depth a path may have: the last row walked. Cut off deep,
+        // that row is a delete of its own (remembered below), so the listing lists it.
         End::Top | End::Deep => up.items.last().copied().unwrap_or(node),
         // Removed rows in a cycle (left by a remote one): one of them, the same whichever row
         // the walk started from.
         End::Cycle => cycle_root(rows, &up.items)?,
     };
-    // A walk cut off deep gives each row its own item (the row that deep above it): none is
-    // remembered, so no row's item depends on which was walked first.
-    if up.end == End::Deep {
-        return Ok(item);
-    }
     if let End::At(at) = up.end {
         known.insert(at, item);
     }
@@ -401,8 +422,9 @@ struct RestorePlan {
 }
 
 /// `top` and what its delete took along below it, level by level: the removed items in it
-/// deleted with their folder ([`deleted_with`]), and the live ones it took along
-/// ([`taken_along`]), which count as removed then. What was deleted from it before stays out.
+/// deleted with their folder ([`deleted_with`]), and the live ones written no later than its
+/// removal (node schema: their own removal was still on its way), which count as removed then.
+/// What was deleted from it before stays out.
 ///
 /// Without `live`, only the removed items: what Recently deleted lists with it.
 fn group(s: &Store<'_>, top: RemovedRow, live: bool) -> Result<Vec<RemovedRow>, StateError> {
@@ -423,7 +445,7 @@ fn group(s: &Store<'_>, top: RemovedRow, live: bool) -> Result<Vec<RemovedRow>, 
             };
             let along = along
                 .into_iter()
-                .filter(|m| taken_along(m.changed_at, folder.removed_at))
+                .filter(|m| m.changed_at.is_none_or(|at| at <= folder.time()))
                 .map(|row| RemovedRow {
                     row,
                     removed_at: folder.removed_at,
@@ -437,14 +459,6 @@ fn group(s: &Store<'_>, top: RemovedRow, live: bool) -> Result<Vec<RemovedRow>, 
         next += 1;
     }
     Ok(rows)
-}
-
-/// Whether a live node written at `changed_at` was taken along by the removal at `removed_at`
-/// of a folder it is in (node schema, Recently deleted: its own removal was still on its way):
-/// both times known, and written no later. One written after, or at a time not known, wasn't:
-/// it stays, and so does the folder.
-pub fn taken_along(changed_at: Option<i64>, removed_at: Option<i64>) -> bool {
-    matches!((changed_at, removed_at), (Some(written), Some(removed)) if written <= removed)
 }
 
 fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, StateError> {
@@ -491,9 +505,9 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
 }
 
 /// Deletes for good the items of Recently deleted removed before `before_ms` (Unix ms), each
-/// with what was deleted with it (a folder's delete goes as a whole), files before their
-/// folders, and empties every folder's trash (`.hbsync/trash`) of the same age. Returns how
-/// many items went.
+/// with what was deleted with it ([`select`]: removed nodes only, never a live one), files
+/// before their folders, and empties every folder's trash (`.hbsync/trash`) of the same age.
+/// Returns how many items went.
 pub fn purge(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize, EngineError> {
     let gone = expire(db, remote, before_ms)?;
     for folder in db.read(|s| s.folders())? {
@@ -521,8 +535,8 @@ pub fn purge(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<us
     Ok(gone)
 }
 
-/// Deletes for good the items `nodes` name, each with what was deleted with it. Returns how
-/// many items went.
+/// Deletes for good the items `nodes` name, each with what was deleted with it ([`select`]).
+/// Returns how many items went.
 pub fn empty(
     db: &mut StateDb,
     remote: &dyn Remote,
@@ -539,11 +553,10 @@ pub fn empty(
 }
 
 /// Deletes for good what a listing saw ([`DeletedSummary::listed`]): the rows recorded up to
-/// its counter, an open removal too, and the live nodes their folders took along
-/// ([`taken_along`]); nothing recorded since (a removal that arrives later, whatever its server
-/// time, or a node deleted again after a restore), no other live node. A folder holding
-/// anything that stays stays too, emptied of the rest. Refused for a listing of another DB (the
-/// account's, made again) or one this DB never gave. Returns how many items went.
+/// its counter, an open removal too; nothing recorded since (a removal that arrives later,
+/// whatever its server time, or a node deleted again after a restore), and never a live node
+/// ([`select`]). Refused for a listing of another DB (the account's, made again) or one this DB
+/// never gave. Returns how many items went.
 pub fn empty_listed(
     db: &mut StateDb,
     remote: &dyn Remote,
@@ -566,66 +579,73 @@ pub fn listed_here(s: &Store<'_>, listed: &Listed) -> Result<bool, StateError> {
     Ok(!listed.db.is_empty() && listed.db == s.db_id()? && listed.seq <= s.removed_seq()?)
 }
 
-/// What emptying `chosen` (rows of Recently deleted) deletes for good: those rows and the live
-/// nodes their folders took along ([`taken_along`]), but a folder holding anything else (a live
-/// node not taken along, a removed one not chosen) and the folders it is in; in the order
-/// [`emptying_order`] gives.
+/// What emptying `chosen` (rows of Recently deleted) deletes for good ([`select`]), in that
+/// order: what the folders hold read in two queries.
 fn going(s: &Store<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<RemovedRow>, StateError> {
-    // How many of the chosen rows each folder holds, to tell whether it holds others.
-    let mut chosen_in: HashMap<NodeId, u64> = HashMap::new();
-    let mut rows: HashMap<NodeId, RemovedRow> = HashMap::new();
-    for r in chosen {
-        if let Entry::Vacant(row) = rows.entry(r.row.node) {
-            *chosen_in.entry(r.row.parent).or_default() += 1;
-            row.insert(r);
-        }
-    }
-    let mut folders: Vec<NodeId> = rows
-        .values()
-        .filter(|r| r.row.kind == NodeKind::Folder)
-        .map(|r| r.row.node)
-        .collect();
-    let mut holding = Vec::new();
-    while let Some(folder) = folders.pop() {
-        let removed_at = rows[&folder].removed_at;
-        let mut holds =
-            s.removed_child_count(folder)? > chosen_in.get(&folder).copied().unwrap_or(0);
-        for m in s.mirror_children(folder)? {
-            if !taken_along(m.changed_at, removed_at) {
-                holds = true;
-            } else if let Entry::Vacant(row) = rows.entry(m.node) {
-                if m.kind == NodeKind::Folder {
-                    folders.push(m.node);
-                }
-                row.insert(RemovedRow { row: m, removed_at });
-            }
-        }
-        if holds {
-            holding.push(folder);
-        }
-    }
-    let links = rows
-        .iter()
-        .map(|(n, r)| (*n, (r.row.parent, r.row.kind == NodeKind::Folder)))
-        .collect();
-    Ok(emptying_order(&links, holding)
+    let holdings = Holdings {
+        live: s.removed_holding_live()?,
+        removed: s.removed_per_folder()?,
+    };
+    let picked: Vec<Chosen> = chosen.iter().map(Chosen::of).collect();
+    let mut rows: HashMap<NodeId, RemovedRow> =
+        chosen.into_iter().map(|r| (r.row.node, r)).collect();
+    Ok(select(&picked, &holdings)
         .into_iter()
         .filter_map(|n| rows.remove(&n))
         .collect())
 }
 
-/// Of the nodes `links` gives (each with its folder, and whether it is a folder), the ones that
-/// go when the folders `holding` hold something else that stays: all but those folders and the
-/// folders they are in. Files first, then each folder after the folders in it (a cycle of them
-/// in some order); by the links among them alone, however deep.
-pub fn emptying_order(
-    links: &HashMap<NodeId, (NodeId, bool)>,
-    holding: impl IntoIterator<Item = NodeId>,
-) -> Vec<NodeId> {
+/// A row of Recently deleted as emptying sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chosen {
+    pub node: NodeId,
+    pub parent: NodeId,
+    pub folder: bool,
+}
+
+impl Chosen {
+    fn of(r: &RemovedRow) -> Chosen {
+        Chosen {
+            node: r.row.node,
+            parent: r.row.parent,
+            folder: r.row.kind == NodeKind::Folder,
+        }
+    }
+}
+
+/// What the folders of Recently deleted hold on the drive.
+#[derive(Debug, Clone, Default)]
+pub struct Holdings {
+    /// The removed folders holding a live node.
+    pub live: HashSet<NodeId>,
+    /// How many removed nodes each folder holds.
+    pub removed: HashMap<NodeId, u64>,
+}
+
+/// Of `chosen` (rows of Recently deleted), the ones emptying them deletes for good, in the
+/// order it deletes them. Only removed rows, never a live node: a folder holding a live node
+/// (one its delete took along, or one written since) or a removed node not chosen stays, and
+/// so do the folders it is in. Files first, then each folder after the folders in it (a cycle
+/// of them in some order), by the links among the chosen alone, however deep.
+pub fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
+    let mut links: HashMap<NodeId, (NodeId, bool)> = HashMap::new();
+    let mut chosen_in: HashMap<NodeId, u64> = HashMap::new();
+    for c in chosen {
+        if let Entry::Vacant(link) = links.entry(c.node) {
+            link.insert((c.parent, c.folder));
+            *chosen_in.entry(c.parent).or_default() += 1;
+        }
+    }
     let mut stays = HashSet::new();
-    for mut at in holding {
-        while links.contains_key(&at) && stays.insert(at) {
-            at = links[&at].0;
+    for (&folder, &(_, is_folder)) in &links {
+        let removed = holdings.removed.get(&folder).copied().unwrap_or(0);
+        let holds = holdings.live.contains(&folder)
+            || removed > chosen_in.get(&folder).copied().unwrap_or(0);
+        if is_folder && holds {
+            let mut at = folder;
+            while links.contains_key(&at) && stays.insert(at) {
+                at = links[&at].0;
+            }
         }
     }
     // How many of them each is in, worked out once each.
@@ -680,7 +700,7 @@ fn expire(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize
     delete_groups(db, remote, tops)
 }
 
-/// Deletes for good `tops`, each with what was deleted with it ([`going`]).
+/// Deletes for good `tops`, each with what was deleted with it ([`select`]).
 fn delete_groups(
     db: &mut StateDb,
     remote: &dyn Remote,
@@ -723,11 +743,7 @@ fn delete_for_good(
             Err(RemoteError::VersionMismatch) => continue,
             Err(e) => return Err(EngineError::Remote(e)),
         }
-        // No row of it is left, in Recently deleted or, taken along, in the tree.
-        db.write(|s| {
-            s.delete_removed(r.row.node)?;
-            s.delete_mirror(r.row.file_id).map(drop)
-        })?;
+        db.write(|s| s.delete_removed(r.row.node).map(drop))?;
         gone += 1;
     }
     Ok(gone)
@@ -869,17 +885,14 @@ mod tests {
         Ok(())
     }
 
-    /// A live node written no later than its folder's removal was taken along: the listing
-    /// counts it with the delete, and it goes with the folder (a delete that stopped half-way
-    /// can be emptied). One written after, or at a time not known, stays, and so do the folders
-    /// it is in, emptied of the rest. Emptying as listed, emptying the deletes and the purge
-    /// agree.
+    /// Emptying deletes for good only removed rows, never a live node: a folder holding one
+    /// (its delete took it along, it was written since, or its time isn't known) stays, and so
+    /// do the folders it is in, emptied of the rest. Emptying as listed, emptying the deletes
+    /// and the purge agree, and the listing counts what they delete.
     #[test]
-    fn a_live_node_goes_with_its_folder_only_if_taken_along()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn a_live_node_is_never_deleted_for_good() -> Result<(), Box<dyn std::error::Error>> {
         let [outer, f, gone, other, g, h] = [(); 6].map(|_| NodeId::new());
-        let [taken, taken_deep, later, unknown] = [(); 4].map(|_| NodeId::new());
-        let [h_child, h_child2] = [(); 2].map(|_| NodeId::new());
+        let [taken, taken_deep, later, unknown, h_child] = [(); 5].map(|_| NodeId::new());
         let live = |node, parent, changed_at| MirrorRow {
             changed_at,
             ..removed(node, parent, 0).row
@@ -902,34 +915,31 @@ mod tests {
                 s.put_mirror(&live(taken_deep, taken, Some(6)))?;
                 s.put_mirror(&live(later, f, Some(20)))?;
                 s.put_mirror(&live(unknown, g, None))?;
-                s.put_mirror(&live(h_child, h, Some(10)))?;
-                s.put_mirror(&live(h_child2, h, Some(9)))
+                s.put_mirror(&live(h_child, h, Some(10)))
             })?;
             let along: HashMap<NodeId, usize> = db
                 .read(all)?
                 .into_iter()
                 .map(|(d, n)| (d.node, n))
                 .collect();
-            assert_eq!((along[&outer], along[&g], along[&h]), (4, 0, 2));
+            assert_eq!((along[&outer], along[&g], along[&h]), (1, 0, 0));
+            let found = db.read(|s| find(s, &[outer]))?;
+            assert_eq!(found[0].1, 1, "a pick counts the same");
             let went = match how {
                 "listed" => {
                     // The count it shows is what emptying takes.
                     let (_, summary) = db.read(|s| deletes(s, 0))?;
-                    assert_eq!(summary.items, 7);
+                    assert_eq!((summary.deletes, summary.items), (4, 2));
                     empty_listed(&mut db, &remote, &summary.listed)?
                 }
                 "deletes" => empty(&mut db, &remote, &[outer, other, g, h])?,
                 _ => expire(&mut db, &remote, 11)?,
             };
-            assert_eq!(went, 7, "{how}");
-            assert_eq!(left(&mut db)?, sorted(vec![outer, f, g]), "{how}");
-            let mut live_left = Vec::new();
-            for n in [taken, taken_deep, later, unknown, h_child, h_child2] {
-                if db.read(|s| s.get_mirror(n))?.is_some() {
-                    live_left.push(n);
-                }
+            assert_eq!(went, 2, "{how}");
+            assert_eq!(left(&mut db)?, sorted(vec![outer, f, g, h]), "{how}");
+            for n in [taken, taken_deep, later, unknown, h_child] {
+                assert!(db.read(|s| s.get_mirror(n))?.is_some(), "{how}: {n:?}");
             }
-            assert_eq!(sorted(live_left), sorted(vec![later, unknown]), "{how}");
         }
         Ok(())
     }
@@ -1023,8 +1033,9 @@ mod tests {
         Ok(())
     }
 
-    /// A chain of removed folders deeper than any path may be isn't a cycle: the item is the
-    /// last row walked, as at the top.
+    /// A chain of removed folders deeper than any path may be isn't a cycle: its item is the
+    /// last row walked, as at the top, remembered for the chain; that row is its own item, so the
+    /// listing lists it as a delete.
     #[test]
     fn a_chain_too_deep_ends_at_the_last_row_walked() -> Result<(), StateError> {
         let mut db = StateDb::open_in_memory()?;
@@ -1038,17 +1049,16 @@ mod tests {
             Ok(())
         })?;
         let deep = hbsync_state::MAX_DEPTH;
-        // A row's item is the same whichever row was walked first.
-        let (first, second, alone) = db.read(|s| {
+        let items = db.read(|s| {
             let mut rows = RemovedRows::new(s, Vec::new());
             let mut known = HashMap::new();
-            let first = deleted_by_item(&mut rows, chain[0], &mut known)?;
-            let second = deleted_by_item(&mut rows, chain[1], &mut known)?;
-            let alone = deleted_by_item(&mut rows, chain[1], &mut HashMap::new())?;
-            Ok((first, second, alone))
+            let mut items = Vec::new();
+            for n in [chain[0], chain[1], chain[deep - 1]] {
+                items.push(deleted_by_item(&mut rows, n, &mut known)?);
+            }
+            Ok(items)
         })?;
-        assert_eq!((first, second), (chain[deep - 1], chain[deep]));
-        assert_eq!(second, alone);
+        assert_eq!(items, [chain[deep - 1]; 3]);
         Ok(())
     }
 
@@ -1060,17 +1070,27 @@ mod tests {
         let chain: Vec<NodeId> = (0..hbsync_state::MAX_DEPTH + 10)
             .map(|_| NodeId::new())
             .collect();
-        let mut links: HashMap<NodeId, (NodeId, bool)> =
-            chain.windows(2).map(|w| (w[0], (w[1], true))).collect();
-        let top = chain[chain.len() - 1];
-        links.insert(top, (NodeId::ROOT, true));
+        let folder = |w: &[NodeId]| Chosen {
+            node: w[0],
+            parent: w.get(1).copied().unwrap_or(NodeId::ROOT),
+            folder: true,
+        };
+        let mut chosen: Vec<Chosen> = (0..chain.len()).map(|i| folder(&chain[i..])).collect();
         let file = NodeId::new();
-        links.insert(file, (chain[0], false));
-        let order = emptying_order(&links, []);
+        chosen.push(Chosen {
+            node: file,
+            parent: chain[0],
+            folder: false,
+        });
+        let mut holdings = Holdings::default();
+        for c in &chosen {
+            *holdings.removed.entry(c.parent).or_default() += 1;
+        }
         let mut expected = vec![file];
         expected.extend(&chain);
-        assert_eq!(order, expected);
-        assert_eq!(emptying_order(&links, [chain[0]]), [file]);
+        assert_eq!(select(&chosen, &holdings), expected);
+        holdings.live.insert(chain[0]);
+        assert_eq!(select(&chosen, &holdings), [file]);
     }
 
     /// A folder's restore brings back what was removed with it or after it, not what was removed

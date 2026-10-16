@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use hbsync_engine::deleted;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{
@@ -87,10 +88,9 @@ pub enum Action {
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
-    /// The user empties Recently deleted as last listed (nothing without a listing): the rows
-    /// listed, at the version listed, and the live nodes their folders took along, but a folder
-    /// holding anything else and the folders it is in, in the order the engine deletes them
-    /// ([`hbsync_engine::deleted::emptying_order`]).
+    /// The user empties Recently deleted as last listed (nothing without a listing): what the
+    /// engine selects of the rows still as listed ([`hbsync_engine::deleted::select`]), in its
+    /// order.
     EmptyListed,
     /// Another device (the phone, which opened it before) saves an edit of a file a folder's
     /// delete took along, its own removal still on its way: on the server at once, the folder
@@ -191,8 +191,8 @@ struct Server {
     dangling: Option<String>,
     /// The last listing of Recently deleted ([`Action::ListDeleted`]): each node at its version.
     listed: Option<BTreeSet<(NodeId, VersionTag)>>,
-    /// The first node emptying as listed deleted for good that was neither listed (at that
-    /// version) nor taken along by a folder's removal.
+    /// The first node emptying as listed deleted for good that wasn't a removed row listed at
+    /// that version (a live node, say), or a folder holding anything not going after it.
     emptied_unlisted: Option<String>,
 }
 
@@ -986,75 +986,57 @@ impl Sim {
         self.server.live.insert(node, n);
     }
 
-    /// [`Action::EmptyListed`].
+    /// [`Action::EmptyListed`]: the engine's own selection ([`deleted::select`]) over the rows
+    /// still as listed, with what the folders hold on the server, deleted in its order.
     fn empty_listed(&mut self) {
         let Some(listed) = self.server.listed.clone() else {
             return;
         };
         let server = &self.server;
-        // The rows still as listed, and the live nodes their folders took along (by the engine's
-        // rule, below the nearest of them).
-        let mut links: HashMap<NodeId, (NodeId, bool)> = HashMap::new();
-        let mut folders = Vec::new();
-        for (n, r) in &server.removed {
-            if listed.contains(&(*n, r.remote.version)) {
-                links.insert(*n, (r.state.parent, r.state.kind == NodeKind::Folder));
-                folders.push((*n, server.removed_at.get(n).copied()));
-            }
+        let chosen: Vec<deleted::Chosen> = server
+            .removed
+            .iter()
+            .filter(|(n, r)| listed.contains(&(**n, r.remote.version)))
+            .map(|(n, r)| deleted::Chosen {
+                node: *n,
+                parent: r.state.parent,
+                folder: r.state.kind == NodeKind::Folder,
+            })
+            .collect();
+        let mut holdings = deleted::Holdings::default();
+        for r in server.removed.values() {
+            *holdings.removed.entry(r.state.parent).or_default() += 1;
         }
-        let mut holding = Vec::new();
-        while let Some((folder, removed_at)) = folders.pop() {
-            let mut holds = server
-                .removed
-                .iter()
-                .any(|(n, r)| r.state.parent == folder && !links.contains_key(n));
-            for (n, live) in &server.live {
-                if live.state.parent != folder {
-                    continue;
-                }
-                let written = Some(time(live.remote.version));
-                if !hbsync_engine::deleted::taken_along(written, removed_at) {
-                    holds = true;
-                } else if !links.contains_key(n) {
-                    let is_folder = live.state.kind == NodeKind::Folder;
-                    links.insert(*n, (folder, is_folder));
-                    if is_folder {
-                        folders.push((*n, removed_at));
-                    }
-                }
-            }
-            if holds {
-                holding.push(folder);
-            }
-        }
-        // What may go: listed at that version, or taken along by a folder's removal (the
-        // server's model of it, not the engine's).
-        let taken = server.taken_along();
-        for n in hbsync_engine::deleted::emptying_order(&links, holding) {
-            let ok = match self.server.removed.get(&n) {
-                Some(r) => listed.contains(&(n, r.remote.version)),
-                None => taken.contains(&n),
-            };
-            if !ok && self.server.emptied_unlisted.is_none() {
-                self.server.emptied_unlisted = Some(format!("{n:?}"));
-            }
-            // A folder still holding anything (what is in it goes first) stays.
-            let holds = |s: &Server| {
-                s.live
-                    .values()
-                    .chain(s.removed.values())
-                    .any(|c| c.state.parent == n)
-            };
-            if holds(&self.server) {
-                continue;
-            }
-            self.server.removed_at.remove(&n);
-            let gone = self
+        holdings.live = server
+            .live
+            .values()
+            .map(|n| n.state.parent)
+            .filter(|p| server.removed.contains_key(p))
+            .collect();
+        let mut pending: BTreeSet<NodeId> = BTreeSet::new();
+        let order = deleted::select(&chosen, &holdings);
+        pending.extend(&order);
+        for n in order {
+            pending.remove(&n);
+            // Only a removed row listed at that version, never a live node; and no folder while
+            // it holds anything not going after it.
+            let listed_row = self
                 .server
                 .removed
-                .remove(&n)
-                .or_else(|| self.server.live.remove(&n));
-            if let Some(gone) = gone {
+                .get(&n)
+                .is_some_and(|r| listed.contains(&(n, r.remote.version)));
+            let held = self
+                .server
+                .live
+                .iter()
+                .chain(&self.server.removed)
+                .find(|(c, s)| s.state.parent == n && !pending.contains(*c))
+                .map(|(c, _)| *c);
+            if (!listed_row || held.is_some()) && self.server.emptied_unlisted.is_none() {
+                self.server.emptied_unlisted = Some(format!("{n:?} (holding {held:?})"));
+            }
+            self.server.removed_at.remove(&n);
+            if let Some(gone) = self.server.removed.remove(&n) {
                 self.deleted.insert(n);
                 self.supersede(gone.state.content);
             }
@@ -2113,7 +2095,7 @@ impl Sim {
         }
         if let Some(what) = &self.server.emptied_unlisted {
             return Err(format!(
-                "emptying as listed deleted what it didn't list: {what}"
+                "emptying as listed deleted what it mustn't: {what}"
             ));
         }
         // No folder wrote outside its part of the drive.

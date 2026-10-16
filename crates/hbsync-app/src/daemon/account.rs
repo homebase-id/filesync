@@ -279,7 +279,8 @@ impl Account {
         let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
             return (Vec::new(), None);
         };
-        let account = (summary.items > 0).then(|| DeletedAccount {
+        // Anything to list, though emptying may take nothing (a folder holding a live node).
+        let account = (summary.deletes > 0).then(|| DeletedAccount {
             identity: self.identity.clone(),
             deletes: summary.deletes,
             items: summary.items,
@@ -957,6 +958,49 @@ mod tests {
         assert!(refused.contains("never listed"), "{refused}");
         assert!(empty(&listed.db, listed.seq + 1).is_err(), "never given");
         empty(&listed.db, listed.seq)?;
+        Ok(())
+    }
+
+    /// Recently deleted holding only a folder that stays (it holds a live node) is still listed:
+    /// the folder can be restored, though emptying takes nothing.
+    #[test]
+    fn a_folder_that_only_stays_is_still_listed() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_state::{MirrorRow, RemovedRow, StateDb};
+        use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let (account, _requests) =
+            Account::new(&paths, "a.example", &home.path().join("Homebase"), None);
+        let db = paths.account_db("a.example");
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        Drive::open(
+            &db,
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        let row = |node, parent| MirrorRow {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            node,
+            parent,
+            name: node.0.to_string(),
+            kind: NodeKind::Folder,
+            file: None,
+            content_extra: None,
+            token: None,
+            changed_at: Some(5),
+        };
+        let folder = NodeId::new();
+        StateDb::open_account(&db)?.write(|s| {
+            s.put_removed(&RemovedRow {
+                row: row(folder, NodeId::ROOT),
+                removed_at: Some(10),
+            })?;
+            s.put_mirror(&row(NodeId::new(), folder))
+        })?;
+        let (items, summary) = account.deleted(10);
+        let summary = summary.ok_or("Recently deleted shown empty")?;
+        assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
         Ok(())
     }
 }

@@ -175,8 +175,8 @@ pub struct DeletedAccount {
     pub identity: String,
     /// The items deleted on their own.
     pub deletes: usize,
-    /// What emptying all of it deletes for good: every item, the ones its deletes took along too
-    /// (live ones included), but a folder holding anything that stays.
+    /// What emptying all of it deletes for good: removed nodes only, every item and the ones its
+    /// deletes took along, but a folder holding a live node or a removal that stays.
     pub items: usize,
     /// What the listing saw, which emptying all of it as listed takes
     /// ([`AccountControl::EmptyListed`]): the account's DB (its own id: one made again is

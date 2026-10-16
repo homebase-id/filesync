@@ -154,12 +154,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 - After 30 days (the client's `keep_deleted_days`) any client deletes for good an item deleted
   on its own, counted from its removal, with everything deleted with it (a folder's delete goes
   as a whole, live nodes it took along included: see below), files before their folders, each
-  at the version the client knows: that leaves the tombstone below. Deleting for good (this, or
-  a user emptying Recently deleted) takes a live node along only when both times are known: one
-  whose own time, or whose folder's removal time, the client doesn't know yet stays. A folder
-  holding anything that stays (that node, one written after the removal, one removed that isn't
-  going) stays too, with the folders it is in, emptied of the rest; each folder is looked at
-  again just before its delete, so one whose contents didn't all go stays.
+  at the version the client knows: that leaves the tombstone below.
 - **The server's time decides** what a folder's delete took along. A live node in a removed
   folder (directly, or through live folders in it) whose version was written no later than the
   folder's removal (its header's `updated` against the folder's) was in the folder when it was
@@ -210,8 +205,6 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
-- 2026-10-16: deleting for good keeps a folder holding anything that stays, and takes a live
-  node along only when its time and its folder's removal time are both known.
 - 2026-10-16: what a folder's delete took along goes by the server's time too: a live node in a
   removed folder written no later than the removal is deleted with it, one written after keeps
   its folders alive (an edit made before a folder's delete goes with it, into Recently deleted).

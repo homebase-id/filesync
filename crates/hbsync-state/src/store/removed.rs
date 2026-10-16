@@ -85,13 +85,35 @@ impl Store<'_> {
         Ok(n as u64)
     }
 
-    /// How many nodes of Recently deleted are in folder `parent`.
-    pub fn removed_child_count(&self, parent: NodeId) -> Result<u64> {
-        let parent = self.coords()?.to_drive(parent);
-        let n: i64 = self
-            .prep("SELECT COUNT(*) FROM removed WHERE parent = ?1")?
-            .query_row([parent.0.as_bytes()], |r| r.get(0))?;
-        Ok(n as u64)
+    /// The nodes of Recently deleted that hold a live node: one query.
+    pub fn removed_holding_live(&self) -> Result<std::collections::HashSet<NodeId>> {
+        let c = self.coords()?;
+        let nodes = self.many(
+            "SELECT r.node FROM removed r JOIN nodes n ON n.uuid = r.node \
+             WHERE EXISTS (SELECT 1 FROM remote m WHERE m.parent = n.id)",
+            [],
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )?;
+        Ok(nodes.into_iter().map(|n| c.from_drive(n)).collect())
+    }
+
+    /// How many nodes of Recently deleted each folder holds: one grouped query.
+    pub fn removed_per_folder(&self) -> Result<HashMap<NodeId, u64>> {
+        let c = self.coords()?;
+        let counts = self.many(
+            "SELECT parent, COUNT(*) FROM removed GROUP BY parent",
+            [],
+            |r| {
+                Ok((
+                    codec::node(&r.get::<_, Vec<u8>>(0)?)?,
+                    r.get::<_, i64>(1)? as u64,
+                ))
+            },
+        )?;
+        Ok(counts
+            .into_iter()
+            .map(|(n, count)| (c.from_drive(n), count))
+            .collect())
     }
 
     /// This DB's own id (random, made with it): a listing of its Recently deleted names it, so
