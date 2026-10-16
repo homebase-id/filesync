@@ -269,7 +269,7 @@ fn a_placement_record_keeps_the_base_its_plan_saw() -> R {
         placed_tags: None,
         prior_tags: Some(Tags::new([Tag::new("Red", 0)])),
         base_at,
-        placed_ms: 0,
+        held_ms: None,
     };
     let (absent, at) = (
         record(PlannedBase::Absent),

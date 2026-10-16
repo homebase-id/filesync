@@ -114,7 +114,7 @@ impl Executor<'_> {
             placed_tags: none.then(Tags::default),
             prior_tags: prior,
             base_at: a.base_at.into(),
-            placed_ms: hbsync_types::unix_now_ms(),
+            held_ms: None,
         });
         let kept = !adopt && synced_before;
         if !adopt {
@@ -148,7 +148,11 @@ impl Executor<'_> {
         if let Some(ct) = created_ms {
             let _ = ops::set_created(&abs, ct);
         }
-        let meta = match hbsync_platform::stat(&abs) {
+        let stat = match self.read_fails() {
+            true => Err(io::Error::other("its read failed (a test)")),
+            false => hbsync_platform::stat(&abs),
+        };
+        let meta = match stat {
             Ok(m) => m,
             Err(e) => {
                 let outcome = io_outcome(e);
@@ -184,12 +188,11 @@ impl Executor<'_> {
                 }
             }
         });
-        // Its commit fails once it is in place: one with a record is recovery's then; a new
-        // folder's retry takes it over, as an interrupted run's.
+        // The DB failing stops the run; its record (one synced before has one) is the next
+        // sync's recovery's, and a new folder's next plan takes it over.
         let at = match committed {
             Ok(at) => at,
-            Err(_) if kept => return self.placed_not_committed(node),
-            Err(e) => return Ok(Outcome::Retry(e.to_string())),
+            Err(e) => return Ok(Outcome::Fatal(e)),
         };
         self.note([(node, at)]);
         Ok(Outcome::Settled)

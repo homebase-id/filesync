@@ -102,7 +102,7 @@ impl Store<'_> {
         self.prep(
             "INSERT OR REPLACE INTO placing (folder, id, path, parent, name, kind, hash, size, \
              mtime_ms, executable, remote_file_id, version_tag, tags, placed_tags, prior_tags, \
-             base_at, placed_ms) \
+             base_at, held_ms) \
              VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )?
         .execute(params![
@@ -125,7 +125,7 @@ impl Store<'_> {
                 PlannedBase::Absent => Some(Vec::new()),
                 PlannedBase::At(v) => Some(v.0.as_bytes().to_vec()),
             },
-            p.placed_ms,
+            p.held_ms,
         ])?;
         Ok(())
     }
@@ -167,7 +167,7 @@ impl Store<'_> {
 /// The columns of a base row, then the target and the tags put on it.
 const PLACING_SELECT: &str = "SELECT n.uuid, p.uuid, k.name, k.kind, k.hash, k.size, k.mtime_ms, k.executable, \
              k.remote_file_id, k.version_tag, 0, NULL, NULL, k.tags, k.path, k.placed_tags, \
-             k.base_at, k.prior_tags, k.placed_ms \
+             k.base_at, k.prior_tags, k.held_ms \
              FROM placing k \
              JOIN nodes n ON n.id = k.id JOIN nodes p ON p.id = k.parent WHERE k.folder = $F";
 
@@ -188,6 +188,6 @@ fn placing_row(r: &Row<'_>) -> Result<Placing> {
             Some([]) => PlannedBase::Absent,
             Some(v) => PlannedBase::At(codec::version(v)?),
         },
-        placed_ms: r.get::<_, Option<i64>>(18)?.unwrap_or(0),
+        held_ms: r.get::<_, Option<i64>>(18)?,
     })
 }

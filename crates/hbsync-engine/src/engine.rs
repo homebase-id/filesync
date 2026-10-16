@@ -55,6 +55,7 @@ impl EngineConfig {
                 tags_kept: Default::default(),
                 crash_at: None,
                 fail_commits: Arc::default(),
+                fail_reads: Arc::default(),
             },
             device: device.to_owned(),
             max_rounds: 8,
@@ -529,7 +530,12 @@ impl Engine {
         // What an earlier round left placed (its operation failed after), as at the start of a
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
-        recover_placements(&mut self.db, &self.cfg.exec.root, os)?;
+        recover_placements(
+            &mut self.db,
+            &self.cfg.exec.root,
+            os,
+            self.cfg.exec.algorithm,
+        )?;
         let input = self
             .db
             .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter, &self.cfg.scope))?;

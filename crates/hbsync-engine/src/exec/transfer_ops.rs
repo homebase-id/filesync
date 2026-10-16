@@ -137,7 +137,7 @@ impl Executor<'_> {
                 None => Some(Tags::default()),
             },
             base_at: acted.base_at.into(),
-            placed_ms: hbsync_types::unix_now_ms(),
+            held_ms: None,
         };
         let job = Job::Download(Download {
             node,
@@ -372,6 +372,12 @@ impl Executor<'_> {
                 self.put(target, |at| done.persist_new(at, created_ms))?
             }
         };
+        let placed = match placed {
+            Ok(_) if self.read_fails() => Err(FileIoError::PlacedUnread(io::Error::other(
+                "its read failed (a test)",
+            ))),
+            placed => placed,
+        };
         let meta = match placed {
             Ok(m) => m,
             Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, target)),
@@ -410,9 +416,10 @@ impl Executor<'_> {
             // The bytes were just fetched: equal even if the hashes use other algorithms.
             settle_placement(s, &record, os)
         });
-        // Its commit fails once it is in place: recovery's then.
-        let Ok(at) = committed else {
-            return self.placed_not_committed(node);
+        // The DB failing stops the run; the record is the next sync's recovery's.
+        let at = match committed {
+            Ok(at) => at,
+            Err(e) => return Ok(Outcome::Fatal(e)),
         };
         self.note([(node, at)]);
         Ok(Outcome::Settled)

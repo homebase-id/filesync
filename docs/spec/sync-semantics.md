@@ -273,16 +273,18 @@ expected fingerprint is treated as done.
   its base is written, by the commit or by recovery, or when the operation that wrote it, in
   that run, fails before its own item is in place, or its batch stops before it starts (so no
   item the user puts at that place is ever taken for it); one whose item is in place stays
-  through a failed commit (the operation ends there, and recovery settles it right away by
-  that item alone, read off the disk, no other item read again: the one way an item put in
-  place settles then; a folder new here, without a record, is taken over by its retry), and
-  one whose item can't be read as a node yet (its file can't be hashed yet, say: locked), for
-  ten minutes from when it was put in place at most, then dropped. Recovery runs
-  at the start of a sync and of each of its rounds, and first rescans the folders its records
-  go into and those their nodes' items are in (each record's once a sync), so it judges what
-  is on disk: the item there with the record's bytes is settled, a
-  record whose target holds nothing goes, and one whose target holds something else is left to
-  adoption. A record never goes only because no scan has seen its item yet. No operation writes over a
+  through a failed commit: where the state DB fails, the run stops and the next sync's
+  recovery settles it; where reading the item back fails, the operation ends there and
+  recovery settles it right away by that item alone, no other item read again (the one way an
+  item put in place settles then; a folder new here, without a record, is taken over by its
+  retry). One whose item can't be told yet (its file not hashed, say: locked; its folder
+  unreadable) stays for ten minutes from when recovery first found it so, then goes. Recovery
+  runs at the start of a sync and of each of its rounds, and first rescans the folders its
+  records go into and those their nodes' items are in (each record's once a sync); both it and
+  recovery in the run read the disk at a record's target alike: the item there with the
+  record's bytes is settled, a record whose target verifiably holds nothing (not found, a file
+  where a folder would be, a loop of links) goes, and one whose target holds another node is
+  left to adoption. A record never goes only because no scan has seen its item yet. No operation writes over a
   record it didn't write: it is left for the next plan, the node dirty, until recovery settles
   the record. A verified download that couldn't be
   placed stays in the temp folder for the retry; temp files no pending download wants are

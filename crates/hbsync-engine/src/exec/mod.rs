@@ -65,10 +65,14 @@ pub struct ExecConfig {
     /// Tests only: stop the run at this point, as if the process died there.
     #[doc(hidden)]
     pub crash_at: Option<CrashPoint>,
-    /// Tests only: this many placements' commit writes fail once their item is in place, and
-    /// the run goes on.
+    /// Tests only: this many placements' commit writes fail once their item is in place: the
+    /// run stops, the record kept for the next sync's recovery.
     #[doc(hidden)]
     pub fail_commits: Arc<std::sync::atomic::AtomicUsize>,
+    /// Tests only: this many placements fail to read their item back once it is in place (a
+    /// folder's stat, a file's metadata): recovery settles them in the run.
+    #[doc(hidden)]
+    pub fail_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Places where a test can make the executor stop as if it crashed.
@@ -157,6 +161,8 @@ enum Outcome {
     Stop(String),
     /// The drive is out of storage: hold this and every later upload of the run.
     Full,
+    /// The state DB failed (a placement's commit, say): the run stops, as at a crash.
+    Fatal(StateError),
 }
 
 impl Outcome {
@@ -595,29 +601,27 @@ impl<'a> Executor<'a> {
     /// item alone, read off the disk: no other item is read, nor its row touched. One it can't
     /// settle yet (a file not hashed yet) stays, for a later recovery.
     fn placed_not_committed(&mut self, node: NodeId) -> Step {
-        let Some(mut record) = self.db.read(|s| s.get_placing(node))? else {
+        let Some(record) = self.db.read(|s| s.get_placing(node))? else {
             return Ok(Outcome::stale("put in place, its record gone"));
         };
-        // Put in place just now: a file not hashed yet is held from here.
-        let now = hbsync_types::unix_now_ms();
-        record.placed_ms = now;
-        let judged = match read_item(&self.cfg.root, &record.target, node, self.cfg.algorithm) {
-            OnDisk::Absent => judge(&self.cfg.root, &record, None, now),
+        let (root, now) = (&self.cfg.root, hbsync_types::unix_now_ms());
+        let judged = match look(root, &record.target) {
+            OnDisk::Absent => Judged::Drop,
             OnDisk::Unreadable => Judged::Keep,
-            OnDisk::Item(row) => judge(&self.cfg.root, &record, Some(row), now),
-        };
-        if let Judged::Keep = judged {
-            self.db.write(|s| s.put_placing(&record))?;
-        }
-        let outcome = match &judged {
-            Judged::Settle(_) => Outcome::Settled,
-            Judged::Keep => Outcome::stale("put in place, not hashed yet: recovery settles it"),
-            Judged::Drop => Outcome::stale("put in place, not there since"),
+            OnDisk::There(meta) => {
+                let row = read_row(root, &record.target, node, &meta, self.cfg.algorithm);
+                judge(root, &record, Some(row), now)
+            }
         };
         let os = self.cfg.os;
-        let at = self.db.write(|s| apply(s, &record, judged, os))?;
-        self.note([(node, at)]);
-        Ok(outcome)
+        match self.db.write(|s| apply(s, &record, judged, os, now))? {
+            Applied::Settled(at) => {
+                self.note([(node, at)]);
+                Ok(Outcome::Settled)
+            }
+            Applied::Kept => Ok(Outcome::stale("put in place: recovery settles it later")),
+            Applied::Dropped => Ok(Outcome::stale("put in place, not there since")),
+        }
     }
 
     /// `how`, with where this run's operations settled its node's base.
@@ -641,6 +645,14 @@ impl<'a> Executor<'a> {
     fn commit_fails(&self) -> bool {
         self.cfg
             .fail_commits
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+    }
+
+    /// Whether reading a placed item back fails, for a test ([`ExecConfig::fail_reads`]).
+    fn read_fails(&self) -> bool {
+        self.cfg
+            .fail_reads
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
             .is_ok()
     }
@@ -764,6 +776,7 @@ impl<'a> Executor<'a> {
                 self.full = true;
                 self.report.full = true;
             }
+            Outcome::Fatal(e) => return Err(e),
         }
         Ok(())
     }
@@ -1136,7 +1149,7 @@ mod tests;
 
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};
-use recover::{Judged, OnDisk, apply, judge, read_item};
+use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub(crate) use settle::update_meta;

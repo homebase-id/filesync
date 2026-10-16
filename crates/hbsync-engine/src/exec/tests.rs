@@ -225,10 +225,10 @@ fn recovery_writes_the_commits_base() -> R {
         placed_tags: Some(Tags::default()),
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        placed_ms: 0,
+        held_ms: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     let base = h.base(node)?.ok_or("no base")?;
     assert_eq!(base.state.content, Some(fetched));
     assert_eq!(base.remote, at);
@@ -267,10 +267,10 @@ fn recovery_reads_the_tags_the_item_was_placed_with() -> R {
         placed_tags: Some(work.clone()),
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        placed_ms: 0,
+        held_ms: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
-    recover_placements(&mut h.db, &h.cfg.root, Os::Linux)?;
+    recover_placements(&mut h.db, &h.cfg.root, Os::Linux, h.cfg.algorithm)?;
     let base = h.base(node)?.ok_or("no base")?;
     assert_eq!(base.state.tags, work);
     Ok(())
@@ -298,10 +298,10 @@ fn recovery_keeps_a_record_it_cannot_settle() -> R {
         placed_tags: Some(Tags::default()),
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        placed_ms: 0,
+        held_ms: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.base(node)?, None);
     assert_eq!(h.db.read(|s| s.all_placing())?, [record]);
     // Taken over: the next recovery finds it as the node's.
@@ -376,7 +376,7 @@ fn a_folder_made_before_its_tags_keeps_them_on_the_drive() -> R {
     // The scan finds the folder without tags.
     h.local_folder("d", NodeId::new())?;
     h.scanned_with("d", Tags::default())?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         !plan
@@ -429,13 +429,13 @@ fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
             placed_tags: None,
             prior_tags: None,
             base_at: PlannedBase::Unchecked,
-            placed_ms: 0,
+            held_ms: None,
         })
     })?;
     // The scan finds the folder, made without tags.
     h.local_folder("d", NodeId::new())?;
     h.scanned_with("d", Tags::default())?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.records()?, []);
     let plan = plan_of(&mut h, &[node])?;
     assert!(
@@ -467,7 +467,7 @@ fn a_tag_added_before_recovery_goes_up() -> R {
     let red = Tags::new(vec![Tag::new("Red", 0)]);
     h.local_file("f", NodeId::new(), b"A")?;
     h.scanned_with("f", red.clone())?;
-    recover_placements(&mut h.db, &h.cfg.root, Os::Linux)?;
+    recover_placements(&mut h.db, &h.cfg.root, Os::Linux, h.cfg.algorithm)?;
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         plan.ops.iter().any(
@@ -601,7 +601,7 @@ fn base_after_a_download(crash: bool) -> Result<Option<BaseRow>, Box<dyn std::er
         let read = tags::read(&h.cfg.root.join("f"));
         h.local_file("f", node, b"B")?;
         h.scanned_with("f", read.unwrap_or_default())?;
-        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
         assert_eq!(h.records()?, []);
     }
     // Each harness has its own node: the rest is compared.
@@ -675,13 +675,13 @@ fn a_removed_tag_stays_removed_through_recovery() -> R {
             placed_tags: Some(Tags::default()),
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(base.version),
-            placed_ms: 0,
+            held_ms: None,
         })
     })?;
     // The scan finds the new bytes, untagged.
     h.local_file("f", NodeId::new(), b"B")?;
     h.scanned_with("f", Tags::default())?;
-    recover_placements(&mut h.db, &h.cfg.root, Os::Linux)?;
+    recover_placements(&mut h.db, &h.cfg.root, Os::Linux, h.cfg.algorithm)?;
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         !plan.ops.iter().any(|op| matches!(op, Op::LocalTags { .. })),
@@ -741,7 +741,7 @@ fn a_tag_write_that_fails_is_never_claimed() -> R {
     // The scan finds the file; recovery writes what the commit would have: the drive's tags.
     let node = h.db.read(|s| s.all_placing())?[0].base.node;
     h.local_file("f", NodeId::new(), b"A")?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.base(node)?.ok_or("no base")?.state.tags, huge);
     Ok(())
 }
@@ -801,13 +801,13 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::Absent,
-            placed_ms: 0,
+            held_ms: None,
         })?;
         // Pulled before: nothing marked now.
         s.clear_dirty(child)
     })?;
     h.local_folder("d", NodeId::new())?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert!(h.base(folder)?.is_some());
     assert!(
         h.db.read(|s| s.is_dirty(child))?,
@@ -1256,7 +1256,7 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::Absent,
-            placed_ms: 0,
+            held_ms: None,
         },
         Placing {
             base: BaseRow::new(folder, folder_state.clone(), folder_at),
@@ -1264,7 +1264,7 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(folder_at.version),
-            placed_ms: 0,
+            held_ms: None,
         },
     ];
     h.db.write(|s| {
@@ -1316,10 +1316,10 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
 }
 
 /// A round leaves a folder made and its record (its run cut short after the folder was made);
-/// the scan hasn't seen the folder yet. The next round's recovery drops the record (nothing it
-/// knows is at its place), and that round's folder op takes the folder that is there: one
-/// folder, the node's, no record left. Without the recovery, the record held the node off
-/// until the next sync.
+/// the scan hasn't seen the folder yet. The next round's recovery reads the disk and settles
+/// the folder there as the node: one folder, the node's, no record left, nothing left for the
+/// round's folder op to do. Without the recovery, the record held the node off until the next
+/// sync.
 #[test]
 fn a_folder_a_round_left_is_taken_by_the_next() -> R {
     let mut h = Harness::new()?;
@@ -1352,10 +1352,11 @@ fn a_folder_a_round_left_is_taken_by_the_next() -> R {
     assert_eq!(h.records()?.len(), 1);
     h.cfg.crash_at = None;
     // The next round.
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
-    let report = h.run(vec![mkdir()])?;
-    assert!(report.skipped.is_empty(), "{report:?}");
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.records()?, []);
+    assert!(h.base(node)?.is_some());
+    let report = h.run(vec![mkdir()])?;
+    assert!(report.failed.is_empty(), "{report:?}");
     let here: Vec<_> = fs::read_dir(&h.cfg.root)?
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -1609,7 +1610,7 @@ fn a_placement_whose_commit_fails_is_settled_by_recovery() -> R {
         },
     ];
     h.cfg
-        .fail_commits
+        .fail_reads
         .store(2, std::sync::atomic::Ordering::Relaxed);
     let report = h.run(ops)?;
     assert_eq!(report.done, 2, "{report:?}");
@@ -1693,7 +1694,7 @@ fn files_go_into_a_folder_whose_commit_failed() -> R {
         });
     }
     h.cfg
-        .fail_commits
+        .fail_reads
         .store(1, std::sync::atomic::Ordering::Relaxed);
     let report = h.run(ops)?;
     assert!(report.failed.is_empty(), "{report:?}");
@@ -1763,7 +1764,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
         },
     ];
     h.cfg
-        .fail_commits
+        .fail_reads
         .store(1, std::sync::atomic::Ordering::Relaxed);
     h.run(ops)?;
     assert_eq!(fs::read(h.cfg.root.join("b"))?, b"user's edit");
@@ -1778,7 +1779,7 @@ fn a_new_folder_whose_commit_failed_is_taken_by_its_retry() -> R {
     let mut h = Harness::new()?;
     let node = NodeId::new();
     h.cfg
-        .fail_commits
+        .fail_reads
         .store(1, std::sync::atomic::Ordering::Relaxed);
     let report = h.run(vec![Op::LocalMkdir {
         node,
@@ -1797,25 +1798,30 @@ fn a_new_folder_whose_commit_failed_is_taken_by_its_retry() -> R {
     Ok(())
 }
 
-/// What recovery in the run reads at a placement's target: nothing only when verifiably
-/// nothing is there (not found; or what the scan skips, a link), and "can't tell" when its
-/// metadata can't be read (a folder denying access): the record stays then. Read as nothing,
-/// the record went, and the item became a new one.
+/// What recovery reads at a placement's target: nothing only when verifiably nothing can be
+/// there (not found, a file where a folder would be, a loop of links; or what the scan skips,
+/// a link), and "can't tell" when its metadata can't be read (a folder denying access): the
+/// record stays then. Read as nothing, the record went, and the item became a new one.
 #[cfg(unix)]
 #[test]
 fn recovery_tells_an_unreadable_item_from_none() -> R {
-    use super::recover::{OnDisk, read_item};
+    use super::recover::{OnDisk, look};
     use std::os::unix::fs::PermissionsExt;
     let h = Harness::new()?;
-    let (root, alg, node) = (h.cfg.root.clone(), h.cfg.algorithm, NodeId::new());
+    let root = h.cfg.root.clone();
     fs::write(root.join("f"), b"A")?;
     std::os::unix::fs::symlink(root.join("f"), root.join("link"))?;
+    std::os::unix::fs::symlink(root.join("l2"), root.join("l1"))?;
+    std::os::unix::fs::symlink(root.join("l1"), root.join("l2"))?;
     fs::create_dir(root.join("p"))?;
     fs::write(root.join("p/f"), b"A")?;
-    let read = |rel: &str| read_item(&root, &RelPath::new(rel).expect("a path"), node, alg);
-    assert!(matches!(read("f"), OnDisk::Item(r) if r.node == node && r.hash.is_some()));
+    let read = |rel: &str| look(&root, &RelPath::new(rel).expect("a path"));
+    assert!(matches!(read("f"), OnDisk::There(_)));
     assert!(matches!(read("gone"), OnDisk::Absent));
     assert!(matches!(read("link"), OnDisk::Absent));
+    // A file where a folder would be, a loop of links: nothing can be there.
+    assert!(matches!(read("f/x"), OnDisk::Absent));
+    assert!(matches!(read("l1/x"), OnDisk::Absent));
     fs::set_permissions(root.join("p"), fs::Permissions::from_mode(0o000))?;
     let (denied, readable) = (read("p/f"), fs::metadata(root.join("p/f")).is_ok());
     fs::set_permissions(root.join("p"), fs::Permissions::from_mode(0o755))?;
@@ -1830,7 +1836,7 @@ fn recovery_tells_an_unreadable_item_from_none() -> R {
 /// that node lost its place here.
 #[test]
 fn recovery_in_the_run_leaves_another_nodes_row() -> R {
-    use super::recover::{Judged, apply};
+    use super::recover::{Applied, Judged, apply};
     let mut h = Harness::new()?;
     let (node, other) = (NodeId::new(), NodeId::new());
     h.local_file("f", other, b"other")?;
@@ -1844,7 +1850,7 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
         placed_tags: None,
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        placed_ms: 0,
+        held_ms: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
     let row = LocalRow {
@@ -1857,8 +1863,9 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
         tags: None,
     };
     let os = h.cfg.os;
-    let at = h.db.write(|s| apply(s, &record, Judged::Settle(row), os))?;
-    assert_eq!(at, None);
+    let applied =
+        h.db.write(|s| apply(s, &record, Judged::Settle(row), os, 0))?;
+    assert!(matches!(applied, Applied::Kept));
     assert_eq!(h.records()?, [record]);
     let path = RelPath::new("f")?;
     assert_eq!(
@@ -1868,30 +1875,81 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
     Ok(())
 }
 
-/// A record whose file stays unhashed holds its node only so long ([`UNHASHED_HOLD`]): past
-/// it, recovery drops it as main does (the file is then the scan's new item), rather than hold
-/// the node off for good.
+/// Recovery between rounds reads the disk as recovery in the run does: a target in a folder
+/// that denies access may hold the item, so its record stays (the scan has no row there
+/// either). Taken for nothing there, the record went, and the item became a new one.
+#[cfg(unix)]
+#[test]
+fn a_record_in_an_unreadable_folder_stays() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new()?;
+    let node = NodeId::new();
+    fs::create_dir(h.cfg.root.join("p"))?;
+    fs::write(h.cfg.root.join("p/f"), b"A")?;
+    let record = Placing {
+        base: BaseRow::new(
+            node,
+            NodeState::file(NodeId::ROOT, "f", h.content(b"A")),
+            some_version(),
+        ),
+        target: RelPath::new("p/f")?,
+        placed_tags: None,
+        prior_tags: Some(Tags::default()),
+        base_at: PlannedBase::Absent,
+        held_ms: None,
+    };
+    h.db.write(|s| s.put_placing(&record))?;
+    let p = h.cfg.root.join("p");
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o000))?;
+    let readable = fs::metadata(p.join("f")).is_ok();
+    let recovered = recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm);
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
+    recovered?;
+    if readable {
+        return Ok(()); // root reads it anyway
+    }
+    assert_eq!(h.records()?.len(), 1);
+    Ok(())
+}
+
+/// A record whose file stays unhashed holds its node only so long ([`UNHASHED_HOLD`]), from
+/// when recovery first finds it so: however long ago the record was written (a long download,
+/// then a crash), the first finding holds it; past the hold, recovery drops it as main does
+/// (the file is then the scan's new item), rather than hold the node off for good.
 #[test]
 fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
     let mut h = Harness::new()?;
     record_of_a_crashed_download(&mut h, &Tags::default())?;
-    let record = h.records()?.remove(0);
-    let old = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
-    h.db.write(|s| {
-        s.put_placing(&Placing {
-            placed_ms: old,
-            ..record.clone()
-        })
-    })?;
+    let node = h.records()?[0].base.node;
+    assert_eq!(h.records()?[0].held_ms, None);
     h.local_file("f", NodeId::new(), b"A")?;
     let path = RelPath::new("f")?;
     h.db.write(|s| {
         let row = s.get_local(&path)?.expect("a row");
         s.put_local(&LocalRow { hash: None, ..row })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    let held = h.records()?.remove(0);
+    let since = held.held_ms.expect("held from the first finding") - 5_000;
+    h.db.write(|s| {
+        s.put_placing(&Placing {
+            held_ms: Some(since),
+            ..held.clone()
+        })
+    })?;
+    // A later finding doesn't hold it again.
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    assert_eq!(h.records()?[0].held_ms, Some(since));
+    let old = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
+    h.db.write(|s| {
+        s.put_placing(&Placing {
+            held_ms: Some(old),
+            ..held
+        })
+    })?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.records()?, []);
-    assert!(h.base(record.base.node)?.is_none());
+    assert!(h.base(node)?.is_none());
     Ok(())
 }
 
@@ -1909,7 +1967,7 @@ fn a_record_whose_file_cant_be_hashed_yet_stays() -> R {
         let row = s.get_local(&path)?.expect("a row");
         s.put_local(&LocalRow { hash: None, ..row })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.records()?.len(), 1);
     assert!(h.base(node)?.is_none());
     // Hashed now.
@@ -1921,7 +1979,7 @@ fn a_record_whose_file_cant_be_hashed_yet_stays() -> R {
             ..row
         })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.records()?, []);
     assert!(h.base(node)?.is_some());
     Ok(())
@@ -2091,12 +2149,12 @@ fn recovery_checks_the_base_the_record_saw() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(planned.version),
-            placed_ms: 0,
+            held_ms: None,
         })?;
         s.clear_dirty(node)
     })?;
     h.local_file("f", NodeId::new(), b"A")?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os)?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.base(node)?, Some(base));
     assert!(h.db.read(|s| s.is_dirty(node))?);
     Ok(())

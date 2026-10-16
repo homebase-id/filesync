@@ -57,8 +57,8 @@ pub struct Placing {
     pub placed_tags: Option<Tags>,
     pub prior_tags: Option<Tags>,
     pub base_at: PlannedBase,
-    /// When it was written, Unix milliseconds (0: a record from before that was kept).
-    pub placed_ms: i64,
+    /// Since when recovery has held it, its file there but not hashed yet, Unix milliseconds.
+    pub held_ms: Option<i64>,
 }
 
 /// The base a placement's plan saw.

@@ -270,12 +270,12 @@ const MIGRATIONS: &[&str] = &[
     // 11: what a placement's item holds of tags (NULL: not known), and what it held before
     // (NULL: not known): the base records what the write changed, in recovery as in its commit.
     // And the base's version its plan saw, which recovery checks as the commit does (empty: no
-    // base; NULL: a record from before, not checked). And when the record was written: one
-    // whose file can't be hashed yet holds its node only so long.
+    // base; NULL: a record from before, not checked). And since when recovery found its file
+    // there but not hashed yet (NULL: not so far): it holds its node only so long then.
     "ALTER TABLE placing ADD COLUMN placed_tags TEXT;
     ALTER TABLE placing ADD COLUMN prior_tags TEXT;
     ALTER TABLE placing ADD COLUMN base_at BLOB;
-    ALTER TABLE placing ADD COLUMN placed_ms INTEGER;",
+    ALTER TABLE placing ADD COLUMN held_ms INTEGER;",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.

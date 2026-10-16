@@ -671,13 +671,11 @@ fn parked_item_from_a_crash_is_put_back() -> R {
 }
 
 /// b deletes what a changes meanwhile (`gone`), so b's next sync puts it back (a folder with
-/// only what was added to it), and a adds g;
-/// b's placements then fail their commit once their item is in place, all through that sync,
-/// a round per node. The next recovery (of a round, or of the next sync, before any scan) looks
-/// at the disk first: an item put in place but not committed is there to settle, though no
-/// scan has seen it. Taken for absent, its
-/// record went, and the next scan found the item as new: a node with a base it isn't paired
-/// with, so it went up as a duplicate.
+/// only what was added to it), and a adds g. b's placement then fails its commit write once
+/// its item is in place: the run stops, the record kept. The next sync's recovery, before any
+/// scan, looks at the disk first: the item put in place but not committed is there to settle,
+/// though no scan has seen it. Taken for absent, its record went, and the next scan found the
+/// item as new: a node with a base it isn't paired with, so it went up as a duplicate.
 fn a_placement_whose_commit_failed_is_kept(
     setup: impl Fn(&Client) -> std::io::Result<()>,
     gone: Option<&str>,
@@ -709,7 +707,7 @@ fn a_placement_whose_commit_failed_is_kept(
     a.sync()?;
     faults.store(usize::MAX, Ordering::Relaxed);
     b.engine.scan_local()?;
-    b.engine.sync_once("2026-10-08")?;
+    assert!(b.engine.sync_once("2026-10-08").is_err(), "the run stops");
     faults.store(0, Ordering::Relaxed);
     // The next sync, before any scan: its recovery looks at the disk itself, and takes the
     // item for its node.

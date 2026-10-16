@@ -67,6 +67,19 @@ impl Fingerprint {
     }
 }
 
+/// Whether `stat`'s error says nothing can be at the path: not found, a file where a folder
+/// would be, or a loop of links.
+pub fn nothing_there(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    let looped = e.raw_os_error() == Some(libc::ELOOP);
+    #[cfg(windows)]
+    let looped = e.raw_os_error() == Some(1921); // ERROR_CANT_RESOLVE_FILENAME
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    ) || looped
+}
+
 /// Reads the metadata of `path` itself (a symlink is reported as a symlink).
 pub fn stat(path: &Path) -> io::Result<LocalMeta> {
     imp::stat(path)
