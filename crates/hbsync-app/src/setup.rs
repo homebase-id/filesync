@@ -56,17 +56,10 @@ pub struct Prepared {
 
 /// Gets the identity ready for syncing once this device is authorized: finds the sync drive, finds
 /// the app's circle by its slug (installing the app created it; made now if not), and reads the
-/// drive's change feed. `save` keeps `creds` when the circle's id in them changes.
-pub fn prepare<E: std::fmt::Display>(
-    creds: &mut Credentials,
-    save: impl FnOnce(&Credentials) -> Result<(), E>,
-) -> Result<Prepared, HomebaseError> {
+/// drive's change feed.
+pub fn prepare(creds: &Credentials) -> Result<Prepared, HomebaseError> {
     let remote = HomebaseRemote::connect(Client::new(creds)?)?;
     let circle = app::app_circle(&remote)?;
-    if creds.circle_id != Some(circle) {
-        creds.circle_id = Some(circle);
-        save(creds).map_err(|e| HomebaseError::Protocol(format!("saving the credentials: {e}")))?;
-    }
     let feed_entries = remote
         .change_refs(None, 10)
         .map_err(|e| HomebaseError::Protocol(format!("the sync drive's feed: {e}")))?
@@ -379,7 +372,6 @@ pub fn set_up(
         authorized = true;
         Ok(creds)
     };
-    let save = |c: &Credentials| store.save(c).map(drop);
     let mut creds = match store.load(identity)? {
         Some((creds, _)) => {
             say(&format!(
@@ -389,7 +381,7 @@ pub fn set_up(
         }
         None => authorize()?,
     };
-    match prepare(&mut creds, save) {
+    match prepare(&creds) {
         // Revoked since: authorize again.
         Err(HomebaseError::Denied(why)) => {
             say(&format!(
@@ -397,7 +389,7 @@ pub fn set_up(
             ));
             store.delete(identity)?;
             creds = authorize()?;
-            prepare(&mut creds, save)?;
+            prepare(&creds)?;
         }
         other => drop(other?),
     }

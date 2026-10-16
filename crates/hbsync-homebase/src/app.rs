@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use uuid::{Uuid, uuid};
 
 use crate::HomebaseError;
-use crate::drive::{HomebaseRemote, TargetDrive};
+use crate::drive::HomebaseRemote;
 
 /// The app's id on every identity. Never change it: it is how an identity recognises the app.
 pub const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
@@ -54,15 +54,28 @@ pub const SYNC_DRIVE: DriveSpec = DriveSpec {
     permission: 3,
 };
 
+/// A circle the app owns.
+#[derive(Debug, Clone, Copy)]
+pub struct CircleSpec {
+    /// Its address within the app: how a device finds it again.
+    pub slug: &'static str,
+    name: &'static str,
+    description: &'static str,
+    emoji: &'static str,
+    /// What members get on the sync drive (Read = 1).
+    drive_permission: u32,
+}
+
 /// The app's circle: people the files can be shared with, Read on the sync drive, empty at first.
-/// Declared at registration (`ac`), so installing the app creates it; found again by its slug.
-pub const CIRCLE_SLUG: &str = "filesync";
-pub const CIRCLE_NAME: &str = "Filesync";
-pub const CIRCLE_DESCRIPTION: &str =
-    "People who can see the files you share through Homebase Filesync";
-pub const CIRCLE_EMOJI: &str = "📁";
-/// What members of the circle get on the sync drive: Read. The circle starts empty.
-pub const CIRCLE_DRIVE_PERMISSION: u32 = 1;
+/// Declared at registration ([`circle_declaration`]), so installing the app creates it; found again
+/// by its slug ([`circle_request`]).
+pub const CIRCLE: CircleSpec = CircleSpec {
+    slug: "filesync",
+    name: "Filesync",
+    description: "People who can see the files you share through Homebase Filesync",
+    emoji: "📁",
+    drive_permission: 1,
+};
 
 /// The drive request entry (`d`) for `drive`, in the keys the owner app reads.
 pub fn drive_request(drive: &DriveSpec) -> serde_json::Value {
@@ -77,21 +90,41 @@ pub fn drive_request(drive: &DriveSpec) -> serde_json::Value {
     })
 }
 
-/// The circle the app declares at registration (`ac`), in the keys the owner app reads (odin-js
-/// `AppCircleAuthorizationParams`, verified in `util.ts`): `s` slug, `n` name, `d` description,
-/// `e` emoji, `g` drive grants (`a` alias, `t` type, `p` permission). It may grant only what the
-/// registration grants the app (`AssertDeclaredCirclesAsync`): Read on a drive it gets.
+/// [`CIRCLE`] as the app declares it at registration (`ac`), in the keys the owner app reads
+/// (odin-js `AppCircleAuthorizationParams`, verified in `util.ts`): `s` slug, `n` name, `d`
+/// description, `e` emoji, `g` drive grants (`a` alias, `t` type, `p` permission). It may grant
+/// only what the registration grants the app (`AssertDeclaredCirclesAsync`): Read on its drive.
 pub fn circle_declaration() -> serde_json::Value {
     json!({
-        "s": CIRCLE_SLUG,
-        "n": CIRCLE_NAME,
-        "d": CIRCLE_DESCRIPTION,
-        "e": CIRCLE_EMOJI,
+        "s": CIRCLE.slug,
+        "n": CIRCLE.name,
+        "d": CIRCLE.description,
+        "e": CIRCLE.emoji,
         "g": [{
             "a": SYNC_DRIVE.alias.to_string(),
             "t": SYNC_DRIVE.drive_type.to_string(),
-            "p": CIRCLE_DRIVE_PERMISSION,
+            "p": CIRCLE.drive_permission,
         }],
+    })
+}
+
+/// [`CIRCLE`] as `circles/create` asks for it, by its slug.
+pub fn circle_request() -> serde_json::Value {
+    json!({
+        "name": CIRCLE.name,
+        "slug": CIRCLE.slug,
+        "description": CIRCLE.description,
+        "emoji": CIRCLE.emoji,
+        "driveGrants": [{
+            "permissionedDrive": {
+                "drive": {
+                    "alias": SYNC_DRIVE.alias.simple().to_string(),
+                    "type": SYNC_DRIVE.drive_type.simple().to_string(),
+                },
+                "permission": CIRCLE.drive_permission,
+            }
+        }],
+        "permissions": { "keys": [] },
     })
 }
 
@@ -112,37 +145,15 @@ pub fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::
     })
 }
 
-/// The `circles/create` body for the app's circle on `drive`: the circle [`circle_declaration`]
-/// declares, by its slug.
-pub fn circle_request(drive: TargetDrive) -> serde_json::Value {
-    json!({
-        "name": CIRCLE_NAME,
-        "slug": CIRCLE_SLUG,
-        "description": CIRCLE_DESCRIPTION,
-        "emoji": CIRCLE_EMOJI,
-        "driveGrants": [{
-            "permissionedDrive": {
-                "drive": {
-                    "alias": drive.alias.simple().to_string(),
-                    "type": drive.drive_type.simple().to_string(),
-                },
-                "permission": CIRCLE_DRIVE_PERMISSION,
-            }
-        }],
-        "permissions": { "keys": [] },
-    })
-}
-
 /// The app's circle on the identity, by its slug: the one installing the app created, the one an
 /// earlier version created (circles got slugs from their names: "Filesync" is `filesync`), or a
 /// new one if there is none. `circles/create` with a slug the app holds returns that circle and
 /// changes nothing (verified: `CircleMembershipService.CreateAppCircleAsync`), so every device
 /// finds the same circle.
 pub fn app_circle(remote: &HomebaseRemote) -> Result<Uuid, HomebaseError> {
-    let id: Value = remote.client().post(
-        "/api/v2/connections/circles/create",
-        &circle_request(remote.drive()),
-    )?;
+    let id: Value = remote
+        .client()
+        .post("/api/v2/connections/circles/create", &circle_request())?;
     Ok(serde_json::from_value(id)?)
 }
 
@@ -153,7 +164,7 @@ mod tests {
     #[test]
     fn slugs_are_valid_odin_slugs() {
         // OdinSlug: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$, at most 14 characters.
-        for slug in [APP_SLUG, SYNC_DRIVE.slug, SYNC_DRIVE.type_slug, CIRCLE_SLUG] {
+        for slug in [APP_SLUG, SYNC_DRIVE.slug, SYNC_DRIVE.type_slug, CIRCLE.slug] {
             assert!(!slug.is_empty() && slug.len() <= 14, "{slug}");
             assert!(
                 slug.bytes()
@@ -174,34 +185,13 @@ mod tests {
         Ok(())
     }
 
-    /// Registering declares the circle (`ac`, a JSON list in a string); a device finds it with
-    /// `circles/create` by the same slug, asking for the same circle.
+    /// Registering declares the circle in `ac`, a JSON list in a string.
     #[test]
-    fn the_circle_is_declared_at_registration_and_found_by_its_slug()
-    -> Result<(), serde_json::Error> {
+    fn the_circle_is_declared_at_registration() -> Result<(), serde_json::Error> {
         let request = permission_request("laptop", "http://localhost:1/cb");
         let declared: Value = serde_json::from_str(request["ac"].as_str().unwrap_or_default())?;
-        let declared = &declared[0];
-        assert_eq!(declared["s"], "filesync");
-        assert_eq!(declared["n"], "Filesync");
-        assert_eq!(declared["g"][0]["a"], SYNC_DRIVE.alias.to_string());
-        assert_eq!(declared["g"][0]["t"], SYNC_DRIVE.drive_type.to_string());
-        assert_eq!(declared["g"][0]["p"], 1);
-
-        let create = circle_request(TargetDrive {
-            alias: SYNC_DRIVE.alias,
-            drive_type: SYNC_DRIVE.drive_type,
-        });
-        assert_eq!(create["slug"], declared["s"]);
-        assert_eq!(create["name"], declared["n"]);
-        assert_eq!(create["description"], declared["d"]);
-        assert_eq!(create["emoji"], declared["e"]);
-        let grant = &create["driveGrants"][0]["permissionedDrive"];
-        assert_eq!(
-            grant["drive"]["alias"],
-            SYNC_DRIVE.alias.simple().to_string()
-        );
-        assert_eq!(grant["permission"], declared["g"][0]["p"]);
+        assert_eq!(declared, json!([circle_declaration()]));
+        assert_eq!(declared[0]["s"], "filesync");
         Ok(())
     }
 }

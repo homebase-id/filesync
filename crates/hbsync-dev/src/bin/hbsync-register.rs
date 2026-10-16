@@ -31,7 +31,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .cloned();
     let path = hbsync_dev::credentials_path(&identity)?;
 
-    let mut creds = match Credentials::load(&path)? {
+    let creds = match Credentials::load(&path)? {
         Some(c) => {
             println!("Using the saved registration in {}", path.display());
             c
@@ -47,7 +47,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             creds
         }
     };
-    let prepared = setup::prepare(&mut creds, |c| c.save(&path))?;
+    let prepared = setup::prepare(&creds)?;
     let drive = prepared.remote.drive();
     println!(
         "Sync drive: alias {}, type {}",
@@ -56,7 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "The app's circle '{}': {}",
-        hbsync_homebase::app::CIRCLE_SLUG,
+        hbsync_homebase::app::CIRCLE.slug,
         prepared.circle
     );
     println!(

@@ -205,22 +205,23 @@ mod tests {
             identity: identity.to_owned(),
             client_auth_token: "Y2F0".to_owned(),
             shared_secret: "AAECAwQFBgcICQoLDA0ODw==".to_owned(),
-            circle_id: Some(uuid::Uuid::from_u128(7)),
         }
     }
 
     fn same(a: &Credentials, b: &Credentials) -> bool {
-        (
-            &a.identity,
-            &a.client_auth_token,
-            &a.shared_secret,
-            a.circle_id,
-        ) == (
-            &b.identity,
-            &b.client_auth_token,
-            &b.shared_secret,
-            b.circle_id,
-        )
+        (&a.identity, &a.client_auth_token, &a.shared_secret)
+            == (&b.identity, &b.client_auth_token, &b.shared_secret)
+    }
+
+    /// Credentials saved before the circle's id was dropped from them still load.
+    #[test]
+    fn credentials_with_a_circle_id_still_load() -> Result<(), serde_json::Error> {
+        let old = r#"{"identity":"a.example","client_auth_token":"Y2F0",
+            "shared_secret":"AAECAwQFBgcICQoLDA0ODw==",
+            "circle_id":"ae76d900-4394-4541-8a72-273b755211d1"}"#;
+        let creds: Credentials = serde_json::from_str(old)?;
+        assert!(same(&creds, &sample("a.example")));
+        Ok(())
     }
 
     #[test]
