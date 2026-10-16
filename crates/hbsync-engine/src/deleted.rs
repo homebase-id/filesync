@@ -108,7 +108,7 @@ impl<'a, 's> RemovedRows<'a, 's> {
 
     /// The folder `node` was deleted with ([`deleted_with`]), if it was.
     fn deleted_with(&mut self, node: NodeId) -> Result<Option<NodeId>, StateError> {
-        let Some((parent, at)) = self.get(node)?.map(|r| (r.row.parent, r.removed_at)) else {
+        let Some((parent, at)) = self.get(node)?.map(|r| (r.row.parent, r.time())) else {
             return Ok(None);
         };
         Ok(self
@@ -121,7 +121,7 @@ impl<'a, 's> RemovedRows<'a, 's> {
 /// Whether a node removed at `removed_at` was deleted with `folder`, the folder it is in, in
 /// Recently deleted too: removed no earlier than the folder (node schema, Recently deleted).
 fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
-    folder.removed_at <= removed_at
+    folder.time() <= removed_at
 }
 
 /// The item of Recently deleted whose delete took `node` along: up through the folders it was
@@ -273,11 +273,11 @@ fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> 
             let removed = s
                 .removed_children(folder.row.node)?
                 .into_iter()
-                .filter(|r| deleted_with(r.removed_at, folder));
+                .filter(|r| deleted_with(r.time(), folder));
             let live = s
                 .mirror_children(folder.row.node)?
                 .into_iter()
-                .filter(|m| m.changed_at.is_none_or(|at| at <= folder.removed_at))
+                .filter(|m| m.changed_at.is_none_or(|at| at <= folder.time()))
                 .map(|row| RemovedRow {
                     row,
                     removed_at: folder.removed_at,
@@ -489,7 +489,7 @@ mod tests {
                 token: None,
                 changed_at: None,
             },
-            removed_at,
+            removed_at: Some(removed_at),
         }
     }
 

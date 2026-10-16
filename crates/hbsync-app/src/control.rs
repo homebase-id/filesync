@@ -101,6 +101,17 @@ pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> 
     )
 }
 
+/// The time to empty Recently deleted until after the user saw `items`: the newest of theirs
+/// the server has confirmed (an open one, this device's own of moments ago, is never deleted
+/// for good before it is).
+pub fn shown_until(items: &[DeletedItem]) -> i64 {
+    items
+        .iter()
+        .filter_map(|i| i.deleted.removed_at_ms)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Deletes for good what Recently deleted had until `at_ms` (Unix ms, its newest item the user
 /// saw), in every account of `items`: anything deleted since is newer.
 pub fn empty_deleted_until(paths: &Paths, items: &[DeletedItem], at_ms: i64) -> Result<()> {

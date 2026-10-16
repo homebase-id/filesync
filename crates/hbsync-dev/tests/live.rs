@@ -230,11 +230,44 @@ fn throughput() -> R {
     result
 }
 
+/// A token that doesn't open (sealed under an earlier login's shared secret) leaves the update
+/// to read the header first, as without one: it goes through, and the token it returns opens.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
+    use hbsync_remote::RemoteBody;
+    use hbsync_remote::contract::{file, with};
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{FileToken, Target};
+    let remote = live_remote()?;
+    let bench = Bench::new(&remote, &run_name("stale-token"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let (folder, _) = bench.folder("d")?;
+        let meta = file("f.txt", folder.node, b"one");
+        let at = bench.create(&meta, Some(b"one"))?;
+        let stale = Target {
+            at,
+            token: Some(FileToken(vec![0x5a; 64].into())),
+        };
+        let renamed = with(&meta, NodeContent::file("g.txt", 1, 3, false));
+        let written = remote.update(&stale, &renamed, None)?;
+        let again = with(&meta, NodeContent::file("h.txt", 1, 3, false));
+        remote.update(&written, &again, None)?;
+        match remote.header(at.file_id)?.body {
+            RemoteBody::Live { content, .. } => assert_eq!(content.name, "h.txt"),
+            RemoteBody::Deleted => panic!("deleted"),
+        }
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
+}
+
 /// What the feed costs whole and slim (odin-core #1967): `n` files (`FEED_SIZES_FILES`, 2,000 by
 /// default) created and then removed, read back as this device's own writes coming back (the
 /// echo: slim only, its versions are known) and as a catch-up from before the creates (every
-/// row new: slim, then each page again whole). Bytes are what the process read from its
-/// sockets (`rchar`: TLS, after gzip), so nothing else may run in it meanwhile. Prints a table.
+/// row new). Bytes are what this process's connections received ([`socket_bytes`]), so nothing
+/// else may run in it meanwhile. Prints a table.
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
 fn feed_sizes() -> R {
@@ -248,7 +281,7 @@ fn feed_sizes() -> R {
         .unwrap_or(2000usize);
     let bench = Bench::new(&remote, &run_name("feed-sizes"), Duration::from_millis(20))?;
     let result = (|| -> R {
-        let before = feed_end(&remote)?;
+        let before = bench.cursor_now()?;
         let (folder, _) = bench.folder("files")?;
         let next = AtomicUsize::new(0);
         let made = Mutex::new(Vec::with_capacity(n));
@@ -272,7 +305,7 @@ fn feed_sizes() -> R {
         });
         let made = made.into_inner().unwrap_or_else(|e| e.into_inner());
         assert_eq!(made.len(), n, "every create went through");
-        let after_creates = feed_end(&remote)?;
+        let after_creates = bench.cursor_now()?;
         let next = AtomicUsize::new(0);
         std::thread::scope(|scope| {
             for _ in 0..8 {
@@ -332,18 +365,6 @@ enum Read {
     /// As the engine reads a run of news: the first page slim, then again whole, and whole
     /// pages after it (the rest of this run is new too).
     Engine,
-}
-
-/// The feed's end now: a cursor after every change so far (read slim).
-fn feed_end(remote: &HomebaseRemote) -> Result<String, Box<dyn std::error::Error>> {
-    let mut cursor: Option<String> = None;
-    loop {
-        let page = remote.change_refs(cursor.as_deref(), PAGE)?;
-        if !page.has_more {
-            return Ok(page.cursor);
-        }
-        cursor = Some(page.cursor);
-    }
 }
 
 /// Reads the feed from `from` to its end `how`: the rows and the requests it took.

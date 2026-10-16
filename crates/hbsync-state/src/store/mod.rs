@@ -115,12 +115,21 @@ pub struct MirrorRow {
     pub changed_at: Option<i64>,
 }
 
-/// A remote node in Recently deleted: its row as it was, and when it went there (Unix ms, the
-/// server's time; this device's own until its removal comes back through the feed).
+/// A remote node in Recently deleted: its row as it was, and when it went there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedRow {
     pub row: MirrorRow,
-    pub removed_at: i64,
+    /// Unix ms, the server's time of the removal. Open (`None`) for this device's own removal
+    /// until the feed brings it back: never this device's clock, and the newest of all where
+    /// times are compared ([`RemovedRow::time`]).
+    pub removed_at: Option<i64>,
+}
+
+impl RemovedRow {
+    /// The removal's time for comparing: an open one is the newest.
+    pub fn time(&self) -> i64 {
+        self.removed_at.unwrap_or(i64::MAX)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,8 +294,6 @@ const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size
 /// A removed row has no `changed_at` of its own: its removal is its last write.
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
      mtime_ms, executable, content_extra, token, NULL, removed_at FROM removed";
-const PENDING_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
-     mtime_ms, executable, content_extra, token, NULL FROM pending";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
      m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token, m.changed_at \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";

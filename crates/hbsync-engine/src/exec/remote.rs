@@ -147,14 +147,16 @@ impl Executor<'_> {
                 row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
             After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
-            // Out of the tree; Recently deleted has it once the feed brings it back with the
-            // server's time of the removal (the write's answer has none, and this device's
-            // clock isn't the server's), at the end of the sync at the latest. Until then the
-            // row waits as written: the feed knows that version without reading it whole.
+            // Out of the tree, into Recently deleted with its time open: the write's answer has
+            // none, and this device's clock isn't the server's. The feed brings the time back
+            // (by the end of the sync at the latest); it knows that version meanwhile.
             After::Removed { file_id } => {
                 s.delete_mirror(file_id)?;
-                if let Some(row) = &row {
-                    s.put_pending(row)?;
+                if let Some(row) = row {
+                    s.put_removed(&RemovedRow {
+                        row,
+                        removed_at: None,
+                    })?;
                 }
                 s.mark_dirty(node)
             }

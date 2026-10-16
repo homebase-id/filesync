@@ -226,12 +226,12 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE removed ADD COLUMN token BLOB;
     DROP INDEX removed_root;
     ALTER TABLE removed DROP COLUMN root;",
-    // 8: this device's own removals until the feed brings them back: the row as written, so
-    // the feed's slim pages know that version and Recently deleted gets it, with the server's
-    // time, without reading the page whole. The account's, in drive coordinates, as `removed`.
-    "CREATE TABLE pending (
-        file_id       BLOB PRIMARY KEY,
-        node          BLOB NOT NULL,
+    // 8: a removal's time may be open: this device's own removal is in Recently deleted from
+    // its write on, its time NULL until the feed brings the server's (so the feed knows that
+    // version without reading it whole). SQLite drops a NOT NULL only by making the table again.
+    "CREATE TABLE removed_new (
+        node          BLOB PRIMARY KEY,
+        file_id       BLOB NOT NULL UNIQUE,
         version_tag   BLOB NOT NULL,
         parent        BLOB NOT NULL,
         kind          INTEGER NOT NULL,
@@ -241,8 +241,17 @@ const MIGRATIONS: &[&str] = &[
         mtime_ms      INTEGER,
         executable    INTEGER NOT NULL DEFAULT 0,
         content_extra TEXT,
+        removed_at    INTEGER,                        -- Unix ms; NULL: open
         token         BLOB
-    ) WITHOUT ROWID;",
+    ) WITHOUT ROWID;
+    INSERT INTO removed_new (node, file_id, version_tag, parent, kind, name, hash, size,
+        mtime_ms, executable, content_extra, removed_at, token)
+        SELECT node, file_id, version_tag, parent, kind, name, hash, size, mtime_ms, executable,
+            content_extra, removed_at, token FROM removed;
+    DROP TABLE removed;
+    ALTER TABLE removed_new RENAME TO removed;
+    CREATE INDEX removed_at ON removed(removed_at);
+    CREATE INDEX removed_parent ON removed(parent);",
 ];
 
 /// The version this client makes and reads.
@@ -344,27 +353,31 @@ mod tests {
         Ok(())
     }
 
-    /// A DB at version 7 gets the table of removals waiting for the feed, empty; its rows stay.
+    /// A DB at version 7 keeps its removals and their times, and takes an open one.
     #[test]
-    fn version_7_gets_pending_removals() -> Result<()> {
+    fn version_7_takes_open_removal_times() -> Result<()> {
         let mut conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(MIGRATIONS[0])?;
         conn.execute_batch(MIGRATIONS[1])?;
         conn.pragma_update(None, "user_version", 7)?;
         conn.execute(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at) \
-             VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5)",
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at, \
+             token) VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5, x'09')",
             [],
         )?;
         apply(&mut conn)?;
         assert_eq!(user_version(&conn)?, VERSION);
-        let (removed, pending): (i64, i64) = conn.query_row(
-            "SELECT (SELECT COUNT(*) FROM removed), (SELECT COUNT(*) FROM pending)",
+        let (at, token): (i64, Vec<u8>) =
+            conn.query_row("SELECT removed_at, token FROM removed", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        assert_eq!((at, token), (5, vec![9]));
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name) \
+             VALUES (x'05', x'06', x'07', x'04', 1, 'e')",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        assert_eq!((removed, pending), (1, 0));
         Ok(())
     }
 

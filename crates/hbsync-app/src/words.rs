@@ -118,9 +118,12 @@ pub fn deleted(d: &Deleted, main: Option<&Path>, now: u64) -> String {
         .map(|n| format!(" ({})", bytes(n)))
         .unwrap_or_default();
     let folder = if d.kind == NodeKind::Folder { "/" } else { "" };
-    let at = u64::try_from(d.removed_at_ms / 1000).unwrap_or(0);
     let place = deleted_place(d, main);
-    format!("{place}{folder}{size}, deleted {}", when(at, now))
+    let when = match d.removed_at_ms {
+        Some(ms) => when(u64::try_from(ms / 1000).unwrap_or(0), now),
+        None => "just now".to_owned(),
+    };
+    format!("{place}{folder}{size}, deleted {when}")
 }
 
 /// Where a deleted item was, as people name it (and `hbsync restore` takes it): its path in
@@ -217,7 +220,7 @@ mod tests {
             path: "Work/cv.txt".into(),
             kind: NodeKind::File,
             size: None,
-            removed_at_ms: 0,
+            removed_at_ms: Some(0),
             root: hbsync_types::NodeId::ROOT,
             folder: folder.map(Into::into),
         };

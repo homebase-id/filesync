@@ -109,7 +109,7 @@ impl Server {
             empty = self.pages.url("deleted/empty"),
             count = items.len(),
             // Newest first: what the user sees, nothing deleted after this look.
-            until = items[0].deleted.removed_at_ms,
+            until = control::shown_until(&items),
         )
     }
 

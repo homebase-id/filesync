@@ -41,12 +41,14 @@ impl std::ops::AddAssign for FeedReport {
 /// Reads the feed from the stored cursor until it has no more rows. The DB is taken from `db`
 /// for each step, and let go while a page is on its way: others use it meanwhile.
 ///
-/// A page comes as [`ChangeRef`]s first. One whose rows are all known (versions the store has,
-/// this device's own writes coming back) or tombstones is applied from them alone; one with
-/// anything new is read again whole from the same cursor and applied from that, whose cursor it
-/// continues from (a file changed in between has moved further along the feed). Changes from
-/// elsewhere come in runs, so after a page with something new the next is read whole at once,
-/// as is a first read (no cursor: all of it is new), until a whole page holds nothing new.
+/// A page is read slim first ([`Remote::change_refs`]: which version of which file changed).
+/// If the store knows every row (a version it has: this device's own writes coming back; a
+/// tombstone), the page is applied from them alone; this device's own removals are known from
+/// their write on, their time open until the feed confirms it. A page with anything new is
+/// read again whole from the same cursor, and the feed continues from that page's cursor (a
+/// file changed in between has moved further along the feed). Changes from elsewhere come in
+/// runs, so after a page with something new the next is read whole at once, as is a first read
+/// (no cursor: all of it is new), until a whole page holds nothing new.
 pub fn pull<G: DerefMut<Target = StateDb>>(
     db: impl Fn() -> G,
     remote: &dyn Remote,
@@ -56,42 +58,68 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
     let mut slim = None;
     loop {
         let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
-        let slim_now = *slim.get_or_insert(cursor.is_some());
-        let mut known = false;
-        let mut has_more = false;
-        if slim_now {
-            let refs = with_retries(|| remote.change_refs(cursor.as_deref(), page_size))?;
-            // Checked where it is applied: a commit in between may have changed what is known.
-            known = db().write(|s| {
-                if !all_known(s, refs.refs.iter().copied())? {
-                    return Ok(false);
-                }
-                for r in &refs.refs {
-                    report.count(apply_ref(s, r)?);
-                }
-                save_cursor(s, cursor.as_deref(), !refs.refs.is_empty(), &refs.cursor)?;
-                Ok(true)
-            })?;
-            has_more = refs.has_more;
-        }
-        if !known {
-            let mut page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
-            report.skipped.append(&mut page.skipped);
-            slim = Some(db().write(|s| {
-                let nothing_new = all_known(s, page.entries.iter().map(ChangeRef::of))?;
-                for header in &page.entries {
-                    report.count(apply(s, header)?);
-                }
-                save_cursor(s, cursor.as_deref(), !page.entries.is_empty(), &page.cursor)?;
-                Ok(nothing_new)
-            })?);
-            has_more = page.has_more;
-        }
+        let cursor = cursor.as_deref();
+        let applied = if *slim.get_or_insert(cursor.is_some()) {
+            read_slim(&db, remote, cursor, page_size, &mut report)?
+        } else {
+            None
+        };
+        let (has_more, nothing_new) = match applied {
+            Some(has_more) => (has_more, true),
+            None => read_whole(&db, remote, cursor, page_size, &mut report)?,
+        };
+        slim = Some(nothing_new);
         report.pages += 1;
         if !has_more {
             return Ok(report);
         }
     }
+}
+
+/// One page slim, applied if it holds nothing new: whether more follow; `None` if it holds
+/// something new (nothing applied).
+fn read_slim<G: DerefMut<Target = StateDb>>(
+    db: &impl Fn() -> G,
+    remote: &dyn Remote,
+    cursor: Option<&str>,
+    page_size: usize,
+    report: &mut FeedReport,
+) -> Result<Option<bool>, FeedError> {
+    let page = with_retries(|| remote.change_refs(cursor, page_size))?;
+    // Checked where it is applied: a commit in between may have changed what is known.
+    let applied = db().write(|s| {
+        if !known(s, &page.refs)? {
+            return Ok(false);
+        }
+        for r in &page.refs {
+            report.count(apply_ref(s, r)?);
+        }
+        save_cursor(s, cursor, !page.refs.is_empty(), &page.cursor)?;
+        Ok(true)
+    })?;
+    Ok(applied.then_some(page.has_more))
+}
+
+/// One page whole, applied: whether more follow, and whether it held nothing new.
+fn read_whole<G: DerefMut<Target = StateDb>>(
+    db: &impl Fn() -> G,
+    remote: &dyn Remote,
+    cursor: Option<&str>,
+    page_size: usize,
+    report: &mut FeedReport,
+) -> Result<(bool, bool), FeedError> {
+    let mut page = with_retries(|| remote.changes(cursor, page_size))?;
+    report.skipped.append(&mut page.skipped);
+    let nothing_new = db().write(|s| {
+        let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
+        let nothing_new = known(s, &refs)?;
+        for header in &page.entries {
+            report.count(apply(s, header)?);
+        }
+        save_cursor(s, cursor, !page.entries.is_empty(), &page.cursor)?;
+        Ok(nothing_new)
+    })?;
+    Ok((page.has_more, nothing_new))
 }
 
 impl FeedReport {
@@ -104,14 +132,15 @@ impl FeedReport {
     }
 }
 
-/// Whether the store knows every one of `refs` ([`is_known`]).
-fn all_known(s: &Store<'_>, refs: impl IntoIterator<Item = ChangeRef>) -> Result<bool, StateError> {
-    for r in refs {
-        if !is_known(s, &r)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+/// Whether the store knows every one of `refs`: a tombstone needs nothing, the rest are
+/// versions it has, in Recently deleted or else in the mirror.
+fn known(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
+    let versions: Vec<(RemoteRef, bool)> = refs
+        .iter()
+        .filter(|r| !r.deleted)
+        .map(|r| (r.at(), r.removed_at.is_some()))
+        .collect();
+    s.known(&versions)
 }
 
 /// Stores the cursor after a page; unchanged on an idle pull: no write, so nothing to sync.
@@ -122,48 +151,22 @@ fn save_cursor(s: &Store<'_>, old: Option<&str>, rows: bool, new: &str) -> Resul
     Ok(())
 }
 
-/// Whether a ref says nothing the store doesn't know: a tombstone (its file id is all it
-/// takes), or a version the store has, as a node, in Recently deleted, or as this device's
-/// own removal waiting for the feed.
-fn is_known(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
-    let at = RemoteRef {
-        file_id: r.file_id,
-        version: r.version,
-    };
-    Ok(r.deleted
-        || if r.removed_at.is_some() {
-            s.has_version(at, true)? || s.has_pending(at)?
-        } else {
-            s.has_version(at, false)?
-        })
-}
-
-/// Applies a known ref ([`is_known`]) as [`apply`] would its header. Returns `true` for a
-/// node in the tree.
+/// Applies a known ref ([`known`]) as [`apply`] would its header: only what the server says
+/// better, its times. Returns `true` for a node in the tree.
 fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
     if r.deleted {
-        s.delete_pending(r.file_id)?;
-        s.delete_removed_file(r.file_id)?;
-        gone(s, r.file_id)?;
+        apply_tombstone(s, r.file_id)?;
         return Ok(false);
     }
-    let at = RemoteRef {
-        file_id: r.file_id,
-        version: r.version,
-    };
-    let Some(removed_at) = r.removed_at else {
-        // The token can't have changed with the version; the time matters in a removed folder.
-        if let (Some(changed_at), Some(row)) = (r.changed_at, s.mirror_by_file(r.file_id)?) {
-            s.refresh_time(r.file_id, row.parent, changed_at)?;
-        }
-        return Ok(true);
-    };
-    // This device's own removal: into Recently deleted with the server's time.
-    if let Some(row) = s.take_pending(at)? {
-        gone(s, r.file_id)?;
-        s.put_removed(&RemovedRow { row, removed_at })?;
+    if let Some(removed_at) = r.removed_at {
+        s.confirm_removed(r.at(), removed_at)?;
+        return Ok(false);
     }
-    Ok(false)
+    // The token can't have changed with the version; the time matters in a removed folder.
+    if let (Some(changed_at), Some(row)) = (r.changed_at, s.mirror_by_file(r.file_id)?) {
+        s.refresh_time(r.file_id, row.parent, changed_at)?;
+    }
+    Ok(true)
 }
 
 /// Retries transient errors a few times with exponential backoff (50, 100, 200 ms).
@@ -184,11 +187,8 @@ pub fn with_retries<T>(mut f: impl FnMut() -> Result<T, RemoteError>) -> Result<
 /// Applies one header to the mirror. Returns `true` for a node in the tree, `false` for one
 /// that left it (deleted, or removed to Recently deleted).
 pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
-    // Whatever version this is, the file's row comes from here now.
-    s.delete_pending(header.file_id)?;
     if header.is_deleted() {
-        s.delete_removed_file(header.file_id)?;
-        gone(s, header.file_id)?;
+        apply_tombstone(s, header.file_id)?;
         return Ok(false);
     }
     // A live file without its payload changes nothing: it must never read as a delete.
@@ -196,22 +196,34 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         return Ok(true);
     };
     // A version the store has already (this device's own write coming back, or a page applied
-    // again) changes nothing but what the server knows better ([`Store::refresh`]); the store
-    // marks the nodes that changed dirty where that concerns.
+    // again) changes nothing but what the server knows better ([`Store::refresh`], a removal's
+    // time); the store marks the nodes that changed dirty where that concerns.
     let removed_at = header.removed_at;
     if s.has_version(row.remote_ref(), removed_at.is_some())? {
         s.refresh(&row, removed_at.is_some())?;
+        if let Some(removed_at) = removed_at {
+            s.confirm_removed(row.remote_ref(), removed_at)?;
+        }
         return Ok(removed_at.is_none());
     }
     if let Some(removed_at) = removed_at {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
         gone(s, header.file_id)?;
-        s.put_removed(&RemovedRow { row, removed_at })?;
+        s.put_removed(&RemovedRow {
+            row,
+            removed_at: Some(removed_at),
+        })?;
         return Ok(false);
     }
     s.delete_removed(row.node)?;
     s.put_mirror(&row)?;
     Ok(true)
+}
+
+/// A file deleted for good: out of Recently deleted and the mirror.
+fn apply_tombstone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
+    s.delete_removed_file(file_id)?;
+    gone(s, file_id)
 }
 
 /// The mirror without file `file_id`, its node marked to plan again where it was
@@ -424,7 +436,7 @@ mod tests {
         assert!(!db.write(|s| apply(s, &live(Some(9))))?);
         db.read(|s| {
             assert_eq!(s.get_mirror(node)?, None);
-            let at = s.removed_by_node(node)?.map(|r| r.removed_at);
+            let at = s.removed_by_node(node)?.and_then(|r| r.removed_at);
             assert_eq!(at, Some(9));
             Ok(())
         })?;

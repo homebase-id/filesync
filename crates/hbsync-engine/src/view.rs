@@ -220,7 +220,7 @@ pub fn build_input(
             b.input.removed.insert(
                 folder,
                 Removed {
-                    at: r.removed_at,
+                    at: r.time(),
                     state,
                 },
             );

@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use hbsync_engine::exec::CrashPoint;
 use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
-use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
+use hbsync_remote::{
+    ChangesPage, NodeMeta, RefsPage, Remote, RemoteHeader, Result as RemoteResult, Upload,
+};
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
 use hbsync_types::{NodeId, RemoteFileId, Target, VersionTag};
@@ -230,6 +232,9 @@ impl Remote for StopAfterCreates {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
         self.inner.changes(cursor, limit)
     }
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
+        self.inner.change_refs(cursor, limit)
+    }
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
@@ -328,6 +333,9 @@ impl SlowWrites {
 impl Remote for SlowWrites {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
         self.inner.changes(cursor, limit)
+    }
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
+        self.inner.change_refs(cursor, limit)
     }
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
@@ -1998,7 +2006,9 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     );
 
     // Empty until a moment: what was deleted after it stays.
-    let until = find(&mut a, "P/y.txt")?.removed_at_ms;
+    let until = find(&mut a, "P/y.txt")?
+        .removed_at_ms
+        .ok_or("confirmed by the end of the sync")?;
     std::thread::sleep(std::time::Duration::from_millis(5));
     fs::remove_file(a.root.join("keep.txt"))?;
     a.write("other.txt", "o")?; // not every file deleted (the guard)
@@ -2584,7 +2594,7 @@ fn own_writes_come_back_slim() -> R {
     assert!(
         listed
             .iter()
-            .all(|i| server_times.contains(&i.removed_at_ms)),
+            .all(|i| i.removed_at_ms.is_some_and(|t| server_times.contains(&t))),
         "the server's times: {listed:?}"
     );
 

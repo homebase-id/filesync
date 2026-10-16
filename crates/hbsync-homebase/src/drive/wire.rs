@@ -114,16 +114,39 @@ pub struct FileRef {
 }
 
 impl FileRef {
-    /// As [`to_remote`] reads the same row's header: a tombstone has no times.
+    /// As [`to_remote`] reads the same row's header ([`Times`]).
     pub fn to_ref(&self) -> ChangeRef {
-        let deleted = self.file_state == "deleted";
+        let times = Times::of(&self.file_state, self.archival_status, self.updated);
         ChangeRef {
             file_id: RemoteFileId(self.file_id),
             version: VersionTag(self.version_tag),
+            deleted: times.deleted,
+            removed_at: times.removed_at,
+            changed_at: times.changed_at,
+        }
+    }
+}
+
+/// What a row's state, status and `updated` say, read alike from a header and a minimal row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Times {
+    pub deleted: bool,
+    /// In Recently deleted since: the status says whether it's removed, the header's `updated`
+    /// when, the server's time of the last write (odin-core's `record.modified`, **[verified]**
+    /// `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no sharing,
+    /// reactions or local app data, which move it too).
+    pub removed_at: Option<i64>,
+    /// The server's time of this version. A tombstone has neither.
+    pub changed_at: Option<i64>,
+}
+
+impl Times {
+    pub fn of(file_state: &str, archival_status: i32, updated: i64) -> Times {
+        let deleted = file_state == "deleted";
+        Times {
             deleted,
-            removed_at: (!deleted && self.archival_status == ARCHIVAL_REMOVED)
-                .then_some(self.updated),
-            changed_at: (!deleted).then_some(self.updated),
+            removed_at: (!deleted && archival_status == ARCHIVAL_REMOVED).then_some(updated),
+            changed_at: (!deleted).then_some(updated),
         }
     }
 }
@@ -188,13 +211,12 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 .map_err(|e| format!("file {id}: content: {e}"))?;
             let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
-            // The status says whether it's removed; the header's `updated` when: the server's
-            // time of the last write (odin-core's `record.modified`, **[verified]**
-            // `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no
-            // sharing, reactions or local app data, which move it too).
-            removed_at =
-                (meta.app_data.archival_status == ARCHIVAL_REMOVED).then_some(meta.updated);
-            changed_at = Some(meta.updated);
+            let times = Times::of(
+                &header.file_state,
+                meta.app_data.archival_status,
+                meta.updated,
+            );
+            (removed_at, changed_at) = (times.removed_at, times.changed_at);
             // The stored size of an encrypted payload isn't the file's: only `size` tells it.
             if kind == NodeKind::File && content.size.is_none() {
                 return Err(format!("file {id}: no size (node schema v1)"));

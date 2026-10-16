@@ -29,8 +29,8 @@ use hbsync_types::{
 };
 
 use crate::{
-    ChangeRef, ChangesPage, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody, RemoteError,
-    RemoteHeader, Result, Upload,
+    ChangesPage, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader,
+    Result, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -563,12 +563,7 @@ impl Remote for FakeRemote {
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
         self.gate()?;
         self.faults().ref_pages += 1;
-        let page = self.server().changes(cursor, limit)?;
-        Ok(RefsPage {
-            refs: page.entries.iter().map(ChangeRef::of).collect(),
-            cursor: page.cursor,
-            has_more: page.has_more,
-        })
+        Ok(RefsPage::of(&self.server().changes(cursor, limit)?))
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {

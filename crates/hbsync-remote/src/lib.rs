@@ -11,8 +11,8 @@ use std::io::{Read, Write};
 
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    ContentHash, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId, Target,
-    VersionTag,
+    ContentHash, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
+    Target, VersionTag,
 };
 
 pub mod contract;
@@ -145,6 +145,13 @@ impl ChangeRef {
             changed_at: header.changed_at,
         }
     }
+
+    pub fn at(&self) -> RemoteRef {
+        RemoteRef {
+            file_id: self.file_id,
+            version: self.version,
+        }
+    }
 }
 
 /// One page of the change feed in [`ChangeRef`]s: the same rows and cursor as
@@ -154,6 +161,17 @@ pub struct RefsPage {
     pub refs: Vec<ChangeRef>,
     pub cursor: String,
     pub has_more: bool,
+}
+
+impl RefsPage {
+    /// A whole page as refs: for a remote that has only whole pages (a test double).
+    pub fn of(page: &ChangesPage) -> RefsPage {
+        RefsPage {
+            refs: page.entries.iter().map(ChangeRef::of).collect(),
+            cursor: page.cursor.clone(),
+            has_more: page.has_more,
+        }
+    }
 }
 
 /// A node's header as a client writes it, on create and on every update. Homebase replaces
@@ -270,17 +288,11 @@ pub trait Remote: Send + Sync {
     /// Includes tombstones.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage>;
 
-    /// The same page as [`Remote::changes`], each row only as a [`ChangeRef`]: what a client
-    /// that has most of it compares before reading the page whole. A row the remote can't
-    /// read as a node is in it too (it is unknown, so the page is read whole and skips it).
-    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
-        let page = self.changes(cursor, limit)?;
-        Ok(RefsPage {
-            refs: page.entries.iter().map(ChangeRef::of).collect(),
-            cursor: page.cursor,
-            has_more: page.has_more,
-        })
-    }
+    /// The same page as [`Remote::changes`], each row only as a [`ChangeRef`]: what the feed
+    /// compares with what it has before reading a page whole (`hbsync_engine::feed::pull`). A
+    /// row the remote can't read as a node is in it too (unknown: the page is read whole and
+    /// skips it).
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage>;
 
     /// The current header of a file, live or deleted.
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader>;

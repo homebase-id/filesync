@@ -192,7 +192,7 @@ impl<'a> Bench<'a> {
     }
 
     /// The feed's end: a cursor after every change so far.
-    fn cursor_now(&self) -> Result<String, RemoteError> {
+    pub fn cursor_now(&self) -> Result<String, RemoteError> {
         Ok(self.changes_after(None)?.1)
     }
 

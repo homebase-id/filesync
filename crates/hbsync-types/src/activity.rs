@@ -80,8 +80,10 @@ pub struct Deleted {
     /// Files only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
-    /// Unix ms.
-    pub removed_at_ms: i64,
+    /// Unix ms, the server's time; `None` for this device's own removal until the feed brings
+    /// that time back (moments later): just now, and newer than any other.
+    #[serde(default)]
+    pub removed_at_ms: Option<i64>,
     /// The node whose delete took it along (itself, or a folder it was in): restoring that
     /// one restores this one.
     pub root: NodeId,

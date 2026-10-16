@@ -355,40 +355,55 @@ mod mirror {
             s.delete_mirror(with_token.file_id)?;
             s.put_removed(&RemovedRow {
                 row: without.clone(),
-                removed_at: 5,
+                removed_at: Some(5),
             })?;
             s.clear_dirty(node)
         })?;
         db.write(|s| s.refresh(&with_token, true))?;
         let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
-        assert_eq!((back.row.token, back.removed_at), (with_token.token, 5));
+        assert_eq!(
+            (back.row.token, back.removed_at),
+            (with_token.token, Some(5))
+        );
         assert!(!db.read(|s| s.is_dirty(node))?);
         Ok(())
     }
 
-    /// This device's own removal waits as written until the feed brings it back: known as that
-    /// version (no other), taken once, and out of the way of Recently deleted meanwhile.
+    /// This device's own removal is in Recently deleted at once, its time open: listed first,
+    /// never purged, known as that version; the feed's echo confirms the server's time once.
     #[test]
-    fn an_own_removal_waits_for_the_feed() -> R {
+    fn an_own_removal_is_open_until_the_feed_confirms_it() -> R {
+        use hbsync_state::RemovedRow;
         let mut db = StateDb::open_in_memory()?;
-        let written = row(NodeId::new(), NodeId::ROOT, "d", None);
-        let at = written.remote_ref();
+        let earlier = row(NodeId::new(), NodeId::ROOT, "earlier", None);
+        let own = row(NodeId::new(), NodeId::ROOT, "own", None);
+        let at = own.remote_ref();
+        db.write(|s| {
+            s.put_removed(&RemovedRow {
+                row: earlier.clone(),
+                removed_at: Some(5),
+            })?;
+            s.put_removed(&RemovedRow {
+                row: own.clone(),
+                removed_at: None,
+            })
+        })?;
+        let listed = db.read(|s| s.list_removed(10))?;
+        assert_eq!(listed[0].row.node, own.node, "open: the newest");
+        assert_eq!(listed[0].time(), i64::MAX);
+        let purged: Vec<_> = db.read(|s| s.removed_before(i64::MAX))?;
+        assert_eq!(purged.len(), 1, "an open time isn't purged: {purged:?}");
         let other = RemoteRef {
             version: VersionTag(Uuid::new_v4()),
             ..at
         };
-        db.write(|s| s.put_pending(&written))?;
-        assert!(db.read(|s| s.has_pending(at))?);
-        assert!(!db.read(|s| s.has_pending(other))?);
-        assert!(db.read(|s| s.list_removed(10))?.is_empty());
-        assert!(!db.read(|s| s.has_version(at, true))?);
-        assert_eq!(db.write(|s| s.take_pending(at))?, Some(written));
-        assert_eq!(db.write(|s| s.take_pending(at))?, None, "taken once");
-        // Another version of the file came through the feed: the wait is over.
-        let again = row(NodeId::new(), NodeId::ROOT, "e", None);
-        db.write(|s| s.put_pending(&again))?;
-        assert!(db.write(|s| s.delete_pending(again.file_id))?);
-        assert!(!db.read(|s| s.has_pending(again.remote_ref()))?);
+        assert!(db.read(|s| s.known(&[(at, true), (earlier.remote_ref(), true)]))?);
+        assert!(!db.read(|s| s.known(&[(at, true), (other, true)]))?);
+        assert!(!db.read(|s| s.known(&[(at, false)]))?, "not in the mirror");
+        db.write(|s| s.confirm_removed(at, 9))?;
+        db.write(|s| s.confirm_removed(at, 10))?;
+        let back = db.read(|s| s.removed_by_node(own.node))?.expect("removed");
+        assert_eq!(back.removed_at, Some(9), "confirmed once");
         Ok(())
     }
 
@@ -421,7 +436,7 @@ mod mirror {
             s.delete_mirror(folder.file_id)?;
             s.put_removed(&RemovedRow {
                 row: folder.clone(),
-                removed_at: 5,
+                removed_at: Some(5),
             })
         })?;
         db.write(|s| s.refresh(&echo, false))?;
@@ -496,7 +511,11 @@ mod mirror {
             row: row.clone(),
             removed_at,
         };
-        let (rf, rd, ra) = (with(&file, 8), with(&folder, 10), with(&alone, 20));
+        let (rf, rd, ra) = (
+            with(&file, Some(8)),
+            with(&folder, Some(10)),
+            with(&alone, Some(20)),
+        );
         db.write(|s| {
             s.put_removed(&rf)?;
             s.put_removed(&rd)?;
@@ -931,7 +950,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
                 parent: NodeId::ROOT,
                 ..gone.clone()
             },
-            removed_at: 1,
+            removed_at: Some(1),
         })
     })?;
     assert_eq!(
