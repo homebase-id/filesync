@@ -1189,6 +1189,42 @@ fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
     Ok(())
 }
 
+/// The device deleting a folder stops after the folder's removal: what is in it is still live,
+/// unmarked, taken along by the folder's removal (node schema, Recently deleted). Emptying the
+/// folder from Recently deleted, on another device, deletes it for good with everything taken
+/// along: nothing is left to turn up at the top.
+#[test]
+fn emptying_a_folder_deletes_what_its_delete_took_along() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("Photos/x.txt", "x")?;
+    a.write("Photos/2024/y.txt", "y")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder goes; 2024's removal fails, holding back y.txt's; a stops there.
+    a.remote.faults().fail_writes_named = Some("2024".into());
+    a.sync()?;
+    let live = |server: &std::sync::Arc<std::sync::Mutex<hbsync_remote::fake::FakeServer>>| {
+        server
+            .lock()
+            .map(|s| s.live().count())
+            .unwrap_or(usize::MAX)
+    };
+    assert_eq!(live(&server), 2, "2024 and y.txt are still live");
+    let photos = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    // Another device, which never synced, empties it.
+    let mut b = Client::new(&server, "b")?;
+    assert_eq!(b.engine.drive().empty(&[photos.node])?, 4);
+    assert_eq!(live(&server), 0, "nothing taken along is left");
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
 #[test]
 fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     let server = server();

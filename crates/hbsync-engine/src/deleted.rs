@@ -258,8 +258,10 @@ struct RestorePlan {
     taken: HashMap<NodeId, HashSet<String>>,
 }
 
-/// `top` and what its delete took along below it: the removed items in it, level by level,
-/// deleted with their folder ([`deleted_with`]). What was deleted from it before stays out.
+/// `top` and what its delete took along below it, level by level: the removed items in it
+/// deleted with their folder ([`deleted_with`]), and the live ones written no later than its
+/// removal (node schema: their own removal was still on its way), which count as removed then.
+/// What was deleted from it before stays out.
 fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
     // Each node once: removed rows may form a cycle (left by a remote one).
     let mut seen = HashSet::from([top.row.node]);
@@ -268,10 +270,21 @@ fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> 
     while next < rows.len() {
         if rows[next].row.kind == NodeKind::Folder {
             let folder = &rows[next];
-            let with: Vec<RemovedRow> = s
+            let removed = s
                 .removed_children(folder.row.node)?
                 .into_iter()
-                .filter(|r| deleted_with(r.removed_at, folder) && seen.insert(r.row.node))
+                .filter(|r| deleted_with(r.removed_at, folder));
+            let live = s
+                .mirror_children(folder.row.node)?
+                .into_iter()
+                .filter(|m| m.changed_at.is_none_or(|at| at <= folder.removed_at))
+                .map(|row| RemovedRow {
+                    row,
+                    removed_at: folder.removed_at,
+                });
+            let with: Vec<RemovedRow> = removed
+                .chain(live)
+                .filter(|r| seen.insert(r.row.node))
                 .collect();
             rows.extend(with);
         }
@@ -294,13 +307,15 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     })?
     .items;
     chain.reverse();
-    // Then the node and what was deleted with it, each after its folder; each node once.
+    // Then the node and what was deleted with it, each after its folder; each node once. What
+    // is live still comes back with its folder by itself.
     let mut seen = HashSet::new();
-    let rows: Vec<RemovedRow> = chain
-        .into_iter()
-        .chain(group(s, top)?)
-        .filter(|r| seen.insert(r.row.node))
-        .collect();
+    let mut rows = Vec::new();
+    for r in chain.into_iter().chain(group(s, top)?) {
+        if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
+            rows.push(r);
+        }
+    }
     // The folders in the tree the rows may go into, and their names.
     let mut live = HashSet::from([NodeId::ROOT]);
     let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
@@ -429,7 +444,11 @@ fn delete_for_good(
             Err(RemoteError::VersionMismatch) => continue,
             Err(e) => return Err(EngineError::Remote(e)),
         }
-        db.write(|s| s.delete_removed(r.row.node))?;
+        // No row of it is left, in Recently deleted or, taken along, in the tree.
+        db.write(|s| {
+            s.delete_removed(r.row.node)?;
+            s.delete_mirror(r.row.file_id).map(drop)
+        })?;
         gone += 1;
     }
     Ok(gone)

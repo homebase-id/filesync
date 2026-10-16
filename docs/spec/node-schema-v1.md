@@ -153,7 +153,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   meanwhile gets ` (restored)`.
 - After 30 days (the client's `keep_deleted_days`) any client deletes for good an item deleted
   on its own, counted from its removal, with everything deleted with it (a folder's delete goes
-  as a whole), files before their folders: that leaves the tombstone below.
+  as a whole, live nodes it took along included: see below), files before their folders, each
+  at the version the client knows: that leaves the tombstone below.
 - **The server's time decides** what a folder's delete took along. A live node in a removed
   folder (directly, or through live folders in it) whose version was written no later than the
   folder's removal (its header's `updated` against the folder's) was in the folder when it was

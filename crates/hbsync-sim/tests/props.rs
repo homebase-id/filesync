@@ -1715,3 +1715,49 @@ mod folder_delete_races {
         assert_eq!(sim.server_paths(), Vec::<String>::new());
     }
 }
+
+/// One computer stops syncing a folder in the role folder and removes it; another writes a file
+/// into it after that. The file stays and brings the folder back on the computer syncing the
+/// role folder: through the folder in Recently deleted, the file is in its part of the drive.
+#[test]
+fn regression_a_file_written_into_a_removed_folder_of_the_role_folder_brings_it_back() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(4, CreateFolder { parent: 0, name: 0 }),
+        plan(4),
+        act(4, ToggleIgnore),
+        act(0, Phone { op: 0, pick: 2 }),
+        step(4),
+        act(
+            4,
+            Move {
+                node: 0,
+                parent: 7,
+                name: 5,
+            },
+        ),
+        act(4, CreateFile { parent: 5, name: 1 }),
+        plan(4),
+        step(4),
+        step(4),
+        plan(3),
+        step(3),
+        act(
+            3,
+            CreateFile {
+                parent: 14,
+                name: 0,
+            },
+        ),
+        plan(3),
+        step(4),
+        act(0, Tag { node: 0, tag: 0 }),
+        step(3),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_new_role_devices, &events) {
+        panic!("{e}");
+    }
+}
