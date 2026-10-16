@@ -10,8 +10,8 @@
 //! - server frames are `{isEncrypted, payload}`; drive changes are `fileAdded`,
 //!   `fileModified`, `fileDeleted` (reactions also send `fileModified`);
 //! - the subscription asks for `resultShape: "minimal"` (odin-core #1970):
-//!   a drive event then carries `fileRef`/`previousFileRef` (a minimal query-batch row) instead
-//!   of the full headers (`header` stays, `null`). Only the type is read here.
+//!   a drive event then carries `targetDrive` and `fileRef`/`previousFileRef` (a minimal
+//!   query-batch row), no header keys. Only the type is read here.
 
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
@@ -423,10 +423,10 @@ mod tests {
             n(json!({"notificationType": "fileModified", "data": "{}"})),
             Notification::Changed
         );
-        // A minimal event: `header` null, the file as a ref.
+        // A minimal event: no header keys, the file as a ref.
         assert_eq!(
             n(json!({"notificationType": "fileDeleted",
-                "data": "{\"header\":null,\"fileRef\":{\"fileId\":\"x\"}}"})),
+                "data": "{\"targetDrive\":{},\"previousFileRef\":{\"fileId\":\"x\"}}"})),
             Notification::Changed
         );
         assert_eq!(n(json!({"notificationType": "pong"})), Notification::Other);

@@ -471,7 +471,9 @@ fn notification_sizes() -> R {
         match *name {
             "minimal" => {
                 assert!(
-                    data["header"].is_null() && data["fileRef"]["fileId"].is_string(),
+                    data.get("header").is_none()
+                        && data.get("previousServerFileHeader").is_none()
+                        && data["fileRef"]["fileId"].is_string(),
                     "a minimal event: {data}"
                 );
                 println!("a minimal event's data: {data}");
