@@ -41,60 +41,77 @@ impl std::ops::AddAssign for FeedReport {
 /// Reads the feed from the stored cursor until it has no more rows. The DB is taken from `db`
 /// for each step, and let go while a page is on its way: others use it meanwhile.
 ///
-/// Each page comes as [`ChangeRef`]s first. One whose rows are all known (versions the store
-/// has, this device's own writes coming back) or tombstones is applied from them alone; one
-/// with anything new is read again whole from the same cursor and applied from that, whose
-/// cursor it continues from (a file changed in between has moved further along the feed).
+/// A page comes as [`ChangeRef`]s first. One whose rows are all known (versions the store has,
+/// this device's own writes coming back) or tombstones is applied from them alone; one with
+/// anything new is read again whole from the same cursor and applied from that, whose cursor it
+/// continues from (a file changed in between has moved further along the feed). Changes from
+/// elsewhere come in runs, so after a page with something new the next is read whole at once,
+/// as is a first read (no cursor: all of it is new), until a whole page holds nothing new.
 pub fn pull<G: DerefMut<Target = StateDb>>(
     db: impl Fn() -> G,
     remote: &dyn Remote,
     page_size: usize,
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
+    let mut slim = None;
     loop {
         let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
-        let refs = with_retries(|| remote.change_refs(cursor.as_deref(), page_size))?;
-        // Checked where it is applied: a commit in between may have changed what is known.
-        let known = db().write(|s| {
-            if !refs
-                .refs
-                .iter()
-                .try_fold(true, |all, r| Ok::<_, StateError>(all && is_known(s, r)?))?
-            {
-                return Ok(false);
-            }
-            for r in &refs.refs {
-                if apply_ref(s, r)? {
-                    report.live += 1;
-                } else {
-                    report.deleted += 1;
+        let slim_now = *slim.get_or_insert(cursor.is_some());
+        let mut known = false;
+        let mut has_more = false;
+        if slim_now {
+            let refs = with_retries(|| remote.change_refs(cursor.as_deref(), page_size))?;
+            // Checked where it is applied: a commit in between may have changed what is known.
+            known = db().write(|s| {
+                if !all_known(s, refs.refs.iter().copied())? {
+                    return Ok(false);
                 }
-            }
-            save_cursor(s, cursor.as_deref(), !refs.refs.is_empty(), &refs.cursor)?;
-            Ok(true)
-        })?;
-        let has_more = if known {
-            refs.has_more
-        } else {
+                for r in &refs.refs {
+                    report.count(apply_ref(s, r)?);
+                }
+                save_cursor(s, cursor.as_deref(), !refs.refs.is_empty(), &refs.cursor)?;
+                Ok(true)
+            })?;
+            has_more = refs.has_more;
+        }
+        if !known {
             let mut page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
             report.skipped.append(&mut page.skipped);
-            db().write(|s| {
+            slim = Some(db().write(|s| {
+                let nothing_new = all_known(s, page.entries.iter().map(ChangeRef::of))?;
                 for header in &page.entries {
-                    if apply(s, header)? {
-                        report.live += 1;
-                    } else {
-                        report.deleted += 1;
-                    }
+                    report.count(apply(s, header)?);
                 }
-                save_cursor(s, cursor.as_deref(), !page.entries.is_empty(), &page.cursor)
-            })?;
-            page.has_more
-        };
+                save_cursor(s, cursor.as_deref(), !page.entries.is_empty(), &page.cursor)?;
+                Ok(nothing_new)
+            })?);
+            has_more = page.has_more;
+        }
         report.pages += 1;
         if !has_more {
             return Ok(report);
         }
     }
+}
+
+impl FeedReport {
+    fn count(&mut self, live: bool) {
+        if live {
+            self.live += 1;
+        } else {
+            self.deleted += 1;
+        }
+    }
+}
+
+/// Whether the store knows every one of `refs` ([`is_known`]).
+fn all_known(s: &Store<'_>, refs: impl IntoIterator<Item = ChangeRef>) -> Result<bool, StateError> {
+    for r in refs {
+        if !is_known(s, &r)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Stores the cursor after a page; unchanged on an idle pull: no write, so nothing to sync.
@@ -251,6 +268,42 @@ mod tests {
     use hbsync_types::{NodeId, RemoteFileId, VersionTag};
 
     use super::*;
+
+    /// A first read (no cursor) is read whole; a page of nothing new costs one slim read; a run
+    /// of changes from elsewhere is read slim once, then whole page by page.
+    #[test]
+    fn news_is_read_whole_and_the_rest_slim() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::NodeMeta;
+        use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+        let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
+        let folder = |name: String| NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder(&name),
+            removed: false,
+        };
+        for i in 0..4 {
+            remote.create(&folder(format!("a{i}")), None)?;
+        }
+        let db = std::sync::Mutex::new(StateDb::open_in_memory()?);
+        let lock = || db.lock().unwrap_or_else(|e| e.into_inner());
+        let reads = |r: &FakeRemote| {
+            let f = r.faults();
+            (f.ref_pages, f.full_pages)
+        };
+        pull(lock, &remote, 3)?;
+        assert_eq!(reads(&remote), (0, 2), "a first read: whole");
+        pull(lock, &remote, 3)?;
+        assert_eq!(reads(&remote), (1, 2), "nothing new: slim");
+        for i in 0..7 {
+            remote.create(&folder(format!("b{i}")), None)?;
+        }
+        pull(lock, &remote, 3)?;
+        assert_eq!(reads(&remote), (2, 5), "news: slim once, then whole");
+        assert_eq!(lock().read(|s| s.mirror_count())?, 11);
+        Ok(())
+    }
 
     #[test]
     fn a_live_file_without_its_payload_is_no_delete() -> Result<(), StateError> {

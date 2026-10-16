@@ -68,9 +68,9 @@ pub fn prepare<E: std::fmt::Display>(
         save(creds).map_err(|e| HomebaseError::Protocol(format!("saving the credentials: {e}")))?;
     }
     let feed_entries = remote
-        .changes(None, 10)
+        .change_refs(None, 10)
         .map_err(|e| HomebaseError::Protocol(format!("the sync drive's feed: {e}")))?
-        .entries
+        .refs
         .len();
     Ok(Prepared {
         remote,

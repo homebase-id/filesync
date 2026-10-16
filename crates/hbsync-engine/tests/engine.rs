@@ -2556,13 +2556,16 @@ fn own_writes_come_back_slim() -> R {
     }
     a.write("Photos/2024/y.jpg", "y")?;
     a.sync()?;
+    // The first read has no cursor: all of it is new, so it is read whole.
+    let first = a.remote.faults().full_pages;
+    assert_eq!(first, 1, "the first read, of an empty drive");
     fs::rename(a.root.join("Photos/0.jpg"), a.root.join("Photos/zero.jpg"))?;
     a.sync()?;
     fs::remove_dir_all(a.root.join("Photos"))?;
     a.sync()?;
     {
         let faults = a.remote.faults();
-        assert_eq!(faults.full_pages, 0, "its own writes, slim");
+        assert_eq!(faults.full_pages, first, "its own writes, slim");
         assert!(faults.ref_pages > 0);
     }
     let listed = a.recently_deleted(100)?;
