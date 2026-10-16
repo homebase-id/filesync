@@ -563,7 +563,7 @@ mod mirror {
         db.write(|s| s.put_removed(&again))?;
         let seq = |db: &mut StateDb, node| -> hbsync_state::Result<Option<u64>> {
             db.read(|s| {
-                Ok(s.recorded_children(NodeId::ROOT)?
+                Ok(s.recorded_upto(u64::MAX)?
                     .into_iter()
                     .find(|r| r.removed.row.node == node)
                     .map(|r| r.seq))
@@ -586,9 +586,9 @@ mod mirror {
         Ok(())
     }
 
-    /// This device's own removal, its time still open, then the feed's row of another version
-    /// of that node (restored elsewhere, edited, deleted again before the echo): another
-    /// removal, recorded at the next place, not under the open one's.
+    /// This device's own removal, its time still open, keeps its place when confirmed; the
+    /// feed's row of another version of that node (restored elsewhere, edited, deleted again)
+    /// is another removal, recorded at the next place.
     #[test]
     fn another_version_after_an_open_removal_is_another_removal() -> R {
         let mut db = StateDb::open_in_memory()?;
@@ -602,11 +602,26 @@ mod mirror {
             removed_at: Some(40),
         };
         again.row.version = VersionTag(Uuid::new_v4());
+        let seqs = |db: &mut StateDb| -> hbsync_state::Result<Vec<(Option<i64>, u64)>> {
+            db.read(|s| {
+                Ok(s.recorded_upto(u64::MAX)?
+                    .into_iter()
+                    .map(|r| (r.removed.removed_at, r.seq))
+                    .collect())
+            })
+        };
         db.write(|s| s.put_removed(&open))?;
+        // Its own removal confirmed, and the feed's row of it: the same removal.
+        db.write(|s| {
+            s.confirm_removed(x.remote_ref(), 30)?;
+            s.put_removed(&RemovedRow {
+                removed_at: Some(30),
+                ..open.clone()
+            })
+        })?;
+        assert_eq!(seqs(&mut db)?, [(Some(30), 1)]);
         db.write(|s| s.put_removed(&again))?;
-        let seqs = db.read(|s| s.recorded_upto(u64::MAX))?;
-        assert_eq!(seqs.len(), 1);
-        assert_eq!((seqs[0].removed.removed_at, seqs[0].seq), (Some(40), 2));
+        assert_eq!(seqs(&mut db)?, [(Some(40), 2)]);
         Ok(())
     }
 

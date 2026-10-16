@@ -108,6 +108,10 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   One removed before it was deleted on its own. A live node in a removed folder (its delete still under way)
   written no later than the folder's removal is deleted with it too: it doesn't show anywhere, and comes back
   with the folder; one written after it keeps the folder alive (node schema, "Recently deleted").
+- **Deleting for good** (emptying, or the 30-day purge): an item with what was deleted with it and the live
+  nodes it took along, files first, then each folder after what is in it. A live node goes only when its time
+  and its folder's removal time are both known; a folder holding anything that stays (that node, one written
+  after, one removed on its own that isn't going, one whose delete failed) stays, emptied of the rest.
 - **Lists:** the whole drive with `archivalStatus: [2]`. The items are the ones not deleted with their folder;
   each counts the items deleted with it, below it.
 - **Never write to a removed node** except to restore it: no rename, no sharing or sending to another

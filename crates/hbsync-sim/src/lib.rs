@@ -84,6 +84,20 @@ pub enum Action {
     },
     /// The purge: everything in Recently deleted is deleted for good.
     Purge,
+    /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
+    /// each node at its version, is what emptying it as listed may take.
+    ListDeleted,
+    /// The user empties Recently deleted as last listed (nothing without a listing): the rows
+    /// listed, at the version listed, and the live nodes their folders took along, but a folder
+    /// holding anything else and the folders it is in, in the order the engine deletes them
+    /// ([`hbsync_engine::deleted::emptying_order`]).
+    EmptyListed,
+    /// Another device (the phone, which opened it before) saves an edit of a file a folder's
+    /// delete took along, its own removal still on its way: on the server at once, the folder
+    /// still deleted. Nothing when no file is taken along.
+    EditTaken {
+        pick: usize,
+    },
     /// The user adds a tag of [`TAGS`] to an item, or removes it, as far as the client's OS
     /// lets them.
     Tag {
@@ -175,6 +189,11 @@ struct Server {
     ever: BTreeSet<NodeId>,
     /// The first write that pointed a node at a folder the server never had.
     dangling: Option<String>,
+    /// The last listing of Recently deleted ([`Action::ListDeleted`]): each node at its version.
+    listed: Option<BTreeSet<(NodeId, VersionTag)>>,
+    /// The first node emptying as listed deleted for good that was neither listed (at that
+    /// version) nor taken along by a folder's removal.
+    emptied_unlisted: Option<String>,
 }
 
 /// The server's time of the write that made `version`: every write takes the next id, so ids
@@ -809,6 +828,31 @@ impl Sim {
                     self.tags_added.insert((to, n, name));
                 }
             }
+            Action::ListDeleted => {
+                let listed = self.server.removed.iter();
+                let listed = listed.map(|(n, r)| (*n, r.remote.version)).collect();
+                self.server.listed = Some(listed);
+            }
+            Action::EmptyListed => self.empty_listed(),
+            Action::EditTaken { pick } => {
+                let taken: Vec<NodeId> = self
+                    .server
+                    .taken_along()
+                    .into_iter()
+                    .filter(|n| self.server.live[n].state.kind == NodeKind::File)
+                    .collect();
+                let Some(&file) = taken.get(pick % taken.len().max(1)) else {
+                    return;
+                };
+                let content = self.new_blob();
+                let version = VersionTag(self.server.uuid());
+                let old = self.server.live.get(&file).and_then(|n| n.state.content);
+                self.supersede(old);
+                if let Some(n) = self.server.live.get_mut(&file) {
+                    n.state.content = Some(content);
+                    n.remote.version = version;
+                }
+            }
             Action::Purge => {
                 self.server.removed_at.clear();
                 for (_, n) in std::mem::take(&mut self.server.removed) {
@@ -940,6 +984,81 @@ impl Sim {
         n.state.name = name;
         n.remote.version = VersionTag(self.server.uuid());
         self.server.live.insert(node, n);
+    }
+
+    /// [`Action::EmptyListed`].
+    fn empty_listed(&mut self) {
+        let Some(listed) = self.server.listed.clone() else {
+            return;
+        };
+        let server = &self.server;
+        // The rows still as listed, and the live nodes their folders took along (by the engine's
+        // rule, below the nearest of them).
+        let mut links: HashMap<NodeId, (NodeId, bool)> = HashMap::new();
+        let mut folders = Vec::new();
+        for (n, r) in &server.removed {
+            if listed.contains(&(*n, r.remote.version)) {
+                links.insert(*n, (r.state.parent, r.state.kind == NodeKind::Folder));
+                folders.push((*n, server.removed_at.get(n).copied()));
+            }
+        }
+        let mut holding = Vec::new();
+        while let Some((folder, removed_at)) = folders.pop() {
+            let mut holds = server
+                .removed
+                .iter()
+                .any(|(n, r)| r.state.parent == folder && !links.contains_key(n));
+            for (n, live) in &server.live {
+                if live.state.parent != folder {
+                    continue;
+                }
+                let written = Some(time(live.remote.version));
+                if !hbsync_engine::deleted::taken_along(written, removed_at) {
+                    holds = true;
+                } else if !links.contains_key(n) {
+                    let is_folder = live.state.kind == NodeKind::Folder;
+                    links.insert(*n, (folder, is_folder));
+                    if is_folder {
+                        folders.push((*n, removed_at));
+                    }
+                }
+            }
+            if holds {
+                holding.push(folder);
+            }
+        }
+        // What may go: listed at that version, or taken along by a folder's removal (the
+        // server's model of it, not the engine's).
+        let taken = server.taken_along();
+        for n in hbsync_engine::deleted::emptying_order(&links, holding) {
+            let ok = match self.server.removed.get(&n) {
+                Some(r) => listed.contains(&(n, r.remote.version)),
+                None => taken.contains(&n),
+            };
+            if !ok && self.server.emptied_unlisted.is_none() {
+                self.server.emptied_unlisted = Some(format!("{n:?}"));
+            }
+            // A folder still holding anything (what is in it goes first) stays.
+            let holds = |s: &Server| {
+                s.live
+                    .values()
+                    .chain(s.removed.values())
+                    .any(|c| c.state.parent == n)
+            };
+            if holds(&self.server) {
+                continue;
+            }
+            self.server.removed_at.remove(&n);
+            let gone = self
+                .server
+                .removed
+                .remove(&n)
+                .or_else(|| self.server.live.remove(&n));
+            if let Some(gone) = gone {
+                self.deleted.insert(n);
+                self.supersede(gone.state.content);
+            }
+        }
     }
 
     fn supersede(&mut self, content: Option<FileContent>) {
@@ -1991,6 +2110,11 @@ impl Sim {
         }
         if let Some(what) = &self.removed_after_contents {
             return Err(format!("a folder was removed after what is in it: {what}"));
+        }
+        if let Some(what) = &self.server.emptied_unlisted {
+            return Err(format!(
+                "emptying as listed deleted what it didn't list: {what}"
+            ));
         }
         // No folder wrote outside its part of the drive.
         if let Some(op) = &self.scope_breach {

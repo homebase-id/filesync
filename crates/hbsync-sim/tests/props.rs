@@ -13,6 +13,9 @@ fn action() -> impl Strategy<Value = Action> {
         1 => Just(Action::ToggleIgnore),
         1 => i().prop_map(|node| Action::Restore { node }),
         1 => Just(Action::Purge),
+        1 => Just(Action::ListDeleted),
+        1 => Just(Action::EmptyListed),
+        1 => i().prop_map(|pick| Action::EditTaken { pick }),
         2 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
         1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),
         1 => (i(), i()).prop_map(|(op, pick)| Action::Phone { op, pick }),
@@ -951,6 +954,78 @@ fn restore_and_purge_converge() {
 /// Tags meet on every device: a Mac's tag and colour change, a Linux tag (Linux keeps no
 /// colours, and keeps the Mac's), and a Windows device, which has no tags, keeps them through
 /// its own edit and rename. A tag removed anywhere goes everywhere.
+/// Emptying Recently deleted as listed while other devices work: after the listing a listed
+/// folder comes back, and (or not) the phone saves an edit of a file a listed
+/// folder's delete took along (its own removal still on its way). What was listed goes, with
+/// what it took along; the edit, written after, stays with its folder, which comes back;
+/// nothing written is lost, and the clients converge.
+#[test]
+fn emptying_as_listed_spares_what_came_after_the_listing() {
+    use Action::*;
+    use hbsync_types::NodeId;
+    let (a, b, c_txt) = (0, 1, 3); // NAMES: "a", "b", "c.txt"
+    let act = |client, action| Event::Act { client, action };
+    let folder = |sim: &Sim, path: &str| -> usize {
+        let node = match path {
+            "" => NodeId::ROOT,
+            _ => sim.item(0, path).expect(path),
+        };
+        sim.pick(0, node, true).expect(path)
+    };
+    let create = |sim: &mut Sim, parent: &str, name, file: bool| {
+        let parent = folder(sim, parent);
+        let action = match file {
+            true => CreateFile { parent, name },
+            false => CreateFolder { parent, name },
+        };
+        sim.run(&[act(0, action)]);
+    };
+    let mut sync0 = vec![Event::Plan { client: 0 }];
+    sync0.extend([Event::Step { client: 0 }; 12]);
+    for edited in [false, true] {
+        let mut sim = Sim::new(2);
+        create(&mut sim, "", a, false);
+        create(&mut sim, "", b, false);
+        create(&mut sim, "a", c_txt, true);
+        create(&mut sim, "b", c_txt, true);
+        assert!(sim.quiesce(30), "no convergence");
+        let (node_a, node_b) = (sim.item(0, "a").expect("a"), sim.item(0, "b").expect("b"));
+        // Client 0 deletes `b`, and `a` as far as the folder (the file in it, still live, was
+        // taken along); then lists Recently deleted.
+        let node = sim.pick(0, node_b, false).expect("b");
+        sim.run(&[act(0, Delete { node })]);
+        sim.run(&sync0);
+        let node = sim.pick(0, node_a, false).expect("a");
+        sim.run(&[act(0, Delete { node })]);
+        sim.run(&[Event::Plan { client: 0 }, Event::Step { client: 0 }]);
+        assert!(sim.is_removed(node_a), "the folder went first");
+        sim.run(&[act(0, ListDeleted)]);
+        // Since the listing: `b` comes back, and the phone may edit the file in `a`. (No device
+        // syncs here: its sync would mark the file removed, a removal recorded after the
+        // listing, which keeps `a`.)
+        let node = sim.removed_pick(node_b).expect("b removed");
+        sim.run(&[act(0, Restore { node })]);
+        if edited {
+            sim.run(&[act(0, EditTaken { pick: 0 })]);
+        }
+        sim.run(&[act(0, EmptyListed)]);
+        assert_eq!(
+            sim.is_removed(node_a),
+            edited,
+            "`a` stays only with the edit"
+        );
+        assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            panic!("edited {edited}: {e}");
+        }
+        let mut expected = vec!["b", "b/c.txt"];
+        if edited {
+            expected.splice(0..0, ["a", "a/c.txt"]);
+        }
+        assert_eq!(sim.server_paths(), expected, "edited {edited}");
+    }
+}
+
 #[test]
 fn tags_meet_across_macos_linux_and_windows() {
     use Action::*;

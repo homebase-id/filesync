@@ -6,7 +6,9 @@ impl Store<'_> {
     // ---- Recently deleted ----
 
     /// Records a removed node (replacing an older record of it), and marks it dirty where that
-    /// concerns ([`Store::fan_out`]); the same version again changes nothing.
+    /// concerns ([`Store::fan_out`]); the same version again changes nothing, and keeps its
+    /// [`Recorded::seq`]. Another version is another removal (a restore, an edit, then a delete
+    /// again, perhaps elsewhere): it gets the next.
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         if self.has_version(removed.row.remote_ref(), true)? {
             return Ok(());
@@ -15,25 +17,12 @@ impl Store<'_> {
             return Ok(());
         };
         self.moved_folder(row.node, row.kind);
-        // Another version than the one recorded is another removal (a restore, then a delete
-        // again, perhaps elsewhere): the next place. The version recorded again keeps its own.
         let seq = self.next_removed_seq()?;
-        // The file id goes with the node: another node's row holding it (never expected) goes.
-        self.prep("DELETE FROM removed WHERE file_id = ?1 AND node <> ?2")?
-            .execute([row.file_id.0.as_bytes(), row.node.0.as_bytes()])?;
         let f = row.file.as_ref();
         self.prep(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, hash, size, \
-                 mtime_ms, executable, content_extra, removed_at, token, seq) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
-             ON CONFLICT (node) DO UPDATE SET file_id = excluded.file_id, \
-                 parent = excluded.parent, kind = excluded.kind, name = excluded.name, \
-                 hash = excluded.hash, size = excluded.size, mtime_ms = excluded.mtime_ms, \
-                 executable = excluded.executable, content_extra = excluded.content_extra, \
-                 removed_at = excluded.removed_at, token = excluded.token, \
-                 seq = CASE WHEN removed.version_tag = excluded.version_tag \
-                     THEN removed.seq ELSE excluded.seq END, \
-                 version_tag = excluded.version_tag",
+            "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
+                 hash, size, mtime_ms, executable, content_extra, removed_at, token, seq) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?
         .execute(params![
             row.node.0.as_bytes(),
@@ -84,6 +73,27 @@ impl Store<'_> {
         Ok(())
     }
 
+    /// How many nodes folder `parent` holds on the drive: live, or in Recently deleted.
+    pub fn child_count(&self, parent: NodeId) -> Result<u64> {
+        let parent = self.coords()?.to_drive(parent);
+        let n: i64 = self
+            .prep(&format!(
+                "SELECT (SELECT COUNT(*) FROM remote m WHERE m.parent = {ID_OF}) \
+                     + (SELECT COUNT(*) FROM removed WHERE parent = ?1)"
+            ))?
+            .query_row([parent.0.as_bytes()], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// How many nodes of Recently deleted are in folder `parent`.
+    pub fn removed_child_count(&self, parent: NodeId) -> Result<u64> {
+        let parent = self.coords()?.to_drive(parent);
+        let n: i64 = self
+            .prep("SELECT COUNT(*) FROM removed WHERE parent = ?1")?
+            .query_row([parent.0.as_bytes()], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
     /// This DB's own id (random, made with it): a listing of its Recently deleted names it, so
     /// one of another DB (of the same identity, made again) is told apart.
     pub fn db_id(&self) -> Result<String> {
@@ -95,15 +105,6 @@ impl Store<'_> {
         self.recorded_rows(
             &format!("{REMOVED_SELECT} WHERE seq <= ?1"),
             [i64::try_from(seq).unwrap_or(i64::MAX)],
-        )
-    }
-
-    /// The removed nodes in folder `parent`, as recorded.
-    pub fn recorded_children(&self, parent: NodeId) -> Result<Vec<Recorded>> {
-        let parent = self.coords()?.to_drive(parent);
-        self.recorded_rows(
-            &format!("{REMOVED_SELECT} WHERE parent = ?1"),
-            [parent.0.as_bytes()],
         )
     }
 
