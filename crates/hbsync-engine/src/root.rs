@@ -284,6 +284,11 @@ impl AccountReader {
         self.db.read(|s| crate::deleted::deletes(s, limit))
     }
 
+    /// Whether this DB gave `listed` ([`crate::deleted::listed_here`]).
+    pub fn listed_here(&mut self, listed: &crate::deleted::Listed) -> Result<bool, StateError> {
+        self.db.read(|s| crate::deleted::listed_here(s, listed))
+    }
+
     /// Items of Recently deleted by node ([`crate::deleted::find`]).
     pub fn find_deleted(
         &mut self,

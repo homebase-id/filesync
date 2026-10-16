@@ -132,8 +132,8 @@ pub enum AccountControl {
     EmptyDeleted { nodes: Vec<NodeId> },
     /// Delete for good what Recently deleted held when it was listed ([`DeletedAccount::db`],
     /// [`DeletedAccount::seq`]): every removal this device recorded up to `seq`, nothing recorded
-    /// since and nothing live (a folder holding either stays). The account refuses a listing of
-    /// another DB, or one it never gave (in its log: the request is answered before it runs).
+    /// since and nothing live (a folder holding either stays). A listing of another DB, or one
+    /// the account never gave, is refused in the reply.
     EmptyListed { db: String, seq: u64 },
 }
 

@@ -545,7 +545,7 @@ pub fn empty_listed(
     listed: &Listed,
 ) -> Result<usize, EngineError> {
     let rows = db.read(|s| {
-        if listed.db != s.db_id()? || listed.seq > s.removed_seq()? {
+        if !listed_here(s, listed)? {
             return Err(StateError::Conflict(
                 "Recently deleted was never listed so here: look at it again".to_owned(),
             ));
@@ -553,6 +553,11 @@ pub fn empty_listed(
         emptied_as_listed(s, listed.seq)
     })?;
     delete_for_good(db, remote, &rows)
+}
+
+/// Whether this DB gave `listed`: its own, up to a counter it reached.
+pub fn listed_here(s: &Store<'_>, listed: &Listed) -> Result<bool, StateError> {
+    Ok(listed.db == s.db_id()? && listed.seq <= s.removed_seq()?)
 }
 
 /// The rows recorded up to `seq` but a folder holding something that stays (a live node, a

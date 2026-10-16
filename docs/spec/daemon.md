@@ -230,7 +230,7 @@ Replies:
   deletes for good exactly the removals recorded up to `seq`, an open one too: nothing recorded
   since, whatever its server time, and nothing live; a listed folder holding either stays,
   emptied of what was listed in it. A listing of another DB, or a `seq` the account never gave,
-  is refused (in the daemon's log: the request is answered before it runs).
+  is refused in the reply (and again by the drive as it empties).
 - `{"found":[…]}`: for `find_deleted`, the items named (a node id, or the place `hbsync deleted`
   shows: a delete there before an item a delete took along, then the newest; a name shaped like a node id that isn't one is tried as a place),
   deleted on their own or along with a folder; refused naming the first one that isn't there.

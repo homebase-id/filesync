@@ -215,6 +215,29 @@ impl Account {
         if let Some(why) = self.not_running() {
             return Err(why);
         }
+        // Answered before it runs: a listing the drive would refuse is refused here, so the
+        // refusal reaches whoever asked (the drive checks again as it empties).
+        if let AccountControl::EmptyListed { db, seq } = &control {
+            let listed = Listed {
+                db: db.clone(),
+                seq: *seq,
+            };
+            match self.try_read(|r| r.listed_here(&listed)) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!(
+                        "Recently deleted of {} was never listed so: look at it again",
+                        self.identity
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "can't read Recently deleted of {}: {e}",
+                        self.identity
+                    ));
+                }
+            }
+        }
         let request = Request::Deleted(control);
         self.requests
             .send(request)
@@ -291,28 +314,36 @@ impl Account {
     /// DB isn't there yet (or not brought up to date yet: the drive does as it opens) or `f`
     /// failed, which drops the connection.
     fn read<T>(&self, f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>) -> Option<T> {
+        self.try_read(f).ok()
+    }
+
+    /// [`Account::read`], saying why there is no answer.
+    fn try_read<T>(
+        &self,
+        f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>,
+    ) -> Result<T, String> {
         let mut reader = lock(&self.reader);
         if reader.is_none() {
             *reader = match AccountReader::open(&self.db, &self.identity) {
                 Ok(opened) => opened,
                 Err(RootError::State(e @ StateError::Behind { .. })) => {
                     tracing::debug!("{}: {e}", self.identity);
-                    None
+                    return Err(e.to_string());
                 }
                 Err(e) => {
                     tracing::warn!("{}: can't read its state DB: {e}", self.identity);
-                    None
+                    return Err(e.to_string());
                 }
             };
         }
-        match f(reader.as_mut()?) {
-            Ok(answer) => Some(answer),
-            Err(e) => {
-                tracing::warn!("{}: can't read its state DB: {e}", self.identity);
-                *reader = None;
-                None
-            }
-        }
+        let Some(opened) = reader.as_mut() else {
+            return Err("its state DB isn't there yet".to_owned());
+        };
+        f(opened).map_err(|e| {
+            tracing::warn!("{}: can't read its state DB: {e}", self.identity);
+            *reader = None;
+            e.to_string()
+        })
     }
 
     fn waiting(&self, to: State, why: String) {
@@ -895,6 +926,37 @@ mod tests {
         assert!(status.error.is_some());
         assert!(!waiting(&failed(true, false)?), "removed");
         assert!(!waiting(&failed(false, true)?), "the account ends");
+        Ok(())
+    }
+
+    /// Emptying Recently deleted as listed is refused in the answer for a listing of another DB
+    /// (the identity's, made again) or one this DB never gave; one it gave is taken.
+    #[test]
+    fn a_foreign_listing_is_refused_in_the_answer() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let folder = home.path().join("Homebase");
+        let (account, _requests) = Account::new(&paths, "a.example", &folder, None);
+        // Its DB, from the drive; its runners running (none needed here).
+        let db = paths.account_db("a.example");
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        Drive::open(
+            &db,
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        *lock(&account.phase) = Phase::Running(Vec::new());
+        let listed = account.read(|r| r.deletes(0)).ok_or("unreadable")?.1.listed;
+        let empty = |db: &str, seq| {
+            account.request(AccountControl::EmptyListed {
+                db: db.to_owned(),
+                seq,
+            })
+        };
+        let refused = empty("another-db", listed.seq).expect_err("another DB's listing");
+        assert!(refused.contains("never listed"), "{refused}");
+        assert!(empty(&listed.db, listed.seq + 1).is_err(), "never given");
+        empty(&listed.db, listed.seq)?;
         Ok(())
     }
 }
