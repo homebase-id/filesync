@@ -345,13 +345,9 @@ impl Executor<'_> {
             }
             Err(_) => None,
         };
-        // Placed now: a file not hashed yet is held from here.
-        record.placed_ms = hbsync_types::unix_now_ms();
         if tags != record.placed_tags {
             record.placed_tags = tags.clone();
             self.write_durable(|s| s.put_placing(&record))?;
-        } else {
-            self.db.write(|s| s.put_placing(&record))?;
         }
         let placed = match &current {
             Some(row) if &row.path == target => self.put(target, |at| {
@@ -379,6 +375,11 @@ impl Executor<'_> {
         let meta = match placed {
             Ok(m) => m,
             Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, target)),
+            // In place, its metadata unread: recovery's.
+            Err(FileIoError::PlacedUnread(_)) => {
+                self.placed(node);
+                return self.placed_not_committed(node);
+            }
             Err(FileIoError::Io(e)) => return Ok(io_outcome(e)),
             Err(e) => return Ok(Outcome::Retry(e.to_string())),
         };
@@ -386,12 +387,13 @@ impl Executor<'_> {
         if self.crash_here(CrashPoint::AfterPlaced) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        if self.commit_fails() {
-            return self.placed_not_committed(node);
-        }
         let target = target.clone();
         let os = self.cfg.os;
-        let at = self.db.write(|s| {
+        let fails = self.commit_fails();
+        let committed = self.db.write(|s| {
+            if fails {
+                return Err(StateError::Conflict("the commit failed (a test)".into()));
+            }
             if let Some(row) = &current {
                 s.delete_local(row.node)?;
             }
@@ -407,7 +409,11 @@ impl Executor<'_> {
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
             settle_placement(s, &record, os)
-        })?;
+        });
+        // Its commit fails once it is in place: recovery's then.
+        let Ok(at) = committed else {
+            return self.placed_not_committed(node);
+        };
         self.note([(node, at)]);
         Ok(Outcome::Settled)
     }

@@ -65,8 +65,8 @@ pub struct ExecConfig {
     /// Tests only: stop the run at this point, as if the process died there.
     #[doc(hidden)]
     pub crash_at: Option<CrashPoint>,
-    /// Tests only: this many placements fail their commit once their item is in place (a
-    /// folder's stat failing, a download's commit write), and the run goes on.
+    /// Tests only: this many placements' commit writes fail once their item is in place, and
+    /// the run goes on.
     #[doc(hidden)]
     pub fail_commits: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -595,31 +595,20 @@ impl<'a> Executor<'a> {
     /// item alone, read off the disk: no other item is read, nor its row touched. One it can't
     /// settle yet (a file not hashed yet) stays, for a later recovery.
     fn placed_not_committed(&mut self, node: NodeId) -> Step {
-        let Some(record) = self.db.read(|s| s.get_placing(node))? else {
+        let Some(mut record) = self.db.read(|s| s.get_placing(node))? else {
             return Ok(Outcome::stale("put in place, its record gone"));
         };
-        let abs = self.abs(&record.target);
-        let row = match hbsync_platform::stat(&abs) {
-            Err(_) => None,
-            Ok(meta) => Some(LocalRow {
-                path: record.target.clone(),
-                node,
-                kind: if meta.kind == EntryKind::Dir {
-                    NodeKind::Folder
-                } else {
-                    NodeKind::File
-                },
-                fingerprint: meta.fingerprint(),
-                executable: meta.executable.filter(|_| meta.kind != EntryKind::Dir),
-                // A file that can't be read now (locked) is kept for later.
-                hash: (meta.kind == EntryKind::File)
-                    .then(|| hbsync_fileio::hash_file(&abs, self.cfg.algorithm).ok())
-                    .flatten()
-                    .map(|h| h.hash),
-                tags: tags::read(&abs),
-            }),
+        // Put in place just now: a file not hashed yet is held from here.
+        let now = hbsync_types::unix_now_ms();
+        record.placed_ms = now;
+        let judged = match read_item(&self.cfg.root, &record.target, node, self.cfg.algorithm) {
+            OnDisk::Absent => judge(&self.cfg.root, &record, None, now),
+            OnDisk::Unreadable => Judged::Keep,
+            OnDisk::Item(row) => judge(&self.cfg.root, &record, Some(row), now),
         };
-        let judged = judge(&self.cfg.root, &record, row, hbsync_types::unix_now_ms());
+        if let Judged::Keep = judged {
+            self.db.write(|s| s.put_placing(&record))?;
+        }
         let outcome = match &judged {
             Judged::Settle(_) => Outcome::Settled,
             Judged::Keep => Outcome::stale("put in place, not hashed yet: recovery settles it"),
@@ -648,7 +637,7 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Whether a placement's commit fails here, for a test ([`ExecConfig::fail_commits`]).
+    /// Whether a placement's commit write fails, for a test ([`ExecConfig::fail_commits`]).
     fn commit_fails(&self) -> bool {
         self.cfg
             .fail_commits
@@ -1147,7 +1136,7 @@ mod tests;
 
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};
-use recover::{Judged, apply, judge};
+use recover::{Judged, OnDisk, apply, judge, read_item};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub(crate) use settle::update_meta;

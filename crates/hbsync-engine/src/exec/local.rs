@@ -148,14 +148,6 @@ impl Executor<'_> {
         if let Some(ct) = created_ms {
             let _ = ops::set_created(&abs, ct);
         }
-        // Its commit fails once it is in place: one with a record is recovery's then; a new
-        // folder's retry takes it over, as an interrupted run's.
-        if self.commit_fails() {
-            return match kept {
-                true => self.placed_not_committed(node),
-                false => Ok(Outcome::Retry("its commit failed".into())),
-            };
-        }
         let meta = match hbsync_platform::stat(&abs) {
             Ok(m) => m,
             Err(e) => {
@@ -177,17 +169,27 @@ impl Executor<'_> {
             tags,
         };
         let os = self.cfg.os;
-        let at = match &record {
-            Some(r) => self.db.write(|s| {
-                s.put_local(&row)?;
-                settle_placement(s, r, os)
-            })?,
-            None => self.db.write(|s| {
-                s.put_local(&row)?;
-                let at = settle(s, Settle::placed(node, None, TagWrite::Agreed), os)?;
-                mark_children(s, node)?;
-                Ok(at)
-            })?,
+        let fails = self.commit_fails();
+        let committed = self.db.write(|s| {
+            if fails {
+                return Err(StateError::Conflict("the commit failed (a test)".into()));
+            }
+            s.put_local(&row)?;
+            match &record {
+                Some(r) => settle_placement(s, r, os),
+                None => {
+                    let at = settle(s, Settle::placed(node, None, TagWrite::Agreed), os)?;
+                    mark_children(s, node)?;
+                    Ok(at)
+                }
+            }
+        });
+        // Its commit fails once it is in place: one with a record is recovery's then; a new
+        // folder's retry takes it over, as an interrupted run's.
+        let at = match committed {
+            Ok(at) => at,
+            Err(_) if kept => return self.placed_not_committed(node),
+            Err(e) => return Ok(Outcome::Retry(e.to_string())),
         };
         self.note([(node, at)]);
         Ok(Outcome::Settled)

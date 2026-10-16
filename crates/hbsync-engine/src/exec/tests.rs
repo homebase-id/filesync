@@ -1797,6 +1797,77 @@ fn a_new_folder_whose_commit_failed_is_taken_by_its_retry() -> R {
     Ok(())
 }
 
+/// What recovery in the run reads at a placement's target: nothing only when verifiably
+/// nothing is there (not found; or what the scan skips, a link), and "can't tell" when its
+/// metadata can't be read (a folder denying access): the record stays then. Read as nothing,
+/// the record went, and the item became a new one.
+#[cfg(unix)]
+#[test]
+fn recovery_tells_an_unreadable_item_from_none() -> R {
+    use super::recover::{OnDisk, read_item};
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new()?;
+    let (root, alg, node) = (h.cfg.root.clone(), h.cfg.algorithm, NodeId::new());
+    fs::write(root.join("f"), b"A")?;
+    std::os::unix::fs::symlink(root.join("f"), root.join("link"))?;
+    fs::create_dir(root.join("p"))?;
+    fs::write(root.join("p/f"), b"A")?;
+    let read = |rel: &str| read_item(&root, &RelPath::new(rel).expect("a path"), node, alg);
+    assert!(matches!(read("f"), OnDisk::Item(r) if r.node == node && r.hash.is_some()));
+    assert!(matches!(read("gone"), OnDisk::Absent));
+    assert!(matches!(read("link"), OnDisk::Absent));
+    fs::set_permissions(root.join("p"), fs::Permissions::from_mode(0o000))?;
+    let (denied, readable) = (read("p/f"), fs::metadata(root.join("p/f")).is_ok());
+    fs::set_permissions(root.join("p"), fs::Permissions::from_mode(0o755))?;
+    if !readable {
+        assert!(matches!(denied, OnDisk::Unreadable));
+    } // else root, who reads it anyway
+    Ok(())
+}
+
+/// Recovery in the run never writes the item's row over another node's row at its target:
+/// the record stays, for the recovery between rounds to judge after its rescan. Overwritten,
+/// that node lost its place here.
+#[test]
+fn recovery_in_the_run_leaves_another_nodes_row() -> R {
+    use super::recover::{Judged, apply};
+    let mut h = Harness::new()?;
+    let (node, other) = (NodeId::new(), NodeId::new());
+    h.local_file("f", other, b"other")?;
+    let record = Placing {
+        base: BaseRow::new(
+            node,
+            NodeState::file(NodeId::ROOT, "f", h.content(b"A")),
+            some_version(),
+        ),
+        target: RelPath::new("f")?,
+        placed_tags: None,
+        prior_tags: Some(Tags::default()),
+        base_at: PlannedBase::Absent,
+        placed_ms: 0,
+    };
+    h.db.write(|s| s.put_placing(&record))?;
+    let row = LocalRow {
+        path: RelPath::new("f")?,
+        node,
+        kind: NodeKind::File,
+        fingerprint: hbsync_platform::stat(&h.cfg.root.join("f"))?.fingerprint(),
+        executable: Some(false),
+        hash: Some(h.content(b"A").hash),
+        tags: None,
+    };
+    let os = h.cfg.os;
+    let at = h.db.write(|s| apply(s, &record, Judged::Settle(row), os))?;
+    assert_eq!(at, None);
+    assert_eq!(h.records()?, [record]);
+    let path = RelPath::new("f")?;
+    assert_eq!(
+        h.db.read(|s| s.get_local(&path))?.map(|r| r.node),
+        Some(other)
+    );
+    Ok(())
+}
+
 /// A record whose file stays unhashed holds its node only so long ([`UNHASHED_HOLD`]): past
 /// it, recovery drops it as main does (the file is then the scan's new item), rather than hold
 /// the node off for good.

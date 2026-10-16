@@ -70,14 +70,8 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateEr
 /// [`UNHASHED_HOLD`] at most: then it goes, as one whose item isn't there (the file is the
 /// scan's new item then).
 pub fn recover_placements(db: &mut StateDb, root: &Path, os: Os) -> Result<(), StateError> {
-    recover_records(db, root, os)
-}
-
-/// How long a record whose file is there but can't be hashed yet holds its node.
-pub const UNHASHED_HOLD: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Every record, judged by the scanned item at its target (the node's own row, or a new one).
-fn recover_records(db: &mut StateDb, root: &Path, os: Os) -> Result<(), StateError> {
+    // Every record, judged by the scanned item at its target (the node's own row, or a new
+    // one).
     let found = db.read(|s| {
         let mut found = Vec::new();
         for p in s.all_placing()? {
@@ -110,6 +104,9 @@ fn recover_records(db: &mut StateDb, root: &Path, os: Os) -> Result<(), StateErr
             .try_for_each(|(p, judged)| apply(s, &p, judged, os).map(drop))
     })
 }
+
+/// How long a record whose file is there but can't be hashed yet holds its node.
+pub const UNHASHED_HOLD: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// What recovery does with a record.
 pub(super) enum Judged {
@@ -161,10 +158,16 @@ pub(super) fn apply(
             Ok(None)
         }
         Judged::Settle(row) => {
+            let at_target = s.get_local(&row.path)?;
             if row.node != node {
                 adopt::take_over(s, row.node, node)?;
-            } else if s.get_local(&row.path)?.as_ref() != Some(&row) {
-                // Read off the disk: the node's row moves there, as the commit does.
+            } else if at_target.as_ref() != Some(&row) {
+                // Read off the disk. Another node's row there is never overwritten: the record
+                // stays, for the recovery between rounds to judge after its rescan.
+                if at_target.is_some_and(|r| r.node != node) {
+                    return Ok(None);
+                }
+                // The node's row moves there, as the commit does.
                 if s.local_by_node(node)?.is_some_and(|r| r.path != row.path) {
                     s.delete_local(node)?;
                 }
@@ -178,6 +181,48 @@ pub(super) fn apply(
             Ok(at)
         }
     }
+}
+
+/// What is at a placement's target on disk, read as the scan reads it.
+pub(super) enum OnDisk {
+    /// Verifiably nothing (not found), or what the scan skips (a link, a special file).
+    Absent,
+    /// Something whose metadata can't be read now (denied, say): it may be the item.
+    Unreadable,
+    /// The item, as `node`'s row; a file not hashed if it can't be read now (locked).
+    Item(LocalRow),
+}
+
+/// Reads the item at `path` (under `root`) as `node`'s row, as the scan would.
+pub(super) fn read_item(
+    root: &Path,
+    path: &RelPath,
+    node: NodeId,
+    algorithm: hbsync_fileio::HashAlgorithm,
+) -> OnDisk {
+    let abs = path.to_native(root);
+    let meta = match hbsync_platform::stat(&abs) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return OnDisk::Absent,
+        Err(_) => return OnDisk::Unreadable,
+    };
+    if matches!(
+        meta.kind,
+        hbsync_platform::EntryKind::Symlink | hbsync_platform::EntryKind::Other
+    ) {
+        return OnDisk::Absent;
+    }
+    let hash = (hbsync_local::scan::kind_of(&meta) == NodeKind::File)
+        .then(|| hbsync_fileio::hash_file(&abs, algorithm).ok())
+        .flatten()
+        .map(|h| h.hash);
+    OnDisk::Item(hbsync_local::scan::row_from(
+        path,
+        node,
+        &meta,
+        hash,
+        tags::read(&abs),
+    ))
 }
 
 /// The folders to rescan for record `p` before recovery judges it: the one its target is in,
