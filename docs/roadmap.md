@@ -123,7 +123,8 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Daemon host** (done 2026-10-09, [spec/daemon.md](spec/daemon.md)): a per-user daemon,
   started at logon by a launchd agent, a systemd user unit or the Windows `Run` key; single
   instance; sleep/resume (a wall-clock gap); network changes only through reconnect backoff
-  and the poll so far
+  so far (the 60 s poll of the drive went 2026-10-16: every reconnect catches up from the
+  feed's cursor)
 - **IPC control API + CLI** (done 2026-10-09): a local socket / named pipe only the user can
   open; `hbsync setup`, `status`, `sync`, `pause`, `resume`, `confirm-deletes`, `start`,
   `stop`, `autostart`, `logout`, `unlink`, `log`

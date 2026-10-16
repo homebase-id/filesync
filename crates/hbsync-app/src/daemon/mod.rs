@@ -7,7 +7,7 @@
 mod account;
 mod answer;
 
-pub use account::Notifications;
+pub use account::{Notifications, Puller, UNANNOUNCED_READ};
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

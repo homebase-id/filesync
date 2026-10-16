@@ -192,7 +192,7 @@ impl AccountStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Hints {
-    /// None: syncs come from local changes and the poll.
+    /// Not yet: the account waits for its credentials or for the identity to answer.
     Off,
     Connecting,
     Connected,
@@ -248,7 +248,7 @@ pub struct FolderStatus {
     /// Entries added to the recently synced list since the daemon started: a client reads
     /// the list again ([`Ask::Recent`]) when this changes.
     pub synced_added: u64,
-    /// Why there is no live watcher (the folder is then rescanned at every poll).
+    /// Why there is no live watcher (the folder is then rescanned once a minute).
     pub watcher_error: Option<String>,
     /// Ignore rules in `.hbsync/ignore`.
     pub rules: usize,
