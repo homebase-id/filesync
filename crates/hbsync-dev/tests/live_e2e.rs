@@ -1,7 +1,9 @@
 //! Two clients syncing two folders through a live identity:
 //! `HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-dev --test live_e2e -- --ignored`.
 //! Needs the credentials `hbsync-register` saves. Both clients sync the whole drive; the test
-//! works and checks inside one top-level folder of its own and deletes it at the end.
+//! works and checks inside one top-level folder of its own and deletes it at the end. The two
+//! share one client registration: they sync when the test says, never on a notification, so
+//! that the socket leaves out a client's own writes (`excludeOwnWrites`) doesn't concern them.
 
 use std::fs;
 use std::ops::{Deref, DerefMut};

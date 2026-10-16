@@ -2,7 +2,10 @@
 //! `HBSYNC_HOME`, set up with `hbsync setup` and running `hbsyncd`, controlled through `hbsync`:
 //! `HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync --test live_daemon -- --ignored`.
 //!
-//! Needs the credentials `hbsync-register` saves (copied into each home as a credentials file).
+//! Needs the credentials `hbsync-register` saves (copied into each home as a credentials file),
+//! and those of a second client (`hbsync-register <identity> --as b`) for the second computer:
+//! the notifications leave out a client's own writes (`excludeOwnWrites`), so two computers on
+//! one token wouldn't hear each other.
 //! Each computer ignores everything on the drive except the test's own top-level folder, which
 //! the test deletes at the end.
 
@@ -24,14 +27,22 @@ struct Computer {
 }
 
 impl Computer {
-    fn set_up(identity: &str, run: &str) -> Res<Computer> {
+    /// A computer with the credentials of `client` (`hbsync-register --as <client>`; `None`:
+    /// the default one).
+    fn set_up(identity: &str, run: &str, client: Option<&str>) -> Res<Computer> {
         let home = Home::new()?;
         let credentials = home.path().join("credentials");
         std::fs::create_dir_all(&credentials)?;
-        std::fs::copy(
-            hbsync_dev::credentials_path(identity)?,
-            credentials.join(format!("{identity}.json")),
-        )?;
+        let saved = hbsync_dev::credentials_path_as(identity, client)?;
+        if !saved.exists() {
+            let register = client.map_or(String::new(), |c| format!(" --as {c}"));
+            return Err(format!(
+                "no credentials at {}: run hbsync-register {identity}{register} first",
+                saved.display()
+            )
+            .into());
+        }
+        std::fs::copy(saved, credentials.join(format!("{identity}.json")))?;
         let folder = home.path().join("Homebase");
         std::fs::create_dir_all(folder.join(".hbsync"))?;
         // Only the test's folder: nothing else on the drive is downloaded.
@@ -126,8 +137,9 @@ fn exists(p: &Path) -> Res<bool> {
 fn two_computers_sync_through_the_daemon() -> Res<()> {
     let identity = hbsync_dev::live_identity()?;
     let run = hbsync_dev::run_name("daemon");
-    let a = Computer::set_up(&identity, &run)?;
-    let b = Computer::set_up(&identity, &run)?;
+    let a = Computer::set_up(&identity, &run, None)?;
+    // A client of its own, as another computer has: it hears a's writes.
+    let b = Computer::set_up(&identity, &run, Some(hbsync_dev::OTHER_CLIENT))?;
     let rel = |p: &str| format!("{run}/{p}");
 
     // A file written on one computer shows up on the other.

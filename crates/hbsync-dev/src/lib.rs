@@ -13,22 +13,47 @@ use hbsync_homebase::{Client, Credentials};
 /// `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json` (default `~/.config`). The product keeps them
 /// in the OS keychain.
 pub fn credentials_path(identity: &str) -> Result<PathBuf, String> {
+    credentials_path_as(identity, None)
+}
+
+/// [`credentials_path`] of one of several clients of `identity` on this machine (`hbsync-register
+/// --as <client>`): `<identity>.<client>.json`; `None` is the default one. Each is a client
+/// registration of its own, as on another computer: a notification subscription leaves out
+/// only its own token's writes (`excludeOwnWrites`), so test "computers" that should hear each
+/// other need one each.
+pub fn credentials_path_as(identity: &str, client: Option<&str>) -> Result<PathBuf, String> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .ok_or("no config folder (HOME unset)")?;
-    Ok(base
-        .join("hbsync")
-        .join("dev")
-        .join(format!("{identity}.json")))
+    let file = match client {
+        None => format!("{identity}.json"),
+        Some(c) => format!("{identity}.{c}.json"),
+    };
+    Ok(base.join("hbsync").join("dev").join(file))
 }
+
+/// The second client the live tests use for another computer.
+pub const OTHER_CLIENT: &str = "b";
 
 /// A client from the credentials `hbsync-register` saved for `identity`.
 pub fn saved_client(identity: &str) -> Result<Client, Box<dyn std::error::Error>> {
-    let path = credentials_path(identity)?;
+    saved_client_as(identity, None)
+}
+
+/// A client from the credentials `hbsync-register --as <client>` saved for `identity`.
+pub fn saved_client_as(
+    identity: &str,
+    client: Option<&str>,
+) -> Result<Client, Box<dyn std::error::Error>> {
+    let path = credentials_path_as(identity, client)?;
     let creds = Credentials::load(&path)?.ok_or_else(|| {
+        let register = match client {
+            None => format!("hbsync-register {identity}"),
+            Some(c) => format!("hbsync-register {identity} --as {c}"),
+        };
         format!(
-            "no credentials for {identity} at {}: run hbsync-register {identity} first",
+            "no credentials for {identity} at {}: run {register} first",
             path.display()
         )
     })?;

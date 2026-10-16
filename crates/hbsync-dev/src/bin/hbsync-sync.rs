@@ -1,8 +1,12 @@
 //! Development tool: syncs a folder with an identity's Filesync drive until stopped.
 //!
 //! ```text
-//! hbsync-sync <identity> <folder> [--once] [--allow-mass-delete]
+//! hbsync-sync <identity> <folder> [--as <client>] [--once] [--allow-mass-delete]
 //! ```
+//!
+//! `--as <client>` syncs with the credentials `hbsync-register --as <client>` saved: two
+//! folders synced at once each need a client of their own to hear the other's changes (the
+//! notifications leave out a client's own writes).
 //!
 //! Uses the credentials `hbsync-register` saved, and the daemon's sync loop
 //! ([`hbsync_app::Runner`]) without the daemon: the account's state DB lives beside the
@@ -30,7 +34,10 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(identity), Some(folder)) = (args.first(), args.get(1)) else {
-        return Err("usage: hbsync-sync <identity> <folder> [--once] [--allow-mass-delete]".into());
+        return Err(
+            "usage: hbsync-sync <identity> <folder> [--as <client>] [--once] [--allow-mass-delete]"
+                .into(),
+        );
     };
     tracing_subscriber::fmt()
         .with_target(false)
@@ -38,7 +45,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
-    let client = hbsync_dev::saved_client(identity)?;
+    let as_client = args
+        .iter()
+        .position(|a| a == "--as")
+        .and_then(|i| args.get(i + 1));
+    let client = hbsync_dev::saved_client_as(identity, as_client.map(String::as_str))?;
     let remote = Arc::new(HomebaseRemote::connect(client.clone())?);
     std::fs::create_dir_all(folder)?;
     let root = std::fs::canonicalize(folder)?;
