@@ -1026,6 +1026,184 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
     }
 }
 
+/// Found by a 150,000-case run (2026-10-16), failing on main too: two devices hold the same
+/// file without a base, both edited against the drive, and fork it to the same copy id
+/// (`fork_id`: same node, same bytes, no base version). The first device's copy is on the drive
+/// (detached) when the second plans its fork: the copy's merged state is the drive's node, not
+/// the fork's, so the fork takes no name (`emit`: `unwrap_or_default`) and the copy is created
+/// on the drive as "". Kept until the fork id is fixed.
+#[test]
+#[ignore = "a conflict copy forked under an id another device's copy has (fork_id)"]
+fn regression_two_devices_fork_to_one_copy_id() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 2,
+            action: CreateFolder { parent: 0, name: 1 },
+        },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 2, name: 0 },
+        },
+        Act {
+            client: 1,
+            action: CreateFile {
+                parent: 0,
+                name: 11,
+            },
+        },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 2 },
+        Plan { client: 0 },
+        Act {
+            client: 2,
+            action: Move {
+                node: 1,
+                parent: 1,
+                name: 8,
+            },
+        },
+        Act {
+            client: 1,
+            action: CreateFile { parent: 0, name: 9 },
+        },
+        Plan { client: 1 },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 1, name: 5 },
+        },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: CreateFile { parent: 1, name: 0 },
+        },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: Delete { node: 15 },
+        },
+        Step { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: Edit { file: 8 },
+        },
+        Step { client: 0 },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 0 },
+        Step { client: 2 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Step { client: 2 },
+        Step { client: 2 },
+        Step { client: 1 },
+        Plan { client: 1 },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 1 },
+        Step { client: 2 },
+    ];
+    run(3, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Found by a 150,000-case run (2026-10-16), failing on main and on sim-role-fixes (d998bb4)
+/// too: a tag added on client 1 is lost ("lost tag \"Red\"") with clients that sync only when
+/// asked and the guard at 1. The class sim-role-fixes works on; kept for it.
+#[test]
+#[ignore = "a lost tag, failing on main: for sim-role-fixes"]
+fn regression_a_tag_lost_when_syncing_only_when_asked() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Act {
+            client: 2,
+            action: CreateFolder { parent: 0, name: 8 },
+        },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 6, name: 6 },
+        },
+        Act {
+            client: 0,
+            action: CreateFolder { parent: 0, name: 3 },
+        },
+        Plan { client: 0 },
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 0, name: 6 },
+        },
+        Plan { client: 2 },
+        Step { client: 0 },
+        Step { client: 2 },
+        Plan { client: 1 },
+        Step { client: 0 },
+        Step { client: 2 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: Edit { file: 0 },
+        },
+        Step { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: Delete { node: 5 },
+        },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: CreateJunk { parent: 0 },
+        },
+        Step { client: 1 },
+        Step { client: 1 },
+        Plan { client: 0 },
+        Act {
+            client: 1,
+            action: Move {
+                node: 12,
+                parent: 1,
+                name: 0,
+            },
+        },
+        Step { client: 0 },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 8 },
+        },
+        Act {
+            client: 1,
+            action: Tag { node: 2, tag: 4 },
+        },
+        Step { client: 0 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Step { client: 0 },
+        Step { client: 0 },
+    ];
+    run_settled(
+        3,
+        Some(1),
+        |sim| sim,
+        |sim| sim.quiesce_announced(300),
+        &events,
+    )
+    .map_err(|e| e.to_string())
+    .unwrap_or_else(|e| panic!("{e}"));
+}
+
 #[test]
 fn tags_meet_across_macos_linux_and_windows() {
     use Action::*;

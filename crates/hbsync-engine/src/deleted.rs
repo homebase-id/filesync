@@ -28,7 +28,8 @@ use hbsync_local::layout;
 pub struct DeletedSummary {
     /// The items deleted on their own.
     pub deletes: usize,
-    /// Every item, those its deletes took along too.
+    /// What emptying all of it now deletes for good: every item, those its deletes took along
+    /// too (live ones included), but a folder holding anything that stays ([`empty_listed`]).
     pub items: usize,
     /// What the listing saw: [`empty_listed`] with it empties exactly that.
     pub listed: Listed,
@@ -49,10 +50,10 @@ pub fn deletes(
     limit: usize,
 ) -> Result<(Vec<(Deleted, usize)>, DeletedSummary), StateError> {
     let mut listing = Listing::read(s)?;
-    let rows = &listing.rows.rows[..listing.roots.len()];
+    let rows = listing.rows.rows[..listing.roots.len()].to_vec();
     let summary = DeletedSummary {
         deletes: listing.deletes().count(),
-        items: rows.len(),
+        items: going(s, rows)?.len(),
         listed: Listed {
             db: s.db_id()?,
             seq: s.removed_seq()?,
@@ -877,7 +878,8 @@ mod tests {
     fn a_live_node_goes_with_its_folder_only_if_taken_along()
     -> Result<(), Box<dyn std::error::Error>> {
         let [outer, f, gone, other, g, h] = [(); 6].map(|_| NodeId::new());
-        let [taken, taken_deep, later, unknown, h_child] = [(); 5].map(|_| NodeId::new());
+        let [taken, taken_deep, later, unknown] = [(); 4].map(|_| NodeId::new());
+        let [h_child, h_child2] = [(); 2].map(|_| NodeId::new());
         let live = |node, parent, changed_at| MirrorRow {
             changed_at,
             ..removed(node, parent, 0).row
@@ -900,26 +902,29 @@ mod tests {
                 s.put_mirror(&live(taken_deep, taken, Some(6)))?;
                 s.put_mirror(&live(later, f, Some(20)))?;
                 s.put_mirror(&live(unknown, g, None))?;
-                s.put_mirror(&live(h_child, h, Some(10)))
+                s.put_mirror(&live(h_child, h, Some(10)))?;
+                s.put_mirror(&live(h_child2, h, Some(9)))
             })?;
             let along: HashMap<NodeId, usize> = db
                 .read(all)?
                 .into_iter()
                 .map(|(d, n)| (d.node, n))
                 .collect();
-            assert_eq!((along[&outer], along[&g], along[&h]), (4, 0, 1));
+            assert_eq!((along[&outer], along[&g], along[&h]), (4, 0, 2));
             let went = match how {
                 "listed" => {
-                    let listing = listed(&mut db)?;
-                    empty_listed(&mut db, &remote, &listing)?
+                    // The count it shows is what emptying takes.
+                    let (_, summary) = db.read(|s| deletes(s, 0))?;
+                    assert_eq!(summary.items, 7);
+                    empty_listed(&mut db, &remote, &summary.listed)?
                 }
                 "deletes" => empty(&mut db, &remote, &[outer, other, g, h])?,
                 _ => expire(&mut db, &remote, 11)?,
             };
-            assert_eq!(went, 6, "{how}");
+            assert_eq!(went, 7, "{how}");
             assert_eq!(left(&mut db)?, sorted(vec![outer, f, g]), "{how}");
             let mut live_left = Vec::new();
-            for n in [taken, taken_deep, later, unknown, h_child] {
+            for n in [taken, taken_deep, later, unknown, h_child, h_child2] {
                 if db.read(|s| s.get_mirror(n))?.is_some() {
                     live_left.push(n);
                 }
