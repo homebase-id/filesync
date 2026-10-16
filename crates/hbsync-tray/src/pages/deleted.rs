@@ -62,6 +62,7 @@ impl Server {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
         let now = words::now();
+        let shown = control::Shown::of(&items);
         let main = control::configured(&self.paths)
             .ok()
             .flatten()
@@ -104,12 +105,14 @@ impl Server {
              A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>\
              <form method=post action=\"{empty}\"><input type=hidden name=count value={count}>\
              <input type=hidden name=until value={until}>\
+             <input type=hidden name=open value=\"{open}\">\
              <button class=secondary>Empty now…</button></form>",
             days = self.keep_days(),
             empty = self.pages.url("deleted/empty"),
             count = items.len(),
-            // Newest first: what the user sees, nothing deleted after this look.
-            until = items[0].deleted.removed_at_ms,
+            // What the user sees, nothing deleted after this look.
+            until = shown.until,
+            open = escape(&shown.open_field()),
         )
     }
 
@@ -120,10 +123,12 @@ impl Server {
              <p>The {count} items in it are deleted for good, from your Homebase and every \
              device. This can't be undone.</p>\
              <form method=post action=\"{url}\"><input type=hidden name=until value=\"{until}\">\
+             <input type=hidden name=open value=\"{open}\">\
              <button>Delete them for good</button></form>\
              <p class=small>Changed your mind? Leave this page: nothing is deleted.</p>",
             count = field("count"),
             until = field("until"),
+            open = field("open"),
             url = self.pages.url("deleted/empty/yes"),
         )
     }
@@ -150,8 +155,10 @@ impl Server {
         let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
             return "Nothing was deleted.".into();
         };
+        let shown =
+            control::Shown::with_open_field(at_ms, form.get("open").map_or("", String::as_str));
         let emptied = control::deleted(&self.paths, usize::MAX).and_then(|items| {
-            control::empty_deleted_until(&self.paths, &items.unwrap_or_default(), at_ms)
+            control::empty_shown(&self.paths, &items.unwrap_or_default(), &shown)
         });
         match emptied {
             Ok(()) => {

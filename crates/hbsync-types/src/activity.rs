@@ -68,6 +68,12 @@ pub struct Progress {
     pub bytes_total: u64,
 }
 
+/// A removal's time for comparing (Unix ms): an open one (this device's own, its time not back
+/// from the server yet) is the newest of all.
+pub fn removal_time(removed_at_ms: Option<i64>) -> i64 {
+    removed_at_ms.unwrap_or(i64::MAX)
+}
+
 /// One item in Recently deleted (node schema): out of the tree, restorable until the purge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Deleted {
@@ -80,8 +86,10 @@ pub struct Deleted {
     /// Files only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
-    /// Unix ms.
-    pub removed_at_ms: i64,
+    /// Unix ms, the server's time; `None` for this device's own removal until the feed brings
+    /// that time back (moments later): just now, and newer than any other.
+    #[serde(default)]
+    pub removed_at_ms: Option<i64>,
     /// The node whose delete took it along (itself, or a folder it was in): restoring that
     /// one restores this one.
     pub root: NodeId,
@@ -89,4 +97,11 @@ pub struct Deleted {
     /// folder here syncs. `path` is below that folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+}
+
+impl Deleted {
+    /// [`removal_time`]: an open one is the newest.
+    pub fn time(&self) -> i64 {
+        removal_time(self.removed_at_ms)
+    }
 }

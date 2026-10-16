@@ -201,6 +201,21 @@ impl Drive {
         Ok(())
     }
 
+    /// Records which login (`by`, a fingerprint of its key) the remote seals file tokens under
+    /// from now on; if another one sealed those stored, they are forgotten (a token doesn't open
+    /// under another login's key: the next update of each file reads its header first, and the
+    /// token it writes is the new login's). Whether they were.
+    pub fn tokens_sealed_by(&self, by: &str) -> Result<bool, StateError> {
+        self.account().write(|s| {
+            let changed = s.account_kv(keys::TOKENS_SEALED_BY)?.as_deref() != Some(by);
+            if changed {
+                s.clear_tokens()?;
+                s.set_account_kv(keys::TOKENS_SEALED_BY, by)?;
+            }
+            Ok(changed)
+        })
+    }
+
     /// Restores these items of Recently deleted (each with what was deleted with it); the
     /// next syncs bring them back. Returns how many items came back.
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {

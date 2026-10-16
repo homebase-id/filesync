@@ -11,8 +11,8 @@ use std::io::{Read, Write};
 
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    ContentHash, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId, Target,
-    VersionTag,
+    ContentHash, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
+    Target, VersionTag,
 };
 
 pub mod contract;
@@ -119,6 +119,65 @@ pub struct ChangesPage {
     /// Rows left out because they can't be read as nodes (another app's file, one that doesn't
     /// decrypt), each with why.
     pub skipped: Vec<String>,
+}
+
+/// One row of the change feed as a slim page carries it: which version of which file changed,
+/// without the header (Homebase's minimal `query-batch`, odin-core #1967).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeRef {
+    pub file_id: RemoteFileId,
+    pub version: VersionTag,
+    /// A tombstone.
+    pub deleted: bool,
+    /// As in [`RemoteHeader`]; `None` for a tombstone.
+    pub parent: Option<NodeId>,
+    /// As in [`RemoteHeader`].
+    pub removed_at: Option<i64>,
+    /// As in [`RemoteHeader`].
+    pub changed_at: Option<i64>,
+}
+
+impl ChangeRef {
+    pub fn of(header: &RemoteHeader) -> ChangeRef {
+        ChangeRef {
+            file_id: header.file_id,
+            version: header.version,
+            deleted: header.is_deleted(),
+            parent: (!header.is_deleted()).then_some(header.parent),
+            removed_at: header.removed_at,
+            changed_at: header.changed_at,
+        }
+    }
+
+    pub fn at(&self) -> RemoteRef {
+        RemoteRef {
+            file_id: self.file_id,
+            version: self.version,
+        }
+    }
+}
+
+/// One page of the change feed in [`ChangeRef`]s: the same rows and cursor as
+/// [`Remote::changes`] gives for the same cursor and limit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefsPage {
+    pub refs: Vec<ChangeRef>,
+    pub cursor: String,
+    pub has_more: bool,
+    /// Rows that couldn't be read slim: the page is read whole, which says what they are.
+    pub unread: usize,
+}
+
+impl RefsPage {
+    /// A whole page as refs: for a remote that has only whole pages (a test double).
+    pub fn of(page: &ChangesPage) -> RefsPage {
+        RefsPage {
+            refs: page.entries.iter().map(ChangeRef::of).collect(),
+            cursor: page.cursor.clone(),
+            has_more: page.has_more,
+            unread: 0,
+        }
+    }
 }
 
 /// A node's header as a client writes it, on create and on every update. Homebase replaces
@@ -235,6 +294,12 @@ pub trait Remote: Send + Sync {
     /// Includes tombstones.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage>;
 
+    /// The same page as [`Remote::changes`], each row only as a [`ChangeRef`]: what the feed
+    /// compares with what it has before reading a page whole (`hbsync_engine::feed::pull`). A
+    /// row the remote can't read as a node is in it too (unknown: the page is read whole and
+    /// skips it).
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage>;
+
     /// The current header of a file, live or deleted.
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader>;
 
@@ -272,6 +337,10 @@ pub trait Remote: Send + Sync {
 impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         (**self).changes(cursor, limit)
+    }
+
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
+        (**self).change_refs(cursor, limit)
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {

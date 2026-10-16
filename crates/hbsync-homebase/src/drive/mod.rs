@@ -11,7 +11,8 @@ use std::rc::Rc;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    ChangesPage, NodeMeta, Paced, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
+    ChangesPage, NodeMeta, Paced, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
+    Upload,
 };
 use hbsync_types::schema::{NodeContent, PAYLOAD_KEY};
 use hbsync_types::{ContentHash, RemoteFileId, RemoteRef, Target, VersionTag};
@@ -224,6 +225,30 @@ impl HomebaseRemote {
         }
     }
 
+    /// One page of the change feed in `shape`,
+    /// and the cursor after it.
+    fn feed_page(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+        shape: wire::Shape,
+    ) -> Result<(wire::QueryBatchResponse, String)> {
+        let mut page: wire::QueryBatchResponse = self
+            .client
+            .post(
+                &format!("{}/query-batch", self.files()),
+                &wire::feed_query(cursor, limit.max(1), shape),
+            )
+            .map_err(remote_error)?;
+        // An empty page of an empty drive has no cursor yet: start from the beginning.
+        let next = page
+            .cursor_state
+            .take()
+            .or_else(|| cursor.map(str::to_owned))
+            .unwrap_or_default();
+        Ok((page, next))
+    }
+
     /// The header of `at`, which must still be that version and not deleted.
     fn current(&self, at: RemoteRef) -> Result<wire::FileHeader> {
         let header = self.raw_header(at.file_id)?;
@@ -348,14 +373,7 @@ impl<R: Read> Read for Tap<R> {
 impl Remote for HomebaseRemote {
     /// Rows that aren't usable sync nodes come back in [`ChangesPage::skipped`], with why.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
-        let size = limit.max(1);
-        let page: wire::QueryBatchResponse = self
-            .client
-            .post(
-                &format!("{}/query-batch", self.files()),
-                &wire::feed_query(cursor, size),
-            )
-            .map_err(remote_error)?;
+        let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
         let mut entries = Vec::with_capacity(page.search_results.len());
         let mut skipped = Vec::new();
         for row in &page.search_results {
@@ -369,13 +387,33 @@ impl Remote for HomebaseRemote {
         }
         Ok(ChangesPage {
             entries,
-            // An empty page of an empty drive has no cursor yet: start from the beginning.
-            cursor: page
-                .cursor_state
-                .or_else(|| cursor.map(str::to_owned))
-                .unwrap_or_default(),
+            cursor,
             has_more: page.has_more_rows,
             skipped,
+        })
+    }
+
+    /// A minimal page (odin-core #1967): what changed, without the headers.
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
+        let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Minimal)?;
+        // A server without #1967 ignores the shape and sends headers: an empty page there
+        // would skip what changed.
+        let rows = page.file_refs.ok_or_else(|| {
+            RemoteError::Fatal("the server doesn't page the feed slim (odin-core #1967)".into())
+        })?;
+        let mut refs = Vec::with_capacity(rows.len());
+        let mut unread = 0;
+        for row in &rows {
+            match serde_json::from_str::<wire::FileRef>(row.get()) {
+                Ok(r) => refs.push(r.to_ref()),
+                Err(_) => unread += 1,
+            }
+        }
+        Ok(RefsPage {
+            refs,
+            cursor,
+            has_more: page.has_more_rows,
+            unread,
         })
     }
 

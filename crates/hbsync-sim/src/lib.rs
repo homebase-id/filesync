@@ -169,6 +169,8 @@ struct Server {
     /// `updated`, [`time`]).
     removed_at: BTreeMap<NodeId, i64>,
     next: u128,
+    /// Which client wrote each version ([`time`]); one not in it was the users' elsewhere.
+    writer: BTreeMap<i64, usize>,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     ever: BTreeSet<NodeId>,
     /// The first write that pointed a node at a folder the server never had.
@@ -185,6 +187,14 @@ impl Server {
     fn uuid(&mut self) -> Uuid {
         self.next += 1;
         Uuid::from_u128(self.next)
+    }
+
+    /// Whether every write after `at` was client `c`'s: then its feed may not have brought its
+    /// own write of `at` back yet, as it brought nothing later (the feed is in order); after
+    /// a write from elsewhere it has, so its time is known.
+    fn only_own_writes_since(&self, at: i64, c: usize) -> bool {
+        let now = self.next as i64;
+        (at + 1..=now).all(|t| self.writer.get(&t) == Some(&c))
     }
 
     /// Puts `node` in Recently deleted: a write, at its time.
@@ -283,6 +293,10 @@ struct Client {
     plan: VecDeque<(Op, u8)>,
     /// What the pending plan removed to Recently deleted so far.
     removed_by_plan: BTreeSet<NodeId>,
+    /// This client's removals whose time it doesn't know yet (drive ids): the engine's own
+    /// removal is open until the feed brings it back. Its next plan sees them so, where that
+    /// is how an engine could see them ([`Server::only_own_writes_since`]); later plans don't.
+    unconfirmed: BTreeSet<NodeId>,
     /// Nodes parked under a temporary name, with their original (parent, name).
     parked: HashMap<NodeId, (NodeId, String)>,
     /// The local tree when the pending plan was made (for the fingerprint guard).
@@ -311,6 +325,7 @@ impl Client {
             extra: HashMap::new(),
             plan: VecDeque::new(),
             removed_by_plan: BTreeSet::new(),
+            unconfirmed: BTreeSet::new(),
             parked: HashMap::new(),
             planned_local: Tree::new(),
             planned_remote: Tree::new(),
@@ -342,6 +357,8 @@ pub struct Sim {
     written: BTreeSet<u64>,
     pub ops_executed: usize,
     pub conflicts: usize,
+    /// Plans that saw a removal's time open (the client's own, not back yet).
+    pub open_times: usize,
     /// Items that stopped being tracked so far (each gets a new id).
     released: u64,
     /// Record every plan and skipped operation in `trace` (debugging).
@@ -389,6 +406,7 @@ impl Sim {
             written: BTreeSet::new(),
             ops_executed: 0,
             conflicts: 0,
+            open_times: 0,
             released: 0,
             verbose: false,
             trace: Vec::new(),
@@ -1017,7 +1035,18 @@ impl Sim {
                     parent: client.coords.from_drive(n.state.parent),
                     ..n.state.clone()
                 };
-                let at = self.server.removed_at[&client.coords.to_drive(folder)];
+                let drive = client.coords.to_drive(folder);
+                let at = self.server.removed_at[&drive];
+                // The engine's own removal: open, the newest of all, while its feed hasn't
+                // brought it back.
+                let at = if client.unconfirmed.contains(&drive)
+                    && self.server.only_own_writes_since(at, c)
+                {
+                    self.open_times += 1;
+                    i64::MAX
+                } else {
+                    at
+                };
                 let parent = state.parent;
                 input.removed.insert(folder, Removed { at, state });
                 folder = parent;
@@ -1107,6 +1136,8 @@ impl Sim {
         client.held = plan.held.iter().map(Op::node).collect();
         client.plan = plan.ops.into_iter().map(|op| (op, 0)).collect();
         client.removed_by_plan.clear();
+        // The feed brings this client's removals back by its next plan.
+        client.unconfirmed.clear();
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
     }
@@ -1176,7 +1207,11 @@ impl Sim {
         // Every remote write that lands stays in the folder's part of the drive (§12): what it
         // writes, and where to (judged before it runs; one refused on its version wrote nothing).
         let breach = self.breaches(c, &op);
+        let before = self.server.next;
         let outcome = self.execute(c, &op);
+        for t in before + 1..=self.server.next {
+            self.server.writer.insert(t as i64, c);
+        }
         if outcome == Outcome::Done && breach && self.scope_breach.is_none() {
             self.scope_breach = Some(format!("{} {op:?}", self.clients[c].name));
         }
@@ -1556,6 +1591,7 @@ impl Sim {
                                 Some(format!("{} removed {node} after {r} in it", client.name));
                         }
                         client.removed_by_plan.insert(node);
+                        client.unconfirmed.insert(node);
                     }
                     self.clients[c].planned_remote.remove(node);
                     // Its tags go with it: a tag change loses to a delete (§11), and one brought

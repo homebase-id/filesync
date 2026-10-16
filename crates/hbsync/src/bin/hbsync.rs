@@ -299,7 +299,7 @@ fn run(command: Command) -> Res<ExitCode> {
             }
             match picked {
                 // Newest first.
-                None => daemon::empty_deleted_until(&paths, &list, list[0].deleted.removed_at_ms)?,
+                None => daemon::empty_shown(&paths, &list, &daemon::Shown::of(&list))?,
                 Some(picked) => {
                     for (identity, nodes) in picked {
                         daemon::account(&paths, &identity, AccountControl::EmptyDeleted { nodes })?;

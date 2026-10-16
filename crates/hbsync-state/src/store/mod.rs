@@ -115,12 +115,22 @@ pub struct MirrorRow {
     pub changed_at: Option<i64>,
 }
 
-/// A remote node in Recently deleted: its row as it was, and when it went there (Unix ms, the
-/// server's time; this device's own until its removal comes back through the feed).
+/// A remote node in Recently deleted: its row as it was, and when it went there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedRow {
     pub row: MirrorRow,
-    pub removed_at: i64,
+    /// Unix ms, the server's time of the removal. Open (`None`) for this device's own removal
+    /// until the feed brings it back: never this device's clock, and the newest of all where
+    /// times are compared ([`RemovedRow::time`]).
+    pub removed_at: Option<i64>,
+}
+
+impl RemovedRow {
+    /// The removal's time for comparing: an open one is the newest
+    /// ([`hbsync_types::activity::removal_time`]).
+    pub fn time(&self) -> i64 {
+        hbsync_types::activity::removal_time(self.removed_at)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

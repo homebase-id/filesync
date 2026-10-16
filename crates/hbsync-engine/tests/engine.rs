@@ -8,7 +8,9 @@ use std::sync::{Arc, Mutex};
 use hbsync_engine::exec::CrashPoint;
 use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
-use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
+use hbsync_remote::{
+    ChangesPage, NodeMeta, RefsPage, Remote, RemoteHeader, Result as RemoteResult, Upload,
+};
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
 use hbsync_types::{NodeId, RemoteFileId, Target, VersionTag};
@@ -230,6 +232,9 @@ impl Remote for StopAfterCreates {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
         self.inner.changes(cursor, limit)
     }
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
+        self.inner.change_refs(cursor, limit)
+    }
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
@@ -328,6 +333,9 @@ impl SlowWrites {
 impl Remote for SlowWrites {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
         self.inner.changes(cursor, limit)
+    }
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
+        self.inner.change_refs(cursor, limit)
     }
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
@@ -1998,7 +2006,9 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     );
 
     // Empty until a moment: what was deleted after it stays.
-    let until = find(&mut a, "P/y.txt")?.removed_at_ms;
+    let until = find(&mut a, "P/y.txt")?
+        .removed_at_ms
+        .ok_or("confirmed by the end of the sync")?;
     std::thread::sleep(std::time::Duration::from_millis(5));
     fs::remove_file(a.root.join("keep.txt"))?;
     a.write("other.txt", "o")?; // not every file deleted (the guard)
@@ -2540,5 +2550,58 @@ fn a_power_cut_after_a_folder_came_back_keeps_one() -> R {
     a.sync()?;
     assert_eq!(b.tree_text(""), ["G/", "keep.txt = k"]);
     assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// The feed comes slim first (odin-core #1967): this device's own writes coming back are
+/// versions it knows, so its pages are never read whole; its removals reach Recently deleted
+/// from the slim rows, with the server's times. Another device, to which they are new, reads
+/// them whole.
+#[test]
+fn own_writes_come_back_slim() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    for i in 0..20 {
+        a.write(&format!("Photos/{i}.jpg"), format!("{i}"))?;
+    }
+    a.write("Photos/2024/y.jpg", "y")?;
+    a.sync()?;
+    // The first read has no cursor: all of it is new, so it is read whole.
+    let first = a.remote.faults().full_pages;
+    assert_eq!(first, 1, "the first read, of an empty drive");
+    fs::rename(a.root.join("Photos/0.jpg"), a.root.join("Photos/zero.jpg"))?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    a.sync()?;
+    {
+        let faults = a.remote.faults();
+        assert_eq!(faults.full_pages, first, "its own writes, slim");
+        assert!(faults.ref_pages > 0);
+    }
+    let listed = a.recently_deleted(100)?;
+    assert_eq!(listed.len(), 23, "{listed:?}");
+    let photos = listed
+        .iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    assert!(listed.iter().all(|i| i.root == photos.node), "{listed:?}");
+    let server_times: Vec<i64> = server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .removed()
+        .filter_map(|h| h.removed_at)
+        .collect();
+    assert!(
+        listed
+            .iter()
+            .all(|i| i.removed_at_ms.is_some_and(|t| server_times.contains(&t))),
+        "the server's times: {listed:?}"
+    );
+
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert!(b.remote.faults().full_pages > 0, "new to b: read whole");
+    assert_eq!(b.recently_deleted(100)?.len(), 23);
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     Ok(())
 }

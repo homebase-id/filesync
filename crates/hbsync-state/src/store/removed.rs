@@ -39,6 +39,58 @@ impl Store<'_> {
         self.fan_out(row.node, row.parent)
     }
 
+    /// Records the server's time of a removal this device made, open until now
+    /// ([`RemovedRow::removed_at`]); a time already known stays.
+    pub fn confirm_removed(&self, at: RemoteRef, removed_at: i64) -> Result<()> {
+        self.prep(
+            "UPDATE removed SET removed_at = ?3 \
+             WHERE file_id = ?1 AND version_tag = ?2 AND removed_at IS NULL",
+        )?
+        .execute(params![
+            at.file_id.0.as_bytes(),
+            at.version.0.as_bytes(),
+            removed_at
+        ])?;
+        Ok(())
+    }
+
+    /// Forgets every file's token, in the mirror and Recently deleted: they were sealed under
+    /// a login that is no longer this one's. The next update of each reads its header first.
+    pub fn clear_tokens(&self) -> Result<()> {
+        self.prep("UPDATE remote SET token = NULL WHERE token IS NOT NULL")?
+            .execute([])?;
+        self.prep("UPDATE removed SET token = NULL WHERE token IS NOT NULL")?
+            .execute([])?;
+        Ok(())
+    }
+
+    /// Whether the store has every one of `versions`, each `(version, removed)` in Recently
+    /// deleted or else the mirror: one query (its text differs by length: not cached).
+    pub fn known(&self, versions: &[(RemoteRef, bool)]) -> Result<bool> {
+        if versions.is_empty() {
+            return Ok(true);
+        }
+        let rows = vec!["(?, ?, ?)"; versions.len()].join(", ");
+        let sql = format!(
+            "WITH q(f, v, r) AS (VALUES {rows}) SELECT NOT EXISTS (SELECT 1 FROM q WHERE \
+             CASE WHEN q.r THEN NOT EXISTS (SELECT 1 FROM removed \
+                 WHERE file_id = q.f AND version_tag = q.v) \
+             ELSE NOT EXISTS (SELECT 1 FROM remote \
+                 WHERE file_id = q.f AND version_tag = q.v) END)"
+        );
+        let params = versions.iter().flat_map(|(at, removed)| {
+            [
+                rusqlite::types::Value::Blob(at.file_id.0.as_bytes().to_vec()),
+                rusqlite::types::Value::Blob(at.version.0.as_bytes().to_vec()),
+                rusqlite::types::Value::Integer(i64::from(*removed)),
+            ]
+        });
+        Ok(self
+            .conn
+            .prepare(&sql)?
+            .query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
+    }
+
     pub fn removed_by_node(&self, node: NodeId) -> Result<Option<RemovedRow>> {
         match self.one(
             &format!("{REMOVED_SELECT} WHERE node = ?1"),
@@ -72,15 +124,18 @@ impl Store<'_> {
         )
     }
 
-    /// Recently deleted, newest first.
+    /// Recently deleted, newest first: NULL (an open time) first, as
+    /// [`hbsync_types::activity::removal_time`] has it.
     pub fn list_removed(&self, limit: usize) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
-            &format!("{REMOVED_SELECT} ORDER BY removed_at DESC, name LIMIT ?1"),
+            &format!(
+                "{REMOVED_SELECT} ORDER BY removed_at IS NULL DESC, removed_at DESC, name LIMIT ?1"
+            ),
             [i64::try_from(limit).unwrap_or(i64::MAX)],
         )
     }
 
-    /// What was removed before `at_ms` (Unix ms), oldest first.
+    /// What was removed before `at_ms` (Unix ms), oldest first; an open time isn't.
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
             &format!("{REMOVED_SELECT} WHERE removed_at < ?1 ORDER BY removed_at"),

@@ -29,8 +29,8 @@ use hbsync_types::{
 };
 
 use crate::{
-    ChangesPage, NodeMeta, PayloadInfo, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
-    Upload,
+    ChangesPage, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader,
+    Result, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -440,6 +440,11 @@ pub struct Faults {
     pub served: u64,
     /// Updates that came without a token (on Homebase: a header read first), for assertions.
     pub updates_without_token: usize,
+    /// Feed pages read whole ([`Remote::changes`]) and as refs ([`Remote::change_refs`]).
+    pub full_pages: usize,
+    pub ref_pages: usize,
+    /// Slim pages say one of their rows couldn't be read (a row the client doesn't decode).
+    pub unread_refs: bool,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -553,7 +558,21 @@ fn replay<T>(
 impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
+        self.faults().full_pages += 1;
         self.server().changes(cursor, limit)
+    }
+
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
+        self.gate()?;
+        let unread = {
+            let mut faults = self.faults();
+            faults.ref_pages += 1;
+            usize::from(faults.unread_refs)
+        };
+        Ok(RefsPage {
+            unread,
+            ..RefsPage::of(&self.server().changes(cursor, limit)?)
+        })
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {

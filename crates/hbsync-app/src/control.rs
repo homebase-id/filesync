@@ -101,6 +101,76 @@ pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> 
     )
 }
 
+/// What emptying Recently deleted takes after the user saw it: everything up to the newest
+/// time the server confirmed among what was shown (anything deleted after the look is newer),
+/// and this device's own removals shown with their time still open, by node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Shown {
+    pub until: i64,
+    /// `(identity, node)`.
+    pub open: Vec<(String, hbsync_types::NodeId)>,
+}
+
+impl Shown {
+    pub fn of(items: &[DeletedItem]) -> Shown {
+        Shown {
+            until: items
+                .iter()
+                .filter_map(|i| i.deleted.removed_at_ms)
+                .max()
+                .unwrap_or(0),
+            open: items
+                .iter()
+                .filter(|i| i.deleted.removed_at_ms.is_none())
+                .map(|i| (i.identity.clone(), i.deleted.node))
+                .collect(),
+        }
+    }
+
+    /// The open ones as a form field: `identity/node`, comma-separated.
+    pub fn open_field(&self) -> String {
+        let pairs: Vec<String> = self
+            .open
+            .iter()
+            .map(|(identity, node)| format!("{identity}/{}", node.0))
+            .collect();
+        pairs.join(",")
+    }
+
+    /// [`Shown::open_field`] read back; what doesn't read is left out.
+    pub fn with_open_field(until: i64, field: &str) -> Shown {
+        let open = field
+            .split(',')
+            .filter_map(|pair| {
+                let (identity, node) = pair.split_once('/')?;
+                Some((
+                    identity.to_owned(),
+                    hbsync_types::NodeId(node.parse().ok()?),
+                ))
+            })
+            .collect();
+        Shown { until, open }
+    }
+}
+
+/// Empties Recently deleted of what was `shown`, in every account of `items` (as listed now).
+pub fn empty_shown(paths: &Paths, items: &[DeletedItem], shown: &Shown) -> Result<()> {
+    empty_deleted_until(paths, items, shown.until)?;
+    let mut open: std::collections::BTreeMap<&str, Vec<hbsync_types::NodeId>> =
+        std::collections::BTreeMap::new();
+    for (identity, node) in &shown.open {
+        open.entry(identity).or_default().push(*node);
+    }
+    for (identity, nodes) in open {
+        account(
+            paths,
+            identity,
+            crate::protocol::AccountControl::EmptyDeleted { nodes },
+        )?;
+    }
+    Ok(())
+}
+
 /// Deletes for good what Recently deleted had until `at_ms` (Unix ms, its newest item the user
 /// saw), in every account of `items`: anything deleted since is newer.
 pub fn empty_deleted_until(paths: &Paths, items: &[DeletedItem], at_ms: i64) -> Result<()> {
@@ -360,6 +430,33 @@ pub fn unlink(paths: &Paths) -> Result<Option<Unlinked>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What emptying takes after a look: up to the newest confirmed time, and the open items
+    /// by node, also through the tray's form field.
+    #[test]
+    fn emptying_takes_what_was_shown_the_open_items_too() {
+        use hbsync_types::activity::Deleted;
+        use hbsync_types::{NodeId, NodeKind};
+        let item = |identity: &str, at: Option<i64>| DeletedItem {
+            identity: identity.into(),
+            deleted: Deleted {
+                node: NodeId::new(),
+                parent: NodeId::ROOT,
+                path: "x".into(),
+                kind: NodeKind::File,
+                size: None,
+                removed_at_ms: at,
+                root: NodeId::ROOT,
+                folder: None,
+            },
+        };
+        let items = [item("a", None), item("a", Some(7)), item("b", Some(9))];
+        let shown = Shown::of(&items);
+        assert_eq!(shown.until, 9);
+        assert_eq!(shown.open, [("a".to_owned(), items[0].deleted.node)]);
+        assert_eq!(Shown::with_open_field(9, &shown.open_field()), shown);
+        assert_eq!(Shown::with_open_field(3, "").open, []);
+    }
 
     #[test]
     fn an_older_daemon_is_told_by_its_refusal() {

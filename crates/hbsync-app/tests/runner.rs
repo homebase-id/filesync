@@ -206,6 +206,8 @@ fn the_drive_is_read_on_a_timer_only_while_not_connected() -> R {
     assert!(!b.has("x.txt"), "too soon, or paused");
     n.tick(t0 + UNANNOUNCED_READ, false);
     wait_until("b read the drive", || b.has("x.txt"))?;
+    // The sync that brought it reads the feed once more at its end: done before y.txt.
+    wait_until("b is idle", || b.status().state == State::Idle)?;
 
     // Connected (while paused: no pull either): no timer any more.
     n.event(Event::Connected, t0, true);

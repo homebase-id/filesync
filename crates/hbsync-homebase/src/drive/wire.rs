@@ -7,7 +7,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use hbsync_remote::{NodeMeta, PayloadInfo, RemoteBody, RemoteHeader};
+use hbsync_remote::{ChangeRef, NodeMeta, PayloadInfo, RemoteBody, RemoteHeader};
 use hbsync_types::schema::{
     ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY,
 };
@@ -93,14 +93,86 @@ pub struct QueryBatchResponse {
     /// ignores are skipped, not built into a tree).
     #[serde(default)]
     pub search_results: Vec<Box<serde_json::value::RawValue>>,
+    /// The rows of a [`Shape::Minimal`] page, which has no `searchResults`; absent from a
+    /// server without odin-core #1967. Raw, as `searchResults`: one row the client can't read
+    /// doesn't fail the page.
+    pub file_refs: Option<Vec<Box<serde_json::value::RawValue>>>,
+}
+
+/// One row of a minimal `query-batch` page (odin-core #1967 `QueryBatchFileRef`, **[verified]**):
+/// the fields the client reads; the others (fileType, created, uniqueId, …) are skipped.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileRef {
+    pub file_id: Uuid,
+    pub version_tag: Uuid,
+    pub file_state: String,
+    #[serde(default)]
+    pub archival_status: i32,
+    /// The parent node, as the header's: omitted when empty.
+    pub group_id: Option<Uuid>,
+    /// Unix ms, as the header's `updated`.
+    #[serde(default)]
+    pub updated: i64,
+}
+
+impl FileRef {
+    /// As [`to_remote`] reads the same row's header ([`Times`]).
+    pub fn to_ref(&self) -> ChangeRef {
+        let times = Times::of(&self.file_state, self.archival_status, self.updated);
+        ChangeRef {
+            file_id: RemoteFileId(self.file_id),
+            version: VersionTag(self.version_tag),
+            deleted: times.deleted,
+            parent: self.group_id.map(NodeId).filter(|_| !times.deleted),
+            removed_at: times.removed_at,
+            changed_at: times.changed_at,
+        }
+    }
+}
+
+/// What a row's state, status and `updated` say, read alike from a header and a minimal row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Times {
+    pub deleted: bool,
+    /// In Recently deleted since: the status says whether it's removed, the header's `updated`
+    /// when, the server's time of the last write (odin-core's `record.modified`, **[verified]**
+    /// `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no sharing,
+    /// reactions or local app data, which move it too).
+    pub removed_at: Option<i64>,
+    /// The server's time of this version. A tombstone has neither.
+    pub changed_at: Option<i64>,
+}
+
+impl Times {
+    pub fn of(file_state: &str, archival_status: i32, updated: i64) -> Times {
+        let deleted = file_state == "deleted";
+        Times {
+            deleted,
+            removed_at: (!deleted && archival_status == ARCHIVAL_REMOVED).then_some(updated),
+            changed_at: (!deleted).then_some(updated),
+        }
+    }
+}
+
+/// What each row of a feed page carries (`resultShape`, odin-core #1967).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    /// The full header.
+    Full,
+    /// Only what identifies the change: a [`FileRef`].
+    Minimal,
 }
 
 /// The `query-batch` body for one page of the change feed: every change to a sync node,
-/// tombstones included, oldest first.
-pub fn feed_query(cursor: Option<&str>, limit: usize) -> Value {
+/// tombstones included, oldest first. Both shapes page alike: the same rows and cursor.
+pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
     let mut options = json!({
         "maxRecords": limit.max(1),
-        "includeMetadataHeader": true,
+        "resultShape": match shape {
+            Shape::Full => "full",
+            Shape::Minimal => "minimal",
+        },
         "sorting": "anyChangeDate",
         "ordering": "oldestFirst",
     });
@@ -143,13 +215,12 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 .map_err(|e| format!("file {id}: content: {e}"))?;
             let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
-            // The status says whether it's removed; the header's `updated` when: the server's
-            // time of the last write (odin-core's `record.modified`, **[verified]**
-            // `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no
-            // sharing, reactions or local app data, which move it too).
-            removed_at =
-                (meta.app_data.archival_status == ARCHIVAL_REMOVED).then_some(meta.updated);
-            changed_at = Some(meta.updated);
+            let times = Times::of(
+                &header.file_state,
+                meta.app_data.archival_status,
+                meta.updated,
+            );
+            (removed_at, changed_at) = (times.removed_at, times.changed_at);
             // The stored size of an encrypted payload isn't the file's: only `size` tells it.
             if kind == NodeKind::File && content.size.is_none() {
                 return Err(format!("file {id}: no size (node schema v1)"));
@@ -576,6 +647,45 @@ mod tests {
         restored.file_metadata.app_data.archival_status = 0;
         let header = to_remote(as_stored(restored)?, &SS)?;
         assert!(header.removed_at.is_none() && header.state().is_some());
+        Ok(())
+    }
+
+    /// A minimal page's rows as odin-core #1967 sends them read as the same rows' headers do:
+    /// removed from the status at `updated`, a tombstone without times.
+    #[test]
+    fn minimal_rows_read_as_their_headers() -> R {
+        let page: QueryBatchResponse = serde_json::from_str(
+            r#"{"cursorState": "c", "hasMoreRows": true, "queryTime": 1, "fileRefs": [
+                {"fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
+                 "fileType": 1, "dataType": 0, "archivalStatus": 2,
+                 "versionTag": "22222222-2222-2222-2222-222222222222",
+                 "created": 5, "updated": 9, "fileByteCount": 3,
+                 "uniqueId": "33333333-3333-3333-3333-333333333333"},
+                {"fileId": "44444444-4444-4444-4444-444444444444", "fileState": "deleted",
+                 "fileType": 1, "dataType": 0, "archivalStatus": 0,
+                 "versionTag": "55555555-5555-5555-5555-555555555555",
+                 "created": 5, "updated": 10, "fileByteCount": 0}
+            ]}"#,
+        )?;
+        assert!(page.search_results.is_empty());
+        let refs = page
+            .file_refs
+            .ok_or("no fileRefs")?
+            .iter()
+            .map(|row| serde_json::from_str::<FileRef>(row.get()).map(|r| r.to_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            (refs[0].deleted, refs[0].removed_at, refs[0].changed_at),
+            (false, Some(9), Some(9))
+        );
+        assert_eq!(
+            (refs[1].deleted, refs[1].removed_at, refs[1].changed_at),
+            (true, None, None)
+        );
+        // A server without #1967 answers headers: no refs, not an empty page.
+        let old: QueryBatchResponse =
+            serde_json::from_str(r#"{"cursorState": "c", "searchResults": []}"#)?;
+        assert!(old.file_refs.is_none());
         Ok(())
     }
 

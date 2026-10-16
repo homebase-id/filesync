@@ -1322,6 +1322,77 @@ fn regression_a_file_put_into_a_deleted_role_folder_stays_its() {
     }
 }
 
+/// A device's own folder removal has no time until its feed brings it back: a plan made before
+/// that sees the time open, the newest of all, so what is in the folder still went with it,
+/// and a restore of the folder brings it all back.
+#[test]
+fn regression_an_open_removal_time_takes_along_what_is_in_the_folder() {
+    use Action::*;
+    use hbsync_types::NodeId;
+    let mut sim = Sim::new(2);
+    let run = |sim: &mut Sim, events: &[Event]| sim.run(events);
+    let folder = |sim: &Sim, path: &str| -> usize {
+        let node = if path.is_empty() {
+            NodeId::ROOT
+        } else {
+            sim.item(0, path).expect(path)
+        };
+        sim.pick(0, node, true).expect(path)
+    };
+    let (d, a, b) = (5, 0, 1); // NAMES: "d", "a", "b"
+    let parent = folder(&sim, "");
+    run(
+        &mut sim,
+        &[Event::Act {
+            client: 0,
+            action: CreateFolder { parent, name: d },
+        }],
+    );
+    let parent = folder(&sim, "d");
+    for name in [a, b] {
+        run(
+            &mut sim,
+            &[Event::Act {
+                client: 0,
+                action: CreateFile { parent, name },
+            }],
+        );
+    }
+    assert!(sim.quiesce(30), "no convergence");
+    let photos = sim.item(0, "d").expect("d");
+    let node = sim.pick(0, photos, false).expect("d");
+    // The folder goes first; the next plan comes before the feed brings its time back.
+    run(
+        &mut sim,
+        &[
+            Event::Act {
+                client: 0,
+                action: Delete { node },
+            },
+            Event::Plan { client: 0 },
+            Event::Step { client: 0 },
+            Event::Plan { client: 0 },
+        ],
+    );
+    assert!(sim.open_times > 0, "the second plan saw the time open");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(sim.server_paths(), Vec::<String>::new());
+    // All of it is deleted with the folder: restoring it brings it all back.
+    let node = sim.removed_pick(photos).expect("d removed");
+    run(
+        &mut sim,
+        &[Event::Act {
+            client: 1,
+            action: Restore { node },
+        }],
+    );
+    assert!(sim.quiesce(30), "no convergence");
+    assert_eq!(sim.server_paths(), ["d", "d/a", "d/b"]);
+}
+
 /// The Photos example: on Monday `Photos/a.jpg` is deleted on its own; on Tuesday the folder
 /// `Photos`, still holding `b.jpg` and a subfolder with a file. Restoring `Photos` brings back
 /// `b.jpg` and the subfolder's file, not `a.jpg`: that stays in Recently deleted, and comes back

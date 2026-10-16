@@ -229,3 +229,223 @@ fn throughput() -> R {
     bench.cleanup()?;
     result
 }
+
+/// A token that doesn't open (sealed under an earlier login's shared secret) leaves the update
+/// to read the header first, as without one: it goes through, and the token it returns opens.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
+    use hbsync_remote::RemoteBody;
+    use hbsync_remote::contract::{file, with};
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{FileToken, Target};
+    let remote = live_remote()?;
+    let bench = Bench::new(&remote, &run_name("stale-token"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let (folder, _) = bench.folder("d")?;
+        let meta = file("f.txt", folder.node, b"one");
+        let at = bench.create(&meta, Some(b"one"))?;
+        let stale = Target {
+            at,
+            token: Some(FileToken(vec![0x5a; 64].into())),
+        };
+        let renamed = with(&meta, NodeContent::file("g.txt", 1, 3, false));
+        let written = remote.update(&stale, &renamed, None)?;
+        let again = with(&meta, NodeContent::file("h.txt", 1, 3, false));
+        remote.update(&written, &again, None)?;
+        match remote.header(at.file_id)?.body {
+            RemoteBody::Live { content, .. } => assert_eq!(content.name, "h.txt"),
+            RemoteBody::Deleted => panic!("deleted"),
+        }
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
+}
+
+/// What the feed costs whole and slim (odin-core #1967): `n` files (`FEED_SIZES_FILES`, 2,000 by
+/// default) created and then removed, read back as this device's own writes coming back (the
+/// echo: slim only, its versions are known) and as a catch-up from before the creates (every
+/// row new). Bytes are what this process's connections received ([`socket_bytes`]), so nothing
+/// else may run in it meanwhile. Prints a table.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
+fn feed_sizes() -> R {
+    use hbsync_remote::contract::{file, removed};
+    use std::sync::Mutex;
+    let remote = live_remote()?;
+    let n = std::env::var("FEED_SIZES_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000usize);
+    let bench = Bench::new(&remote, &run_name("feed-sizes"), Duration::from_millis(20))?;
+    let result = (|| -> R {
+        let before = bench.cursor_now()?;
+        let (folder, _) = bench.folder("files")?;
+        let made = Mutex::new(Vec::with_capacity(n));
+        let created = on_threads(n, |i| {
+            let data = format!("file {i}");
+            let meta = file(&format!("f{i:05}.txt"), folder.node, data.as_bytes());
+            let at = bench.create(&meta, Some(data.as_bytes()))?;
+            made.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((meta, at));
+            Ok(())
+        })?;
+        let made = made.into_inner().unwrap_or_else(|e| e.into_inner());
+        assert_eq!((created, made.len()), (n, n), "every create went through");
+        let after_creates = bench.cursor_now()?;
+        let removed_count = on_threads(n, |i| {
+            let (meta, at) = &made[i];
+            remote.update(&bench.target(*at), &removed(meta), None)?;
+            Ok(())
+        })?;
+        assert_eq!(removed_count, n, "every removal went through");
+        std::thread::sleep(Duration::from_millis(50));
+        println!("{n} files created, then removed; feed pages of {PAGE} rows");
+        println!(
+            "{:<32} {:>7} {:>9} {:>12} {:>10}",
+            "read", "rows", "requests", "bytes", "bytes/row"
+        );
+        let cases: [(&str, &str, Read); 5] = [
+            ("echo: whole", &after_creates, Read::Whole),
+            ("echo: slim", &after_creates, Read::Slim),
+            ("catch-up: whole", &before, Read::Whole),
+            (
+                "catch-up: each page slim+whole",
+                &before,
+                Read::SlimThenWhole,
+            ),
+            ("catch-up: as the engine reads", &before, Read::Engine),
+        ];
+        for (name, from, how) in cases {
+            let start = socket_bytes()?;
+            let (rows, requests) = read_feed(&remote, from, how)?;
+            // A connection that closed meanwhile takes its count along: never below zero.
+            let bytes = socket_bytes()?.saturating_sub(start);
+            println!(
+                "{name:<32} {rows:>7} {requests:>9} {bytes:>12} {:>10}",
+                bytes / rows.max(1) as u64
+            );
+        }
+        Ok(())
+    })();
+    let cleanup = bench.cleanup();
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+const PAGE: usize = 500;
+
+/// `work` for each of `0..n` on 8 threads: how many went through, or the first error.
+fn on_threads(
+    n: usize,
+    work: impl Fn(usize) -> Result<(), hbsync_remote::RemoteError> + Sync,
+) -> Result<usize, hbsync_remote::RemoteError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= n {
+                            return Ok(());
+                        }
+                        work(i)?;
+                        done.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().try_for_each(|t| {
+            t.join().unwrap_or_else(|_| {
+                Err(hbsync_remote::RemoteError::Fatal(
+                    "a thread panicked".into(),
+                ))
+            })
+        })
+    })?;
+    Ok(done.into_inner())
+}
+
+#[derive(Clone, Copy)]
+enum Read {
+    Whole,
+    Slim,
+    /// Every page slim first, then again whole (it holds something new).
+    SlimThenWhole,
+    /// As the engine reads a run of news: the first page slim, then again whole, and whole
+    /// pages after it (the rest of this run is new too).
+    Engine,
+}
+
+/// Reads the feed from `from` to its end `how`: the rows and the requests it took.
+fn read_feed(
+    remote: &HomebaseRemote,
+    from: &str,
+    how: Read,
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let (mut cursor, mut rows, mut requests) = (from.to_owned(), 0, 0);
+    let mut how = how;
+    loop {
+        let (count, next, more) = match how {
+            Read::Engine => {
+                // The first page slim, then whole; the rest whole.
+                how = Read::Whole;
+                let r = remote.change_refs(Some(&cursor), PAGE)?;
+                requests += 1;
+                if r.refs.is_empty() {
+                    (0, r.cursor, r.has_more)
+                } else {
+                    let p = remote.changes(Some(&cursor), PAGE)?;
+                    requests += 1;
+                    (p.entries.len() + p.skipped.len(), p.cursor, p.has_more)
+                }
+            }
+            Read::Whole => {
+                let p = remote.changes(Some(&cursor), PAGE)?;
+                requests += 1;
+                (p.entries.len() + p.skipped.len(), p.cursor, p.has_more)
+            }
+            Read::Slim | Read::SlimThenWhole => {
+                let r = remote.change_refs(Some(&cursor), PAGE)?;
+                requests += 1;
+                if matches!(how, Read::SlimThenWhole) && !r.refs.is_empty() {
+                    let p = remote.changes(Some(&cursor), PAGE)?;
+                    requests += 1;
+                    (p.entries.len() + p.skipped.len(), p.cursor, p.has_more)
+                } else {
+                    (r.refs.len(), r.cursor, r.has_more)
+                }
+            }
+        };
+        rows += count;
+        cursor = next;
+        if !more {
+            return Ok((rows, requests));
+        }
+    }
+}
+
+/// Bytes this process's open TCP connections have received (`ss -tip`: TLS, after gzip). The
+/// HTTP client keeps its connections open, so the counts carry on between two readings.
+fn socket_bytes() -> Result<u64, Box<dyn std::error::Error>> {
+    let out = std::process::Command::new("ss").arg("-tinpH").output()?;
+    let me = format!("pid={},", std::process::id());
+    let (mut total, mut mine) = (0u64, false);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        if !line.starts_with(char::is_whitespace) {
+            mine = line.contains(&me);
+        } else if mine
+            && let Some(n) = line
+                .split_whitespace()
+                .find_map(|w| w.strip_prefix("bytes_received:"))
+        {
+            total += n.parse::<u64>()?;
+        }
+    }
+    Ok(total)
+}

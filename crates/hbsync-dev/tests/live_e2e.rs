@@ -146,12 +146,15 @@ fn photos(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
         (photos.node, photos.node),
         "deleted with the folder"
     );
+    // Confirmed by the end of a sync: the server's times.
+    let (a_at, photos_at, b_at) = (
+        a_jpg.removed_at_ms.ok_or("a.jpg's time open")?,
+        photos.removed_at_ms.ok_or("Photos' time open")?,
+        b_jpg.removed_at_ms.ok_or("b.jpg's time open")?,
+    );
     assert!(
-        a_jpg.removed_at_ms < photos.removed_at_ms && photos.removed_at_ms <= b_jpg.removed_at_ms,
-        "server times: a.jpg {}, Photos {}, b.jpg {}",
-        a_jpg.removed_at_ms,
-        photos.removed_at_ms,
-        b_jpg.removed_at_ms
+        a_at < photos_at && photos_at <= b_at,
+        "server times: a.jpg {a_at}, Photos {photos_at}, b.jpg {b_at}"
     );
 
     // b restores Photos: b.jpg and 2024/c.jpg come back, on both; a.jpg doesn't.

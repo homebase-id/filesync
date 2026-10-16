@@ -149,7 +149,8 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
 ## Change feed
 **[verified]** `QueryBatch.cs`, `KMP/sync/DriveSync.kt:173-295`:
 - `resultOptionsRequest`: `sorting: "anyChangeDate"`, `ordering: "oldestFirst"`,
-  `includeMetadataHeader: true`, `maxRecords`, `cursorState` (opaque string, persist after each page).
+  `resultShape` (below; `includeMetadataHeader: true` before odin-core #1967), `maxRecords`,
+  `cursorState` (opaque string, persist after each page).
 - `queryParams.fileState` null → tombstones included.
 - Only rows with modified < now are returned; with `oldestFirst` the cursor resumes after the
   last change. Page until `hasMoreRows == false`.
@@ -161,6 +162,21 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   the cursor.
 - Tombstones: `fileState: "deleted"`, `uniqueId: null`, `content: ""`, `payloads: null`;
   `fileId`, `groupId`, `fileType` kept.
+- **Slim pages** (odin-core #1967, **[verified]** in its branch: `QueryBatchResultShape.cs`,
+  `QueryBatchFileRef.cs`, `DriveQueryServiceBase.CreateBatchResultAsync`):
+  `resultOptionsRequest.resultShape`: `"full"`, `"noContent"` or `"minimal"` (unknown → 400
+  InvalidQuery; without it `includeMetadataHeader` decides as before, and a server without
+  #1967 ignores it). A minimal page has `fileRefs` instead of `searchResults`: per row
+  `fileId`, `fileState` (`"active"`/`"deleted"`), `fileType`, `dataType`, `archivalStatus`,
+  `versionTag`, `created`, `updated` and `fileByteCount`, plus `globalTransitId`, `uniqueId`,
+  `groupId`, `localVersionTag`, `userDate` and `senderOdinId` when set. The rows, cursor and
+  `hasMoreRows` are those of the same query in any shape: they come from the query before
+  the rows are filtered for the caller, and every shape filters alike. `versionTag` changes
+  only when the header is written; `updated` also on reactions and transfer history. Measured
+  against frodo (2,000 files, pages of 500, bytes received over TLS): a full row 2,510 bytes,
+  a minimal one 588 (the encrypted envelope and its base64 included).
+- How the client reads with it: `hbsync_engine::feed::pull`. A server without `fileRefs` in
+  its answer is refused, not read as an empty page.
 
 ## Errors
 **[verified]** `ExceptionHandlingMiddleware.cs`: plaintext `application/problem+json` (never
