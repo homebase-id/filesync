@@ -1,7 +1,5 @@
-//! The identity's notification WebSocket, as a wake-up hint: when a file on the sync drive
-//! changes, the sync loop reads the feed. The feed stays the truth, read from its cursor: every
-//! (re)connect catches up on what wasn't announced (there is no poll), and a missed
-//! notification only delays a sync until the next one.
+//! The identity's notification WebSocket, as a wake-up hint to read the feed from its cursor,
+//! the truth: a change announced, and every (re)connect (daemon.md, "No poll").
 //!
 //! Verified in odin-core `V2NotificationSocketController`, `AppNotificationHandler`,
 //! `AppNotificationDispatcher`, and chat-kmp `OdinWebSocketClient`:
@@ -33,23 +31,15 @@ use crate::drive::TargetDrive;
 /// What the notifier tells the sync loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
-    /// Subscribed (again): changes made while disconnected aren't announced, so sync now.
+    /// Subscribed (again): changes made while disconnected weren't announced, so read the feed.
     Connected,
     /// A file on the drive changed.
     Changed,
     /// The connection broke; it is retried with backoff.
     Lost(String),
     /// The identity refused the subscription (credentials revoked, no access to the drive):
-    /// asked again every [`REFUSED_RETRY`], as the API calls are refused too meanwhile.
+    /// asked again later, as for a broken connection but not before [`REFUSED_PAUSE`].
     Refused(String),
-}
-
-/// How the connection ended.
-enum End {
-    /// The notifier stopped, or nobody listens any more.
-    Stopped,
-    Broke(String),
-    Refused,
 }
 
 /// How often the socket is checked for a stop request and the keep-alive.
@@ -59,9 +49,8 @@ const PING_EVERY: Duration = Duration::from_secs(30);
 const SILENCE: Duration = Duration::from_secs(75);
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// A refused subscription is asked again this much later (the sync's own refusals back off
-/// as long).
-pub const REFUSED_RETRY: Duration = Duration::from_secs(300);
+/// A refused subscription isn't asked again sooner (the sync's own refusals wait as long).
+const REFUSED_PAUSE: Duration = Duration::from_secs(300);
 
 /// The notification connection, on its own thread. Stops when dropped: the thread ends at
 /// its next check (it isn't waited for, as it may be in the middle of connecting).
@@ -78,8 +67,8 @@ impl Notifier {
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
         let (flag, kick) = (stop.clone(), reconnect.clone());
-        // Without a thread there are no hints: the drive's changes are read at the next sync
-        // this device has a reason for (a change here, a request, a restart).
+        // Without a thread there are no hints and no reconnects to catch up on (daemon.md,
+        // "No poll"): the drive's changes then wait for a local change, a request or a restart.
         let _ = std::thread::Builder::new()
             .name("hbsync-notify".into())
             .spawn(move || run(&client, drive, &events, &flag, &kick));
@@ -110,24 +99,32 @@ fn run(
     const FIRST: Duration = Duration::from_secs(1);
     let mut backoff = FIRST;
     while !stop.load(Ordering::Relaxed) {
-        let mut connected = false;
-        let end = session(client, drive, events, stop, reconnect, &mut connected);
+        let (mut connected, mut refused) = (false, false);
+        let result = session(
+            client,
+            drive,
+            events,
+            stop,
+            reconnect,
+            &mut connected,
+            &mut refused,
+        );
         if connected {
             backoff = FIRST;
         }
-        let pause = match end {
-            End::Stopped => return,
-            _ if reconnect.swap(false, Ordering::Relaxed) => {
-                backoff = FIRST;
-                continue;
-            }
-            End::Broke(why) => {
-                if events.send(Event::Lost(why)).is_err() {
-                    return;
-                }
-                backoff
-            }
-            End::Refused => REFUSED_RETRY,
+        let Err(why) = result else {
+            return; // stopped, or nobody listens any more
+        };
+        if reconnect.swap(false, Ordering::Relaxed) {
+            backoff = FIRST;
+            continue;
+        }
+        let pause = if refused {
+            backoff.max(REFUSED_PAUSE)
+        } else if events.send(Event::Lost(why)).is_err() {
+            return;
+        } else {
+            backoff
         };
         // Jitter of ±20%, so clients of one identity don't reconnect in lockstep.
         let jitter = random::<1>().map_or(0, |b| b[0]) as f64 / 255.0;
@@ -149,7 +146,7 @@ fn run(
 
 type Socket = WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
-/// One connection, until it breaks, is refused, or the notifier stops.
+/// One connection, until it breaks or is `refused` (`Err`) or the notifier stops (`Ok`).
 fn session(
     client: &Client,
     drive: TargetDrive,
@@ -157,18 +154,8 @@ fn session(
     stop: &AtomicBool,
     reconnect: &AtomicBool,
     connected: &mut bool,
-) -> End {
-    connection(client, drive, events, stop, reconnect, connected).unwrap_or_else(End::Broke)
-}
-
-fn connection(
-    client: &Client,
-    drive: TargetDrive,
-    events: &Sender<Event>,
-    stop: &AtomicBool,
-    reconnect: &AtomicBool,
-    connected: &mut bool,
-) -> Result<End, String> {
+    refused: &mut bool,
+) -> Result<(), String> {
     let mut socket = connect(client)?;
     send(
         &mut socket,
@@ -185,7 +172,7 @@ fn connection(
     loop {
         if stop.load(Ordering::Relaxed) {
             let _ = socket.close(None);
-            return Ok(End::Stopped);
+            return Ok(());
         }
         if reconnect.load(Ordering::Relaxed) {
             let _ = socket.close(None);
@@ -202,15 +189,14 @@ fn connection(
                     Notification::Changed => Event::Changed,
                     Notification::Refused(why) => {
                         let _ = socket.close(None);
-                        if events.send(Event::Refused(why)).is_err() {
-                            return Ok(End::Stopped);
-                        }
-                        return Ok(End::Refused);
+                        let _ = events.send(Event::Refused(why.clone()));
+                        *refused = true;
+                        return Err(why);
                     }
                     _ => continue,
                 };
                 if events.send(event).is_err() {
-                    return Ok(End::Stopped);
+                    return Ok(());
                 }
             }
             Ok(Message::Close(frame)) => {

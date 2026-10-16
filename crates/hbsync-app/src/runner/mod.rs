@@ -2,10 +2,9 @@
 //!
 //! A sync runs when the folder changes (live watcher), when its part of the drive changed (the
 //! drive wakes it: a change the identity announced, the notifications connecting again, another
-//! folder's sync), when asked, and a minute after one that left work unfinished. There is no
-//! poll of the drive: the account catches up from the feed's cursor at every (re)connect.
-//! After a failed sync the runner waits, doubling up to five minutes. It is controlled through
-//! a [`Handle`] and publishes a [`FolderStatus`].
+//! folder's sync), when asked, and after a backoff when a sync left work unfinished; never on
+//! a timer of its own (daemon.md, "No poll"). After a failed sync the runner waits, doubling
+//! up to five minutes. It is controlled through a [`Handle`] and publishes a [`FolderStatus`].
 //!
 //! - **Pause** stops a running sync between operations (and before the next transfer) and
 //!   syncs nothing until **resume**; the watcher keeps recording changes meanwhile.
@@ -39,7 +38,7 @@ mod report;
 pub(crate) mod schedule;
 
 pub(crate) use schedule::Backoff;
-use schedule::Schedule;
+use schedule::{Schedule, Synced};
 
 /// How long the loop waits for local changes before looking at everything else.
 const TICK: Duration = Duration::from_millis(250);
@@ -75,8 +74,8 @@ pub struct RunnerConfig {
     pub mass_delete: MassDelete,
     /// Start paused: until then, or until resumed (`Some(None)`).
     pub paused: Option<Until>,
-    /// How often what is local is looked at (the ignore rules, a folder that is gone, a folder
-    /// without a watcher), and how long work a sync left unfinished waits for another try.
+    /// How often what is local is looked at: the ignore rules, whether a folder that is gone
+    /// is back, a rescan of a folder without a watcher.
     pub look: Duration,
     /// Catch up, sync once, and stop (development).
     pub once: bool,
@@ -398,8 +397,7 @@ impl Runner {
                     && !p.observer.has_watcher()
                 {
                     match p.engine.scan_local() {
-                        Ok(scan) if scan.dirty > 0 => schedule.want(),
-                        Ok(_) => {}
+                        Ok(scan) => schedule.rescanned(scan.dirty > 0),
                         Err(e) => tracing::warn!("scanning the folder failed: {e}"),
                     }
                 }
@@ -438,7 +436,7 @@ impl Runner {
                         started = false;
                         parts.insert(p)
                     }
-                    // Rules that don't parse: say so, and try again a minute later.
+                    // Rules that don't parse: say so, and look again at the next look.
                     Err(RunnerError::Filter(e)) if !self.cfg.once => {
                         tracing::warn!("{e}");
                         self.failing(
@@ -475,9 +473,12 @@ impl Runner {
             match result {
                 Ok(report) => {
                     started = true;
-                    // Held deletes wait for a confirmation, not for another try.
-                    let unfinished = report.pending > report.held.len() as u64;
-                    schedule.synced(Instant::now(), report.stopped, unfinished);
+                    let outcome = match report.unfinished() {
+                        _ if report.stopped => Synced::Stopped,
+                        0 => Synced::Done,
+                        left => Synced::Unfinished(left),
+                    };
+                    schedule.synced(Instant::now(), outcome);
                     self.record(&mut p.engine, &report, began.elapsed())?;
                 }
                 Err(e) => {

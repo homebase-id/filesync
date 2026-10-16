@@ -1,8 +1,7 @@
 //! When a folder syncs: what asks for a sync (a change here or in its part of the drive, a
-//! request, work a sync left unfinished) and what holds it back (a pause, the backoff after a
-//! failure); and when changes the drive announced are pulled ([`Announced`]). There is no
-//! poll of the drive: its changes come announced, and every (re)connect of the notifications
-//! catches up from the cursor. Pure: the caller tells the time.
+//! request, work a sync left unfinished; never time alone, daemon.md "No poll") and what holds
+//! it back (a pause, the backoff after a failure); and when changes the drive announced are
+//! pulled ([`Announced`]). Pure: the caller tells the time.
 
 use std::time::{Duration, Instant};
 
@@ -62,19 +61,33 @@ impl Announced {
     }
 }
 
+/// How a sync ended, for [`Schedule::synced`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Synced {
+    /// Nothing left that another try could do.
+    Done,
+    /// Stopped by a pause or a stop: the rest waits for resume.
+    Stopped,
+    /// This many nodes left that another try may do (`SyncReport::unfinished`).
+    Unfinished(u64),
+}
+
 #[derive(Debug)]
 pub(crate) struct Schedule {
-    /// How often what is local is looked at (the ignore rules, a folder that is gone, a folder
-    /// without a watcher), and how long unfinished work waits for another try.
+    /// How often what is local is looked at (`RunnerConfig::look`).
     look: Duration,
     next_look: Instant,
     /// Something asked for a sync since the last one.
     wanted: bool,
-    /// No sync before then (a backoff, a folder that is gone, unfinished work).
+    /// No sync before then (a failure's backoff, a folder that is gone).
     not_before: Instant,
     /// Paused: until then (Unix seconds), or until resumed (`None`).
     pause: Option<Until>,
     backoff: Backoff,
+    /// Work a sync left unfinished: tried again then, with how much was left. A timer of its
+    /// own, with its own backoff, so a change meanwhile still syncs at once.
+    retry: Option<(Instant, u64)>,
+    retry_backoff: Backoff,
 }
 
 impl Schedule {
@@ -87,6 +100,8 @@ impl Schedule {
             not_before: now,
             pause,
             backoff: Backoff::new(),
+            retry: None,
+            retry_backoff: Backoff::new(),
         }
     }
 
@@ -136,29 +151,47 @@ impl Schedule {
         true
     }
 
-    /// Whether to sync now: wanted, not paused, not backing off.
-    pub fn due(&self, now: Instant) -> bool {
-        self.pause.is_none() && self.wanted && now >= self.not_before
-    }
-
-    /// Not now: tried again a look later (the folder gone, rules that don't parse). Returns
-    /// the wait.
-    pub fn later(&mut self, now: Instant) -> Duration {
-        self.not_before = now + self.look;
-        self.look
-    }
-
-    /// A sync ended. Stopped by a pause (or a stop), the rest waits for resume. Work it left
-    /// `unfinished` (deferred or failed, not held for a confirmation) is tried again a look
-    /// later; nothing else asks for one then.
-    pub fn synced(&mut self, now: Instant, stopped: bool, unfinished: bool) {
-        self.backoff = Backoff::new();
-        if stopped {
-            return;
+    /// A rescan of a folder without a watcher ended: a sync if it found a change.
+    pub fn rescanned(&mut self, changed: bool) {
+        if changed {
+            self.want();
         }
-        self.wanted = unfinished;
-        if unfinished {
-            self.not_before = now + self.look;
+    }
+
+    /// Whether to sync now: wanted (or unfinished work's retry has come), not paused, not
+    /// backing off.
+    pub fn due(&self, now: Instant) -> bool {
+        let retry = self.retry.is_some_and(|(at, _)| now >= at);
+        self.pause.is_none() && (self.wanted || retry) && now >= self.not_before
+    }
+
+    /// Not now: tried again at the next look (the folder gone, rules that don't parse: both
+    /// are local). Returns the wait.
+    pub fn later(&mut self, now: Instant) -> Duration {
+        self.not_before = self.next_look;
+        self.next_look.saturating_duration_since(now)
+    }
+
+    /// A sync ended. Work it left unfinished is tried again after a backoff (5 s, doubling to
+    /// 5 min, from the start again when less is left), so stuck work isn't a full sync every
+    /// minute.
+    pub fn synced(&mut self, now: Instant, outcome: Synced) {
+        self.backoff = Backoff::new();
+        match outcome {
+            Synced::Stopped => {}
+            Synced::Done => {
+                self.wanted = false;
+                self.retry = None;
+                self.retry_backoff = Backoff::new();
+            }
+            Synced::Unfinished(left) => {
+                self.wanted = false;
+                if self.retry.is_none_or(|(_, before)| left < before) {
+                    self.retry_backoff = Backoff::new();
+                }
+                let wait = self.retry_backoff.after(State::Failing);
+                self.retry = Some((now + wait, left));
+            }
         }
     }
 
@@ -185,7 +218,7 @@ mod tests {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, None);
         assert!(s.due(t0));
-        s.synced(t0, false, false);
+        s.synced(t0, Synced::Done);
         assert!(!s.due(t0 + ms(10)));
         s.want();
         assert!(s.due(t0 + ms(20)));
@@ -196,7 +229,7 @@ mod tests {
     fn nothing_syncs_without_a_reason() {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, None);
-        s.synced(t0, false, false);
+        s.synced(t0, Synced::Done);
         assert!(!s.look_due(t0 + LOOK - ms(1)));
         assert!(s.look_due(t0 + LOOK));
         assert!(
@@ -206,21 +239,51 @@ mod tests {
         assert!(!s.due(t0 + LOOK * 100));
     }
 
-    /// Work a sync left unfinished is tried again a look later, not at once.
+    /// Work a sync left unfinished is tried again after a backoff that doubles while nothing
+    /// gets done, starts over when less is left, and holds back nothing else.
     #[test]
-    fn unfinished_work_is_tried_again_a_look_later() {
+    fn unfinished_work_backs_off_without_holding_back_changes() {
+        let t0 = Instant::now();
+        let s5 = Duration::from_secs(5);
+        let mut s = Schedule::new(t0, LOOK, None);
+        s.synced(t0, Synced::Unfinished(3));
+        assert!(!s.due(t0 + s5 - ms(1)));
+        assert!(s.due(t0 + s5));
+        // Stuck: twice as long each time.
+        s.synced(t0, Synced::Unfinished(3));
+        assert!(!s.due(t0 + s5 * 2 - ms(1)));
+        assert!(s.due(t0 + s5 * 2));
+        // A change meanwhile syncs at once.
+        s.want();
+        assert!(s.due(t0 + ms(1)));
+        // Less left: from the start again.
+        s.synced(t0, Synced::Unfinished(2));
+        assert!(s.due(t0 + s5));
+        // Finished: nothing more.
+        s.synced(t0, Synced::Done);
+        assert!(!s.due(t0 + LOOK * 100));
+    }
+
+    /// Without a watcher, a rescan asks for a sync only when it found a change.
+    #[test]
+    fn a_rescan_syncs_only_what_it_found() {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, None);
-        s.synced(t0, false, true);
+        s.synced(t0, Synced::Done);
+        s.rescanned(false);
+        assert!(!s.due(t0 + ms(1)));
+        s.rescanned(true);
+        assert!(s.due(t0 + ms(1)));
+    }
+
+    /// A folder that is gone is looked for again at the next look.
+    #[test]
+    fn later_is_the_next_look() {
+        let t0 = Instant::now();
+        let mut s = Schedule::new(t0, LOOK, None);
+        assert_eq!(s.later(t0 + ms(10)), LOOK - ms(10));
         assert!(!s.due(t0 + LOOK - ms(1)));
         assert!(s.due(t0 + LOOK));
-        // A change meanwhile doesn't wait for it.
-        s.synced(t0, false, true);
-        s.asked(t0 + ms(5));
-        assert!(s.due(t0 + ms(5)));
-        // Finished: nothing more.
-        s.synced(t0 + ms(5), false, false);
-        assert!(!s.due(t0 + LOOK * 2));
     }
 
     /// Announcements are pulled once they stop for a second, or ten seconds after the first.
@@ -287,10 +350,7 @@ mod tests {
     fn a_sync_stopped_by_a_pause_is_still_wanted() {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, None);
-        s.synced(t0, true, false);
+        s.synced(t0, Synced::Stopped);
         assert!(s.due(t0));
-        assert_eq!(s.later(t0), LOOK);
-        assert!(!s.due(t0 + LOOK - ms(1)));
-        assert!(s.due(t0 + LOOK));
     }
 }

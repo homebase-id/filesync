@@ -563,9 +563,9 @@ impl Account {
 }
 
 /// What the identity's notifications do to its drive: a change announced is pulled once the
-/// announcements have quieted (a burst of deletes reaches the mass-delete guard whole), which
-/// wakes the folders the change concerns; connecting again wakes every folder (changes made
-/// meanwhile weren't announced).
+/// announcements have quieted (a burst of deletes reaches the mass-delete guard whole);
+/// connecting (again) pulls at once, as changes made meanwhile weren't announced. A pull wakes
+/// the folders its changes concern.
 #[derive(Debug, Default)]
 pub struct Notifications {
     announced: Announced,
@@ -576,7 +576,7 @@ impl Notifications {
     pub fn event(&mut self, event: Event, drive: &Drive) -> Option<Hints> {
         match event {
             Event::Connected => {
-                drive.wake_all();
+                pull(drive);
                 Some(Hints::Connected)
             }
             Event::Changed => {
@@ -588,10 +588,7 @@ impl Notifications {
                 Some(Hints::Lost(why))
             }
             Event::Refused(why) => {
-                tracing::warn!(
-                    "notifications refused ({why}); asking again in {} min",
-                    hbsync_homebase::notify::REFUSED_RETRY.as_secs() / 60
-                );
+                tracing::warn!("notifications refused ({why}); asking again later");
                 Some(Hints::Refused(why))
             }
         }
@@ -599,12 +596,18 @@ impl Notifications {
 
     /// Pulls what was announced, once it has quieted.
     pub fn tick(&mut self, drive: &Drive, now: Instant) {
-        if self.announced.due(now)
-            && let Err(e) = drive.pull(None)
-        {
-            tracing::info!("pulling announced changes failed ({e}); the folders' syncs will");
-            drive.wake_all();
+        if self.announced.due(now) {
+            pull(drive);
         }
+    }
+}
+
+/// Pulls the drive's changes, waking the folders they concern; when that fails, the folders'
+/// syncs pull (and back off) themselves.
+fn pull(drive: &Drive) {
+    if let Err(e) = drive.pull(None) {
+        tracing::info!("pulling the drive's changes failed ({e}); the folders' syncs will");
+        drive.wake_all();
     }
 }
 

@@ -95,8 +95,7 @@ impl EngineError {
 pub struct StartupReport {
     /// How the local side caught up (journal or full walk).
     pub local: CatchUp,
-    pub feed: FeedReport,
-    /// The first sync after both catch-ups.
+    /// The first sync after both catch-ups; its `feed` is start-up's pull.
     pub sync: SyncReport,
 }
 
@@ -127,6 +126,12 @@ pub struct SyncReport {
 impl SyncReport {
     pub fn is_idle(&self) -> bool {
         self.ops_done == 0 && self.pending == 0
+    }
+
+    /// The nodes left that another try may do: what is pending, but the deletes held for a
+    /// confirmation (another try doesn't let those through).
+    pub fn unfinished(&self) -> u64 {
+        self.pending.saturating_sub(self.held.len() as u64)
     }
 
     /// Adds a later sync's report to this one: counts and lists add up, `held` and `pending`
@@ -291,8 +296,9 @@ impl Engine {
         });
         let local = local.map_err(|_| EngineError::Panic("local catch-up"))??;
         let feed = feed?;
-        let sync = self.sync_once(date)?;
-        Ok(StartupReport { local, feed, sync })
+        // Just pulled: the first sync plans from it (a change since is announced).
+        let sync = self.sync_with(date, Some(feed))?;
+        Ok(StartupReport { local, sync })
     }
 
     /// Prepares for a filter that changed since the last run (§10): items may have come into
@@ -337,22 +343,38 @@ impl Engine {
     /// Pulls remote changes, then plans and executes until nothing is left to do (or the
     /// round limit is hit). `date` (`YYYY-MM-DD`) is used for conflict-copy names.
     pub fn sync_once(&mut self, date: &str) -> Result<SyncReport, EngineError> {
+        self.sync_with(date, None)
+    }
+
+    /// [`Engine::sync_once`], with the feed `pulled` just before if it was.
+    fn sync_with(
+        &mut self,
+        date: &str,
+        pulled: Option<FeedReport>,
+    ) -> Result<SyncReport, EngineError> {
         // What earlier syncs did is durable before this one puts anything back on disk
         // (unpark), and what this one did is when it ends, however it ends: a power cut loses
         // at most the sync in progress (sync semantics §8a).
         self.db.flush()?;
-        let synced = self.sync_pass(date);
+        let synced = self.sync_pass(date, pulled);
         // Best effort: a failure here leaves what was done undone in no way, and the next
         // sync's opening flush reports it.
         let _ = self.db.flush();
         synced
     }
 
-    fn sync_pass(&mut self, date: &str) -> Result<SyncReport, EngineError> {
+    fn sync_pass(
+        &mut self,
+        date: &str,
+        pulled: Option<FeedReport>,
+    ) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
         self.progress.reset();
         recover(&mut self.db, &self.cfg.exec)?;
-        report.feed = self.drive.pull(Some(self.db.folder()))?;
+        report.feed = match pulled {
+            Some(feed) => feed,
+            None => self.drive.pull(Some(self.db.folder()))?,
+        };
         // A role folder's top on the drive: joined, restored, or made.
         if let Some(role) = hbsync_types::Role::of(self.cfg.scope.top) {
             self.drive.ensure_role(role)?;

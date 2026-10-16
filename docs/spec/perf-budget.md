@@ -35,7 +35,7 @@ network latency.
 | First download into an empty folder (10,130 nodes, 361 MB) | 8.3 s wall, 9.0 s CPU, peak RSS 157 MB |
 | Feed read, 10,755 rows from the start | 1.1 s (500 per page; 1,000 or 2,000 aren't faster) |
 | Restart, nothing changed | 55 ms to idle |
-| Idle loop (watcher, WebSocket, 60 s poll) | 12 MB RSS, 3 threads, CPU ≈ 0 |
+| Idle loop (watcher, WebSocket; measured with the 60 s poll, gone since 2026-10-16) | 12 MB RSS, 3 threads, CPU ≈ 0 |
 | Edit in one folder until it is in the other (both running) | ≈ 0.55 s, mostly the 300 ms local debounce |
 | Deleting the 10,130 nodes | 33.6 s: a header check and a delete per node, one at a time |
 

@@ -46,12 +46,6 @@ impl Device {
         })
     }
 
-    /// What the account does when the drive announces a change or the notifications connect
-    /// again: wakes its folders, which read the feed from its cursor. There is no poll.
-    fn announce(&self) {
-        self.drive.wake_all();
-    }
-
     fn write(&self, rel: &str, data: &str) -> std::io::Result<()> {
         let path = self.root.join(rel);
         if let Some(dir) = path.parent() {
@@ -110,7 +104,6 @@ fn on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
     live_names(server).iter().any(|n| n == name)
 }
 
-/// Long enough that only local changes and requests make a device sync.
 #[test]
 fn syncs_by_itself_and_pauses_and_resumes() -> R {
     let server = server();
@@ -118,7 +111,8 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     let mut b = Device::start(&server, "b")?;
     a.write("one.txt", "1")?;
     wait_until("one.txt is up", || on_server(&server, "one.txt"))?;
-    b.announce();
+    // b's account hears of it (no notifications in these tests).
+    Notifications::default().event(Event::Connected, &b.drive);
     wait_until("b has one.txt", || b.has("one.txt"))?;
     wait_until("b is idle", || b.status().state == State::Idle)?;
     assert!(b.status().last_sync.is_some());
@@ -173,9 +167,8 @@ fn a_reconnect_catches_up_on_what_wasnt_announced() -> R {
     wait_until("all three are up", || live_names(&server).len() == 3)?;
     std::thread::sleep(Duration::from_millis(500));
     assert!(!b.has("x.txt"), "nothing announced yet");
-    // The notifications connect again: the account wakes every folder.
-    let mut notifications = Notifications::default();
-    notifications.event(Event::Connected, &b.drive);
+    // The notifications connect again: the account pulls, which wakes the folder.
+    Notifications::default().event(Event::Connected, &b.drive);
     wait_until("b has all three", || {
         ["x.txt", "y.txt", "z.txt"].iter().all(|n| b.has(n))
     })?;
@@ -260,9 +253,10 @@ fn spawn_at(
     server: &Arc<Mutex<FakeServer>>,
     root: &Path,
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
-    let mut cfg = RunnerConfig::new(root, &db_of(root), "test.example", "a");
-    cfg.look = Duration::from_millis(300);
-    spawn(cfg, server)
+    spawn(
+        RunnerConfig::new(root, &db_of(root), "test.example", "a"),
+        server,
+    )
 }
 
 /// The runner of `cfg`, on its account's drive on `server`, without notifications.
@@ -298,7 +292,10 @@ fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
     let disk = parent.path().join("disk");
     rename_with_retries(&root, &disk)?;
     std::fs::create_dir(&root)?;
-    let (handle, thread) = spawn_at(&server, &root)?;
+    let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
+    // Looks for the folder again this often.
+    cfg.look = Duration::from_millis(300);
+    let (handle, thread) = spawn(cfg, &server)?;
     wait_until("the runner says why it waits", || {
         handle
             .status()
