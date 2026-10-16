@@ -105,9 +105,9 @@ a failure (service managers restart it then).
 
 ### The sync loop
 
-- Syncs when the folder changes (live watcher), when another folder's sync changed this one's
-  part of the drive, when the identity announces a change on the
-  drive (notification socket; once its announcements have stopped for 1 s, at most 10 s
+- Syncs when the folder changes (live watcher; not its own writes coming back), when another
+  folder's sync changed this one's part of the drive, when the identity announces a change on
+  the drive (notification socket; once its announcements have stopped for 1 s, at most 10 s
   after the first, so a burst of deletes from another device reaches the mass-delete guard
   whole), when the socket connects (again), and on request. A sync that left work unfinished
   (the round limit, or operations skipped or failed; never deletes held for a confirmation)

@@ -317,13 +317,16 @@ impl Runner {
             }
         );
         loop {
-            // Local changes: the watcher's batches are recorded in the DB as they come.
+            // Local changes: the watcher's batches are recorded in the DB as they come. Only a
+            // change syncs: a sync's own writes come back as batches that change nothing.
             let (wall, mono) = (SystemTime::now(), Instant::now());
             let mut worked = false;
             match &mut parts {
                 Some(p) => {
-                    if p.engine.observe(&mut p.observer, TICK)?.is_some() {
-                        schedule.want();
+                    if let Some(scan) = p.engine.observe(&mut p.observer, TICK)? {
+                        if scan.dirty > 0 {
+                            schedule.want();
+                        }
                         worked = true;
                     }
                 }

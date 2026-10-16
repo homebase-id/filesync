@@ -234,6 +234,26 @@ fn the_drive_is_read_on_a_timer_only_while_not_connected() -> R {
     Ok(())
 }
 
+/// A sync's own writes come back from the watcher, changing nothing: they start no sync (one
+/// would read the feed unannounced).
+#[test]
+fn a_syncs_own_writes_start_no_sync() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    wait_until("b started", || b.status().last_sync.is_some())?;
+    a.write("x.txt", "x")?;
+    wait_until("x.txt is up", || on_server(&server, "x.txt"))?;
+    b.handle.send(Command::SyncNow);
+    wait_until("b has x.txt", || b.has("x.txt"))?;
+    wait_until("b is idle", || b.status().state == State::Idle)?;
+    let reads = b.feed_reads();
+    // The watcher's quiet period and a few of the runner's ticks.
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(b.feed_reads(), reads, "the download's echo started a sync");
+    Ok(())
+}
+
 /// A change announced that the drive has already (its own write coming back) brings no read
 /// of the feed; one it doesn't have is read and synced.
 #[test]
