@@ -23,36 +23,42 @@ fn remote_change(i: &Input, node: NodeId) -> Change {
     }
 }
 
-/// The remote nodes a folder's removal takes along (§6.3): unchanged since the base, in a
-/// folder in Recently deleted, or in one taken along itself. A folder's delete removes the folder
-/// first, then what is in it: until it has, they count as gone, and don't keep the folder alive.
-/// One changed or added meanwhile still does.
+/// The remote nodes a folder's removal took along (node schema, Recently deleted): those in a
+/// folder in Recently deleted, directly or through folders in it, written no later than that
+/// folder's removal (the server's times; one this device wrote, whose time it doesn't know,
+/// was). A folder's delete removes the folder first, then what is in it: until it has, they
+/// count as gone. One written after the removal is a change of its own, and keeps the folder
+/// alive (§6.3).
 pub(super) fn taken_along(i: &Input) -> HashSet<NodeId> {
+    // The removal time of the removed folder each node is in (`None`: none), found once.
+    let mut folder_at: HashMap<NodeId, Option<i64>> = HashMap::new();
     let mut taken = HashSet::new();
     if i.removed.is_empty() {
         return taken;
     }
-    let mut checked = HashSet::new();
     for node in i.remote.ids() {
         let mut chain = Vec::new();
         let mut at = node;
-        // Up through unchanged nodes, each once (a cycle ends it), to a removed folder.
         let found = loop {
-            if taken.contains(&at) {
-                break true;
+            if let Some(&known) = folder_at.get(&at) {
+                break known;
             }
-            if !checked.insert(at) || remote_change(i, at) != Change::Unchanged {
-                break false;
-            }
+            let Some(parent) = i.remote.get(at).map(|s| s.parent) else {
+                break None;
+            };
             chain.push(at);
-            match i.remote.get(at).map(|s| s.parent) {
-                Some(parent) if i.removed.contains(&parent) => break true,
-                Some(parent) if i.remote.contains(parent) => at = parent,
-                _ => break false,
+            match i.removed.get(&parent) {
+                Some(r) => break Some(r.at),
+                // A cycle ends it.
+                None if chain.contains(&parent) => break None,
+                None => at = parent,
             }
         };
-        if found {
-            taken.extend(chain);
+        for n in chain {
+            folder_at.insert(n, found);
+        }
+        if found.is_some_and(|removed| i.changed_at.get(&node).is_none_or(|c| *c <= removed)) {
+            taken.insert(node);
         }
     }
     taken
@@ -136,12 +142,13 @@ impl Reconciler<'_> {
         }
     }
 
-    /// The remote change of `node`; one a folder's removal takes along is a delete.
+    /// The remote change of `node`; one a folder's removal took along is gone from the tree.
     pub(super) fn remote_change(&self, node: NodeId) -> Change {
-        if self.taken.contains(&node) {
-            return Change::Deleted;
+        match self.taken.contains(&node) {
+            true if self.input.base.contains(node) => Change::Deleted,
+            true => Change::Absent,
+            false => remote_change(self.input, node),
         }
-        remote_change(self.input, node)
     }
 
     /// Leaves `node` for a later plan, keeping it in the merged tree where it is now, so that
@@ -166,7 +173,9 @@ impl Reconciler<'_> {
             return;
         }
         let (lc, rc) = (self.local_change(node), self.remote_change(node));
-        let (b, l, r) = (i.base.get(node), self.local_state(node), i.remote.get(node));
+        // One a folder's removal took along isn't in the tree.
+        let r = i.remote.get(node).filter(|_| !self.taken.contains(&node));
+        let (b, l) = (i.base.get(node), self.local_state(node));
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
             // Gone from what this device syncs; what must stay here was detached (§10).
             _ if self.masks.masked.contains(&node) => (None, Origin::Base),

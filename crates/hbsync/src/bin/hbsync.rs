@@ -253,9 +253,15 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(list) => {
                 let now = words::now();
                 let main = daemon::configured(&paths)?.map(|r| r.folder);
-                for item in &list {
-                    let d = &item.deleted;
-                    println!("{}  {}", d.node.0, words::deleted(d, main.as_deref(), now));
+                // Each item deleted on its own, with how many its delete took along.
+                for d in list.iter().map(|i| &i.deleted).filter(|d| d.root == d.node) {
+                    let along = list.iter().filter(|i| i.deleted.root == d.node).count() - 1;
+                    let along = match along {
+                        0 => String::new(),
+                        n => format!(" (with {n} items in it)"),
+                    };
+                    let what = words::deleted(d, main.as_deref(), now);
+                    println!("{}  {what}{along}", d.node.0);
                 }
             }
             None => return Ok(not_running()),

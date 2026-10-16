@@ -124,7 +124,7 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         other => return Err(format!("file {id}: file type {other} isn't a sync node")),
     };
     let group = meta.app_data.group_id.map(NodeId);
-    let mut removed_at = None;
+    let (mut removed_at, mut changed_at) = (None, None);
     let (parent, body, token) = match header.file_state.as_str() {
         // A tombstone always comes through: dropping it would keep a deleted node alive. Its
         // parent isn't used, only its file id.
@@ -149,6 +149,7 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
             // sharing, reactions or local app data, which move it too).
             removed_at =
                 (meta.app_data.archival_status == ARCHIVAL_REMOVED).then_some(meta.updated);
+            changed_at = Some(meta.updated);
             // The stored size of an encrypted payload isn't the file's: only `size` tells it.
             if kind == NodeKind::File && content.size.is_none() {
                 return Err(format!("file {id}: no size (node schema v1)"));
@@ -183,6 +184,7 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         kind,
         body,
         removed_at,
+        changed_at,
         token,
     })
 }

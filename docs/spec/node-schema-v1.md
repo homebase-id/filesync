@@ -154,10 +154,16 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 - After 30 days (the client's `keep_deleted_days`) any client deletes for good an item deleted
   on its own, counted from its removal, with everything deleted with it (a folder's delete goes
   as a whole), files before their folders: that leaves the tombstone below.
-- While a folder's delete is under way, what is in it is still live for a moment. A client that
-  sees a removed folder with live nodes in it, unchanged since it last synced them, takes them
-  as deleted with it (they will be); one changed or added meanwhile keeps the folder alive
-  (sync-semantics §6.3).
+- **The server's time decides** what a folder's delete took along. A live node in a removed
+  folder (directly, or through live folders in it) whose version was written no later than the
+  folder's removal (its header's `updated` against the folder's) was in the folder when it was
+  deleted: it is deleted with it, though its own removal may still be on its way (a folder goes
+  first). A client takes it as removed, and any client may mark it so; one that doesn't know
+  the node's time (its own write, not back from the feed yet) takes it as written before. A
+  node written after the removal (an edit, a new file, by a device that didn't know of the
+  delete yet) is a change of its own: it stays, and brings its folders back (the folders alone,
+  not what was deleted with them; sync-semantics §6.3). A removed folder outside the part of the
+  drive a device syncs, or one it ignores, isn't its to bring back.
 - Homebase gives `archivalStatus` no meaning: each app picks its values. `2` is odin-js mail's
   trash and the `Removed` of odin-js's and chat-kmp's types. It is replaced, like the whole
   header, on every update: a write that leaves it out sets it to `0` **[verified]**
@@ -198,6 +204,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-16: what a folder's delete took along goes by the server's time too: a live node in a
+  removed folder written no later than the removal is deleted with it, one written after keeps
+  its folders alive (an edit made before a folder's delete goes with it, into Recently deleted).
 - 2026-10-15: Recently deleted by time: a delete sets only `archivalStatus` `2` (no `rm`), a
   folder before what is in it; the removal time is the header's `updated`, and what was deleted
   with a folder is what was removed no earlier than it. Nothing writes to a removed node: no

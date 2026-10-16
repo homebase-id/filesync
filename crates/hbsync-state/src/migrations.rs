@@ -218,9 +218,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE TRIGGER placing_gone AFTER DELETE ON placing
         BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;",
     // 7: each file's token (what the remote needs to write it again without reading it
-    // first), NULL until known; what was deleted with what goes by the removal times (node
-    // schema, Recently deleted), so the root goes.
+    // first), NULL until known; the server's time of each version (NULL for this device's own
+    // writes until the feed brings it where it matters); what was deleted with what goes by
+    // these times (node schema, Recently deleted), so the root goes.
     "ALTER TABLE remote ADD COLUMN token BLOB;
+    ALTER TABLE remote ADD COLUMN changed_at INTEGER;
     ALTER TABLE removed ADD COLUMN token BLOB;
     DROP INDEX removed_root;
     ALTER TABLE removed DROP COLUMN root;",

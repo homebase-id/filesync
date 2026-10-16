@@ -105,7 +105,9 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
 - **Removed:** `archivalStatus` 2, at the header's `updated` (the server's time of the removal). Any other
   status is live. An `rm` in the content (from before 2026-10-15) means nothing; leave it out when writing.
 - **Deleted with its folder:** a removed node whose folder is removed too, removed no earlier than the folder.
-  One removed before it was deleted on its own.
+  One removed before it was deleted on its own. A live node in a removed folder (its delete still under way)
+  written no later than the folder's removal is deleted with it too: it doesn't show anywhere, and comes back
+  with the folder; one written after it keeps the folder alive (node schema, "Recently deleted").
 - **Lists:** the whole drive with `archivalStatus: [2]`. The items are the ones not deleted with their folder;
   each counts the items deleted with it, below it.
 - **Never write to a removed node** except to restore it: no rename, no sharing or sending to another
@@ -125,7 +127,9 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
 - **Delete forever:** only what the user saw.
   - Send each item's `versionTag` with it (`delete-batch/by-file-id` takes one per request, from
     odin-core v0.1.960): an item changed since isn't deleted. One stale tag refuses the whole batch
-    (4160) without saying which: re-read the items, leave the changed ones, send the rest again.
+    before anything is deleted (4160; the message names the tag, not the file: **[verified]**
+    odin-core `V2DriveControllerBase.DeleteFileIdBatchInternal`): re-read the items, leave the
+    changed ones, send the rest again.
   - Delete files before folders (`delete-batch/by-file-id`), which leaves tombstones.
   - The 30-day purge is the desktops' job; the phone never purges on its own.
 - **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.

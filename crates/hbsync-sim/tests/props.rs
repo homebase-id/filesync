@@ -1401,3 +1401,317 @@ fn regression_a_folder_kept_alive_in_a_removed_one_keeps_its_tag() {
         panic!("{e}");
     }
 }
+
+/// A computer that synced the role folder writes a file into a folder in it after the phone
+/// deleted the role folder: written after the removal, the file brings its folders back
+/// (§6.3), in that computer's part of the drive. The main folder, which doesn't sync the role
+/// folder, leaves it alone: it never brings back what is outside its part.
+#[test]
+fn regression_a_file_written_into_a_removed_role_folder_stays_out_of_main() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(4, CreateJunk { parent: 0 }),
+        act(4, CreateFolder { parent: 0, name: 6 }),
+        act(
+            4,
+            Move {
+                node: 6,
+                parent: 2,
+                name: 0,
+            },
+        ),
+        plan(4),
+        step(4),
+        act(0, DeleteRoleFolder),
+        step(4),
+        plan(1),
+        step(1),
+        step(1),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_new_role_devices, &events) {
+        panic!("{e}");
+    }
+}
+
+/// The computer deleting a folder stops syncing a file in it before it removed the file: the
+/// folder's removal took the file along (written before it), so it is removed, though no
+/// device marks it so.
+#[test]
+fn regression_a_file_taken_along_and_no_longer_synced_is_removed() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(3, CreateFolder { parent: 0, name: 5 }),
+        plan(3),
+        act(0, Phone { op: 0, pick: 0 }),
+        act(3, CreateFile { parent: 6, name: 0 }),
+        step(3),
+        plan(3),
+        step(3),
+        act(3, ToggleIgnore),
+        plan(3),
+        step(3),
+        step(3),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_new_role_devices, &events) {
+        panic!("{e}");
+    }
+}
+
+/// One client edits a file and deletes the folder it moved it into; the other, which never
+/// had that edit, only renamed the file meanwhile. The folder's removal took the edited version
+/// along: the rename doesn't write over it (it stays, with the folder, in Recently deleted), the
+/// renamed file goes up as a new item.
+#[test]
+fn regression_a_rename_doesnt_write_over_a_version_taken_along() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(1, CreateJunk { parent: 0 }),
+        act(
+            1,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 3,
+            },
+        ),
+        plan(1),
+        step(1),
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        act(1, Edit { file: 0 }),
+        plan(0),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        step(0),
+        act(
+            1,
+            Move {
+                node: 6,
+                parent: 0,
+                name: 0,
+            },
+        ),
+        plan(1),
+        act(0, CreateJunk { parent: 0 }),
+        step(1),
+        step(1),
+        act(1, Delete { node: 1 }),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        plan(1),
+        step(1),
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 4,
+            },
+        ),
+        step(1),
+    ];
+    if let Err(e) = run_with(2, Some(1), |sim| sim, &events) {
+        panic!("{e}");
+    }
+}
+
+/// A folder is written into another after every client began to ignore that one, and after it
+/// was removed: written after the removal, it stays; its folder, ignored everywhere, isn't any
+/// client's to bring back, so it goes to the top, where it stays visible.
+#[test]
+fn regression_a_folder_written_into_an_ignored_removed_one_stays_visible() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(
+            2,
+            CreateFolder {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        plan(2),
+        act(2, CreateFolder { parent: 0, name: 0 }),
+        step(2),
+        plan(0),
+        act(0, Edit { file: 0 }),
+        plan(2),
+        step(0),
+        act(2, ToggleIgnore),
+        act(0, ToggleIgnore),
+        plan(0),
+        step(0),
+        step(2),
+    ];
+    if let Err(e) = run(3, &events) {
+        panic!("{e}");
+    }
+    if let Err(e) = run_with(3, None, Sim::with_role_folder, &events) {
+        panic!("{e}");
+    }
+}
+
+/// Scripted races around a folder's delete (node schema, Recently deleted): the server's time
+/// decides what went with the folder.
+mod folder_delete_races {
+    use super::*;
+    use Action::*;
+    use hbsync_types::NodeId;
+
+    // Not "d": the odd clients ignore it.
+    const D: usize = 1; // "b"
+    const A: usize = 0; // "a"
+    const B: usize = 3; // "c.txt"
+
+    fn act(sim: &mut Sim, client: usize, action: Action) {
+        sim.run(&[Event::Act { client, action }]);
+    }
+
+    fn plan(sim: &mut Sim, client: usize) {
+        sim.run(&[Event::Plan { client }]);
+    }
+
+    fn steps(sim: &mut Sim, client: usize, n: usize) {
+        sim.run(&vec![Event::Step { client }; n]);
+    }
+
+    fn settle(sim: &mut Sim) {
+        assert!(sim.quiesce(30), "no convergence");
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// What a create's `parent` is to pick folder `path` on client `c`.
+    fn folder(sim: &Sim, c: usize, path: &str) -> usize {
+        let node = if path.is_empty() {
+            NodeId::ROOT
+        } else {
+            sim.item(c, path).expect(path)
+        };
+        sim.pick(c, node, true).expect(path)
+    }
+
+    /// What a `Delete` or `Edit` picks for `path` on client `c`.
+    fn item(sim: &Sim, c: usize, path: &str) -> usize {
+        let node = sim.item(c, path).expect(path);
+        sim.pick(c, node, false).expect(path)
+    }
+
+    /// The index `Edit` picks for file `path` on client `c` (files only, by id).
+    fn pick_file(sim: &Sim, c: usize, path: &str) -> usize {
+        sim.file_pick(c, sim.item(c, path).expect(path))
+            .expect(path)
+    }
+
+    /// Folder `b` with `b/a` in it, synced on both clients.
+    fn synced_folder() -> Sim {
+        let mut sim = Sim::new(2);
+        let root = folder(&sim, 0, "");
+        act(
+            &mut sim,
+            0,
+            CreateFolder {
+                parent: root,
+                name: D,
+            },
+        );
+        let d = folder(&sim, 0, "b");
+        act(&mut sim, 0, CreateFile { parent: d, name: A });
+        settle(&mut sim);
+        sim
+    }
+
+    /// One client adds `b/c.txt` and deletes `b` while the other hasn't downloaded `b/c.txt`
+    /// yet, and plans in the middle of the delete: `b/c.txt` was written before the folder's
+    /// removal, so it went with it, and the folder doesn't come back.
+    #[test]
+    fn a_file_not_downloaded_yet_doesnt_bring_its_folder_back() {
+        let mut sim = synced_folder();
+        let d = folder(&sim, 0, "b");
+        act(&mut sim, 0, CreateFile { parent: d, name: B });
+        plan(&mut sim, 0);
+        steps(&mut sim, 0, 5);
+        let photos = sim.item(0, "b").expect("b");
+        let node = item(&sim, 0, "b");
+        act(&mut sim, 0, Delete { node });
+        plan(&mut sim, 0);
+        steps(&mut sim, 0, 1); // the folder first
+        assert!(sim.is_removed(photos));
+        plan(&mut sim, 1);
+        steps(&mut sim, 1, 10);
+        settle(&mut sim);
+        assert_eq!(sim.server_paths(), Vec::<String>::new());
+    }
+
+    /// One client edits `b/a` and uploads it before the other, not knowing, deletes `b`: the
+    /// edit came before the delete, so it went with the folder, into Recently deleted with its
+    /// content.
+    #[test]
+    fn an_edit_before_the_delete_goes_with_the_folder() {
+        let mut sim = synced_folder();
+        let a = sim.item(1, "b/a").expect("b/a");
+        let file = pick_file(&sim, 1, "b/a");
+        act(&mut sim, 1, Edit { file });
+        plan(&mut sim, 1);
+        let node = item(&sim, 0, "b");
+        act(&mut sim, 0, Delete { node });
+        plan(&mut sim, 0); // before the edit is on the drive
+        steps(&mut sim, 1, 5);
+        steps(&mut sim, 0, 5);
+        settle(&mut sim);
+        assert_eq!(sim.server_paths(), Vec::<String>::new());
+        assert!(sim.is_removed(a), "the edit is in Recently deleted");
+    }
+
+    /// One client deletes `b`; the other, not knowing, edits `b/a` after that: the edit came
+    /// after the delete, so the file stays, and brings its folder back.
+    #[test]
+    fn an_edit_after_the_delete_keeps_the_file_and_its_folder() {
+        let mut sim = synced_folder();
+        let node = item(&sim, 0, "b");
+        act(&mut sim, 0, Delete { node });
+        plan(&mut sim, 0);
+        steps(&mut sim, 0, 1); // the folder first
+        let file = pick_file(&sim, 1, "b/a");
+        act(&mut sim, 1, Edit { file });
+        plan(&mut sim, 1);
+        steps(&mut sim, 1, 5);
+        settle(&mut sim);
+        assert_eq!(sim.server_paths(), ["b", "b/a"]);
+    }
+
+    /// A client that never saw `b` plans in the middle of its delete: `b/c.txt`, written before
+    /// the removal, went with it. It isn't moved to the top, nor is `b` brought back.
+    #[test]
+    fn a_folder_never_seen_doesnt_leave_its_files_at_the_top() {
+        let mut sim = Sim::new(2);
+        let root = folder(&sim, 0, "");
+        act(
+            &mut sim,
+            0,
+            CreateFolder {
+                parent: root,
+                name: D,
+            },
+        );
+        let d = folder(&sim, 0, "b");
+        act(&mut sim, 0, CreateFile { parent: d, name: B });
+        plan(&mut sim, 0);
+        steps(&mut sim, 0, 5);
+        let node = item(&sim, 0, "b");
+        act(&mut sim, 0, Delete { node });
+        plan(&mut sim, 0);
+        steps(&mut sim, 0, 1);
+        plan(&mut sim, 1);
+        steps(&mut sim, 1, 10);
+        settle(&mut sim);
+        assert_eq!(sim.server_paths(), Vec::<String>::new());
+    }
+}

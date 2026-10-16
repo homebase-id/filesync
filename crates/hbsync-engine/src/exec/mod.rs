@@ -201,6 +201,10 @@ pub struct Executor<'a> {
     forgetting: HashSet<NodeId>,
     /// The nodes with a `RemoteDelete` still to run in this run (or to retry).
     removing: HashSet<NodeId>,
+    /// The nodes whose `RemoteDelete` ended in this run without removing them: what is in them
+    /// waits for the next plan, so nothing is removed before its folder (node schema, Recently
+    /// deleted).
+    unremoved: HashSet<NodeId>,
     report: ExecReport,
     urgent: HashSet<NodeId>,
     /// Set when a test's crash point was reached: the run stops.
@@ -336,6 +340,7 @@ impl<'a> Executor<'a> {
             queue: VecDeque::new(),
             forgetting: HashSet::new(),
             removing: HashSet::new(),
+            unremoved: HashSet::new(),
             report: ExecReport::default(),
             urgent: HashSet::new(),
             crashed: false,
@@ -396,6 +401,7 @@ impl<'a> Executor<'a> {
     fn run_ops(&mut self, ops: Vec<Op>) -> Result<(), StateError> {
         self.forgetting.clear();
         self.removing.clear();
+        self.unremoved.clear();
         for op in &ops {
             if let Some(pending) = self.pending(op) {
                 pending.insert(op.node());
@@ -562,6 +568,9 @@ impl<'a> Executor<'a> {
             Some(Requirement::RemoteFolder(folder)) => {
                 self.db.read(|s| s.get_mirror(folder))?.is_some()
             }
+            Some(Requirement::FolderFirst(folder)) if self.unremoved.contains(&folder) => {
+                return Err(Outcome::waiting("its folder wasn't removed"));
+            }
             Some(Requirement::FolderFirst(folder)) => !self.removing.contains(&folder),
         };
         if met {
@@ -589,6 +598,14 @@ impl<'a> Executor<'a> {
             && let Some(pending) = self.pending(&op)
         {
             pending.remove(&op.node());
+        }
+        if matches!(op, Op::RemoteDelete { .. })
+            && !matches!(
+                outcome,
+                Outcome::Done | Outcome::Settled | Outcome::Retry(_) | Outcome::Backoff(_)
+            )
+        {
+            self.unremoved.insert(op.node());
         }
         match outcome {
             Outcome::Done => {
@@ -675,6 +692,9 @@ impl<'a> Executor<'a> {
         } else {
             if let Some(pending) = self.pending(&op) {
                 pending.remove(&op.node());
+            }
+            if matches!(op, Op::RemoteDelete { .. }) {
+                self.unremoved.insert(op.node());
             }
             self.report.failed.push((op, why));
         }

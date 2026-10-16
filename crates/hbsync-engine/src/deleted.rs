@@ -21,8 +21,9 @@ use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
 
-/// Recently deleted, newest first: the drive's, each item with the folder of this device it
-/// comes back to and its path below that folder's top.
+/// Recently deleted, newest first: the drive's newest `limit` items (what a delete of its own
+/// took out, [`Deleted::root`] itself) with what each took along, each with the folder of this
+/// device it comes back to and its path below that folder's top.
 pub fn list(s: &Store<'_>, limit: usize) -> Result<Vec<Deleted>, StateError> {
     // Where a walk up stops: a folder's top (here or not), the role folders whether
     // synced here or not; above them all, the main folder's top (the drive's root).
@@ -33,34 +34,44 @@ pub fn list(s: &Store<'_>, limit: usize) -> Result<Vec<Deleted>, StateError> {
         .copied()
         .chain(Role::ALL.iter().map(|r| r.node()))
         .collect();
-    let listed = s.list_removed(limit)?;
+    let listed = s.list_removed(usize::MAX)?;
     let count = listed.len();
     let mut rows = RemovedRows::new(s, listed);
-    let mut known = HashMap::new();
     let mut deleted_by = HashMap::new();
-    (0..count)
+    let roots = (0..count)
         .map(|i| {
-            let r = &rows.rows[i];
-            let (node, parent, removed_at_ms) = (r.row.node, r.row.parent, r.removed_at);
-            let item = Deleted {
-                node,
-                parent,
-                path: r.row.name.clone(),
-                kind: r.row.kind,
-                size: r.row.file.map(|f| f.size),
-                removed_at_ms,
-                root: node,
-                folder: None,
-            };
-            let (path, top) = place(&mut rows, &tops, parent, &mut known)?;
-            Ok(Deleted {
-                path: join(&path, &item.path),
-                root: deleted_by_item(&mut rows, node, &mut deleted_by)?,
-                folder: folders.get(&top).cloned(),
-                ..item
-            })
+            let node = rows.rows[i].row.node;
+            deleted_by_item(&mut rows, node, &mut deleted_by)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    // Newest first: the items' own rows give the order.
+    let items: HashSet<NodeId> = (0..count)
+        .filter(|&i| roots[i] == rows.rows[i].row.node)
+        .take(limit)
+        .map(|i| roots[i])
+        .collect();
+    let mut known = HashMap::new();
+    let mut listed = Vec::new();
+    for (i, root) in roots.into_iter().enumerate() {
+        if !items.contains(&root) {
+            continue;
+        }
+        let r = &rows.rows[i];
+        let (node, parent, name) = (r.row.node, r.row.parent, r.row.name.clone());
+        let (kind, size, removed_at_ms) = (r.row.kind, r.row.file.map(|f| f.size), r.removed_at);
+        let (path, top) = place(&mut rows, &tops, parent, &mut known)?;
+        listed.push(Deleted {
+            node,
+            parent,
+            path: join(&path, &name),
+            kind,
+            size,
+            removed_at_ms,
+            root,
+            folder: folders.get(&top).cloned(),
+        });
+    }
+    Ok(listed)
 }
 
 /// Rows of Recently deleted by node: the ones read already, else from the store, each once.
@@ -97,21 +108,20 @@ impl<'a, 's> RemovedRows<'a, 's> {
 
     /// The folder `node` was deleted with ([`deleted_with`]), if it was.
     fn deleted_with(&mut self, node: NodeId) -> Result<Option<NodeId>, StateError> {
-        let Some(r) = self.get(node)? else {
+        let Some((parent, at)) = self.get(node)?.map(|r| (r.row.parent, r.removed_at)) else {
             return Ok(None);
         };
-        let (parent, at) = (r.row.parent, r.removed_at);
         Ok(self
             .get(parent)?
-            .filter(|folder| folder.removed_at <= at)
+            .filter(|folder| deleted_with(at, folder))
             .map(|folder| folder.row.node))
     }
 }
 
-/// Whether `r` was deleted with `folder`, the folder it is in, in Recently deleted too: removed
-/// no earlier than the folder (node schema, Recently deleted: a folder goes first).
-fn deleted_with(r: &RemovedRow, folder: &RemovedRow) -> bool {
-    folder.removed_at <= r.removed_at
+/// Whether a node removed at `removed_at` was deleted with `folder`, the folder it is in, in
+/// Recently deleted too: removed no earlier than the folder (node schema, Recently deleted).
+fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
+    folder.removed_at <= removed_at
 }
 
 /// The item of Recently deleted whose delete took `node` along: up through the folders it was
@@ -261,7 +271,7 @@ fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> 
             let with: Vec<RemovedRow> = s
                 .removed_children(folder.row.node)?
                 .into_iter()
-                .filter(|r| deleted_with(r, folder) && seen.insert(r.row.node))
+                .filter(|r| deleted_with(r.removed_at, folder) && seen.insert(r.row.node))
                 .collect();
             rows.extend(with);
         }
@@ -458,6 +468,7 @@ mod tests {
                 file: None,
                 content_extra: None,
                 token: None,
+                changed_at: None,
             },
             removed_at,
         }

@@ -1111,6 +1111,84 @@ fn temp_files_no_download_wants_are_swept() -> R {
     Ok(())
 }
 
+/// A folder's removal that fails holds back the removals of what is in it, so nothing is
+/// removed before its folder (node schema, Recently deleted): once the folder goes, what was in
+/// it goes with it, and is deleted with it.
+#[test]
+fn a_folder_that_isnt_removed_keeps_what_is_in_it() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("Photos/x.jpg", "x")?;
+    a.write("Photos/2024/y.jpg", "y")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder's removal keeps failing during this sync.
+    a.remote.faults().fail_writes_named = Some("Photos".into());
+    let report = a.sync()?;
+    assert!(!report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.removed().count(),
+        0,
+        "nothing went before its folder"
+    );
+    a.remote.faults().fail_writes_named = None;
+    a.sync()?;
+    let listed = a.recently_deleted(10)?;
+    let photos = listed
+        .iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    assert_eq!(listed.len(), 4, "{listed:?}");
+    assert!(
+        listed.iter().all(|i| i.root == photos.node),
+        "all deleted with the folder: {listed:?}"
+    );
+    Ok(())
+}
+
+/// A folder's removal took along a version another device never had (its own removal still
+/// on its way): that device's rename of its older copy doesn't write over it. The version stays,
+/// and goes with the folder into Recently deleted; the renamed copy goes up as a new item.
+#[test]
+fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Photos/x.txt", "old")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("Photos/x.txt", "new")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder goes; the file's own removal keeps failing during this sync.
+    a.remote.faults().fail_writes_named = Some("x.txt".into());
+    a.sync()?;
+    a.remote.faults().fail_writes_named = None;
+    // b never had "new": it renames its "old".
+    b.engine.scan_local()?;
+    fs::rename(b.root.join("Photos/x.txt"), b.root.join("Photos/y.txt"))?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read_text("Photos/y.txt")?, "old");
+    let removed: Vec<String> = a
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert!(removed.contains(&"Photos/x.txt".to_owned()), "{removed:?}");
+    let x = server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .removed()
+        .find(|h| matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == "x.txt"))
+        .map(|h| h.file_id)
+        .ok_or("x.txt not in Recently deleted")?;
+    let bytes = server.lock().map_err(|_| "poisoned")?.payload(x)?;
+    assert_eq!(bytes.as_slice(), b"new", "the version taken along stays");
+    Ok(())
+}
+
 #[test]
 fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     let server = server();

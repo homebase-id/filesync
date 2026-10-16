@@ -89,9 +89,22 @@ pub struct Input {
     /// drained and parents were looked up). Then a remote node whose parent is unknown
     /// everywhere is a true orphan and is moved to the root instead of waiting forever.
     pub remote_complete: bool,
-    /// The folders in Recently deleted that nodes of `remote` are in: a folder's delete removes
-    /// the folder first, then what is in it (§6.3).
-    pub removed: HashSet<NodeId>,
+    /// The folders in Recently deleted that nodes of `remote` are in, and the removed folders
+    /// above them: a folder's delete removes the folder first, then what is in it (§6.3).
+    pub removed: HashMap<NodeId, Removed>,
+    /// The server's time of each remote node's version, where this device knows it (node
+    /// schema, Recently deleted): a node in a removed folder written no later than the
+    /// folder's removal went with it.
+    pub changed_at: HashMap<NodeId, i64>,
+}
+
+/// A folder in Recently deleted, as [`Input::removed`] has it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Removed {
+    /// When it was removed: the server's time (Unix ms).
+    pub at: i64,
+    /// Where it was, to bring it back.
+    pub state: NodeState,
 }
 
 /// One step for the executor. Locations are (parent node, remote name); the executor turns

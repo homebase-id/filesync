@@ -50,16 +50,6 @@ impl Store<'_> {
         }
     }
 
-    /// Whether `node` is in Recently deleted, as this folder sees it.
-    pub fn is_removed(&self, node: NodeId) -> Result<bool> {
-        if self.coords()?.hides(node) {
-            return Ok(false);
-        }
-        Ok(self
-            .prep("SELECT 1 FROM removed WHERE node = ?1")?
-            .exists([node.0.as_bytes()])?)
-    }
-
     /// Rows of Recently deleted as this folder sees them.
     pub(super) fn removed_rows(
         &self,

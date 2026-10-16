@@ -162,12 +162,15 @@ impl Executor<'_> {
             None => self.db.read(|s| s.removed_by_node(node))?,
             Some(_) => None,
         };
-        // Recently deleted holds a version this device never had (edited elsewhere, then
-        // deleted): restoring over it would lose it. It stays there, and this version goes up
-        // as a new item.
-        if let Some(r) = &removed
-            && r.row.file.map(|f| f.hash)
-                != base.as_ref().and_then(|b| b.state.content).map(|c| c.hash)
+        // The version written over has bytes this device never had: edited elsewhere, then
+        // deleted (in Recently deleted, or taken along by a folder's delete, node schema):
+        // writing over it would lose it. It stays, and this version goes up as a new item.
+        let over = match existing {
+            None => removed.as_ref().map(|r| &r.row),
+            Some((file_id, _)) => mirror.as_ref().filter(|m| m.file_id == file_id),
+        };
+        if let Some(r) = over
+            && r.file.map(|f| f.hash) != base.as_ref().and_then(|b| b.state.content).map(|c| c.hash)
         {
             return Err(self.detach(node, NodeId::new()).unwrap_or_else(|o| o));
         }

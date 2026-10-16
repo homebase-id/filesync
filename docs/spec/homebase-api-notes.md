@@ -215,8 +215,9 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   retry (the tombstone has a version of its own): the client reads the header once and takes
   `deleted` as done. `delete-batch/by-file-id` takes a `versionTag` per request and checks them
   all before deleting any (**[verified]** `DeleteFileIdBatchInternal`); not used yet. A retried
-  batch whose files were partly deleted fails whole (their tombstones have new tags), and 4160
-  doesn't say which: re-read the headers. Deleting a tombstone at its own tag rewrites it (new
+  batch whose files were partly deleted fails whole (their tombstones have new tags, **[inferred]**
+  from the single delete), and its 4160 names the stale tag in its message, not the file
+  (**[verified]**, `AssertVersionTagMatches`): re-read the headers. Deleting a tombstone at its own tag rewrites it (new
   version, feed row and `fileDeleted`, **[verified]** `UpsertAllButReactionsAndTransferAsync`).
 - Payload reads were buffered whole in server memory (#1892) and ranges were `int` (#1893)
   until odin-core PR #1921 (merged 2026-10-11). The client is written for #1921: a read is one streamed

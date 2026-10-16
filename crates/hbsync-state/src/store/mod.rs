@@ -108,6 +108,11 @@ pub struct MirrorRow {
     pub content_extra: Option<String>,
     /// The file's [`FileToken`], once a write or the feed has given it.
     pub token: Option<FileToken>,
+    /// When this version was written, the server's time (Unix ms, the feed's header): whether
+    /// the node went with a removed folder it is in depends on it (node schema, Recently
+    /// deleted). `None` for this device's own write until the feed brings it back where that
+    /// matters ([`Store::refresh`]); a removed node's is its removal time.
+    pub changed_at: Option<i64>,
 }
 
 /// A remote node in Recently deleted: its row as it was, and when it went there (Unix ms, the
@@ -158,6 +163,7 @@ impl MirrorRow {
                 }),
             content_extra: content.carried_json(),
             token: None,
+            changed_at: None,
         }
     }
 
@@ -276,10 +282,11 @@ const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size
      b.executable, b.remote_file_id, b.version_tag, b.content_state, b.local_name, b.local_hash, \
      b.tags FROM base b JOIN nodes n ON n.id = b.id AND b.folder = $F \
      JOIN nodes p ON p.id = b.parent";
+/// A removed row has no `changed_at` of its own: its removal is its last write.
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
-     mtime_ms, executable, content_extra, token, removed_at FROM removed";
+     mtime_ms, executable, content_extra, token, NULL, removed_at FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
-     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token \
+     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token, m.changed_at \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
 /// The columns [`RawLocal`] reads, from `local l JOIN nodes n`.
 const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, l.volume, \
@@ -422,7 +429,7 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
 fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
     Ok(RemovedRow {
         row: mirror_row(r)?,
-        removed_at: r.get(12)?,
+        removed_at: r.get(13)?,
     })
 }
 
@@ -449,5 +456,6 @@ fn mirror_row(r: &Row<'_>) -> Result<MirrorRow> {
         token: r
             .get::<_, Option<Vec<u8>>>(11)?
             .map(|b| FileToken(b.into())),
+        changed_at: r.get(12)?,
     })
 }

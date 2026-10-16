@@ -147,14 +147,11 @@ impl Executor<'_> {
                 row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
             After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
+            // Out of the tree; Recently deleted has it once the feed brings it back with the
+            // server's time of the removal (the write's answer has none, and this device's
+            // clock isn't the server's), at the end of the sync at the latest.
             After::Removed { file_id } => {
                 s.delete_mirror(file_id)?;
-                if let Some(row) = row {
-                    // This device's time until the feed brings the server's: the write's
-                    // answer has none.
-                    let removed_at = hbsync_types::unix_now_ms();
-                    s.put_removed(&RemovedRow { row, removed_at })?;
-                }
                 s.mark_dirty(node)
             }
         })

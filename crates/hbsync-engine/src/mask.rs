@@ -77,6 +77,15 @@ impl Masks {
             .into_iter()
             .filter(|m| !outside.contains(m))
             .collect();
+        // A folder in Recently deleted the filter masks isn't this device's to bring back.
+        if !input.removed.is_empty() {
+            let mut paths = input.remote.clone();
+            for (node, r) in &input.removed {
+                paths.insert(*node, r.state.clone());
+            }
+            let filtered = self::masked(&paths, filter);
+            masked.extend(input.removed.keys().filter(|n| filtered.contains(n)));
+        }
         if masked.is_empty() && outside.is_empty() {
             return Masks::default();
         }
@@ -207,6 +216,7 @@ impl Masks {
             dirty,
             remote_complete: input.remote_complete,
             removed: input.removed.clone(),
+            changed_at: input.changed_at.clone(),
         };
         Masks {
             masked,

@@ -66,28 +66,19 @@ impl Server {
             .ok()
             .flatten()
             .map(|r| r.folder);
-        // Shown: the items whose folder isn't in Recently deleted too; each with how many items
-        // below it its restore brings back (those deleted with it).
-        let by_node: HashMap<_, _> = items.iter().map(|i| (i.deleted.node, &i.deleted)).collect();
+        // Shown: the items deleted on their own (their `root`), each with how many items
+        // its delete took along: its restore brings them back.
         let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
-        for d in items.iter().map(|i| &i.deleted) {
-            let mut up = d.parent;
-            for _ in 0..256 {
-                let Some(folder) = by_node.get(&up) else {
-                    break;
-                };
-                if !by_node.contains_key(&folder.parent) {
-                    if folder.root == d.root {
-                        *along.entry(folder.node).or_default() += 1;
-                    }
-                    break;
-                }
-                up = folder.parent;
-            }
+        for d in items
+            .iter()
+            .map(|i| &i.deleted)
+            .filter(|d| d.root != d.node)
+        {
+            *along.entry(d.root).or_default() += 1;
         }
         let rows: String = items
             .iter()
-            .filter(|i| !by_node.contains_key(&i.deleted.parent))
+            .filter(|i| i.deleted.root == i.deleted.node)
             .take(MAX_DELETED)
             .map(|item| {
                 let d = &item.deleted;

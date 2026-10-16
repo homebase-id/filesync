@@ -81,11 +81,11 @@ impl Store<'_> {
         let f = row.file.as_ref();
         self.prep(
             "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, token) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+                 hash, size, mtime_ms, executable, content_extra, token, changed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
                  ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
                  kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
-                 content_extra = ?11, token = ?12",
+                 content_extra = ?11, token = ?12, changed_at = ?13",
         )?
         .execute(params![
             id,
@@ -100,29 +100,62 @@ impl Store<'_> {
             f.is_some_and(|f| f.executable),
             row.content_extra,
             row.token.as_ref().map(|t| &t.0[..]),
+            row.changed_at,
         ])?;
         self.fan_out(row.node, row.parent)
     }
 
     /// A version the store has already, as the feed brings it back: its token (one kept from
-    /// an earlier login may not open with this one's shared secret) and, `removed_at` it, the
-    /// server's time of its removal (this device wrote its own). Written only where they
-    /// differ; no change of the node, so nothing to reconcile.
-    pub fn refresh(&self, row: &MirrorRow, removed_at: Option<i64>) -> Result<()> {
+    /// an earlier login may not open with this one's shared secret), and the server's time of
+    /// this device's own write where it decides something: in a folder in Recently deleted,
+    /// whether the node went with it (node schema, Recently deleted). Elsewhere it stays
+    /// unknown, which counts as before any removal the feed brings later. Written only where
+    /// something differs; no change of the node, so nothing to reconcile.
+    pub fn refresh(&self, row: &MirrorRow, removed: bool) -> Result<()> {
         let token = row.token.as_ref().map(|t| &t.0[..]);
-        match removed_at {
-            None if token.is_some() => self
-                .prep("UPDATE remote SET token = ?2 WHERE file_id = ?1 AND token IS NOT ?2")?
-                .execute(params![row.file_id.0.as_bytes(), token])?,
-            None => 0,
-            Some(at) => self
-                .prep(
-                    "UPDATE removed SET token = coalesce(?2, token), removed_at = ?3 \
-                     WHERE file_id = ?1 AND (token IS NOT coalesce(?2, token) OR removed_at != ?3)",
-                )?
-                .execute(params![row.file_id.0.as_bytes(), token, at])?,
-        };
+        let table = if removed { "removed" } else { "remote" };
+        if token.is_some() {
+            self.prep(&format!(
+                "UPDATE {table} SET token = ?2 WHERE file_id = ?1 AND token IS NOT ?2"
+            ))?
+            .execute(params![row.file_id.0.as_bytes(), token])?;
+        }
+        if let Some(at) = row.changed_at
+            && !removed
+            && self.in_removed_folder(row.parent)?
+        {
+            self.prep(
+                "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NULL",
+            )?
+            .execute(params![row.file_id.0.as_bytes(), at])?;
+        }
         Ok(())
+    }
+
+    /// Whether the drive's folder `folder`, or one above it in the mirror, is in Recently
+    /// deleted.
+    fn in_removed_folder(&self, folder: NodeId) -> Result<bool> {
+        let mut parent = self.prep(MIRROR_PARENT)?;
+        let mut at = folder;
+        for _ in 0..MAX_DEPTH {
+            if at.is_root() {
+                return Ok(false);
+            }
+            if self
+                .prep("SELECT 1 FROM removed WHERE node = ?1")?
+                .exists([at.0.as_bytes()])?
+            {
+                return Ok(true);
+            }
+            match parent
+                .query_row([at.0.as_bytes()], |r| r.get::<_, Vec<u8>>(0))
+                .optional()?
+            {
+                Some(up) => at = codec::node(&up)?,
+                None => return Ok(false),
+            }
+        }
+        Ok(false)
     }
 
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
@@ -247,5 +280,6 @@ fn outside_row() -> MirrorRow {
         file: None,
         content_extra: None,
         token: None,
+        changed_at: None,
     }
 }

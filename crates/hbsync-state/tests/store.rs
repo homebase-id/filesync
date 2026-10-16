@@ -308,12 +308,12 @@ mod mirror {
             file,
             content_extra: Some(r#"{"future":1}"#.into()),
             token: Some(FileToken(node.0.as_bytes().as_slice().into())),
+            changed_at: None,
         }
     }
 
     /// A version the mirror has already, again, changes nothing; the feed's refresh takes its
-    /// token (a file this device created has none yet; an earlier login's may not open) and its
-    /// removal's time, and nothing needs reconciling.
+    /// token (an earlier login's may not open), and nothing needs reconciling.
     #[test]
     fn a_known_version_takes_only_a_refresh() -> R {
         use hbsync_state::RemovedRow;
@@ -334,7 +334,7 @@ mod mirror {
         };
         db.write(|s| s.put_mirror(&renamed))?;
         assert_eq!(db.read(|s| s.get_mirror(node))?, Some(without.clone()));
-        db.write(|s| s.refresh(&with_token, None))?;
+        db.write(|s| s.refresh(&with_token, false))?;
         assert_eq!(
             db.read(|s| s.get_mirror(node))?,
             Some(with_token.clone()),
@@ -346,27 +346,64 @@ mod mirror {
             token: Some(FileToken(vec![0xEE; 16].into())),
             ..with_token.clone()
         };
-        db.write(|s| s.refresh(&other, None))?;
-        db.write(|s| s.refresh(&without, None))?;
+        db.write(|s| s.refresh(&other, false))?;
+        db.write(|s| s.refresh(&without, false))?;
         assert_eq!(db.read(|s| s.get_mirror(node))?, Some(other.clone()));
 
-        // Removed: this device's time until the server's comes back.
-        let removed = |row: &MirrorRow, removed_at| RemovedRow {
-            row: row.clone(),
-            removed_at,
-        };
+        // In Recently deleted, the same.
         db.write(|s| {
             s.delete_mirror(with_token.file_id)?;
-            s.put_removed(&removed(&without, 1))?;
+            s.put_removed(&RemovedRow {
+                row: without.clone(),
+                removed_at: 5,
+            })?;
             s.clear_dirty(node)
         })?;
-        db.write(|s| s.refresh(&with_token, Some(5)))?;
-        db.write(|s| s.refresh(&without, Some(5)))?;
-        assert_eq!(
-            db.read(|s| s.removed_by_node(node))?,
-            Some(removed(&with_token, 5))
-        );
+        db.write(|s| s.refresh(&with_token, true))?;
+        let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
+        assert_eq!((back.row.token, back.removed_at), (with_token.token, 5));
         assert!(!db.read(|s| s.is_dirty(node))?);
+        Ok(())
+    }
+
+    /// This device's own write has no server time until the feed brings it back, and the echo
+    /// records it only where it decides something: in a folder in Recently deleted.
+    #[test]
+    fn an_own_writes_time_is_kept_in_a_removed_folder_only() -> R {
+        use hbsync_state::RemovedRow;
+        let mut db = StateDb::open_in_memory()?;
+        let folder = row(NodeId::new(), NodeId::ROOT, "f", None);
+        let inner = row(NodeId::new(), folder.node, "g", None);
+        let file = row(NodeId::new(), inner.node, "x", None);
+        db.write(|s| {
+            s.put_mirror(&folder)?;
+            s.put_mirror(&inner)?;
+            s.put_mirror(&file)
+        })?;
+        let echo = MirrorRow {
+            changed_at: Some(7),
+            ..file.clone()
+        };
+        let time = |db: &mut StateDb| -> hbsync_state::Result<Option<i64>> {
+            Ok(db
+                .read(|s| s.get_mirror(file.node))?
+                .and_then(|m| m.changed_at))
+        };
+        db.write(|s| s.refresh(&echo, false))?;
+        assert_eq!(time(&mut db)?, None, "nothing it decides");
+        db.write(|s| {
+            s.delete_mirror(folder.file_id)?;
+            s.put_removed(&RemovedRow {
+                row: folder.clone(),
+                removed_at: 5,
+            })
+        })?;
+        db.write(|s| s.refresh(&echo, false))?;
+        assert_eq!(
+            time(&mut db)?,
+            Some(7),
+            "in a removed folder, two levels up"
+        );
         Ok(())
     }
 
@@ -739,6 +776,7 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
         file: None,
         content_extra: None,
         token: None,
+        changed_at: None,
     };
     let dirty = |db: &mut StateDb, node| db.read(|s| s.is_dirty(node));
     // The role folders' tops, then a folder inside Documents: only docs is concerned.
@@ -801,6 +839,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
         file: None,
         content_extra: None,
         token: None,
+        changed_at: None,
     };
     let (inside, elsewhere) = (NodeId::new(), NodeId::new());
     main.write(|s| {

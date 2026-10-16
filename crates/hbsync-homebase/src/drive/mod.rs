@@ -31,6 +31,9 @@ pub mod wire;
 
 /// The server counts the bytes of an upload in 32 bits: a larger one fails (#1893).
 const MAX_PAYLOAD: u64 = u32::MAX as u64;
+/// Content updates at least this large read the file's header first, token or not: one small
+/// request, against sending all of it for a refusal (the file changed or went meanwhile).
+const LOOK_FIRST: u64 = 8 << 20;
 
 /// The sync drive on an identity, as its alias and type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -120,9 +123,10 @@ impl HomebaseRemote {
         payload: Option<Upload<'_>>,
     ) -> Result<Target> {
         let at = target.map(|t| t.at);
+        let look_first = payload.as_ref().is_some_and(|p| p.size >= LOOK_FIRST);
         let key = match target {
             None => KeyHeader::random().map_err(remote_error)?,
-            Some(t) => self.update_key(t)?,
+            Some(t) => self.update_key(t, look_first)?,
         };
         let transfer_iv = sealed::strong().map_err(remote_error)?;
         // The payload as sent: read once, hashed, encrypted under a new payload IV, hashed
@@ -207,9 +211,9 @@ impl HomebaseRemote {
                 },
                 token: Some(key.token(self.client.key())),
             }),
-            // odin-core answers a content update of a file deleted since `update_key` looked
-            // with 500 (a null payload list in `ProcessAppendOrOverwrite`, odin-core #1904)
-            // instead of 4002: look again before retrying.
+            // odin-core answers a content update of a file deleted meanwhile with 500 (a null
+            // payload list in `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002: look
+            // before retrying.
             Err(HomebaseError::Api { ref error, .. }) if error.status == 500 => {
                 if let Some(at) = at {
                     self.current(at)?;
@@ -234,12 +238,14 @@ impl HomebaseRemote {
 
     /// The key an update of `target` sends: the file's own, with a new header IV. From its
     /// token when that opens: the server's version guard (4160) refuses the write if the file
-    /// changed since. Else from its header, read first.
-    fn update_key(&self, target: &Target) -> Result<KeyHeader> {
+    /// changed since. Else, or to `look_first`, from its header, read first: a file changed or
+    /// deleted since is found then.
+    fn update_key(&self, target: &Target, look_first: bool) -> Result<KeyHeader> {
         let shared = self.client.key();
         let opened = target
             .token
             .as_ref()
+            .filter(|_| !look_first)
             .and_then(SealedKeyHeader::from_token)
             .and_then(|sealed| KeyHeader::open(&sealed, shared).ok());
         let key = match opened {

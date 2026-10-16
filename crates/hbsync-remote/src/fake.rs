@@ -195,6 +195,7 @@ impl FakeServer {
                 payload: payload.as_ref().map(|(_, info)| *info),
             },
             removed_at: self.removed_at(node),
+            changed_at: Some(self.clock_ms),
             token: Some(token_of(file_id)),
         };
         self.files.insert(
@@ -251,6 +252,7 @@ impl FakeServer {
         f.header.version = version;
         f.header.parent = meta.parent;
         f.header.removed_at = removed_at;
+        f.header.changed_at = Some(self.clock_ms);
         let payload = match new_payload {
             Some((bytes, info)) => {
                 f.bytes = Some(bytes);
@@ -282,6 +284,7 @@ impl FakeServer {
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
         f.header.removed_at = None;
+        f.header.changed_at = None;
         f.header.token = None;
         f.bytes = None;
         self.touch(file_id);

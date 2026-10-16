@@ -30,7 +30,7 @@ use std::sync::Arc;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{
-    Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile_with_known,
+    Agreement, BaseExtra, Input, Op, Options, Removed, Requirement, reconcile_with_known,
 };
 use hbsync_engine::scope::Scope;
 use hbsync_engine::tree::{Tree, first_free, numbered_names, restored_names};
@@ -165,14 +165,20 @@ struct Server {
     live: BTreeMap<NodeId, ServerNode>,
     /// Recently deleted: out of the tree, with their bytes, until restored or purged.
     removed: BTreeMap<NodeId, ServerNode>,
-    /// When each node went to Recently deleted (the server's clock: a header's `updated`).
-    removed_at: BTreeMap<NodeId, u64>,
-    clock: u64,
+    /// When each node went to Recently deleted (the server's time of that write: a header's
+    /// `updated`, [`time`]).
+    removed_at: BTreeMap<NodeId, i64>,
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     ever: BTreeSet<NodeId>,
     /// The first write that pointed a node at a folder the server never had.
     dangling: Option<String>,
+}
+
+/// The server's time of the write that made `version`: every write takes the next id, so ids
+/// are the server's clock (Homebase's `updated`).
+fn time(version: VersionTag) -> i64 {
+    version.0.as_u128() as i64
 }
 
 impl Server {
@@ -181,10 +187,10 @@ impl Server {
         Uuid::from_u128(self.next)
     }
 
-    /// Puts `node` in Recently deleted, at the time of this write.
-    fn remove(&mut self, node: NodeId, n: ServerNode) {
-        self.clock += 1;
-        self.removed_at.insert(node, self.clock);
+    /// Puts `node` in Recently deleted: a write, at its time.
+    fn remove(&mut self, node: NodeId, mut n: ServerNode) {
+        n.remote.version = VersionTag(self.uuid());
+        self.removed_at.insert(node, time(n.remote.version));
         self.removed.insert(node, n);
     }
 
@@ -200,6 +206,33 @@ impl Server {
                 r.state.parent == node && self.removed_at.get(n).is_some_and(|t| t >= at)
             })
             .map(|(n, _)| *n)
+            .collect()
+    }
+
+    /// The live nodes a folder's removal took along (node schema, Recently deleted): in a
+    /// removed folder, directly or through live folders in it, written no later than its
+    /// removal. They count as removed, whether or not a device marked them so yet.
+    fn taken_along(&self) -> BTreeSet<NodeId> {
+        let taken = |n: &ServerNode| {
+            let mut seen = BTreeSet::new();
+            let mut at = n.state.parent;
+            loop {
+                if self.removed.contains_key(&at) {
+                    return self
+                        .removed_at
+                        .get(&at)
+                        .is_some_and(|removed| time(n.remote.version) <= *removed);
+                }
+                match self.live.get(&at) {
+                    Some(folder) if seen.insert(at) => at = folder.state.parent,
+                    _ => return false,
+                }
+            }
+        };
+        self.live
+            .iter()
+            .filter(|(_, n)| taken(n))
+            .map(|(id, _)| *id)
             .collect()
     }
 
@@ -491,8 +524,7 @@ impl Sim {
         let tree = self.server.tree();
         below.sort_by_key(|n| tree.ancestors(*n).len());
         for node in [docs].into_iter().chain(below.iter().copied()) {
-            if let Some(mut n) = self.server.live.remove(&node) {
-                n.remote.version = VersionTag(self.server.uuid());
+            if let Some(n) = self.server.live.remove(&node) {
                 self.server.remove(node, n);
                 // A tag change loses to a delete (§11).
                 self.deleted.insert(node);
@@ -635,6 +667,23 @@ impl Sim {
         list.iter().position(|n| *n == node)
     }
 
+    /// For scripted tests: what `Edit`'s `file` is to pick file `node` on client `c`.
+    pub fn file_pick(&self, c: usize, node: NodeId) -> Option<usize> {
+        self.files_of(c).iter().position(|n| *n == node)
+    }
+
+    /// The files an action's `file` picks from on client `c`.
+    fn files_of(&self, c: usize) -> Vec<NodeId> {
+        let mut files: Vec<NodeId> = self.clients[c]
+            .local
+            .iter()
+            .filter(|(_, s)| s.kind == NodeKind::File)
+            .map(|(id, _)| id)
+            .collect();
+        files.sort();
+        files
+    }
+
     /// For scripted tests: what `Restore`'s `node` is to pick `node` in Recently deleted.
     pub fn removed_pick(&self, node: NodeId) -> Option<usize> {
         self.server.removed.keys().position(|n| *n == node)
@@ -659,13 +708,8 @@ impl Sim {
     fn act(&mut self, c: usize, action: Action) {
         let folders = self.folders_of(c);
         let all = self.items_of(c);
+        let files = self.files_of(c);
         let local = &self.clients[c].local;
-        let mut files: Vec<NodeId> = local
-            .iter()
-            .filter(|(_, s)| s.kind == NodeKind::File)
-            .map(|(id, _)| id)
-            .collect();
-        files.sort();
         let name_free = |t: &Tree, parent: NodeId, name: &str, except: Option<NodeId>| {
             t.child_named(parent, name, except).is_none()
         };
@@ -961,14 +1005,29 @@ impl Sim {
             .filter(|(id, _)| !client.coords.hides(**id))
             .map(|(id, n)| (*id, n.remote))
             .collect();
-        // The folders in Recently deleted that live nodes are in, as the engine's view has them.
-        input.removed = remote
-            .missing_parents()
-            .into_iter()
-            .filter(|p| {
-                self.server
-                    .removed
-                    .contains_key(&client.coords.to_drive(*p))
+        // The folders in Recently deleted that live nodes are in, and the removed ones above
+        // them, and the server's time of each live node's version, as the engine's view has them.
+        let outside = client.scope().outside;
+        for mut folder in remote.missing_parents() {
+            while !input.removed.contains_key(&folder)
+                && !outside.contains(&folder)
+                && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))
+            {
+                let state = NodeState {
+                    parent: client.coords.from_drive(n.state.parent),
+                    ..n.state.clone()
+                };
+                let at = self.server.removed_at[&client.coords.to_drive(folder)];
+                let parent = state.parent;
+                input.removed.insert(folder, Removed { at, state });
+                folder = parent;
+            }
+        }
+        input.changed_at = remote
+            .ids()
+            .filter_map(|id| {
+                let n = self.server.live.get(&client.coords.to_drive(id))?;
+                Some((id, time(n.remote.version)))
             })
             .collect();
         input.dirty = client
@@ -1415,6 +1474,22 @@ impl Sim {
                 ..
             } => {
                 let local_content = self.clients[c].local.get(node).and_then(|s| s.content);
+                // Over a version this client never had (taken along by a folder's delete):
+                // that one stays, and this version becomes a new item (as the executor
+                // detaches it).
+                let base_content = self.clients[c].base.get(node).and_then(|b| b.content);
+                if upload
+                    && let Some(server) = self.server.live.get(&node)
+                    && server.remote.version == expected
+                    && server.state.content.map(|c| c.hash) != base_content.map(|c| c.hash)
+                {
+                    let client = &self.clients[c];
+                    if !client.local.contains(node) || !unchanged(client, node) {
+                        return Skip;
+                    }
+                    let new_node = NodeId::new();
+                    return self.execute(c, &Op::LocalDetach { node, new_node });
+                }
                 let version = VersionTag(self.server.uuid());
                 let Some(server) = self.server.live.get_mut(&node) else {
                     return Skip;
@@ -1465,8 +1540,7 @@ impl Sim {
                 Some(server) if server.remote.version != expected => Skip, // changed meanwhile
                 // Removed to Recently deleted now, or already gone: done either way.
                 _ => {
-                    if let Some(mut n) = self.server.live.remove(&node) {
-                        n.remote.version = VersionTag(self.server.uuid());
+                    if let Some(n) = self.server.live.remove(&node) {
                         self.server.remove(node, n);
                         let client = &mut self.clients[c];
                         let after = client.removed_by_plan.iter().find(|r| {
@@ -1779,10 +1853,18 @@ impl Sim {
         if let Some(plan) = &self.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
         }
-        let server = self.server.tree();
+        // What a folder's removal took along is removed, marked so or not yet.
+        let taken = self.server.taken_along();
+        let mut server = self.server.tree();
+        for n in &taken {
+            server.remove(*n);
+        }
         let mut kept_here: BTreeSet<u64> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
-            let server = self.server_view(c);
+            let mut server = self.server_view(c);
+            for n in &taken {
+                server.remove(*n);
+            }
             let hidden = masked(&client.local, &client.filter);
             let mut visible = client.local.clone();
             for n in &hidden {
@@ -1870,7 +1952,8 @@ impl Sim {
             .filter_map(|(_, s)| s.content.and_then(|c| self.blobs.get(&c.hash).copied()))
             .collect();
         // Recently deleted keeps what was deleted, until the purge.
-        present.extend(self.server.removed.values().filter_map(|n| {
+        let taken = taken.iter().filter_map(|n| self.server.live.get(n));
+        present.extend(self.server.removed.values().chain(taken).filter_map(|n| {
             n.state
                 .content
                 .and_then(|c| self.blobs.get(&c.hash).copied())

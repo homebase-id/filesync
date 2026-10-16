@@ -30,7 +30,9 @@ mod guard;
 mod merge;
 mod repair;
 
-pub use crate::plan::{Agreement, BaseExtra, Conflict, Input, Op, Options, Plan, Requirement};
+pub use crate::plan::{
+    Agreement, BaseExtra, Conflict, Input, Op, Options, Plan, Removed, Requirement,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Change {

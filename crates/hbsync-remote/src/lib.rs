@@ -31,6 +31,10 @@ pub struct RemoteHeader {
     /// A live node in Recently deleted (`archivalStatus` 2 on Homebase): when it went there,
     /// Unix ms, the server's time of the write that removed it (Homebase's `updated`).
     pub removed_at: Option<i64>,
+    /// When this version was written, Unix ms, the server's time (Homebase's `updated`): what
+    /// decides whether a node in a removed folder went with it (node schema, Recently deleted).
+    /// `None` where the remote doesn't say (a tombstone).
+    pub changed_at: Option<i64>,
     /// The file's [`FileToken`], where the remote has one (a tombstone has none).
     pub token: Option<FileToken>,
 }

@@ -103,7 +103,7 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     // marks the nodes that changed dirty where that concerns.
     let removed_at = header.removed_at;
     if s.has_version(row.remote_ref(), removed_at.is_some())? {
-        s.refresh(&row, removed_at)?;
+        s.refresh(&row, removed_at.is_some())?;
         return Ok(removed_at.is_none());
     }
     if let Some(removed_at) = removed_at {
@@ -152,6 +152,7 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     let hash = payload.map(|p| p.hash);
     let mut row = MirrorRow {
         token: header.token.clone(),
+        changed_at: header.changed_at,
         ..MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash)
     };
     // A content without its size (another client's) has the payload's.
@@ -188,6 +189,7 @@ mod tests {
                 }),
             },
             removed_at: None,
+            changed_at: None,
             token: None,
         };
         assert!(db.write(|s| apply(s, &header))?);
@@ -222,6 +224,7 @@ mod tests {
                 }),
             },
             removed_at: None,
+            changed_at: None,
             token: None,
         };
         let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
@@ -244,6 +247,7 @@ mod tests {
                 payload: None,
             },
             removed_at,
+            changed_at: None,
             token: None,
         };
         let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
@@ -262,10 +266,6 @@ mod tests {
                 "version {version} again isn't"
             );
         }
-        // A removal of this device's own coming back: the server's time replaces its own.
-        assert_eq!(dirty_after(&mut db, &header(2, Some(12)))?, 0);
-        let at = db.read(|s| s.removed_by_node(node))?.map(|r| r.removed_at);
-        assert_eq!(at, Some(12));
         Ok(())
     }
 
@@ -284,6 +284,7 @@ mod tests {
                 payload: None,
             },
             removed_at,
+            changed_at: None,
             token: None,
         };
         assert!(db.write(|s| apply(s, &live(None)))?);
