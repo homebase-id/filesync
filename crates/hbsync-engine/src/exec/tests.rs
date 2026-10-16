@@ -386,10 +386,13 @@ fn a_folder_made_before_its_tags_keeps_them_on_the_drive() -> R {
         "the drive's tags removed: {:?}",
         plan.ops
     );
+    // Where tags are held here, the folder gets the drive's; elsewhere it reads as the drive's.
     assert!(
-        plan.ops
-            .iter()
-            .any(|op| matches!(op, Op::LocalTags { node: n, .. } if *n == node)),
+        !tags_kept(&h.cfg.root)
+            || plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::LocalTags { node: n, .. } if *n == node)),
         "the folder doesn't get its tags: {:?}",
         plan.ops
     );
@@ -446,13 +449,119 @@ fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
         "the drive's tags removed: {:?}",
         plan.ops
     );
+    // Where tags are held here, the folder gets the drive's; elsewhere it reads as the drive's.
     assert!(
-        plan.ops
-            .iter()
-            .any(|op| matches!(op, Op::LocalTags { node: n, .. } if *n == node)),
+        !tags_kept(&h.cfg.root)
+            || plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::LocalTags { node: n, .. } if *n == node)),
         "the folder doesn't get its tags: {:?}",
         plan.ops
     );
+    Ok(())
+}
+
+/// Where the volume keeps no tags (Windows, say), a placement claims none written (not known),
+/// and settles as main does: a folder made again or a file downloaded, tagged on the drive,
+/// committed or recovered after a crash, never takes a tag off the drive. A folder claimed
+/// none written there, as if it held none.
+#[test]
+fn no_placement_takes_tags_off_the_drive_where_none_are_kept() -> R {
+    for crash in [false, true] {
+        for folder in [false, true] {
+            let mut h = Harness::new()?;
+            h.cfg.os = Os::Windows;
+            let _ = h.cfg.tags_kept.set(false);
+            let work = Tags::new(vec![Tag::new("Work", 0)]);
+            let (node, at) = match folder {
+                true => (NodeId::new(), some_version()),
+                false => h.seed("x", b"A")?,
+            };
+            let mut content = match folder {
+                true => NodeContent::folder("x"),
+                false => NodeContent::file("x", 0, 1, false),
+            };
+            content.set_tags(&work);
+            let state = NodeState {
+                tags: work.clone(),
+                ..match folder {
+                    true => NodeState::folder(NodeId::ROOT, "x"),
+                    false => NodeState::file(NodeId::ROOT, "x", h.content(b"A")),
+                }
+            };
+            let kind = if folder {
+                NodeKind::Folder
+            } else {
+                NodeKind::File
+            };
+            let hash = (!folder).then(|| h.content(b"A").hash);
+            h.db.write(|s| {
+                s.put_mirror(&MirrorRow::from_content(
+                    at,
+                    node,
+                    NodeId::ROOT,
+                    kind,
+                    &content,
+                    hash,
+                ))?;
+                // Synced before, tagged: a folder made again gets a record.
+                s.put_base(&BaseRow::new(node, state.clone(), at))
+            })?;
+            let drive = Some(Box::new(DriveVersion {
+                state,
+                at,
+                base_at: Some(at.version),
+            }));
+            let op = match folder {
+                true => Op::LocalMkdir {
+                    node,
+                    parent: NodeId::ROOT,
+                    name: "x".into(),
+                    tags: work.clone(),
+                    drive,
+                },
+                false => Op::LocalDownload {
+                    node,
+                    parent: NodeId::ROOT,
+                    name: "x".into(),
+                    replace: false,
+                    tags: work.clone(),
+                    drive,
+                },
+            };
+            if crash {
+                h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+                assert!(h.run(vec![op]).is_err(), "the crash point wasn't reached");
+                // A folder claims nothing written. (A download claims what reads back: on
+                // Windows nothing, the volume unsupported; this test's volume keeps tags.)
+                assert!(
+                    !folder || h.records()?.iter().all(|r| r.placed_tags.is_none()),
+                    "a record claims tags written where none are kept: {:?}",
+                    h.records()?
+                );
+                // The scan finds the item, its tags not known.
+                match folder {
+                    true => h.local_folder("x", NodeId::new())?,
+                    false => h.local_file("x", NodeId::new(), b"A")?,
+                }
+                recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+            } else {
+                h.run(vec![op])?;
+            }
+            assert!(h.base(node)?.is_some(), "crash {crash}, folder {folder}");
+            let plan = plan_of(&mut h, &[node])?;
+            assert!(
+                !plan.ops.iter().any(|op| match op {
+                    Op::RemoteTags { tags, .. } => tags.get("Work").is_none(),
+                    Op::RemoteUpdate { tags, .. } => tags.get("Work").is_none(),
+                    _ => false,
+                }),
+                "crash {crash}, folder {folder}: the drive's tag removed: {:?}",
+                plan.ops
+            );
+        }
+    }
     Ok(())
 }
 
@@ -642,6 +751,9 @@ fn a_record_claims_the_tags_it_writes() -> R {
 #[test]
 fn a_removed_tag_stays_removed_through_recovery() -> R {
     let mut h = Harness::new()?;
+    if !tags_kept(&h.cfg.root) {
+        return Ok(()); // no tag can be removed here
+    }
     let (node, at) = h
         .remote
         .server()
@@ -700,7 +812,8 @@ fn a_removed_tag_stays_removed_through_recovery() -> R {
 }
 
 /// A folder made again with no tags holds none as soon as it is made: its record claims the
-/// empty set from the start (a crash right after it is made leaves that true).
+/// empty set from the start (a crash right after it is made leaves that true). Where tags
+/// aren't kept, it claims nothing (not known).
 #[test]
 fn an_untagged_folder_claims_no_tags() -> R {
     let mut h = Harness::new()?;
@@ -721,7 +834,8 @@ fn an_untagged_folder_claims_no_tags() -> R {
         })),
     }]);
     assert!(crashed.is_err(), "the crash point wasn't reached");
-    assert_eq!(h.records()?[0].placed_tags, Some(Tags::default()));
+    let expected = tags::CAN_TAG.then(Tags::default);
+    assert_eq!(h.records()?[0].placed_tags, expected);
     Ok(())
 }
 

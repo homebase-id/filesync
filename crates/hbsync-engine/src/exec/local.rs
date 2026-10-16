@@ -107,11 +107,14 @@ impl Executor<'_> {
         } else {
             Some(Tags::default())
         };
+        // Where the volume keeps no tags (this OS none), what it holds of them is never known:
+        // it claims none, as a download does.
+        let kept_tags = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
         let none = tags.held_by(self.cfg.os).is_empty();
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
             target: target.clone(),
-            placed_tags: none.then(Tags::default),
+            placed_tags: (none && kept_tags).then(Tags::default),
             prior_tags: prior,
             base_at: a.base_at.into(),
             held_ms: None,
@@ -136,7 +139,8 @@ impl Executor<'_> {
         let tags = write_tags(&abs, tags);
         // Tags written: the record claims what the folder holds now, before its commit. A
         // folder taken over held its own: a failed write left those, not known (none claimed).
-        if (adopt || !none)
+        if kept_tags
+            && (adopt || !none)
             && let Some(r) = &mut record
         {
             r.placed_tags = tags.clone();
