@@ -18,6 +18,7 @@ use hbsync_engine::root::{AccountReader, RootError};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
+use hbsync_remote::ChangeRef;
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
 use hbsync_types::activity::Deleted;
@@ -660,15 +661,19 @@ impl Account {
 /// refusal), the drive is read this often; never while they are.
 pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 
-/// What the identity's notifications do to its drive: a change announced is pulled once the
-/// announcements have quieted (a burst of deletes reaches the mass-delete guard whole);
-/// connecting (again) pulls at once, as changes made meanwhile weren't announced; while not
-/// connected, the drive is read every [`UNANNOUNCED_READ`]. Nothing is pulled while paused.
-/// A pull wakes the folders its changes concern.
+/// What the identity's notifications do to its drive: changes announced are taken once the
+/// announcements have quieted (a burst of deletes reaches the mass-delete guard whole), the
+/// feed read only for what the store doesn't know already ([`Drive::announced`]); connecting
+/// (again) pulls at once, as changes made meanwhile weren't announced; while not connected,
+/// the drive is read every [`UNANNOUNCED_READ`]. Nothing is pulled while paused. A pull wakes
+/// the folders its changes concern.
 #[derive(Debug)]
 pub struct Notifications {
     puller: Puller,
     announced: Announced,
+    /// The files announced since the last take, and whether an announcement didn't say which.
+    changes: Vec<ChangeRef>,
+    unsaid: bool,
     connected: bool,
     /// While not connected: the next read of the drive.
     next_read: Instant,
@@ -681,6 +686,8 @@ impl Notifications {
         Notifications {
             puller,
             announced: Announced::default(),
+            changes: Vec::new(),
+            unsaid: false,
             connected: false,
             next_read: now + UNANNOUNCED_READ,
         }
@@ -693,13 +700,19 @@ impl Notifications {
                 self.connected = true;
                 // This pull takes what was announced so far too.
                 self.announced = Announced::default();
+                self.changes.clear();
+                self.unsaid = false;
                 if !paused {
                     self.puller.ask();
                 }
                 Some(Hints::Connected)
             }
-            Event::Changed => {
+            Event::Changed(change) => {
                 self.announced.note(now);
+                match change {
+                    Some(change) => self.changes.push(change),
+                    None => self.unsaid = true,
+                }
                 None
             }
             Event::Lost(why) => {
@@ -728,7 +741,10 @@ impl Notifications {
             return;
         }
         if self.announced.due(now) {
-            self.puller.ask();
+            self.puller.take(
+                std::mem::take(&mut self.changes),
+                std::mem::take(&mut self.unsaid),
+            );
         }
         if !self.connected && now >= self.next_read {
             self.next_read = now + UNANNOUNCED_READ;
@@ -738,25 +754,49 @@ impl Notifications {
 }
 
 /// Pulls the drive's changes on a thread of its own, so whoever asks (the account's loop)
-/// never waits for the network: asks while a pull runs are answered by one more. A pull wakes
+/// never waits for the network: asks while a pull runs are answered by one more. Changes
+/// announced are taken first, and the feed read only for what they leave unknown. A pull wakes
 /// the folders its changes concern; when it fails, or the thread couldn't start, every folder
 /// is woken, and their syncs pull (and back off) themselves.
 #[derive(Debug, Clone)]
 pub struct Puller {
-    asks: Sender<()>,
+    asks: Sender<Ask>,
     drive: Arc<Drive>,
+}
+
+/// What the puller is asked: the feed, or announced changes (and whether one didn't say which).
+#[derive(Debug)]
+enum Ask {
+    Pull,
+    Take(Vec<ChangeRef>, bool),
 }
 
 impl Puller {
     pub fn spawn(drive: Arc<Drive>) -> Puller {
-        let (asks, rx) = channel::<()>();
+        let (asks, rx) = channel::<Ask>();
         let mine = Arc::clone(&drive);
         let started = std::thread::Builder::new()
             .name("hbsync-pull".into())
             .spawn(move || {
-                while rx.recv().is_ok() {
-                    rx.try_iter().for_each(drop);
-                    if let Err(e) = mine.pull(None) {
+                while let Ok(first) = rx.recv() {
+                    let (mut changes, mut pull) = (Vec::new(), false);
+                    for ask in std::iter::once(first).chain(rx.try_iter()) {
+                        match ask {
+                            Ask::Pull => pull = true,
+                            Ask::Take(more, unsaid) => {
+                                changes.extend(more);
+                                pull |= unsaid;
+                            }
+                        }
+                    }
+                    pull |= match mine.announced(&changes) {
+                        Ok(all) => !all,
+                        Err(e) => {
+                            tracing::info!("taking announced changes failed ({e}); reading them");
+                            true
+                        }
+                    };
+                    if pull && let Err(e) = mine.pull(None) {
                         tracing::info!(
                             "pulling the drive's changes failed ({e}); the folders' syncs will"
                         );
@@ -770,8 +810,22 @@ impl Puller {
         Puller { asks, drive }
     }
 
+    /// Reads the feed.
     pub fn ask(&self) {
-        if self.asks.send(()).is_err() {
+        self.send(Ask::Pull);
+    }
+
+    /// Takes announced `changes`, reading the feed for what they leave unknown or when one
+    /// announcement didn't say which file (`unsaid`).
+    pub fn take(&self, changes: Vec<ChangeRef>, unsaid: bool) {
+        if changes.is_empty() && !unsaid {
+            return;
+        }
+        self.send(Ask::Take(changes, unsaid));
+    }
+
+    fn send(&self, ask: Ask) {
+        if self.asks.send(ask).is_err() {
             self.drive.wake_all();
         }
     }

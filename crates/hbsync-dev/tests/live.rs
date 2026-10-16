@@ -35,21 +35,22 @@ fn a_change_on_the_drive_is_announced() -> R {
     let bench = Bench::new(&remote, &run_name("notify"), Duration::ZERO)?;
     let (tx, rx) = std::sync::mpsc::channel();
     let notifier = Notifier::spawn(remote.client().clone(), remote.drive(), tx);
-    let wait = |what: Event| -> Result<(), String> {
+    let wait = |what: &dyn Fn(&Event) -> bool| -> Result<(), String> {
         loop {
             match rx.recv_timeout(Duration::from_secs(15)) {
-                Ok(e) if e == what => return Ok(()),
+                Ok(e) if what(&e) => return Ok(()),
                 Ok(Event::Lost(why) | Event::Refused(why)) => return Err(why),
                 Ok(_) => {}
-                Err(e) => return Err(format!("waiting for {what:?}: {e}")),
+                Err(e) => return Err(format!("waiting: {e}")),
             }
         }
     };
     let result = (|| -> R {
-        wait(Event::Connected)?;
+        wait(&|e| *e == Event::Connected)?;
         let start = std::time::Instant::now();
-        bench.folder("inside")?;
-        wait(Event::Changed)?;
+        let (_, at) = bench.folder("inside")?;
+        // The write is announced with the file and version written (a minimal event).
+        wait(&|e| matches!(e, Event::Changed(Some(r)) if r.at() == at && !r.deleted))?;
         let took = start.elapsed();
         assert!(took < Duration::from_secs(2), "announced after {took:?}");
         println!("announced {took:?} after the write returned");
@@ -332,155 +333,6 @@ fn feed_sizes() -> R {
     })();
     let cleanup = bench.cleanup();
     result?;
-    cleanup?;
-    Ok(())
-}
-
-/// What a drive event costs on the notification socket, full headers against minimal rows
-/// (odin-core #1970): two subscriptions, one of each, watch `n` files
-/// (`NOTIFY_SIZES_FILES`, 2,000 by default) created, removed to Recently deleted, then deleted.
-/// Bytes are the text frames as received (the encrypted envelope). Prints a table.
-#[test]
-#[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
-fn notification_sizes() -> R {
-    use hbsync_homebase::notify::{Seen, watch};
-    use hbsync_remote::contract::{file, removed};
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Instant;
-
-    let remote = live_remote()?;
-    let n = std::env::var("NOTIFY_SIZES_FILES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2000usize);
-    let bench = Bench::new(
-        &remote,
-        &run_name("notify-sizes"),
-        Duration::from_millis(20),
-    )?;
-    let stop = AtomicBool::new(false);
-    let shapes = [("full", None), ("minimal", Some("minimal"))];
-    // Events still on their way when a phase's last write returned.
-    let settle = || std::thread::sleep(Duration::from_secs(3));
-    let (phases, seen) = std::thread::scope(|scope| {
-        let watchers: Vec<_> = shapes
-            .iter()
-            .map(|&(_, shape)| {
-                let (client, drive, stop) = (remote.client(), remote.drive(), &stop);
-                scope.spawn(move || watch(client, drive, shape, stop))
-            })
-            .collect();
-        let phases = (|| -> Result<Vec<(&str, Instant)>, Box<dyn std::error::Error>> {
-            settle(); // both subscribed
-            let (folder, _) = bench.folder("files")?;
-            settle();
-            let mut phases = vec![("create", Instant::now())];
-            let made = Mutex::new(Vec::with_capacity(n));
-            let created = on_threads(n, |i| {
-                let data = format!("file {i}");
-                let meta = file(&format!("f{i:05}.txt"), folder.node, data.as_bytes());
-                let at = bench.create(&meta, Some(data.as_bytes()))?;
-                made.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push((meta, at));
-                Ok(())
-            })?;
-            let made = made.into_inner().unwrap_or_else(|e| e.into_inner());
-            assert_eq!((created, made.len()), (n, n), "every create went through");
-            settle();
-            phases.push(("remove", Instant::now()));
-            let gone = Mutex::new(Vec::with_capacity(n));
-            let removed_count = on_threads(n, |i| {
-                let (meta, at) = &made[i];
-                let written = remote.update(&bench.target(*at), &removed(meta), None)?;
-                gone.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(written.at);
-                Ok(())
-            })?;
-            let gone = gone.into_inner().unwrap_or_else(|e| e.into_inner());
-            assert_eq!(
-                (removed_count, gone.len()),
-                (n, n),
-                "every removal went through"
-            );
-            settle();
-            phases.push(("delete", Instant::now()));
-            let deleted = on_threads(n, |i| remote.delete(gone[i].file_id, gone[i].version))?;
-            assert_eq!(deleted, n, "every delete went through");
-            settle();
-            phases.push(("end", Instant::now()));
-            Ok(phases)
-        })();
-        stop.store(true, Ordering::Relaxed);
-        let seen: Vec<Result<Vec<Seen>, String>> = watchers
-            .into_iter()
-            .map(|w| {
-                w.join()
-                    .unwrap_or_else(|_| Err("a watcher panicked".into()))
-            })
-            .collect();
-        (phases, seen)
-    });
-    let cleanup = bench.cleanup();
-    let phases = phases?;
-    let kind = |s: &Seen| {
-        s.body
-            .as_ref()
-            .and_then(|b| b["notificationType"].as_str())
-            .unwrap_or("?")
-            .to_owned()
-    };
-    let is_drive = |k: &str| matches!(k, "fileAdded" | "fileModified" | "fileDeleted");
-    println!("{n} files created, removed, then deleted; drive events per subscription");
-    println!(
-        "{:<8} {:<8} {:>7} {:>12} {:>11} {:>11}",
-        "shape", "phase", "events", "bytes", "bytes/event", "plain/event"
-    );
-    for ((name, _), frames) in shapes.iter().zip(seen) {
-        let frames = frames?;
-        for w in phases.windows(2) {
-            let ((phase, from), (_, to)) = (w[0], w[1]);
-            let events: Vec<&Seen> = frames
-                .iter()
-                .filter(|s| s.at >= from && s.at < to && is_drive(&kind(s)))
-                .collect();
-            let bytes: usize = events.iter().map(|s| s.bytes).sum();
-            // The decrypted body, as JSON text: what the envelope and its base64 carry.
-            let plain: usize = events
-                .iter()
-                .filter_map(|s| s.body.as_ref())
-                .map(|b| b.to_string().len())
-                .sum();
-            let per = |total: usize| total / events.len().max(1);
-            println!(
-                "{name:<8} {phase:<8} {:>7} {bytes:>12} {:>11} {:>11}",
-                events.len(),
-                per(bytes),
-                per(plain)
-            );
-        }
-        // The shape is what was asked for: a minimal event carries a ref and no header.
-        let data = frames
-            .iter()
-            .filter(|s| is_drive(&kind(s)))
-            .find_map(|s| s.body.as_ref()?["data"].as_str().map(str::to_owned))
-            .ok_or("no drive event seen")?;
-        let data: serde_json::Value = serde_json::from_str(&data)?;
-        match *name {
-            "minimal" => {
-                assert!(
-                    data.get("header").is_none()
-                        && data.get("previousServerFileHeader").is_none()
-                        && data["fileRef"]["fileId"].is_string(),
-                    "a minimal event: {data}"
-                );
-                println!("a minimal event's data: {data}");
-            }
-            _ => assert!(data["header"].is_object(), "a full event: {data}"),
-        }
-    }
     cleanup?;
     Ok(())
 }

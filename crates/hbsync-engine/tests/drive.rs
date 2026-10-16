@@ -74,6 +74,73 @@ fn pulls_asked_at_once_are_merged() -> R {
     Ok(())
 }
 
+/// Changes the notifications announce: versions the store has (this device's own writes
+/// coming back) are taken without reading the feed, an own removal getting the server's time;
+/// a version it doesn't know needs the feed; a file deleted for good (a hard delete leaves no
+/// row in the feed) is gone from the mirror at once.
+#[test]
+fn announced_changes_are_taken_without_reading_what_is_known() -> R {
+    use hbsync_remote::ChangeRef;
+    use hbsync_remote::contract::removed;
+    use hbsync_state::RemovedRow;
+
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let docs = folder("Docs");
+    let made = remote.create(&docs, None)?;
+    drive.pull(None)?;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    let known = ChangeRef::of(&remote.header(made.at.file_id)?);
+    assert!(
+        drive.announced(&[known])?,
+        "an own write coming back: no read"
+    );
+
+    // This device removed it: its row in Recently deleted, the time open until the server's.
+    let gone_at = remote.update(&made, &removed(&docs), None)?;
+    db.write(|s| {
+        let mut row = s.mirror_by_file(made.at.file_id)?.expect("in the mirror");
+        s.delete_mirror(made.at.file_id)?;
+        row.version = gone_at.at.version;
+        s.put_removed(&RemovedRow {
+            row,
+            removed_at: None,
+        })
+    })?;
+    let echo = ChangeRef::of(&remote.header(made.at.file_id)?);
+    assert!(
+        drive.announced(&[echo])?,
+        "an own removal coming back: no read"
+    );
+    let row = db
+        .read(|s| s.removed_by_node(docs.node))?
+        .expect("in Recently deleted");
+    assert_eq!(
+        row.removed_at, echo.removed_at,
+        "the server's time, confirmed"
+    );
+
+    let other = remote.create(&folder("Other"), None)?;
+    let unknown = ChangeRef::of(&remote.header(other.at.file_id)?);
+    assert!(
+        !drive.announced(&[echo, unknown])?,
+        "a version not known: read the feed"
+    );
+
+    // Deleted for good without a row in the feed (a hard delete): gone at once.
+    let hard = ChangeRef {
+        deleted: true,
+        parent: None,
+        removed_at: None,
+        changed_at: None,
+        ..echo
+    };
+    assert!(drive.announced(&[hard])?);
+    assert!(db.read(|s| s.removed_by_node(docs.node))?.is_none());
+    assert!(db.read(|s| s.mirror_by_file(made.at.file_id))?.is_none());
+    Ok(())
+}
+
 /// A change pulled by one folder's engine wakes the folders it concerns: not itself, and not
 /// one whose part of the drive it isn't in.
 #[test]

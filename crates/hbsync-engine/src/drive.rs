@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hbsync_remote::{NodeMeta, Remote, RemoteError};
+use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::schema::NodeContent;
@@ -127,6 +127,18 @@ impl Drive {
         let room = MAX_SKIPPED.saturating_sub(skipped.len());
         skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));
         Ok(report)
+    }
+
+    /// Takes changes the notifications announced ([`feed::announced`]): whether that was all,
+    /// or the feed has to be read. Wakes the folders they concern.
+    pub fn announced(&self, refs: &[ChangeRef]) -> Result<bool, StateError> {
+        if refs.is_empty() {
+            return Ok(true);
+        }
+        let mut db = self.account();
+        let all = db.write(|s| feed::announced(s, refs))?;
+        self.wake_touched(&mut db, None);
+        Ok(all)
     }
 
     /// The feed rows the client couldn't read (not encrypted, another key, not a sync node)

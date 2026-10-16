@@ -115,10 +115,16 @@ a failure (service managers restart it then).
   after one that did some, without holding back other syncs. After a failure it waits 5 s,
   doubling to 5 min. When the socket connects again, a folder waiting for either goes at
   once.
+- **Announced changes** name their file (a minimal row, odin-core #1970): a file deleted for
+  good is gone from the account's picture at once (a hard delete leaves no row in the feed),
+  and versions the account has already (this device's own writes coming back) are taken as
+  a slim feed page's rows, an own removal getting the server's time; the feed is read only
+  when something announced isn't known, or an event didn't say which file.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start
-  (which wakes only the folders it concerns), or with the next announced change. While the
+  (which wakes only the folders it concerns), or with the next change announced that the
+  account doesn't know. While the
   socket isn't connected (not yet, not any more, or never: a proxy blocking it, a refusal,
   its thread not starting), the account reads the drive every 5 min instead. Nothing is
   pulled while paused; the account's pulls run on a thread of their own. A dead socket is

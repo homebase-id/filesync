@@ -8,11 +8,10 @@
 //! - client frames are envelopes of `{command, data}` (`data` a JSON string); the drive
 //!   subscription is `establishConnectionRequest`, answered by `deviceHandshakeSuccess`;
 //! - server frames are `{isEncrypted, payload}`; drive changes are `fileAdded`,
-//!   `fileModified`, `fileDeleted` (reactions also send `fileModified`);
-//! - the subscription asks for `resultShape: "minimal"` (odin-core #1970):
-//!   a drive event then carries `targetDrive` and `fileRef`/`previousFileRef` (a minimal
-//!   query-batch row), no header keys. Only the type is read here.
+//!   `fileModified`, `fileDeleted` (reactions also send `fileModified`), as minimal rows
+//!   (odin-core #1970, `homebase-api-notes.md`).
 
+use std::borrow::Cow;
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,22 +21,25 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use hbsync_remote::ChangeRef;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{Message, WebSocket};
 
 use crate::client::Client;
 use crate::crypto::{Envelope, random};
 use crate::drive::TargetDrive;
+use crate::drive::wire::FileRef;
 
 /// What the notifier tells the sync loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Subscribed (again): changes made while disconnected weren't announced, so read the feed.
     Connected,
-    /// A file on the drive changed.
-    Changed,
+    /// A file on the drive changed: which, as a slim feed row has it (`deleted` also for a hard
+    /// delete, which leaves no row in the feed), when the event says (`None`: read the feed).
+    Changed(Option<ChangeRef>),
     /// The connection broke; it is retried with backoff.
     Lost(String),
     /// The identity refused the subscription (credentials revoked, no access to the drive):
@@ -54,9 +56,6 @@ const HANDSHAKE: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A refused subscription isn't asked again sooner (the sync's own refusals wait as long).
 const REFUSED_PAUSE: Duration = Duration::from_secs(300);
-/// How drive events describe their file: a minimal row, not the full header (only the type is
-/// read here).
-const SHAPE: &str = "minimal";
 
 /// The notification connection, on its own thread. Stops when dropped: the thread ends at
 /// its next check (it isn't waited for, as it may be in the middle of connecting).
@@ -162,7 +161,20 @@ fn session(
     connected: &mut bool,
     refused: &mut bool,
 ) -> Result<(), String> {
-    let mut socket = subscribe(client, drive, Some(SHAPE))?;
+    let mut socket = connect(client)?;
+    send(
+        &mut socket,
+        client,
+        "establishConnectionRequest",
+        &json!({
+            "drives": [{
+                "alias": drive.alias.simple().to_string(),
+                "type": drive.drive_type.simple().to_string(),
+            }],
+            "resultShape": "minimal",
+        })
+        .to_string(),
+    )?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
     loop {
@@ -182,7 +194,7 @@ fn session(
                         *connected = true;
                         Event::Connected
                     }
-                    Notification::Changed => Event::Changed,
+                    Notification::Changed(change) => Event::Changed(change),
                     Notification::Refused(why) => {
                         let _ = socket.close(None);
                         let _ = events.send(Event::Refused(why.clone()));
@@ -217,71 +229,6 @@ fn session(
             last_ping = Instant::now();
         }
     }
-}
-
-/// A connection subscribed to `drive`, its events in `shape` (`None`: the server's default,
-/// full headers).
-fn subscribe(client: &Client, drive: TargetDrive, shape: Option<&str>) -> Result<Socket, String> {
-    let mut socket = connect(client)?;
-    let mut options = json!({ "drives": [{
-        "alias": drive.alias.simple().to_string(),
-        "type": drive.drive_type.simple().to_string(),
-    }]});
-    if let Some(shape) = shape {
-        options["resultShape"] = json!(shape);
-    }
-    send(
-        &mut socket,
-        client,
-        "establishConnectionRequest",
-        &options.to_string(),
-    )?;
-    Ok(socket)
-}
-
-/// A frame [`watch`] received: its body (when it decodes), its size as received (the text
-/// frame: the encrypted envelope) and when.
-#[doc(hidden)]
-#[derive(Debug, Clone)]
-pub struct Seen {
-    pub body: Option<Value>,
-    pub bytes: usize,
-    pub at: Instant,
-}
-
-/// Every frame on a subscription in `shape` until `stop`, for live measurements.
-#[doc(hidden)]
-pub fn watch(
-    client: &Client,
-    drive: TargetDrive,
-    shape: Option<&str>,
-    stop: &AtomicBool,
-) -> Result<Vec<Seen>, String> {
-    let mut socket = subscribe(client, drive, shape)?;
-    let (mut seen, mut last_ping) = (Vec::new(), Instant::now());
-    while !stop.load(Ordering::Relaxed) {
-        match socket.read() {
-            Ok(Message::Text(text)) => seen.push(Seen {
-                body: body(client, text.as_str()),
-                bytes: text.len(),
-                at: Instant::now(),
-            }),
-            Ok(Message::Close(frame)) => return Err(format!("closed by the server: {frame:?}")),
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(e))
-                if matches!(
-                    e.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(e) => return Err(e.to_string()),
-        }
-        if last_ping.elapsed() > PING_EVERY {
-            send(&mut socket, client, "ping", "ping")?;
-            last_ping = Instant::now();
-        }
-    }
-    let _ = socket.close(None);
-    Ok(seen)
 }
 
 fn connect(client: &Client) -> Result<Socket, String> {
@@ -364,7 +311,7 @@ fn send(socket: &mut Socket, client: &Client, command: &str, data: &str) -> Resu
 #[derive(Debug, PartialEq, Eq)]
 enum Notification {
     Handshake,
-    Changed,
+    Changed(Option<ChangeRef>),
     Refused(String),
     Other,
 }
@@ -379,32 +326,73 @@ struct Frame {
 
 /// What a server frame says; [`Notification::Other`] if it can't be read.
 fn notification(client: &Client, text: &str) -> Notification {
-    body(client, text).map_or(Notification::Other, |b| classify(&b))
+    let body = || -> Option<Vec<u8>> {
+        let frame: Frame = serde_json::from_str(text).ok()?;
+        if frame.is_encrypted {
+            let envelope: Envelope = serde_json::from_str(&frame.payload).ok()?;
+            envelope.open(client.key()).ok()
+        } else {
+            Some(frame.payload.into_bytes())
+        }
+    };
+    body().map_or(Notification::Other, |b| classify(&b))
 }
 
-/// A server frame's body, opened if encrypted.
-fn body(client: &Client, text: &str) -> Option<Value> {
-    let frame: Frame = serde_json::from_str(text).ok()?;
-    if frame.is_encrypted {
-        let envelope: Envelope = serde_json::from_str(&frame.payload).ok()?;
-        serde_json::from_slice(&envelope.open(client.key()).ok()?).ok()
+/// A notification's body: only what is read of it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Body<'a> {
+    #[serde(borrow)]
+    notification_type: Cow<'a, str>,
+    #[serde(borrow, default)]
+    data: Option<Cow<'a, str>>,
+}
+
+/// A minimal drive event (its `data`): the file as it is now, or as it was before a delete,
+/// as rows of a slim feed page.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DriveEvent {
+    #[serde(default)]
+    file_ref: Option<FileRef>,
+    #[serde(default)]
+    previous_file_ref: Option<FileRef>,
+}
+
+fn classify(body: &[u8]) -> Notification {
+    let Ok(body) = serde_json::from_slice::<Body>(body) else {
+        return Notification::Other;
+    };
+    let kind = |k: &str| body.notification_type.eq_ignore_ascii_case(k);
+    if kind("deviceHandshakeSuccess") {
+        Notification::Handshake
+    } else if kind("fileAdded") || kind("fileModified") || kind("fileDeleted") {
+        Notification::Changed(
+            body.data
+                .as_deref()
+                .and_then(|d| change(d, kind("fileDeleted"))),
+        )
+    } else if kind("authenticationError") {
+        Notification::Refused(format!("refused: {}", body.data.as_deref().unwrap_or("")))
     } else {
-        serde_json::from_str(&frame.payload).ok()
+        Notification::Other
     }
 }
 
-fn classify(body: &Value) -> Notification {
-    let kind = match &body["notificationType"] {
-        Value::String(s) => s.to_ascii_lowercase(),
-        _ => return Notification::Other,
-    };
-    match kind.as_str() {
-        "devicehandshakesuccess" => Notification::Handshake,
-        "fileadded" | "filemodified" | "filedeleted" => Notification::Changed,
-        "authenticationerror" => {
-            Notification::Refused(format!("refused: {}", body["data"].as_str().unwrap_or("")))
-        }
-        _ => Notification::Other,
+/// The file a drive event announces; `None` if the event doesn't say.
+fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
+    let event: DriveEvent = serde_json::from_str(data).ok()?;
+    match (event.file_ref, event.previous_file_ref) {
+        (Some(now), _) => Some(now.to_ref()),
+        // Deleted, and no file now: deleted for good without a tombstone (a hard delete).
+        (None, Some(before)) if deleted => Some(ChangeRef {
+            deleted: true,
+            parent: None,
+            removed_at: None,
+            changed_at: None,
+            ..before.to_ref()
+        }),
+        _ => None,
     }
 }
 
@@ -412,27 +400,71 @@ fn classify(body: &Value) -> Notification {
 mod tests {
     use super::*;
 
+    fn n(body: serde_json::Value) -> Notification {
+        classify(body.to_string().as_bytes())
+    }
+
     #[test]
     fn notifications_are_classified() {
-        let n = |v: Value| classify(&v);
         assert_eq!(
             n(json!({"notificationType": "deviceHandshakeSuccess", "stunUrls": []})),
             Notification::Handshake
-        );
-        assert_eq!(
-            n(json!({"notificationType": "fileModified", "data": "{}"})),
-            Notification::Changed
-        );
-        // A minimal event: no header keys, the file as a ref.
-        assert_eq!(
-            n(json!({"notificationType": "fileDeleted",
-                "data": "{\"targetDrive\":{},\"previousFileRef\":{\"fileId\":\"x\"}}"})),
-            Notification::Changed
         );
         assert_eq!(n(json!({"notificationType": "pong"})), Notification::Other);
         assert!(matches!(
             n(json!({"notificationType": "authenticationError", "data": "no"})),
             Notification::Refused(_)
         ));
+    }
+
+    #[test]
+    fn a_minimal_event_says_which_file() {
+        use hbsync_types::{NodeId, RemoteFileId, VersionTag};
+        use uuid::Uuid;
+        let (file, version, parent) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let event = |kind: &str, data: serde_json::Value| {
+            n(json!({"notificationType": kind, "data": data.to_string()}))
+        };
+        let row = |state: &str, archival: i64| {
+            json!({"fileId": file, "versionTag": version, "fileState": state,
+                "archivalStatus": archival, "groupId": parent, "updated": 7, "fileType": 7101})
+        };
+        let changed = |deleted, removed_at, changed_at, parent| {
+            Notification::Changed(Some(ChangeRef {
+                file_id: RemoteFileId(file),
+                version: VersionTag(version),
+                deleted,
+                parent,
+                removed_at,
+                changed_at,
+            }))
+        };
+        assert_eq!(
+            event(
+                "fileModified",
+                json!({"targetDrive": {}, "fileRef": row("active", 2)})
+            ),
+            changed(false, Some(7), Some(7), Some(NodeId(parent)))
+        );
+        // A tombstone, and a hard delete (only the file as it was): deleted either way.
+        assert_eq!(
+            event(
+                "fileDeleted",
+                json!({"fileRef": row("deleted", 0), "previousFileRef": row("active", 2)})
+            ),
+            changed(true, None, None, None)
+        );
+        assert_eq!(
+            event(
+                "fileDeleted",
+                json!({"targetDrive": {}, "previousFileRef": row("active", 2)})
+            ),
+            changed(true, None, None, None)
+        );
+        // An event that doesn't say (full headers, or no row): the feed is read.
+        assert_eq!(
+            event("fileAdded", json!({"header": {"fileId": file}})),
+            Notification::Changed(None)
+        );
     }
 }

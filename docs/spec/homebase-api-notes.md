@@ -205,18 +205,14 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - Server frames: `{isEncrypted, payload}`, `payload` an envelope string of
   `{notificationType, data}`. `fileAdded`, `fileModified`, `fileDeleted` carry the header.
   Reaction updates also send `fileModified`: treat all of them as a hint to read the feed.
-- `resultShape` in the subscription (odin-core #1970, not released yet; **[verified]**
-  `EstablishConnectionOptions`, `ClientDriveNotification.For`, `AppNotificationHandler` at
-  9087c252c; the null keys' removal **[verified]** live at 5cbd1d363): `"minimal"` makes every
-  drive event (the subscriber's own writes included) carry `targetDrive` and whichever of
-  `fileRef`/`previousFileRef` (the rows of a minimal `query-batch`) it has, with no
-  `header`/`previousServerFileHeader` keys; `"noContent"` sends the headers without
-  `appData.content`; left out, the full headers. An unknown value is a client error, then the
-  socket is closed. This client subscribes `"minimal"` and reads only the type. Measured on
-  frodo (`notification_sizes`, 2,000 files, 5cbd1d363): an add or update event 4,514 B full →
-  1,355–1,376 B minimal, a delete 7,438 → 2,217 B (text frames as received; the decrypted body
-  is 638–641 B, a delete's 1,079 B: the rest is the envelope's base64 and `data` sent as a JSON
-  string).
+- `resultShape: "minimal"` in the subscription (odin-core #1970, not released yet;
+  **[verified]** `EstablishConnectionOptions`, `ClientDriveNotification.For` at 9087c252c, and
+  live at 5cbd1d363): every drive event, the subscriber's own writes included, carries
+  `targetDrive` and whichever of `fileRef` (the file now) and `previousFileRef` (as it was, on
+  a delete) it has: the rows of a minimal `query-batch`, no header keys. A hard delete has only
+  `previousFileRef`. The client takes them as slim feed rows (`daemon.md`, the sync loop).
+  Measured once on frodo at 5cbd1d363 (2,000 files, text frames as received): an add or update
+  event 4,514 B full → 1,355–1,376 B minimal, a delete 7,438 → 2,217 B.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

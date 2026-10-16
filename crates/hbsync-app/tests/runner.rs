@@ -219,6 +219,47 @@ fn the_drive_is_read_on_a_timer_only_while_not_connected() -> R {
     Ok(())
 }
 
+/// A change announced that the drive has already (its own write coming back) brings no read
+/// of the feed; one it doesn't have is read and synced.
+#[test]
+fn announced_changes_are_read_only_when_new() -> R {
+    use hbsync_remote::{ChangeRef, Remote, RemoteBody};
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    // As the server announces a file: a minimal event's row.
+    let announce = |name: &str| -> Result<Event, Box<dyn std::error::Error>> {
+        let page = FakeRemote::new(Arc::clone(&server)).changes(None, 10_000)?;
+        let header = page
+            .entries
+            .iter()
+            .find(|h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == name))
+            .ok_or(format!("{name} isn't on the server"))?;
+        Ok(Event::Changed(Some(ChangeRef::of(header))))
+    };
+    b.write("mine.txt", "m")?;
+    wait_until("mine.txt is up", || on_server(&server, "mine.txt"))?;
+    wait_until("b is idle", || {
+        let s = b.status();
+        s.state == State::Idle && s.pending == 0
+    })?;
+    a.write("x.txt", "x")?;
+    wait_until("x.txt is up", || on_server(&server, "x.txt"))?;
+
+    let t0 = Instant::now();
+    let mut n = b.notifications(t0);
+    n.event(Event::Connected, t0, true); // connected; paused, so not pulled now
+    n.event(announce("mine.txt")?, t0, false);
+    n.tick(t0 + Duration::from_secs(2), false);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!b.has("x.txt"), "the feed was read for b's own write");
+
+    n.event(announce("x.txt")?, t0, false);
+    n.tick(t0 + Duration::from_secs(2), false);
+    wait_until("b read the drive", || b.has("x.txt"))?;
+    Ok(())
+}
+
 #[test]
 fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     let server = server();

@@ -151,6 +151,23 @@ fn save_cursor(s: &Store<'_>, old: Option<&str>, rows: bool, new: &str) -> Resul
     Ok(())
 }
 
+/// Changes the notifications announced (rows as a slim page has them): a file deleted for good
+/// is gone at once (a hard delete leaves no row in the feed), and when the store knows every
+/// other version (this device's own writes coming back) they are applied as a slim page's,
+/// without reading the feed. Whether that was all; else the feed has to be read.
+pub(crate) fn announced(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
+    for r in refs.iter().filter(|r| r.deleted) {
+        apply_tombstone(s, r.file_id)?;
+    }
+    if !known(s, refs)? {
+        return Ok(false);
+    }
+    for r in refs.iter().filter(|r| !r.deleted) {
+        apply_ref(s, r)?;
+    }
+    Ok(true)
+}
+
 /// Applies a known ref ([`known`]) as [`apply`] would its header: only what the server says
 /// better, its times. Returns `true` for a node in the tree.
 fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
