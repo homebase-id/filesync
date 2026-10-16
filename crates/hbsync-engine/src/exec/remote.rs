@@ -10,10 +10,7 @@ pub(super) enum After {
     /// Renamed, moved or tagged.
     Updated,
     /// Moved to Recently deleted: its mirror row (`file_id`) goes, its removed row comes.
-    Removed {
-        file_id: hbsync_types::RemoteFileId,
-        removal: Removal,
-    },
+    Removed { file_id: hbsync_types::RemoteFileId },
 }
 
 impl Executor<'_> {
@@ -51,11 +48,9 @@ impl Executor<'_> {
             parent,
             kind: NodeKind::Folder,
             content,
+            removed: false,
         };
-        let target = removed.map(|r| RemoteRef {
-            file_id: r.row.file_id,
-            version: r.row.version,
-        });
+        let target = removed.map(|r| r.row.target());
         Ok(meta_job(meta, target, None, None, After::Created))
     }
 
@@ -69,7 +64,11 @@ impl Executor<'_> {
         place: Option<(NodeId, &str)>,
         tags: &Tags,
     ) -> Step<(Job, Ctx)> {
-        let Some(mirror) = self.db.read(|s| s.get_mirror(node))? else {
+        let Some(mirror) = self
+            .db
+            .read(|s| s.get_mirror(node))?
+            .filter(|m| m.file_id == file_id)
+        else {
             return Err(Outcome::stale("gone remotely"));
         };
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
@@ -86,15 +85,12 @@ impl Executor<'_> {
             parent,
             kind: mirror.kind,
             content,
-        };
-        let target = RemoteRef {
-            file_id,
-            version: expected,
+            removed: false,
         };
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
-            Some(target),
+            Some(mirror.target_at(expected)),
             hash,
             Some(mirror.parent),
             After::Updated,
@@ -102,7 +98,8 @@ impl Executor<'_> {
     }
 
     /// A delete: the node goes to Recently deleted (a metadata-only update setting its
-    /// removal), its bytes kept there until the purge.
+    /// removal), its bytes kept there until the purge. A folder goes first (node schema,
+    /// Recently deleted; [`Batch::holds_up`]).
     pub(super) fn prepare_remove(
         &mut self,
         node: NodeId,
@@ -116,29 +113,20 @@ impl Executor<'_> {
         else {
             return Err(Outcome::Done); // already out of the tree
         };
-        let removal = Removal {
-            at_ms: hbsync_types::unix_now_ms(),
-            root: self.db.read(|s| removal_root(s, node))?,
-        };
-        let mut content = mirror.content(&mirror.name);
-        content.set_removal(Some(removal));
         let meta = NodeMeta {
             node,
             parent: mirror.parent,
             kind: mirror.kind,
-            content,
-        };
-        let target = RemoteRef {
-            file_id,
-            version: expected,
+            content: mirror.content(&mirror.name),
+            removed: true,
         };
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
-            Some(target),
+            Some(mirror.target_at(expected)),
             hash,
             Some(mirror.parent),
-            After::Removed { file_id, removal },
+            After::Removed { file_id },
         ))
     }
 
@@ -149,7 +137,7 @@ impl Executor<'_> {
         meta: NodeMeta,
         hash: Option<hbsync_types::ContentHash>,
         after: After,
-        written: Option<RemoteRef>,
+        written: Option<Target>,
     ) -> Step {
         let node = meta.node;
         let row = written.map(|w| written_row(w, &meta, hash));
@@ -159,11 +147,11 @@ impl Executor<'_> {
                 row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
             After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
-            After::Removed { file_id, removal } => {
+            // Out of the tree; Recently deleted has it once the feed brings it back with the
+            // server's time of the removal (the write's answer has none, and this device's
+            // clock isn't the server's), at the end of the sync at the latest.
+            After::Removed { file_id } => {
                 s.delete_mirror(file_id)?;
-                if let Some(row) = row {
-                    s.put_removed(&RemovedRow { row, removal })?;
-                }
                 s.mark_dirty(node)
             }
         })
@@ -174,7 +162,7 @@ impl Executor<'_> {
 /// (its parent on the drive now), if any.
 fn meta_job(
     meta: NodeMeta,
-    target: Option<RemoteRef>,
+    target: Option<Target>,
     hash: Option<hbsync_types::ContentHash>,
     from: Option<NodeId>,
     after: After,

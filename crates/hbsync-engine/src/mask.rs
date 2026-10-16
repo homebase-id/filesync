@@ -71,12 +71,30 @@ impl Masks {
         device: &str,
         taken: &HashSet<NodeId>,
     ) -> Masks {
-        let outside = scope.out_of_scope(&input.remote);
+        // Where a node is: through the folders in Recently deleted too (a node in one is where
+        // that folder was).
+        let with_removed;
+        let paths = if input.removed.is_empty() {
+            &input.remote
+        } else {
+            let mut tree = input.remote.clone();
+            for (node, r) in &input.removed {
+                tree.insert(*node, r.state.clone());
+            }
+            with_removed = tree;
+            &with_removed
+        };
+        let outside = scope.out_of_scope(paths);
         // The filter's masks, on what the scope keeps; the rules below are the filter's (§10).
         let mut masked: HashSet<NodeId> = masked(&input.remote, filter)
             .into_iter()
             .filter(|m| !outside.contains(m))
             .collect();
+        // A folder in Recently deleted the filter masks isn't this device's to bring back.
+        if !input.removed.is_empty() {
+            let filtered = self::masked(paths, filter);
+            masked.extend(input.removed.keys().filter(|n| filtered.contains(n)));
+        }
         if masked.is_empty() && outside.is_empty() {
             return Masks::default();
         }
@@ -206,6 +224,8 @@ impl Masks {
             local_unhashed,
             dirty,
             remote_complete: input.remote_complete,
+            removed: input.removed.clone(),
+            changed_at: input.changed_at.clone(),
         };
         Masks {
             masked,

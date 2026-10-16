@@ -183,11 +183,11 @@ fn throughput() -> R {
                 pace: None,
             }),
         )?;
-        bench.track(at.file_id);
+        bench.track(at.at.file_id);
         rate(&format!("upload {mb} MiB"), size, t);
         let t = Instant::now();
         let mut sink = Hashing(Hasher::new(alg));
-        remote.read(at.file_id, Some(0..size), &mut sink)?;
+        remote.read(at.at.file_id, Some(0..size), &mut sink)?;
         assert_eq!(sink.0.finalize(), hash);
         rate(&format!("download {mb} MiB"), size, t);
 
@@ -218,8 +218,7 @@ fn throughput() -> R {
             let content = NodeContent::file(&meta.content.name, 2, new.len() as u64, false);
             let mut source = Cursor::new(&new[..]);
             remote.update(
-                at.file_id,
-                at.version,
+                &bench.target(*at),
                 &with(meta, content),
                 Some(upload(&mut source)),
             )?;

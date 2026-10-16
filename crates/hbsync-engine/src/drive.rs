@@ -183,6 +183,7 @@ impl Drive {
                 parent: NodeId::ROOT,
                 kind: NodeKind::Folder,
                 content: NodeContent::folder(role.name()),
+                removed: false,
             };
             match self.remote().create(&meta, None) {
                 // Another device made it (or deleted it) meanwhile: seen below.

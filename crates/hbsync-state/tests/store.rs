@@ -2,8 +2,8 @@ use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_state::{BaseRow, LocalRow, StateDb, StateError, keys};
 use hbsync_types::RemoteRef;
 use hbsync_types::{
-    ContentState, FileContent, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId, Tag, Tags,
-    Uuid, VersionTag,
+    ContentState, FileContent, FileToken, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId,
+    Tag, Tags, Uuid, VersionTag,
 };
 
 type R = Result<(), StateError>;
@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 6);
+    assert_eq!(db.schema_version()?, 7);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -259,10 +259,10 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
 mod mirror {
     use super::*;
     use hbsync_state::{MirrorFile, MirrorRow};
-    use hbsync_types::schema::{NodeContent, Removal};
+    use hbsync_types::schema::NodeContent;
 
     /// A node's content survives its mirror row, unknown keys, creation time and tags
-    /// included; the removal stays out (the `removed` table has it in columns).
+    /// included.
     #[test]
     fn content_round_trips_through_the_row() {
         let c = content(b"x");
@@ -270,20 +270,9 @@ mod mirror {
         file.unknown.insert("future".into(), 1.into());
         file.set_created_ms(Some(1_451_606_400_123));
         file.set_tags(&Tags::new([Tag::new("Red", 6)]));
-        let mut removed = file.clone();
-        removed.set_removal(Some(Removal {
-            at_ms: 1,
-            root: NodeId::new(),
-        }));
         let (node, at) = (NodeId::new(), remote());
-        let row = MirrorRow::from_content(
-            at,
-            node,
-            NodeId::ROOT,
-            NodeKind::File,
-            &removed,
-            Some(c.hash),
-        );
+        let row =
+            MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::File, &file, Some(c.hash));
         assert_eq!(row.remote_ref(), at);
         assert_eq!(row.content("f"), file);
         assert_eq!(row.file.map(|f| (f.hash, f.size)), Some((c.hash, c.size)));
@@ -318,7 +307,104 @@ mod mirror {
             },
             file,
             content_extra: Some(r#"{"future":1}"#.into()),
+            token: Some(FileToken(node.0.as_bytes().as_slice().into())),
+            changed_at: None,
         }
+    }
+
+    /// A version the mirror has already, again, changes nothing; the feed's refresh takes its
+    /// token (an earlier login's may not open), and nothing needs reconciling.
+    #[test]
+    fn a_known_version_takes_only_a_refresh() -> R {
+        use hbsync_state::RemovedRow;
+        let mut db = StateDb::open_in_memory()?;
+        let with_token = row(NodeId::new(), NodeId::ROOT, "d", None);
+        let without = MirrorRow {
+            token: None,
+            ..with_token.clone()
+        };
+        let node = with_token.node;
+        db.write(|s| {
+            s.put_mirror(&without)?;
+            s.clear_dirty(node)
+        })?;
+        let renamed = MirrorRow {
+            name: "other".into(),
+            ..with_token.clone()
+        };
+        db.write(|s| s.put_mirror(&renamed))?;
+        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(without.clone()));
+        db.write(|s| s.refresh(&with_token, false))?;
+        assert_eq!(
+            db.read(|s| s.get_mirror(node))?,
+            Some(with_token.clone()),
+            "the token only"
+        );
+        assert!(!db.read(|s| s.is_dirty(node))?);
+        // An earlier login's is replaced; none keeps the one there.
+        let other = MirrorRow {
+            token: Some(FileToken(vec![0xEE; 16].into())),
+            ..with_token.clone()
+        };
+        db.write(|s| s.refresh(&other, false))?;
+        db.write(|s| s.refresh(&without, false))?;
+        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(other.clone()));
+
+        // In Recently deleted, the same.
+        db.write(|s| {
+            s.delete_mirror(with_token.file_id)?;
+            s.put_removed(&RemovedRow {
+                row: without.clone(),
+                removed_at: 5,
+            })?;
+            s.clear_dirty(node)
+        })?;
+        db.write(|s| s.refresh(&with_token, true))?;
+        let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
+        assert_eq!((back.row.token, back.removed_at), (with_token.token, 5));
+        assert!(!db.read(|s| s.is_dirty(node))?);
+        Ok(())
+    }
+
+    /// This device's own write has no server time until the feed brings it back, and the echo
+    /// records it only where it decides something: in a folder in Recently deleted.
+    #[test]
+    fn an_own_writes_time_is_kept_in_a_removed_folder_only() -> R {
+        use hbsync_state::RemovedRow;
+        let mut db = StateDb::open_in_memory()?;
+        let folder = row(NodeId::new(), NodeId::ROOT, "f", None);
+        let inner = row(NodeId::new(), folder.node, "g", None);
+        let file = row(NodeId::new(), inner.node, "x", None);
+        db.write(|s| {
+            s.put_mirror(&folder)?;
+            s.put_mirror(&inner)?;
+            s.put_mirror(&file)
+        })?;
+        let echo = MirrorRow {
+            changed_at: Some(7),
+            ..file.clone()
+        };
+        let time = |db: &mut StateDb| -> hbsync_state::Result<Option<i64>> {
+            Ok(db
+                .read(|s| s.get_mirror(file.node))?
+                .and_then(|m| m.changed_at))
+        };
+        db.write(|s| s.refresh(&echo, false))?;
+        assert_eq!(time(&mut db)?, None, "nothing it decides");
+        db.write(|s| {
+            s.delete_mirror(folder.file_id)?;
+            s.put_removed(&RemovedRow {
+                row: folder.clone(),
+                removed_at: 5,
+            })
+        })?;
+        db.write(|s| s.refresh(&echo, false))?;
+        assert_eq!(
+            time(&mut db)?,
+            Some(7),
+            "in a removed folder, two levels up"
+        );
+        Ok(())
     }
 
     #[test]
@@ -365,7 +451,6 @@ mod mirror {
     #[test]
     fn recently_deleted_lists_finds_and_forgets() -> R {
         use hbsync_state::RemovedRow;
-        use hbsync_types::schema::Removal;
         let mut db = StateDb::open_in_memory()?;
         let folder = row(NodeId::new(), NodeId::ROOT, "d", None);
         let c = content(b"x");
@@ -381,15 +466,11 @@ mod mirror {
             }),
         );
         let alone = row(NodeId::new(), NodeId::ROOT, "g", None);
-        let with = |row: &MirrorRow, at_ms, root| RemovedRow {
+        let with = |row: &MirrorRow, removed_at| RemovedRow {
             row: row.clone(),
-            removal: Removal { at_ms, root },
+            removed_at,
         };
-        let (rf, rd, ra) = (
-            with(&file, 8, folder.node),
-            with(&folder, 10, folder.node),
-            with(&alone, 20, alone.node),
-        );
+        let (rf, rd, ra) = (with(&file, 8), with(&folder, 10), with(&alone, 20));
         db.write(|s| {
             s.put_removed(&rf)?;
             s.put_removed(&rd)?;
@@ -404,15 +485,15 @@ mod mirror {
                 .map(|r| r.row.name)
                 .collect();
             assert_eq!(newest, ["g", "d", "f"]);
-            // Expired ones, files before folders.
-            let expired: Vec<_> = s
-                .removed_before(15)?
-                .into_iter()
-                .map(|r| r.row.name)
-                .collect();
-            assert_eq!(expired, ["f", "d"]);
-            // The file went before its folder, but goes when the folder's delete does.
-            assert!(s.removed_before(9)?.is_empty());
+            // Expired ones, oldest first (what goes with what is the engine's).
+            let expired = |before| -> hbsync_state::Result<Vec<String>> {
+                Ok(s.removed_before(before)?
+                    .into_iter()
+                    .map(|r| r.row.name)
+                    .collect())
+            };
+            assert_eq!(expired(15)?, ["f", "d"]);
+            assert_eq!(expired(9)?, ["f"]);
             Ok(())
         })?;
         db.write(|s| {
@@ -601,7 +682,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 6);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 7);
     Ok(())
 }
 
@@ -694,6 +775,8 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,
+        token: None,
+        changed_at: None,
     };
     let dirty = |db: &mut StateDb, node| db.read(|s| s.is_dirty(node));
     // The role folders' tops, then a folder inside Documents: only docs is concerned.
@@ -740,7 +823,6 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
 #[test]
 fn a_role_folder_sees_its_top_as_the_root() -> R {
     use hbsync_state::{MirrorRow, RemovedRow};
-    use hbsync_types::schema::Removal;
     let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
     let db_path = dir.path().join("state.db");
     let mut main = StateDb::open(&db_path)?;
@@ -756,6 +838,8 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
         kind: NodeKind::Folder,
         file: None,
         content_extra: None,
+        token: None,
+        changed_at: None,
     };
     let (inside, elsewhere) = (NodeId::new(), NodeId::new());
     main.write(|s| {
@@ -811,10 +895,6 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
             .is_err()
     );
     // Recently deleted too.
-    let removal = Removal {
-        at_ms: 1,
-        root: new,
-    };
     let gone = main
         .read(|s| s.get_mirror(new))?
         .ok_or(StateError::Corrupt("no".into()))?;
@@ -825,7 +905,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
                 parent: NodeId::ROOT,
                 ..gone.clone()
             },
-            removal,
+            removed_at: 1,
         })
     })?;
     assert_eq!(

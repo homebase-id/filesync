@@ -30,7 +30,7 @@ use std::sync::Arc;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::reconcile::{
-    Agreement, BaseExtra, Input, Op, Options, Requirement, reconcile_with_known,
+    Agreement, BaseExtra, Input, Op, Options, Removed, Requirement, reconcile_with_known,
 };
 use hbsync_engine::scope::Scope;
 use hbsync_engine::tree::{Tree, first_free, numbered_names, restored_names};
@@ -75,10 +75,10 @@ pub enum Action {
     },
     /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
     ToggleIgnore,
-    /// The user restores one item of Recently deleted, on the server at once: back in its
-    /// folder, or at the top if that is gone, under a free name. (The engine's restore also
-    /// brings back what was deleted with it and the folders above: each such step is one of
-    /// these.)
+    /// The user restores one item of Recently deleted, on the server at once, with what was
+    /// deleted with it (node schema: in it, removed no earlier than it), folders first: back in
+    /// its folder, or at the top if that is gone, under a free name. (The engine's restore also
+    /// brings back the folders above: each such step is one of these.)
     Restore {
         node: usize,
     },
@@ -165,6 +165,9 @@ struct Server {
     live: BTreeMap<NodeId, ServerNode>,
     /// Recently deleted: out of the tree, with their bytes, until restored or purged.
     removed: BTreeMap<NodeId, ServerNode>,
+    /// When each node went to Recently deleted (the server's time of that write: a header's
+    /// `updated`, [`time`]).
+    removed_at: BTreeMap<NodeId, i64>,
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     ever: BTreeSet<NodeId>,
@@ -172,10 +175,65 @@ struct Server {
     dangling: Option<String>,
 }
 
+/// The server's time of the write that made `version`: every write takes the next id, so ids
+/// are the server's clock (Homebase's `updated`).
+fn time(version: VersionTag) -> i64 {
+    version.0.as_u128() as i64
+}
+
 impl Server {
     fn uuid(&mut self) -> Uuid {
         self.next += 1;
         Uuid::from_u128(self.next)
+    }
+
+    /// Puts `node` in Recently deleted: a write, at its time.
+    fn remove(&mut self, node: NodeId, mut n: ServerNode) {
+        n.remote.version = VersionTag(self.uuid());
+        self.removed_at.insert(node, time(n.remote.version));
+        self.removed.insert(node, n);
+    }
+
+    /// The nodes in Recently deleted that were deleted with folder `node` (node schema): in it,
+    /// removed no earlier than it.
+    fn deleted_with(&self, node: NodeId) -> Vec<NodeId> {
+        let Some(at) = self.removed_at.get(&node) else {
+            return Vec::new();
+        };
+        self.removed
+            .iter()
+            .filter(|(n, r)| {
+                r.state.parent == node && self.removed_at.get(n).is_some_and(|t| t >= at)
+            })
+            .map(|(n, _)| *n)
+            .collect()
+    }
+
+    /// The live nodes a folder's removal took along (node schema, Recently deleted): in a
+    /// removed folder, directly or through live folders in it, written no later than its
+    /// removal. They count as removed, whether or not a device marked them so yet.
+    fn taken_along(&self) -> BTreeSet<NodeId> {
+        let taken = |n: &ServerNode| {
+            let mut seen = BTreeSet::new();
+            let mut at = n.state.parent;
+            loop {
+                if self.removed.contains_key(&at) {
+                    return self
+                        .removed_at
+                        .get(&at)
+                        .is_some_and(|removed| time(n.remote.version) <= *removed);
+                }
+                match self.live.get(&at) {
+                    Some(folder) if seen.insert(at) => at = folder.state.parent,
+                    _ => return false,
+                }
+            }
+        };
+        self.live
+            .iter()
+            .filter(|(_, n)| taken(n))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     fn tree(&self) -> Tree {
@@ -223,6 +281,8 @@ struct Client {
     extra: HashMap<NodeId, BaseExtra>,
     /// Pending operations with their retry count.
     plan: VecDeque<(Op, u8)>,
+    /// What the pending plan removed to Recently deleted so far.
+    removed_by_plan: BTreeSet<NodeId>,
     /// Nodes parked under a temporary name, with their original (parent, name).
     parked: HashMap<NodeId, (NodeId, String)>,
     /// The local tree when the pending plan was made (for the fingerprint guard).
@@ -250,6 +310,7 @@ impl Client {
             base: Tree::new(),
             extra: HashMap::new(),
             plan: VecDeque::new(),
+            removed_by_plan: BTreeSet::new(),
             parked: HashMap::new(),
             planned_local: Tree::new(),
             planned_remote: Tree::new(),
@@ -301,6 +362,9 @@ pub struct Sim {
     role_folder_deleted_with: Vec<NodeId>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
+    /// The first folder a plan removed after something in it (node schema, Recently deleted:
+    /// what a folder's delete takes along is removed no earlier than the folder).
+    removed_after_contents: Option<String>,
     /// Clients that are two folders of one computer (the main folder, a role folder).
     computers: Vec<(usize, usize)>,
 }
@@ -335,6 +399,7 @@ impl Sim {
             deleted: BTreeSet::new(),
             role_folder_deleted_with: Vec::new(),
             scope_breach: None,
+            removed_after_contents: None,
             computers: Vec::new(),
         }
     }
@@ -448,17 +513,19 @@ impl Sim {
         if !self.server.live.contains_key(&docs) {
             return;
         }
-        let below: Vec<NodeId> = self
+        let mut below: Vec<NodeId> = self
             .server
             .live
             .keys()
             .copied()
             .filter(|n| self.server.in_role_folder(*n))
             .collect();
-        for node in below.iter().copied().chain([docs]) {
-            if let Some(mut n) = self.server.live.remove(&node) {
-                n.remote.version = VersionTag(self.server.uuid());
-                self.server.removed.insert(node, n);
+        // The folder first, then what is in it, top-down (node schema, Recently deleted).
+        let tree = self.server.tree();
+        below.sort_by_key(|n| tree.ancestors(*n).len());
+        for node in [docs].into_iter().chain(below.iter().copied()) {
+            if let Some(n) = self.server.live.remove(&node) {
+                self.server.remove(node, n);
                 // A tag change loses to a delete (§11).
                 self.deleted.insert(node);
             }
@@ -503,7 +570,7 @@ impl Sim {
             }
             (2, Some(file)) => {
                 if let Some(n) = self.server.live.remove(&file) {
-                    self.server.removed.insert(file, n);
+                    self.server.remove(file, n);
                     // A tag change loses to a delete (§11), the phone's too.
                     self.deleted.insert(file);
                 }
@@ -563,24 +630,86 @@ impl Sim {
 
     // ---- user actions ----
 
-    fn act(&mut self, c: usize, action: Action) {
-        let local = &self.clients[c].local;
+    /// The folders a create's `parent` picks from on client `c` (its root included).
+    fn folders_of(&self, c: usize) -> Vec<NodeId> {
         let mut folders: Vec<NodeId> = vec![NodeId::ROOT];
         folders.extend(
-            local
+            self.clients[c]
+                .local
                 .iter()
                 .filter(|(_, s)| s.kind == NodeKind::Folder)
                 .map(|(id, _)| id),
         );
         folders.sort();
-        let mut files: Vec<NodeId> = local
+        folders
+    }
+
+    /// The items an action's `node` picks from on client `c`.
+    fn items_of(&self, c: usize) -> Vec<NodeId> {
+        let mut all: Vec<NodeId> = self.clients[c].local.ids().collect();
+        all.sort();
+        all
+    }
+
+    /// For scripted tests: the item at `path` on client `c`.
+    pub fn item(&self, c: usize, path: &str) -> Option<NodeId> {
+        at_path(&self.clients[c].local, path)
+    }
+
+    /// For scripted tests: what an action's `node` (a create's `parent` for a folder) is to pick
+    /// `node` on client `c`.
+    pub fn pick(&self, c: usize, node: NodeId, as_parent: bool) -> Option<usize> {
+        let list = if as_parent {
+            self.folders_of(c)
+        } else {
+            self.items_of(c)
+        };
+        list.iter().position(|n| *n == node)
+    }
+
+    /// For scripted tests: what `Edit`'s `file` is to pick file `node` on client `c`.
+    pub fn file_pick(&self, c: usize, node: NodeId) -> Option<usize> {
+        self.files_of(c).iter().position(|n| *n == node)
+    }
+
+    /// The files an action's `file` picks from on client `c`.
+    fn files_of(&self, c: usize) -> Vec<NodeId> {
+        let mut files: Vec<NodeId> = self.clients[c]
+            .local
             .iter()
             .filter(|(_, s)| s.kind == NodeKind::File)
             .map(|(id, _)| id)
             .collect();
         files.sort();
-        let mut all: Vec<NodeId> = local.ids().collect();
-        all.sort();
+        files
+    }
+
+    /// For scripted tests: what `Restore`'s `node` is to pick `node` in Recently deleted.
+    pub fn removed_pick(&self, node: NodeId) -> Option<usize> {
+        self.server.removed.keys().position(|n| *n == node)
+    }
+
+    /// The paths of the server's live nodes, sorted.
+    pub fn server_paths(&self) -> Vec<String> {
+        let tree = self.server.tree();
+        let mut paths: Vec<String> = tree
+            .ids()
+            .filter_map(|n| tree.path(n).map(|p| p.join("/")))
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    /// Whether `node` is in Recently deleted.
+    pub fn is_removed(&self, node: NodeId) -> bool {
+        self.server.removed.contains_key(&node)
+    }
+
+    fn act(&mut self, c: usize, action: Action) {
+        let folders = self.folders_of(c);
+        let all = self.items_of(c);
+        let files = self.files_of(c);
+        let local = &self.clients[c].local;
         let name_free = |t: &Tree, parent: NodeId, name: &str, except: Option<NodeId>| {
             t.child_named(parent, name, except).is_none()
         };
@@ -663,6 +792,7 @@ impl Sim {
                 }
             }
             Action::Purge => {
+                self.server.removed_at.clear();
                 for (_, n) in std::mem::take(&mut self.server.removed) {
                     self.supersede(n.state.content);
                 }
@@ -757,7 +887,20 @@ impl Sim {
         else {
             return;
         };
-        self.restore_node(node);
+        self.restore_with(node);
+    }
+
+    /// Brings `node` back from Recently deleted with what was deleted with it, folders before
+    /// what is in them; what doesn't come back keeps what is in it there.
+    fn restore_with(&mut self, node: NodeId) {
+        let mut queue = VecDeque::from([node]);
+        while let Some(n) = queue.pop_front() {
+            let with = self.server.deleted_with(n);
+            self.restore_node(n);
+            if self.server.live.contains_key(&n) {
+                queue.extend(with);
+            }
+        }
     }
 
     /// Brings `node` back from Recently deleted: into its folder if that is live, else at the
@@ -862,6 +1005,31 @@ impl Sim {
             .filter(|(id, _)| !client.coords.hides(**id))
             .map(|(id, n)| (*id, n.remote))
             .collect();
+        // The folders in Recently deleted that live nodes are in, and the removed ones above
+        // them, and the server's time of each live node's version, as the engine's view has them.
+        let outside = client.scope().outside;
+        for mut folder in remote.missing_parents() {
+            while !input.removed.contains_key(&folder)
+                && !outside.contains(&folder)
+                && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))
+            {
+                let state = NodeState {
+                    parent: client.coords.from_drive(n.state.parent),
+                    ..n.state.clone()
+                };
+                let at = self.server.removed_at[&client.coords.to_drive(folder)];
+                let parent = state.parent;
+                input.removed.insert(folder, Removed { at, state });
+                folder = parent;
+            }
+        }
+        input.changed_at = remote
+            .ids()
+            .filter_map(|id| {
+                let n = self.server.live.get(&client.coords.to_drive(id))?;
+                Some((id, time(n.remote.version)))
+            })
+            .collect();
         input.dirty = client
             .base
             .ids()
@@ -938,6 +1106,7 @@ impl Sim {
         client.confirmed = confirmed.intersection(&deleting).copied().collect();
         client.held = plan.held.iter().map(Op::node).collect();
         client.plan = plan.ops.into_iter().map(|op| (op, 0)).collect();
+        client.removed_by_plan.clear();
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
     }
@@ -1305,6 +1474,22 @@ impl Sim {
                 ..
             } => {
                 let local_content = self.clients[c].local.get(node).and_then(|s| s.content);
+                // Over a version this client never had (taken along by a folder's delete):
+                // that one stays, and this version becomes a new item (as the executor
+                // detaches it).
+                let base_content = self.clients[c].base.get(node).and_then(|b| b.content);
+                if upload
+                    && let Some(server) = self.server.live.get(&node)
+                    && server.remote.version == expected
+                    && server.state.content.map(|c| c.hash) != base_content.map(|c| c.hash)
+                {
+                    let client = &self.clients[c];
+                    if !client.local.contains(node) || !unchanged(client, node) {
+                        return Skip;
+                    }
+                    let new_node = NodeId::new();
+                    return self.execute(c, &Op::LocalDetach { node, new_node });
+                }
                 let version = VersionTag(self.server.uuid());
                 let Some(server) = self.server.live.get_mut(&node) else {
                     return Skip;
@@ -1355,9 +1540,22 @@ impl Sim {
                 Some(server) if server.remote.version != expected => Skip, // changed meanwhile
                 // Removed to Recently deleted now, or already gone: done either way.
                 _ => {
-                    if let Some(mut n) = self.server.live.remove(&node) {
-                        n.remote.version = VersionTag(self.server.uuid());
-                        self.server.removed.insert(node, n);
+                    if let Some(n) = self.server.live.remove(&node) {
+                        self.server.remove(node, n);
+                        let client = &mut self.clients[c];
+                        let after = client.removed_by_plan.iter().find(|r| {
+                            self.server
+                                .removed
+                                .get(r)
+                                .is_some_and(|n| n.state.parent == node)
+                        });
+                        if let Some(r) = after
+                            && self.removed_after_contents.is_none()
+                        {
+                            self.removed_after_contents =
+                                Some(format!("{} removed {node} after {r} in it", client.name));
+                        }
+                        client.removed_by_plan.insert(node);
                     }
                     self.clients[c].planned_remote.remove(node);
                     // Its tags go with it: a tag change loses to a delete (§11), and one brought
@@ -1642,9 +1840,7 @@ impl Sim {
     /// The tags (`name:colour`) of the server's item at `path` (`/`-separated), if it has one.
     pub fn server_tags(&self, path: &str) -> Option<Vec<String>> {
         let tree = self.server.tree();
-        let (_, state) = tree
-            .iter()
-            .find(|(id, _)| tree.path(*id).is_some_and(|p| p.join("/") == path))?;
+        let state = tree.get(at_path(&tree, path)?)?;
         Some(tag_names(&state.tags))
     }
 
@@ -1657,10 +1853,18 @@ impl Sim {
         if let Some(plan) = &self.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
         }
-        let server = self.server.tree();
+        // What a folder's removal took along is removed, marked so or not yet.
+        let taken = self.server.taken_along();
+        let mut server = self.server.tree();
+        for n in &taken {
+            server.remove(*n);
+        }
         let mut kept_here: BTreeSet<u64> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
-            let server = self.server_view(c);
+            let mut server = self.server_view(c);
+            for n in &taken {
+                server.remove(*n);
+            }
             let hidden = masked(&client.local, &client.filter);
             let mut visible = client.local.clone();
             for n in &hidden {
@@ -1713,6 +1917,9 @@ impl Sim {
         if !broken.is_empty() {
             return Err(format!("server: {broken:?}"));
         }
+        if let Some(what) = &self.removed_after_contents {
+            return Err(format!("a folder was removed after what is in it: {what}"));
+        }
         // No folder wrote outside its part of the drive.
         if let Some(op) = &self.scope_breach {
             return Err(format!(
@@ -1745,7 +1952,8 @@ impl Sim {
             .filter_map(|(_, s)| s.content.and_then(|c| self.blobs.get(&c.hash).copied()))
             .collect();
         // Recently deleted keeps what was deleted, until the purge.
-        present.extend(self.server.removed.values().filter_map(|n| {
+        let taken = taken.iter().filter_map(|n| self.server.live.get(n));
+        present.extend(self.server.removed.values().chain(taken).filter_map(|n| {
             n.state
                 .content
                 .and_then(|c| self.blobs.get(&c.hash).copied())
@@ -1919,6 +2127,12 @@ fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
     }
 }
 
+/// The node at `path` (`/`-separated) in `tree`.
+fn at_path(tree: &Tree, path: &str) -> Option<NodeId> {
+    tree.ids()
+        .find(|n| tree.path(*n).is_some_and(|p| p.join("/") == path))
+}
+
 /// Tags as `name:colour`.
 fn tag_names(tags: &Tags) -> Vec<String> {
     tags.iter()
@@ -1927,14 +2141,15 @@ fn tag_names(tags: &Tags) -> Vec<String> {
 }
 
 /// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
-/// from, plus its own writes since), as the executor checks them.
+/// from, plus its own writes since) and its plan, as the executor checks them.
 fn ready(client: &Client, op: &Op) -> bool {
     match op.requires() {
         None => true,
         Some(Requirement::RemoteFolder(folder)) => client.planned_remote.contains(folder),
-        Some(Requirement::NoRemoteChildren(node)) => {
-            client.planned_remote.children(node).next().is_none()
-        }
+        Some(Requirement::FolderFirst(folder)) => !client
+            .plan
+            .iter()
+            .any(|(o, _)| matches!(o, Op::RemoteDelete { node, .. } if *node == folder)),
     }
 }
 

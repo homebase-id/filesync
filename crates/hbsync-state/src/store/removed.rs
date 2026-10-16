@@ -16,10 +16,9 @@ impl Store<'_> {
         };
         self.moved_folder(row.node, row.kind);
         let f = row.file.as_ref();
-        let root = self.coords()?.to_drive(removed.removal.root);
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, root) \
+                 hash, size, mtime_ms, executable, content_extra, removed_at, token) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?
         .execute(params![
@@ -34,8 +33,8 @@ impl Store<'_> {
             f.map(|f| f.mtime_ms),
             f.is_some_and(|f| f.executable),
             row.content_extra,
-            removed.removal.at_ms,
-            root.0.as_bytes(),
+            removed.removed_at,
+            row.token.as_ref().map(|t| &t.0[..]),
         ])?;
         self.fan_out(row.node, row.parent)
     }
@@ -81,15 +80,10 @@ impl Store<'_> {
         )
     }
 
-    /// What was removed before `at_ms` (Unix ms), with the delete that took it along (its
-    /// root, if still removed): a folder's delete goes as a whole. Files before folders.
+    /// What was removed before `at_ms` (Unix ms), oldest first.
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
-            &format!(
-                "{REMOVED_SELECT} WHERE removed_at < ?1 AND NOT EXISTS \
-                 (SELECT 1 FROM removed r WHERE r.node = removed.root AND r.removed_at >= ?1) \
-                 ORDER BY kind, removed_at"
-            ),
+            &format!("{REMOVED_SELECT} WHERE removed_at < ?1 ORDER BY removed_at"),
             [at_ms],
         )
     }

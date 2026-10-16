@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
 use hbsync_remote::{NodeMeta, Pace, Remote, RemoteError, Upload};
-use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef};
+use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -147,7 +147,7 @@ pub enum Job {
     /// file at that version.
     Upload {
         meta: NodeMeta,
-        target: Option<RemoteRef>,
+        target: Option<Target>,
         path: PathBuf,
         hash: ContentHash,
         size: u64,
@@ -156,7 +156,7 @@ pub enum Job {
     /// version (a folder restored, a rename or move, tags, a removal).
     Meta {
         meta: NodeMeta,
-        target: Option<RemoteRef>,
+        target: Option<Target>,
     },
 }
 
@@ -184,7 +184,7 @@ pub enum JobResult {
         local_hash: ContentHash,
     },
     /// An upload or a [`Job::Meta`] landed.
-    Written(RemoteRef),
+    Written(Target),
     Failed(JobError),
 }
 
@@ -321,12 +321,12 @@ impl Queue {
 fn write(
     remote: &dyn Remote,
     meta: &NodeMeta,
-    target: Option<RemoteRef>,
+    target: Option<&Target>,
     upload: Option<Upload<'_>>,
-) -> Result<RemoteRef, RemoteError> {
+) -> Result<Target, RemoteError> {
     match target {
         None => remote.create(meta, upload),
-        Some(at) => remote.update(at.file_id, at.version, meta, upload),
+        Some(t) => remote.update(t, meta, upload),
     }
 }
 
@@ -351,9 +351,14 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
                 reader: &mut file,
                 pace: Some(meter),
             });
-            Ok(JobResult::Written(write(remote, meta, *target, upload)?))
+            Ok(JobResult::Written(write(
+                remote,
+                meta,
+                target.as_ref(),
+                upload,
+            )?))
         })(),
-        Job::Meta { meta, target } => write(remote, meta, *target, None)
+        Job::Meta { meta, target } => write(remote, meta, target.as_ref(), None)
             .map(JobResult::Written)
             .map_err(JobError::Remote),
     };

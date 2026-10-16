@@ -77,7 +77,7 @@ Per node, after classifying both sides:
 | moved | moved | same destination → no-op. Different → **remote wins**; the local move is reverted |
 | edited | moved | apply both: the content goes up, the move comes down (and vice versa) |
 | deleted | edited / moved | **edit wins**: the node is restored locally from the remote |
-| edited / moved | deleted | **edit wins**: the removed node is restored remotely with the local version (an update at its file id: node schema "Recently deleted"). If Recently deleted holds a version of the file this device never had (edited elsewhere, then deleted), that one stays there and the local version goes up as a new node (detached in place) |
+| edited / moved | deleted | **edit wins**: the removed node is restored remotely with the local version (an update at its file id: node schema "Recently deleted"). If Recently deleted holds a version of the file this device never had (edited elsewhere, then deleted; or taken along by a folder's delete, §6.3), that one stays there and the local version goes up as a new node (detached in place) |
 | created | created | impossible for one node id; same-name clashes are handled by section 6 |
 
 A `moved` that only reverts a delete case is applied to the restored node.
@@ -104,9 +104,17 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    - remote-deleted parent → restored remotely (still removed) or re-created with the same
      node id and its base name (deleted for good);
    - local-deleted parent → re-created locally.
-   Any live child keeps its folder alive. Deleting clients delete bottom-up, so a completed
-   delete never leaves live children, and a child that survives was added concurrently.
-4. **Folder delete propagation** deletes descendants bottom-up, then the folder.
+   Any live child keeps its folder alive, but one a folder's removal took along doesn't: a
+   deleting client removes the folder first, then what is in it (node schema, Recently deleted),
+   so while it does, a removed folder holds live nodes. A remote node in a folder in Recently
+   deleted (directly or through live folders) written no later than the folder's removal, by
+   the server's times, is remotely deleted with it; one written after (an edit or a new file from
+   a device that didn't know yet) keeps the folder alive: restored. A removed folder outside this
+   folder's part of the drive, or one it filters (§10), isn't its to bring back: a node written
+   into it waits for the folder that syncs that part, or, filtered, goes to the root as an
+   orphan does.
+4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
+   top-down; here it trashes the topmost folder (its base goes after its children's).
 
 ## 7. Delete safety
 
@@ -123,9 +131,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   the operation is skipped and the node is re-planned.
 - **Version guard.** Remote updates, moves and deletes carry the base `VersionTag`. A mismatch
   means the remote changed: the operation is dropped and the node is re-planned with the newer
-  remote state. Homebase's delete takes no VersionTag today (verified in odin-core
-  `V2DriveSingleFileWriteOperationsController.cs`), so the client reads the header right before
-  deleting and compares (a small race window remains until the server accepts a VersionTag).
+  remote state. Homebase's delete takes the VersionTag too (odin-core PR #1931, verified in
+  `V2DriveControllerBase.PerformFileDelete`); a delete refused because the file is already
+  deleted is a retry, and done.
 - **Mass-delete guard.** If one plan deletes more than `max(50, 25 % of synced files)` files on
   either side, or every file on a side, the deletes are held and the user must confirm. The
   rest of the plan proceeds. A confirmation names the held deletes the user was shown, node
@@ -147,10 +155,11 @@ restores it). Outside plans: `restore` and `purge` (Recently deleted). Every op 
 node (create, upload, move, download, mkdir) writes its merged tags too; `tags` is for a change
 of tags alone.
 
-Ordering within one plan: folder creates top-down, then moves, then content, then deletes
-bottom-up; in each phase the local operations before the remote ones, for deletes among those
-at one depth (a folder's base is forgotten after its children's deletes), so that the remote
-ones run together (section 8a). A move whose target
+Ordering within one plan: folder creates top-down, then moves, then content, then deletes:
+first the remote ones top-down (a folder before what is in it: node schema, Recently deleted),
+then the local ones bottom-up (a folder's base is forgotten after its children's deletes, on
+either side). In the other phases the local operations come before the remote ones, so that
+the remote ones run together (section 8a). A move whose target
 name is occupied by a node that is itself moving away goes through a temporary name.
 
 Every operation is **idempotent**: a remote create that returns `ExistingFileWithUniqueId`
@@ -185,15 +194,17 @@ expected fingerprint is treated as done.
   whose create failed would look like an orphan to every other client. A remote move whose
   destination is inside the node on the drive (a nesting turned around) waits too, for the
   move that takes the destination out: the server doesn't check cycles either.
-- **Folders are deleted last.** A remote folder delete waits while the mirror still has a
-  child in it (a child delete that failed or was skipped, or a child just added): the folder
-  stays, and the next plan resurrects it if needed.
+- **Folders are removed first** (node schema, Recently deleted). A remote delete waits while
+  the plan still has the removal of its folder to run (one retried goes to the back of the
+  queue); one whose folder's removal didn't happen in the run waits for the next plan. A child
+  whose removal failed or was skipped stays live in the removed folder until a later plan
+  removes it; meanwhile §6.3 takes it as deleted with the folder by its time.
 - **Together on the pool.** Transfers and remote writes (folder creates, renames, moves, tags,
   deletes) are collected and run together on the worker pool, in any order. An operation that
   depends on one collected waits until they all ran: a create or move into a folder created
   (or restored) in the batch, a move into a folder another move in the batch carries along (the two could
-  make a cycle on the drive), a folder's delete while the batch moves or deletes a child of
-  it, the same node twice. Anything else (local work, settling) runs on its own, after the
+  make a cycle on the drive), a folder's delete while the batch moves a node into or out of
+  it, a delete while the batch removes its folder, the same node twice. Anything else (local work, settling) runs on its own, after the
   batch. A remote outage starts no further writes; those failing together count as one
   failure, and the rest run again after the pause.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after

@@ -5,7 +5,7 @@ use std::time::Duration;
 use hbsync_remote::contract::{Bench, file, folder, upload};
 use hbsync_remote::{NodeMeta, Remote, RemoteError, Upload};
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_types::{NodeId, NodeKind, Target};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -13,11 +13,7 @@ fn remote() -> FakeRemote {
     FakeRemote::new(FakeServer::new(ServerConfig::default()))
 }
 
-fn create_file(
-    r: &FakeRemote,
-    node: &NodeMeta,
-    data: &[u8],
-) -> Result<hbsync_types::RemoteRef, RemoteError> {
+fn create_file(r: &FakeRemote, node: &NodeMeta, data: &[u8]) -> Result<Target, RemoteError> {
     r.create(node, Some(upload(&mut std::io::Cursor::new(data))))
 }
 
@@ -49,11 +45,36 @@ fn an_update_keeps_node_id_and_kind() -> R {
     };
     for wrong in [other_node, other_kind] {
         assert!(matches!(
-            r.update(w.file_id, w.version, &wrong, None),
+            r.update(&w, &wrong, None),
             Err(RemoteError::Fatal(_))
         ));
     }
-    assert_eq!(r.header(w.file_id)?.node(), Some(f.node));
+    assert_eq!(r.header(w.at.file_id)?.node(), Some(f.node));
+    Ok(())
+}
+
+/// The token a write returns is the one its header gives and an update takes; another file's
+/// is refused (on Homebase it would write content under the wrong key).
+#[test]
+fn an_update_takes_only_the_files_own_token() -> R {
+    let r = remote();
+    let (f, g) = (file("f", NodeId::ROOT, b"1"), file("g", NodeId::ROOT, b"2"));
+    let (wf, wg) = (create_file(&r, &f, b"1")?, create_file(&r, &g, b"2")?);
+    assert!(wf.token.is_some() && wf.token == r.header(wf.at.file_id)?.token);
+    let other = Target {
+        token: wg.token,
+        ..wf.clone()
+    };
+    assert!(matches!(
+        r.update(&other, &f, None),
+        Err(RemoteError::Fatal(_))
+    ));
+    let w2 = r.update(&wf, &f, None)?;
+    assert_eq!(
+        r.header(w2.at.file_id)?.token,
+        w2.token,
+        "a write's token is its header's"
+    );
     Ok(())
 }
 
@@ -109,11 +130,11 @@ fn injected_faults() -> R {
     r.faults().cut_download_after = Some(300);
     let mut out = Vec::new();
     assert!(
-        r.read(w.file_id, None, &mut out)
+        r.read(w.at.file_id, None, &mut out)
             .is_err_and(|e| e.is_transient())
     );
     assert_eq!(out.len(), 300);
-    r.read(w.file_id, Some(300..1000), &mut out)?;
+    r.read(w.at.file_id, Some(300..1000), &mut out)?;
     assert_eq!(out, vec![7u8; 1000]);
     Ok(())
 }

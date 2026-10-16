@@ -51,7 +51,7 @@ place, from its own Documents folder and so on, never inside the main folder.
 ## Listing a folder
 - One `query-batch` with `groupId: [<folder's node id>]`, `fileType: [7101, 7102]`,
   `fileState: [active]` and `archivalStatus: [0]`, in pages. A deleted node is only removed:
-  `archivalStatus` 2 with a content key `rm`, still in its folder (filesync's "Recently deleted").
+  `archivalStatus` 2, still in its folder (filesync's "Recently deleted").
 - Every row is encrypted: names, sizes and times. Decrypt each one, then sort on the device.
 - Skip any row that won't decrypt, isn't encrypted or has a different file type; a name that
   breaks the name rules under "Uploading"; and a file without `size` or without a hashed
@@ -93,32 +93,43 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   `versionTag`. Any update decodes the content it read as a JSON object, changes only its own
   keys and writes the rest back, unknown keys included: rebuilding it from `FilesyncNodeContent`
   would drop `ct`, `x` and later keys for every device.
-- Delete: delete a folder's contents from the bottom up, then the folder. Desktop clients move
-  local copies they lose to `.hbsync/trash/`, so a deletion from the phone can be recovered there.
+- Delete: remove (`archivalStatus` 2, content as read), a folder first (node schema, "Recently
+  deleted").
+  Desktop clients move local copies they lose to `.hbsync/trash/`, so a deletion from the phone
+  can be recovered there.
 - A retry keeps the node id, including one the user asks for after a failure, so a retry that gets 4105
   (`ExistingFileWithUniqueId`) means an earlier attempt already succeeded.
 
 ## Recently deleted
 filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs`; the mini-app follows them exactly.
-- **Removed:** `archivalStatus` 2. Its `rm: {at, root}` says when, and which delete took it along (itself, or a
-  folder it was in). With status 2 and no readable `rm`, it was removed at the header's `updated`, on its own.
-  Any other status is live, even with an `rm` left behind.
-- **Lists:** the whole drive with `archivalStatus: [2]`. The topmost items are the ones whose parent isn't
-  removed too; each counts the items below it with the same `root`.
+- **Removed:** `archivalStatus` 2, at the header's `updated` (the server's time of the removal). Any other
+  status is live. An `rm` in the content (from before 2026-10-15) means nothing; leave it out when writing.
+- **Deleted with its folder:** a removed node whose folder is removed too, removed no earlier than the folder.
+  One removed before it was deleted on its own. A live node in a removed folder (its delete still under way)
+  written no later than the folder's removal is deleted with it too: it doesn't show anywhere, and comes back
+  with the folder; one written after it keeps the folder alive (node schema, "Recently deleted").
+- **Lists:** the whole drive with `archivalStatus: [2]`. The items are the ones not deleted with their folder;
+  each counts the items deleted with it, below it.
+- **Never write to a removed node** except to restore it: no rename, no sharing or sending to another
+  identity, no reactions or comments, no local app data (local tags, local content, read time). odin-core
+  counts each as a change, which moves its `updated`, its removal time.
 - **Restore** is a metadata-only update by fileId:
   - It uses the node's own key with a new IV, its `versionTag`, an empty manifest (the payload stays) and
     `archivalStatus` 0.
-  - The content is written back as read, unknown keys included, minus `rm`.
-  - Order: the removed folders above the item first, outermost first, then the item, then what its delete
-    took along.
+  - The content is written back as read, unknown keys included, without an `rm`.
+  - Order: the removed folders above the item first, outermost first, then the item, then what was deleted
+    with it (not what was deleted from it before).
   - An item whose folder is gone for good goes to the top level; one whose folder didn't come back stays
     removed.
   - A name a live sibling took meanwhile gets ` (restored)`, then ` (restored 2)` up to 99, before the
     extension.
   - A `VersionTagMismatch` or not-found skips the item: another device changed it.
 - **Delete forever:** only what the user saw.
-  - Re-read each item first, and leave it if its `versionTag` changed. The batch delete itself has no
-    version guard, so a change in the moment between the re-read and the delete isn't caught.
+  - Send each item's `versionTag` with it (`delete-batch/by-file-id` takes one per request, from
+    odin-core v0.1.960): an item changed since isn't deleted. One stale tag refuses the whole batch
+    before anything is deleted (4160; the message names the tag, not the file: **[verified]**
+    odin-core `V2DriveControllerBase.DeleteFileIdBatchInternal`): re-read the items, leave the
+    changed ones, send the rest again.
   - Delete files before folders (`delete-batch/by-file-id`), which leaves tombstones.
   - The 30-day purge is the desktops' job; the phone never purges on its own.
 - **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.

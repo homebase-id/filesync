@@ -18,7 +18,7 @@ use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
 
 use crate::exec::parked_name;
-use crate::reconcile::{BaseExtra, Input};
+use crate::reconcile::{BaseExtra, Input, Removed};
 use crate::scope::Scope;
 
 /// The local state of one node, as the reconciler sees it.
@@ -208,6 +208,25 @@ pub fn build_input(
             }
         }
     }
+    // The folders in Recently deleted that remote nodes are in, and the removed ones above them
+    // in this folder's part of the drive: what a folder's delete took along goes by their times
+    // (node schema, Recently deleted).
+    for mut folder in b.input.remote.missing_parents() {
+        while !b.input.removed.contains_key(&folder)
+            && !scope.outside.contains(&folder)
+            && let Some(r) = s.removed_by_node(folder)?
+            && let Some(state) = r.row.state()
+        {
+            b.input.removed.insert(
+                folder,
+                Removed {
+                    at: r.removed_at,
+                    state,
+                },
+            );
+            folder = r.row.parent;
+        }
+    }
     Ok(b.input)
 }
 
@@ -301,6 +320,9 @@ impl Builder<'_, '_> {
 
     fn add_mirror(&mut self, row: MirrorRow) {
         self.input.remote_refs.insert(row.node, row.remote_ref());
+        if let Some(at) = row.changed_at {
+            self.input.changed_at.insert(row.node, at);
+        }
         if let Some(state) = row.state() {
             self.input.remote.insert(row.node, state);
         }

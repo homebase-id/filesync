@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hbsync_remote::{NodeMeta, PayloadInfo, RemoteBody, RemoteHeader};
 use hbsync_types::schema::{
-    ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY, Removal,
+    ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY,
 };
 use hbsync_types::{ContentHash, HashAlgorithm, NodeId, NodeKind, RemoteFileId, VersionTag};
 use serde::Deserialize;
@@ -124,10 +124,11 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         other => return Err(format!("file {id}: file type {other} isn't a sync node")),
     };
     let group = meta.app_data.group_id.map(NodeId);
-    let (parent, body) = match header.file_state.as_str() {
+    let (mut removed_at, mut changed_at) = (None, None);
+    let (parent, body, token) = match header.file_state.as_str() {
         // A tombstone always comes through: dropping it would keep a deleted node alive. Its
         // parent isn't used, only its file id.
-        "deleted" => (group.unwrap_or(NodeId::ROOT), RemoteBody::Deleted),
+        "deleted" => (group.unwrap_or(NodeId::ROOT), RemoteBody::Deleted, None),
         "active" => {
             let parent = group.ok_or_else(|| format!("file {id}: no parent (groupId)"))?;
             let node = meta
@@ -140,18 +141,15 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
             let content = key
                 .open_text(meta.app_data.content.as_deref().unwrap_or_default())
                 .map_err(|e| format!("file {id}: content: {e}"))?;
-            let mut content = NodeContent::from_json(&content)
+            let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
-            // The status says whether it's removed; `rm` says when and with what. Another
-            // app's removal without one counts from the last change, as its own root.
-            match (meta.app_data.archival_status, content.removal()) {
-                (ARCHIVAL_REMOVED, None) => content.set_removal(Some(Removal {
-                    at_ms: meta.updated,
-                    root: NodeId(node),
-                })),
-                (ARCHIVAL_REMOVED, Some(_)) => {}
-                _ => content.set_removal(None),
-            }
+            // The status says whether it's removed; the header's `updated` when: the server's
+            // time of the last write (odin-core's `record.modified`, **[verified]**
+            // `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no
+            // sharing, reactions or local app data, which move it too).
+            removed_at =
+                (meta.app_data.archival_status == ARCHIVAL_REMOVED).then_some(meta.updated);
+            changed_at = Some(meta.updated);
             // The stored size of an encrypted payload isn't the file's: only `size` tells it.
             if kind == NodeKind::File && content.size.is_none() {
                 return Err(format!("file {id}: no size (node schema v1)"));
@@ -170,7 +168,12 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 content,
                 payload,
             };
-            (parent, body)
+            // The key opened: the header it came in is the file's token.
+            let token = header
+                .shared_secret_encrypted_key_header
+                .as_ref()
+                .and_then(SealedKeyHeader::to_token);
+            (parent, body, token)
         }
         other => return Err(format!("file {id}: file state {other:?}")),
     };
@@ -180,6 +183,9 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         parent,
         kind,
         body,
+        removed_at,
+        changed_at,
+        token,
     })
 }
 
@@ -359,7 +365,7 @@ pub(crate) fn metadata(
                 "dataType": 0,
                 "content": key.seal_text(&meta.content.to_json()),
                 // Homebase sets a missing one to 0: a write that left it out would restore.
-                "archivalStatus": if meta.content.removal().is_some() { ARCHIVAL_REMOVED } else { 0 },
+                "archivalStatus": if meta.removed { ARCHIVAL_REMOVED } else { 0 },
             },
             "versionTag": version.map(|v| v.0),
         },
@@ -454,15 +460,14 @@ mod tests {
         assert_eq!(folder.kind, NodeKind::Folder);
         assert!(folder.state().is_some());
 
+        // An older writer's removal: the time is the header's, its `rm` is dropped.
         let removed = to_remote(as_stored(fixture("removed-node.json"))?, &SS)?;
-        assert_eq!(
-            removed.removal(),
-            Some(Removal {
-                at_ms: 1_759_920_005_000,
-                root: removed.node().ok_or("node")?,
-            })
-        );
+        assert_eq!(removed.removed_at, Some(1_759_920_005_000));
         assert!(removed.state().is_none());
+        let RemoteBody::Live { content, .. } = &removed.body else {
+            return Err("not live".into());
+        };
+        assert!(content.unknown.is_empty(), "{content:?}");
 
         let tomb = to_remote(fixture("tombstone.json"), &SS)?;
         assert!(tomb.is_deleted());
@@ -561,22 +566,16 @@ mod tests {
 
     #[test]
     fn the_status_decides_removal() -> R {
-        // Another app's removal, without `rm`: from the last change, as its own root.
+        // A removal without `rm` (this client's, another app's): from the last change.
         let mut other = fixture("file-node.json");
         other.file_metadata.app_data.archival_status = ARCHIVAL_REMOVED;
         let header = to_remote(as_stored(other)?, &SS)?;
-        assert_eq!(
-            header.removal(),
-            Some(Removal {
-                at_ms: 1_759_920_001_000,
-                root: header.node().ok_or("node")?,
-            })
-        );
+        assert_eq!(header.removed_at, Some(1_759_920_001_000));
         // A restore by a writer that kept `rm`: the status wins.
         let mut restored = fixture("removed-node.json");
         restored.file_metadata.app_data.archival_status = 0;
         let header = to_remote(as_stored(restored)?, &SS)?;
-        assert!(header.removal().is_none() && header.state().is_some());
+        assert!(header.removed_at.is_none() && header.state().is_some());
         Ok(())
     }
 
@@ -626,6 +625,7 @@ mod tests {
             parent: NodeId::ROOT,
             kind: NodeKind::File,
             content: NodeContent::file("Résumé.txt", 1, 1, false),
+            removed: false,
         };
         let version = VersionTag(Uuid::from_u128(5));
         let sealed = metadata(&meta, Some(version), &SS, &transfer_iv, &kh);
@@ -638,18 +638,18 @@ mod tests {
         assert_eq!(app["groupId"], json!(NodeId::ROOT.0));
         assert_eq!(app["fileType"], FILE_TYPE_FILE);
         assert_eq!(app["archivalStatus"], 0);
-        let mut gone = meta.clone();
-        gone.content.set_removal(Some(Removal {
-            at_ms: 1,
-            root: meta.node,
-        }));
+        // A removal is the status alone: the content goes as it is.
+        let gone = NodeMeta {
+            removed: true,
+            ..meta.clone()
+        };
         let sealed_gone = metadata(&gone, Some(version), &SS, &transfer_iv, &kh);
         let plain_gone: Value =
             serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed_gone)?)?;
-        assert_eq!(
-            plain_gone["fileMetadata"]["appData"]["archivalStatus"],
-            ARCHIVAL_REMOVED
-        );
+        let app_gone = &plain_gone["fileMetadata"]["appData"];
+        assert_eq!(app_gone["archivalStatus"], ARCHIVAL_REMOVED);
+        let content_gone = app_gone["content"].as_str().ok_or("content")?;
+        assert_eq!(kh.open_text(content_gone)?, meta.content.to_json());
         let key: SealedKeyHeader = serde_json::from_value(plain["encryptedKeyHeader"].clone())?;
         assert_eq!(KeyHeader::open(&key, &SS)?, kh);
         let content = app["content"].as_str().ok_or("content")?;

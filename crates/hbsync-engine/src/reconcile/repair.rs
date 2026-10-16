@@ -12,8 +12,8 @@ impl Reconciler<'_> {
         self.origin.entry(node).or_insert(Origin::Base);
     }
 
-    /// The best known state of a node that the merge removed or never saw. A masked node has
-    /// none: it can't come back here under its id.
+    /// The best known state of a node that the merge removed or never saw, Recently deleted
+    /// included. A masked node has none: it can't come back here under its id.
     pub(super) fn known_state(&self, node: NodeId) -> Option<NodeState> {
         if self.masks.masked.contains(&node) {
             return None;
@@ -23,6 +23,7 @@ impl Reconciler<'_> {
             .get(node)
             .or(i.local.get(node))
             .or(i.base.get(node))
+            .or(i.removed.get(&node).map(|r| &r.state))
             .cloned()
     }
 
@@ -45,7 +46,16 @@ impl Reconciler<'_> {
             };
             match parent_state {
                 Some(state) if state.kind == NodeKind::Folder => {
-                    // A live child keeps its folder alive (§6.3).
+                    // A live child keeps its folder alive (§6.3), one in Recently deleted too.
+                    // One a folder's removal took along is merged after all, as if no removal
+                    // had: its own changes count (a tag, which the merge doesn't call one).
+                    if self.taken.remove(&parent) {
+                        self.merge_node(parent);
+                        if self.merged.exists(parent) {
+                            queue.push(parent);
+                            continue;
+                        }
+                    }
                     self.retarget(parent, state);
                     queue.push(parent);
                 }

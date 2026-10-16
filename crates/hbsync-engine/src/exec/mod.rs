@@ -29,8 +29,8 @@ use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Synced;
-use hbsync_types::schema::{NodeContent, Removal};
-use hbsync_types::{ContentState, NodeId, NodeKind, RemoteRef, Tags};
+use hbsync_types::schema::NodeContent;
+use hbsync_types::{ContentState, NodeId, NodeKind, Tags, Target};
 
 use crate::activity::{self, Counters};
 use crate::reconcile::{Agreement, Op, Requirement};
@@ -199,6 +199,12 @@ pub struct Executor<'a> {
     queue: VecDeque<(Op, u8)>,
     /// The nodes with a `Forget` still to run in this run.
     forgetting: HashSet<NodeId>,
+    /// The nodes with a `RemoteDelete` still to run in this run (or to retry).
+    removing: HashSet<NodeId>,
+    /// The nodes whose `RemoteDelete` ended in this run without removing them: what is in them
+    /// waits for the next plan, so nothing is removed before its folder (node schema, Recently
+    /// deleted).
+    unremoved: HashSet<NodeId>,
     report: ExecReport,
     urgent: HashSet<NodeId>,
     /// Set when a test's crash point was reached: the run stops.
@@ -277,14 +283,16 @@ impl Batch {
         self.under.contains(&node) || target.iter().any(|n| self.moved.contains(n))
     }
 
-    /// Whether `op` must wait until the batch ran: it is about a node in it, or its server-side
-    /// order guard ([`Op::requires`]) waits on one: a folder created in it, or the children a
-    /// folder's delete waits for.
+    /// Whether `op` must wait until the batch ran: it is about a node in it, its server-side
+    /// order guard ([`Op::requires`]) waits on one (a folder created in it, or the removal of
+    /// the folder a removal is in), or it removes a folder the batch puts a node into or takes
+    /// one from.
     fn holds_up(&self, op: &Op) -> bool {
         self.nodes.contains(&op.node())
+            || matches!(op, Op::RemoteDelete { .. }) && self.folders.contains(&op.node())
             || match op.requires() {
                 Some(Requirement::RemoteFolder(folder)) => self.created.contains(&folder),
-                Some(Requirement::NoRemoteChildren(folder)) => self.folders.contains(&folder),
+                Some(Requirement::FolderFirst(folder)) => self.nodes.contains(&folder),
                 None => false,
             }
     }
@@ -331,6 +339,8 @@ impl<'a> Executor<'a> {
             cfg,
             queue: VecDeque::new(),
             forgetting: HashSet::new(),
+            removing: HashSet::new(),
+            unremoved: HashSet::new(),
             report: ExecReport::default(),
             urgent: HashSet::new(),
             crashed: false,
@@ -389,11 +399,14 @@ impl<'a> Executor<'a> {
     }
 
     fn run_ops(&mut self, ops: Vec<Op>) -> Result<(), StateError> {
-        self.forgetting = ops
-            .iter()
-            .filter(|op| matches!(op, Op::Forget { .. }))
-            .map(Op::node)
-            .collect();
+        self.forgetting.clear();
+        self.removing.clear();
+        self.unremoved.clear();
+        for op in &ops {
+            if let Some(pending) = self.pending(op) {
+                pending.insert(op.node());
+            }
+        }
         let visible = ops.iter().filter(|op| activity::kind_of(op).is_some());
         self.progress
             .files_total
@@ -538,6 +551,16 @@ impl<'a> Executor<'a> {
         self.crashed
     }
 
+    /// The nodes with operations like `op` still to run in this run (or to retry), where others
+    /// wait for them: a folder's `Forget` for its children's, a removal for its folder's.
+    fn pending(&mut self, op: &Op) -> Option<&mut HashSet<NodeId>> {
+        match op {
+            Op::Forget { .. } => Some(&mut self.forgetting),
+            Op::RemoteDelete { .. } => Some(&mut self.removing),
+            _ => None,
+        }
+    }
+
     /// The server-side order guards ([`Op::requires`]), checked against the mirror.
     fn ready(&mut self, op: &Op) -> Step<()> {
         let met = match op.requires() {
@@ -545,9 +568,10 @@ impl<'a> Executor<'a> {
             Some(Requirement::RemoteFolder(folder)) => {
                 self.db.read(|s| s.get_mirror(folder))?.is_some()
             }
-            Some(Requirement::NoRemoteChildren(node)) => {
-                self.db.read(|s| s.mirror_children(node))?.is_empty()
+            Some(Requirement::FolderFirst(folder)) if self.unremoved.contains(&folder) => {
+                return Err(Outcome::waiting("its folder wasn't removed"));
             }
+            Some(Requirement::FolderFirst(folder)) => !self.removing.contains(&folder),
         };
         if met {
             Ok(())
@@ -570,10 +594,18 @@ impl<'a> Executor<'a> {
         ) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
-        if matches!(op, Op::Forget { .. })
-            && !matches!(outcome, Outcome::Retry(_) | Outcome::Backoff(_))
+        if !matches!(outcome, Outcome::Retry(_) | Outcome::Backoff(_))
+            && let Some(pending) = self.pending(&op)
         {
-            self.forgetting.remove(&op.node());
+            pending.remove(&op.node());
+        }
+        if matches!(op, Op::RemoteDelete { .. })
+            && !matches!(
+                outcome,
+                Outcome::Done | Outcome::Settled | Outcome::Retry(_) | Outcome::Backoff(_)
+            )
+        {
+            self.unremoved.insert(op.node());
         }
         match outcome {
             Outcome::Done => {
@@ -658,7 +690,12 @@ impl<'a> Executor<'a> {
         if attempts + 1 < self.cfg.attempts {
             self.queue.push_back((op, attempts + 1));
         } else {
-            self.forgetting.remove(&op.node());
+            if let Some(pending) = self.pending(&op) {
+                pending.remove(&op.node());
+            }
+            if matches!(op, Op::RemoteDelete { .. }) {
+                self.unremoved.insert(op.node());
+            }
             self.report.failed.push((op, why));
         }
     }
@@ -967,22 +1004,6 @@ pub use settle::settle;
 pub(crate) use settle::update_meta;
 use settle::{recorded_name, restored_tags, write_tags, written_row};
 
-/// The node whose delete takes `node` along: its topmost synced ancestor that is gone here
-/// too (a folder deleted with everything in it), or `node` itself.
-fn removal_root(s: &Store<'_>, node: NodeId) -> Result<NodeId, StateError> {
-    let Some(base) = s.get_base(node)? else {
-        return Ok(node);
-    };
-    // Up through the folders that went too: synced, and gone here.
-    let above = crate::walk::up::<_, StateError>(base.state.parent, |at| {
-        if s.local_by_node(at)?.is_some() {
-            return Ok(None);
-        }
-        Ok(s.get_base(at)?.map(|b| (at, b.state.parent)))
-    })?;
-    Ok(above.items.last().copied().unwrap_or(node))
-}
-
 // Every change the executor makes to a folder's entries goes through these two, which keep the
 // order the state DB needs with its durable commits (its docs on durability). Tags and times
 // written on an item aren't ordered: one lost reads as a change of those only.
@@ -1080,41 +1101,4 @@ fn renamed_row(root: &Path, old: &LocalRow, path: &RelPath) -> Option<LocalRow> 
         fingerprint: meta.fingerprint(),
         ..old.clone()
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use hbsync_state::{BaseRow, StateDb};
-    use hbsync_types::{ContentState, NodeState, RemoteFileId, RemoteRef, Uuid, VersionTag};
-
-    use super::*;
-
-    fn base(node: NodeId, parent: NodeId, name: &str) -> BaseRow {
-        BaseRow {
-            node,
-            state: NodeState::folder(parent, name),
-            remote: RemoteRef {
-                file_id: RemoteFileId(Uuid::new_v4()),
-                version: VersionTag(Uuid::new_v4()),
-            },
-            content_state: ContentState::Local,
-            local_name: None,
-            local_hash: None,
-        }
-    }
-
-    /// A cycle of bases, as a remote cycle leaves them, ends the walk instead of hanging it.
-    #[test]
-    fn the_removal_root_of_a_cycle_of_bases_is_found() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
-        db.write(|s| {
-            s.put_base(&base(a, b, "a"))?;
-            s.put_base(&base(b, a, "b"))?;
-            s.put_base(&base(c, a, "c"))
-        })?;
-        let root = db.read(|s| removal_root(s, c))?;
-        assert!(root == a || root == b, "{root:?}");
-        Ok(())
-    }
 }

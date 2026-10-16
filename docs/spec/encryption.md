@@ -84,10 +84,19 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   its hash part: nothing is stored **[verified]** (live contract), and it counts as the same
   mismatch. A file whose size changed since it was hashed isn't sent at all, and one that can't
   be read is a local error, not the server's.
-- **An update** reads the file's header first. It sends the file's own key with a new header
-  IV, and the content encrypted with those: the server requires a strong key, keeps the file's
-  key, and takes only the IV. New bytes get a new payload IV. The header read also finds a file
-  deleted or changed since, before anything is uploaded.
+- **An update** sends the file's own key with a new header IV, and the content encrypted with
+  those: the server requires a strong key, keeps the file's key, and takes only the IV. New
+  bytes get a new payload IV. The key comes from the file's **token**: its key header as the
+  server hands it out, sealed with the shared secret (as safe as the server's copy), kept on its
+  row in the state DB (`remote.token`, `removed.token`). A write works out the token the server
+  will give for the version it wrote (the key header sealed with its own IV as the wrap IV,
+  **[verified]** odin-core `DriveFileUtility.CreateClientFileHeader`), so the feed bringing the
+  write back changes nothing; another device's write brings its token with it. One request does
+  an update; the version tag guards it (4160 if the file changed since; a deleted file 4002). A
+  file without a token (a row an older client stored) has its header read first, as before; so
+  does one whose token doesn't open (sealed for an earlier login's shared secret), and the
+  feed's next row of the file replaces it. A token is only ever used for its own file: another
+  file's key would leave content no one can read.
 - **Every node is encrypted.** A live row that isn't is skipped as unreadable: no client has
   users with unencrypted nodes. (The server couldn't change `isEncrypted` on an update anyway **[verified]**,
   `homebase-api-notes.md`.)

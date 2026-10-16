@@ -93,6 +93,90 @@ fn two_clients_converge_through_homebase() -> Res<()> {
     Ok(())
 }
 
+/// The Photos example, with the server's removal times (a header's `updated`): on Monday
+/// `Photos/a.jpg` is deleted on its own; on Tuesday the folder `Photos`, still holding `b.jpg`
+/// and a subfolder with a file. Restoring `Photos` brings back `b.jpg` and the subfolder's
+/// file, not `a.jpg`: that stays in Recently deleted, and comes back on its own, into `Photos`.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn photos_restore_without_what_was_deleted_from_it_before() -> Res<()> {
+    let identity = hbsync_dev::live_identity()?;
+    let run = hbsync_dev::run_name("photos");
+    let mut a = Client::new(&identity, "a")?;
+    let mut b = Client::new(&identity, "b")?;
+    let result = photos(&run, &mut a, &mut b);
+    let _ = fs::remove_dir_all(a.root.join(&run));
+    let cleanup = a.sync().and_then(|_| b.sync());
+    result?;
+    cleanup?;
+    Ok(())
+}
+
+fn photos(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
+    let at = |rel: &str| format!("{run}/{rel}");
+    a.write(&at("keep.txt"), "k")?;
+    a.write(&at("Photos/a.jpg"), "a")?;
+    a.write(&at("Photos/b.jpg"), "b")?;
+    a.write(&at("Photos/2024/c.jpg"), "c")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join(at("Photos/a.jpg")))?; // Monday
+    a.sync()?;
+    fs::remove_dir_all(a.root.join(at("Photos")))?; // Tuesday
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(run), ["keep.txt = k"]);
+    let listed = b.recently_deleted(1000)?;
+    let item = |rel: &str| {
+        listed
+            .iter()
+            .find(|i| i.path == at(rel))
+            .cloned()
+            .ok_or(format!("{rel} not listed"))
+    };
+    let (photos, a_jpg, b_jpg, c_jpg) = (
+        item("Photos")?,
+        item("Photos/a.jpg")?,
+        item("Photos/b.jpg")?,
+        item("Photos/2024/c.jpg")?,
+    );
+    assert_eq!(a_jpg.root, a_jpg.node, "deleted on its own");
+    assert_eq!(
+        (b_jpg.root, c_jpg.root),
+        (photos.node, photos.node),
+        "deleted with the folder"
+    );
+    assert!(
+        a_jpg.removed_at_ms < photos.removed_at_ms && photos.removed_at_ms <= b_jpg.removed_at_ms,
+        "server times: a.jpg {}, Photos {}, b.jpg {}",
+        a_jpg.removed_at_ms,
+        photos.removed_at_ms,
+        b_jpg.removed_at_ms
+    );
+
+    // b restores Photos: b.jpg and 2024/c.jpg come back, on both; a.jpg doesn't.
+    assert_eq!(b.engine.drive().restore(&[photos.node])?, 4);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read(&at("Photos/b.jpg"))?, b"b");
+    assert_eq!(a.read(&at("Photos/2024/c.jpg"))?, b"c");
+    assert!(!a.root.join(at("Photos/a.jpg")).exists());
+    assert!(
+        a.recently_deleted(1000)?
+            .iter()
+            .any(|i| i.path == at("Photos/a.jpg")),
+        "a.jpg stays in Recently deleted"
+    );
+
+    // a.jpg on its own: back into Photos.
+    assert_eq!(a.engine.drive().restore(&[a_jpg.node])?, 1);
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read(&at("Photos/a.jpg"))?, b"a");
+    assert_eq!(a.tree_text(run), b.tree_text(run));
+    Ok(())
+}
+
 fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     let at = |rel: &str| format!("{run}/{rel}");
     // A large file goes up streamed and comes down in ranged chunks.

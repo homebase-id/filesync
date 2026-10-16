@@ -20,6 +20,7 @@ fn upload_job(dir: &std::path::Path, name: &str, size: usize) -> std::io::Result
             parent: NodeId::ROOT,
             kind: NodeKind::File,
             content: NodeContent::file(name, 0, size as u64, false),
+            removed: false,
         },
         target: None,
         path,
@@ -151,6 +152,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
         parent: NodeId::ROOT,
         kind: NodeKind::File,
         content: NodeContent::file("big", 0, data.len() as u64, false),
+        removed: false,
     };
     let written = remote.create(
         &new,
@@ -163,7 +165,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
     )?;
     let job = Job::Download(Download {
         node,
-        file_id: written.file_id,
+        file_id: written.at.file_id,
         expected: hash,
         size: data.len() as u64,
         mtime_ms: 1_700_000_000_000,

@@ -217,6 +217,15 @@ const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;
     CREATE TRIGGER placing_gone AFTER DELETE ON placing
         BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;",
+    // 7: each file's token (what the remote needs to write it again without reading it
+    // first), NULL until known; the server's time of each version (NULL for this device's own
+    // writes until the feed brings it where it matters); what was deleted with what goes by
+    // these times (node schema, Recently deleted), so the root goes.
+    "ALTER TABLE remote ADD COLUMN token BLOB;
+    ALTER TABLE remote ADD COLUMN changed_at INTEGER;
+    ALTER TABLE removed ADD COLUMN token BLOB;
+    DROP INDEX removed_root;
+    ALTER TABLE removed DROP COLUMN root;",
 ];
 
 /// The version this client makes and reads.
@@ -282,6 +291,39 @@ mod tests {
         let value: String =
             conn.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))?;
         assert_eq!(value, "v");
+        Ok(())
+    }
+
+    /// A DB of 0.6.0 (version 6) gets the token columns, its rows without one, and loses the
+    /// roots of its removals.
+    #[test]
+    fn version_6_gets_tokens_and_loses_roots() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(MIGRATIONS[0])?;
+        conn.pragma_update(None, "user_version", 6)?;
+        conn.execute(
+            "INSERT INTO remote (id, file_id, version_tag, parent, kind, name) \
+             VALUES (1, x'01', x'02', 0, 1, 'd')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at, \
+             root) VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5, x'01')",
+            [],
+        )?;
+        apply(&mut conn)?;
+        assert_eq!(user_version(&conn)?, VERSION);
+        let token: Option<Vec<u8>> =
+            conn.query_row("SELECT token FROM remote WHERE id = 1", [], |r| r.get(0))?;
+        assert_eq!(token, None);
+        let at: i64 = conn.query_row("SELECT removed_at FROM removed", [], |r| r.get(0))?;
+        assert_eq!(at, 5);
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at, \
+             token) VALUES (x'05', x'06', x'07', x'04', 1, 'e', 6, x'00')",
+            [],
+        )?;
         Ok(())
     }
 

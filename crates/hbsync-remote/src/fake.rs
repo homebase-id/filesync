@@ -5,7 +5,7 @@
 //! - creating a live file with an existing `UniqueId` fails (4105); tombstones don't count;
 //! - updates are `VersionTag`-guarded (4160); every write gets a new tag;
 //! - a delete tombstones the file: `UniqueId`, content and payload are dropped, `fileId`,
-//!   `GroupId` and `FileType` stay; **the server's delete takes no version**;
+//!   `GroupId` and `FileType` stay; deletes are `VersionTag`-guarded too;
 //! - the change feed is `anyChangeDate` + `oldestFirst`, resumes after the last row seen, and
 //!   only returns rows modified strictly before "now" (a row written in the current
 //!   millisecond shows up once the clock moves on);
@@ -13,9 +13,9 @@
 //!   payloads need `contentHash == storedHash` (here: one hash), and a drive can require
 //!   hashes (4177).
 //!
-//! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter will:
-//! `delete` reads the header, compares the version, then deletes (a check-then-act race the
-//! real server can't close yet). Faults and latency are injected per client.
+//! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter does:
+//! a delete refused for its version (4160) is read once more and counts as done when the file
+//! is deleted (a retry). Faults and latency are injected per client.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use hbsync_fileio::hash_bytes;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef, Uuid, VersionTag};
+use hbsync_types::{
+    FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target, Uuid, VersionTag,
+};
 
 use crate::{
     ChangesPage, NodeMeta, PayloadInfo, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
@@ -86,7 +88,8 @@ impl FakeServer {
             files: HashMap::new(),
             by_node: HashMap::new(),
             feed: BTreeMap::new(),
-            clock_ms: 1_000,
+            // A server's clock: removal times are compared with the purge's cut-off.
+            clock_ms: hbsync_types::unix_now_ms(),
             next_row: 1,
             next_id: 1,
         }))
@@ -107,6 +110,11 @@ impl FakeServer {
         // Deterministic, but with the version and variant bits of a v4 UUID so it looks like
         // one. The counter goes in the low 62 bits, below the variant bits, so no two ids meet.
         Uuid::from_u128(u128::from(self.next_id) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
+    }
+
+    /// When a write leaves `meta` removed: now, as Homebase's `updated` is the write's time.
+    fn removed_at(&self, meta: &NodeMeta) -> Option<i64> {
+        meta.removed.then_some(self.clock_ms)
     }
 
     fn touch(&mut self, file_id: RemoteFileId) {
@@ -186,6 +194,9 @@ impl FakeServer {
                 content: node.content.clone(),
                 payload: payload.as_ref().map(|(_, info)| *info),
             },
+            removed_at: self.removed_at(node),
+            changed_at: Some(self.clock_ms),
+            token: Some(token_of(file_id)),
         };
         self.files.insert(
             file_id,
@@ -230,7 +241,7 @@ impl FakeServer {
                 meta.node, meta.kind
             )));
         }
-        let (parent, content) = (meta.parent, &meta.content);
+        let removed_at = self.removed_at(meta);
         // Without an upload the payload stays.
         let new_payload = match upload {
             Some(upload) => self.receive(kind, Some(upload))?,
@@ -239,7 +250,9 @@ impl FakeServer {
         let version = VersionTag(self.fresh_uuid());
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
-        f.header.parent = parent;
+        f.header.parent = meta.parent;
+        f.header.removed_at = removed_at;
+        f.header.changed_at = Some(self.clock_ms);
         let payload = match new_payload {
             Some((bytes, info)) => {
                 f.bytes = Some(bytes);
@@ -249,25 +262,30 @@ impl FakeServer {
         };
         f.header.body = RemoteBody::Live {
             node,
-            content: content.clone(),
+            content: meta.content.clone(),
             payload,
         };
         self.touch(file_id);
         Ok(RemoteRef { file_id, version })
     }
 
-    /// Homebase's delete: no version check.
-    pub fn delete(&mut self, file_id: RemoteFileId) -> Result<()> {
+    /// Deletes a file if it is still at `expected` (4160 otherwise). Like Homebase, deleting a
+    /// tombstone at its own version rewrites it: a new version and a new feed row.
+    pub fn delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
         let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
+        if f.header.version != expected {
+            return Err(RemoteError::VersionMismatch);
+        }
         if let RemoteBody::Live { node, .. } = f.header.body {
             self.by_node.remove(&node);
-        } else {
-            return Ok(()); // deleting a tombstone is a no-op
         }
         let version = VersionTag(self.fresh_uuid());
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
+        f.header.removed_at = None;
+        f.header.changed_at = None;
+        f.header.token = None;
         f.bytes = None;
         self.touch(file_id);
         Ok(())
@@ -334,6 +352,7 @@ impl FakeServer {
             parent,
             kind: NodeKind::File,
             content: NodeContent::file(name, 1_700_000_000_000, data.len() as u64, false),
+            removed: false,
         };
         let hash = hbsync_fileio::hash_bytes(data, algorithm);
         let upload = Upload {
@@ -364,7 +383,7 @@ impl FakeServer {
         self.files
             .values()
             .map(|f| &f.header)
-            .filter(|h| !h.is_deleted() && h.removal().is_none())
+            .filter(|h| !h.is_deleted() && h.removed_at.is_none())
     }
 
     /// The files in Recently deleted, for test assertions.
@@ -372,12 +391,17 @@ impl FakeServer {
         self.files
             .values()
             .map(|f| &f.header)
-            .filter(|h| h.removal().is_some())
+            .filter(|h| h.removed_at.is_some())
     }
 
     pub fn file_id_of(&self, node: NodeId) -> Option<RemoteFileId> {
         self.by_node.get(&node).copied()
     }
+}
+
+/// The fake's token of a file: its id. A file's own and no other.
+pub fn token_of(file_id: RemoteFileId) -> FileToken {
+    FileToken(file_id.0.as_bytes().as_slice().into())
 }
 
 fn parse_cursor(c: &str) -> Result<(i64, u64)> {
@@ -414,6 +438,8 @@ pub struct Faults {
     pub requests: usize,
     /// Payload bytes handed out by `read`, for assertions about resumed downloads.
     pub served: u64,
+    /// Updates that came without a token (on Homebase: a header read first), for assertions.
+    pub updates_without_token: usize,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -500,6 +526,14 @@ impl FakeRemote {
     }
 }
 
+/// The file written at `at`, with its token.
+fn written(at: RemoteRef) -> Target {
+    Target {
+        at,
+        token: Some(token_of(at.file_id)),
+    }
+}
+
 /// Hands bytes taken in by [`FakeRemote::receive`] on to the server as an upload.
 fn replay<T>(
     received: Option<(hbsync_types::ContentHash, Vec<u8>)>,
@@ -527,43 +561,62 @@ impl Remote for FakeRemote {
         self.server().header(file_id)
     }
 
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<RemoteRef> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
         self.gate()?;
         self.gate_name(&node.content.name)?;
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
-        replay(received, |upload| self.server().create(node, upload))
+        let at = replay(received, |upload| self.server().create(node, upload))?;
+        Ok(written(at))
     }
 
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<RemoteRef> {
+    ) -> Result<Target> {
+        let file_id = target.at.file_id;
+        // On Homebase another file's token would write content no one can read.
+        match &target.token {
+            Some(t) if *t != token_of(file_id) => {
+                return Err(RemoteError::Fatal(format!(
+                    "update of {file_id:?} with another file's token"
+                )));
+            }
+            Some(_) => {}
+            None => self.faults().updates_without_token += 1,
+        }
         self.gate()?;
         self.gate_name(&meta.content.name)?;
         let received = self.receive(payload)?;
-        replay(received, |upload| {
-            self.server().update(file_id, expected, meta, upload)
-        })
+        let at = replay(received, |upload| {
+            self.server()
+                .update(file_id, target.at.version, meta, upload)
+        })?;
+        Ok(written(at))
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
-        // Check, then act: the server's delete has no version guard.
         self.gate()?;
-        let current = self.server().header(file_id)?;
-        let RemoteBody::Live { content, .. } = &current.body else {
-            return Ok(()); // already deleted: a retry
-        };
-        self.gate_name(&content.name)?;
-        if current.version != expected {
-            return Err(RemoteError::VersionMismatch);
+        let body = self.server().header(file_id)?.body;
+        if let RemoteBody::Live { content, .. } = body {
+            self.gate_name(&content.name)?;
         }
-        self.gate()?;
-        self.server().delete(file_id)
+        let result = self.server().delete(file_id, expected);
+        match result {
+            // A retry, as the Homebase adapter takes it.
+            Err(RemoteError::VersionMismatch)
+                if self
+                    .server()
+                    .header(file_id)
+                    .is_ok_and(|h| h.body == RemoteBody::Deleted) =>
+            {
+                Ok(())
+            }
+            result => result,
+        }
     }
 
     fn read(

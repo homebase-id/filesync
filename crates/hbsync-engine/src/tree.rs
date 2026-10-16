@@ -3,7 +3,7 @@
 //! The same type holds the base, local, remote and merged views. Parent pointers are node ids;
 //! the root ([`NodeId::ROOT`]) is implicit and never stored.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use hbsync_platform::name::{MAX_NAME_BYTES, name_key, split_extension};
 use hbsync_types::{NodeId, NodeKind, NodeState};
@@ -83,6 +83,14 @@ impl Tree {
     /// Direct children of `parent` (which may be the root), in node-id order.
     pub fn children(&self, parent: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         self.children.get(&parent).into_iter().flatten().copied()
+    }
+
+    /// The folders nodes are in that aren't in the tree themselves (the root aside).
+    pub fn missing_parents(&self) -> HashSet<NodeId> {
+        self.iter()
+            .map(|(_, state)| state.parent)
+            .filter(|p| !p.is_root() && !self.contains(*p))
+            .collect()
     }
 
     /// The child of `parent` whose name has the same key as `name`, other than `except`.

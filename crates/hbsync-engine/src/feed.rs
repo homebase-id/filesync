@@ -99,15 +99,17 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         return Ok(true);
     };
     // A version the store has already (this device's own write coming back, or a page applied
-    // again) changes nothing; the store marks the nodes that changed dirty where that concerns.
-    let removal = header.removal();
-    if s.has_version(row.remote_ref(), removal.is_some())? {
-        return Ok(removal.is_none());
+    // again) changes nothing but what the server knows better ([`Store::refresh`]); the store
+    // marks the nodes that changed dirty where that concerns.
+    let removed_at = header.removed_at;
+    if s.has_version(row.remote_ref(), removed_at.is_some())? {
+        s.refresh(&row, removed_at.is_some())?;
+        return Ok(removed_at.is_none());
     }
-    if let Some(removal) = removal {
+    if let Some(removed_at) = removed_at {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
         gone(s, header)?;
-        s.put_removed(&RemovedRow { row, removal })?;
+        s.put_removed(&RemovedRow { row, removed_at })?;
         return Ok(false);
     }
     s.delete_removed(row.node)?;
@@ -148,7 +150,11 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
         version: header.version,
     };
     let hash = payload.map(|p| p.hash);
-    let mut row = MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash);
+    let mut row = MirrorRow {
+        token: header.token.clone(),
+        changed_at: header.changed_at,
+        ..MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash)
+    };
     // A content without its size (another client's) has the payload's.
     if let (Some(file), Some(p), None) = (&mut row.file, payload, content.size) {
         file.size = p.bytes;
@@ -182,6 +188,9 @@ mod tests {
                     bytes: 1,
                 }),
             },
+            removed_at: None,
+            changed_at: None,
+            token: None,
         };
         assert!(db.write(|s| apply(s, &header))?);
         if let RemoteBody::Live { payload, .. } = &mut header.body {
@@ -214,6 +223,9 @@ mod tests {
                     bytes: 3,
                 }),
             },
+            removed_at: None,
+            changed_at: None,
+            token: None,
         };
         let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
         assert_eq!(size, Some(3));
@@ -222,19 +234,21 @@ mod tests {
     /// The feed brings this device's own writes back: a version the mirror has is no change.
     #[test]
     fn a_known_version_marks_nothing() -> Result<(), StateError> {
-        use hbsync_types::schema::Removal;
         let mut db = StateDb::open_in_memory()?;
         let node = NodeId::new();
-        let header = |version: u128, content: NodeContent| RemoteHeader {
+        let header = |version: u128, removed_at: Option<i64>| RemoteHeader {
             file_id: RemoteFileId(Uuid::from_u128(1)),
             version: VersionTag(Uuid::from_u128(version)),
             parent: NodeId::ROOT,
             kind: NodeKind::Folder,
             body: RemoteBody::Live {
                 node,
-                content,
+                content: NodeContent::folder("d"),
                 payload: None,
             },
+            removed_at,
+            changed_at: None,
+            token: None,
         };
         let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
             db.write(|s| {
@@ -243,13 +257,8 @@ mod tests {
                 s.dirty_count()
             })
         };
-        let mut gone = NodeContent::folder("d");
-        gone.set_removal(Some(Removal {
-            at_ms: 9,
-            root: node,
-        }));
-        for (version, content) in [(1, NodeContent::folder("d")), (2, gone)] {
-            let h = header(version, content);
+        for (version, removed_at) in [(1, None), (2, Some(9))] {
+            let h = header(version, removed_at);
             assert_eq!(dirty_after(&mut db, &h)?, 1, "version {version} is news");
             assert_eq!(
                 dirty_after(&mut db, &h)?,
@@ -262,41 +271,31 @@ mod tests {
 
     #[test]
     fn a_removal_leaves_the_tree_and_a_restore_returns() -> Result<(), StateError> {
-        use hbsync_types::schema::Removal;
         let mut db = StateDb::open_in_memory()?;
         let node = NodeId::new();
-        let live = |content: NodeContent| RemoteHeader {
+        let live = |removed_at: Option<i64>| RemoteHeader {
             file_id: RemoteFileId(Uuid::from_u128(1)),
             version: VersionTag(Uuid::new_v4()),
             parent: NodeId::ROOT,
             kind: NodeKind::Folder,
             body: RemoteBody::Live {
                 node,
-                content,
+                content: NodeContent::folder("d"),
                 payload: None,
             },
+            removed_at,
+            changed_at: None,
+            token: None,
         };
-        let mut gone = NodeContent::folder("d");
-        let removal = Removal {
-            at_ms: 9,
-            root: node,
-        };
-        gone.set_removal(Some(removal));
-        assert!(db.write(|s| apply(s, &live(NodeContent::folder("d"))))?);
-        assert!(!db.write(|s| apply(s, &live(gone)))?);
+        assert!(db.write(|s| apply(s, &live(None)))?);
+        assert!(!db.write(|s| apply(s, &live(Some(9))))?);
         db.read(|s| {
             assert_eq!(s.get_mirror(node)?, None);
-            let removed = s
-                .removed_by_node(node)?
-                .map(|r| (r.removal, r.row.content_extra));
-            assert_eq!(
-                removed,
-                Some((removal, None)),
-                "kept, without rm in the extra keys"
-            );
+            let at = s.removed_by_node(node)?.map(|r| r.removed_at);
+            assert_eq!(at, Some(9));
             Ok(())
         })?;
-        assert!(db.write(|s| apply(s, &live(NodeContent::folder("d"))))?);
+        assert!(db.write(|s| apply(s, &live(None)))?);
         db.read(|s| {
             assert!(s.get_mirror(node)?.is_some() && s.removed_by_node(node)?.is_none());
             Ok(())

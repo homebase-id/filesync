@@ -11,7 +11,7 @@ use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{ChangesPage, NodeMeta, Remote, RemoteHeader, Result as RemoteResult, Upload};
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
-use hbsync_types::{NodeId, RemoteFileId, RemoteRef, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, Target, VersionTag};
 
 mod common;
 
@@ -36,6 +36,37 @@ fn upload_then_download() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(""), a.tree_text(""));
     assert_eq!(b.read_text("Docs/deep/nested.bin")?, "bytes");
+    Ok(())
+}
+
+/// A file's updates carry its token (on Homebase: one request, no header read first), from the
+/// write that made it or from the feed, whether this device or another wrote it; the fake
+/// refuses another file's token.
+#[test]
+fn updates_carry_the_files_token() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("x/one.txt", "1")?;
+    a.write("x/two.txt", "2")?;
+    a.write("three.txt", "3")?;
+    a.sync()?;
+    b.sync()?;
+    a.remote.faults().updates_without_token = 0;
+    b.remote.faults().updates_without_token = 0;
+
+    fs::rename(a.root.join("three.txt"), a.root.join("four.txt"))?;
+    a.write("x/one.txt", "1 edited")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(b.root.join("x"))?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.read_text("four.txt")?, "3");
+    assert!(b.read_text("x/one.txt").is_err());
+    assert_eq!(a.remote.faults().updates_without_token, 0);
+    assert_eq!(b.remote.faults().updates_without_token, 0);
     Ok(())
 }
 
@@ -69,7 +100,7 @@ fn edits_moves_and_deletes_propagate() -> R {
         .lock()
         .map_err(|_| "poisoned")?
         .removed()
-        .filter_map(|h| h.removal().map(|r| (h.node(), r.root)))
+        .filter_map(|h| h.removed_at.map(|at| (h.node(), at)))
         .collect();
     assert_eq!(removed.len(), 1, "{removed:?}");
     // And here, the local copy went to the trash (emptied by the purge).
@@ -202,7 +233,7 @@ impl Remote for StopAfterCreates {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         let made = self.inner.create(node, payload);
         if self.creates.fetch_add(1, Ordering::SeqCst) + 1 == self.after {
             self.stop.store(true, Ordering::SeqCst);
@@ -211,12 +242,11 @@ impl Remote for StopAfterCreates {
     }
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> RemoteResult<RemoteRef> {
-        self.inner.update(file_id, expected, meta, payload)
+    ) -> RemoteResult<Target> {
+        self.inner.update(target, meta, payload)
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
@@ -302,17 +332,16 @@ impl Remote for SlowWrites {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<RemoteRef> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         self.write(|| self.unless_down(|| self.inner.create(node, payload)))
     }
     fn update(
         &self,
-        file_id: RemoteFileId,
-        expected: VersionTag,
+        target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> RemoteResult<RemoteRef> {
-        self.write(|| self.unless_down(|| self.inner.update(file_id, expected, meta, payload)))
+    ) -> RemoteResult<Target> {
+        self.write(|| self.unless_down(|| self.inner.update(target, meta, payload)))
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
@@ -1082,6 +1111,120 @@ fn temp_files_no_download_wants_are_swept() -> R {
     Ok(())
 }
 
+/// A folder's removal that fails holds back the removals of what is in it, so nothing is
+/// removed before its folder (node schema, Recently deleted): once the folder goes, what was in
+/// it goes with it, and is deleted with it.
+#[test]
+fn a_folder_that_isnt_removed_keeps_what_is_in_it() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("Photos/x.jpg", "x")?;
+    a.write("Photos/2024/y.jpg", "y")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder's removal keeps failing during this sync.
+    a.remote.faults().fail_writes_named = Some("Photos".into());
+    let report = a.sync()?;
+    assert!(!report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.removed().count(),
+        0,
+        "nothing went before its folder"
+    );
+    a.remote.faults().fail_writes_named = None;
+    a.sync()?;
+    let listed = a.recently_deleted(10)?;
+    let photos = listed
+        .iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    assert_eq!(listed.len(), 4, "{listed:?}");
+    assert!(
+        listed.iter().all(|i| i.root == photos.node),
+        "all deleted with the folder: {listed:?}"
+    );
+    Ok(())
+}
+
+/// A folder's removal took along a version another device never had (its own removal still
+/// on its way): that device's rename of its older copy doesn't write over it. The version stays,
+/// and goes with the folder into Recently deleted; the renamed copy goes up as a new item.
+#[test]
+fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Photos/x.txt", "old")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("Photos/x.txt", "new")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder goes; the file's own removal keeps failing during this sync.
+    a.remote.faults().fail_writes_named = Some("x.txt".into());
+    a.sync()?;
+    a.remote.faults().fail_writes_named = None;
+    // b never had "new": it renames its "old".
+    b.engine.scan_local()?;
+    fs::rename(b.root.join("Photos/x.txt"), b.root.join("Photos/y.txt"))?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read_text("Photos/y.txt")?, "old");
+    let removed: Vec<String> = a
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert!(removed.contains(&"Photos/x.txt".to_owned()), "{removed:?}");
+    let x = server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .removed()
+        .find(|h| matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == "x.txt"))
+        .map(|h| h.file_id)
+        .ok_or("x.txt not in Recently deleted")?;
+    let bytes = server.lock().map_err(|_| "poisoned")?.payload(x)?;
+    assert_eq!(bytes.as_slice(), b"new", "the version taken along stays");
+    Ok(())
+}
+
+/// The device deleting a folder stops after the folder's removal: what is in it is still live,
+/// unmarked, taken along by the folder's removal (node schema, Recently deleted). Emptying the
+/// folder from Recently deleted, on another device, deletes it for good with everything taken
+/// along: nothing is left to turn up at the top.
+#[test]
+fn emptying_a_folder_deletes_what_its_delete_took_along() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("Photos/x.txt", "x")?;
+    a.write("Photos/2024/y.txt", "y")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder goes; 2024's removal fails, holding back y.txt's; a stops there.
+    a.remote.faults().fail_writes_named = Some("2024".into());
+    a.sync()?;
+    let live = |server: &std::sync::Arc<std::sync::Mutex<hbsync_remote::fake::FakeServer>>| {
+        server
+            .lock()
+            .map(|s| s.live().count())
+            .unwrap_or(usize::MAX)
+    };
+    assert_eq!(live(&server), 2, "2024 and y.txt are still live");
+    let photos = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    // Another device, which never synced, empties it.
+    let mut b = Client::new(&server, "b")?;
+    assert_eq!(b.engine.drive().empty(&[photos.node])?, 4);
+    assert_eq!(live(&server), 0, "nothing taken along is left");
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
 #[test]
 fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     let server = server();
@@ -1107,34 +1250,121 @@ fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     Ok(())
 }
 
+/// A folder's delete removes the folder first, then what is in it (node schema, Recently
+/// deleted). A child whose removal failed follows later; meanwhile another client doesn't bring
+/// the folder back for it (§6.3), and the folder's restore brings both back.
 #[test]
-fn a_folder_is_not_deleted_remotely_while_a_child_delete_failed() -> R {
+fn a_folder_goes_first_and_a_child_that_failed_follows() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
     a.write("d/keep.txt", "k")?;
     a.write("d/other.txt", "o")?;
     a.write("stay.txt", "s")?; // not everything is deleted: no mass-delete hold
     a.sync()?;
+    b.sync()?;
     fs::remove_dir_all(a.root.join("d"))?;
     // The delete of one file keeps failing.
     a.remote.faults().fail_writes_named = Some("keep.txt".into());
     a.sync()?;
-    {
-        let srv = server.lock().map_err(|_| "poisoned")?;
-        let mut names = srv.live_names();
-        names.sort();
-        assert_eq!(
-            names,
-            ["d", "keep.txt", "stay.txt"],
-            "the folder stays while it has a child"
-        );
-    }
-    a.remote.faults().fail_writes_named = None;
-    a.sync()?;
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.live_names(),
-        ["stay.txt"]
+        ["keep.txt", "stay.txt"],
+        "the folder went first"
     );
+    // b sees the delete under way: its copies go, the folder stays deleted.
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = s"]);
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["stay.txt"],
+        "b removed the rest of it"
+    );
+    a.remote.faults().fail_writes_named = None;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["stay.txt = s"]);
+    // Everything was deleted with the folder: its restore brings it all back.
+    let d = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "d")
+        .ok_or("d")?;
+    assert_eq!(d.root, d.node);
+    assert_eq!(a.engine.drive().restore(&[d.node])?, 3);
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(a.read_text("d/keep.txt")?, "k");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// The Photos example: on Monday `Photos/a.jpg` is deleted on its own; on Tuesday the folder
+/// `Photos`, still holding `b.jpg` and a subfolder with a file. Restoring `Photos` brings back
+/// `b.jpg` and the subfolder's file, not `a.jpg`: that stays in Recently deleted, an item of its
+/// own, and comes back on its own, into `Photos`.
+#[test]
+fn photos_restored_without_what_was_deleted_from_it_before() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Photos/a.jpg", "a")?;
+    a.write("Photos/b.jpg", "b")?;
+    a.write("Photos/2024/c.jpg", "c")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("Photos/a.jpg"))?; // Monday
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?; // Tuesday
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
+    let listed = b.recently_deleted(10)?;
+    let item = |path: &str| {
+        listed
+            .iter()
+            .find(|i| i.path == path)
+            .ok_or(format!("{path} not listed"))
+    };
+    let (photos, a_jpg, b_jpg, c_jpg) = (
+        item("Photos")?,
+        item("Photos/a.jpg")?,
+        item("Photos/b.jpg")?,
+        item("Photos/2024/c.jpg")?,
+    );
+    assert_eq!(a_jpg.root, a_jpg.node, "deleted on its own");
+    assert_eq!(
+        (b_jpg.root, c_jpg.root),
+        (photos.node, photos.node),
+        "deleted with the folder"
+    );
+    assert!(a_jpg.removed_at_ms < photos.removed_at_ms);
+    assert!(
+        photos.removed_at_ms <= b_jpg.removed_at_ms,
+        "the folder went first"
+    );
+
+    // b restores Photos: b.jpg and 2024/c.jpg come back, on both; a.jpg doesn't.
+    assert_eq!(b.engine.drive().restore(&[photos.node])?, 4);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read_text("Photos/b.jpg")?, "b");
+    assert_eq!(a.read_text("Photos/2024/c.jpg")?, "c");
+    assert!(a.read_text("Photos/a.jpg").is_err());
+    let left: Vec<String> = a
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert_eq!(left, ["Photos/a.jpg"]);
+
+    // a.jpg on its own: back into Photos.
+    assert_eq!(a.engine.drive().restore(&[a_jpg.node])?, 1);
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read_text("Photos/a.jpg")?, "a");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert!(a.recently_deleted(10)?.is_empty());
     Ok(())
 }
 
@@ -1883,6 +2113,7 @@ fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
             parent: hbsync_types::NodeId::ROOT,
             kind: hbsync_types::NodeKind::File,
             content,
+            removed: false,
         };
         srv.update(written.file_id, written.version, &meta, None)?;
     }
@@ -2027,6 +2258,7 @@ fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
                     parent: h.parent,
                     kind: h.kind,
                     content,
+                    removed: false,
                 });
                 srv.update(h.file_id, h.version, &meta, None)?;
             }

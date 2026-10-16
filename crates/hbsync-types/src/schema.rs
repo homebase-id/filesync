@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::{NodeId, Tag, Tags};
+use crate::{Tag, Tags};
 
 /// `appData.fileType` of a folder node (provisional, see the spec).
 pub const FILE_TYPE_FOLDER: i32 = 7101;
@@ -18,19 +18,11 @@ pub const VERSION: u32 = 1;
 const CREATED: &str = "ct";
 /// The content key of the Finder tags ([`NodeContent::tags`]).
 const TAGS_KEY: &str = "tags";
-/// The content key of a removal ([`NodeContent::removal`]).
-pub const REMOVAL_KEY: &str = "rm";
+/// The content key of an older writer's removal marker: read by no one, dropped when the
+/// content is read (node schema, Recently deleted).
+const REMOVAL_KEY: &str = "rm";
 /// `appData.archivalStatus` of a node in Recently deleted (0 is a live one).
 pub const ARCHIVAL_REMOVED: i32 = 2;
-
-/// When a node went to Recently deleted, and the topmost node deleted with it (the node
-/// itself, or the folder whose delete took it along): restoring that one restores this one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Removal {
-    /// Unix ms.
-    pub at_ms: i64,
-    pub root: NodeId,
-}
 
 /// The `appData.content` JSON of a node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,8 +68,12 @@ impl NodeContent {
         serde_json::to_string(self).unwrap_or_default()
     }
 
+    /// An older writer's removal marker `rm` is dropped: the header says what is removed and
+    /// when, and the next write goes without it.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        let mut content: Self = serde_json::from_str(json)?;
+        content.unknown.remove(REMOVAL_KEY);
+        Ok(content)
     }
 
     /// The creation time `ct`, Unix ms: the item's own when the node was created, then never
@@ -124,38 +120,10 @@ impl NodeContent {
         }
     }
 
-    /// The removal `rm` of a node in Recently deleted (`archivalStatus` 2), kept with the
-    /// unknown keys like `ct`; one that doesn't read (another writer's) is none.
-    pub fn removal(&self) -> Option<Removal> {
-        let rm = self.unknown.get(REMOVAL_KEY)?;
-        let at = &rm["at"];
-        Some(Removal {
-            at_ms: at.as_i64().or_else(|| {
-                at.as_f64()
-                    .filter(|f| f.is_finite())
-                    .map(|f| f.round() as i64)
-            })?,
-            root: NodeId(rm["root"].as_str()?.parse().ok()?),
-        })
-    }
-
-    pub fn set_removal(&mut self, removal: Option<Removal>) {
-        match removal {
-            Some(r) => self.unknown.insert(
-                REMOVAL_KEY.into(),
-                json!({"at": r.at_ms, "root": r.root.0.to_string()}),
-            ),
-            None => self.unknown.remove(REMOVAL_KEY),
-        };
-    }
-
     /// The keys sync carries without acting on them, as a JSON object (read back by
-    /// [`keys_from_str`]): the unknown ones, the creation time and the tags. Not the removal,
-    /// which the state DB keeps in columns.
+    /// [`keys_from_str`]): the unknown ones, the creation time and the tags.
     pub fn carried_json(&self) -> Option<String> {
-        let mut keys = self.unknown.clone();
-        keys.remove(REMOVAL_KEY);
-        (!keys.is_empty()).then(|| Value::Object(keys).to_string())
+        (!self.unknown.is_empty()).then(|| Value::Object(self.unknown.clone()).to_string())
     }
 
     /// A reader that finds a newer version treats the node as read-only.
@@ -291,24 +259,11 @@ mod tests {
     }
 
     #[test]
-    fn a_removal_rides_with_the_unknown_keys() -> Result<(), serde_json::Error> {
-        let mut c = NodeContent::file("a", 5, 1, false);
-        let root = NodeId::ROOT;
-        c.set_removal(Some(Removal { at_ms: 7, root }));
-        let json = c.to_json();
-        assert_eq!(
-            json,
-            r#"{"v":1,"name":"a","mtime":5,"size":1,"rm":{"at":7,"root":"2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e"}}"#
-        );
-        assert_eq!(
-            NodeContent::from_json(&json)?.removal(),
-            Some(Removal { at_ms: 7, root })
-        );
-        c.set_removal(None);
-        assert_eq!(c.removal(), None);
-        // Another writer's odd one: the node still reads, with no removal.
-        let odd = NodeContent::from_json(r#"{"v":1,"name":"a","rm":{"at":"x"}}"#)?;
-        assert_eq!(odd.removal(), None);
+    fn an_older_writers_removal_marker_is_dropped() -> Result<(), serde_json::Error> {
+        let c = NodeContent::from_json(
+            r#"{"v":1,"name":"a","rm":{"at":7,"root":"2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e"},"ct":3}"#,
+        )?;
+        assert_eq!(c.to_json(), r#"{"v":1,"name":"a","ct":3}"#);
         Ok(())
     }
 

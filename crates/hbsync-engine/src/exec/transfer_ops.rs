@@ -48,6 +48,7 @@ impl Executor<'_> {
                 node,
                 file_id,
                 expected,
+                ..
             } => self.prepare_remove(*node, *file_id, *expected),
             Op::RemoteUpdate {
                 node,
@@ -161,12 +162,15 @@ impl Executor<'_> {
             None => self.db.read(|s| s.removed_by_node(node))?,
             Some(_) => None,
         };
-        // Recently deleted holds a version this device never had (edited elsewhere, then
-        // deleted): restoring over it would lose it. It stays there, and this version goes up
-        // as a new item.
-        if let Some(r) = &removed
-            && r.row.file.map(|f| f.hash)
-                != base.as_ref().and_then(|b| b.state.content).map(|c| c.hash)
+        // The version written over has bytes this device never had: edited elsewhere, then
+        // deleted (in Recently deleted, or taken along by a folder's delete, node schema):
+        // writing over it would lose it. It stays, and this version goes up as a new item.
+        let over = match existing {
+            None => removed.as_ref().map(|r| &r.row),
+            Some((file_id, _)) => mirror.as_ref().filter(|m| m.file_id == file_id),
+        };
+        if let Some(r) = over
+            && r.file.map(|f| f.hash) != base.as_ref().and_then(|b| b.state.content).map(|c| c.hash)
         {
             return Err(self.detach(node, NodeId::new()).unwrap_or_else(|o| o));
         }
@@ -176,7 +180,7 @@ impl Executor<'_> {
             None if let Some(r) = &removed => {
                 content.unknown = r.row.carried_keys();
                 tags = restored_tags(base.as_ref(), &tags, r);
-                Some(r.row.remote_ref())
+                Some(r.row.target())
             }
             // A new node: the file's own creation time, kept from then on.
             None => {
@@ -184,7 +188,7 @@ impl Executor<'_> {
                 None
             }
             Some((file_id, version)) => {
-                let Some(mirror) = &mirror else {
+                let Some(mirror) = mirror.as_ref().filter(|m| m.file_id == file_id) else {
                     return Err(Outcome::stale("gone remotely"));
                 };
                 content.unknown = mirror.carried_keys();
@@ -192,7 +196,7 @@ impl Executor<'_> {
                 if content.created_ms().is_none() {
                     content.set_created_ms(ops::created_ms(&path));
                 }
-                Some(RemoteRef { file_id, version })
+                Some(mirror.target_at(version))
             }
         };
         content.set_tags(&tags);
@@ -202,6 +206,7 @@ impl Executor<'_> {
                 parent,
                 kind,
                 content,
+                removed: false,
             },
             target,
             path,

@@ -693,6 +693,7 @@ fn an_edit_keeps_the_executable_bit() -> R {
             parent: NodeId::ROOT,
             kind: NodeKind::File,
             content: NodeContent::file("run.sh", 1_700_000_000_000, script.len() as u64, true),
+            removed: false,
         },
         Some(Upload {
             hash: hbsync_fileio::hash_bytes(script, hbsync_fileio::HashAlgorithm::Blake3),

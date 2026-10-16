@@ -185,6 +185,7 @@ fn a_move_between_the_folders_parts_follows() -> R {
                 parent: NodeId::ROOT,
                 kind: cv.kind,
                 content,
+                removed: false,
             };
             srv.update(cv.file_id, cv.version, &meta, None)?;
         }
@@ -386,6 +387,7 @@ fn remove_documents(server: &Arc<Mutex<FakeServer>>) -> R {
             parent: docs.parent,
             kind: docs.kind,
             content,
+            removed: false,
         });
         srv.update(docs.file_id, docs.version, &meta, None)?;
     }
