@@ -56,7 +56,7 @@ use rusqlite::{Connection, TransactionBehavior};
 pub use coords::Coords;
 pub use reader::Reader;
 pub use store::{
-    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing,
+    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing, Recorded,
     RemovedRow, Store,
 };
 
@@ -519,6 +519,7 @@ impl StateDb {
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             let store = Store::new(&tx, self.folder);
             let out = f(&store)?;
+            store.finish()?;
             let touched = store.take_touched();
             #[cfg(feature = "testkit")]
             if let Some(hook) = &self.hook {

@@ -256,9 +256,12 @@ fn a_file_moved_across_the_folders_here_is_kept() -> R {
     );
     let deleted = AccountReader::open(&pc.main_root.with_file_name("state.db"), "t.example")?
         .ok_or("no state DB")?
-        .recently_deleted(10)?;
+        .all_deleted()?;
     assert_eq!(
-        deleted.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(),
+        deleted
+            .iter()
+            .map(|(d, _)| d.path.as_str())
+            .collect::<Vec<_>>(),
         ["notes.txt"]
     );
     Ok(())

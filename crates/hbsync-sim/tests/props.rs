@@ -13,6 +13,9 @@ fn action() -> impl Strategy<Value = Action> {
         1 => Just(Action::ToggleIgnore),
         1 => i().prop_map(|node| Action::Restore { node }),
         1 => Just(Action::Purge),
+        1 => Just(Action::ListDeleted),
+        1 => Just(Action::EmptyListed),
+        1 => i().prop_map(|pick| Action::EditTaken { pick }),
         2 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
         1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),
         1 => (i(), i()).prop_map(|(op, pick)| Action::Phone { op, pick }),
@@ -946,6 +949,256 @@ fn restore_and_purge_converge() {
     run(2, &events)
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Emptying Recently deleted as listed while other devices work: after the listing a listed
+/// folder comes back, and (or not) the phone saves an edit of a file a listed folder's delete
+/// took along (its own removal still on its way). What was listed goes (or, purged, all of
+/// Recently deleted), but never a live node: the folder holding the file stays, and comes back
+/// with the edit; nothing written is lost, and the clients converge.
+#[test]
+fn emptying_as_listed_spares_what_came_after_the_listing() {
+    use Action::*;
+    use hbsync_types::NodeId;
+    let (a, b, c_txt) = (0, 1, 3); // NAMES: "a", "b", "c.txt"
+    let act = |client, action| Event::Act { client, action };
+    let folder = |sim: &Sim, path: &str| -> usize {
+        let node = match path {
+            "" => NodeId::ROOT,
+            _ => sim.item(0, path).expect(path),
+        };
+        sim.pick(0, node, true).expect(path)
+    };
+    let create = |sim: &mut Sim, parent: &str, name, file: bool| {
+        let parent = folder(sim, parent);
+        let action = match file {
+            true => CreateFile { parent, name },
+            false => CreateFolder { parent, name },
+        };
+        sim.run(&[act(0, action)]);
+    };
+    let mut sync0 = vec![Event::Plan { client: 0 }];
+    sync0.extend([Event::Step { client: 0 }; 12]);
+    for (edited, purge) in [(false, false), (true, false), (false, true), (true, true)] {
+        let mut sim = Sim::new(2);
+        create(&mut sim, "", a, false);
+        create(&mut sim, "", b, false);
+        create(&mut sim, "a", c_txt, true);
+        create(&mut sim, "b", c_txt, true);
+        assert!(sim.quiesce(30), "no convergence");
+        let (node_a, node_b) = (sim.item(0, "a").expect("a"), sim.item(0, "b").expect("b"));
+        // Client 0 deletes `b`, and `a` as far as the folder (the file in it, still live, was
+        // taken along); then lists Recently deleted.
+        let node = sim.pick(0, node_b, false).expect("b");
+        sim.run(&[act(0, Delete { node })]);
+        sim.run(&sync0);
+        let node = sim.pick(0, node_a, false).expect("a");
+        sim.run(&[act(0, Delete { node })]);
+        sim.run(&[Event::Plan { client: 0 }, Event::Step { client: 0 }]);
+        assert!(sim.is_removed(node_a), "the folder went first");
+        sim.run(&[act(0, ListDeleted)]);
+        // Since the listing: `b` comes back, and the phone may edit the file in `a`. (No device
+        // syncs here: its sync would mark the file removed, a removal recorded after the
+        // listing, which keeps `a`.)
+        let node = sim.removed_pick(node_b).expect("b removed");
+        sim.run(&[act(0, Restore { node })]);
+        if edited {
+            sim.run(&[act(0, EditTaken { pick: 0 })]);
+        }
+        sim.run(&[act(0, if purge { Purge } else { EmptyListed })]);
+        assert!(sim.is_removed(node_a), "`a` holds a live node: it stays");
+        assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            panic!("edited {edited}, purge {purge}: {e}");
+        }
+        let mut expected = vec!["b", "b/c.txt"];
+        if edited {
+            expected.splice(0..0, ["a", "a/c.txt"]);
+        }
+        assert_eq!(
+            sim.server_paths(),
+            expected,
+            "edited {edited}, purge {purge}"
+        );
+    }
+}
+
+/// Found by a 150,000-case run (2026-10-16), failing on main too: two devices hold the same
+/// file without a base, both edited against the drive, and fork it to the same copy id
+/// (`fork_id`: same node, same bytes, no base version). The first device's copy is on the drive
+/// (detached) when the second plans its fork: the copy's merged state is the drive's node, not
+/// the fork's, so the fork takes no name (`emit`: `unwrap_or_default`) and the copy is created
+/// on the drive as "". Kept until the fork id is fixed.
+#[test]
+#[ignore = "a conflict copy forked under an id another device's copy has (fork_id)"]
+fn regression_two_devices_fork_to_one_copy_id() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 2,
+            action: CreateFolder { parent: 0, name: 1 },
+        },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 2, name: 0 },
+        },
+        Act {
+            client: 1,
+            action: CreateFile {
+                parent: 0,
+                name: 11,
+            },
+        },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 2 },
+        Plan { client: 0 },
+        Act {
+            client: 2,
+            action: Move {
+                node: 1,
+                parent: 1,
+                name: 8,
+            },
+        },
+        Act {
+            client: 1,
+            action: CreateFile { parent: 0, name: 9 },
+        },
+        Plan { client: 1 },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 1, name: 5 },
+        },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: CreateFile { parent: 1, name: 0 },
+        },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: Delete { node: 15 },
+        },
+        Step { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 2,
+            action: Edit { file: 8 },
+        },
+        Step { client: 0 },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 0 },
+        Step { client: 2 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Step { client: 2 },
+        Step { client: 2 },
+        Step { client: 1 },
+        Plan { client: 1 },
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 1 },
+        Step { client: 2 },
+    ];
+    run(3, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Found by a 150,000-case run (2026-10-16), failing on main and on sim-role-fixes (d998bb4)
+/// too: a tag added on client 1 is lost ("lost tag \"Red\"") with clients that sync only when
+/// asked and the guard at 1. The class sim-role-fixes works on; kept for it.
+#[test]
+#[ignore = "a lost tag, failing on main: for sim-role-fixes"]
+fn regression_a_tag_lost_when_syncing_only_when_asked() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Act {
+            client: 2,
+            action: CreateFolder { parent: 0, name: 8 },
+        },
+        Act {
+            client: 2,
+            action: CreateFile { parent: 6, name: 6 },
+        },
+        Act {
+            client: 0,
+            action: CreateFolder { parent: 0, name: 3 },
+        },
+        Plan { client: 0 },
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 0, name: 6 },
+        },
+        Plan { client: 2 },
+        Step { client: 0 },
+        Step { client: 2 },
+        Plan { client: 1 },
+        Step { client: 0 },
+        Step { client: 2 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: Edit { file: 0 },
+        },
+        Step { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: Delete { node: 5 },
+        },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: CreateJunk { parent: 0 },
+        },
+        Step { client: 1 },
+        Step { client: 1 },
+        Plan { client: 0 },
+        Act {
+            client: 1,
+            action: Move {
+                node: 12,
+                parent: 1,
+                name: 0,
+            },
+        },
+        Step { client: 0 },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 8 },
+        },
+        Act {
+            client: 1,
+            action: Tag { node: 2, tag: 4 },
+        },
+        Step { client: 0 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Step { client: 0 },
+        Step { client: 0 },
+    ];
+    run_settled(
+        3,
+        Some(1),
+        |sim| sim,
+        |sim| sim.quiesce_announced(300),
+        &events,
+    )
+    .map_err(|e| e.to_string())
+    .unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// Tags meet on every device: a Mac's tag and colour change, a Linux tag (Linux keeps no

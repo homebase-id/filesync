@@ -1199,10 +1199,11 @@ fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
 
 /// The device deleting a folder stops after the folder's removal: what is in it is still live,
 /// unmarked, taken along by the folder's removal (node schema, Recently deleted). Emptying the
-/// folder from Recently deleted, on another device, deletes it for good with everything taken
-/// along: nothing is left to turn up at the top.
+/// folder from Recently deleted, on another device, deletes for good only what is removed: the
+/// folder stays while it holds live nodes, which emptying never deletes for good (marking them
+/// removed first is the purge's, still to come). Taken along, they show nowhere.
 #[test]
-fn emptying_a_folder_deletes_what_its_delete_took_along() -> R {
+fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
     a.write("Photos/x.txt", "x")?;
@@ -1226,8 +1227,14 @@ fn emptying_a_folder_deletes_what_its_delete_took_along() -> R {
         .ok_or("Photos not listed")?;
     // Another device, which never synced, empties it.
     let mut b = Client::new(&server, "b")?;
-    assert_eq!(b.engine.drive().empty(&[photos.node])?, 4);
-    assert_eq!(live(&server), 0, "nothing taken along is left");
+    assert_eq!(b.engine.drive().empty(&[photos.node])?, 1, "x.txt");
+    assert_eq!(live(&server), 2, "2024 and y.txt stay");
+    let left: Vec<String> = b
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert_eq!(left, ["Photos"]);
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
     Ok(())
@@ -1819,6 +1826,49 @@ fn what_was_synced_is_listed_and_kept() -> R {
     Ok(())
 }
 
+/// Recently deleted by deletes: a folder with what it took along is one entry with its count;
+/// any of its items can still be found, by node or (all of them) to pick by place.
+#[test]
+fn recently_deleted_lists_deletes_with_counts_and_finds_items() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    for i in 0..30 {
+        a.write(&format!("d/f{i}.txt"), "x")?;
+    }
+    a.write("z.txt", "z")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    fs::remove_file(a.root.join("z.txt"))?;
+    a.sync()?;
+
+    let mut reader =
+        hbsync_engine::root::AccountReader::open(&a.db_path(), "test.example")?.ok_or("no db")?;
+    let (deletes, summary) = reader.deletes(10)?;
+    let mut shown: Vec<_> = deletes.iter().map(|(d, n)| (d.path.as_str(), *n)).collect();
+    shown.sort();
+    assert_eq!(shown, [("d", 30), ("z.txt", 0)]);
+    assert_eq!((summary.deletes, summary.items), (2, 32));
+    assert!(summary.listed.seq >= 32, "{summary:?}");
+    let (cut, summary) = reader.deletes(1)?;
+    assert_eq!(cut.len(), 1, "cut by deletes");
+    assert_eq!(summary.items, 32, "the summary counts everything");
+
+    let all = reader.all_deleted()?;
+    assert_eq!(all.len(), 32);
+    let child = all
+        .iter()
+        .find(|(d, _)| d.path == "d/f7.txt")
+        .ok_or("f7")?
+        .0
+        .node;
+    let folder = all.iter().find(|(d, _)| d.path == "d").ok_or("d")?.0.node;
+    let found = reader.find_deleted(&[child, folder])?;
+    let found: Vec<_> = found.iter().map(|(d, n)| (d.path.as_str(), *n)).collect();
+    assert_eq!(found, [("d/f7.txt", 0), ("d", 30)]);
+    Ok(())
+}
+
 #[test]
 fn recently_deleted_restores_and_purges() -> R {
     let server = server();
@@ -2005,15 +2055,13 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
         "the rest of P stays deleted"
     );
 
-    // Empty until a moment: what was deleted after it stays.
-    let until = find(&mut a, "P/y.txt")?
-        .removed_at_ms
-        .ok_or("confirmed by the end of the sync")?;
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    // Empty as listed: what was deleted after the listing stays.
+    find(&mut a, "P/y.txt")?;
+    let listed = a.listed()?;
     fs::remove_file(a.root.join("keep.txt"))?;
     a.write("other.txt", "o")?; // not every file deleted (the guard)
     a.sync()?;
-    assert_eq!(a.engine.drive().empty_until(until)?, 1);
+    assert_eq!(a.engine.drive().empty_listed(&listed)?, 1);
     let left: Vec<_> = a
         .recently_deleted(10)?
         .into_iter()
@@ -2320,7 +2368,8 @@ fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
             )
         ]
     );
-    a.engine.drive().empty_until(i64::MAX - 1)?;
+    let listed = a.listed()?;
+    a.engine.drive().empty_listed(&listed)?;
     let srv = server.lock().map_err(|_| "poisoned")?;
     assert_eq!(srv.removed().count(), 0);
     Ok(())

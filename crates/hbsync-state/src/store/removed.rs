@@ -6,7 +6,9 @@ impl Store<'_> {
     // ---- Recently deleted ----
 
     /// Records a removed node (replacing an older record of it), and marks it dirty where that
-    /// concerns ([`Store::fan_out`]); the same version again changes nothing.
+    /// concerns ([`Store::fan_out`]); the same version again changes nothing, and keeps its
+    /// [`Recorded::seq`]. Another version is another removal (a restore, an edit, then a delete
+    /// again, perhaps elsewhere): it gets the next.
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         if self.has_version(removed.row.remote_ref(), true)? {
             return Ok(());
@@ -15,11 +17,12 @@ impl Store<'_> {
             return Ok(());
         };
         self.moved_folder(row.node, row.kind);
+        let seq = self.next_removed_seq()?;
         let f = row.file.as_ref();
         self.prep(
             "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, token) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                 hash, size, mtime_ms, executable, content_extra, removed_at, token, seq) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )?
         .execute(params![
             row.node.0.as_bytes(),
@@ -35,8 +38,109 @@ impl Store<'_> {
             row.content_extra,
             removed.removed_at,
             row.token.as_ref().map(|t| &t.0[..]),
+            seq,
         ])?;
         self.fan_out(row.node, row.parent)
+    }
+
+    /// The largest [`Recorded::seq`] given so far (0: none): no row has a larger one, and a row
+    /// recorded later gets a larger one.
+    pub fn removed_seq(&self) -> Result<u64> {
+        if let Some((seq, _)) = self.removed_seq.get() {
+            return Ok(seq);
+        }
+        let seq = self
+            .account_kv(crate::keys::REMOVED_SEQ)?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        self.removed_seq.set(Some((seq, false)));
+        Ok(seq)
+    }
+
+    /// The next [`Recorded::seq`]: the counter is written once, when the transaction commits.
+    fn next_removed_seq(&self) -> Result<i64> {
+        let next = self.removed_seq()? + 1;
+        self.removed_seq.set(Some((next, true)));
+        Ok(next as i64)
+    }
+
+    /// What this transaction leaves for its commit: the counter, if it gave a [`Recorded::seq`].
+    pub(crate) fn finish(&self) -> Result<()> {
+        if let Some((seq, true)) = self.removed_seq.get() {
+            self.set_account_kv(crate::keys::REMOVED_SEQ, &seq.to_string())?;
+            self.removed_seq.set(Some((seq, false)));
+        }
+        Ok(())
+    }
+
+    /// How many nodes folder `parent` holds on the drive: live, or in Recently deleted.
+    pub fn child_count(&self, parent: NodeId) -> Result<u64> {
+        let parent = self.coords()?.to_drive(parent);
+        let n: i64 = self
+            .prep(&format!(
+                "SELECT (SELECT COUNT(*) FROM remote m WHERE m.parent = {ID_OF}) \
+                     + (SELECT COUNT(*) FROM removed WHERE parent = ?1)"
+            ))?
+            .query_row([parent.0.as_bytes()], |r| r.get(0))?;
+        Ok(n as u64)
+    }
+
+    /// The nodes of Recently deleted that hold a live node: one query.
+    pub fn removed_holding_live(&self) -> Result<std::collections::HashSet<NodeId>> {
+        let c = self.coords()?;
+        let nodes = self.many(
+            "SELECT r.node FROM removed r JOIN nodes n ON n.uuid = r.node \
+             WHERE EXISTS (SELECT 1 FROM remote m WHERE m.parent = n.id)",
+            [],
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )?;
+        Ok(nodes.into_iter().map(|n| c.from_drive(n)).collect())
+    }
+
+    /// How many nodes of Recently deleted each folder holds: one grouped query.
+    pub fn removed_per_folder(&self) -> Result<HashMap<NodeId, u64>> {
+        let c = self.coords()?;
+        let counts = self.many(
+            "SELECT parent, COUNT(*) FROM removed GROUP BY parent",
+            [],
+            |r| {
+                Ok((
+                    codec::node(&r.get::<_, Vec<u8>>(0)?)?,
+                    r.get::<_, i64>(1)? as u64,
+                ))
+            },
+        )?;
+        Ok(counts
+            .into_iter()
+            .map(|(n, count)| (c.from_drive(n), count))
+            .collect())
+    }
+
+    /// This DB's own id (random, made with it): a listing of its Recently deleted names it, so
+    /// one of another DB (of the same identity, made again) is told apart.
+    pub fn db_id(&self) -> Result<String> {
+        Ok(self.account_kv(crate::keys::DB_ID)?.unwrap_or_default())
+    }
+
+    /// Recently deleted's rows recorded up to `seq`: what a listing that read it saw.
+    pub fn recorded_upto(&self, seq: u64) -> Result<Vec<Recorded>> {
+        self.recorded_rows(
+            &format!("{REMOVED_SELECT} WHERE seq <= ?1"),
+            [i64::try_from(seq).unwrap_or(i64::MAX)],
+        )
+    }
+
+    fn recorded_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Recorded>> {
+        let mut seen = Vec::new();
+        for r in self.many(sql, params, recorded_row)? {
+            if let Some(removed) = self.seen_removed(r.removed)? {
+                seen.push(Recorded {
+                    removed,
+                    seq: r.seq,
+                });
+            }
+        }
+        Ok(seen)
     }
 
     /// Records the server's time of a removal this device made, open until now

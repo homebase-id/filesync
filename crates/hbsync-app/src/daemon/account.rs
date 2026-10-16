@@ -13,15 +13,19 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use hbsync_engine::Drive;
+use hbsync_engine::deleted::Listed;
 use hbsync_engine::root::{AccountReader, RootError};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_state::StateError;
+use hbsync_types::NodeId;
+use hbsync_types::activity::Deleted;
 
 use super::DaemonError;
 use crate::protocol::{
-    AccountControl, AccountStatus, DeletedItem, FolderStatus, Hints, RecentItem, State, Until,
+    AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Hints, RecentItem,
+    State, Until,
 };
 use crate::runner::schedule::Announced;
 use crate::runner::{Backoff, Command, Handle, Runner, RunnerConfig, RunnerError, lock, slept};
@@ -211,8 +215,32 @@ impl Account {
         if let Some(why) = self.not_running() {
             return Err(why);
         }
+        // Answered before it runs: a listing the drive would refuse is refused here, so the
+        // refusal reaches whoever asked (the drive checks again as it empties).
+        if let AccountControl::EmptyListed { db, seq } = &control {
+            let listed = Listed {
+                db: db.clone(),
+                seq: *seq,
+            };
+            match self.try_read(|r| r.listed_here(&listed)) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!(
+                        "Recently deleted of {} was never listed so: look at it again",
+                        self.identity
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "can't read Recently deleted of {}: {e}",
+                        self.identity
+                    ));
+                }
+            }
+        }
+        let request = Request::Deleted(control);
         self.requests
-            .send(Request::Deleted(control))
+            .send(request)
             .map_err(|_| "the account has stopped".to_owned())
     }
 
@@ -245,14 +273,40 @@ impl Account {
         .unwrap_or_default()
     }
 
-    /// The newest `limit` items of its Recently deleted, newest first.
-    pub fn deleted(&self, limit: usize) -> Vec<DeletedItem> {
-        self.read(|db| db.recently_deleted(limit))
-            .unwrap_or_default()
+    /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
+    /// items it took along; and, when it holds anything, all of it as listed now.
+    pub fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
+        let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
+            return (Vec::new(), None);
+        };
+        // Anything to list, though emptying may take nothing (a folder holding a live node).
+        let account = (summary.deletes > 0).then(|| DeletedAccount {
+            identity: self.identity.clone(),
+            deletes: summary.deletes,
+            items: summary.items,
+            db: summary.listed.db,
+            seq: summary.listed.seq,
+        });
+        (self.items(deletes), account)
+    }
+
+    /// The items of its Recently deleted that are `nodes`.
+    pub fn find_deleted(&self, nodes: &[NodeId]) -> Vec<DeletedItem> {
+        self.items(self.read(|db| db.find_deleted(nodes)).unwrap_or_default())
+    }
+
+    /// Every item of its Recently deleted, newest first.
+    pub fn all_deleted(&self) -> Vec<DeletedItem> {
+        self.items(self.read(|db| db.all_deleted()).unwrap_or_default())
+    }
+
+    fn items(&self, found: Vec<(Deleted, usize)>) -> Vec<DeletedItem> {
+        found
             .into_iter()
-            .map(|deleted| DeletedItem {
+            .map(|(deleted, along)| DeletedItem {
                 identity: self.identity.clone(),
                 deleted,
+                along,
             })
             .collect()
     }
@@ -261,28 +315,36 @@ impl Account {
     /// DB isn't there yet (or not brought up to date yet: the drive does as it opens) or `f`
     /// failed, which drops the connection.
     fn read<T>(&self, f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>) -> Option<T> {
+        self.try_read(f).ok()
+    }
+
+    /// [`Account::read`], saying why there is no answer.
+    fn try_read<T>(
+        &self,
+        f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>,
+    ) -> Result<T, String> {
         let mut reader = lock(&self.reader);
         if reader.is_none() {
             *reader = match AccountReader::open(&self.db, &self.identity) {
                 Ok(opened) => opened,
                 Err(RootError::State(e @ StateError::Behind { .. })) => {
                     tracing::debug!("{}: {e}", self.identity);
-                    None
+                    return Err(e.to_string());
                 }
                 Err(e) => {
                     tracing::warn!("{}: can't read its state DB: {e}", self.identity);
-                    None
+                    return Err(e.to_string());
                 }
             };
         }
-        match f(reader.as_mut()?) {
-            Ok(answer) => Some(answer),
-            Err(e) => {
-                tracing::warn!("{}: can't read its state DB: {e}", self.identity);
-                *reader = None;
-                None
-            }
-        }
+        let Some(opened) = reader.as_mut() else {
+            return Err("its state DB isn't there yet".to_owned());
+        };
+        f(opened).map_err(|e| {
+            tracing::warn!("{}: can't read its state DB: {e}", self.identity);
+            *reader = None;
+            e.to_string()
+        })
     }
 
     fn waiting(&self, to: State, why: String) {
@@ -803,7 +865,9 @@ fn run_request(drive: &Drive, control: AccountControl) {
             Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
         },
         AccountControl::EmptyDeleted { nodes } => report_emptied(drive.empty(&nodes)),
-        AccountControl::EmptyDeletedUntil { at_ms } => report_emptied(drive.empty_until(at_ms)),
+        AccountControl::EmptyListed { db, seq } => {
+            report_emptied(drive.empty_listed(&Listed { db, seq }))
+        }
     }
 }
 
@@ -863,6 +927,80 @@ mod tests {
         assert!(status.error.is_some());
         assert!(!waiting(&failed(true, false)?), "removed");
         assert!(!waiting(&failed(false, true)?), "the account ends");
+        Ok(())
+    }
+
+    /// Emptying Recently deleted as listed is refused in the answer for a listing of another DB
+    /// (the identity's, made again) or one this DB never gave; one it gave is taken.
+    #[test]
+    fn a_foreign_listing_is_refused_in_the_answer() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let folder = home.path().join("Homebase");
+        let (account, _requests) = Account::new(&paths, "a.example", &folder, None);
+        // Its DB, from the drive; its runners running (none needed here).
+        let db = paths.account_db("a.example");
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        Drive::open(
+            &db,
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        *lock(&account.phase) = Phase::Running(Vec::new());
+        let listed = account.read(|r| r.deletes(0)).ok_or("unreadable")?.1.listed;
+        let empty = |db: &str, seq| {
+            account.request(AccountControl::EmptyListed {
+                db: db.to_owned(),
+                seq,
+            })
+        };
+        let refused = empty("another-db", listed.seq).expect_err("another DB's listing");
+        assert!(refused.contains("never listed"), "{refused}");
+        assert!(empty(&listed.db, listed.seq + 1).is_err(), "never given");
+        empty(&listed.db, listed.seq)?;
+        Ok(())
+    }
+
+    /// Recently deleted holding only a folder that stays (it holds a live node) is still listed:
+    /// the folder can be restored, though emptying takes nothing.
+    #[test]
+    fn a_folder_that_only_stays_is_still_listed() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_state::{MirrorRow, RemovedRow, StateDb};
+        use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let (account, _requests) =
+            Account::new(&paths, "a.example", &home.path().join("Homebase"), None);
+        let db = paths.account_db("a.example");
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        Drive::open(
+            &db,
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        let row = |node, parent| MirrorRow {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            node,
+            parent,
+            name: node.0.to_string(),
+            kind: NodeKind::Folder,
+            file: None,
+            content_extra: None,
+            token: None,
+            changed_at: Some(5),
+        };
+        let folder = NodeId::new();
+        StateDb::open_account(&db)?.write(|s| {
+            s.put_removed(&RemovedRow {
+                row: row(folder, NodeId::ROOT),
+                removed_at: Some(10),
+            })?;
+            s.put_mirror(&row(NodeId::new(), folder))
+        })?;
+        let (items, summary) = account.deleted(10);
+        let summary = summary.ok_or("Recently deleted shown empty")?;
+        assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
         Ok(())
     }
 }

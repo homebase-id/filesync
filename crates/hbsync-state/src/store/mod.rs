@@ -125,6 +125,16 @@ pub struct RemovedRow {
     pub removed_at: Option<i64>,
 }
 
+/// A row of Recently deleted as this device recorded it: with its place in this device's order
+/// of recording removals (the account's counter when [`Store::put_removed`] first recorded that
+/// version; [`Store::removed_seq`]). What a listing saw is what has a `seq` up to the counter it
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    pub removed: RemovedRow,
+    pub seq: u64,
+}
+
 impl RemovedRow {
     /// The removal's time for comparing: an open one is the newest
     /// ([`hbsync_types::activity::removal_time`]).
@@ -276,6 +286,9 @@ pub struct Store<'a> {
     local_paths: std::cell::RefCell<HashMap<i64, RelPath>>,
     /// [`Store::prep`]: each SQL text with this store's folder put in.
     sqls: std::cell::RefCell<HashMap<Box<str>, Box<str>>>,
+    /// The last [`Recorded::seq`] given in this transaction, once read; written back when it
+    /// commits ([`Store::finish`]) if one was given.
+    removed_seq: std::cell::Cell<Option<(u64, bool)>>,
 }
 
 /// A folder this account syncs here.
@@ -294,7 +307,7 @@ const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size
      JOIN nodes p ON p.id = b.parent";
 /// A removed row has no `changed_at` of its own: its removal is its last write.
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
-     mtime_ms, executable, content_extra, token, NULL, removed_at FROM removed";
+     mtime_ms, executable, content_extra, token, NULL, removed_at, seq FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
      m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token, m.changed_at \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
@@ -337,6 +350,7 @@ impl<'a> Store<'a> {
             touched: Default::default(),
             local_ids: Default::default(),
             local_paths: Default::default(),
+            removed_seq: std::cell::Cell::new(None),
             sqls: Default::default(),
         }
     }
@@ -440,6 +454,13 @@ fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
     Ok(RemovedRow {
         row: mirror_row(r)?,
         removed_at: r.get(13)?,
+    })
+}
+
+fn recorded_row(r: &Row<'_>) -> Result<Recorded> {
+    Ok(Recorded {
+        removed: removed_row(r)?,
+        seq: r.get::<_, i64>(14)? as u64,
     })
 }
 

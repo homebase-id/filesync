@@ -48,8 +48,8 @@ impl Server {
     /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
     /// newest first.
     pub(super) fn deleted_page(&self) -> String {
-        let items = match control::deleted(&self.paths, usize::MAX) {
-            Ok(Some(items)) => items,
+        let list = match control::deleted(&self.paths, MAX_DELETED) {
+            Ok(Some(list)) => list,
             Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
             Err(e) => {
                 return format!(
@@ -58,32 +58,22 @@ impl Server {
                 );
             }
         };
-        if items.is_empty() {
+        if list.accounts.is_empty() {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
         let now = words::now();
-        let shown = control::Shown::of(&items);
         let main = control::configured(&self.paths)
             .ok()
             .flatten()
             .map(|r| r.folder);
-        // Shown: the items deleted on their own (their `root`), each with how many items
-        // its delete took along: its restore brings them back.
-        let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
-        for d in items
+        // Shown: the items deleted on their own, each with how many items its delete took
+        // along: its restore brings them back.
+        let rows: String = list
+            .items
             .iter()
-            .map(|i| &i.deleted)
-            .filter(|d| d.root != d.node)
-        {
-            *along.entry(d.root).or_default() += 1;
-        }
-        let rows: String = items
-            .iter()
-            .filter(|i| i.deleted.root == i.deleted.node)
-            .take(MAX_DELETED)
             .map(|item| {
                 let d = &item.deleted;
-                let along = match along.get(&d.node).copied().unwrap_or(0) {
+                let along = match item.along {
                     0 => String::new(),
                     n => format!(" <span class=small>with {n} items in it</span>"),
                 };
@@ -102,17 +92,9 @@ impl Server {
         format!(
             "<h1>Recently deleted</h1>\
              <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
-             A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>\
-             <form method=post action=\"{empty}\"><input type=hidden name=count value={count}>\
-             <input type=hidden name=until value={until}>\
-             <input type=hidden name=open value=\"{open}\">\
-             <button class=secondary>Empty now…</button></form>",
+             A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>{empty}",
             days = self.keep_days(),
-            empty = self.pages.url("deleted/empty"),
-            count = items.len(),
-            // What the user sees, nothing deleted after this look.
-            until = shown.until,
-            open = escape(&shown.open_field()),
+            empty = empty_offer(&list, &self.pages.url("deleted/empty")),
         )
     }
 
@@ -122,13 +104,12 @@ impl Server {
             "<h1>Empty Recently deleted?</h1>\
              <p>The {count} items in it are deleted for good, from your Homebase and every \
              device. This can't be undone.</p>\
-             <form method=post action=\"{url}\"><input type=hidden name=until value=\"{until}\">\
-             <input type=hidden name=open value=\"{open}\">\
+             <form method=post action=\"{url}\">\
+             <input type=hidden name=listed value=\"{listed}\">\
              <button>Delete them for good</button></form>\
              <p class=small>Changed your mind? Leave this page: nothing is deleted.</p>",
             count = field("count"),
-            until = field("until"),
-            open = field("open"),
+            listed = field("listed"),
             url = self.pages.url("deleted/empty/yes"),
         )
     }
@@ -149,23 +130,22 @@ impl Server {
         )
     }
 
-    /// Empties Recently deleted of what the page showed (deleted until then): every account's,
-    /// as anything deleted after the look is newer.
+    /// Empties Recently deleted of everything it held when the page listed it, in the accounts
+    /// that held anything.
     pub(super) fn empty(&self, form: &HashMap<String, String>) -> String {
-        let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
+        let listed = control::listed_from_field(form.get("listed").map_or("", String::as_str));
+        if listed.is_empty() {
             return "Nothing was deleted.".into();
-        };
-        let shown =
-            control::Shown::with_open_field(at_ms, form.get("open").map_or("", String::as_str));
-        let emptied = control::deleted(&self.paths, usize::MAX).and_then(|items| {
-            control::empty_shown(&self.paths, &items.unwrap_or_default(), &shown)
-        });
-        match emptied {
+        }
+        match control::empty_listed(&self.paths, &listed) {
             Ok(()) => {
                 (self.send)(Event::Wake);
                 "Emptying Recently deleted.".into()
             }
-            Err(e) => format!("That didn't work: {e}"),
+            Err(e) => {
+                (self.send)(Event::Wake);
+                format!("That didn't work everywhere: {e}")
+            }
         }
     }
 
@@ -218,5 +198,51 @@ impl Server {
             }
             Err(e) => format!("Not confirmed: {e}"),
         }
+    }
+}
+
+/// The button that empties Recently deleted as listed (`url`): all it held now, nothing deleted
+/// after this look. When emptying would take nothing (every folder in it still holds a live
+/// item), it says so instead.
+fn empty_offer(list: &hbsync_app::protocol::DeletedList, url: &str) -> String {
+    if list.total() == 0 {
+        return "<p class=small>Nothing in it can be emptied yet: the folders in it still hold \
+                items that aren't deleted. You can restore them.</p>"
+            .into();
+    }
+    format!(
+        "<form method=post action=\"{url}\">\
+         <input type=hidden name=count value=\"{count}\">\
+         <input type=hidden name=listed value=\"{listed}\">\
+         <button class=secondary>Empty now…</button></form>",
+        count = list.total(),
+        listed = escape(&control::listed_field(&list.accounts)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_app::protocol::{DeletedAccount, DeletedList};
+
+    /// Empty is offered only when emptying takes something; else the page says why not.
+    #[test]
+    fn empty_is_offered_only_when_it_takes_something() {
+        let list = |items| DeletedList {
+            items: Vec::new(),
+            accounts: vec![DeletedAccount {
+                identity: "a.example".into(),
+                deletes: 1,
+                items,
+                db: "d1".into(),
+                seq: 3,
+            }],
+        };
+        assert!(empty_offer(&list(2), "/e").contains("Empty now"));
+        let none = empty_offer(&list(0), "/e");
+        assert!(
+            !none.contains("<form") && none.contains("can be emptied yet"),
+            "{none}"
+        );
     }
 }

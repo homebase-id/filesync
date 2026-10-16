@@ -16,7 +16,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -45,9 +45,15 @@ pub enum Ask {
     Recent {
         limit: usize,
     },
-    /// The newest items of Recently deleted, every account's.
+    /// The newest deletes of Recently deleted, every account's: each item deleted on its own,
+    /// with how many items its delete took along (never those items themselves).
     Deleted {
         limit: usize,
+    },
+    /// The items of Recently deleted the user named (a node id, or its place as `hbsync
+    /// deleted` shows it), any account's; refused naming the first one that isn't there.
+    FindDeleted {
+        items: Vec<String>,
     },
     /// Set the folder at `path` up for `identity` and sync it (`hbsync setup` has checked it).
     AddFolder {
@@ -76,8 +82,10 @@ pub enum Reply {
     Status(Box<DaemonStatus>),
     /// Newest first.
     Recent(Vec<RecentItem>),
-    /// Newest first.
-    Deleted(Vec<DeletedItem>),
+    /// The newest deletes, and each account's Recently deleted as a whole.
+    Deleted(DeletedList),
+    /// The items asked for, in the order asked.
+    Found(Vec<DeletedItem>),
     Done,
     Refused(String),
 }
@@ -122,9 +130,11 @@ pub enum AccountControl {
     Restore { nodes: Vec<NodeId> },
     /// Delete these items of Recently deleted for good, each with what was deleted with it.
     EmptyDeleted { nodes: Vec<NodeId> },
-    /// Delete everything in Recently deleted removed until then (Unix ms) for good: what the
-    /// user saw, nothing removed since.
-    EmptyDeletedUntil { at_ms: i64 },
+    /// Delete for good what Recently deleted held when it was listed ([`DeletedAccount::db`],
+    /// [`DeletedAccount::seq`]): every removal this device recorded up to `seq`, nothing recorded
+    /// since and nothing live (a folder holding either stays). A listing of another DB, or one
+    /// the account never gave, is refused in the reply.
+    EmptyListed { db: String, seq: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,12 +154,55 @@ pub struct RecentItem {
     pub synced: Synced,
 }
 
+/// Recently deleted's newest deletes, every account's, newest first, and each account's that
+/// holds anything, as a whole.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeletedList {
+    pub items: Vec<DeletedItem>,
+    pub accounts: Vec<DeletedAccount>,
+}
+
+impl DeletedList {
+    /// Every item, the ones the deletes took along too.
+    pub fn total(&self) -> usize {
+        self.accounts.iter().map(|a| a.items).sum()
+    }
+}
+
+/// An account's Recently deleted as a whole, when listed: what emptying all of it takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedAccount {
+    pub identity: String,
+    /// The items deleted on their own.
+    pub deletes: usize,
+    /// What emptying all of it deletes for good: removed nodes only, every item and the ones its
+    /// deletes took along, but a folder holding a live node or a removal that stays.
+    pub items: usize,
+    /// What the listing saw, which emptying all of it as listed takes
+    /// ([`AccountControl::EmptyListed`]): the account's DB (its own id: one made again is
+    /// another), and the counter of its order of recording removals.
+    pub db: String,
+    pub seq: u64,
+}
+
 /// An item of an account's Recently deleted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeletedItem {
     pub identity: String,
     #[serde(flatten)]
     pub deleted: Deleted,
+    /// How many items its delete took along: the removed ones deleted with it, which restoring
+    /// it restores (a deleted folder of thousands of files is one item with its count), whatever
+    /// emptying can take now; 0 for an item a delete took along itself.
+    #[serde(default)]
+    pub along: usize,
+}
+
+impl DeletedItem {
+    /// This item and what its delete took along.
+    pub fn count(&self) -> usize {
+        1 + self.along
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

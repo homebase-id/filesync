@@ -123,7 +123,7 @@ fn reaches_root(tree: &Tree, node: NodeId, known: &mut HashMap<NodeId, bool>) ->
     let reached = match up.end {
         End::Top => true,
         End::At(at) => known.get(&at).copied().unwrap_or(false),
-        End::Cycle => false,
+        End::Cycle | End::Deep => false,
     };
     for n in up.items {
         known.insert(n, reached);

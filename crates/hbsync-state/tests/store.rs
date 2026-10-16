@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 8);
+    assert_eq!(db.schema_version()?, 9);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -258,7 +258,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
 
 mod mirror {
     use super::*;
-    use hbsync_state::{MirrorFile, MirrorRow};
+    use hbsync_state::{MirrorFile, MirrorRow, RemovedRow};
     use hbsync_types::schema::NodeContent;
 
     /// A node's content survives its mirror row, unknown keys, creation time and tags
@@ -507,6 +507,7 @@ mod mirror {
             }),
         );
         let alone = row(NodeId::new(), NodeId::ROOT, "g", None);
+        // Each with the place it is recorded in.
         let with = |row: &MirrorRow, removed_at| RemovedRow {
             row: row.clone(),
             removed_at,
@@ -539,7 +540,41 @@ mod mirror {
             };
             assert_eq!(expired(15)?, ["f", "d"]);
             assert_eq!(expired(9)?, ["f"]);
+            // Each recorded in turn, the counter at the last.
+            let upto = |seq| -> hbsync_state::Result<Vec<(String, u64)>> {
+                Ok(s.recorded_upto(seq)?
+                    .into_iter()
+                    .map(|r| (r.removed.row.name, r.seq))
+                    .collect())
+            };
+            assert_eq!(upto(2)?, [("f".to_owned(), 1), ("d".to_owned(), 2)]);
+            assert_eq!(s.removed_seq()?, 3);
             Ok(())
+        })?;
+        // The version recorded again keeps its place (and changes nothing); another version is
+        // another removal, the next place; so is a restore then a delete again.
+        db.write(|s| {
+            s.put_removed(&rd)?;
+            s.delete_removed(alone.node)?;
+            s.put_removed(&with(&alone, Some(30)))
+        })?;
+        let mut again = with(&folder, Some(10));
+        again.row.version = VersionTag(Uuid::new_v4());
+        db.write(|s| s.put_removed(&again))?;
+        let seq = |db: &mut StateDb, node| -> hbsync_state::Result<Option<u64>> {
+            db.read(|s| {
+                Ok(s.recorded_upto(u64::MAX)?
+                    .into_iter()
+                    .find(|r| r.removed.row.node == node)
+                    .map(|r| r.seq))
+            })
+        };
+        assert_eq!(seq(&mut db, folder.node)?, Some(5));
+        assert_eq!(seq(&mut db, alone.node)?, Some(4));
+        assert_eq!(db.read(|s| s.removed_seq())?, 5, "written once per commit");
+        db.write(|s| {
+            s.delete_removed(alone.node)?;
+            s.put_removed(&ra).map(drop)
         })?;
         db.write(|s| {
             assert!(s.delete_removed(alone.node)?);
@@ -547,7 +582,46 @@ mod mirror {
             assert!(!s.delete_removed(file.node)?);
             Ok(())
         })?;
-        assert_eq!(db.read(|s| s.list_removed(10))?, [rd]);
+        assert_eq!(db.read(|s| s.list_removed(10))?, [again]);
+        Ok(())
+    }
+
+    /// This device's own removal, its time still open, keeps its place when confirmed; the
+    /// feed's row of another version of that node (restored elsewhere, edited, deleted again)
+    /// is another removal, recorded at the next place.
+    #[test]
+    fn another_version_after_an_open_removal_is_another_removal() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let x = row(NodeId::new(), NodeId::ROOT, "x", None);
+        let open = RemovedRow {
+            row: x.clone(),
+            removed_at: None,
+        };
+        let mut again = RemovedRow {
+            row: x.clone(),
+            removed_at: Some(40),
+        };
+        again.row.version = VersionTag(Uuid::new_v4());
+        let seqs = |db: &mut StateDb| -> hbsync_state::Result<Vec<(Option<i64>, u64)>> {
+            db.read(|s| {
+                Ok(s.recorded_upto(u64::MAX)?
+                    .into_iter()
+                    .map(|r| (r.removed.removed_at, r.seq))
+                    .collect())
+            })
+        };
+        db.write(|s| s.put_removed(&open))?;
+        // Its own removal confirmed, and the feed's row of it: the same removal.
+        db.write(|s| {
+            s.confirm_removed(x.remote_ref(), 30)?;
+            s.put_removed(&RemovedRow {
+                removed_at: Some(30),
+                ..open.clone()
+            })
+        })?;
+        assert_eq!(seqs(&mut db)?, [(Some(30), 1)]);
+        db.write(|s| s.put_removed(&again))?;
+        assert_eq!(seqs(&mut db)?, [(Some(40), 2)]);
         Ok(())
     }
 
@@ -727,7 +801,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 8);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 9);
     Ok(())
 }
 

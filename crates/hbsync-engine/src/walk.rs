@@ -23,8 +23,10 @@ pub enum End {
     /// At a node the step gave nothing for: one it knows nothing of, or one it stops at (a
     /// folder already worked out, say).
     At(NodeId),
-    /// At a node already passed, or deeper than any path may be.
+    /// At a node already passed.
     Cycle,
+    /// Deeper than any path may be ([`MAX_DEPTH`] steps), without passing a node twice.
+    Deep,
 }
 
 /// Walks up from `start`: `step(at)` gives what `at` holds and its parent, or `None` where the
@@ -39,8 +41,10 @@ pub fn up<T, E>(
     loop {
         let end = if at.is_root() {
             End::Top
-        } else if !seen.insert(at) || items.len() >= MAX_DEPTH {
+        } else if !seen.insert(at) {
             End::Cycle
+        } else if items.len() >= MAX_DEPTH {
+            End::Deep
         } else if let Some((item, parent)) = step(at)? {
             items.push(item);
             at = parent;
@@ -73,5 +77,14 @@ mod tests {
         assert_eq!(walk(&parents, gap), (vec![], End::At(gap)));
         assert_eq!(walk(&parents, c), (vec![c, d], End::Cycle));
         assert_eq!(walk(&parents, NodeId::ROOT), (vec![], End::Top));
+    }
+
+    /// A chain past the deepest a path may be ends there, told apart from a cycle.
+    #[test]
+    fn a_chain_too_deep_ends_deep() {
+        let chain: Vec<NodeId> = (0..MAX_DEPTH + 2).map(|_| NodeId::new()).collect();
+        let parents: HashMap<NodeId, NodeId> = chain.windows(2).map(|w| (w[0], w[1])).collect();
+        let (items, end) = walk(&parents, chain[0]);
+        assert_eq!((items.len(), end), (MAX_DEPTH, End::Deep));
     }
 }

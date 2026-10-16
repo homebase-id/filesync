@@ -6,9 +6,11 @@ use std::time::{Duration, Instant};
 
 use crate::ipc::{self, IpcError};
 use crate::protocol::{
-    Ask, Control, DaemonControl, DaemonStatus, DeletedItem, RecentItem, Reply, Request,
+    AccountControl, Ask, Control, DaemonControl, DaemonStatus, DeletedAccount, DeletedItem,
+    DeletedList, RecentItem, Reply, Request,
 };
 use crate::{Config, CredentialStore, Paths, Root, autostart};
+use hbsync_types::NodeId;
 
 /// An error worded for people: the CLI prints it, the tray shows it.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -57,10 +59,27 @@ pub fn recent(paths: &Paths, limit: usize) -> Result<Option<Vec<RecentItem>>> {
     }
 }
 
-/// Recently deleted, newest first; `None` when the daemon isn't running.
-pub fn deleted(paths: &Paths, limit: usize) -> Result<Option<Vec<DeletedItem>>> {
+/// Recently deleted's newest `limit` deletes, newest first, each with how many items it took
+/// along, and each account's as a whole; `None` when the daemon isn't running.
+pub fn deleted(paths: &Paths, limit: usize) -> Result<Option<DeletedList>> {
     match ask(paths, Ask::Deleted { limit }) {
         Ok(Reply::Deleted(list)) => Ok(Some(list)),
+        other => unexpected(other),
+    }
+}
+
+/// The items of Recently deleted that `items` name (a node id, or the place `hbsync deleted`
+/// shows), deleted on their own or along with a folder; `None` when the daemon isn't running.
+pub fn find_deleted(paths: &Paths, items: Vec<String>) -> Result<Option<Vec<DeletedItem>>> {
+    match ask(paths, Ask::FindDeleted { items }) {
+        Ok(Reply::Found(found)) => Ok(Some(found)),
+        other => unexpected(other),
+    }
+}
+
+fn unexpected<T>(answer: std::result::Result<Reply, IpcError>) -> Result<Option<T>> {
+    match answer {
+        Ok(Reply::Refused(why)) => Err(why.into()),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
         Err(IpcError::NotRunning) => Ok(None),
         Err(e) => Err(e.into()),
@@ -101,90 +120,79 @@ pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> 
     )
 }
 
-/// What emptying Recently deleted takes after the user saw it: everything up to the newest
-/// time the server confirmed among what was shown (anything deleted after the look is newer),
-/// and this device's own removals shown with their time still open, by node.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Shown {
-    pub until: i64,
-    /// `(identity, node)`.
-    pub open: Vec<(String, hbsync_types::NodeId)>,
+/// Restores `items` (each with what its delete took along), in their accounts.
+pub fn restore(paths: &Paths, items: &[DeletedItem]) -> Result<()> {
+    for (identity, nodes) in by_account(items) {
+        account(paths, &identity, AccountControl::Restore { nodes })?;
+    }
+    Ok(())
 }
 
-impl Shown {
-    pub fn of(items: &[DeletedItem]) -> Shown {
-        Shown {
-            until: items
-                .iter()
-                .filter_map(|i| i.deleted.removed_at_ms)
-                .max()
-                .unwrap_or(0),
-            open: items
-                .iter()
-                .filter(|i| i.deleted.removed_at_ms.is_none())
-                .map(|i| (i.identity.clone(), i.deleted.node))
-                .collect(),
-        }
+/// Deletes `items` (each with what its delete took along) for good, in their accounts.
+pub fn empty(paths: &Paths, items: &[DeletedItem]) -> Result<()> {
+    for (identity, nodes) in by_account(items) {
+        account(paths, &identity, AccountControl::EmptyDeleted { nodes })?;
     }
+    Ok(())
+}
 
-    /// The open ones as a form field: `identity/node`, comma-separated.
-    pub fn open_field(&self) -> String {
-        let pairs: Vec<String> = self
-            .open
-            .iter()
-            .map(|(identity, node)| format!("{identity}/{}", node.0))
-            .collect();
-        pairs.join(",")
+fn by_account(items: &[DeletedItem]) -> std::collections::BTreeMap<String, Vec<NodeId>> {
+    let mut by = std::collections::BTreeMap::<String, Vec<NodeId>>::new();
+    for item in items {
+        by.entry(item.identity.clone())
+            .or_default()
+            .push(item.deleted.node);
     }
+    by
+}
 
-    /// [`Shown::open_field`] read back; what doesn't read is left out.
-    pub fn with_open_field(until: i64, field: &str) -> Shown {
-        let open = field
-            .split(',')
-            .filter_map(|pair| {
-                let (identity, node) = pair.split_once('/')?;
-                Some((
-                    identity.to_owned(),
-                    hbsync_types::NodeId(node.parse().ok()?),
-                ))
+/// Empties Recently deleted of everything it held when `accounts` were listed, nothing removed
+/// since: each account is asked, the ones that refuse are named.
+pub fn empty_listed(paths: &Paths, accounts: &[DeletedAccount]) -> Result<()> {
+    let refused: Vec<String> = accounts
+        .iter()
+        .filter_map(|a| {
+            let control = AccountControl::EmptyListed {
+                db: a.db.clone(),
+                seq: a.seq,
+            };
+            account(paths, &a.identity, control)
+                .err()
+                .map(|e| format!("{}: {e}", a.identity))
+        })
+        .collect();
+    match refused.is_empty() {
+        true => Ok(()),
+        false => Err(refused.join("; ").into()),
+    }
+}
+
+/// `accounts` as a form field (what emptying all of them takes): `identity/db/seq`,
+/// comma-separated.
+pub fn listed_field(accounts: &[DeletedAccount]) -> String {
+    let parts: Vec<String> = accounts
+        .iter()
+        .map(|a| format!("{}/{}/{}", a.identity, a.db, a.seq))
+        .collect();
+    parts.join(",")
+}
+
+/// [`listed_field`] read back (without the counts); what doesn't read is left out.
+pub fn listed_from_field(field: &str) -> Vec<DeletedAccount> {
+    field
+        .split(',')
+        .filter_map(|part| {
+            let (rest, seq) = part.rsplit_once('/')?;
+            let (identity, db) = rest.rsplit_once('/')?;
+            Some(DeletedAccount {
+                identity: identity.to_owned(),
+                deletes: 0,
+                items: 0,
+                db: db.to_owned(),
+                seq: seq.parse().ok()?,
             })
-            .collect();
-        Shown { until, open }
-    }
-}
-
-/// Empties Recently deleted of what was `shown`, in every account of `items` (as listed now).
-pub fn empty_shown(paths: &Paths, items: &[DeletedItem], shown: &Shown) -> Result<()> {
-    empty_deleted_until(paths, items, shown.until)?;
-    let mut open: std::collections::BTreeMap<&str, Vec<hbsync_types::NodeId>> =
-        std::collections::BTreeMap::new();
-    for (identity, node) in &shown.open {
-        open.entry(identity).or_default().push(*node);
-    }
-    for (identity, nodes) in open {
-        account(
-            paths,
-            identity,
-            crate::protocol::AccountControl::EmptyDeleted { nodes },
-        )?;
-    }
-    Ok(())
-}
-
-/// Deletes for good what Recently deleted had until `at_ms` (Unix ms, its newest item the user
-/// saw), in every account of `items`: anything deleted since is newer.
-pub fn empty_deleted_until(paths: &Paths, items: &[DeletedItem], at_ms: i64) -> Result<()> {
-    let mut identities: Vec<&str> = items.iter().map(|i| i.identity.as_str()).collect();
-    identities.sort_unstable();
-    identities.dedup();
-    for identity in identities {
-        account(
-            paths,
-            identity,
-            crate::protocol::AccountControl::EmptyDeletedUntil { at_ms },
-        )?;
-    }
-    Ok(())
+        })
+        .collect()
 }
 
 /// Has the account `identity` start over: its credentials changed.
@@ -431,31 +439,19 @@ pub fn unlink(paths: &Paths) -> Result<Option<Unlinked>> {
 mod tests {
     use super::*;
 
-    /// What emptying takes after a look: up to the newest confirmed time, and the open items
-    /// by node, also through the tray's form field.
+    /// What emptying everything takes goes through the tray's form field and back.
     #[test]
-    fn emptying_takes_what_was_shown_the_open_items_too() {
-        use hbsync_types::activity::Deleted;
-        use hbsync_types::{NodeId, NodeKind};
-        let item = |identity: &str, at: Option<i64>| DeletedItem {
+    fn the_listed_accounts_go_through_a_form_field() {
+        let a = |identity: &str, seq| DeletedAccount {
             identity: identity.into(),
-            deleted: Deleted {
-                node: NodeId::new(),
-                parent: NodeId::ROOT,
-                path: "x".into(),
-                kind: NodeKind::File,
-                size: None,
-                removed_at_ms: at,
-                root: NodeId::ROOT,
-                folder: None,
-            },
+            deletes: 0,
+            items: 0,
+            db: "d1".into(),
+            seq,
         };
-        let items = [item("a", None), item("a", Some(7)), item("b", Some(9))];
-        let shown = Shown::of(&items);
-        assert_eq!(shown.until, 9);
-        assert_eq!(shown.open, [("a".to_owned(), items[0].deleted.node)]);
-        assert_eq!(Shown::with_open_field(9, &shown.open_field()), shown);
-        assert_eq!(Shown::with_open_field(3, "").open, []);
+        let accounts = [a("a.example", 9), a("b/c.example", 4)];
+        assert_eq!(listed_from_field(&listed_field(&accounts)), accounts);
+        assert_eq!(listed_from_field(""), []);
     }
 
     #[test]

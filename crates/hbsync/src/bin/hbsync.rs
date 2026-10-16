@@ -1,6 +1,5 @@
 //! The Homebase Filesync command line: sets syncing up and controls the daemon (`hbsyncd`).
 
-use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -9,12 +8,10 @@ use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop};
 use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Taken};
-use hbsync_app::protocol::{
-    AccountControl, DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints,
-};
+use hbsync_app::protocol::{DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints};
 use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
-use hbsync_types::{NodeId, Role};
+use hbsync_types::Role;
 
 type Res<T> = hbsync_app::control::Result<T>;
 
@@ -97,7 +94,7 @@ enum Command {
     },
     /// Shows Recently deleted, newest first: what can still be restored.
     Deleted {
-        /// How many items.
+        /// How many deletes (a deleted folder is one, with everything in it).
         #[arg(short = 'n', default_value_t = 50)]
         limit: usize,
     },
@@ -249,63 +246,72 @@ fn run(command: Command) -> Res<ExitCode> {
             daemon::daemon(&paths, DaemonControl::Resume)?;
             println!("Resumed.");
         }
-        Command::Deleted { limit } => match daemon::deleted(&paths, limit)? {
+        Command::Deleted { limit } => match daemon::deleted(&paths, limit)?.map(|l| l.items) {
             Some(list) if list.is_empty() => println!("Recently deleted is empty."),
             Some(list) => {
-                let now = words::now();
-                let main = daemon::configured(&paths)?.map(|r| r.folder);
                 // Each item deleted on its own, with how many its delete took along.
-                for d in list.iter().map(|i| &i.deleted).filter(|d| d.root == d.node) {
-                    let along = list.iter().filter(|i| i.deleted.root == d.node).count() - 1;
-                    let along = match along {
-                        0 => String::new(),
-                        n => format!(" (with {n} items in it)"),
-                    };
-                    let what = words::deleted(d, main.as_deref(), now);
-                    println!("{}  {what}{along}", d.node.0);
+                for (item, what) in list.iter().zip(described(&paths, &list)?) {
+                    println!("{}  {what}", item.deleted.node.0);
                 }
             }
             None => return Ok(not_running()),
         },
         Command::Restore { items } => {
-            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+            let Some(found) = daemon::find_deleted(&paths, items)? else {
                 return Ok(not_running());
             };
-            for (identity, nodes) in pick(&paths, &list, &items)? {
-                daemon::account(&paths, &identity, AccountControl::Restore { nodes })?;
-            }
+            daemon::restore(&paths, &found)?;
             println!("Restoring; the next sync brings it back.");
         }
-        Command::EmptyDeleted { items, yes } => {
-            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+        Command::EmptyDeleted { items, yes } if !items.is_empty() => {
+            let Some(found) = daemon::find_deleted(&paths, items.clone())? else {
                 return Ok(not_running());
             };
-            if list.is_empty() {
-                println!("Recently deleted is empty.");
-                return Ok(ExitCode::SUCCESS);
-            }
-            // None: everything listed now, nothing deleted after this look.
-            let picked = match items.is_empty() {
-                true => None,
-                false => Some(pick(&paths, &list, &items)?),
-            };
-            let what = match &picked {
-                None => format!("the {} items in Recently deleted", list.len()),
-                Some(_) => items.join(", "),
-            };
-            if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
+            // What was found, as `hbsync deleted` shows it: the user's words may name another.
+            let question = format!(
+                "In Recently deleted:\n  {}\nDelete {} for good?",
+                described(&paths, &found)?.join("\n  "),
+                if found.len() == 1 { "it" } else { "them" }
+            );
+            if !yes && !ask_yes(&question)? {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
-            match picked {
-                // Newest first.
-                None => daemon::empty_shown(&paths, &list, &daemon::Shown::of(&list))?,
-                Some(picked) => {
-                    for (identity, nodes) in picked {
-                        daemon::account(&paths, &identity, AccountControl::EmptyDeleted { nodes })?;
-                    }
-                }
+            daemon::empty(&paths, &found)?;
+            println!("Deleting for good.");
+        }
+        Command::EmptyDeleted { yes, .. } => {
+            // Everything it holds now, nothing deleted after this look: the counts only.
+            let Some(list) = daemon::deleted(&paths, 0)? else {
+                return Ok(not_running());
+            };
+            if list.accounts.is_empty() {
+                println!("Recently deleted is empty.");
+                return Ok(ExitCode::SUCCESS);
             }
+            if list.total() == 0 {
+                // Every folder in it still holds a live item: nothing goes for good yet.
+                let shown = daemon::deleted(&paths, 20)?
+                    .map(|l| l.items)
+                    .unwrap_or_default();
+                println!(
+                    "Nothing in Recently deleted can be emptied yet: the folders in it still \
+                     hold items that aren't deleted. In it:"
+                );
+                for what in described(&paths, &shown)? {
+                    println!("  {what}");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let question = format!(
+                "Delete the {} items in Recently deleted for good?",
+                list.total()
+            );
+            if !yes && !ask_yes(&question)? {
+                println!("Nothing deleted.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            daemon::empty_listed(&paths, &list.accounts)?;
             println!("Deleting for good.");
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
@@ -419,31 +425,24 @@ fn parse_role(s: &str) -> Result<Role, String> {
     s.parse()
 }
 
-/// The items of `list` (Recently deleted) that `items` name, by node id or as `hbsync deleted`
-/// shows them ([`words::deleted_place`]; a path deleted twice names its latest), by account.
-fn pick(
-    paths: &Paths,
-    list: &[DeletedItem],
-    items: &[String],
-) -> Res<BTreeMap<String, Vec<NodeId>>> {
+/// Items of Recently deleted as `hbsync deleted` shows them: where, when deleted, and how many
+/// items each delete took along.
+fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
+    let now = words::now();
     let main = daemon::configured(paths)?.map(|r| r.folder);
-    let mut picked: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
-    for item in items {
-        let id = item.parse().ok().map(NodeId);
-        let place = item.trim_end_matches('/');
-        let found = list
-            .iter()
-            .find(|i| {
-                Some(i.deleted.node) == id
-                    || words::deleted_place(&i.deleted, main.as_deref()) == place
-            })
-            .ok_or_else(|| format!("{item} isn't in Recently deleted"))?;
-        picked
-            .entry(found.identity.clone())
-            .or_default()
-            .push(found.deleted.node);
-    }
-    Ok(picked)
+    Ok(items
+        .iter()
+        .map(|item| {
+            let along = match item.along {
+                0 => String::new(),
+                n => format!(" (with {n} items in it)"),
+            };
+            format!(
+                "{}{along}",
+                words::deleted(&item.deleted, main.as_deref(), now)
+            )
+        })
+        .collect())
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.

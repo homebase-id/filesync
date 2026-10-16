@@ -275,9 +275,31 @@ impl AccountReader {
         self.db.read_folder(folder, |s| s.recent_synced(limit))
     }
 
-    /// Recently deleted, newest first ([`crate::deleted::list`]).
-    pub fn recently_deleted(&mut self, limit: usize) -> Result<Vec<Deleted>, StateError> {
-        self.db.read(|s| crate::deleted::list(s, limit))
+    /// Recently deleted's newest deletes with their counts, and its summary
+    /// ([`crate::deleted::deletes`]).
+    pub fn deletes(
+        &mut self,
+        limit: usize,
+    ) -> Result<(Vec<(Deleted, usize)>, crate::deleted::DeletedSummary), StateError> {
+        self.db.read(|s| crate::deleted::deletes(s, limit))
+    }
+
+    /// Whether this DB gave `listed` ([`crate::deleted::listed_here`]).
+    pub fn listed_here(&mut self, listed: &crate::deleted::Listed) -> Result<bool, StateError> {
+        self.db.read(|s| crate::deleted::listed_here(s, listed))
+    }
+
+    /// Items of Recently deleted by node ([`crate::deleted::find`]).
+    pub fn find_deleted(
+        &mut self,
+        nodes: &[hbsync_types::NodeId],
+    ) -> Result<Vec<(Deleted, usize)>, StateError> {
+        self.db.read(|s| crate::deleted::find(s, nodes))
+    }
+
+    /// Every item of Recently deleted ([`crate::deleted::all`]).
+    pub fn all_deleted(&mut self) -> Result<Vec<(Deleted, usize)>, StateError> {
+        self.db.read(crate::deleted::all)
     }
 }
 
