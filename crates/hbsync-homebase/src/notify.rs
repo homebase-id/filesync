@@ -1,6 +1,7 @@
 //! The identity's notification WebSocket, as a wake-up hint: when a file on the sync drive
-//! changes, the sync loop reads the feed now instead of at its next poll. The feed stays the
-//! truth; a missed notification only delays a sync.
+//! changes, the sync loop reads the feed. The feed stays the truth, read from its cursor: every
+//! (re)connect catches up on what wasn't announced (there is no poll), and a missed
+//! notification only delays a sync until the next one.
 //!
 //! Verified in odin-core `V2NotificationSocketController`, `AppNotificationHandler`,
 //! `AppNotificationDispatcher`, and chat-kmp `OdinWebSocketClient`:
@@ -39,8 +40,16 @@ pub enum Event {
     /// The connection broke; it is retried with backoff.
     Lost(String),
     /// The identity refused the subscription (credentials revoked, no access to the drive):
-    /// the notifier stops, as the API calls will be refused too.
+    /// asked again every [`REFUSED_RETRY`], as the API calls are refused too meanwhile.
     Refused(String),
+}
+
+/// How the connection ended.
+enum End {
+    /// The notifier stopped, or nobody listens any more.
+    Stopped,
+    Broke(String),
+    Refused,
 }
 
 /// How often the socket is checked for a stop request and the keep-alive.
@@ -50,6 +59,9 @@ const PING_EVERY: Duration = Duration::from_secs(30);
 const SILENCE: Duration = Duration::from_secs(75);
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// A refused subscription is asked again this much later (the sync's own refusals back off
+/// as long).
+pub const REFUSED_RETRY: Duration = Duration::from_secs(300);
 
 /// The notification connection, on its own thread. Stops when dropped: the thread ends at
 /// its next check (it isn't waited for, as it may be in the middle of connecting).
@@ -66,7 +78,8 @@ impl Notifier {
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
         let (flag, kick) = (stop.clone(), reconnect.clone());
-        // Without a thread there are no hints; the sync loop's poll still catches up.
+        // Without a thread there are no hints: the drive's changes are read at the next sync
+        // this device has a reason for (a change here, a request, a restart).
         let _ = std::thread::Builder::new()
             .name("hbsync-notify".into())
             .spawn(move || run(&client, drive, &events, &flag, &kick));
@@ -98,23 +111,27 @@ fn run(
     let mut backoff = FIRST;
     while !stop.load(Ordering::Relaxed) {
         let mut connected = false;
-        let result = session(client, drive, events, stop, reconnect, &mut connected);
+        let end = session(client, drive, events, stop, reconnect, &mut connected);
         if connected {
             backoff = FIRST;
         }
-        let Err(why) = result else {
-            return; // stopped, or nobody listens any more
+        let pause = match end {
+            End::Stopped => return,
+            _ if reconnect.swap(false, Ordering::Relaxed) => {
+                backoff = FIRST;
+                continue;
+            }
+            End::Broke(why) => {
+                if events.send(Event::Lost(why)).is_err() {
+                    return;
+                }
+                backoff
+            }
+            End::Refused => REFUSED_RETRY,
         };
-        if reconnect.swap(false, Ordering::Relaxed) {
-            backoff = FIRST;
-            continue;
-        }
-        if events.send(Event::Lost(why)).is_err() {
-            return;
-        }
         // Jitter of ±20%, so clients of one identity don't reconnect in lockstep.
         let jitter = random::<1>().map_or(0, |b| b[0]) as f64 / 255.0;
-        let wait = backoff.mul_f64(0.8 + 0.4 * jitter);
+        let wait = pause.mul_f64(0.8 + 0.4 * jitter);
         let until = Instant::now() + wait;
         while Instant::now() < until
             && !stop.load(Ordering::Relaxed)
@@ -132,7 +149,7 @@ fn run(
 
 type Socket = WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
-/// One connection, until it breaks (`Err`) or the notifier stops (`Ok`).
+/// One connection, until it breaks, is refused, or the notifier stops.
 fn session(
     client: &Client,
     drive: TargetDrive,
@@ -140,7 +157,18 @@ fn session(
     stop: &AtomicBool,
     reconnect: &AtomicBool,
     connected: &mut bool,
-) -> Result<(), String> {
+) -> End {
+    connection(client, drive, events, stop, reconnect, connected).unwrap_or_else(End::Broke)
+}
+
+fn connection(
+    client: &Client,
+    drive: TargetDrive,
+    events: &Sender<Event>,
+    stop: &AtomicBool,
+    reconnect: &AtomicBool,
+    connected: &mut bool,
+) -> Result<End, String> {
     let mut socket = connect(client)?;
     send(
         &mut socket,
@@ -157,7 +185,7 @@ fn session(
     loop {
         if stop.load(Ordering::Relaxed) {
             let _ = socket.close(None);
-            return Ok(());
+            return Ok(End::Stopped);
         }
         if reconnect.load(Ordering::Relaxed) {
             let _ = socket.close(None);
@@ -173,13 +201,16 @@ fn session(
                     }
                     Notification::Changed => Event::Changed,
                     Notification::Refused(why) => {
-                        let _ = events.send(Event::Refused(why));
-                        return Ok(()); // stop
+                        let _ = socket.close(None);
+                        if events.send(Event::Refused(why)).is_err() {
+                            return Ok(End::Stopped);
+                        }
+                        return Ok(End::Refused);
                     }
                     _ => continue,
                 };
                 if events.send(event).is_err() {
-                    return Ok(());
+                    return Ok(End::Stopped);
                 }
             }
             Ok(Message::Close(frame)) => {

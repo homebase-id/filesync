@@ -1,6 +1,8 @@
 //! When a folder syncs: what asks for a sync (a change here or in its part of the drive, a
-//! request, the poll) and what holds it back (a pause, the backoff after a failure); and when
-//! changes the drive announced are pulled ([`Announced`]). Pure: the caller tells the time.
+//! request, work a sync left unfinished) and what holds it back (a pause, the backoff after a
+//! failure); and when changes the drive announced are pulled ([`Announced`]). There is no
+//! poll of the drive: its changes come announced, and every (re)connect of the notifications
+//! catches up from the cursor. Pure: the caller tells the time.
 
 use std::time::{Duration, Instant};
 
@@ -62,12 +64,13 @@ impl Announced {
 
 #[derive(Debug)]
 pub(crate) struct Schedule {
-    /// A sync at least this often.
-    poll: Duration,
-    next_poll: Instant,
+    /// How often what is local is looked at (the ignore rules, a folder that is gone, a folder
+    /// without a watcher), and how long unfinished work waits for another try.
+    look: Duration,
+    next_look: Instant,
     /// Something asked for a sync since the last one.
     wanted: bool,
-    /// No sync before then (a backoff, a folder that is gone).
+    /// No sync before then (a backoff, a folder that is gone, unfinished work).
     not_before: Instant,
     /// Paused: until then (Unix seconds), or until resumed (`None`).
     pause: Option<Until>,
@@ -76,10 +79,10 @@ pub(crate) struct Schedule {
 
 impl Schedule {
     /// A folder starting (paused, with `pause`): it syncs at once unless paused.
-    pub fn new(now: Instant, poll: Duration, pause: Option<Until>) -> Schedule {
+    pub fn new(now: Instant, look: Duration, pause: Option<Until>) -> Schedule {
         Schedule {
-            poll,
-            next_poll: now + poll,
+            look,
+            next_look: now + look,
             wanted: true,
             not_before: now,
             pause,
@@ -123,14 +126,13 @@ impl Schedule {
         self.pause.flatten().is_some_and(|t| unix >= t) && self.resume(now)
     }
 
-    /// Whether the poll is due: a sync is wanted then, whatever else happened. Its next one
-    /// is a poll later, whether the syncs succeed or back off.
-    pub fn poll_due(&mut self, now: Instant) -> bool {
-        if now < self.next_poll {
+    /// Whether it is time to look at what is local again; the next look is a look later. It
+    /// asks for no sync by itself.
+    pub fn look_due(&mut self, now: Instant) -> bool {
+        if now < self.next_look {
             return false;
         }
-        self.next_poll = now + self.poll;
-        self.wanted = true;
+        self.next_look = now + self.look;
         true
     }
 
@@ -139,18 +141,24 @@ impl Schedule {
         self.pause.is_none() && self.wanted && now >= self.not_before
     }
 
-    /// Not now: tried again at the next poll (the folder gone, rules that don't parse).
-    /// Returns the wait.
+    /// Not now: tried again a look later (the folder gone, rules that don't parse). Returns
+    /// the wait.
     pub fn later(&mut self, now: Instant) -> Duration {
-        self.not_before = now + self.poll;
-        self.poll
+        self.not_before = now + self.look;
+        self.look
     }
 
-    /// A sync ended. Stopped by a pause (or a stop), the rest waits for resume.
-    pub fn synced(&mut self, stopped: bool) {
+    /// A sync ended. Stopped by a pause (or a stop), the rest waits for resume. Work it left
+    /// `unfinished` (deferred or failed, not held for a confirmation) is tried again a look
+    /// later; nothing else asks for one then.
+    pub fn synced(&mut self, now: Instant, stopped: bool, unfinished: bool) {
         self.backoff = Backoff::new();
-        if !stopped {
-            self.wanted = false;
+        if stopped {
+            return;
+        }
+        self.wanted = unfinished;
+        if unfinished {
+            self.not_before = now + self.look;
         }
     }
 
@@ -166,7 +174,7 @@ impl Schedule {
 mod tests {
     use super::*;
 
-    const POLL: Duration = Duration::from_secs(60);
+    const LOOK: Duration = Duration::from_secs(60);
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
@@ -175,26 +183,44 @@ mod tests {
     #[test]
     fn it_syncs_at_start_then_when_something_changes() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, POLL, None);
+        let mut s = Schedule::new(t0, LOOK, None);
         assert!(s.due(t0));
-        s.synced(false);
+        s.synced(t0, false, false);
         assert!(!s.due(t0 + ms(10)));
         s.want();
         assert!(s.due(t0 + ms(20)));
     }
 
+    /// No poll: time alone asks for no sync, however long nothing happens.
     #[test]
-    fn the_poll_asks_for_a_sync() {
+    fn nothing_syncs_without_a_reason() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, POLL, None);
-        s.synced(false);
-        assert!(!s.poll_due(t0 + POLL - ms(1)));
-        assert!(s.poll_due(t0 + POLL));
-        assert!(s.due(t0 + POLL));
+        let mut s = Schedule::new(t0, LOOK, None);
+        s.synced(t0, false, false);
+        assert!(!s.look_due(t0 + LOOK - ms(1)));
+        assert!(s.look_due(t0 + LOOK));
         assert!(
-            !s.poll_due(t0 + POLL + ms(1)),
-            "the next poll is a poll later"
+            !s.look_due(t0 + LOOK + ms(1)),
+            "the next look is a look later"
         );
+        assert!(!s.due(t0 + LOOK * 100));
+    }
+
+    /// Work a sync left unfinished is tried again a look later, not at once.
+    #[test]
+    fn unfinished_work_is_tried_again_a_look_later() {
+        let t0 = Instant::now();
+        let mut s = Schedule::new(t0, LOOK, None);
+        s.synced(t0, false, true);
+        assert!(!s.due(t0 + LOOK - ms(1)));
+        assert!(s.due(t0 + LOOK));
+        // A change meanwhile doesn't wait for it.
+        s.synced(t0, false, true);
+        s.asked(t0 + ms(5));
+        assert!(s.due(t0 + ms(5)));
+        // Finished: nothing more.
+        s.synced(t0 + ms(5), false, false);
+        assert!(!s.due(t0 + LOOK * 2));
     }
 
     /// Announcements are pulled once they stop for a second, or ten seconds after the first.
@@ -221,7 +247,7 @@ mod tests {
     #[test]
     fn failures_back_off_doubling_and_waking_forgets_it() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, POLL, None);
+        let mut s = Schedule::new(t0, LOOK, None);
         assert_eq!(s.failed(t0, State::Offline), Duration::from_secs(5));
         assert!(!s.due(t0 + Duration::from_secs(4)));
         assert!(s.due(t0 + Duration::from_secs(5)));
@@ -243,7 +269,7 @@ mod tests {
     #[test]
     fn a_pause_holds_syncs_until_resumed_or_over() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, POLL, Some(None));
+        let mut s = Schedule::new(t0, LOOK, Some(None));
         assert!(!s.due(t0), "started paused");
         s.want();
         assert!(!s.due(t0));
@@ -260,11 +286,11 @@ mod tests {
     #[test]
     fn a_sync_stopped_by_a_pause_is_still_wanted() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, POLL, None);
-        s.synced(true);
+        let mut s = Schedule::new(t0, LOOK, None);
+        s.synced(t0, true, false);
         assert!(s.due(t0));
-        assert_eq!(s.later(t0), POLL);
-        assert!(!s.due(t0 + POLL - ms(1)));
-        assert!(s.due(t0 + POLL));
+        assert_eq!(s.later(t0), LOOK);
+        assert!(!s.due(t0 + LOOK - ms(1)));
+        assert!(s.due(t0 + LOOK));
     }
 }

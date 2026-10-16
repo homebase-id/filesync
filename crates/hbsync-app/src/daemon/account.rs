@@ -588,7 +588,10 @@ impl Notifications {
                 Some(Hints::Lost(why))
             }
             Event::Refused(why) => {
-                tracing::warn!("notifications refused ({why}); syncing on the poll only");
+                tracing::warn!(
+                    "notifications refused ({why}); asking again in {} min",
+                    hbsync_homebase::notify::REFUSED_RETRY.as_secs() / 60
+                );
                 Some(Hints::Refused(why))
             }
         }

@@ -109,16 +109,22 @@ a failure (service managers restart it then).
   part of the drive, when the identity announces a change on the
   drive (notification socket; once its announcements have stopped for 1 s, at most 10 s
   after the first, so a burst of deletes from another device reaches the mass-delete guard
-  whole), at least once a minute, and on request. After a failure it
-  waits 5 s, doubling to 5 min.
+  whole), when the socket connects (again), on request, and a minute after a sync that left
+  work unfinished (deferred or failed, not held deletes). After a failure it waits 5 s,
+  doubling to 5 min.
+- **No poll:** the drive is read from the feed's cursor, so what wasn't announced (the socket
+  was down, a notification got lost) arrives at the next (re)connect, which catches up as at
+  start, or with the next announced change. A dead socket is noticed within 75 s (no frame,
+  not even a pong to the ping every 30 s) and reconnected (backoff 1 s, doubling to 30 s); a
+  refused subscription is asked again every 5 min.
 - **Pause** stops a running sync between operations and before the next transfer (transfers
   in flight finish); nothing syncs until resume. The watcher keeps recording changes. A pause
   survives a restart (`paused` in the config).
 - **Sleep:** a wall-clock jump of more than 30 s across a 250 ms wait means the machine slept.
   The loop syncs at once and forgets its backoff; the account reconnects the notification
   socket.
-- **Network changes:** the reconnect backoff (at most 30 s) and the poll; no OS hooks yet.
-- **Ignore rules:** `.hbsync/ignore` is checked for an edit at every poll and on a sync
+- **Network changes:** the reconnect backoff (at most 30 s); no OS hooks yet.
+- **Ignore rules:** `.hbsync/ignore` is checked for an edit once a minute and on a sync
   request; an edit restarts the engine with the new rules (sync semantics §10).
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a

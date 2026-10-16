@@ -6,10 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use hbsync_app::daemon::Notifications;
 use hbsync_app::runner::RunnerError;
 use hbsync_app::{Command, FolderStatus, Handle, Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
 use hbsync_engine::root::{AccountReader, RootError, SyncRoot};
+use hbsync_homebase::notify::Event;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -21,26 +23,33 @@ struct Device {
     root: PathBuf,
     handle: Handle,
     thread: Option<JoinHandle<Result<(), RunnerError>>>,
+    drive: Arc<Drive>,
 }
 
 impl Device {
     fn start(
         server: &Arc<Mutex<FakeServer>>,
         name: &str,
-        poll: Duration,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
         let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", name);
-        cfg.poll = poll;
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
-        let (handle, thread) = spawn(cfg, server)?;
+        let drive = drive(&cfg, server)?;
+        let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
         Ok(Device {
             _dir: dir,
             root,
             handle,
             thread: Some(thread),
+            drive,
         })
+    }
+
+    /// What the account does when the drive announces a change or the notifications connect
+    /// again: wakes its folders, which read the feed from its cursor. There is no poll.
+    fn announce(&self) {
+        self.drive.wake_all();
     }
 
     fn write(&self, rel: &str, data: &str) -> std::io::Result<()> {
@@ -102,14 +111,14 @@ fn on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
 }
 
 /// Long enough that only local changes and requests make a device sync.
-const NO_POLL: Duration = Duration::from_secs(3600);
-
 #[test]
 fn syncs_by_itself_and_pauses_and_resumes() -> R {
     let server = server();
-    let a = Device::start(&server, "a", Duration::from_millis(300))?;
-    let mut b = Device::start(&server, "b", Duration::from_millis(300))?;
+    let a = Device::start(&server, "a")?;
+    let mut b = Device::start(&server, "b")?;
     a.write("one.txt", "1")?;
+    wait_until("one.txt is up", || on_server(&server, "one.txt"))?;
+    b.announce();
     wait_until("b has one.txt", || b.has("one.txt"))?;
     wait_until("b is idle", || b.status().state == State::Idle)?;
     assert!(b.status().last_sync.is_some());
@@ -133,24 +142,50 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
 }
 
 #[test]
-fn sync_now_reads_the_drive_without_waiting_for_the_poll() -> R {
+fn sync_now_reads_the_drive_unannounced() -> R {
     let server = server();
-    let a = Device::start(&server, "a", NO_POLL)?;
-    let b = Device::start(&server, "b", NO_POLL)?;
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
     wait_until("b started", || b.status().last_sync.is_some())?;
     a.write("news.txt", "hot")?;
     wait_until("news.txt is up", || on_server(&server, "news.txt"))?;
     std::thread::sleep(Duration::from_millis(500));
-    assert!(!b.has("news.txt"), "no hints, no poll: b can't know yet");
+    assert!(
+        !b.has("news.txt"),
+        "not announced, and no poll: b can't know yet"
+    );
     b.handle.send(Command::SyncNow);
     wait_until("b has news.txt", || b.has("news.txt"))?;
+    Ok(())
+}
+
+/// Changes made while the notifications were down weren't announced: the reconnect catches
+/// up on all of them from the feed's cursor, as at start.
+#[test]
+fn a_reconnect_catches_up_on_what_wasnt_announced() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    wait_until("b started", || b.status().last_sync.is_some())?;
+    for name in ["x.txt", "y.txt", "z.txt"] {
+        a.write(name, name)?;
+    }
+    wait_until("all three are up", || live_names(&server).len() == 3)?;
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!b.has("x.txt"), "nothing announced yet");
+    // The notifications connect again: the account wakes every folder.
+    let mut notifications = Notifications::default();
+    notifications.event(Event::Connected, &b.drive);
+    wait_until("b has all three", || {
+        ["x.txt", "y.txt", "z.txt"].iter().all(|n| b.has(n))
+    })?;
     Ok(())
 }
 
 #[test]
 fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     let server = server();
-    let a = Device::start(&server, "a", Duration::from_millis(300))?;
+    let a = Device::start(&server, "a")?;
     for i in 0..60 {
         a.write(&format!("f{i:02}.txt"), &i.to_string())?;
     }
@@ -191,7 +226,7 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
 #[test]
 fn an_edited_ignore_file_applies_without_a_restart() -> R {
     let server = server();
-    let a = Device::start(&server, "a", NO_POLL)?;
+    let a = Device::start(&server, "a")?;
     a.write("notes.txt", "keep")?;
     a.write("debug.log", "noise")?;
     a.write("other.txt", "keep")?;
@@ -226,7 +261,7 @@ fn spawn_at(
     root: &Path,
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
     let mut cfg = RunnerConfig::new(root, &db_of(root), "test.example", "a");
-    cfg.poll = Duration::from_millis(300);
+    cfg.look = Duration::from_millis(300);
     spawn(cfg, server)
 }
 
@@ -235,12 +270,17 @@ fn spawn(
     cfg: RunnerConfig,
     server: &Arc<Mutex<FakeServer>>,
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
-    let drive = Drive::open(
+    let drive = drive(&cfg, server)?;
+    Runner::spawn(cfg, drive)
+}
+
+/// The account's drive of `cfg` on `server`.
+fn drive(cfg: &RunnerConfig, server: &Arc<Mutex<FakeServer>>) -> Result<Arc<Drive>, RunnerError> {
+    Ok(Drive::open(
         &cfg.db,
         &cfg.identity,
         Arc::new(FakeRemote::new(server.clone())),
-    )?;
-    Runner::spawn(cfg, drive)
+    )?)
 }
 
 #[test]
@@ -358,7 +398,7 @@ fn a_folder_of_an_older_filesync_is_set_up_again() -> R {
 #[test]
 fn a_timed_pause_ends_by_itself() -> R {
     let server = server();
-    let a = Device::start(&server, "a", NO_POLL)?;
+    let a = Device::start(&server, "a")?;
     wait_until("a is idle", || a.status().state == State::Idle)?;
     let until = hbsync_types::unix_now() + 2;
     a.handle.send(Command::Pause { until: Some(until) });
@@ -380,7 +420,7 @@ fn a_timed_pause_ends_by_itself() -> R {
 #[test]
 fn the_recently_synced_list_follows_the_syncs() -> R {
     let server = server();
-    let a = Device::start(&server, "a", NO_POLL)?;
+    let a = Device::start(&server, "a")?;
     a.write("Docs/one.txt", "1")?;
     a.write("two.txt", "22")?;
     wait_until("both are listed", || a.status().synced_added == 2)?;
@@ -410,7 +450,6 @@ fn progress_shows_during_the_first_sync() -> R {
     // There before the daemon starts: uploaded by start-up's first sync.
     std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
     let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
-    cfg.poll = NO_POLL;
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
     let (handle, _thread) = spawn(cfg, &server)?;
     let mut seen = None;
@@ -432,7 +471,6 @@ fn progress_shows_while_a_transfer_runs() -> R {
     let dir = tempfile::tempdir()?;
     let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
     let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
-    cfg.poll = NO_POLL;
     // 600 kB at 300 kB/s: two seconds to watch.
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
     let (handle, _thread) = spawn(cfg, &server)?;
