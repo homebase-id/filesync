@@ -780,7 +780,8 @@ impl Remote for Counted {
 }
 
 /// Each write's answer carries `updated`, the time the feed then shows for it (odin-core
-/// #1971): a create, a removal and a restore (PATCH), the archival-status batch, and a delete
+/// #1971): a create, a new version, a removal and a restore (PATCH), the archival-status batch,
+/// and a delete
 /// (the tombstone's). One file per kind, as the feed shows only a file's last write; their rows
 /// are read minimal from a cursor taken before. Prints a table.
 #[test]
@@ -810,6 +811,19 @@ fn write_answers_carry_the_feeds_time() -> R {
         let mut answers = Vec::new();
         let (_, created) = made("created")?;
         answers.push(("create (POST)", created.at, created.changed_at));
+        let (meta, w) = made("edited")?;
+        let data = b"a new version";
+        let edited = remote.update(
+            &w,
+            &hbsync_remote::contract::with(
+                &meta,
+                hbsync_types::schema::NodeContent::file("edited", 1, data.len() as u64, false),
+            ),
+            Some(hbsync_remote::contract::upload(&mut std::io::Cursor::new(
+                &data[..],
+            ))),
+        )?;
+        answers.push(("version (PATCH)", edited.at, edited.changed_at));
         let (meta, w) = made("removed")?;
         let gone = remote.update(&w, &removed(&meta), None)?;
         answers.push(("removal (PATCH)", gone.at, gone.changed_at));

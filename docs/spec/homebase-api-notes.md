@@ -245,15 +245,22 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   4.4 MB), and the process received 5.4, 5.3 and 5.7 MB in all; with it no drive event at all
   (one pong), and 2.6, 2.5 and 1.2 MB in all. The feed reads are the same either way (8 slim
   pages for each of the first two phases, 1 for the last, none whole): the echoes were taken
-  as known versions and never needed the feed.
-- **Write answers carry the write's time** (odin-core #1971 at fcfc3b422; **[verified]**
+  as known versions and never needed the feed. Again at fe067124b, with each write's time
+  taken from its answer and no feed read after own writes: no feed page at all in any phase,
+  and with the option 1.46, 1.34 and 1.28 MB received in all (the echoes alone would add 2.7,
+  2.8 and 4.4 MB). The rows of the own writes stay in the feed, each file's last only, and are
+  read slim at the next read the client makes anyway.
+- **Write answers carry the write's time** (odin-core #1971 at fcfc3b422, and fe067124b:
+  the time after the request's own last change; **[verified]**
   `CreateFileResult.Updated`, `UpdateFileResult.Updated`, `DeleteFileResultV2.Updated`,
   `UpdateArchivalStatusResultV2.Updated`, all set from `GetUpdatedAfterWrite`, the header's
   `updated` read after the whole write; `UnixTimeUtc` serializes as Unix ms): create and update
   answer `updated` next to `fileId` and `newVersionTag` (null only for a peer-only update);
   a delete (single, batch, by group) the tombstone's time, null when `localFileNotFound`; the
   archival-status batch per result, null with an `errorCode`. Hard-delete-batch answers none.
-  It is the time the feed shows for that write (odin-core `WriteResponseUpdatedTests`). The
+  It is the time the feed shows for that write (odin-core `WriteResponseUpdatedTests`;
+  **[tried]** on frodo at fe067124b for a create, a new version, a removal and a restore by
+  PATCH, the archival-status batch and a delete: `write_answers_carry_the_feeds_time`). The
   client records a version's and a removal's time from it (`drive::HomebaseRemote`'s
   `Target::changed_at`) and reads no feed after its writes. It doesn't read a delete's: a
   tombstone isn't kept. Before #1971 the answers had no time (`payloads[].lastModified` is
