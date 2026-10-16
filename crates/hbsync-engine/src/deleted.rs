@@ -25,53 +25,127 @@ use hbsync_local::layout;
 /// took out, [`Deleted::root`] itself) with what each took along, each with the folder of this
 /// device it comes back to and its path below that folder's top.
 pub fn list(s: &Store<'_>, limit: usize) -> Result<Vec<Deleted>, StateError> {
-    // Where a walk up stops: a folder's top (here or not), the role folders whether
-    // synced here or not; above them all, the main folder's top (the drive's root).
-    let folders: HashMap<NodeId, String> =
-        s.folders()?.into_iter().map(|f| (f.top, f.path)).collect();
-    let tops: HashSet<NodeId> = folders
-        .keys()
-        .copied()
-        .chain(Role::ALL.iter().map(|r| r.node()))
-        .collect();
-    let listed = s.list_removed(usize::MAX)?;
-    let count = listed.len();
-    let mut rows = RemovedRows::new(s, listed);
-    let mut deleted_by = HashMap::new();
-    let roots = (0..count)
-        .map(|i| {
-            let node = rows.rows[i].row.node;
-            deleted_by_item(&mut rows, node, &mut deleted_by)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    // Newest first: the items' own rows give the order.
-    let items: HashSet<NodeId> = (0..count)
-        .filter(|&i| roots[i] == rows.rows[i].row.node)
+    let mut listing = Listing::read(s)?;
+    let shown: HashSet<NodeId> = listing
+        .deletes()
         .take(limit)
-        .map(|i| roots[i])
+        .map(|i| listing.roots[i])
         .collect();
-    let mut known = HashMap::new();
-    let mut listed = Vec::new();
-    for (i, root) in roots.into_iter().enumerate() {
-        if !items.contains(&root) {
-            continue;
+    let picked: Vec<usize> = (0..listing.roots.len())
+        .filter(|&i| shown.contains(&listing.roots[i]))
+        .collect();
+    picked.into_iter().map(|i| listing.describe(i)).collect()
+}
+
+/// The drive's newest `limit` deletes of Recently deleted, newest first, each with how many
+/// items it took along: [`list`] without those items.
+pub fn deletes(s: &Store<'_>, limit: usize) -> Result<Vec<(Deleted, usize)>, StateError> {
+    let mut listing = Listing::read(s)?;
+    let picked = listing.deletes().take(limit).collect();
+    listing.with_along(picked)
+}
+
+/// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, or
+/// every one when `all` (to be picked by place), each with how many items it took along.
+pub fn find(
+    s: &Store<'_>,
+    nodes: &HashSet<NodeId>,
+    all: bool,
+) -> Result<Vec<(Deleted, usize)>, StateError> {
+    let mut listing = Listing::read(s)?;
+    let picked = (0..listing.roots.len())
+        .filter(|&i| all || nodes.contains(&listing.rows.rows[i].row.node))
+        .collect();
+    listing.with_along(picked)
+}
+
+/// Recently deleted's rows, newest first, each with the item whose delete took it along.
+struct Listing<'a, 's> {
+    rows: RemovedRows<'a, 's>,
+    /// For each of the first rows (the listed ones), its item: itself, deleted on its own.
+    roots: Vec<NodeId>,
+    folders: HashMap<NodeId, String>,
+    /// Where a walk up stops: a folder's top (here or not), the role folders whether synced
+    /// here or not; above them all, the main folder's top (the drive's root).
+    tops: HashSet<NodeId>,
+    places: HashMap<NodeId, (String, NodeId)>,
+}
+
+impl<'a, 's> Listing<'a, 's> {
+    fn read(s: &'a Store<'s>) -> Result<Self, StateError> {
+        let folders: HashMap<NodeId, String> =
+            s.folders()?.into_iter().map(|f| (f.top, f.path)).collect();
+        let tops = folders
+            .keys()
+            .copied()
+            .chain(Role::ALL.iter().map(|r| r.node()))
+            .collect();
+        let listed = s.list_removed(usize::MAX)?;
+        let count = listed.len();
+        let mut rows = RemovedRows::new(s, listed);
+        let mut deleted_by = HashMap::new();
+        let roots = (0..count)
+            .map(|i| {
+                let node = rows.rows[i].row.node;
+                deleted_by_item(&mut rows, node, &mut deleted_by)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Listing {
+            rows,
+            roots,
+            folders,
+            tops,
+            places: HashMap::new(),
+        })
+    }
+
+    /// The rows of the items deleted on their own, newest first (the items' own rows give
+    /// the order).
+    fn deletes(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..self.roots.len()).filter(|&i| self.roots[i] == self.rows.rows[i].row.node)
+    }
+
+    /// Rows `picked`, described, each with how many items it took along.
+    fn with_along(&mut self, picked: Vec<usize>) -> Result<Vec<(Deleted, usize)>, StateError> {
+        let along = self.along();
+        picked
+            .into_iter()
+            .map(|i| {
+                let d = self.describe(i)?;
+                let n = along.get(&d.node).copied().unwrap_or(0);
+                Ok((d, n))
+            })
+            .collect()
+    }
+
+    /// How many items each delete took along.
+    fn along(&self) -> HashMap<NodeId, usize> {
+        let mut along = HashMap::new();
+        for (i, root) in self.roots.iter().enumerate() {
+            if *root != self.rows.rows[i].row.node {
+                *along.entry(*root).or_default() += 1;
+            }
         }
-        let r = &rows.rows[i];
+        along
+    }
+
+    /// Row `i` as listed: where it comes back to and its path there.
+    fn describe(&mut self, i: usize) -> Result<Deleted, StateError> {
+        let r = &self.rows.rows[i];
         let (node, parent, name) = (r.row.node, r.row.parent, r.row.name.clone());
         let (kind, size, removed_at_ms) = (r.row.kind, r.row.file.map(|f| f.size), r.removed_at);
-        let (path, top) = place(&mut rows, &tops, parent, &mut known)?;
-        listed.push(Deleted {
+        let (path, top) = place(&mut self.rows, &self.tops, parent, &mut self.places)?;
+        Ok(Deleted {
             node,
             parent,
             path: join(&path, &name),
             kind,
             size,
             removed_at_ms,
-            root,
-            folder: folders.get(&top).cloned(),
-        });
+            root: self.roots[i],
+            folder: self.folders.get(&top).cloned(),
+        })
     }
-    Ok(listed)
 }
 
 /// Rows of Recently deleted by node: the ones read already, else from the store, each once.

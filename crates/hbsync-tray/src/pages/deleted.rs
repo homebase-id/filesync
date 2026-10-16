@@ -48,7 +48,8 @@ impl Server {
     /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
     /// newest first.
     pub(super) fn deleted_page(&self) -> String {
-        let items = match control::deleted(&self.paths, usize::MAX) {
+        // One more than shown: whether there are more.
+        let mut items = match control::deleted(&self.paths, MAX_DELETED + 1) {
             Ok(Some(items)) => items,
             Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
             Err(e) => {
@@ -61,6 +62,8 @@ impl Server {
         if items.is_empty() {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
+        let more = items.len() > MAX_DELETED;
+        items.truncate(MAX_DELETED);
         let now = words::now();
         let shown = control::Shown::of(&items);
         let main = control::configured(&self.paths)
@@ -71,7 +74,6 @@ impl Server {
         // along: its restore brings them back.
         let rows: String = items
             .iter()
-            .take(MAX_DELETED)
             .map(|item| {
                 let d = &item.deleted;
                 let along = match item.along {
@@ -100,7 +102,15 @@ impl Server {
              <button class=secondary>Empty now…</button></form>",
             days = self.keep_days(),
             empty = self.pages.url("deleted/empty"),
-            count = items.iter().map(|i| i.count()).sum::<usize>(),
+            count = {
+                let n: usize = items.iter().map(|i| i.count()).sum();
+                // Emptying takes what is older too.
+                if more {
+                    format!("more than {n}")
+                } else {
+                    n.to_string()
+                }
+            },
             // What the user sees, nothing deleted after this look.
             until = shown.until,
             open = escape(&shown.open_field()),
@@ -148,8 +158,11 @@ impl Server {
         };
         let shown =
             control::Shown::with_open_field(at_ms, form.get("open").map_or("", String::as_str));
-        let emptied = control::deleted(&self.paths, usize::MAX).and_then(|items| {
-            control::empty_shown(&self.paths, &items.unwrap_or_default(), &shown)
+        let emptied = control::status(&self.paths).and_then(|status| {
+            let identities: Vec<String> = status
+                .map(|s| s.accounts.into_iter().map(|a| a.identity).collect())
+                .unwrap_or_default();
+            control::empty_shown(&self.paths, &identities, &shown)
         });
         match emptied {
             Ok(()) => {

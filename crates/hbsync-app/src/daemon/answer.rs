@@ -1,12 +1,12 @@
 //! Answering the control socket: the status of every account and folder, their lists, and
 //! requests routed to the daemon, an account or a folder.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use hbsync_types::NodeId;
-use hbsync_types::activity::Deleted;
 
 use super::Daemon;
 use super::account::Account;
@@ -43,11 +43,13 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
                 .ok()
                 .flatten()
                 .map(|r| r.folder);
-            let lists: Vec<_> = accounts
-                .iter()
-                .map(|a| (a.identity.as_str(), a.recently_deleted(usize::MAX)))
-                .collect();
-            match find_deleted(&lists, &items, main.as_deref()) {
+            let find = |nodes: &HashSet<NodeId>, all| {
+                accounts
+                    .iter()
+                    .flat_map(|a| a.find_deleted(nodes, all))
+                    .collect()
+            };
+            match find_deleted(find, &items, main.as_deref()) {
                 Ok(found) => Reply::Deleted(found),
                 Err(why) => Reply::Refused(why),
             }
@@ -80,38 +82,55 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
     }
 }
 
-/// The items of `lists` (each account's Recently deleted, as the engine lists it) that `picks`
-/// name: a node id, or the place [`words::deleted_place`] shows; refused naming the first one
-/// that isn't there.
+/// The items of Recently deleted, any account's, that `picks` name: a node id, or the place
+/// [`words::deleted_place`] shows (a delete, or an item a delete took along); refused naming the
+/// first one that isn't there.
+/// `find` gives the items of Recently deleted that are those nodes, or every one when asked
+/// (to pick by place).
 fn find_deleted(
-    lists: &[(&str, Vec<Deleted>)],
+    find: impl Fn(&HashSet<NodeId>, bool) -> Vec<DeletedItem>,
     picks: &[String],
     main: Option<&Path>,
 ) -> Result<Vec<DeletedItem>, String> {
+    let pick = |p: &String| match p.parse() {
+        Ok(id) => Pick::Node(NodeId(id)),
+        Err(_) => Pick::Place(p.trim_end_matches('/').to_owned()),
+    };
+    let picks: Vec<(&String, Pick)> = picks.iter().map(|p| (p, pick(p))).collect();
+    let nodes: HashSet<NodeId> = picks
+        .iter()
+        .filter_map(|(_, p)| match p {
+            Pick::Node(n) => Some(*n),
+            Pick::Place(_) => None,
+        })
+        .collect();
+    let by_place = picks.iter().any(|(_, p)| matches!(p, Pick::Place(_)));
+    // Places are worked out only when a pick names one.
+    let found: Vec<(DeletedItem, Option<String>)> = find(&nodes, by_place)
+        .into_iter()
+        .map(|item| {
+            let place = by_place.then(|| words::deleted_place(&item.deleted, main));
+            (item, place)
+        })
+        .collect();
     picks
         .iter()
-        .map(|pick| {
-            let id = pick.parse().ok().map(NodeId);
-            let place = pick.trim_end_matches('/');
-            lists
+        .map(|(named, p)| {
+            found
                 .iter()
-                .find_map(|(identity, list)| {
-                    let d = list
-                        .iter()
-                        .find(|d| Some(d.node) == id || words::deleted_place(d, main) == place)?;
-                    let along = list
-                        .iter()
-                        .filter(|o| o.root == d.node && o.node != d.node)
-                        .count();
-                    Some(DeletedItem {
-                        identity: (*identity).to_owned(),
-                        deleted: d.clone(),
-                        along,
-                    })
+                .find(|(item, place)| match p {
+                    Pick::Node(n) => item.deleted.node == *n,
+                    Pick::Place(want) => place.as_deref() == Some(want.as_str()),
                 })
-                .ok_or_else(|| format!("{pick} isn't in Recently deleted"))
+                .map(|(item, _)| item.clone())
+                .ok_or_else(|| format!("{named} isn't in Recently deleted"))
         })
         .collect()
+}
+
+enum Pick {
+    Node(NodeId),
+    Place(String),
 }
 
 fn status(accounts: &[Arc<Account>]) -> DaemonStatus {
@@ -191,47 +210,62 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hbsync_types::activity::Deleted;
     use hbsync_types::{NodeKind, Uuid};
 
-    fn removed(n: u128, root: u128, path: &str) -> Deleted {
-        Deleted {
-            node: NodeId(Uuid::from_u128(n)),
-            parent: NodeId::ROOT,
-            path: path.into(),
-            kind: NodeKind::File,
-            size: None,
-            removed_at_ms: Some(1),
-            root: NodeId(Uuid::from_u128(root)),
-            folder: Some("/home/a/Homebase".into()),
+    fn item(identity: &str, n: u128, root: u128, path: &str, along: usize) -> DeletedItem {
+        DeletedItem {
+            identity: identity.into(),
+            deleted: Deleted {
+                node: NodeId(Uuid::from_u128(n)),
+                parent: NodeId::ROOT,
+                path: path.into(),
+                kind: NodeKind::File,
+                size: None,
+                removed_at_ms: Some(1),
+                root: NodeId(Uuid::from_u128(root)),
+                folder: Some("/home/a/Homebase".into()),
+            },
+            along,
         }
     }
 
-    /// Picks are found in each account's whole Recently deleted, whatever its size: by node id
-    /// or place, a delete or an item it took along.
+    /// Picks by node id ask only for those nodes; a place asks for everything once. A delete
+    /// or an item a delete took along can be picked, in any account.
     #[test]
     fn picks_are_found_by_id_or_place_in_any_account() {
-        let mut anna = vec![removed(1, 1, "Photos")];
-        anna.extend((0..5000).map(|i| removed(10 + i, 1, &format!("Photos/p{i}.jpg"))));
-        let bob = vec![removed(2, 2, "notes.txt")];
-        let lists = [("anna.example", anna), ("bob.example", bob)];
+        let all = [
+            item("anna.example", 1, 1, "Photos", 2),
+            item("anna.example", 10, 1, "Photos/p1.jpg", 0),
+            item("bob.example", 2, 2, "notes.txt", 0),
+        ];
+        let asked = std::cell::RefCell::new(Vec::new());
+        let find = |nodes: &HashSet<NodeId>, every: bool| {
+            asked.borrow_mut().push((nodes.len(), every));
+            all.iter()
+                .filter(|i| every || nodes.contains(&i.deleted.node))
+                .cloned()
+                .collect()
+        };
         let main = Some(Path::new("/home/a/Homebase"));
         let picks = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
-        let found = find_deleted(&lists, &picks(&["Photos/", "Photos/p4999.jpg"]), main);
+        let id = Uuid::from_u128(2).to_string();
+        let found = find_deleted(find, &picks(&[&id]), main).expect("found");
+        assert_eq!(found[0].identity, "bob.example");
+        assert_eq!(asked.borrow().last(), Some(&(1, false)), "only that node");
+
+        let found = find_deleted(find, &picks(&["Photos/", "Photos/p1.jpg"]), main);
         let found = found.expect("found");
         assert_eq!(
-            (found[0].identity.as_str(), found[0].along),
-            ("anna.example", 5000)
+            (found[0].deleted.path.as_str(), found[0].along),
+            ("Photos", 2)
         );
-        assert_eq!(found[1].deleted.path, "Photos/p4999.jpg");
-        assert_eq!(found[1].along, 0);
-
-        let id = Uuid::from_u128(2).to_string();
-        let found = find_deleted(&lists, &picks(&[&id]), main).expect("found");
-        assert_eq!(found[0].identity, "bob.example");
+        assert_eq!(found[1].deleted.path, "Photos/p1.jpg");
+        assert_eq!(asked.borrow().last(), Some(&(0, true)));
 
         assert_eq!(
-            find_deleted(&lists, &picks(&["Photos", "gone.txt"]), main),
+            find_deleted(find, &picks(&["Photos", "gone.txt"]), main),
             Err("gone.txt isn't in Recently deleted".to_owned())
         );
     }

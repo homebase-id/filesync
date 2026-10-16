@@ -166,9 +166,9 @@ impl Shown {
     }
 }
 
-/// Empties Recently deleted of what was `shown`, in every account of `items` (as listed now).
-pub fn empty_shown(paths: &Paths, items: &[DeletedItem], shown: &Shown) -> Result<()> {
-    empty_deleted_until(paths, items, shown.until)?;
+/// Empties Recently deleted of what was `shown`, in each of `identities`.
+pub fn empty_shown(paths: &Paths, identities: &[String], shown: &Shown) -> Result<()> {
+    empty_deleted_until(paths, identities, shown.until)?;
     let mut open: std::collections::BTreeMap<&str, Vec<hbsync_types::NodeId>> =
         std::collections::BTreeMap::new();
     for (identity, node) in &shown.open {
@@ -185,11 +185,8 @@ pub fn empty_shown(paths: &Paths, items: &[DeletedItem], shown: &Shown) -> Resul
 }
 
 /// Deletes for good what Recently deleted had until `at_ms` (Unix ms, its newest item the user
-/// saw), in every account of `items`: anything deleted since is newer.
-pub fn empty_deleted_until(paths: &Paths, items: &[DeletedItem], at_ms: i64) -> Result<()> {
-    let mut identities: Vec<&str> = items.iter().map(|i| i.identity.as_str()).collect();
-    identities.sort_unstable();
-    identities.dedup();
+/// saw), in each of `identities`: anything deleted since is newer.
+pub fn empty_deleted_until(paths: &Paths, identities: &[String], at_ms: i64) -> Result<()> {
     for identity in identities {
         account(
             paths,

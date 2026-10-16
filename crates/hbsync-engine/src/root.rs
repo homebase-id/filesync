@@ -279,6 +279,20 @@ impl AccountReader {
     pub fn recently_deleted(&mut self, limit: usize) -> Result<Vec<Deleted>, StateError> {
         self.db.read(|s| crate::deleted::list(s, limit))
     }
+
+    /// Recently deleted's newest deletes with their counts ([`crate::deleted::deletes`]).
+    pub fn deletes(&mut self, limit: usize) -> Result<Vec<(Deleted, usize)>, StateError> {
+        self.db.read(|s| crate::deleted::deletes(s, limit))
+    }
+
+    /// Items of Recently deleted by node, or all ([`crate::deleted::find`]).
+    pub fn find_deleted(
+        &mut self,
+        nodes: &std::collections::HashSet<hbsync_types::NodeId>,
+        all: bool,
+    ) -> Result<Vec<(Deleted, usize)>, StateError> {
+        self.db.read(|s| crate::deleted::find(s, nodes, all))
+    }
 }
 
 #[cfg(test)]

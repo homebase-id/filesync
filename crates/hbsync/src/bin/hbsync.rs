@@ -275,7 +275,21 @@ fn run(command: Command) -> Res<ExitCode> {
             }
             println!("Restoring; the next sync brings it back.");
         }
-        Command::EmptyDeleted { items, yes } => {
+        Command::EmptyDeleted { items, yes } if !items.is_empty() => {
+            let Some(found) = daemon::find_deleted(&paths, items.clone())? else {
+                return Ok(not_running());
+            };
+            if !yes && !ask_yes(&format!("Delete {} for good?", items.join(", ")))? {
+                println!("Nothing deleted.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            for (identity, nodes) in by_account(&found) {
+                daemon::account(&paths, &identity, AccountControl::EmptyDeleted { nodes })?;
+            }
+            println!("Deleting for good.");
+        }
+        Command::EmptyDeleted { yes, .. } => {
+            // Everything listed now, nothing deleted after this look.
             let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
                 return Ok(not_running());
             };
@@ -283,34 +297,16 @@ fn run(command: Command) -> Res<ExitCode> {
                 println!("Recently deleted is empty.");
                 return Ok(ExitCode::SUCCESS);
             }
-            // None: everything listed now, nothing deleted after this look.
-            let picked = match items.is_empty() {
-                true => None,
-                false => match daemon::find_deleted(&paths, items.clone())? {
-                    Some(found) => Some(by_account(&found)),
-                    None => return Ok(not_running()),
-                },
-            };
-            let what = match &picked {
-                None => {
-                    let count: usize = list.iter().map(|i| i.count()).sum();
-                    format!("the {count} items in Recently deleted")
-                }
-                Some(_) => items.join(", "),
-            };
-            if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
+            let count: usize = list.iter().map(|i| i.count()).sum();
+            let question = format!("Delete the {count} items in Recently deleted for good?");
+            if !yes && !ask_yes(&question)? {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
-            match picked {
-                // Newest first.
-                None => daemon::empty_shown(&paths, &list, &daemon::Shown::of(&list))?,
-                Some(picked) => {
-                    for (identity, nodes) in picked {
-                        daemon::account(&paths, &identity, AccountControl::EmptyDeleted { nodes })?;
-                    }
-                }
-            }
+            let mut identities: Vec<String> = list.iter().map(|i| i.identity.clone()).collect();
+            identities.sort_unstable();
+            identities.dedup();
+            daemon::empty_shown(&paths, &identities, &daemon::Shown::of(&list))?;
             println!("Deleting for good.");
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
@@ -424,8 +420,6 @@ fn parse_role(s: &str) -> Result<Role, String> {
     s.parse()
 }
 
-/// The items of `list` (Recently deleted) that `items` name, by node id or as `hbsync deleted`
-/// shows them ([`words::deleted_place`]; a path deleted twice names its latest), by account.
 /// `found`'s nodes by account.
 fn by_account(found: &[DeletedItem]) -> BTreeMap<String, Vec<NodeId>> {
     let mut picked: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();

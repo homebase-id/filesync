@@ -1819,6 +1819,44 @@ fn what_was_synced_is_listed_and_kept() -> R {
     Ok(())
 }
 
+/// Recently deleted by deletes: a folder with what it took along is one entry with its count;
+/// any of its items can still be found, by node or (all of them) to pick by place.
+#[test]
+fn recently_deleted_lists_deletes_with_counts_and_finds_items() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    for i in 0..30 {
+        a.write(&format!("d/f{i}.txt"), "x")?;
+    }
+    a.write("z.txt", "z")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    fs::remove_file(a.root.join("z.txt"))?;
+    a.sync()?;
+
+    let mut reader =
+        hbsync_engine::root::AccountReader::open(&a.db_path(), "test.example")?.ok_or("no db")?;
+    let deletes = reader.deletes(10)?;
+    let mut shown: Vec<_> = deletes.iter().map(|(d, n)| (d.path.as_str(), *n)).collect();
+    shown.sort();
+    assert_eq!(shown, [("d", 30), ("z.txt", 0)]);
+    assert_eq!(reader.deletes(1)?.len(), 1, "cut by deletes");
+
+    let all = reader.find_deleted(&Default::default(), true)?;
+    assert_eq!(all.len(), 32);
+    let child = all
+        .iter()
+        .find(|(d, _)| d.path == "d/f7.txt")
+        .ok_or("f7")?
+        .0
+        .node;
+    let found = reader.find_deleted(&[child].into_iter().collect(), false)?;
+    assert_eq!(found.len(), 1);
+    assert_eq!((found[0].0.path.as_str(), found[0].1), ("d/f7.txt", 0));
+    Ok(())
+}
+
 #[test]
 fn recently_deleted_restores_and_purges() -> R {
     let server = server();

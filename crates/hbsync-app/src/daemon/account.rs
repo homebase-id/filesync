@@ -5,6 +5,7 @@
 //! Its folders' runners sync until the daemon stops, or until it starts over with new
 //! credentials.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -18,6 +19,7 @@ use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_state::StateError;
+use hbsync_types::NodeId;
 use hbsync_types::activity::Deleted;
 
 use super::DaemonError;
@@ -249,13 +251,24 @@ impl Account {
     /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
     /// items it took along.
     pub fn deleted(&self, limit: usize) -> Vec<DeletedItem> {
-        DeletedItem::deletes(&self.identity, self.recently_deleted(limit))
+        self.items(self.read(|db| db.deletes(limit)))
     }
 
-    /// Its Recently deleted: the newest `limit` deletes, each followed by what it took along.
-    pub fn recently_deleted(&self, limit: usize) -> Vec<Deleted> {
-        self.read(|db| db.recently_deleted(limit))
+    /// The items of its Recently deleted that are `nodes`, or every one when `all`.
+    pub fn find_deleted(&self, nodes: &HashSet<NodeId>, all: bool) -> Vec<DeletedItem> {
+        self.items(self.read(|db| db.find_deleted(nodes, all)))
+    }
+
+    fn items(&self, found: Option<Vec<(Deleted, usize)>>) -> Vec<DeletedItem> {
+        found
             .unwrap_or_default()
+            .into_iter()
+            .map(|(deleted, along)| DeletedItem {
+                identity: self.identity.clone(),
+                deleted,
+                along,
+            })
+            .collect()
     }
 
     /// `f` on the answers' connection, which only reads, opened on first use; `None` when the
