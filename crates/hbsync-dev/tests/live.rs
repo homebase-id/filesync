@@ -521,7 +521,8 @@ fn socket_bytes() -> Result<u64, Box<dyn std::error::Error>> {
 
 /// What this computer's own writes cost it on the notification socket, with and without
 /// `excludeOwnWrites` (odin-core #1971): one folder synced as the daemon syncs it (the engine,
-/// the notifications taken by `Notifications` and the `Puller`), through `n` files
+/// the notifications taken by `Notifications` and the `Puller`; a local change's sync reads
+/// the feed only while the picture isn't current), through `n` files
 /// (`ECHO_FILES`, 2,000 by default) created, deleted (to Recently deleted), then deleted for
 /// good. Per phase: the bytes this process received (all its connections, [`socket_bytes`]),
 /// the notification frames (every server frame, pongs too) and their bytes (text frames as
@@ -587,6 +588,19 @@ fn echo_run(
     };
     a.write(&format!("{run}/readme.txt"), "echoes")?;
     sync(&mut a)?;
+    // From now on as the daemon syncs a local change: the feed is read only if the account's
+    // picture isn't current (the notifications connected, set by `Notifications`).
+    let local_sync = |a: &mut TestClient<Counted>| -> R {
+        for _ in 0..50 {
+            a.engine.scan_local()?;
+            let report = a.engine.sync(&hbsync_app::today(), false)?;
+            assert!(report.failed.is_empty(), "failed {:?}", report.failed);
+            if report.ops_done == 0 {
+                return Ok(());
+            }
+        }
+        Err("not idle after 50 syncs".into())
+    };
 
     // The notifications, as the daemon's account takes them.
     let (tx, events) = std::sync::mpsc::channel();
@@ -639,11 +653,11 @@ fn echo_run(
             for i in 0..n {
                 a.write(&format!("{run}/files/f{i:05}.txt"), format!("file {i}"))?;
             }
-            sync(&mut a)
+            local_sync(&mut a)
         })?;
         phase("delete", &mut || {
             std::fs::remove_dir_all(a.root.join(&run).join("files"))?;
-            sync(&mut a)
+            local_sync(&mut a)
         })?;
         phase("empty", &mut || {
             let nodes: Vec<_> = a
@@ -763,4 +777,135 @@ impl Remote for Counted {
     ) -> hbsync_remote::Result<u64> {
         self.inner.read(file_id, range, sink)
     }
+}
+
+/// Each write's answer carries `updated`, the time the feed then shows for it (odin-core
+/// #1971): a create, a removal and a restore (PATCH), the archival-status batch, and a delete
+/// (the tombstone's). One file per kind, as the feed shows only a file's last write; their rows
+/// are read minimal from a cursor taken before. Prints a table.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn write_answers_carry_the_feeds_time() -> R {
+    use hbsync_homebase::drive::wire::{Shape, feed_query};
+    use hbsync_remote::contract::{file, removed};
+    use std::collections::HashMap;
+
+    let remote = live_remote()?;
+    let bench = Bench::new(&remote, &run_name("answer-times"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let cursor = bench.cursor_now()?;
+        let (dir, _) = bench.folder("d")?;
+        let made = |name: &str| -> Result<_, Box<dyn std::error::Error>> {
+            let meta = file(name, dir.node, name.as_bytes());
+            let written = remote.create(
+                &meta,
+                Some(hbsync_remote::contract::upload(&mut std::io::Cursor::new(
+                    name.as_bytes(),
+                ))),
+            )?;
+            bench.track(written.at.file_id);
+            Ok((meta, written))
+        };
+        // (what, file, version, the answer's updated)
+        let mut answers = Vec::new();
+        let (_, created) = made("created")?;
+        answers.push(("create (POST)", created.at, created.changed_at));
+        let (meta, w) = made("removed")?;
+        let gone = remote.update(&w, &removed(&meta), None)?;
+        answers.push(("removal (PATCH)", gone.at, gone.changed_at));
+        let (meta, w) = made("restored")?;
+        let gone = remote.update(&w, &removed(&meta), None)?;
+        let back = remote.update(&gone, &meta, None)?;
+        answers.push(("restore (PATCH)", back.at, back.changed_at));
+        let (_, w) = made("archived")?;
+        let batch: serde_json::Value = remote.client().post(
+            &format!("{}/update-archival-status-batch", remote.files()),
+            &serde_json::json!({"archivalStatus": 2, "files": [
+                {"fileId": w.at.file_id.0, "versionTag": w.at.version.0}
+            ]}),
+        )?;
+        let r = &batch["results"][0];
+        assert!(r["errorCode"].is_null(), "{batch}");
+        let version = hbsync_types::VersionTag(
+            r["newVersionTag"]
+                .as_str()
+                .ok_or("newVersionTag")?
+                .parse()?,
+        );
+        answers.push((
+            "archival-status batch",
+            hbsync_types::RemoteRef {
+                file_id: w.at.file_id,
+                version,
+            },
+            r["updated"].as_i64(),
+        ));
+        let (_, w) = made("deleted")?;
+        let deleted: serde_json::Value = remote.client().post(
+            &format!("{}/delete", remote.file(w.at.file_id)),
+            &serde_json::json!({"recipients": [], "versionTag": w.at.version.0}),
+        )?;
+        let tomb = remote.header(w.at.file_id)?;
+        answers.push((
+            "delete (tombstone)",
+            hbsync_types::RemoteRef {
+                file_id: w.at.file_id,
+                version: tomb.version,
+            },
+            deleted["updated"].as_i64(),
+        ));
+
+        // The feed's rows since the cursor: each file's last write.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut rows: HashMap<String, (String, Option<i64>)> = HashMap::new();
+        let mut cursor = Some(cursor);
+        loop {
+            let page: serde_json::Value = remote.client().post(
+                &format!("{}/query-batch", remote.files()),
+                &feed_query(cursor.as_deref(), 1000, Shape::Minimal),
+            )?;
+            for row in page["fileRefs"].as_array().into_iter().flatten() {
+                rows.insert(
+                    row["fileId"].as_str().unwrap_or_default().replace('-', ""),
+                    (
+                        row["versionTag"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .replace('-', ""),
+                        row["updated"].as_i64(),
+                    ),
+                );
+            }
+            cursor = page["cursorState"].as_str().map(str::to_owned).or(cursor);
+            if page["hasMoreRows"].as_bool() != Some(true) {
+                break;
+            }
+        }
+        println!(
+            "{:<24} {:>15} {:>15} {:>8}",
+            "write", "answer updated", "feed updated", "equal"
+        );
+        let mut unequal = Vec::new();
+        for (what, at, answered) in &answers {
+            let (version, fed) = rows
+                .get(&at.file_id.0.simple().to_string())
+                .cloned()
+                .ok_or(format!("{what}: no feed row"))?;
+            let same = answered.is_some()
+                && *answered == fed
+                && version == at.version.0.simple().to_string();
+            println!(
+                "{what:<24} {:>15} {:>15} {same:>8}",
+                answered.map_or("null".into(), |t| t.to_string()),
+                fed.map_or("null".into(), |t| t.to_string()),
+            );
+            if !same {
+                unequal.push(*what);
+            }
+        }
+        assert!(unequal.is_empty(), "not the feed's time: {unequal:?}");
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
 }
