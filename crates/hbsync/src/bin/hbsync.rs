@@ -255,23 +255,22 @@ fn run(command: Command) -> Res<ExitCode> {
                 let now = words::now();
                 let main = daemon::configured(&paths)?.map(|r| r.folder);
                 // Each item deleted on its own, with how many its delete took along.
-                for d in list.iter().map(|i| &i.deleted).filter(|d| d.root == d.node) {
-                    let along = list.iter().filter(|i| i.deleted.root == d.node).count() - 1;
-                    let along = match along {
+                for item in &list {
+                    let along = match item.along {
                         0 => String::new(),
                         n => format!(" (with {n} items in it)"),
                     };
-                    let what = words::deleted(d, main.as_deref(), now);
-                    println!("{}  {what}{along}", d.node.0);
+                    let what = words::deleted(&item.deleted, main.as_deref(), now);
+                    println!("{}  {what}{along}", item.deleted.node.0);
                 }
             }
             None => return Ok(not_running()),
         },
         Command::Restore { items } => {
-            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+            let Some(found) = daemon::find_deleted(&paths, items)? else {
                 return Ok(not_running());
             };
-            for (identity, nodes) in pick(&paths, &list, &items)? {
+            for (identity, nodes) in by_account(&found) {
                 daemon::account(&paths, &identity, AccountControl::Restore { nodes })?;
             }
             println!("Restoring; the next sync brings it back.");
@@ -287,10 +286,16 @@ fn run(command: Command) -> Res<ExitCode> {
             // None: everything listed now, nothing deleted after this look.
             let picked = match items.is_empty() {
                 true => None,
-                false => Some(pick(&paths, &list, &items)?),
+                false => match daemon::find_deleted(&paths, items.clone())? {
+                    Some(found) => Some(by_account(&found)),
+                    None => return Ok(not_running()),
+                },
             };
             let what = match &picked {
-                None => format!("the {} items in Recently deleted", list.len()),
+                None => {
+                    let count: usize = list.iter().map(|i| i.count()).sum();
+                    format!("the {count} items in Recently deleted")
+                }
                 Some(_) => items.join(", "),
             };
             if !yes && !ask_yes(&format!("Delete {what} for good?"))? {
@@ -421,29 +426,16 @@ fn parse_role(s: &str) -> Result<Role, String> {
 
 /// The items of `list` (Recently deleted) that `items` name, by node id or as `hbsync deleted`
 /// shows them ([`words::deleted_place`]; a path deleted twice names its latest), by account.
-fn pick(
-    paths: &Paths,
-    list: &[DeletedItem],
-    items: &[String],
-) -> Res<BTreeMap<String, Vec<NodeId>>> {
-    let main = daemon::configured(paths)?.map(|r| r.folder);
+/// `found`'s nodes by account.
+fn by_account(found: &[DeletedItem]) -> BTreeMap<String, Vec<NodeId>> {
     let mut picked: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
-    for item in items {
-        let id = item.parse().ok().map(NodeId);
-        let place = item.trim_end_matches('/');
-        let found = list
-            .iter()
-            .find(|i| {
-                Some(i.deleted.node) == id
-                    || words::deleted_place(&i.deleted, main.as_deref()) == place
-            })
-            .ok_or_else(|| format!("{item} isn't in Recently deleted"))?;
+    for item in found {
         picked
-            .entry(found.identity.clone())
+            .entry(item.identity.clone())
             .or_default()
-            .push(found.deleted.node);
+            .push(item.deleted.node);
     }
-    Ok(picked)
+    picked
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.

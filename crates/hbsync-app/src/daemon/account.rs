@@ -18,6 +18,7 @@ use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_state::StateError;
+use hbsync_types::activity::Deleted;
 
 use super::DaemonError;
 use crate::protocol::{
@@ -245,16 +246,16 @@ impl Account {
         .unwrap_or_default()
     }
 
-    /// The newest `limit` items of its Recently deleted, newest first.
+    /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
+    /// items it took along.
     pub fn deleted(&self, limit: usize) -> Vec<DeletedItem> {
+        DeletedItem::deletes(&self.identity, self.recently_deleted(limit))
+    }
+
+    /// Its Recently deleted: the newest `limit` deletes, each followed by what it took along.
+    pub fn recently_deleted(&self, limit: usize) -> Vec<Deleted> {
         self.read(|db| db.recently_deleted(limit))
             .unwrap_or_default()
-            .into_iter()
-            .map(|deleted| DeletedItem {
-                identity: self.identity.clone(),
-                deleted,
-            })
-            .collect()
     }
 
     /// `f` on the answers' connection, which only reads, opened on first use; `None` when the

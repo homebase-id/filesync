@@ -67,23 +67,14 @@ impl Server {
             .ok()
             .flatten()
             .map(|r| r.folder);
-        // Shown: the items deleted on their own (their `root`), each with how many items
-        // its delete took along: its restore brings them back.
-        let mut along: HashMap<hbsync_types::NodeId, usize> = HashMap::new();
-        for d in items
-            .iter()
-            .map(|i| &i.deleted)
-            .filter(|d| d.root != d.node)
-        {
-            *along.entry(d.root).or_default() += 1;
-        }
+        // Shown: the items deleted on their own, each with how many items its delete took
+        // along: its restore brings them back.
         let rows: String = items
             .iter()
-            .filter(|i| i.deleted.root == i.deleted.node)
             .take(MAX_DELETED)
             .map(|item| {
                 let d = &item.deleted;
-                let along = match along.get(&d.node).copied().unwrap_or(0) {
+                let along = match item.along {
                     0 => String::new(),
                     n => format!(" <span class=small>with {n} items in it</span>"),
                 };
@@ -109,7 +100,7 @@ impl Server {
              <button class=secondary>Empty now…</button></form>",
             days = self.keep_days(),
             empty = self.pages.url("deleted/empty"),
-            count = items.len(),
+            count = items.iter().map(|i| i.count()).sum::<usize>(),
             // What the user sees, nothing deleted after this look.
             until = shown.until,
             open = escape(&shown.open_field()),

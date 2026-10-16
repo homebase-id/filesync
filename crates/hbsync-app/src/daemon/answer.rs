@@ -1,14 +1,21 @@
 //! Answering the control socket: the status of every account and folder, their lists, and
 //! requests routed to the daemon, an account or a folder.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+
+use hbsync_types::NodeId;
+use hbsync_types::activity::Deleted;
 
 use super::Daemon;
 use super::account::Account;
 use crate::Config;
-use crate::protocol::{Ask, Control, DaemonControl, DaemonStatus, FolderControl, Reply, Request};
+use crate::protocol::{
+    Ask, Control, DaemonControl, DaemonStatus, DeletedItem, FolderControl, Reply, Request,
+};
 use crate::runner::Command;
+use crate::words;
 
 pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
     let accounts = &daemon.accounts();
@@ -25,11 +32,25 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             Reply::Recent(items)
         }
         Ask::Deleted { limit } => {
+            // Each account's newest `limit` deletes; newest first, `limit` deletes of them all.
             let mut items: Vec<_> = accounts.iter().flat_map(|a| a.deleted(limit)).collect();
-            // Newest first.
             items.sort_by_key(|i| std::cmp::Reverse(i.deleted.time()));
             items.truncate(limit);
             Reply::Deleted(items)
+        }
+        Ask::FindDeleted { items } => {
+            let main = crate::control::configured(&daemon.paths)
+                .ok()
+                .flatten()
+                .map(|r| r.folder);
+            let lists: Vec<_> = accounts
+                .iter()
+                .map(|a| (a.identity.as_str(), a.recently_deleted(usize::MAX)))
+                .collect();
+            match find_deleted(&lists, &items, main.as_deref()) {
+                Ok(found) => Reply::Deleted(found),
+                Err(why) => Reply::Refused(why),
+            }
         }
         Ask::Stop => {
             daemon.stop.store(true, Ordering::Relaxed);
@@ -57,6 +78,40 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
         })()),
         Ask::StartOver { identity } => done(daemon.start_over(&identity).map_err(Into::into)),
     }
+}
+
+/// The items of `lists` (each account's Recently deleted, as the engine lists it) that `picks`
+/// name: a node id, or the place [`words::deleted_place`] shows; refused naming the first one
+/// that isn't there.
+fn find_deleted(
+    lists: &[(&str, Vec<Deleted>)],
+    picks: &[String],
+    main: Option<&Path>,
+) -> Result<Vec<DeletedItem>, String> {
+    picks
+        .iter()
+        .map(|pick| {
+            let id = pick.parse().ok().map(NodeId);
+            let place = pick.trim_end_matches('/');
+            lists
+                .iter()
+                .find_map(|(identity, list)| {
+                    let d = list
+                        .iter()
+                        .find(|d| Some(d.node) == id || words::deleted_place(d, main) == place)?;
+                    let along = list
+                        .iter()
+                        .filter(|o| o.root == d.node && o.node != d.node)
+                        .count();
+                    Some(DeletedItem {
+                        identity: (*identity).to_owned(),
+                        deleted: d.clone(),
+                        along,
+                    })
+                })
+                .ok_or_else(|| format!("{pick} isn't in Recently deleted"))
+        })
+        .collect()
 }
 
 fn status(accounts: &[Arc<Account>]) -> DaemonStatus {
@@ -130,5 +185,54 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
                 false => Reply::Refused("the sync has stopped".into()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_types::{NodeKind, Uuid};
+
+    fn removed(n: u128, root: u128, path: &str) -> Deleted {
+        Deleted {
+            node: NodeId(Uuid::from_u128(n)),
+            parent: NodeId::ROOT,
+            path: path.into(),
+            kind: NodeKind::File,
+            size: None,
+            removed_at_ms: Some(1),
+            root: NodeId(Uuid::from_u128(root)),
+            folder: Some("/home/a/Homebase".into()),
+        }
+    }
+
+    /// Picks are found in each account's whole Recently deleted, whatever its size: by node id
+    /// or place, a delete or an item it took along.
+    #[test]
+    fn picks_are_found_by_id_or_place_in_any_account() {
+        let mut anna = vec![removed(1, 1, "Photos")];
+        anna.extend((0..5000).map(|i| removed(10 + i, 1, &format!("Photos/p{i}.jpg"))));
+        let bob = vec![removed(2, 2, "notes.txt")];
+        let lists = [("anna.example", anna), ("bob.example", bob)];
+        let main = Some(Path::new("/home/a/Homebase"));
+        let picks = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let found = find_deleted(&lists, &picks(&["Photos/", "Photos/p4999.jpg"]), main);
+        let found = found.expect("found");
+        assert_eq!(
+            (found[0].identity.as_str(), found[0].along),
+            ("anna.example", 5000)
+        );
+        assert_eq!(found[1].deleted.path, "Photos/p4999.jpg");
+        assert_eq!(found[1].along, 0);
+
+        let id = Uuid::from_u128(2).to_string();
+        let found = find_deleted(&lists, &picks(&[&id]), main).expect("found");
+        assert_eq!(found[0].identity, "bob.example");
+
+        assert_eq!(
+            find_deleted(&lists, &picks(&["Photos", "gone.txt"]), main),
+            Err("gone.txt isn't in Recently deleted".to_owned())
+        );
     }
 }

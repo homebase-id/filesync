@@ -180,24 +180,25 @@ refused this device: `hbsync setup` again), `stopped`.
 ## Control socket
 
 One request line, one reply line (JSON), then the connection closes. Requests carry the protocol
-version (now 4); a daemon refuses another one with the reason (after an update: restart it). The
+version (now 5); a daemon refuses another one with the reason (after an update: restart it). The
 wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":4,"ask":"status"}
-{"protocol":4,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":4,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":4,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":4,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
-{"protocol":4,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted_until":{"at_ms":1800000000000}}}}}}  // all removed until then
-{"protocol":4,"ask":{"recent":{"limit":10}}}
-{"protocol":4,"ask":{"deleted":{"limit":100}}}
-{"protocol":4,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
-{"protocol":4,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":4,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":5,"ask":"status"}
+{"protocol":5,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":5,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":5,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":5,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
+{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted_until":{"at_ms":1800000000000}}}}}}  // all removed until then
+{"protocol":5,"ask":{"recent":{"limit":10}}}
+{"protocol":5,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":5,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":5,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
+{"protocol":5,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":5,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
@@ -217,8 +218,13 @@ Replies:
   `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
   that tell a client what is new.
-- `{"recent":[…]}` (each entry with its `folder`) and `{"deleted":[…]}` (each item with its
-  account's `identity`), newest first.
+- `{"recent":[…]}` (each entry with its `folder`), newest first.
+- `{"deleted":[…]}`: for `deleted`, the newest `limit` deletes, newest first, each an item
+  deleted on its own with its account's `identity` and `along`, how many items its delete took
+  along (not those items: a deleted folder of thousands of files is one entry). For
+  `find_deleted`, the items named (a node id, or the place `hbsync deleted` shows), whether
+  deleted on their own or along with a folder; refused naming the first one that isn't there.
+  Restore and empty pick through it, so no client needs Recently deleted whole.
 - `"done"`, `{"refused":"why"}`.
 
 Only the user can connect:

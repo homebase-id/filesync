@@ -16,7 +16,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -45,9 +45,15 @@ pub enum Ask {
     Recent {
         limit: usize,
     },
-    /// The newest items of Recently deleted, every account's.
+    /// The newest deletes of Recently deleted, every account's: each item deleted on its own,
+    /// with how many items its delete took along (never those items themselves).
     Deleted {
         limit: usize,
+    },
+    /// The items of Recently deleted the user named (a node id, or its place as `hbsync
+    /// deleted` shows it), any account's; refused naming the first one that isn't there.
+    FindDeleted {
+        items: Vec<String>,
     },
     /// Set the folder at `path` up for `identity` and sync it (`hbsync setup` has checked it).
     AddFolder {
@@ -150,6 +156,34 @@ pub struct DeletedItem {
     pub identity: String,
     #[serde(flatten)]
     pub deleted: Deleted,
+    /// How many items its delete took along (restoring it restores them, emptying it empties
+    /// them): 0 for an item a delete took along itself.
+    #[serde(default)]
+    pub along: usize,
+}
+
+impl DeletedItem {
+    /// The deletes of an account's Recently deleted `list` (each delete with what it took
+    /// along), each with its count, in `list`'s order.
+    pub fn deletes(identity: &str, list: Vec<Deleted>) -> Vec<DeletedItem> {
+        let mut along: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
+        for d in list.iter().filter(|d| d.root != d.node) {
+            *along.entry(d.root).or_default() += 1;
+        }
+        list.into_iter()
+            .filter(|d| d.root == d.node)
+            .map(|deleted| DeletedItem {
+                identity: identity.to_owned(),
+                along: along.get(&deleted.node).copied().unwrap_or(0),
+                deleted,
+            })
+            .collect()
+    }
+
+    /// This item and what its delete took along.
+    pub fn count(&self) -> usize {
+        1 + self.along
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -316,4 +350,43 @@ pub struct Note {
     /// Unix seconds.
     pub at: u64,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_types::{NodeKind, Uuid};
+
+    fn removed(n: u128, root: u128, at: i64, path: &str) -> Deleted {
+        Deleted {
+            node: NodeId(Uuid::from_u128(n)),
+            parent: NodeId::ROOT,
+            path: path.into(),
+            kind: NodeKind::File,
+            size: None,
+            removed_at_ms: Some(at),
+            root: NodeId(Uuid::from_u128(root)),
+            folder: Some(String::new()),
+        }
+    }
+
+    /// A folder of thousands of files is one delete with its count; its files, removed after
+    /// it (folder first), never crowd it out.
+    #[test]
+    fn a_folder_with_what_it_took_along_is_one_delete() {
+        let mut list = vec![removed(1, 1, 100, "Photos")];
+        list.extend((0..5000).map(|i| removed(10 + i, 1, 101 + i as i64, "Photos/p.jpg")));
+        list.push(removed(2, 2, 50, "old.txt"));
+        let items = DeletedItem::deletes("a.example", list);
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            (items[0].deleted.path.as_str(), items[0].along),
+            ("Photos", 5000)
+        );
+        assert_eq!(
+            (items[1].deleted.path.as_str(), items[1].along),
+            ("old.txt", 0)
+        );
+        assert_eq!(items[0].count() + items[1].count(), 5002);
+    }
 }

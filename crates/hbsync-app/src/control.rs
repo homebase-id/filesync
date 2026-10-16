@@ -57,10 +57,23 @@ pub fn recent(paths: &Paths, limit: usize) -> Result<Option<Vec<RecentItem>>> {
     }
 }
 
-/// Recently deleted, newest first; `None` when the daemon isn't running.
+/// Recently deleted's newest `limit` deletes, newest first, each with how many items it took
+/// along; `None` when the daemon isn't running.
 pub fn deleted(paths: &Paths, limit: usize) -> Result<Option<Vec<DeletedItem>>> {
-    match ask(paths, Ask::Deleted { limit }) {
+    listed(ask(paths, Ask::Deleted { limit }))
+}
+
+/// The items of Recently deleted that `items` name (a node id, or the place `hbsync deleted`
+/// shows), any it holds, deleted on their own or along with a folder; `None` when the daemon
+/// isn't running.
+pub fn find_deleted(paths: &Paths, items: Vec<String>) -> Result<Option<Vec<DeletedItem>>> {
+    listed(ask(paths, Ask::FindDeleted { items }))
+}
+
+fn listed(answer: std::result::Result<Reply, IpcError>) -> Result<Option<Vec<DeletedItem>>> {
+    match answer {
         Ok(Reply::Deleted(list)) => Ok(Some(list)),
+        Ok(Reply::Refused(why)) => Err(why.into()),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
         Err(IpcError::NotRunning) => Ok(None),
         Err(e) => Err(e.into()),
@@ -449,6 +462,7 @@ mod tests {
                 root: NodeId::ROOT,
                 folder: None,
             },
+            along: 0,
         };
         let items = [item("a", None), item("a", Some(7)), item("b", Some(9))];
         let shown = Shown::of(&items);
