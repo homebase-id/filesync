@@ -6,8 +6,8 @@
 //! credentials.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SendError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -671,13 +671,20 @@ pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 pub struct Notifications {
     puller: Puller,
     announced: Announced,
-    /// The files announced since the last take, and whether an announcement didn't say which.
+    /// The files announced since the last take: every hard delete (it is in no feed), and
+    /// live changes up to [`MAX_LIVE_REFS`]; and whether the feed is to be read too (an
+    /// announcement didn't say which file, or there were more).
     changes: Vec<ChangeRef>,
+    live: usize,
     unsaid: bool,
     connected: bool,
     /// While not connected: the next read of the drive.
     next_read: Instant,
 }
+
+/// Live changes kept while announcements gather (or the account is paused): more are read
+/// from the feed instead, in one go.
+const MAX_LIVE_REFS: usize = 2_000;
 
 impl Notifications {
     /// Not connected yet: the first read of the drive comes [`UNANNOUNCED_READ`] after `now`
@@ -687,6 +694,7 @@ impl Notifications {
             puller,
             announced: Announced::default(),
             changes: Vec::new(),
+            live: 0,
             unsaid: false,
             connected: false,
             next_read: now + UNANNOUNCED_READ,
@@ -698,20 +706,34 @@ impl Notifications {
         match event {
             Event::Connected => {
                 self.connected = true;
-                // This pull takes what was announced so far too.
+                // Changes made while not connected weren't announced: the feed is read (now,
+                // or by every folder's sync at the resume). A hard delete announced before is
+                // in no feed: it is kept, and taken with that read or at the resume.
+                self.changes.retain(|c| c.deleted);
+                self.live = 0;
+                self.unsaid = !paused;
                 self.announced = Announced::default();
-                self.changes.clear();
-                self.unsaid = false;
                 if !paused {
-                    self.puller.ask();
+                    self.take();
+                } else if !self.changes.is_empty() {
+                    self.announced.note(now);
                 }
                 Some(Hints::Connected)
             }
             Event::Changed(change) => {
                 self.announced.note(now);
                 match change {
-                    Some(change) => self.changes.push(change),
-                    None => self.unsaid = true,
+                    Some(change) if change.deleted => self.changes.push(change),
+                    Some(change) if !self.unsaid => {
+                        self.changes.push(change);
+                        self.live += 1;
+                        if self.live > MAX_LIVE_REFS {
+                            self.read_instead();
+                        }
+                    }
+                    // The feed is read anyway.
+                    Some(_) => {}
+                    None => self.read_instead(),
                 }
                 None
             }
@@ -734,6 +756,22 @@ impl Notifications {
         }
     }
 
+    /// The live changes announced are read from the feed instead (the hard deletes stay).
+    fn read_instead(&mut self) {
+        self.changes.retain(|c| c.deleted);
+        self.live = 0;
+        self.unsaid = true;
+    }
+
+    /// Hands what was announced to the puller.
+    fn take(&mut self) {
+        self.live = 0;
+        self.puller.take(
+            std::mem::take(&mut self.changes),
+            std::mem::take(&mut self.unsaid),
+        );
+    }
+
     /// Pulls what was announced once it has quieted, and the drive every [`UNANNOUNCED_READ`]
     /// while not connected; nothing while `paused` (a resume syncs every folder anyway).
     pub fn tick(&mut self, now: Instant, paused: bool) {
@@ -741,15 +779,18 @@ impl Notifications {
             return;
         }
         if self.announced.due(now) {
-            self.puller.take(
-                std::mem::take(&mut self.changes),
-                std::mem::take(&mut self.unsaid),
-            );
+            self.take();
         }
         if !self.connected && now >= self.next_read {
             self.next_read = now + UNANNOUNCED_READ;
             self.puller.ask();
         }
+    }
+
+    /// What waits to be taken: the changes kept, and whether the feed is to be read too.
+    #[cfg(test)]
+    fn waiting(&self) -> (&[ChangeRef], bool) {
+        (&self.changes, self.unsaid)
     }
 }
 
@@ -757,78 +798,133 @@ impl Notifications {
 /// never waits for the network: asks while a pull runs are answered by one more. Changes
 /// announced are taken first, and the feed read only for what they leave unknown. A pull wakes
 /// the folders its changes concern; when it fails, or the thread couldn't start, every folder
-/// is woken, and their syncs pull (and back off) themselves.
+/// is woken, and their syncs pull (and back off) themselves. A hard delete announced is kept
+/// until it is taken: it is in no feed.
 #[derive(Debug, Clone)]
 pub struct Puller {
-    asks: Sender<Ask>,
+    /// Changes announced, and whether to read the feed (a plain ask: none and `true`).
+    asks: Sender<(Vec<ChangeRef>, bool)>,
     drive: Arc<Drive>,
+    /// Hard deletes not taken yet when there is no thread to take them.
+    held: Arc<Mutex<Vec<ChangeRef>>>,
+    /// Rounds done (taken and read), for tests.
+    rounds: Arc<AtomicUsize>,
 }
 
-/// What the puller is asked: the feed, or announced changes (and whether one didn't say which).
-#[derive(Debug)]
-enum Ask {
-    Pull,
-    Take(Vec<ChangeRef>, bool),
-}
+/// How long hard deletes not taken (taking them failed) wait before they are tried again.
+const HELD_RETRY: Duration = Duration::from_secs(10);
 
 impl Puller {
     pub fn spawn(drive: Arc<Drive>) -> Puller {
-        let (asks, rx) = channel::<Ask>();
-        let mine = Arc::clone(&drive);
+        let (asks, rx) = channel::<(Vec<ChangeRef>, bool)>();
+        let rounds = Arc::new(AtomicUsize::new(0));
+        let (mine, done) = (Arc::clone(&drive), Arc::clone(&rounds));
         let started = std::thread::Builder::new()
             .name("hbsync-pull".into())
             .spawn(move || {
-                while let Ok(first) = rx.recv() {
-                    let (mut changes, mut pull) = (Vec::new(), false);
-                    for ask in std::iter::once(first).chain(rx.try_iter()) {
-                        match ask {
-                            Ask::Pull => pull = true,
-                            Ask::Take(more, unsaid) => {
-                                changes.extend(more);
-                                pull |= unsaid;
-                            }
-                        }
-                    }
-                    pull |= match mine.announced(&changes) {
-                        Ok(all) => !all,
-                        Err(e) => {
-                            tracing::info!("taking announced changes failed ({e}); reading them");
-                            true
+                let mut held = Vec::new();
+                loop {
+                    let first = if held.is_empty() {
+                        rx.recv().ok()
+                    } else {
+                        match rx.recv_timeout(HELD_RETRY) {
+                            Ok(ask) => Some(ask),
+                            Err(RecvTimeoutError::Timeout) => Some((Vec::new(), false)),
+                            Err(RecvTimeoutError::Disconnected) => None,
                         }
                     };
-                    if pull && let Err(e) = mine.pull(None) {
-                        tracing::info!(
-                            "pulling the drive's changes failed ({e}); the folders' syncs will"
-                        );
-                        mine.wake_all();
-                    }
+                    let Some(first) = first else { break };
+                    let (changes, pull) = merge(held, std::iter::once(first).chain(rx.try_iter()));
+                    held = round(
+                        changes,
+                        pull,
+                        |c| mine.announced(c).map_err(|e| e.to_string()),
+                        || mine.pull(None).map(drop).map_err(|e| e.to_string()),
+                        || mine.wake_all(),
+                    );
+                    done.fetch_add(1, Ordering::SeqCst);
                 }
             });
         if let Err(e) = started {
             tracing::error!("can't start reading the drive on its own ({e}): the folders will");
         }
-        Puller { asks, drive }
+        Puller {
+            asks,
+            drive,
+            held: Arc::default(),
+            rounds,
+        }
     }
 
     /// Reads the feed.
     pub fn ask(&self) {
-        self.send(Ask::Pull);
+        self.send(Vec::new(), true);
     }
 
     /// Takes announced `changes`, reading the feed for what they leave unknown or when one
     /// announcement didn't say which file (`unsaid`).
     pub fn take(&self, changes: Vec<ChangeRef>, unsaid: bool) {
-        if changes.is_empty() && !unsaid {
-            return;
-        }
-        self.send(Ask::Take(changes, unsaid));
+        self.send(changes, unsaid);
     }
 
-    fn send(&self, ask: Ask) {
-        if self.asks.send(ask).is_err() {
-            self.drive.wake_all();
+    /// Rounds the puller's thread has done.
+    #[doc(hidden)]
+    pub fn rounds(&self) -> usize {
+        self.rounds.load(Ordering::SeqCst)
+    }
+
+    fn send(&self, changes: Vec<ChangeRef>, read: bool) {
+        let Err(SendError((changes, _))) = self.asks.send((changes, read)) else {
+            return;
+        };
+        // No thread to take them: the hard deletes here (they are in no feed), kept until
+        // that works; the rest is the folders' syncs' to read.
+        let mut held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+        held.extend(changes.into_iter().filter(|c| c.deleted));
+        match self.drive.announced(&held) {
+            Ok(_) => held.clear(),
+            Err(e) => tracing::warn!("taking announced deletes failed ({e}); trying again later"),
+        }
+        self.drive.wake_all();
+    }
+}
+
+/// The asks of one round, after the hard deletes `held` from the last: all their changes, and
+/// whether the feed is to be read.
+fn merge(
+    held: Vec<ChangeRef>,
+    asks: impl Iterator<Item = (Vec<ChangeRef>, bool)>,
+) -> (Vec<ChangeRef>, bool) {
+    asks.fold((held, false), |(mut changes, read), (more, also)| {
+        changes.extend(more);
+        (changes, read || also)
+    })
+}
+
+/// One round of the puller: takes `changes` (`announced`), reads the feed when asked or when
+/// they leave something unknown (`read`), and wakes every folder when the read fails. Returns
+/// the hard deletes still to take: taking failed, and they are in no feed.
+fn round(
+    changes: Vec<ChangeRef>,
+    mut pull: bool,
+    announced: impl FnOnce(&[ChangeRef]) -> Result<bool, String>,
+    read: impl FnOnce() -> Result<(), String>,
+    wake_all: impl FnOnce(),
+) -> Vec<ChangeRef> {
+    let mut held = Vec::new();
+    match announced(&changes) {
+        Ok(all) => pull |= !all,
+        Err(e) => {
+            tracing::info!("taking announced changes failed ({e}); reading them");
+            held = changes.into_iter().filter(|c| c.deleted).collect();
+            pull = true;
         }
     }
+    if pull && let Err(e) = read() {
+        tracing::info!("pulling the drive's changes failed ({e}); the folders' syncs will");
+        wake_all();
+    }
+    held
 }
 
 /// A folder's runner, on the account's thread.
@@ -1056,5 +1152,124 @@ mod tests {
         let summary = summary.ok_or("Recently deleted shown empty")?;
         assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
         Ok(())
+    }
+
+    /// A ref of a file nobody has: live, or (`deleted`) deleted for good.
+    fn a_ref(deleted: bool) -> ChangeRef {
+        use hbsync_types::{RemoteFileId, VersionTag};
+        let live = ChangeRef {
+            file_id: RemoteFileId(uuid::Uuid::new_v4()),
+            version: VersionTag(uuid::Uuid::new_v4()),
+            deleted: false,
+            parent: None,
+            removed_at: None,
+            changed_at: Some(1),
+        };
+        if deleted { live.tombstone() } else { live }
+    }
+
+    /// Notifications on a drive of their own; no announcement comes but the test's.
+    fn notifications(
+        home: &Path,
+    ) -> Result<(Notifications, Arc<Drive>), Box<dyn std::error::Error>> {
+        let drive = Drive::open(
+            &home.join("state.db"),
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        let n = Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now());
+        Ok((n, drive))
+    }
+
+    /// A hard delete announced is in no feed: connecting (again) reads the feed instead of the
+    /// live changes announced, but keeps the delete to take with that read.
+    #[test]
+    fn a_hard_delete_survives_connecting() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let (mut n, _) = notifications(home.path())?;
+        let now = Instant::now();
+        let (live, gone) = (a_ref(false), a_ref(true));
+        n.event(Event::Changed(Some(live)), now, true);
+        n.event(Event::Changed(Some(gone)), now, true);
+        // Paused: nothing is taken until the resume.
+        n.event(Event::Connected, now, true);
+        let (kept, read) = n.waiting();
+        assert_eq!(kept, &[gone], "the delete stays, the live change is read");
+        assert!(!read, "every folder's sync reads the feed at the resume");
+        Ok(())
+    }
+
+    /// More live changes than are kept are read from the feed instead; hard deletes are all
+    /// kept, as they are in no feed.
+    #[test]
+    fn too_many_live_changes_are_read_instead() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let (mut n, _) = notifications(home.path())?;
+        let now = Instant::now();
+        let gone = a_ref(true);
+        n.event(Event::Changed(Some(gone)), now, true);
+        for _ in 0..MAX_LIVE_REFS {
+            n.event(Event::Changed(Some(a_ref(false))), now, true);
+        }
+        assert_eq!(n.waiting().0.len(), MAX_LIVE_REFS + 1);
+        n.event(Event::Changed(Some(a_ref(false))), now, true);
+        let (kept, read) = n.waiting();
+        assert_eq!(kept, &[gone]);
+        assert!(read);
+        n.event(Event::Changed(Some(a_ref(false))), now, true);
+        assert_eq!(
+            n.waiting().0.len(),
+            1,
+            "nothing more is kept: the feed is read"
+        );
+        Ok(())
+    }
+
+    /// A take and a plain ask in one round: the changes are taken and the feed is read, once.
+    #[test]
+    fn a_take_merges_with_a_pull() {
+        let (gone, live) = (a_ref(true), a_ref(false));
+        let held = vec![gone];
+        let (changes, read) = merge(held, [(vec![live], false), (Vec::new(), true)].into_iter());
+        assert_eq!(changes, vec![gone, live]);
+        assert!(read);
+        assert!(!merge(Vec::new(), [(vec![live], false)].into_iter()).1);
+    }
+
+    /// Taking announced changes that fails keeps the hard deletes for the next round (they
+    /// are in no feed) and reads the feed meanwhile; once taken they are gone.
+    #[test]
+    fn a_hard_delete_survives_a_failed_take() {
+        let (gone, live) = (a_ref(true), a_ref(false));
+        let reads = std::cell::Cell::new(0);
+        let held = round(
+            vec![gone, live],
+            false,
+            |_| Err("the DB is busy".into()),
+            || {
+                reads.set(reads.get() + 1);
+                Ok(())
+            },
+            || {},
+        );
+        assert_eq!(held, vec![gone]);
+        assert_eq!(reads.get(), 1, "the live change is read instead");
+        let taken = std::cell::RefCell::new(Vec::new());
+        let held = round(
+            merge(held, std::iter::empty()).0,
+            false,
+            |c| {
+                taken.borrow_mut().extend_from_slice(c);
+                Ok(true)
+            },
+            || {
+                reads.set(reads.get() + 1);
+                Ok(())
+            },
+            || {},
+        );
+        assert!(held.is_empty());
+        assert_eq!(*taken.borrow(), vec![gone], "taken the next round");
+        assert_eq!(reads.get(), 1, "known: nothing to read");
     }
 }

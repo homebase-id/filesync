@@ -23,6 +23,8 @@ struct Device {
     handle: Handle,
     thread: Option<JoinHandle<Result<(), RunnerError>>>,
     drive: Arc<Drive>,
+    /// The drive's client of the fake server (its counters).
+    remote: FakeRemote,
     /// Last: removed after the drive has closed the state DB in it (Windows can't remove an
     /// open file).
     _dir: tempfile::TempDir,
@@ -37,20 +39,33 @@ impl Device {
         let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
         let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", name);
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
-        let drive = drive(&cfg, server)?;
+        let remote = FakeRemote::new(server.clone());
+        let drive = Drive::open(&cfg.db, &cfg.identity, Arc::new(remote.clone()))?;
         let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
         Ok(Device {
             root,
             handle,
             thread: Some(thread),
             drive,
+            remote,
             _dir: dir,
         })
     }
 
+    /// The account's puller, as the daemon runs it.
+    fn puller(&self) -> Puller {
+        Puller::spawn(Arc::clone(&self.drive))
+    }
+
     /// The account's notifications, as the daemon runs them (none come in these tests).
     fn notifications(&self, now: Instant) -> Notifications {
-        Notifications::new(Puller::spawn(Arc::clone(&self.drive)), now)
+        Notifications::new(self.puller(), now)
+    }
+
+    /// The feed pages read so far: slim and whole.
+    fn feed_reads(&self) -> usize {
+        let faults = self.remote.faults();
+        faults.ref_pages + faults.full_pages
     }
 
     /// What the account does when its notifications connect (again).
@@ -243,20 +258,63 @@ fn announced_changes_are_read_only_when_new() -> R {
         let s = b.status();
         s.state == State::Idle && s.pending == 0
     })?;
+    let t0 = Instant::now();
+    let puller = b.puller();
+    let mut n = Notifications::new(puller.clone(), t0);
+    n.event(Event::Connected, t0, true); // connected; paused, so not pulled now
     a.write("x.txt", "x")?;
     wait_until("x.txt is up", || on_server(&server, "x.txt"))?;
-
-    let t0 = Instant::now();
-    let mut n = b.notifications(t0);
-    n.event(Event::Connected, t0, true); // connected; paused, so not pulled now
+    let reads = b.feed_reads();
     n.event(announce("mine.txt")?, t0, false);
-    n.tick(t0 + Duration::from_secs(2), false);
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(!b.has("x.txt"), "the feed was read for b's own write");
+    n.tick(t0 + Duration::from_secs(4), false);
+    wait_until("the puller took it", || puller.rounds() == 1)?;
+    assert_eq!(b.feed_reads(), reads, "the feed was read for b's own write");
+    assert!(!b.has("x.txt"));
 
     n.event(announce("x.txt")?, t0, false);
-    n.tick(t0 + Duration::from_secs(2), false);
+    n.tick(t0 + Duration::from_secs(6), false);
     wait_until("b read the drive", || b.has("x.txt"))?;
+    assert!(b.feed_reads() > reads, "x.txt is new: read");
+    Ok(())
+}
+
+/// A hard delete announced just before the notifications reconnect is still taken: the read
+/// at the reconnect can't bring it (it is in no feed).
+#[test]
+fn a_hard_delete_announced_before_a_reconnect_is_taken() -> R {
+    use hbsync_remote::{ChangeRef, RemoteBody};
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    a.write("keep.txt", "k")?;
+    a.write("z.txt", "z")?;
+    wait_until("both are up", || live_names(&server).len() == 2)?;
+    b.connected();
+    wait_until("b has z.txt", || b.has("z.txt"))?;
+    // Its sync that brought z.txt done (the delete isn't to race with that sync).
+    wait_until("b is idle", || {
+        let s = b.status();
+        s.state == State::Idle && s.pending == 0
+    })?;
+    let gone = {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        let header = s
+            .live()
+            .find(
+                |h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == "z.txt"),
+            )
+            .cloned()
+            .ok_or("z.txt")?;
+        s.hard_delete(header.file_id, header.version)?;
+        ChangeRef::of(&header).tombstone()
+    };
+    let now = Instant::now();
+    let mut n = b.notifications(now);
+    n.event(Event::Changed(Some(gone)), now, false);
+    n.event(Event::Connected, now, false);
+    wait_until("b let z.txt go", || !b.has("z.txt"))
+        .map_err(|e| format!("{e}; b: {:?}", b.status()))?;
+    assert!(b.has("keep.txt"));
     Ok(())
 }
 

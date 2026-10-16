@@ -128,13 +128,7 @@ fn announced_changes_are_taken_without_reading_what_is_known() -> R {
     );
 
     // Deleted for good without a row in the feed (a hard delete): gone at once.
-    let hard = ChangeRef {
-        deleted: true,
-        parent: None,
-        removed_at: None,
-        changed_at: None,
-        ..echo
-    };
+    let hard = echo.tombstone();
     assert!(drive.announced(&[hard])?);
     assert!(db.read(|s| s.removed_by_node(docs.node))?.is_none());
     assert!(db.read(|s| s.mirror_by_file(made.at.file_id))?.is_none());
@@ -185,13 +179,7 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
     assert!(db.read(|s| s.removed_by_node(docs.node))?.is_none());
 
     // Deleted for good, the node made again (a new file id), then the delete is announced.
-    let late_delete = ChangeRef {
-        deleted: true,
-        parent: None,
-        removed_at: None,
-        changed_at: None,
-        ..ChangeRef::of(&remote.header(file)?)
-    };
+    let late_delete = ChangeRef::of(&remote.header(file)?).tombstone();
     remote.delete(file, back.at.version)?;
     let again = remote.create(&docs, None)?;
     assert_ne!(again.at.file_id, file, "a new file id");
@@ -201,6 +189,315 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
         .read(|s| s.mirror_by_file(again.at.file_id))?
         .expect("the node made again stays");
     assert_eq!(row.version, again.at.version);
+    Ok(())
+}
+
+/// A remote whose next whole feed page, once fetched, waits for the test before it is handed
+/// back: a page on its way while the drive changes.
+struct HeldPage {
+    inner: Arc<FakeRemote>,
+    hold: std::sync::atomic::AtomicBool,
+    fetched: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Remote for HeldPage {
+    fn changes(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> hbsync_remote::Result<hbsync_remote::ChangesPage> {
+        let page = self.inner.changes(cursor, limit)?;
+        if self.hold.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let _ = self.fetched.lock().map(|tx| tx.send(()));
+            let _ = self.go.lock().map(|rx| rx.recv());
+        }
+        Ok(page)
+    }
+    fn change_refs(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> hbsync_remote::Result<hbsync_remote::RefsPage> {
+        self.inner.change_refs(cursor, limit)
+    }
+    fn header(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+    ) -> hbsync_remote::Result<hbsync_remote::RemoteHeader> {
+        self.inner.header(file_id)
+    }
+    fn create(
+        &self,
+        node: &NodeMeta,
+        payload: Option<hbsync_remote::Upload<'_>>,
+    ) -> hbsync_remote::Result<hbsync_types::Target> {
+        self.inner.create(node, payload)
+    }
+    fn update(
+        &self,
+        target: &hbsync_types::Target,
+        meta: &NodeMeta,
+        payload: Option<hbsync_remote::Upload<'_>>,
+    ) -> hbsync_remote::Result<hbsync_types::Target> {
+        self.inner.update(target, meta, payload)
+    }
+    fn delete(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+        expected: hbsync_types::VersionTag,
+    ) -> hbsync_remote::Result<()> {
+        self.inner.delete(file_id, expected)
+    }
+    fn read(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn std::io::Write,
+    ) -> hbsync_remote::Result<u64> {
+        self.inner.read(file_id, range, sink)
+    }
+}
+
+/// A hard delete announced while a pull's page is on its way waits for that page: the page
+/// (fetched before the delete) must not put the file back after the delete was taken.
+#[test]
+fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
+    use hbsync_remote::ChangeRef;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = tempfile::tempdir()?;
+    let inner = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+    let (fetched_tx, fetched) = std::sync::mpsc::channel();
+    let (go, go_rx) = std::sync::mpsc::channel();
+    let remote = Arc::new(HeldPage {
+        inner: Arc::clone(&inner),
+        hold: AtomicBool::new(false),
+        fetched: std::sync::Mutex::new(fetched_tx),
+        go: std::sync::Mutex::new(go_rx),
+    });
+    let drive = Drive::new(
+        StateDb::open_account(&dir.path().join("state.db"))?,
+        remote.clone(),
+    );
+    let docs = folder("Docs");
+    let v1 = inner.create(&docs, None)?;
+    drive.pull(None)?;
+    // A change the next pull reads whole; its page waits once fetched.
+    let v2 = inner.update(&v1, &docs, None)?;
+    remote.hold.store(true, Ordering::SeqCst);
+    let pulling = {
+        let drive = Arc::clone(&drive);
+        std::thread::spawn(move || drive.pull(None).map(drop).map_err(|e| e.to_string()))
+    };
+    fetched.recv_timeout(Duration::from_secs(10))?;
+    // Deleted for good meanwhile: no feed row; the notification says so.
+    let gone = ChangeRef::of(&inner.header(v2.at.file_id)?).tombstone();
+    inner.server().hard_delete(v2.at.file_id, v2.at.version)?;
+    let taking = {
+        let drive = Arc::clone(&drive);
+        std::thread::spawn(move || drive.announced(&[gone]).map_err(|e| e.to_string()))
+    };
+    // Give the delete every chance to go first (it must wait for the page).
+    let until = std::time::Instant::now() + Duration::from_millis(500);
+    while !taking.is_finished() && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    go.send(())?;
+    pulling.join().map_err(|_| "the pull panicked")??;
+    taking.join().map_err(|_| "the take panicked")??;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    assert!(
+        db.read(|s| s.mirror_by_file(v2.at.file_id))?.is_none(),
+        "the page fetched before the delete brought it back"
+    );
+    Ok(())
+}
+
+/// Thousands of announced versions, more than SQLite takes variables in one query, are asked
+/// in parts.
+#[test]
+fn many_announced_versions_are_asked_in_parts() -> R {
+    use hbsync_remote::ChangeRef;
+    use hbsync_types::{RemoteFileId, VersionTag};
+
+    let dir = tempfile::tempdir()?;
+    let (drive, _) = drive(dir.path())?;
+    let refs: Vec<ChangeRef> = (0..12_000)
+        .map(|_| ChangeRef {
+            file_id: RemoteFileId(uuid::Uuid::new_v4()),
+            version: VersionTag(uuid::Uuid::new_v4()),
+            deleted: false,
+            parent: None,
+            removed_at: None,
+            changed_at: Some(1),
+        })
+        .collect();
+    assert!(!drive.announced(&refs)?, "unknown: the feed is read");
+    Ok(())
+}
+
+/// One ref per file: this device's own write made twice, or made then deleted for good, needs
+/// no read of the feed.
+#[test]
+fn an_own_double_write_or_write_then_delete_needs_no_read() -> R {
+    use hbsync_remote::ChangeRef;
+
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let docs = folder("Docs");
+    let v1 = remote.create(&docs, None)?;
+    let first = ChangeRef::of(&remote.header(v1.at.file_id)?);
+    let v2 = remote.update(&v1, &docs, None)?;
+    let second = ChangeRef::of(&remote.header(v1.at.file_id)?);
+    drive.pull(None)?;
+    assert!(
+        drive.announced(&[first, second])?,
+        "v1 then v2 of an own write: v2 is known, v1 is past"
+    );
+
+    let notes = folder("Notes");
+    let n1 = remote.create(&notes, None)?;
+    let written = ChangeRef::of(&remote.header(n1.at.file_id)?);
+    remote.server().hard_delete(n1.at.file_id, n1.at.version)?;
+    assert!(
+        drive.announced(&[written, written.tombstone()])?,
+        "written, then deleted for good: nothing left to read"
+    );
+    let _ = v2;
+    Ok(())
+}
+
+/// What happens to the drive in the property below, to item `0..ITEMS`.
+#[derive(Debug, Clone)]
+enum Step {
+    Write(usize),
+    Remove(usize),
+    Restore(usize),
+    HardDelete(usize),
+    Pull,
+    /// Announcements delivered: these of the queued ones (by index, wrapped), late, out of
+    /// order and some twice.
+    Announce(Vec<usize>),
+}
+
+const ITEMS: usize = 4;
+
+fn step() -> impl proptest::strategy::Strategy<Value = Step> {
+    use proptest::prelude::*;
+    prop_oneof![
+        (0..ITEMS).prop_map(Step::Write),
+        (0..ITEMS).prop_map(Step::Remove),
+        (0..ITEMS).prop_map(Step::Restore),
+        (0..ITEMS).prop_map(Step::HardDelete),
+        Just(Step::Pull),
+        proptest::collection::vec(0..64usize, 0..6).prop_map(Step::Announce),
+    ]
+}
+
+proptest::proptest! {
+    /// Announcements, however late, out of order or repeated, and pulls in between, leave the
+    /// mirror as the drive is once every hard delete was announced and the feed read: no row a
+    /// hard delete took comes back, none is left, and nothing moves back to an older version.
+    #[test]
+    fn announcements_and_pulls_leave_the_mirror_as_the_drive_is(
+        steps in proptest::collection::vec(step(), 1..40)
+    ) {
+        mirror_follows_the_drive(steps)?;
+    }
+}
+
+/// An error as a failed test case.
+fn ok<T, E: std::fmt::Display>(r: Result<T, E>) -> Result<T, proptest::test_runner::TestCaseError> {
+    r.map_err(|e| proptest::test_runner::TestCaseError::fail(e.to_string()))
+}
+
+fn mirror_follows_the_drive(steps: Vec<Step>) -> Result<(), proptest::test_runner::TestCaseError> {
+    use hbsync_remote::ChangeRef;
+    let dir = ok(tempfile::tempdir())?;
+    let (drive, remote) = ok(drive(dir.path()))?;
+    let mut db = ok(StateDb::open_account(&dir.path().join("state.db")))?;
+    // Per item: its node, and its file now (`None`: none, or deleted for good).
+    let metas: Vec<NodeMeta> = (0..ITEMS).map(|i| folder(&format!("f{i}"))).collect();
+    let mut files: Vec<Option<hbsync_types::Target>> = vec![None; ITEMS];
+    // Every file id an item had: one deleted for good must stay gone.
+    let mut ever: Vec<Vec<hbsync_types::RemoteFileId>> = vec![Vec::new(); ITEMS];
+    let mut queued: Vec<ChangeRef> = Vec::new();
+    let mut hard: Vec<ChangeRef> = Vec::new();
+    let announce = |remote: &FakeRemote, at: &hbsync_types::Target| {
+        ok(remote.header(at.at.file_id)).map(|h| ChangeRef::of(&h))
+    };
+    for step in steps {
+        match step {
+            Step::Write(i) => {
+                let done = match &files[i] {
+                    None => remote.create(&metas[i], None),
+                    Some(at) => remote.update(at, &metas[i], None),
+                };
+                if let Ok(at) = done {
+                    queued.push(announce(&remote, &at)?);
+                    if !ever[i].contains(&at.at.file_id) {
+                        ever[i].push(at.at.file_id);
+                    }
+                    files[i] = Some(at);
+                }
+            }
+            Step::Remove(i) | Step::Restore(i) => {
+                let meta = match step {
+                    Step::Remove(_) => hbsync_remote::contract::removed(&metas[i]),
+                    _ => metas[i].clone(),
+                };
+                if let Some(at) = &files[i]
+                    && let Ok(now) = remote.update(at, &meta, None)
+                {
+                    queued.push(announce(&remote, &now)?);
+                    files[i] = Some(now);
+                }
+            }
+            Step::HardDelete(i) => {
+                if let Some(at) = files[i].take() {
+                    let was = announce(&remote, &at)?;
+                    ok(remote.server().hard_delete(at.at.file_id, at.at.version))?;
+                    queued.push(was.tombstone());
+                    hard.push(was.tombstone());
+                }
+            }
+            Step::Pull => {
+                ok(drive.pull(None))?;
+            }
+            Step::Announce(picks) => {
+                if queued.is_empty() {
+                    continue;
+                }
+                let refs: Vec<ChangeRef> = picks.iter().map(|k| queued[k % queued.len()]).collect();
+                ok(drive.announced(&refs))?;
+            }
+        }
+    }
+    // Every hard delete is announced at least once (a notification), and the feed read.
+    ok(drive.announced(&hard))?;
+    ok(drive.pull(None))?;
+    for (i, file) in files.iter().enumerate() {
+        let now = file.as_ref().map(|at| at.at.file_id);
+        for gone in ever[i].iter().filter(|id| Some(**id) != now) {
+            let back = ok(db.read(|s| s.mirror_by_file(*gone)))?;
+            proptest::prop_assert!(back.is_none(), "f{} came back: {:?}", i, back);
+        }
+        let removed = ok(db.read(|s| s.removed_by_node(metas[i].node)))?;
+        let Some(at) = file else {
+            proptest::prop_assert!(removed.is_none(), "f{} left in Recently deleted", i);
+            continue;
+        };
+        let h = ok(remote.header(at.at.file_id))?;
+        let mirror = ok(db.read(|s| s.mirror_by_file(at.at.file_id)))?;
+        if h.removed_at.is_some() {
+            proptest::prop_assert!(mirror.is_none());
+            proptest::prop_assert_eq!(removed.map(|r| r.row.version), Some(h.version));
+        } else {
+            proptest::prop_assert_eq!(mirror.map(|r| r.version), Some(h.version));
+            proptest::prop_assert!(removed.is_none());
+        }
+    }
     Ok(())
 }
 

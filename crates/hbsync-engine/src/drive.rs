@@ -121,8 +121,9 @@ impl Drive {
         let covers = self.asked.load(Ordering::SeqCst);
         let mut report = feed::pull(|| self.account(), self.remote(), FEED_PAGE)?;
         *answered = covers;
-        drop(answered);
+        // Still one at a time: what it touched is its to wake.
         self.wake_touched(&mut self.account(), from);
+        drop(answered);
         let mut skipped = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
         let room = MAX_SKIPPED.saturating_sub(skipped.len());
         skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));
@@ -130,11 +131,15 @@ impl Drive {
     }
 
     /// Takes changes the notifications announced ([`feed::announced`]): whether that was all,
-    /// or the feed has to be read. Wakes the folders they concern.
+    /// or the feed has to be read. Wakes the folders they concern. One at a time with
+    /// [`Drive::pull`] (its lock): a pull's page fetched before a hard delete must not commit
+    /// after the delete was taken (it would put the row back), and the folders a running pull
+    /// touched are its to wake.
     pub fn announced(&self, refs: &[ChangeRef]) -> Result<bool, StateError> {
         if refs.is_empty() {
             return Ok(true);
         }
+        let _one_at_a_time = self.answered.lock().unwrap_or_else(|e| e.into_inner());
         let mut db = self.account();
         let all = db.write(|s| feed::announced(s, refs))?;
         self.wake_touched(&mut db, None);

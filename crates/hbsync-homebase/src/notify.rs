@@ -360,23 +360,32 @@ struct DriveEvent {
 }
 
 fn classify(body: &[u8]) -> Notification {
-    let Ok(body) = serde_json::from_slice::<Body>(body) else {
-        return Notification::Other;
+    // By its type alone when the rest isn't what we expect (`data` not a string): a file
+    // event then says nothing of which file (the feed is read), a refusal is still one.
+    let (kind, data) = match serde_json::from_slice::<Body>(body) {
+        Ok(body) => (body.notification_type.into_owned(), body.data),
+        Err(_) => match serde_json::from_slice::<KindOnly>(body) {
+            Ok(only) => (only.notification_type, None),
+            Err(_) => return Notification::Other,
+        },
     };
-    let kind = |k: &str| body.notification_type.eq_ignore_ascii_case(k);
+    let kind = |k: &str| kind.eq_ignore_ascii_case(k);
     if kind("deviceHandshakeSuccess") {
         Notification::Handshake
     } else if kind("fileAdded") || kind("fileModified") || kind("fileDeleted") {
-        Notification::Changed(
-            body.data
-                .as_deref()
-                .and_then(|d| change(d, kind("fileDeleted"))),
-        )
+        Notification::Changed(data.as_deref().and_then(|d| change(d, kind("fileDeleted"))))
     } else if kind("authenticationError") {
-        Notification::Refused(format!("refused: {}", body.data.as_deref().unwrap_or("")))
+        Notification::Refused(format!("refused: {}", data.as_deref().unwrap_or("")))
     } else {
         Notification::Other
     }
+}
+
+/// A server frame's type, whatever the rest of it holds.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KindOnly {
+    notification_type: String,
 }
 
 /// The file a drive event announces; `None` if the event doesn't say.
@@ -385,13 +394,7 @@ fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
     match (event.file_ref, event.previous_file_ref) {
         (Some(now), _) => Some(now.to_ref()),
         // Deleted, and no file now: deleted for good without a tombstone (a hard delete).
-        (None, Some(before)) if deleted => Some(ChangeRef {
-            deleted: true,
-            parent: None,
-            removed_at: None,
-            changed_at: None,
-            ..before.to_ref()
-        }),
+        (None, Some(before)) if deleted => Some(before.to_ref().tombstone()),
         _ => None,
     }
 }
@@ -415,6 +418,25 @@ mod tests {
             n(json!({"notificationType": "authenticationError", "data": "no"})),
             Notification::Refused(_)
         ));
+    }
+
+    /// A frame whose `data` isn't the string expected still counts by its type: a file event
+    /// says nothing of which file (the feed is read), a refusal stays one.
+    #[test]
+    fn a_frame_counts_by_its_type_whatever_its_data() {
+        assert_eq!(
+            n(json!({"notificationType": "fileModified", "data": {"fileRef": {}}})),
+            Notification::Changed(None)
+        );
+        assert_eq!(
+            n(json!({"notificationType": "fileDeleted", "data": 42})),
+            Notification::Changed(None)
+        );
+        assert!(matches!(
+            n(json!({"notificationType": "authenticationError", "data": {"why": "no"}})),
+            Notification::Refused(_)
+        ));
+        assert_eq!(n(json!({"data": "no type"})), Notification::Other);
     }
 
     #[test]

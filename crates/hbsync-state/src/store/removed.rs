@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Versions [`Store::known`] asks in one query: three variables each, well under SQLite's
+/// limit (32,766 in the bundled SQLite, 999 in old ones).
+const KNOWN_CHUNK: usize = 300;
+
 impl Store<'_> {
     // ---- Recently deleted ----
 
@@ -169,11 +173,18 @@ impl Store<'_> {
     }
 
     /// Whether the store has every one of `versions`, each `(version, removed)` in Recently
-    /// deleted or else the mirror: one query (its text differs by length: not cached).
+    /// deleted or else the mirror: a query per [`KNOWN_CHUNK`] (SQLite allows only so many
+    /// variables in one; its text differs by length: not cached).
     pub fn known(&self, versions: &[(RemoteRef, bool)]) -> Result<bool> {
-        if versions.is_empty() {
-            return Ok(true);
+        for chunk in versions.chunks(KNOWN_CHUNK) {
+            if !self.known_chunk(chunk)? {
+                return Ok(false);
+            }
         }
+        Ok(true)
+    }
+
+    fn known_chunk(&self, versions: &[(RemoteRef, bool)]) -> Result<bool> {
         let rows = vec!["(?, ?, ?)"; versions.len()].join(", ");
         let sql = format!(
             "WITH q(f, v, r) AS (VALUES {rows}) SELECT NOT EXISTS (SELECT 1 FROM q WHERE \

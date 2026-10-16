@@ -291,6 +291,21 @@ impl FakeServer {
         Ok(())
     }
 
+    /// Deletes a file for good if it is still at `expected`, as Homebase's hard delete: gone,
+    /// its row in the feed too (a client learns of it from the notification only).
+    pub fn hard_delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
+        let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
+        if f.header.version != expected {
+            return Err(RemoteError::VersionMismatch);
+        }
+        if let RemoteBody::Live { node, .. } = f.header.body {
+            self.by_node.remove(&node);
+        }
+        self.files.remove(&file_id);
+        self.feed.retain(|_, f| *f != file_id);
+        Ok(())
+    }
+
     pub fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         self.files
             .get(&file_id)

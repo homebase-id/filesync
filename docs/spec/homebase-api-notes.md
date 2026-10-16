@@ -85,11 +85,11 @@ on it only when `archivalStatus` lists values (`QueryBatch.cs:130`), so the feed
 nodes. odin-js mail uses `1` archived and `2` trash, chat `2` deleted and `3` archived.
 
 The client only soft-deletes (a removed node, once its days in Recently deleted are over): the tombstone is how the other clients learn of a delete
-through the feed. A hard delete (`.../hard-delete`) leaves no trace in the feed and is never
-used **[verified]** (`DriveStorageServiceBase.cs`, tried on frodo). Only the Filesync app
-writes to its drive (other apps need a grant), so no hard deletes come from elsewhere either:
-a design decision (2026-10-09), not checked against every owner-side path. A hard delete from
-elsewhere would leave the file's mirror row stale.
+through the feed. A hard delete (`.../hard-delete`) leaves no trace in the feed **[verified]**
+(`DriveStorageServiceBase.cs`, tried on frodo); this client doesn't make one. It learns of one
+from its notification only (`fileDeleted` with just `previousFileRef`, below) and takes it at
+once, keeping it until that commits (it is in no feed). A hard delete made while the client
+wasn't connected leaves the file's mirror row stale.
 
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,
@@ -203,8 +203,10 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   `establishConnectionRequest` and `{"drives":[{"alias","type"}]}` (Read on the drive
   needed); the server answers `deviceHandshakeSuccess`. `ping` → `pong`.
 - Server frames: `{isEncrypted, payload}`, `payload` an envelope string of
-  `{notificationType, data}`. `fileAdded`, `fileModified`, `fileDeleted` carry the header.
-  Reaction updates also send `fileModified`: treat all of them as a hint to read the feed.
+  `{notificationType, data}`. `fileAdded`, `fileModified`, `fileDeleted` carry the header
+  unless the subscription asks for the minimal shape (below), which this client does. Reaction
+  updates also send `fileModified`. A frame whose `data` isn't what the client expects still
+  counts by its `notificationType`: a file event then reads the feed.
 - `resultShape: "minimal"` in the subscription (odin-core #1970, not released yet;
   **[verified]** `EstablishConnectionOptions`, `ClientDriveNotification.For` at 9087c252c, and
   live at 5cbd1d363): every drive event, the subscriber's own writes included, carries
