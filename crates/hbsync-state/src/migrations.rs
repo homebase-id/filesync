@@ -264,6 +264,9 @@ const MIGRATIONS: &[&str] = &[
         SELECT 'deleted.seq', CAST(COUNT(*) AS TEXT) FROM removed;
     DROP TABLE temp.removed_order;
     CREATE INDEX removed_seq ON removed(seq);",
+    // 10: file ids deleted for good (a tombstone or an announced hard delete taken): Homebase
+    // never gives one back, so no row may put one back in the mirror or Recently deleted.
+    "CREATE TABLE gone_files (file_id BLOB PRIMARY KEY) WITHOUT ROWID;",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.

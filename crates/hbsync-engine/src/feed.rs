@@ -266,8 +266,10 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     Ok(true)
 }
 
-/// A file deleted for good: out of Recently deleted and the mirror.
+/// A file deleted for good: out of Recently deleted and the mirror, and never back in them
+/// ([`Store::mark_file_gone`]).
 fn apply_tombstone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
+    s.mark_file_gone(file_id)?;
     s.delete_removed_file(file_id)?;
     gone(s, file_id)
 }

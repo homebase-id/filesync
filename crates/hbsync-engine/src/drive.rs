@@ -119,11 +119,15 @@ impl Drive {
         }
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
-        let mut report = feed::pull(|| self.account(), self.remote(), FEED_PAGE)?;
-        *answered = covers;
-        // Still one at a time: what it touched is its to wake.
+        let pulled = feed::pull(|| self.account(), self.remote(), FEED_PAGE);
+        if pulled.is_ok() {
+            *answered = covers;
+        }
+        // Still one at a time: what it touched is its to wake, the pages it committed before a
+        // failure too.
         self.wake_touched(&mut self.account(), from);
         drop(answered);
+        let mut report = pulled?;
         let mut skipped = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
         let room = MAX_SKIPPED.saturating_sub(skipped.len());
         skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));

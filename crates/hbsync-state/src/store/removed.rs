@@ -11,10 +11,13 @@ impl Store<'_> {
 
     /// Records a removed node (replacing an older record of it), and marks it dirty where that
     /// concerns ([`Store::fan_out`]); the same version again changes nothing, and keeps its
-    /// [`Recorded::seq`]. Another version is another removal (a restore, an edit, then a delete
-    /// again, perhaps elsewhere): it gets the next.
+    /// [`Recorded::seq`], and so does a file id deleted for good ([`Store::file_gone`]).
+    /// Another version is another removal (a restore, an edit, then a delete again, perhaps
+    /// elsewhere): it gets the next.
     pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
-        if self.has_version(removed.row.remote_ref(), true)? {
+        if self.has_version(removed.row.remote_ref(), true)?
+            || self.file_gone(removed.row.file_id)?
+        {
             return Ok(());
         }
         let Some(row) = &self.on_drive(&removed.row)? else {

@@ -390,13 +390,46 @@ struct KindOnly {
 
 /// The file a drive event announces; `None` if the event doesn't say.
 fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
-    let event: DriveEvent = serde_json::from_str(data).ok()?;
-    match (event.file_ref, event.previous_file_ref) {
-        (Some(now), _) => Some(now.to_ref()),
-        // Deleted, and no file now: deleted for good without a tombstone (a hard delete).
-        (None, Some(before)) if deleted => Some(before.to_ref().tombstone()),
-        _ => None,
+    match serde_json::from_str::<DriveEvent>(data) {
+        Ok(event) => match (event.file_ref, event.previous_file_ref) {
+            (Some(now), _) => Some(now.to_ref()),
+            // Deleted, and no file now: deleted for good without a tombstone (a hard delete).
+            (None, Some(before)) if deleted => Some(before.to_ref().tombstone()),
+            _ => None,
+        },
+        // A delete is in no feed when it was a hard one: its file id, however the rest reads.
+        Err(e) if deleted => {
+            let gone = deleted_file(data);
+            if gone.is_none() {
+                tracing::warn!("a delete announced without a file id that reads ({e})");
+            }
+            gone
+        }
+        Err(_) => None,
     }
+}
+
+/// The file a delete names, read leniently: `previousFileRef`'s `fileId` (else `fileRef`'s),
+/// with its version where that reads (a tombstone is taken by file id).
+fn deleted_file(data: &str) -> Option<ChangeRef> {
+    let event: serde_json::Value = serde_json::from_str(data).ok()?;
+    let file = event
+        .get("previousFileRef")
+        .filter(|f| f.get("fileId").is_some())
+        .or_else(|| event.get("fileRef"))?;
+    let id = |key: &str| {
+        file.get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+    };
+    Some(ChangeRef {
+        file_id: hbsync_types::RemoteFileId(id("fileId")?),
+        version: hbsync_types::VersionTag(id("versionTag").unwrap_or_default()),
+        deleted: true,
+        parent: None,
+        removed_at: None,
+        changed_at: None,
+    })
 }
 
 #[cfg(test)]
@@ -437,6 +470,29 @@ mod tests {
             Notification::Refused(_)
         ));
         assert_eq!(n(json!({"data": "no type"})), Notification::Other);
+    }
+
+    /// A delete whose rows don't fully read still names its file (a hard delete is in no
+    /// feed): taken as deleted by its file id; without a file id that reads, the feed is read.
+    #[test]
+    fn a_delete_that_doesnt_fully_read_still_names_its_file() {
+        use hbsync_types::RemoteFileId;
+        use uuid::Uuid;
+        let file = Uuid::new_v4();
+        let deleted = |data: serde_json::Value| {
+            n(json!({"notificationType": "fileDeleted", "data": data.to_string()}))
+        };
+        let Notification::Changed(Some(gone)) = deleted(json!({
+            "previousFileRef": {"fileId": file, "versionTag": 42, "fileState": "active"}
+        })) else {
+            panic!("the file isn't named");
+        };
+        assert_eq!(gone.file_id, RemoteFileId(file));
+        assert!(gone.deleted);
+        assert_eq!(
+            deleted(json!({"previousFileRef": {"fileId": "not an id"}})),
+            Notification::Changed(None)
+        );
     }
 
     #[test]

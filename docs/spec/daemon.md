@@ -121,10 +121,13 @@ a failure (service managers restart it then).
   a slim feed page's rows, an own removal getting the server's time; the feed is read only
   when something announced isn't known, or an event didn't say which file. One ref per file
   counts (a delete for good ends it; else the newest), so an own write made twice, or made
-  then deleted, needs no read. A hard delete announced is kept until it is taken (across a
-  reconnect, a pause, a failed take: it is in no feed); live changes beyond 2,000 are read
-  from the feed instead. Announced changes are taken one at a time with the pulls, so a page
-  fetched before a hard delete can't bring the file back.
+  then deleted, needs no read. A hard delete announced is taken at once, also while paused
+  (it is in no feed; it writes only the account's DB, the folders sync it at the resume),
+  kept and tried again with a growing pause when that fails, and its file id is never let
+  back in by a later row; live changes beyond 2,000 are read from the feed instead.
+  Announced changes are taken one at a time with the pulls, on the account's pull thread
+  (started again if it ended), never on the account's loop. A timed pause runs out for the
+  account as for its folders.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start

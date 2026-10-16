@@ -369,6 +369,36 @@ mod mirror {
         Ok(())
     }
 
+    /// A file id deleted for good never comes back: neither a page fetched before the delete
+    /// nor a write committed after it puts its row in the mirror or Recently deleted.
+    #[test]
+    fn a_file_deleted_for_good_stays_out() -> R {
+        use hbsync_state::RemovedRow;
+        let mut db = StateDb::open_in_memory()?;
+        let live = row(NodeId::new(), NodeId::ROOT, "a", None);
+        let removed = RemovedRow {
+            row: row(NodeId::new(), NodeId::ROOT, "b", None),
+            removed_at: Some(1),
+        };
+        db.write(|s| {
+            s.mark_file_gone(live.file_id)?;
+            s.mark_file_gone(removed.row.file_id)?;
+            s.put_mirror(&live)?;
+            s.put_removed(&removed)
+        })?;
+        db.read(|s| {
+            assert!(
+                s.mirror_by_file(live.file_id)?.is_none(),
+                "back in the mirror"
+            );
+            assert!(
+                s.removed_by_node(removed.row.node)?.is_none(),
+                "back in Recently deleted"
+            );
+            Ok(())
+        })
+    }
+
     /// This device's own removal is in Recently deleted at once, its time open: listed first,
     /// never purged, known as that version; the feed's echo confirms the server's time once.
     #[test]

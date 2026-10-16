@@ -314,6 +314,129 @@ fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
     Ok(())
 }
 
+/// A file deleted for good stays gone whatever comes after: here a page fetched before the
+/// delete and committed after it, past the pulls' lock (the store refuses the file id, as it
+/// does a write the executor commits after it).
+#[test]
+fn a_row_fetched_before_a_hard_delete_is_refused_after_it() -> R {
+    use hbsync_remote::ChangeRef;
+
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let v1 = remote.create(&folder("Docs"), None)?;
+    drive.pull(None)?;
+    let fetched = remote.header(v1.at.file_id)?;
+    remote.server().hard_delete(v1.at.file_id, v1.at.version)?;
+    drive.announced(&[ChangeRef::of(&fetched).tombstone()])?;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    db.write(|s| hbsync_engine::feed::apply(s, &fetched).map(drop))?;
+    assert!(db.read(|s| s.mirror_by_file(v1.at.file_id))?.is_none());
+    Ok(())
+}
+
+/// A remote whose feed reads fail once a whole page was read: a pull that stops partway.
+struct FailsAfterAPage {
+    inner: Arc<FakeRemote>,
+    whole: std::sync::atomic::AtomicUsize,
+}
+
+impl FailsAfterAPage {
+    fn failing(&self) -> hbsync_remote::Result<()> {
+        match self.whole.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => Ok(()),
+            _ => Err(hbsync_remote::RemoteError::Transient(
+                "the line went down".into(),
+            )),
+        }
+    }
+}
+
+impl Remote for FailsAfterAPage {
+    fn changes(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> hbsync_remote::Result<hbsync_remote::ChangesPage> {
+        self.failing()?;
+        let page = self.inner.changes(cursor, limit);
+        self.whole.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        page
+    }
+    fn change_refs(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> hbsync_remote::Result<hbsync_remote::RefsPage> {
+        self.failing()?;
+        self.inner.change_refs(cursor, limit)
+    }
+    fn header(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+    ) -> hbsync_remote::Result<hbsync_remote::RemoteHeader> {
+        self.inner.header(file_id)
+    }
+    fn create(
+        &self,
+        node: &NodeMeta,
+        payload: Option<hbsync_remote::Upload<'_>>,
+    ) -> hbsync_remote::Result<hbsync_types::Target> {
+        self.inner.create(node, payload)
+    }
+    fn update(
+        &self,
+        target: &hbsync_types::Target,
+        meta: &NodeMeta,
+        payload: Option<hbsync_remote::Upload<'_>>,
+    ) -> hbsync_remote::Result<hbsync_types::Target> {
+        self.inner.update(target, meta, payload)
+    }
+    fn delete(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+        expected: hbsync_types::VersionTag,
+    ) -> hbsync_remote::Result<()> {
+        self.inner.delete(file_id, expected)
+    }
+    fn read(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn std::io::Write,
+    ) -> hbsync_remote::Result<u64> {
+        self.inner.read(file_id, range, sink)
+    }
+}
+
+/// A pull that fails partway still wakes the folders the pages it committed concern.
+#[test]
+fn a_pull_that_fails_partway_wakes_what_it_took() -> R {
+    let dir = tempfile::tempdir()?;
+    let inner = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+    let remote = Arc::new(FailsAfterAPage {
+        inner: Arc::clone(&inner),
+        whole: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut account = StateDb::open_account(&dir.path().join("state.db"))?;
+    let main = account.write(|s| s.add_folder(NodeId::ROOT, "/h/Homebase", "m1"))?;
+    drop(account);
+    let drive = Drive::new(
+        StateDb::open_account(&dir.path().join("state.db"))?,
+        remote.clone(),
+    );
+    let woken = drive.subscribe(main);
+    // More than a page: the second read fails.
+    for i in 0..=hbsync_engine::drive::FEED_PAGE {
+        inner.create(&folder(&format!("f{i}")), None)?;
+    }
+    assert!(drive.pull(None).is_err(), "the second page fails");
+    assert!(
+        woken.try_recv().is_ok(),
+        "the first page's folders are woken"
+    );
+    Ok(())
+}
+
 /// Thousands of announced versions, more than SQLite takes variables in one query, are asked
 /// in parts.
 #[test]

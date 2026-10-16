@@ -88,8 +88,12 @@ The client only soft-deletes (a removed node, once its days in Recently deleted 
 through the feed. A hard delete (`.../hard-delete`) leaves no trace in the feed **[verified]**
 (`DriveStorageServiceBase.cs`, tried on frodo); this client doesn't make one. It learns of one
 from its notification only (`fileDeleted` with just `previousFileRef`, below) and takes it at
-once, keeping it until that commits (it is in no feed). A hard delete made while the client
-wasn't connected leaves the file's mirror row stale.
+once, also while paused: no gathering, a commit to the account's DB (the folders sync it at
+the resume), and the file id is never let back in (`gone_files`). What can still miss one: a
+crash between the notification and that commit (moments), a commit that keeps failing until
+the daemon stops (kept and retried meanwhile, 10,000 at most), and a hard delete made while
+the client wasn't connected. Each leaves the file's row stale until it is next written to: a
+file deleted for good answers not found, which forgets the row (coming with the hard purge).
 
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,
