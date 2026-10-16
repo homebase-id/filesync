@@ -6,6 +6,7 @@
 //! back to the folder of this device whose part of the drive it was in, if any.
 
 use std::collections::{HashMap, HashSet};
+use std::convert::Infallible;
 use std::fs;
 use std::path::Path;
 
@@ -29,8 +30,15 @@ pub struct DeletedSummary {
     pub deletes: usize,
     /// Every item, those its deletes took along too.
     pub items: usize,
-    /// The largest [`RemovedRow::seq`] listed: [`empty_listed`] with it empties exactly what was
-    /// listed (0: nothing).
+    /// What the listing saw: [`empty_listed`] with it empties exactly that.
+    pub listed: Listed,
+}
+
+/// What a listing of Recently deleted saw: the rows of this DB (its [`Store::db_id`]) recorded
+/// up to the counter it read ([`hbsync_state::Recorded::seq`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub db: String,
     pub seq: u64,
 }
 
@@ -45,7 +53,10 @@ pub fn deletes(
     let summary = DeletedSummary {
         deletes: listing.deletes().count(),
         items: rows.len(),
-        seq: rows.iter().map(|r| r.seq).max().unwrap_or(0),
+        listed: Listed {
+            db: s.db_id()?,
+            seq: s.removed_seq()?,
+        },
     };
     let picked = listing.deletes().take(limit).collect();
     Ok((listing.with_along(picked)?, summary))
@@ -127,7 +138,7 @@ impl<'a, 's> Listing<'a, 's> {
         };
         let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
         let along = match root == node {
-            true => group(self.rows.s, top, false, None)?.len() - 1,
+            true => group(self.rows.s, top, false)?.len() - 1,
             false => 0,
         };
         let i = self.rows.index[&node].unwrap_or_default();
@@ -254,7 +265,8 @@ fn deleted_by_item(
     })?;
     let item = match up.end {
         End::At(at) => known.get(&at).copied().unwrap_or(at),
-        End::Top => up.items.last().copied().unwrap_or(node),
+        // At the top, or past any depth a path may have: the last row walked.
+        End::Top | End::Deep => up.items.last().copied().unwrap_or(node),
         // Removed rows in a cycle (left by a remote one): one of them, the same whichever row
         // the walk started from.
         End::Cycle => cycle_root(rows, &up.items)?,
@@ -307,7 +319,7 @@ fn place(
             .get(&n)
             .cloned()
             .unwrap_or((String::new(), NodeId::ROOT)),
-        End::Top | End::Cycle => (String::new(), NodeId::ROOT),
+        End::Top | End::Cycle | End::Deep => (String::new(), NodeId::ROOT),
     };
     // Top-down, remembering each folder on the way.
     for (id, name) in up.items.into_iter().rev() {
@@ -395,14 +407,8 @@ struct RestorePlan {
 /// removal (node schema: their own removal was still on its way), which count as removed then.
 /// What was deleted from it before stays out.
 ///
-/// Without `live`, only the removed items: what Recently deleted lists with it. With `upto`,
-/// only the removed items recorded up to that [`RemovedRow::seq`] (what a listing saw).
-fn group(
-    s: &Store<'_>,
-    top: RemovedRow,
-    live: bool,
-    upto: Option<u64>,
-) -> Result<Vec<RemovedRow>, StateError> {
+/// Without `live`, only the removed items: what Recently deleted lists with it.
+fn group(s: &Store<'_>, top: RemovedRow, live: bool) -> Result<Vec<RemovedRow>, StateError> {
     // Each node once: removed rows may form a cycle (left by a remote one).
     let mut seen = HashSet::from([top.row.node]);
     let mut rows = vec![top];
@@ -413,8 +419,7 @@ fn group(
             let removed = s
                 .removed_children(folder.row.node)?
                 .into_iter()
-                .filter(|r| deleted_with(r.time(), folder))
-                .filter(|r| upto.is_none_or(|upto| r.seq <= upto));
+                .filter(|r| deleted_with(r.time(), folder));
             let along = match live {
                 true => s.mirror_children(folder.row.node)?,
                 false => Vec::new(),
@@ -425,7 +430,6 @@ fn group(
                 .map(|row| RemovedRow {
                     row,
                     removed_at: folder.removed_at,
-                    seq: folder.seq,
                 });
             let with: Vec<RemovedRow> = removed
                 .chain(along)
@@ -456,7 +460,7 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     // is live still comes back with its folder by itself.
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for r in chain.into_iter().chain(group(s, top, true, None)?) {
+    for r in chain.into_iter().chain(group(s, top, true)?) {
         if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
             rows.push(r);
         }
@@ -526,39 +530,66 @@ pub fn empty(
         }
         Ok(tops)
     })?;
-    delete_groups(db, remote, tops, None)
+    delete_groups(db, remote, tops)
 }
 
-/// Deletes for good everything Recently deleted held when a listing saw it up to `seq`
-/// ([`DeletedSummary::seq`]): every row recorded up to then, an open removal too, each with
-/// what its delete took along that was recorded by then; nothing recorded since (a removal that
-/// arrives later, whatever its server time, or a node deleted again after a restore). Refused
-/// for a `seq` this DB never gave. Returns how many items went.
-pub fn empty_listed(db: &mut StateDb, remote: &dyn Remote, seq: u64) -> Result<usize, EngineError> {
-    let tops = db.read(|s| {
-        if seq > s.removed_seq()? {
-            return Err(StateError::Conflict(format!(
-                "Recently deleted was never listed up to {seq} here"
-            )));
+/// Deletes for good what a listing saw ([`DeletedSummary::listed`]): the rows recorded up to
+/// its counter, an open removal too; nothing recorded since (a removal that arrives later,
+/// whatever its server time, or a node deleted again after a restore) and nothing live. A folder
+/// holding anything that stays stays too, emptied of what was listed in it. Refused for a
+/// listing of another DB (the account's, made again) or one this DB never gave. Returns how
+/// many items went.
+pub fn empty_listed(
+    db: &mut StateDb,
+    remote: &dyn Remote,
+    listed: &Listed,
+) -> Result<usize, EngineError> {
+    let rows = db.read(|s| {
+        if listed.db != s.db_id()? || listed.seq > s.removed_seq()? {
+            return Err(StateError::Conflict(
+                "Recently deleted was never listed so here: look at it again".to_owned(),
+            ));
         }
-        let listed = s.removed_upto(seq)?;
-        let count = listed.len();
-        let mut rows = RemovedRows::new(s, listed);
-        let mut tops = Vec::new();
-        for i in 0..count {
-            let node = rows.rows[i].row.node;
-            // A top unless the folder it was deleted with was listed too.
-            let with = match rows.deleted_with(node)? {
-                Some(folder) => rows.get(folder)?.is_some_and(|f| f.seq <= seq),
-                None => false,
-            };
-            if !with {
-                tops.push(rows.rows[i].clone());
-            }
-        }
-        Ok(tops)
+        emptied_as_listed(s, listed.seq)
     })?;
-    delete_groups(db, remote, tops, Some(seq))
+    delete_for_good(db, remote, &rows)
+}
+
+/// The rows recorded up to `seq` but a folder holding something that stays (a live node, a
+/// removal recorded since, a folder that stays), deepest first: files, then folders in folders
+/// before theirs.
+fn emptied_as_listed(s: &Store<'_>, seq: u64) -> Result<Vec<RemovedRow>, StateError> {
+    let listed: HashMap<NodeId, RemovedRow> = s
+        .recorded_upto(seq)?
+        .into_iter()
+        .map(|r| (r.removed.row.node, r.removed))
+        .collect();
+    // From a row up through the listed folders it is in (a cycle of them ends the walk).
+    let up = |node: NodeId| {
+        let Ok(up) = crate::walk::up::<_, Infallible>(node, |at| {
+            Ok(listed.get(&at).map(|r| (at, r.row.parent)))
+        });
+        up.items
+    };
+    let mut stays = HashSet::new();
+    for r in listed.values().filter(|r| r.row.kind == NodeKind::Folder) {
+        let node = r.row.node;
+        let holds = !s.mirror_children(node)?.is_empty()
+            || s.recorded_children(node)?.iter().any(|c| c.seq > seq);
+        if holds && !stays.contains(&node) {
+            stays.extend(up(node));
+        }
+    }
+    let mut rows: Vec<(usize, RemovedRow)> = listed
+        .values()
+        .filter(|r| !stays.contains(&r.row.node))
+        .map(|r| (up(r.row.node).len(), r.clone()))
+        .collect();
+    rows.sort_by_key(|(depth, r)| {
+        let folder = r.row.kind == NodeKind::Folder;
+        (folder, std::cmp::Reverse(*depth), r.row.node)
+    });
+    Ok(rows.into_iter().map(|(_, r)| r).collect())
 }
 
 /// Deletes for good the items of Recently deleted removed before `before_ms`, each with what
@@ -568,30 +599,29 @@ fn expire(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize
         let before = s.removed_before(before_ms)?;
         let count = before.len();
         let mut rows = RemovedRows::new(s, before);
-        let mut tops = Vec::new();
+        let (mut tops, mut known) = (Vec::new(), HashMap::new());
         for i in 0..count {
+            // The items deleted on their own, as listed: in a cycle of rows, one of them.
             let node = rows.rows[i].row.node;
-            if rows.deleted_with(node)?.is_none() {
+            if deleted_by_item(&mut rows, node, &mut known)? == node {
                 tops.push(rows.rows[i].clone());
             }
         }
         Ok(tops)
     })?;
-    delete_groups(db, remote, tops, None)
+    delete_groups(db, remote, tops)
 }
 
-/// Deletes for good `tops`, each with what was deleted with it (with `upto`, of the removed
-/// items only those recorded up to it): files before folders.
+/// Deletes for good `tops`, each with what was deleted with it: files before folders.
 fn delete_groups(
     db: &mut StateDb,
     remote: &dyn Remote,
     tops: Vec<RemovedRow>,
-    upto: Option<u64>,
 ) -> Result<usize, EngineError> {
     let mut rows = db.read(|s| {
         let mut rows = Vec::new();
         for top in tops {
-            rows.extend(group(s, top, true, upto)?);
+            rows.extend(group(s, top, true)?);
         }
         Ok(rows)
     })?;
@@ -659,7 +689,6 @@ mod tests {
                 changed_at: None,
             },
             removed_at: Some(removed_at),
-            seq: 0,
         }
     }
 
@@ -699,16 +728,35 @@ mod tests {
         Ok(())
     }
 
+    fn fake() -> hbsync_remote::fake::FakeRemote {
+        use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+        // The drive has none of the files: each delete for good finds it gone, which is done.
+        FakeRemote::new(FakeServer::new(ServerConfig::default()))
+    }
+
+    fn listed(db: &mut StateDb) -> Result<Listed, StateError> {
+        Ok(db.read(|s| deletes(s, 0))?.1.listed)
+    }
+
+    fn left(db: &mut StateDb) -> Result<Vec<NodeId>, StateError> {
+        let mut left: Vec<NodeId> = db.read(all)?.into_iter().map(|(d, _)| d.node).collect();
+        left.sort();
+        Ok(left)
+    }
+
+    fn sorted(mut nodes: Vec<NodeId>) -> Vec<NodeId> {
+        nodes.sort();
+        nodes
+    }
+
     /// Emptying as listed deletes for good exactly what the listing saw: an open removal too,
     /// what a delete took along by then; not what was recorded after it (a removal that arrives
     /// later with an older server time, an item a listed folder's delete took along that came
-    /// later), nor a node restored and deleted again since.
+    /// later, which keeps that folder), nor a node restored and deleted again since.
     #[test]
     fn emptying_takes_what_was_listed_and_nothing_since() -> Result<(), Box<dyn std::error::Error>>
     {
-        use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-        // The drive has none of these files: each delete for good finds it gone, which is done.
-        let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
+        let remote = fake();
         let mut db = StateDb::open_in_memory()?;
         let [f, with, own, lone, late, later_with] = [(); 6].map(|_| NodeId::new());
         db.write(|s| {
@@ -722,7 +770,6 @@ mod tests {
         })?;
         let (deletes, summary) = db.read(|s| deletes(s, 10))?;
         assert_eq!((deletes.len(), summary.items), (3, 4));
-        let listed = summary.seq;
 
         db.write(|s| {
             // Recorded after the listing, though removed before it on the server.
@@ -737,28 +784,114 @@ mod tests {
                 None => Err(StateError::Conflict("own isn't listed".into())),
             }
         })?;
-        assert_eq!(empty_listed(&mut db, &remote, listed)?, 3);
-        let mut left: Vec<NodeId> = db.read(all)?.into_iter().map(|(d, _)| d.node).collect();
-        left.sort();
-        let mut kept = vec![late, later_with, lone];
-        kept.sort();
-        assert_eq!(left, kept);
+        assert_eq!(empty_listed(&mut db, &remote, &summary.listed)?, 2);
+        assert_eq!(left(&mut db)?, sorted(vec![f, late, later_with, lone]));
         Ok(())
     }
 
-    /// A listing this DB never gave (larger than any removal it recorded) empties nothing; one
-    /// that saw nothing empties nothing.
+    /// A listed folder holding a live node (written after its delete, or not removed yet) stays
+    /// with that node, emptied of what was listed in it; the folders it is in stay too. Emptying
+    /// never deletes a live node for good.
+    #[test]
+    fn emptying_keeps_a_listed_folder_with_a_live_node() -> Result<(), Box<dyn std::error::Error>> {
+        let remote = fake();
+        let mut db = StateDb::open_in_memory()?;
+        let [outer, f, gone, live, other] = [(); 5].map(|_| NodeId::new());
+        let alive = removed(live, f, 0).row;
+        db.write(|s| {
+            s.put_removed(&removed(outer, NodeId::ROOT, 10))?;
+            s.put_removed(&removed(f, outer, 10))?;
+            s.put_removed(&removed(gone, f, 10))?;
+            s.put_removed(&removed(other, NodeId::ROOT, 10))?;
+            s.put_mirror(&alive)
+        })?;
+        let listing = listed(&mut db)?;
+        assert_eq!(empty_listed(&mut db, &remote, &listing)?, 2);
+        assert_eq!(left(&mut db)?, sorted(vec![outer, f]));
+        assert!(
+            db.read(|s| s.get_mirror(live))?.is_some(),
+            "the live node stays"
+        );
+        Ok(())
+    }
+
+    /// A listing of another DB of the same identity (made again since), or one this DB never
+    /// gave, empties nothing; one that saw nothing empties nothing.
     #[test]
     fn emptying_an_unknown_listing_is_refused() -> Result<(), Box<dyn std::error::Error>> {
-        use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-        let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
+        let remote = fake();
         let mut db = StateDb::open_in_memory()?;
         let x = NodeId::new();
         db.write(|s| s.put_removed(&removed(x, NodeId::ROOT, 1)))?;
-        let newest = db.read(|s| s.removed_seq())?;
-        assert!(empty_listed(&mut db, &remote, newest + 1).is_err());
-        assert_eq!(empty_listed(&mut db, &remote, 0)?, 0);
-        assert_eq!(db.read(all)?.len(), 1, "nothing went");
+        let listing = listed(&mut db)?;
+        let ahead = Listed {
+            seq: listing.seq + 1,
+            ..listing.clone()
+        };
+        assert!(empty_listed(&mut db, &remote, &ahead).is_err());
+        // Another DB, its counter as far.
+        let mut again = StateDb::open_in_memory()?;
+        let elsewhere = listed(&mut again)?;
+        assert_ne!(elsewhere.db, listing.db);
+        let other = Listed {
+            db: elsewhere.db,
+            ..listing.clone()
+        };
+        assert!(empty_listed(&mut db, &remote, &other).is_err());
+        let nothing = Listed {
+            seq: 0,
+            ..listing.clone()
+        };
+        assert_eq!(empty_listed(&mut db, &remote, &nothing)?, 0);
+        assert_eq!(left(&mut db)?, [x], "nothing went");
+        assert_eq!(empty_listed(&mut db, &remote, &listing)?, 1);
+        Ok(())
+    }
+
+    /// Removed folders in a cycle are listed, so emptying as listed deletes them for good, and
+    /// so does the purge once they expire.
+    #[test]
+    fn a_cycle_in_recently_deleted_is_emptied() -> Result<(), Box<dyn std::error::Error>> {
+        let remote = fake();
+        for purge in [false, true] {
+            let mut db = StateDb::open_in_memory()?;
+            let (a, b) = (NodeId::new(), NodeId::new());
+            db.write(|s| {
+                s.put_removed(&removed(a, b, 1))?;
+                s.put_removed(&removed(b, a, 1))
+            })?;
+            let gone = match purge {
+                false => {
+                    let listing = listed(&mut db)?;
+                    empty_listed(&mut db, &remote, &listing)?
+                }
+                true => expire(&mut db, &remote, 2)?,
+            };
+            assert_eq!(gone, 2, "purge: {purge}");
+            assert_eq!(left(&mut db)?, [], "purge: {purge}");
+        }
+        Ok(())
+    }
+
+    /// A chain of removed folders deeper than any path may be isn't a cycle: the item is the
+    /// last row walked, as at the top.
+    #[test]
+    fn a_chain_too_deep_ends_at_the_last_row_walked() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let chain: Vec<NodeId> = (0..hbsync_state::MAX_DEPTH + 2)
+            .map(|_| NodeId::new())
+            .collect();
+        db.write(|s| {
+            for w in chain.windows(2) {
+                s.put_removed(&removed(w[0], w[1], 1))?;
+            }
+            Ok(())
+        })?;
+        let item = db.read(|s| {
+            let mut rows = RemovedRows::new(s, Vec::new());
+            deleted_by_item(&mut rows, chain[0], &mut HashMap::new())
+        })?;
+        assert_eq!(item, chain[hbsync_state::MAX_DEPTH - 1]);
         Ok(())
     }
 

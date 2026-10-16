@@ -15,21 +15,25 @@ impl Store<'_> {
             return Ok(());
         };
         self.moved_folder(row.node, row.kind);
-        // The same removal recorded again (its server time confirmed, its row as the feed has
-        // it) keeps its place; another one (a restore, then a delete again) gets the next.
-        let recorded: Option<(i64, Option<i64>)> = self
-            .prep("SELECT seq, removed_at FROM removed WHERE node = ?1")?
-            .query_row([row.node.0.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)))
-            .optional()?;
-        let seq = match recorded {
-            Some((seq, at)) if same_removal(at, removed.removed_at) => seq,
-            _ => self.next_removed_seq()?,
-        };
+        // Another version than the one recorded is another removal (a restore, then a delete
+        // again, perhaps elsewhere): the next place. The version recorded again keeps its own.
+        let seq = self.next_removed_seq()?;
+        // The file id goes with the node: another node's row holding it (never expected) goes.
+        self.prep("DELETE FROM removed WHERE file_id = ?1 AND node <> ?2")?
+            .execute([row.file_id.0.as_bytes(), row.node.0.as_bytes()])?;
         let f = row.file.as_ref();
         self.prep(
-            "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, token, seq) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, hash, size, \
+                 mtime_ms, executable, content_extra, removed_at, token, seq) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+             ON CONFLICT (node) DO UPDATE SET file_id = excluded.file_id, \
+                 parent = excluded.parent, kind = excluded.kind, name = excluded.name, \
+                 hash = excluded.hash, size = excluded.size, mtime_ms = excluded.mtime_ms, \
+                 executable = excluded.executable, content_extra = excluded.content_extra, \
+                 removed_at = excluded.removed_at, token = excluded.token, \
+                 seq = CASE WHEN removed.version_tag = excluded.version_tag \
+                     THEN removed.seq ELSE excluded.seq END, \
+                 version_tag = excluded.version_tag",
         )?
         .execute(params![
             row.node.0.as_bytes(),
@@ -50,27 +54,70 @@ impl Store<'_> {
         self.fan_out(row.node, row.parent)
     }
 
-    /// The largest [`RemovedRow::seq`] given so far (0: none): no row has a larger one.
+    /// The largest [`Recorded::seq`] given so far (0: none): no row has a larger one, and a row
+    /// recorded later gets a larger one.
     pub fn removed_seq(&self) -> Result<u64> {
-        Ok(self
+        if let Some((seq, _)) = self.removed_seq.get() {
+            return Ok(seq);
+        }
+        let seq = self
             .account_kv(crate::keys::REMOVED_SEQ)?
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0))
+            .unwrap_or(0);
+        self.removed_seq.set(Some((seq, false)));
+        Ok(seq)
     }
 
+    /// The next [`Recorded::seq`]: the counter is written once, when the transaction commits.
     fn next_removed_seq(&self) -> Result<i64> {
         let next = self.removed_seq()? + 1;
-        self.set_account_kv(crate::keys::REMOVED_SEQ, &next.to_string())?;
+        self.removed_seq.set(Some((next, true)));
         Ok(next as i64)
     }
 
-    /// Recently deleted's rows recorded up to `seq` ([`RemovedRow::seq`]): what a listing that
-    /// saw up to it saw.
-    pub fn removed_upto(&self, seq: u64) -> Result<Vec<RemovedRow>> {
-        self.removed_rows(
+    /// What this transaction leaves for its commit: the counter, if it gave a [`Recorded::seq`].
+    pub(crate) fn finish(&self) -> Result<()> {
+        if let Some((seq, true)) = self.removed_seq.get() {
+            self.set_account_kv(crate::keys::REMOVED_SEQ, &seq.to_string())?;
+            self.removed_seq.set(Some((seq, false)));
+        }
+        Ok(())
+    }
+
+    /// This DB's own id (random, made with it): a listing of its Recently deleted names it, so
+    /// one of another DB (of the same identity, made again) is told apart.
+    pub fn db_id(&self) -> Result<String> {
+        Ok(self.account_kv(crate::keys::DB_ID)?.unwrap_or_default())
+    }
+
+    /// Recently deleted's rows recorded up to `seq`: what a listing that read it saw.
+    pub fn recorded_upto(&self, seq: u64) -> Result<Vec<Recorded>> {
+        self.recorded_rows(
             &format!("{REMOVED_SELECT} WHERE seq <= ?1"),
             [i64::try_from(seq).unwrap_or(i64::MAX)],
         )
+    }
+
+    /// The removed nodes in folder `parent`, as recorded.
+    pub fn recorded_children(&self, parent: NodeId) -> Result<Vec<Recorded>> {
+        let parent = self.coords()?.to_drive(parent);
+        self.recorded_rows(
+            &format!("{REMOVED_SELECT} WHERE parent = ?1"),
+            [parent.0.as_bytes()],
+        )
+    }
+
+    fn recorded_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Recorded>> {
+        let mut seen = Vec::new();
+        for r in self.many(sql, params, recorded_row)? {
+            if let Some(removed) = self.seen_removed(r.removed)? {
+                seen.push(Recorded {
+                    removed,
+                    seq: r.seq,
+                });
+            }
+        }
+        Ok(seen)
     }
 
     /// Records the server's time of a removal this device made, open until now
@@ -193,10 +240,4 @@ impl Store<'_> {
     pub fn mirror_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM remote")
     }
-}
-
-/// Whether a removal recorded with time `recorded` and one arriving with `arriving` are the
-/// same: an open time (this device's own, before the server's comes back) or the same time.
-fn same_removal(recorded: Option<i64>, arriving: Option<i64>) -> bool {
-    recorded.is_none() || arriving.is_none() || recorded == arriving
 }

@@ -304,7 +304,7 @@ fn folder_path(
     let mut known = match up.end {
         End::Top => Some((String::new(), false)),
         End::At(n) => memo.get(&n).cloned().flatten(),
-        End::Cycle => None,
+        End::Cycle | End::Deep => None,
     };
     for node in up.items.into_iter().rev() {
         known = match (known, remote.get(node)) {

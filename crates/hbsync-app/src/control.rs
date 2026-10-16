@@ -152,7 +152,10 @@ pub fn empty_listed(paths: &Paths, accounts: &[DeletedAccount]) -> Result<()> {
     let refused: Vec<String> = accounts
         .iter()
         .filter_map(|a| {
-            let control = AccountControl::EmptyListed { seq: a.seq };
+            let control = AccountControl::EmptyListed {
+                db: a.db.clone(),
+                seq: a.seq,
+            };
             account(paths, &a.identity, control)
                 .err()
                 .map(|e| format!("{}: {e}", a.identity))
@@ -164,12 +167,12 @@ pub fn empty_listed(paths: &Paths, accounts: &[DeletedAccount]) -> Result<()> {
     }
 }
 
-/// `accounts` as a form field (what emptying all of them takes): `identity/seq`,
+/// `accounts` as a form field (what emptying all of them takes): `identity/db/seq`,
 /// comma-separated.
 pub fn listed_field(accounts: &[DeletedAccount]) -> String {
     let parts: Vec<String> = accounts
         .iter()
-        .map(|a| format!("{}/{}", a.identity, a.seq))
+        .map(|a| format!("{}/{}/{}", a.identity, a.db, a.seq))
         .collect();
     parts.join(",")
 }
@@ -179,11 +182,13 @@ pub fn listed_from_field(field: &str) -> Vec<DeletedAccount> {
     field
         .split(',')
         .filter_map(|part| {
-            let (identity, seq) = part.rsplit_once('/')?;
+            let (rest, seq) = part.rsplit_once('/')?;
+            let (identity, db) = rest.rsplit_once('/')?;
             Some(DeletedAccount {
                 identity: identity.to_owned(),
                 deletes: 0,
                 items: 0,
+                db: db.to_owned(),
                 seq: seq.parse().ok()?,
             })
         })
@@ -441,6 +446,7 @@ mod tests {
             identity: identity.into(),
             deletes: 0,
             items: 0,
+            db: "d1".into(),
             seq,
         };
         let accounts = [a("a.example", 9), a("b/c.example", 4)];

@@ -234,11 +234,11 @@ impl Drive {
         deleted::empty(&mut self.account(), self.remote(), nodes)
     }
 
-    /// Deletes for good everything Recently deleted held when a listing saw it up to `seq`
-    /// ([`deleted::empty_listed`]), nothing recorded since.
-    pub fn empty_listed(&self, seq: u64) -> Result<usize, EngineError> {
+    /// Deletes for good what a listing of Recently deleted saw ([`deleted::empty_listed`]),
+    /// nothing recorded since.
+    pub fn empty_listed(&self, listed: &deleted::Listed) -> Result<usize, EngineError> {
         self.pull(None)?;
-        deleted::empty_listed(&mut self.account(), self.remote(), seq)
+        deleted::empty_listed(&mut self.account(), self.remote(), listed)
     }
 
     /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted, and

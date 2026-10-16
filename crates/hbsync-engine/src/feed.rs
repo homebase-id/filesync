@@ -222,7 +222,6 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         s.put_removed(&RemovedRow {
             row,
             removed_at: Some(removed_at),
-            seq: 0,
         })?;
         return Ok(false);
     }

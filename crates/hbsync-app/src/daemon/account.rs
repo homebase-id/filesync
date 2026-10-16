@@ -13,6 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use hbsync_engine::Drive;
+use hbsync_engine::deleted::Listed;
 use hbsync_engine::root::{AccountReader, RootError};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
@@ -214,16 +215,6 @@ impl Account {
         if let Some(why) = self.not_running() {
             return Err(why);
         }
-        if let AccountControl::EmptyListed { seq } = control {
-            // A listing this DB never gave (another DB, since started over) empties nothing.
-            let given = self.read(|db| db.removed_seq()).unwrap_or(0);
-            if seq > given {
-                return Err(format!(
-                    "Recently deleted of {} was never listed so: look at it again",
-                    self.identity
-                ));
-            }
-        }
         let request = Request::Deleted(control);
         self.requests
             .send(request)
@@ -269,7 +260,8 @@ impl Account {
             identity: self.identity.clone(),
             deletes: summary.deletes,
             items: summary.items,
-            seq: summary.seq,
+            db: summary.listed.db,
+            seq: summary.listed.seq,
         });
         (self.items(deletes), account)
     }
@@ -841,7 +833,9 @@ fn run_request(drive: &Drive, control: AccountControl) {
             Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
         },
         AccountControl::EmptyDeleted { nodes } => report_emptied(drive.empty(&nodes)),
-        AccountControl::EmptyListed { seq } => report_emptied(drive.empty_listed(seq)),
+        AccountControl::EmptyListed { db, seq } => {
+            report_emptied(drive.empty_listed(&Listed { db, seq }))
+        }
     }
 }
 

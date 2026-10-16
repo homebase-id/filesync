@@ -1842,7 +1842,7 @@ fn recently_deleted_lists_deletes_with_counts_and_finds_items() -> R {
     shown.sort();
     assert_eq!(shown, [("d", 30), ("z.txt", 0)]);
     assert_eq!((summary.deletes, summary.items), (2, 32));
-    assert!(summary.seq >= 32, "{summary:?}");
+    assert!(summary.listed.seq >= 32, "{summary:?}");
     let (cut, summary) = reader.deletes(1)?;
     assert_eq!(cut.len(), 1, "cut by deletes");
     assert_eq!(summary.items, 32, "the summary counts everything");
@@ -2050,11 +2050,11 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
 
     // Empty as listed: what was deleted after the listing stays.
     find(&mut a, "P/y.txt")?;
-    let listed = a.listed_seq()?;
+    let listed = a.listed()?;
     fs::remove_file(a.root.join("keep.txt"))?;
     a.write("other.txt", "o")?; // not every file deleted (the guard)
     a.sync()?;
-    assert_eq!(a.engine.drive().empty_listed(listed)?, 1);
+    assert_eq!(a.engine.drive().empty_listed(&listed)?, 1);
     let left: Vec<_> = a
         .recently_deleted(10)?
         .into_iter()
@@ -2361,8 +2361,8 @@ fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
             )
         ]
     );
-    let listed = a.listed_seq()?;
-    a.engine.drive().empty_listed(listed)?;
+    let listed = a.listed()?;
+    a.engine.drive().empty_listed(&listed)?;
     let srv = server.lock().map_err(|_| "poisoned")?;
     assert_eq!(srv.removed().count(), 0);
     Ok(())

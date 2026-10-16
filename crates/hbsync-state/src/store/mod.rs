@@ -123,10 +123,15 @@ pub struct RemovedRow {
     /// until the feed brings it back: never this device's clock, and the newest of all where
     /// times are compared ([`RemovedRow::time`]).
     pub removed_at: Option<i64>,
-    /// When this device first recorded the removal, in its own order: the account's counter
-    /// at the time ([`Store::removed_seq`]). Given by [`Store::put_removed`] (a removal recorded
-    /// again keeps it; a new one, after a restore too, gets the next): what is written here is
-    /// ignored. What a listing saw is what has a `seq` up to the largest one it saw.
+}
+
+/// A row of Recently deleted as this device recorded it: with its place in this device's order
+/// of recording removals (the account's counter when [`Store::put_removed`] first recorded that
+/// version; [`Store::removed_seq`]). What a listing saw is what has a `seq` up to the counter it
+/// read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recorded {
+    pub removed: RemovedRow,
     pub seq: u64,
 }
 
@@ -281,6 +286,9 @@ pub struct Store<'a> {
     local_paths: std::cell::RefCell<HashMap<i64, RelPath>>,
     /// [`Store::prep`]: each SQL text with this store's folder put in.
     sqls: std::cell::RefCell<HashMap<Box<str>, Box<str>>>,
+    /// The last [`Recorded::seq`] given in this transaction, once read; written back when it
+    /// commits ([`Store::finish`]) if one was given.
+    removed_seq: std::cell::Cell<Option<(u64, bool)>>,
 }
 
 /// A folder this account syncs here.
@@ -342,6 +350,7 @@ impl<'a> Store<'a> {
             touched: Default::default(),
             local_ids: Default::default(),
             local_paths: Default::default(),
+            removed_seq: std::cell::Cell::new(None),
             sqls: Default::default(),
         }
     }
@@ -445,6 +454,12 @@ fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
     Ok(RemovedRow {
         row: mirror_row(r)?,
         removed_at: r.get(13)?,
+    })
+}
+
+fn recorded_row(r: &Row<'_>) -> Result<Recorded> {
+    Ok(Recorded {
+        removed: removed_row(r)?,
         seq: r.get::<_, i64>(14)? as u64,
     })
 }

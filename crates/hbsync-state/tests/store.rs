@@ -258,7 +258,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
 
 mod mirror {
     use super::*;
-    use hbsync_state::{MirrorFile, MirrorRow};
+    use hbsync_state::{MirrorFile, MirrorRow, RemovedRow};
     use hbsync_types::schema::NodeContent;
 
     /// A node's content survives its mirror row, unknown keys, creation time and tags
@@ -356,7 +356,6 @@ mod mirror {
             s.put_removed(&RemovedRow {
                 row: without.clone(),
                 removed_at: Some(5),
-                seq: 0,
             })?;
             s.clear_dirty(node)
         })?;
@@ -383,12 +382,10 @@ mod mirror {
             s.put_removed(&RemovedRow {
                 row: earlier.clone(),
                 removed_at: Some(5),
-                seq: 0,
             })?;
             s.put_removed(&RemovedRow {
                 row: own.clone(),
                 removed_at: None,
-                seq: 0,
             })
         })?;
         let listed = db.read(|s| s.list_removed(10))?;
@@ -440,7 +437,6 @@ mod mirror {
             s.put_removed(&RemovedRow {
                 row: folder.clone(),
                 removed_at: Some(5),
-                seq: 0,
             })
         })?;
         db.write(|s| s.refresh(&echo, false))?;
@@ -512,15 +508,14 @@ mod mirror {
         );
         let alone = row(NodeId::new(), NodeId::ROOT, "g", None);
         // Each with the place it is recorded in.
-        let with = |row: &MirrorRow, removed_at, seq| RemovedRow {
+        let with = |row: &MirrorRow, removed_at| RemovedRow {
             row: row.clone(),
             removed_at,
-            seq,
         };
         let (rf, rd, ra) = (
-            with(&file, Some(8), 1),
-            with(&folder, Some(10), 2),
-            with(&alone, Some(20), 3),
+            with(&file, Some(8)),
+            with(&folder, Some(10)),
+            with(&alone, Some(20)),
         );
         db.write(|s| {
             s.put_removed(&rf)?;
@@ -545,32 +540,38 @@ mod mirror {
             };
             assert_eq!(expired(15)?, ["f", "d"]);
             assert_eq!(expired(9)?, ["f"]);
-            let upto = |seq| -> hbsync_state::Result<Vec<String>> {
-                Ok(s.removed_upto(seq)?
+            // Each recorded in turn, the counter at the last.
+            let upto = |seq| -> hbsync_state::Result<Vec<(String, u64)>> {
+                Ok(s.recorded_upto(seq)?
                     .into_iter()
-                    .map(|r| r.row.name)
+                    .map(|r| (r.removed.row.name, r.seq))
                     .collect())
             };
-            assert_eq!(upto(2)?, ["f", "d"]);
+            assert_eq!(upto(2)?, [("f".to_owned(), 1), ("d".to_owned(), 2)]);
             assert_eq!(s.removed_seq()?, 3);
             Ok(())
         })?;
-        // Recorded again (another version of the same removal) it keeps its place; restored and
-        // deleted again it gets the next.
-        let mut again = with(&folder, Some(10), 0);
-        again.row.version = VersionTag(Uuid::new_v4());
+        // The version recorded again keeps its place (and changes nothing); another version is
+        // another removal, the next place; so is a restore then a delete again.
         db.write(|s| {
-            s.put_removed(&again)?;
+            s.put_removed(&rd)?;
             s.delete_removed(alone.node)?;
-            s.put_removed(&with(&alone, Some(30), 0))
+            s.put_removed(&with(&alone, Some(30)))
         })?;
-        db.read(|s| {
-            let seq = |node| -> hbsync_state::Result<Option<u64>> {
-                Ok(s.removed_by_node(node)?.map(|r| r.seq))
-            };
-            assert_eq!((seq(folder.node)?, seq(alone.node)?), (Some(2), Some(4)));
-            Ok(())
-        })?;
+        let mut again = with(&folder, Some(10));
+        again.row.version = VersionTag(Uuid::new_v4());
+        db.write(|s| s.put_removed(&again))?;
+        let seq = |db: &mut StateDb, node| -> hbsync_state::Result<Option<u64>> {
+            db.read(|s| {
+                Ok(s.recorded_children(NodeId::ROOT)?
+                    .into_iter()
+                    .find(|r| r.removed.row.node == node)
+                    .map(|r| r.seq))
+            })
+        };
+        assert_eq!(seq(&mut db, folder.node)?, Some(5));
+        assert_eq!(seq(&mut db, alone.node)?, Some(4));
+        assert_eq!(db.read(|s| s.removed_seq())?, 5, "written once per commit");
         db.write(|s| {
             s.delete_removed(alone.node)?;
             s.put_removed(&ra).map(drop)
@@ -581,13 +582,31 @@ mod mirror {
             assert!(!s.delete_removed(file.node)?);
             Ok(())
         })?;
-        assert_eq!(
-            db.read(|s| s.list_removed(10))?,
-            [RemovedRow {
-                row: again.row,
-                ..rd
-            }]
-        );
+        assert_eq!(db.read(|s| s.list_removed(10))?, [again]);
+        Ok(())
+    }
+
+    /// This device's own removal, its time still open, then the feed's row of another version
+    /// of that node (restored elsewhere, edited, deleted again before the echo): another
+    /// removal, recorded at the next place, not under the open one's.
+    #[test]
+    fn another_version_after_an_open_removal_is_another_removal() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let x = row(NodeId::new(), NodeId::ROOT, "x", None);
+        let open = RemovedRow {
+            row: x.clone(),
+            removed_at: None,
+        };
+        let mut again = RemovedRow {
+            row: x.clone(),
+            removed_at: Some(40),
+        };
+        again.row.version = VersionTag(Uuid::new_v4());
+        db.write(|s| s.put_removed(&open))?;
+        db.write(|s| s.put_removed(&again))?;
+        let seqs = db.read(|s| s.recorded_upto(u64::MAX))?;
+        assert_eq!(seqs.len(), 1);
+        assert_eq!((seqs[0].removed.removed_at, seqs[0].seq), (Some(40), 2));
         Ok(())
     }
 
@@ -991,7 +1010,6 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
                 ..gone.clone()
             },
             removed_at: Some(1),
-            seq: 0,
         })
     })?;
     assert_eq!(

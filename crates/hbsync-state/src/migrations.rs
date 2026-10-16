@@ -254,7 +254,9 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX removed_parent ON removed(parent);",
     // 9: each removal's place in this device's order of recording them (`seq`), and the
     // counter (kv `deleted.seq`): emptying Recently deleted as listed takes exactly the rows up
-    // to the largest one the listing saw. The rows there get theirs in a stable order.
+    // to the counter the listing read. The rows there get theirs in a stable order. And the
+    // DB's own random id (kv `db.id`), which a listing names, so one of another DB is told
+    // apart.
     "ALTER TABLE removed ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
     CREATE TEMP TABLE removed_order AS
         SELECT node FROM removed ORDER BY removed_at IS NULL, removed_at, node;
@@ -263,7 +265,8 @@ const MIGRATIONS: &[&str] = &[
     INSERT OR REPLACE INTO kv (key, value)
         SELECT 'deleted.seq', CAST(COUNT(*) AS TEXT) FROM removed;
     DROP TABLE temp.removed_order;
-    CREATE INDEX removed_seq ON removed(seq);",
+    CREATE INDEX removed_seq ON removed(seq);
+    INSERT OR IGNORE INTO kv (key, value) VALUES ('db.id', lower(hex(randomblob(16))));",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.

@@ -130,10 +130,11 @@ pub enum AccountControl {
     Restore { nodes: Vec<NodeId> },
     /// Delete these items of Recently deleted for good, each with what was deleted with it.
     EmptyDeleted { nodes: Vec<NodeId> },
-    /// Delete for good everything Recently deleted held when it was listed: every removal this
-    /// device recorded up to `seq` ([`DeletedAccount::seq`]), nothing recorded since. Refused
-    /// for a `seq` the account never gave.
-    EmptyListed { seq: u64 },
+    /// Delete for good what Recently deleted held when it was listed ([`DeletedAccount::db`],
+    /// [`DeletedAccount::seq`]): every removal this device recorded up to `seq`, nothing recorded
+    /// since and nothing live (a folder holding either stays). The account refuses a listing of
+    /// another DB, or one it never gave (in its log: the request is answered before it runs).
+    EmptyListed { db: String, seq: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,8 +177,10 @@ pub struct DeletedAccount {
     pub deletes: usize,
     /// Every item, the ones its deletes took along too.
     pub items: usize,
-    /// The largest place in this device's order of recording removals that the listing saw:
-    /// what emptying all of it as listed takes ([`AccountControl::EmptyListed`]).
+    /// What the listing saw, which emptying all of it as listed takes
+    /// ([`AccountControl::EmptyListed`]): the account's DB (its own id: one made again is
+    /// another), and the counter of its order of recording removals.
+    pub db: String,
     pub seq: u64,
 }
 

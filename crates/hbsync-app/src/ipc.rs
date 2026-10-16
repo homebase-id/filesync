@@ -407,9 +407,12 @@ mod tests {
         assert_eq!(
             json(Ask::Control(Control::Account {
                 identity: "a.example".into(),
-                control: AccountControl::EmptyListed { seq: 7 }
+                control: AccountControl::EmptyListed {
+                    db: "d1".to_owned(),
+                    seq: 7
+                }
             }))?,
-            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"seq":7}}}}}}"#
+            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"db":"d1","seq":7}}}}}}"#
         );
         assert_eq!(
             json(Ask::Recent { limit: 10 })?,

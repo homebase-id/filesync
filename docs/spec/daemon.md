@@ -192,7 +192,7 @@ account (its Recently deleted) or to one folder (its held deletes):
 {"protocol":5,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
 {"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
 {"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
-{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"seq":4711}}}}}}  // all it held when listed
+{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
 {"protocol":5,"ask":{"recent":{"limit":10}}}
 {"protocol":5,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
 {"protocol":5,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
@@ -222,14 +222,17 @@ Replies:
 - `{"deleted":{"items":[…],"accounts":[…]}}`: the newest `limit` deletes, newest first, each an
   item deleted on its own with its account's `identity` and `along`, how many items its delete
   took along (not those items: a deleted folder of thousands of files is one entry); and, for
-  each account holding anything, its `deletes` and `items` in all, and `seq`: the largest place
-  in this device's order of recording removals the listing saw (each removal gets the next when
-  first recorded; recorded again, its server time confirmed, it keeps it; restored and deleted
-  again, it gets a new one). `empty_listed` with it empties exactly the removals recorded up to
-  it, an open one too, and nothing recorded since, whatever its server time; a `seq` the account
-  never gave is refused (look again).
+  each account holding anything, its `deletes` and `items` in all, and what the listing saw:
+  `db`, the account's state DB (a random id made with it, so one made again is another), and
+  `seq`, the counter of this device's order of recording removals (each version of a node
+  removed gets the next when first recorded; recorded again, its server time confirmed, it keeps
+  it; another version, after a restore or an edit, gets a new one). `empty_listed` with them
+  deletes for good exactly the removals recorded up to `seq`, an open one too: nothing recorded
+  since, whatever its server time, and nothing live; a listed folder holding either stays,
+  emptied of what was listed in it. A listing of another DB, or a `seq` the account never gave,
+  is refused (in the daemon's log: the request is answered before it runs).
 - `{"found":[…]}`: for `find_deleted`, the items named (a node id, or the place `hbsync deleted`
-  shows: the newest one there; a name shaped like a node id that isn't one is tried as a place),
+  shows: a delete there before an item a delete took along, then the newest; a name shaped like a node id that isn't one is tried as a place),
   deleted on their own or along with a folder; refused naming the first one that isn't there.
   Restore and empty pick through it, so no client reads Recently deleted whole.
 - `"done"`, `{"refused":"why"}`.
