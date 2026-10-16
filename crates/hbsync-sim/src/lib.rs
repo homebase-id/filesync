@@ -2806,7 +2806,10 @@ impl Sim {
     /// Like [`Sim::quiesce`], but as the daemon syncs, without a poll: a client syncs only when
     /// something asks it to: at start, when the server changed by another's hand (the change
     /// announced, or caught up on at a reconnect), and when the user confirms what the guard
-    /// held. A sync plans and runs until a plan does nothing. Returns whether every client is
+    /// held. Never by its own writes: the notifications leave them out (`excludeOwnWrites`,
+    /// odin-core #1971), and what a client needs of them (an own removal's time) comes from the
+    /// feed its next plan reads. Another folder of the same computer is asked, by the account's
+    /// drive, which its writes mark. A sync plans and runs until a plan does nothing. Returns whether every client is
     /// then settled (planning one unasked finds nothing: a timer would have nothing to do)
     /// within `max_syncs` syncs.
     pub fn quiesce_announced(&mut self, max_syncs: usize) -> bool {

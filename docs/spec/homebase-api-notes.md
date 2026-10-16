@@ -228,6 +228,31 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   `previousFileRef`. The client takes them as slim feed rows (`daemon.md`, the sync loop).
   Measured once on frodo at 5cbd1d363 (2,000 files, text frames as received): an add or update
   event 4,514 B full → 1,355–1,376 B minimal, a delete 7,438 → 2,217 B.
+- `excludeOwnWrites: true` in the subscription (odin-core #1971, not merged; **[verified]** on
+  its branch at 50923aa02: `EstablishConnectionOptions.ApplyTo`, `AppNotificationDispatcher`,
+  `OdinContext.RequestTokenId`; **[tried]** on frodo): no drive events for writes made by a
+  request with the socket's own token, the client registration's (`AccessRegistrationId`):
+  creates, updates, deletes and hard deletes, and what the same request changed on the side.
+  Still sent: writes with another token (another computer's registration), peer files and
+  read receipts arriving, the outbox's transfer-history updates, reaction previews, and any
+  write the server can't attribute to a request (jobs, system work: `OriginTokenId` null).
+  Sockets sharing one token (a copied credentials file) miss each other's writes. A peer
+  socket asking for it is refused (`InvalidQuery`). A server without #1971 ignores the key
+  **[inferred]** (an unknown JSON property): the echoes come, and are taken as known versions.
+  Measured on frodo at 50923aa02 (`own_write_echoes` in `hbsync-dev/tests/live.rs`: one folder
+  synced as the daemon syncs it, 2,000 files created, deleted to Recently deleted, deleted for
+  good): without the option 2,001 frames a phase, 1,355 / 1,377 / 2,217 B each (2.7, 2.8 and
+  4.4 MB), and the process received 5.4, 5.3 and 5.7 MB in all; with it no drive event at all
+  (one pong), and 2.6, 2.5 and 1.2 MB in all. The feed reads are the same either way (8 slim
+  pages for each of the first two phases, 1 for the last, none whole): the echoes were taken
+  as known versions and never needed the feed.
+- **Write answers carry no time** **[verified]** (`UploadResult`, `UpdateFileResult`,
+  `DeleteFileResultV2`): create and update answer `fileId`, `newVersionTag`, `globalTransitId`,
+  `recipientStatus` and per payload `{key, uid, lastModified}` (the payload's, not the
+  header's `updated`); a delete `localFileDeleted`, `localFileNotFound`, `fileId`,
+  `recipientStatus`. The server's time of a write (`updated`, what Recently deleted orders
+  by) comes only from a header, a feed row or an event: the client takes it from the slim
+  feed page it reads after its writes.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

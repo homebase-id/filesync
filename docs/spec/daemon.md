@@ -117,11 +117,10 @@ a failure (service managers restart it then).
   once.
 - **Announced changes** name their file (a minimal row, odin-core #1970): a file deleted for
   good is gone from the account's picture within a second (a hard delete leaves no row in the
-  feed), and versions the account has already (this device's own writes coming back) are taken as
-  a slim feed page's rows, an own removal getting the server's time; the feed is read only
-  when something announced isn't known, or an event didn't say which file. One ref per file
-  counts (a delete for good ends it; else the newest), so an own write made twice, or made
-  then deleted, needs no read. A hard delete announced is taken within a second (what is
+  feed), and versions the account has already are taken as a slim feed page's rows; the feed
+  is read only when something announced isn't known, or an event didn't say which file. One
+  ref per file counts (a delete for good ends it; else the newest), so a write made twice, or
+  made then deleted, needs no read. A hard delete announced is taken within a second (what is
   announced within a second of it, up to 500 changes, is taken in one write, hard deletes
   before the rest), also while paused (it is in no feed; it writes only the account's DB, the
   folders sync it at the resume), kept and tried again with a growing pause when that fails,
@@ -133,6 +132,18 @@ a failure (service managers restart it then).
   Announced changes are taken one at a time with the pulls, on the account's pull thread
   (started again if it ended), never on the account's loop. A timed pause runs out for the
   account as for its folders.
+- **Own writes aren't announced** (`excludeOwnWrites`, odin-core #1971): the socket leaves
+  out the writes made with this computer's own token (its client registration), so what is
+  announced is another computer's (or the phone's) doing. Nothing waits for an echo: the
+  executor records each write from its answer (version, token), and the feed page the sync
+  reads after its writes (a slim one: every row known) brings the server's times, an own
+  removal's among them (Recently deleted's order, the purge). A sync stopped or failed
+  between the writes and that read leaves the removal's time open (shown as just now, never
+  purged) until the account's next pull: the next sync of any of its folders, a reconnect.
+  The account's other folders hear of the writes through the account's drive, which they
+  share, not the socket. Two computers on one token (a copied credentials file, a restored
+  backup) don't hear each other's writes; each catches up on the other's only at a reconnect
+  or with a change from elsewhere it doesn't know.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start

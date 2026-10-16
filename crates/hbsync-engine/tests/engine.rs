@@ -9,7 +9,8 @@ use hbsync_engine::exec::{CrashPoint, FailPoint};
 use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{
-    ChangesPage, NodeMeta, RefsPage, Remote, RemoteHeader, Result as RemoteResult, Upload,
+    ChangesPage, NodeMeta, RefsPage, Remote, RemoteBody, RemoteHeader, Result as RemoteResult,
+    Upload,
 };
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
@@ -2755,5 +2756,58 @@ fn own_writes_come_back_slim() -> R {
     assert!(b.remote.faults().full_pages > 0, "new to b: read whole");
     assert_eq!(b.recently_deleted(100)?.len(), 23);
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
+    Ok(())
+}
+
+/// With the notifications leaving out a client's own writes (`excludeOwnWrites`, odin-core
+/// #1971), nothing of a's own comes back to it, and nothing needs it to: a's removal has the
+/// server's time once its sync ends (the feed it reads after its writes), and another
+/// computer's change is still announced, which a's drive doesn't know yet and reads.
+#[test]
+fn own_writes_need_no_echo() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let heard = a.remote.subscribe(true);
+    a.write("doc.txt", "x")?;
+    a.write("dir/in.txt", "y")?;
+    a.sync()?;
+    fs::remove_file(a.root.join("doc.txt"))?;
+    fs::remove_dir_all(a.root.join("dir"))?;
+    a.sync()?;
+    assert_eq!(heard.try_iter().count(), 0, "a heard its own writes");
+
+    let on_server: HashMap<String, Option<i64>> = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        s.removed()
+            .filter_map(|h| match &h.body {
+                RemoteBody::Live { content, .. } => Some((content.name.clone(), h.removed_at)),
+                RemoteBody::Deleted => None,
+            })
+            .collect()
+    };
+    let deleted = a.recently_deleted(10)?;
+    assert_eq!(deleted.len(), 3, "{deleted:?}");
+    for d in &deleted {
+        let name = d.path.rsplit('/').next().unwrap_or_default();
+        assert!(d.removed_at_ms.is_some(), "{} still open", d.path);
+        assert_eq!(d.removed_at_ms, on_server[name], "{}", d.path);
+    }
+
+    // Another computer: its write is announced to a, and is news there.
+    let b = FakeRemote::new(server.clone());
+    let made = b.create(
+        &NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: hbsync_types::NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder("from b"),
+            removed: false,
+        },
+        None,
+    )?;
+    let announced: Vec<_> = heard.try_iter().collect();
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].at(), made.at);
+    assert!(!a.engine.drive().announced(&announced)?, "news: read");
     Ok(())
 }

@@ -9,12 +9,15 @@
 //!   subscription is `establishConnectionRequest`, answered by `deviceHandshakeSuccess`;
 //! - server frames are `{isEncrypted, payload}`; drive changes are `fileAdded`,
 //!   `fileModified`, `fileDeleted` (reactions also send `fileModified`), as minimal rows
-//!   (odin-core #1970, `homebase-api-notes.md`).
+//!   (odin-core #1970, `homebase-api-notes.md`);
+//! - with `excludeOwnWrites` (odin-core #1971) the socket isn't told of writes made with its
+//!   own token: this client records its writes itself, and the feed read at the end of each
+//!   batch confirms them (`daemon.md`, the sync loop).
 
 use std::borrow::Cow;
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -57,26 +60,69 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A refused subscription isn't asked again sooner (the sync's own refusals wait as long).
 const REFUSED_PAUSE: Duration = Duration::from_secs(300);
 
+/// Whether the subscription hears of the drive writes this client makes itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OwnWrites {
+    /// Not told (`excludeOwnWrites`, odin-core #1971): the server leaves out the writes made
+    /// with this client's token. Another computer's writes (its own client registration) are
+    /// still announced; two computers sharing one token would miss each other's.
+    #[default]
+    Excluded,
+    /// Told of every write, this client's own coming back as echoes (for measurements).
+    Heard,
+}
+
+/// What the connection received so far, over all its connections: server frames, and their
+/// bytes as text frames (the encrypted envelope included; TLS and WebSocket framing not).
+#[derive(Debug, Default)]
+pub struct Received {
+    pub frames: AtomicU64,
+    pub bytes: AtomicU64,
+}
+
 /// The notification connection, on its own thread. Stops when dropped: the thread ends at
 /// its next check (it isn't waited for, as it may be in the middle of connecting).
 #[derive(Debug)]
 pub struct Notifier {
     stop: Arc<AtomicBool>,
     reconnect: Arc<AtomicBool>,
+    received: Arc<Received>,
 }
 
 impl Notifier {
     /// Connects to `client`'s identity and subscribes to `drive`, reconnecting as needed;
-    /// events go to `events` until it is closed or the notifier dropped. An error: its thread
+    /// events go to `events` until it is closed or the notifier dropped. Writes made with
+    /// `client`'s own token aren't announced ([`OwnWrites::Excluded`]). An error: its thread
     /// couldn't start (then never connected: the caller reads the drive on a timer).
     pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> io::Result<Self> {
+        Self::spawn_with(client, drive, OwnWrites::Excluded, events)
+    }
+
+    /// [`Notifier::spawn`], hearing this client's `own` writes or not.
+    pub fn spawn_with(
+        client: Client,
+        drive: TargetDrive,
+        own: OwnWrites,
+        events: Sender<Event>,
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
-        let (flag, kick) = (stop.clone(), reconnect.clone());
+        let received = Arc::new(Received::default());
+        let (flag, kick, counts) = (stop.clone(), reconnect.clone(), received.clone());
+        let subscription = Subscription { drive, own };
         std::thread::Builder::new()
             .name("hbsync-notify".into())
-            .spawn(move || run(&client, drive, &events, &flag, &kick))?;
-        Ok(Notifier { stop, reconnect })
+            .spawn(move || run(&client, subscription, &events, &flag, &kick, &counts))?;
+        Ok(Notifier {
+            stop,
+            reconnect,
+            received,
+        })
+    }
+
+    /// What it received so far.
+    pub fn received(&self) -> &Received {
+        &self.received
     }
 
     /// Drops the connection and connects again at once, without waiting out a backoff: after
@@ -93,12 +139,34 @@ impl Drop for Notifier {
     }
 }
 
+/// What the connection subscribes to.
+#[derive(Debug, Clone, Copy)]
+struct Subscription {
+    drive: TargetDrive,
+    own: OwnWrites,
+}
+
+impl Subscription {
+    /// The `establishConnectionRequest`'s data.
+    fn request(&self) -> serde_json::Value {
+        json!({
+            "drives": [{
+                "alias": self.drive.alias.simple().to_string(),
+                "type": self.drive.drive_type.simple().to_string(),
+            }],
+            "resultShape": "minimal",
+            "excludeOwnWrites": self.own == OwnWrites::Excluded,
+        })
+    }
+}
+
 fn run(
     client: &Client,
-    drive: TargetDrive,
+    subscription: Subscription,
     events: &Sender<Event>,
     stop: &AtomicBool,
     reconnect: &AtomicBool,
+    received: &Received,
 ) {
     const FIRST: Duration = Duration::from_secs(1);
     let mut backoff = FIRST;
@@ -106,10 +174,10 @@ fn run(
         let (mut connected, mut refused) = (false, false);
         let result = session(
             client,
-            drive,
+            subscription,
             events,
-            stop,
-            reconnect,
+            (stop, reconnect),
+            received,
             &mut connected,
             &mut refused,
         );
@@ -154,10 +222,10 @@ type Socket = WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>
 /// One connection, until it breaks or is `refused` (`Err`) or the notifier stops (`Ok`).
 fn session(
     client: &Client,
-    drive: TargetDrive,
+    subscription: Subscription,
     events: &Sender<Event>,
-    stop: &AtomicBool,
-    reconnect: &AtomicBool,
+    (stop, reconnect): (&AtomicBool, &AtomicBool),
+    received: &Received,
     connected: &mut bool,
     refused: &mut bool,
 ) -> Result<(), String> {
@@ -166,14 +234,7 @@ fn session(
         &mut socket,
         client,
         "establishConnectionRequest",
-        &json!({
-            "drives": [{
-                "alias": drive.alias.simple().to_string(),
-                "type": drive.drive_type.simple().to_string(),
-            }],
-            "resultShape": "minimal",
-        })
-        .to_string(),
+        &subscription.request().to_string(),
     )?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
@@ -189,6 +250,10 @@ fn session(
         match socket.read() {
             Ok(Message::Text(text)) => {
                 last_frame = Instant::now();
+                received.frames.fetch_add(1, Ordering::Relaxed);
+                received
+                    .bytes
+                    .fetch_add(text.len() as u64, Ordering::Relaxed);
                 let event = match notification(client, text.as_str()) {
                     Notification::Handshake if !*connected => {
                         *connected = true;
@@ -438,6 +503,25 @@ mod tests {
 
     fn n(body: serde_json::Value) -> Notification {
         classify(body.to_string().as_bytes())
+    }
+
+    /// The subscription asks for minimal events, without this client's own writes unless it
+    /// wants to hear them.
+    #[test]
+    fn the_subscription_leaves_out_own_writes() {
+        let drive = TargetDrive {
+            alias: uuid::Uuid::from_u128(1),
+            drive_type: uuid::Uuid::from_u128(2),
+        };
+        let request = |own| Subscription { drive, own }.request();
+        let excluded = request(OwnWrites::default());
+        assert_eq!(excluded["excludeOwnWrites"], true);
+        assert_eq!(excluded["resultShape"], "minimal");
+        assert_eq!(
+            excluded["drives"][0]["alias"],
+            "00000000000000000000000000000001"
+        );
+        assert_eq!(request(OwnWrites::Heard)["excludeOwnWrites"], false);
     }
 
     #[test]
