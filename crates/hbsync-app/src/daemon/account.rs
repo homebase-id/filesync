@@ -339,6 +339,17 @@ impl Account {
         };
         let drive = Drive::open(&self.db, &self.identity, remote)
             .map_err(|e| DaemonError::Runner(e.into()))?;
+        // Tokens are sealed under the login's shared secret: another login's don't open.
+        let login = format!(
+            "{:016x}",
+            hbsync_fileio::fnv1a64(creds.shared_secret.as_bytes())
+        );
+        if drive
+            .tokens_sealed_by(&login)
+            .map_err(|e| DaemonError::Runner(e.into()))?
+        {
+            tracing::info!("a new login: the files' tokens are read again as they're written");
+        }
         let mut notifications =
             Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now());
         let mut runners: Vec<Running> = Vec::new();

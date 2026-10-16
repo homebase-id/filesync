@@ -129,6 +129,8 @@ pub struct ChangeRef {
     pub version: VersionTag,
     /// A tombstone.
     pub deleted: bool,
+    /// As in [`RemoteHeader`]; `None` for a tombstone.
+    pub parent: Option<NodeId>,
     /// As in [`RemoteHeader`].
     pub removed_at: Option<i64>,
     /// As in [`RemoteHeader`].
@@ -141,6 +143,7 @@ impl ChangeRef {
             file_id: header.file_id,
             version: header.version,
             deleted: header.is_deleted(),
+            parent: (!header.is_deleted()).then_some(header.parent),
             removed_at: header.removed_at,
             changed_at: header.changed_at,
         }
@@ -161,6 +164,8 @@ pub struct RefsPage {
     pub refs: Vec<ChangeRef>,
     pub cursor: String,
     pub has_more: bool,
+    /// Rows that couldn't be read slim: the page is read whole, which says what they are.
+    pub unread: usize,
 }
 
 impl RefsPage {
@@ -170,6 +175,7 @@ impl RefsPage {
             refs: page.entries.iter().map(ChangeRef::of).collect(),
             cursor: page.cursor.clone(),
             has_more: page.has_more,
+            unread: 0,
         }
     }
 }

@@ -54,8 +54,18 @@ impl Store<'_> {
         Ok(())
     }
 
+    /// Forgets every file's token, in the mirror and Recently deleted: they were sealed under
+    /// a login that is no longer this one's. The next update of each reads its header first.
+    pub fn clear_tokens(&self) -> Result<()> {
+        self.prep("UPDATE remote SET token = NULL WHERE token IS NOT NULL")?
+            .execute([])?;
+        self.prep("UPDATE removed SET token = NULL WHERE token IS NOT NULL")?
+            .execute([])?;
+        Ok(())
+    }
+
     /// Whether the store has every one of `versions`, each `(version, removed)` in Recently
-    /// deleted or else the mirror: one query.
+    /// deleted or else the mirror: one query (its text differs by length: not cached).
     pub fn known(&self, versions: &[(RemoteRef, bool)]) -> Result<bool> {
         if versions.is_empty() {
             return Ok(true);
@@ -76,7 +86,8 @@ impl Store<'_> {
             ]
         });
         Ok(self
-            .prep(&sql)?
+            .conn
+            .prepare(&sql)?
             .query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
     }
 
@@ -113,7 +124,8 @@ impl Store<'_> {
         )
     }
 
-    /// Recently deleted, newest first (an open time is the newest).
+    /// Recently deleted, newest first: NULL (an open time) first, as
+    /// [`hbsync_types::activity::removal_time`] has it.
     pub fn list_removed(&self, limit: usize) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
             &format!(

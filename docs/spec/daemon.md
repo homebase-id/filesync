@@ -164,7 +164,8 @@ a failure (service managers restart it then).
   its state DB (table `removed`), listed newest first with their path and the folder each comes
   back to. Restore and Empty are the account's: run on its thread when asked (once connected).
   Empty takes what the user was shown: the items named, or everything removed until the newest
-  one listed. Once a day (the time is kept in the state DB) the account deletes for good what
+  one listed, and the device's own removals shown "just now" (their time still open: not back
+  from the server yet) by name. Once a day (the time is kept in the state DB) the account deletes for good what
   was removed more than
   `keep_deleted_days` ago (a folder's delete as a whole), and empties `.hbsync/trash` of
   entries that old, from those made since the purge began (older ones, from before Recently

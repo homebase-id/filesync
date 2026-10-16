@@ -273,7 +273,6 @@ fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
 fn feed_sizes() -> R {
     use hbsync_remote::contract::{file, removed};
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     let remote = live_remote()?;
     let n = std::env::var("FEED_SIZES_FILES")
         .ok()
@@ -283,43 +282,25 @@ fn feed_sizes() -> R {
     let result = (|| -> R {
         let before = bench.cursor_now()?;
         let (folder, _) = bench.folder("files")?;
-        let next = AtomicUsize::new(0);
         let made = Mutex::new(Vec::with_capacity(n));
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                scope.spawn(|| -> Result<(), hbsync_remote::RemoteError> {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= n {
-                            return Ok(());
-                        }
-                        let data = format!("file {i}");
-                        let meta = file(&format!("f{i:05}.txt"), folder.node, data.as_bytes());
-                        let at = bench.create(&meta, Some(data.as_bytes()))?;
-                        made.lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .push((meta, at));
-                    }
-                });
-            }
-        });
+        let created = on_threads(n, |i| {
+            let data = format!("file {i}");
+            let meta = file(&format!("f{i:05}.txt"), folder.node, data.as_bytes());
+            let at = bench.create(&meta, Some(data.as_bytes()))?;
+            made.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((meta, at));
+            Ok(())
+        })?;
         let made = made.into_inner().unwrap_or_else(|e| e.into_inner());
-        assert_eq!(made.len(), n, "every create went through");
+        assert_eq!((created, made.len()), (n, n), "every create went through");
         let after_creates = bench.cursor_now()?;
-        let next = AtomicUsize::new(0);
-        std::thread::scope(|scope| {
-            for _ in 0..8 {
-                scope.spawn(|| -> Result<(), hbsync_remote::RemoteError> {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some((meta, at)) = made.get(i) else {
-                            return Ok(());
-                        };
-                        remote.update(&bench.target(*at), &removed(meta), None)?;
-                    }
-                });
-            }
-        });
+        let removed_count = on_threads(n, |i| {
+            let (meta, at) = &made[i];
+            remote.update(&bench.target(*at), &removed(meta), None)?;
+            Ok(())
+        })?;
+        assert_eq!(removed_count, n, "every removal went through");
         std::thread::sleep(Duration::from_millis(50));
         println!("{n} files created, then removed; feed pages of {PAGE} rows");
         println!(
@@ -340,7 +321,8 @@ fn feed_sizes() -> R {
         for (name, from, how) in cases {
             let start = socket_bytes()?;
             let (rows, requests) = read_feed(&remote, from, how)?;
-            let bytes = socket_bytes()? - start;
+            // A connection that closed meanwhile takes its count along: never below zero.
+            let bytes = socket_bytes()?.saturating_sub(start);
             println!(
                 "{name:<32} {rows:>7} {requests:>9} {bytes:>12} {:>10}",
                 bytes / rows.max(1) as u64
@@ -355,6 +337,39 @@ fn feed_sizes() -> R {
 }
 
 const PAGE: usize = 500;
+
+/// `work` for each of `0..n` on 8 threads: how many went through, or the first error.
+fn on_threads(
+    n: usize,
+    work: impl Fn(usize) -> Result<(), hbsync_remote::RemoteError> + Sync,
+) -> Result<usize, hbsync_remote::RemoteError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= n {
+                            return Ok(());
+                        }
+                        work(i)?;
+                        done.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().try_for_each(|t| {
+            t.join().unwrap_or_else(|_| {
+                Err(hbsync_remote::RemoteError::Fatal(
+                    "a thread panicked".into(),
+                ))
+            })
+        })
+    })?;
+    Ok(done.into_inner())
+}
 
 #[derive(Clone, Copy)]
 enum Read {

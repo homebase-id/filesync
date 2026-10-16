@@ -225,19 +225,28 @@ impl HomebaseRemote {
         }
     }
 
-    /// One page of the change feed in `shape`.
+    /// One page of the change feed in `shape`,
+    /// and the cursor after it.
     fn feed_page(
         &self,
         cursor: Option<&str>,
         limit: usize,
         shape: wire::Shape,
-    ) -> Result<wire::QueryBatchResponse> {
-        self.client
+    ) -> Result<(wire::QueryBatchResponse, String)> {
+        let mut page: wire::QueryBatchResponse = self
+            .client
             .post(
                 &format!("{}/query-batch", self.files()),
                 &wire::feed_query(cursor, limit.max(1), shape),
             )
-            .map_err(remote_error)
+            .map_err(remote_error)?;
+        // An empty page of an empty drive has no cursor yet: start from the beginning.
+        let next = page
+            .cursor_state
+            .take()
+            .or_else(|| cursor.map(str::to_owned))
+            .unwrap_or_default();
+        Ok((page, next))
     }
 
     /// The header of `at`, which must still be that version and not deleted.
@@ -364,7 +373,7 @@ impl<R: Read> Read for Tap<R> {
 impl Remote for HomebaseRemote {
     /// Rows that aren't usable sync nodes come back in [`ChangesPage::skipped`], with why.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
-        let page = self.feed_page(cursor, limit, wire::Shape::Full)?;
+        let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
         let mut entries = Vec::with_capacity(page.search_results.len());
         let mut skipped = Vec::new();
         for row in &page.search_results {
@@ -378,11 +387,7 @@ impl Remote for HomebaseRemote {
         }
         Ok(ChangesPage {
             entries,
-            // An empty page of an empty drive has no cursor yet: start from the beginning.
-            cursor: page
-                .cursor_state
-                .or_else(|| cursor.map(str::to_owned))
-                .unwrap_or_default(),
+            cursor,
             has_more: page.has_more_rows,
             skipped,
         })
@@ -390,19 +395,25 @@ impl Remote for HomebaseRemote {
 
     /// A minimal page (odin-core #1967): what changed, without the headers.
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
-        let page = self.feed_page(cursor, limit, wire::Shape::Minimal)?;
+        let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Minimal)?;
         // A server without #1967 ignores the shape and sends headers: an empty page there
         // would skip what changed.
-        let refs = page.file_refs.ok_or_else(|| {
+        let rows = page.file_refs.ok_or_else(|| {
             RemoteError::Fatal("the server doesn't page the feed slim (odin-core #1967)".into())
         })?;
+        let mut refs = Vec::with_capacity(rows.len());
+        let mut unread = 0;
+        for row in &rows {
+            match serde_json::from_str::<wire::FileRef>(row.get()) {
+                Ok(r) => refs.push(r.to_ref()),
+                Err(_) => unread += 1,
+            }
+        }
         Ok(RefsPage {
-            refs: refs.iter().map(wire::FileRef::to_ref).collect(),
-            cursor: page
-                .cursor_state
-                .or_else(|| cursor.map(str::to_owned))
-                .unwrap_or_default(),
+            refs,
+            cursor,
             has_more: page.has_more_rows,
+            unread,
         })
     }
 

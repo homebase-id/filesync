@@ -10,7 +10,7 @@ use std::ops::DerefMut;
 
 use hbsync_remote::{ChangeRef, Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef};
+use hbsync_types::{FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -88,7 +88,7 @@ fn read_slim<G: DerefMut<Target = StateDb>>(
     let page = with_retries(|| remote.change_refs(cursor, page_size))?;
     // Checked where it is applied: a commit in between may have changed what is known.
     let applied = db().write(|s| {
-        if !known(s, &page.refs)? {
+        if page.unread > 0 || !known(s, &page.refs)? {
             return Ok(false);
         }
         for r in &page.refs {
@@ -158,13 +158,29 @@ fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
         apply_tombstone(s, r.file_id)?;
         return Ok(false);
     }
+    apply_known(s, r, None)
+}
+
+/// A version the store has already (this device's own write coming back, or a page applied
+/// again) changes nothing but what the server says better: the file's `token` where the
+/// header gives one (an earlier login's may not open), a removal's time, and the time of a
+/// version in a removed folder, where it decides whether it went with it (node schema,
+/// Recently deleted). No change of the node, so nothing to reconcile. Returns `true` for a node
+/// in the tree.
+fn apply_known(
+    s: &Store<'_>,
+    r: &ChangeRef,
+    token: Option<&FileToken>,
+) -> Result<bool, StateError> {
+    if let Some(token) = token {
+        s.set_token(r.file_id, r.removed_at.is_some(), token)?;
+    }
     if let Some(removed_at) = r.removed_at {
         s.confirm_removed(r.at(), removed_at)?;
         return Ok(false);
     }
-    // The token can't have changed with the version; the time matters in a removed folder.
-    if let (Some(changed_at), Some(row)) = (r.changed_at, s.mirror_by_file(r.file_id)?) {
-        s.refresh_time(r.file_id, row.parent, changed_at)?;
+    if let (Some(changed_at), Some(parent)) = (r.changed_at, r.parent) {
+        s.refresh_time(r.file_id, parent, changed_at)?;
     }
     Ok(true)
 }
@@ -195,16 +211,10 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     let Some(row) = mirror_row(header) else {
         return Ok(true);
     };
-    // A version the store has already (this device's own write coming back, or a page applied
-    // again) changes nothing but what the server knows better ([`Store::refresh`], a removal's
-    // time); the store marks the nodes that changed dirty where that concerns.
+    // The store marks the nodes that changed dirty where that concerns.
     let removed_at = header.removed_at;
     if s.has_version(row.remote_ref(), removed_at.is_some())? {
-        s.refresh(&row, removed_at.is_some())?;
-        if let Some(removed_at) = removed_at {
-            s.confirm_removed(row.remote_ref(), removed_at)?;
-        }
-        return Ok(removed_at.is_none());
+        return apply_known(s, &ChangeRef::of(header), header.token.as_ref());
     }
     if let Some(removed_at) = removed_at {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
@@ -314,6 +324,10 @@ mod tests {
         pull(lock, &remote, 3)?;
         assert_eq!(reads(&remote), (2, 5), "news: slim once, then whole");
         assert_eq!(lock().read(|s| s.mirror_count())?, 11);
+        // A slim row that can't be read: the page is read whole, the cursor goes on.
+        remote.faults().unread_refs = true;
+        pull(lock, &remote, 3)?;
+        assert_eq!(reads(&remote), (3, 6), "an unread row: whole");
         Ok(())
     }
 

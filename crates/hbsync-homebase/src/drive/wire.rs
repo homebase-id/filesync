@@ -94,8 +94,9 @@ pub struct QueryBatchResponse {
     #[serde(default)]
     pub search_results: Vec<Box<serde_json::value::RawValue>>,
     /// The rows of a [`Shape::Minimal`] page, which has no `searchResults`; absent from a
-    /// server without odin-core #1967.
-    pub file_refs: Option<Vec<FileRef>>,
+    /// server without odin-core #1967. Raw, as `searchResults`: one row the client can't read
+    /// doesn't fail the page.
+    pub file_refs: Option<Vec<Box<serde_json::value::RawValue>>>,
 }
 
 /// One row of a minimal `query-batch` page (odin-core #1967 `QueryBatchFileRef`, **[verified]**):
@@ -108,6 +109,8 @@ pub struct FileRef {
     pub file_state: String,
     #[serde(default)]
     pub archival_status: i32,
+    /// The parent node, as the header's: omitted when empty.
+    pub group_id: Option<Uuid>,
     /// Unix ms, as the header's `updated`.
     #[serde(default)]
     pub updated: i64,
@@ -121,6 +124,7 @@ impl FileRef {
             file_id: RemoteFileId(self.file_id),
             version: VersionTag(self.version_tag),
             deleted: times.deleted,
+            parent: self.group_id.map(NodeId).filter(|_| !times.deleted),
             removed_at: times.removed_at,
             changed_at: times.changed_at,
         }
@@ -664,12 +668,12 @@ mod tests {
             ]}"#,
         )?;
         assert!(page.search_results.is_empty());
-        let refs: Vec<_> = page
+        let refs = page
             .file_refs
             .ok_or("no fileRefs")?
             .iter()
-            .map(FileRef::to_ref)
-            .collect();
+            .map(|row| serde_json::from_str::<FileRef>(row.get()).map(|r| r.to_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             (refs[0].deleted, refs[0].removed_at, refs[0].changed_at),
             (false, Some(9), Some(9))

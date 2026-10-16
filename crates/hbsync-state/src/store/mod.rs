@@ -126,9 +126,10 @@ pub struct RemovedRow {
 }
 
 impl RemovedRow {
-    /// The removal's time for comparing: an open one is the newest.
+    /// The removal's time for comparing: an open one is the newest
+    /// ([`hbsync_types::activity::removal_time`]).
     pub fn time(&self) -> i64 {
-        self.removed_at.unwrap_or(i64::MAX)
+        hbsync_types::activity::removal_time(self.removed_at)
     }
 }
 

@@ -26,8 +26,8 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
         }
         Ask::Deleted { limit } => {
             let mut items: Vec<_> = accounts.iter().flat_map(|a| a.deleted(limit)).collect();
-            // Newest first; an open time is the newest.
-            items.sort_by_key(|i| std::cmp::Reverse(i.deleted.removed_at_ms.unwrap_or(i64::MAX)));
+            // Newest first.
+            items.sort_by_key(|i| std::cmp::Reverse(i.deleted.time()));
             items.truncate(limit);
             Reply::Deleted(items)
         }

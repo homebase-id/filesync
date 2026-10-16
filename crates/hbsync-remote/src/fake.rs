@@ -443,6 +443,8 @@ pub struct Faults {
     /// Feed pages read whole ([`Remote::changes`]) and as refs ([`Remote::change_refs`]).
     pub full_pages: usize,
     pub ref_pages: usize,
+    /// Slim pages say one of their rows couldn't be read (a row the client doesn't decode).
+    pub unread_refs: bool,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -562,8 +564,15 @@ impl Remote for FakeRemote {
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
         self.gate()?;
-        self.faults().ref_pages += 1;
-        Ok(RefsPage::of(&self.server().changes(cursor, limit)?))
+        let unread = {
+            let mut faults = self.faults();
+            faults.ref_pages += 1;
+            usize::from(faults.unread_refs)
+        };
+        Ok(RefsPage {
+            unread,
+            ..RefsPage::of(&self.server().changes(cursor, limit)?)
+        })
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {

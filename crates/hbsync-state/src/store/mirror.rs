@@ -112,13 +112,8 @@ impl Store<'_> {
     /// unknown, which counts as before any removal the feed brings later. Written only where
     /// something differs; no change of the node, so nothing to reconcile.
     pub fn refresh(&self, row: &MirrorRow, removed: bool) -> Result<()> {
-        let token = row.token.as_ref().map(|t| &t.0[..]);
-        let table = if removed { "removed" } else { "remote" };
-        if token.is_some() {
-            self.prep(&format!(
-                "UPDATE {table} SET token = ?2 WHERE file_id = ?1 AND token IS NOT ?2"
-            ))?
-            .execute(params![row.file_id.0.as_bytes(), token])?;
+        if let Some(token) = &row.token {
+            self.set_token(row.file_id, removed, token)?;
         }
         if let Some(at) = row.changed_at
             && !removed
@@ -128,10 +123,23 @@ impl Store<'_> {
         Ok(())
     }
 
-    /// Records the server's time of the version the mirror has as `file_id` in `parent`, where
-    /// it matters: a node in a removed folder whose time isn't known yet.
+    /// Keeps `token` for file `file_id` (in Recently deleted if `removed`), if it differs.
+    pub fn set_token(&self, file_id: RemoteFileId, removed: bool, token: &FileToken) -> Result<()> {
+        let table = if removed { "removed" } else { "remote" };
+        self.prep(&format!(
+            "UPDATE {table} SET token = ?2 WHERE file_id = ?1 AND token IS NOT ?2"
+        ))?
+        .execute(params![file_id.0.as_bytes(), &token.0[..]])?;
+        Ok(())
+    }
+
+    /// Records the server's time of the version the mirror has as `file_id` in `parent` (drive
+    /// coordinates), where it matters: a node in a removed folder whose time isn't known yet.
     pub fn refresh_time(&self, file_id: RemoteFileId, parent: NodeId, at: i64) -> Result<()> {
-        if self.in_removed_folder(parent)? {
+        let unknown = self
+            .prep("SELECT 1 FROM remote WHERE file_id = ?1 AND changed_at IS NULL")?
+            .exists([file_id.0.as_bytes()])?;
+        if unknown && self.in_removed_folder(parent)? {
             self.prep(
                 "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NULL",
             )?

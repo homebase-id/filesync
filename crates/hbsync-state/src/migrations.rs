@@ -279,7 +279,7 @@ pub fn apply(conn: &mut Connection) -> Result<()> {
     let seen = user_version(conn)?;
     check(seen)?;
     if seen == VERSION {
-        return Ok(());
+        return repair_early_8(conn);
     }
     // Another connection may be creating or migrating the same DB: decide again under the
     // write lock.
@@ -299,6 +299,29 @@ pub fn apply(conn: &mut Connection) -> Result<()> {
         tx.execute_batch(sql)?;
     }
     tx.pragma_update(None, "user_version", VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Version 8 as an earlier build of it made it (a branch, never released): a table `pending` of
+/// this device's own removals, and `removed.removed_at` still NOT NULL. Made what version 8 is:
+/// those removals come back through the feed as anyone else's (the table goes, unread).
+fn repair_early_8(conn: &mut Connection) -> Result<()> {
+    let early = |c: &Connection| -> Result<bool> {
+        Ok(c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending')",
+            [],
+            |r| r.get(0),
+        )?)
+    };
+    if !early(conn)? {
+        return Ok(());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if early(&tx)? {
+        tx.execute_batch("DROP TABLE pending;")?;
+        tx.execute_batch(MIGRATIONS[MIGRATIONS.len() - 1])?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -378,6 +401,46 @@ mod tests {
              VALUES (x'05', x'06', x'07', x'04', 1, 'e')",
             [],
         )?;
+        Ok(())
+    }
+
+    /// A DB an earlier build took to version 8 (a `pending` table, `removed_at` NOT NULL) is
+    /// made version 8 as it is now when opened: its removals and their times stay.
+    #[test]
+    fn an_early_version_8_is_repaired() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(MIGRATIONS[0])?;
+        conn.execute_batch(MIGRATIONS[1])?;
+        conn.execute_batch(
+            "CREATE TABLE pending (file_id BLOB PRIMARY KEY, node BLOB NOT NULL, \
+             version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, \
+             name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, \
+             executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, token BLOB) WITHOUT ROWID;",
+        )?;
+        conn.pragma_update(None, "user_version", 8)?;
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at) \
+             VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5)",
+            [],
+        )?;
+        apply(&mut conn)?;
+        assert_eq!(user_version(&conn)?, VERSION);
+        let pending: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'pending')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(!pending);
+        let at: i64 = conn.query_row("SELECT removed_at FROM removed", [], |r| r.get(0))?;
+        assert_eq!(at, 5);
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name) \
+             VALUES (x'05', x'06', x'07', x'04', 1, 'e')",
+            [],
+        )?;
+        // Opened again: nothing more to do.
+        apply(&mut conn)?;
         Ok(())
     }
 

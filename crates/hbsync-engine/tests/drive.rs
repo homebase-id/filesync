@@ -42,7 +42,7 @@ fn pulls_asked_at_once_are_merged() -> R {
     let before = {
         let mut faults = remote.faults();
         faults.latency = Duration::from_millis(100);
-        faults.ref_pages
+        faults.requests
     };
     let start = Barrier::new(8);
     std::thread::scope(|scope| {
@@ -62,8 +62,7 @@ fn pulls_asked_at_once_are_merged() -> R {
     let reads = {
         let mut faults = remote.faults();
         faults.latency = Duration::ZERO;
-        // A pull reads each page slim first (and whole only when it holds something new).
-        faults.ref_pages - before
+        faults.requests - before
     };
     assert!((1..=2).contains(&reads), "{reads} feed reads for 8 asks");
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
@@ -141,5 +140,35 @@ fn the_purge_empties_every_folders_trash() -> R {
     drive.purge(((now + 10) * 1000) as i64)?;
     assert!(!in_a.exists() && !in_b.exists(), "both trashes emptied");
     assert!(young.exists(), "what is younger stays");
+    Ok(())
+}
+
+/// The files' tokens are sealed under a login's key: another login forgets them, the same one
+/// keeps them.
+#[test]
+fn a_new_login_forgets_the_tokens() -> R {
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let made = remote.create(&folder("Docs"), None)?;
+    drive.pull(None)?;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    let mut token = || -> Result<_, hbsync_state::StateError> {
+        db.read(|s| s.mirror_by_file(made.at.file_id))
+            .map(|r| r.and_then(|r| r.token))
+    };
+    assert!(token()?.is_some(), "the feed's");
+    assert!(drive.tokens_sealed_by("one")?, "none recorded: forgotten");
+    assert_eq!(token()?, None);
+    let header = remote.header(made.at.file_id)?;
+    let mut db2 = StateDb::open_account(&dir.path().join("state.db"))?;
+    db2.write(|s| {
+        let row = hbsync_engine::feed::mirror_row(&header).expect("a folder's row");
+        s.refresh(&row, false)
+    })?;
+    assert!(token()?.is_some());
+    assert!(!drive.tokens_sealed_by("one")?, "the same login");
+    assert!(token()?.is_some());
+    assert!(drive.tokens_sealed_by("two")?, "another login");
+    assert_eq!(token()?, None);
     Ok(())
 }

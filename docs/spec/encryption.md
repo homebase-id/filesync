@@ -94,9 +94,13 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   write back changes nothing; another device's write brings its token with it. One request does
   an update; the version tag guards it (4160 if the file changed since; a deleted file 4002). A
   file without a token (a row an older client stored) has its header read first, as before; so
-  does one whose token doesn't open (sealed for an earlier login's shared secret), and the
-  feed's next row of the file replaces it. A token is only ever used for its own file: another
-  file's key would leave content no one can read.
+  does one whose token doesn't open. Tokens are sealed under a login's shared secret: when the
+  account connects with another login than the one its tokens were sealed under (a fingerprint
+  of its key, `remote.tokens_sealed_by`), they are all forgotten, and each file's next update
+  reads its header once and keeps the token it writes (the feed's slim rows carry none). A token
+  is only ever used for its own file: another file's key would leave content no one can read.
+  One opens only if it decrypts to exactly 32 bytes, so a stale one (garbage under another key)
+  as good as never passes for a key.
 - **Every node is encrypted.** A live row that isn't is skipped as unreadable: no client has
   users with unencrypted nodes. (The server couldn't change `isEncrypted` on an update anyway **[verified]**,
   `homebase-api-notes.md`.)
