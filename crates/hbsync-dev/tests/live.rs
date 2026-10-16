@@ -290,21 +290,26 @@ fn feed_sizes() -> R {
         std::thread::sleep(Duration::from_millis(50));
         println!("{n} files created, then removed; feed pages of {PAGE} rows");
         println!(
-            "{:<28} {:>7} {:>9} {:>12} {:>10}",
+            "{:<32} {:>7} {:>9} {:>12} {:>10}",
             "read", "rows", "requests", "bytes", "bytes/row"
         );
-        let cases: [(&str, &str, Read); 4] = [
+        let cases: [(&str, &str, Read); 5] = [
             ("echo: whole", &after_creates, Read::Whole),
             ("echo: slim", &after_creates, Read::Slim),
             ("catch-up: whole", &before, Read::Whole),
-            ("catch-up: slim, then whole", &before, Read::SlimThenWhole),
+            (
+                "catch-up: each page slim+whole",
+                &before,
+                Read::SlimThenWhole,
+            ),
+            ("catch-up: as the engine reads", &before, Read::Engine),
         ];
         for (name, from, how) in cases {
             let start = socket_bytes()?;
             let (rows, requests) = read_feed(&remote, from, how)?;
             let bytes = socket_bytes()? - start;
             println!(
-                "{name:<28} {rows:>7} {requests:>9} {bytes:>12} {:>10}",
+                "{name:<32} {rows:>7} {requests:>9} {bytes:>12} {:>10}",
                 bytes / rows.max(1) as u64
             );
         }
@@ -322,8 +327,11 @@ const PAGE: usize = 500;
 enum Read {
     Whole,
     Slim,
-    /// The engine on a page with something new: slim first, then the page again whole.
+    /// Every page slim first, then again whole (it holds something new).
     SlimThenWhole,
+    /// As the engine reads a run of news: the first page slim, then again whole, and whole
+    /// pages after it (the rest of this run is new too).
+    Engine,
 }
 
 /// The feed's end now: a cursor after every change so far (read slim).
@@ -345,8 +353,22 @@ fn read_feed(
     how: Read,
 ) -> Result<(usize, usize), Box<dyn std::error::Error>> {
     let (mut cursor, mut rows, mut requests) = (from.to_owned(), 0, 0);
+    let mut how = how;
     loop {
         let (count, next, more) = match how {
+            Read::Engine => {
+                // The first page slim, then whole; the rest whole.
+                how = Read::Whole;
+                let r = remote.change_refs(Some(&cursor), PAGE)?;
+                requests += 1;
+                if r.refs.is_empty() {
+                    (0, r.cursor, r.has_more)
+                } else {
+                    let p = remote.changes(Some(&cursor), PAGE)?;
+                    requests += 1;
+                    (p.entries.len() + p.skipped.len(), p.cursor, p.has_more)
+                }
+            }
             Read::Whole => {
                 let p = remote.changes(Some(&cursor), PAGE)?;
                 requests += 1;
