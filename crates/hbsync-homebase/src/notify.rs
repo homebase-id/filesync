@@ -8,8 +8,10 @@
 //! - client frames are envelopes of `{command, data}` (`data` a JSON string); the drive
 //!   subscription is `establishConnectionRequest`, answered by `deviceHandshakeSuccess`;
 //! - server frames are `{isEncrypted, payload}`; drive changes are `fileAdded`,
-//!   `fileModified`, `fileDeleted` (reactions also send `fileModified`).
+//!   `fileModified`, `fileDeleted` (reactions also send `fileModified`), as minimal rows
+//!   (odin-core #1970, `homebase-api-notes.md`).
 
+use std::borrow::Cow;
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,22 +21,25 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use hbsync_remote::ChangeRef;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{Message, WebSocket};
 
 use crate::client::Client;
 use crate::crypto::{Envelope, random};
 use crate::drive::TargetDrive;
+use crate::drive::wire::FileRef;
 
 /// What the notifier tells the sync loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     /// Subscribed (again): changes made while disconnected weren't announced, so read the feed.
     Connected,
-    /// A file on the drive changed.
-    Changed,
+    /// A file on the drive changed: which, as a slim feed row has it (`deleted` also for a hard
+    /// delete, which leaves no row in the feed), when the event says (`None`: read the feed).
+    Changed(Option<ChangeRef>),
     /// The connection broke; it is retried with backoff.
     Lost(String),
     /// The identity refused the subscription (credentials revoked, no access to the drive):
@@ -161,10 +166,13 @@ fn session(
         &mut socket,
         client,
         "establishConnectionRequest",
-        &json!({ "drives": [{
-            "alias": drive.alias.simple().to_string(),
-            "type": drive.drive_type.simple().to_string(),
-        }]})
+        &json!({
+            "drives": [{
+                "alias": drive.alias.simple().to_string(),
+                "type": drive.drive_type.simple().to_string(),
+            }],
+            "resultShape": "minimal",
+        })
         .to_string(),
     )?;
     let opened = Instant::now();
@@ -186,7 +194,7 @@ fn session(
                         *connected = true;
                         Event::Connected
                     }
-                    Notification::Changed => Event::Changed,
+                    Notification::Changed(change) => Event::Changed(change),
                     Notification::Refused(why) => {
                         let _ = socket.close(None);
                         let _ = events.send(Event::Refused(why.clone()));
@@ -303,7 +311,7 @@ fn send(socket: &mut Socket, client: &Client, command: &str, data: &str) -> Resu
 #[derive(Debug, PartialEq, Eq)]
 enum Notification {
     Handshake,
-    Changed,
+    Changed(Option<ChangeRef>),
     Refused(String),
     Other,
 }
@@ -318,52 +326,223 @@ struct Frame {
 
 /// What a server frame says; [`Notification::Other`] if it can't be read.
 fn notification(client: &Client, text: &str) -> Notification {
-    let body = || -> Option<Value> {
+    let body = || -> Option<Vec<u8>> {
         let frame: Frame = serde_json::from_str(text).ok()?;
         if frame.is_encrypted {
             let envelope: Envelope = serde_json::from_str(&frame.payload).ok()?;
-            serde_json::from_slice(&envelope.open(client.key()).ok()?).ok()
+            envelope.open(client.key()).ok()
         } else {
-            serde_json::from_str(&frame.payload).ok()
+            Some(frame.payload.into_bytes())
         }
     };
     body().map_or(Notification::Other, |b| classify(&b))
 }
 
-fn classify(body: &Value) -> Notification {
-    let kind = match &body["notificationType"] {
-        Value::String(s) => s.to_ascii_lowercase(),
-        _ => return Notification::Other,
+/// A notification's body: only what is read of it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Body<'a> {
+    #[serde(borrow)]
+    notification_type: Cow<'a, str>,
+    #[serde(borrow, default)]
+    data: Option<Cow<'a, str>>,
+}
+
+/// A minimal drive event (its `data`): the file as it is now, or as it was before a delete,
+/// as rows of a slim feed page.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DriveEvent {
+    #[serde(default)]
+    file_ref: Option<FileRef>,
+    #[serde(default)]
+    previous_file_ref: Option<FileRef>,
+}
+
+fn classify(body: &[u8]) -> Notification {
+    // By its type alone when the rest isn't what we expect (`data` not a string): a file
+    // event then says nothing of which file (the feed is read), a refusal is still one.
+    let (kind, data) = match serde_json::from_slice::<Body>(body) {
+        Ok(body) => (body.notification_type.into_owned(), body.data),
+        Err(_) => match serde_json::from_slice::<KindOnly>(body) {
+            Ok(only) => (only.notification_type, None),
+            Err(_) => return Notification::Other,
+        },
     };
-    match kind.as_str() {
-        "devicehandshakesuccess" => Notification::Handshake,
-        "fileadded" | "filemodified" | "filedeleted" => Notification::Changed,
-        "authenticationerror" => {
-            Notification::Refused(format!("refused: {}", body["data"].as_str().unwrap_or("")))
-        }
-        _ => Notification::Other,
+    let kind = |k: &str| kind.eq_ignore_ascii_case(k);
+    if kind("deviceHandshakeSuccess") {
+        Notification::Handshake
+    } else if kind("fileAdded") || kind("fileModified") || kind("fileDeleted") {
+        Notification::Changed(data.as_deref().and_then(|d| change(d, kind("fileDeleted"))))
+    } else if kind("authenticationError") {
+        Notification::Refused(format!("refused: {}", data.as_deref().unwrap_or("")))
+    } else {
+        Notification::Other
     }
+}
+
+/// A server frame's type, whatever the rest of it holds.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KindOnly {
+    notification_type: String,
+}
+
+/// The file a drive event announces; `None` if the event doesn't say.
+fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
+    match serde_json::from_str::<DriveEvent>(data) {
+        Ok(event) => match (event.file_ref, event.previous_file_ref) {
+            (Some(now), _) => Some(now.to_ref()),
+            // Deleted, and no file now: deleted for good without a tombstone (a hard delete).
+            (None, Some(before)) if deleted => Some(before.to_ref().tombstone()),
+            _ => None,
+        },
+        // A delete is in no feed when it was a hard one: its file id, however the rest reads.
+        Err(e) if deleted => {
+            let gone = deleted_file(data);
+            if gone.is_none() {
+                tracing::warn!("a delete announced without a file id that reads ({e})");
+            }
+            gone
+        }
+        Err(_) => None,
+    }
+}
+
+/// The file a delete names, read leniently: `previousFileRef`'s `fileId` (else `fileRef`'s),
+/// with its version where that reads (a tombstone is taken by file id).
+fn deleted_file(data: &str) -> Option<ChangeRef> {
+    let event: serde_json::Value = serde_json::from_str(data).ok()?;
+    let file = event
+        .get("previousFileRef")
+        .filter(|f| f.get("fileId").is_some())
+        .or_else(|| event.get("fileRef"))?;
+    let id = |key: &str| {
+        file.get(key)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|s| s.parse::<uuid::Uuid>().ok())
+    };
+    Some(ChangeRef {
+        file_id: hbsync_types::RemoteFileId(id("fileId")?),
+        version: hbsync_types::VersionTag(id("versionTag").unwrap_or_default()),
+        deleted: true,
+        parent: None,
+        removed_at: None,
+        changed_at: None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn n(body: serde_json::Value) -> Notification {
+        classify(body.to_string().as_bytes())
+    }
+
     #[test]
     fn notifications_are_classified() {
-        let n = |v: Value| classify(&v);
         assert_eq!(
             n(json!({"notificationType": "deviceHandshakeSuccess", "stunUrls": []})),
             Notification::Handshake
-        );
-        assert_eq!(
-            n(json!({"notificationType": "fileModified", "data": "{}"})),
-            Notification::Changed
         );
         assert_eq!(n(json!({"notificationType": "pong"})), Notification::Other);
         assert!(matches!(
             n(json!({"notificationType": "authenticationError", "data": "no"})),
             Notification::Refused(_)
         ));
+    }
+
+    /// A frame whose `data` isn't the string expected still counts by its type: a file event
+    /// says nothing of which file (the feed is read), a refusal stays one.
+    #[test]
+    fn a_frame_counts_by_its_type_whatever_its_data() {
+        assert_eq!(
+            n(json!({"notificationType": "fileModified", "data": {"fileRef": {}}})),
+            Notification::Changed(None)
+        );
+        assert_eq!(
+            n(json!({"notificationType": "fileDeleted", "data": 42})),
+            Notification::Changed(None)
+        );
+        assert!(matches!(
+            n(json!({"notificationType": "authenticationError", "data": {"why": "no"}})),
+            Notification::Refused(_)
+        ));
+        assert_eq!(n(json!({"data": "no type"})), Notification::Other);
+    }
+
+    /// A delete whose rows don't fully read still names its file (a hard delete is in no
+    /// feed): taken as deleted by its file id; without a file id that reads, the feed is read.
+    #[test]
+    fn a_delete_that_doesnt_fully_read_still_names_its_file() {
+        use hbsync_types::RemoteFileId;
+        use uuid::Uuid;
+        let file = Uuid::new_v4();
+        let deleted = |data: serde_json::Value| {
+            n(json!({"notificationType": "fileDeleted", "data": data.to_string()}))
+        };
+        let Notification::Changed(Some(gone)) = deleted(json!({
+            "previousFileRef": {"fileId": file, "versionTag": 42, "fileState": "active"}
+        })) else {
+            panic!("the file isn't named");
+        };
+        assert_eq!(gone.file_id, RemoteFileId(file));
+        assert!(gone.deleted);
+        assert_eq!(
+            deleted(json!({"previousFileRef": {"fileId": "not an id"}})),
+            Notification::Changed(None)
+        );
+    }
+
+    #[test]
+    fn a_minimal_event_says_which_file() {
+        use hbsync_types::{NodeId, RemoteFileId, VersionTag};
+        use uuid::Uuid;
+        let (file, version, parent) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let event = |kind: &str, data: serde_json::Value| {
+            n(json!({"notificationType": kind, "data": data.to_string()}))
+        };
+        let row = |state: &str, archival: i64| {
+            json!({"fileId": file, "versionTag": version, "fileState": state,
+                "archivalStatus": archival, "groupId": parent, "updated": 7, "fileType": 7101})
+        };
+        let changed = |deleted, removed_at, changed_at, parent| {
+            Notification::Changed(Some(ChangeRef {
+                file_id: RemoteFileId(file),
+                version: VersionTag(version),
+                deleted,
+                parent,
+                removed_at,
+                changed_at,
+            }))
+        };
+        assert_eq!(
+            event(
+                "fileModified",
+                json!({"targetDrive": {}, "fileRef": row("active", 2)})
+            ),
+            changed(false, Some(7), Some(7), Some(NodeId(parent)))
+        );
+        // A tombstone, and a hard delete (only the file as it was): deleted either way.
+        assert_eq!(
+            event(
+                "fileDeleted",
+                json!({"fileRef": row("deleted", 0), "previousFileRef": row("active", 2)})
+            ),
+            changed(true, None, None, None)
+        );
+        assert_eq!(
+            event(
+                "fileDeleted",
+                json!({"targetDrive": {}, "previousFileRef": row("active", 2)})
+            ),
+            changed(true, None, None, None)
+        );
+        // An event that doesn't say (full headers, or no row): the feed is read.
+        assert_eq!(
+            event("fileAdded", json!({"header": {"fileId": file}})),
+            Notification::Changed(None)
+        );
     }
 }

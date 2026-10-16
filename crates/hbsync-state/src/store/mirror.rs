@@ -65,9 +65,11 @@ impl Store<'_> {
     /// Records a live remote node, and marks it dirty in the folders the change concerns
     /// ([`Store::fan_out`]). A row for the same node under an older file id (the node was
     /// deleted and re-created) is replaced. A version the mirror has already (this device's own
-    /// write coming back through the feed, or a page applied again) changes nothing.
+    /// write coming back through the feed, or a page applied again) changes nothing, and so does
+    /// a file id deleted for good ([`Store::file_gone`]: a page fetched before, or a write
+    /// committed after, can't bring it back).
     pub fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
-        if self.has_version(row.remote_ref(), false)? {
+        if self.has_version(row.remote_ref(), false)? || self.file_gone(row.file_id)? {
             return Ok(());
         }
         let Some(row) = &self.on_drive(row)? else {
@@ -176,6 +178,20 @@ impl Store<'_> {
 
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
     /// ([`Store::fan_out`]), and returns the row.
+    /// Records file `file_id` as deleted for good: Homebase never gives a file id back.
+    pub fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
+        self.prep("INSERT OR IGNORE INTO gone_files (file_id) VALUES (?1)")?
+            .execute([file_id.0.as_bytes()])?;
+        Ok(())
+    }
+
+    /// Whether file `file_id` was deleted for good ([`Store::mark_file_gone`]).
+    pub fn file_gone(&self, file_id: RemoteFileId) -> Result<bool> {
+        Ok(self
+            .prep("SELECT 1 FROM gone_files WHERE file_id = ?1")?
+            .exists([file_id.0.as_bytes()])?)
+    }
+
     pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let Some(row) = self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),

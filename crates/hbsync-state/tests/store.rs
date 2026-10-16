@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 9);
+    assert_eq!(db.schema_version()?, 10);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -367,6 +367,36 @@ mod mirror {
         );
         assert!(!db.read(|s| s.is_dirty(node))?);
         Ok(())
+    }
+
+    /// A file id deleted for good never comes back: neither a page fetched before the delete
+    /// nor a write committed after it puts its row in the mirror or Recently deleted.
+    #[test]
+    fn a_file_deleted_for_good_stays_out() -> R {
+        use hbsync_state::RemovedRow;
+        let mut db = StateDb::open_in_memory()?;
+        let live = row(NodeId::new(), NodeId::ROOT, "a", None);
+        let removed = RemovedRow {
+            row: row(NodeId::new(), NodeId::ROOT, "b", None),
+            removed_at: Some(1),
+        };
+        db.write(|s| {
+            s.mark_file_gone(live.file_id)?;
+            s.mark_file_gone(removed.row.file_id)?;
+            s.put_mirror(&live)?;
+            s.put_removed(&removed)
+        })?;
+        db.read(|s| {
+            assert!(
+                s.mirror_by_file(live.file_id)?.is_none(),
+                "back in the mirror"
+            );
+            assert!(
+                s.removed_by_node(removed.row.node)?.is_none(),
+                "back in Recently deleted"
+            );
+            Ok(())
+        })
     }
 
     /// This device's own removal is in Recently deleted at once, its time open: listed first,
@@ -801,7 +831,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 9);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 10);
     Ok(())
 }
 

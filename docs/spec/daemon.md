@@ -105,9 +105,9 @@ a failure (service managers restart it then).
 
 ### The sync loop
 
-- Syncs when the folder changes (live watcher), when another folder's sync changed this one's
-  part of the drive, when the identity announces a change on the
-  drive (notification socket; once its announcements have stopped for 1 s, at most 10 s
+- Syncs when the folder changes (live watcher; not its own writes coming back), when another
+  folder's sync changed this one's part of the drive, when the identity announces a change on
+  the drive (notification socket; once its announcements have stopped for 1 s, at most 10 s
   after the first, so a burst of deletes from another device reaches the mass-delete guard
   whole), when the socket connects (again), and on request. A sync that left work unfinished
   (the round limit, or operations skipped or failed; never deletes held for a confirmation)
@@ -115,10 +115,24 @@ a failure (service managers restart it then).
   after one that did some, without holding back other syncs. After a failure it waits 5 s,
   doubling to 5 min. When the socket connects again, a folder waiting for either goes at
   once.
+- **Announced changes** name their file (a minimal row, odin-core #1970): a file deleted for
+  good is gone from the account's picture at once (a hard delete leaves no row in the feed),
+  and versions the account has already (this device's own writes coming back) are taken as
+  a slim feed page's rows, an own removal getting the server's time; the feed is read only
+  when something announced isn't known, or an event didn't say which file. One ref per file
+  counts (a delete for good ends it; else the newest), so an own write made twice, or made
+  then deleted, needs no read. A hard delete announced is taken at once, also while paused
+  (it is in no feed; it writes only the account's DB, the folders sync it at the resume),
+  kept and tried again with a growing pause when that fails, and its file id is never let
+  back in by a later row; live changes beyond 2,000 are read from the feed instead.
+  Announced changes are taken one at a time with the pulls, on the account's pull thread
+  (started again if it ended), never on the account's loop. A timed pause runs out for the
+  account as for its folders.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start
-  (which wakes only the folders it concerns), or with the next announced change. While the
+  (which wakes only the folders it concerns), or with the next change announced that the
+  account doesn't know. While the
   socket isn't connected (not yet, not any more, or never: a proxy blocking it, a refusal,
   its thread not starting), the account reads the drive every 5 min instead. Nothing is
   pulled while paused; the account's pulls run on a thread of their own. A dead socket is

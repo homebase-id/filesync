@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hbsync_remote::{NodeMeta, Remote, RemoteError};
+use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::schema::NodeContent;
@@ -119,14 +119,35 @@ impl Drive {
         }
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
-        let mut report = feed::pull(|| self.account(), self.remote(), FEED_PAGE)?;
-        *answered = covers;
-        drop(answered);
+        let pulled = feed::pull(|| self.account(), self.remote(), FEED_PAGE);
+        if pulled.is_ok() {
+            *answered = covers;
+        }
+        // Still one at a time: what it touched is its to wake, the pages it committed before a
+        // failure too.
         self.wake_touched(&mut self.account(), from);
+        drop(answered);
+        let mut report = pulled?;
         let mut skipped = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
         let room = MAX_SKIPPED.saturating_sub(skipped.len());
         skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));
         Ok(report)
+    }
+
+    /// Takes changes the notifications announced ([`feed::announced`]): whether that was all,
+    /// or the feed has to be read. Wakes the folders they concern. One at a time with
+    /// [`Drive::pull`] (its lock): a pull's page fetched before a hard delete must not commit
+    /// after the delete was taken (it would put the row back), and the folders a running pull
+    /// touched are its to wake.
+    pub fn announced(&self, refs: &[ChangeRef]) -> Result<bool, StateError> {
+        if refs.is_empty() {
+            return Ok(true);
+        }
+        let _one_at_a_time = self.answered.lock().unwrap_or_else(|e| e.into_inner());
+        let mut db = self.account();
+        let all = db.write(|s| feed::announced(s, refs))?;
+        self.wake_touched(&mut db, None);
+        Ok(all)
     }
 
     /// The feed rows the client couldn't read (not encrypted, another key, not a sync node)

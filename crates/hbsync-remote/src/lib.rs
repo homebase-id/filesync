@@ -149,6 +149,17 @@ impl ChangeRef {
         }
     }
 
+    /// The same file deleted for good: what a hard delete leaves (only the ref of what it was).
+    pub fn tombstone(self) -> ChangeRef {
+        ChangeRef {
+            deleted: true,
+            parent: None,
+            removed_at: None,
+            changed_at: None,
+            ..self
+        }
+    }
+
     pub fn at(&self) -> RemoteRef {
         RemoteRef {
             file_id: self.file_id,

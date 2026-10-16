@@ -6,6 +6,7 @@
 //! back) changes nothing. The feed is drained completely before planning, which is what
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
+use std::collections::HashMap;
 use std::ops::DerefMut;
 
 use hbsync_remote::{ChangeRef, Remote, RemoteBody, RemoteError, RemoteHeader};
@@ -151,6 +152,41 @@ fn save_cursor(s: &Store<'_>, old: Option<&str>, rows: bool, new: &str) -> Resul
     Ok(())
 }
 
+/// Changes the notifications announced (rows as a slim page has them): a file deleted for good
+/// is gone at once (a hard delete leaves no row in the feed), and when the store knows every
+/// other version (this device's own writes coming back) they are applied as a slim page's,
+/// without reading the feed. Whether that was all; else the feed has to be read.
+pub(crate) fn announced(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
+    let refs = latest(refs);
+    for r in refs.iter().filter(|r| r.deleted) {
+        apply_tombstone(s, r.file_id)?;
+    }
+    if !known(s, &refs)? {
+        return Ok(false);
+    }
+    for r in refs.iter().filter(|r| !r.deleted) {
+        apply_ref(s, r)?;
+    }
+    Ok(true)
+}
+
+/// One ref per file: the last a file had. A tombstone ends a file (its id never comes back,
+/// `homebase-api-notes.md`); of the others the newest by the server's time, the later
+/// announced on a tie. An own write made twice, or made then deleted, needs no read.
+fn latest(refs: &[ChangeRef]) -> Vec<ChangeRef> {
+    let time = |r: &ChangeRef| r.changed_at.max(r.removed_at);
+    let mut last: HashMap<RemoteFileId, ChangeRef> = HashMap::new();
+    for r in refs {
+        match last.get(&r.file_id) {
+            Some(had) if had.deleted || (!r.deleted && time(had) > time(r)) => {}
+            _ => {
+                last.insert(r.file_id, *r);
+            }
+        }
+    }
+    last.into_values().collect()
+}
+
 /// Applies a known ref ([`known`]) as [`apply`] would its header: only what the server says
 /// better, its times. Returns `true` for a node in the tree.
 fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
@@ -230,8 +266,10 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     Ok(true)
 }
 
-/// A file deleted for good: out of Recently deleted and the mirror.
+/// A file deleted for good: out of Recently deleted and the mirror, and never back in them
+/// ([`Store::mark_file_gone`]).
 fn apply_tombstone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
+    s.mark_file_gone(file_id)?;
     s.delete_removed_file(file_id)?;
     gone(s, file_id)
 }

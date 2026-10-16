@@ -35,21 +35,22 @@ fn a_change_on_the_drive_is_announced() -> R {
     let bench = Bench::new(&remote, &run_name("notify"), Duration::ZERO)?;
     let (tx, rx) = std::sync::mpsc::channel();
     let notifier = Notifier::spawn(remote.client().clone(), remote.drive(), tx);
-    let wait = |what: Event| -> Result<(), String> {
+    let wait = |what: &dyn Fn(&Event) -> bool| -> Result<(), String> {
         loop {
             match rx.recv_timeout(Duration::from_secs(15)) {
-                Ok(e) if e == what => return Ok(()),
+                Ok(e) if what(&e) => return Ok(()),
                 Ok(Event::Lost(why) | Event::Refused(why)) => return Err(why),
                 Ok(_) => {}
-                Err(e) => return Err(format!("waiting for {what:?}: {e}")),
+                Err(e) => return Err(format!("waiting: {e}")),
             }
         }
     };
     let result = (|| -> R {
-        wait(Event::Connected)?;
+        wait(&|e| *e == Event::Connected)?;
         let start = std::time::Instant::now();
-        bench.folder("inside")?;
-        wait(Event::Changed)?;
+        let (_, at) = bench.folder("inside")?;
+        // The write is announced with the file and version written (a minimal event).
+        wait(&|e| matches!(e, Event::Changed(Some(r)) if r.at() == at && !r.deleted))?;
         let took = start.elapsed();
         assert!(took < Duration::from_secs(2), "announced after {took:?}");
         println!("announced {took:?} after the write returned");
