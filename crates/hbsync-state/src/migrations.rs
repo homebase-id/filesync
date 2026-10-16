@@ -226,6 +226,23 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE removed ADD COLUMN token BLOB;
     DROP INDEX removed_root;
     ALTER TABLE removed DROP COLUMN root;",
+    // 8: this device's own removals until the feed brings them back: the row as written, so
+    // the feed's slim pages know that version and Recently deleted gets it, with the server's
+    // time, without reading the page whole. The account's, in drive coordinates, as `removed`.
+    "CREATE TABLE pending (
+        file_id       BLOB PRIMARY KEY,
+        node          BLOB NOT NULL,
+        version_tag   BLOB NOT NULL,
+        parent        BLOB NOT NULL,
+        kind          INTEGER NOT NULL,
+        name          TEXT NOT NULL,
+        hash          BLOB,
+        size          INTEGER,
+        mtime_ms      INTEGER,
+        executable    INTEGER NOT NULL DEFAULT 0,
+        content_extra TEXT,
+        token         BLOB
+    ) WITHOUT ROWID;",
 ];
 
 /// The version this client makes and reads.
@@ -324,6 +341,30 @@ mod tests {
              token) VALUES (x'05', x'06', x'07', x'04', 1, 'e', 6, x'00')",
             [],
         )?;
+        Ok(())
+    }
+
+    /// A DB at version 7 gets the table of removals waiting for the feed, empty; its rows stay.
+    #[test]
+    fn version_7_gets_pending_removals() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(MIGRATIONS[0])?;
+        conn.execute_batch(MIGRATIONS[1])?;
+        conn.pragma_update(None, "user_version", 7)?;
+        conn.execute(
+            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at) \
+             VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5)",
+            [],
+        )?;
+        apply(&mut conn)?;
+        assert_eq!(user_version(&conn)?, VERSION);
+        let (removed, pending): (i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM removed), (SELECT COUNT(*) FROM pending)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        assert_eq!((removed, pending), (1, 0));
         Ok(())
     }
 

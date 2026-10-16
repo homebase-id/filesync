@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 7);
+    assert_eq!(db.schema_version()?, 8);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -363,6 +363,32 @@ mod mirror {
         let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
         assert_eq!((back.row.token, back.removed_at), (with_token.token, 5));
         assert!(!db.read(|s| s.is_dirty(node))?);
+        Ok(())
+    }
+
+    /// This device's own removal waits as written until the feed brings it back: known as that
+    /// version (no other), taken once, and out of the way of Recently deleted meanwhile.
+    #[test]
+    fn an_own_removal_waits_for_the_feed() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let written = row(NodeId::new(), NodeId::ROOT, "d", None);
+        let at = written.remote_ref();
+        let other = RemoteRef {
+            version: VersionTag(Uuid::new_v4()),
+            ..at
+        };
+        db.write(|s| s.put_pending(&written))?;
+        assert!(db.read(|s| s.has_pending(at))?);
+        assert!(!db.read(|s| s.has_pending(other))?);
+        assert!(db.read(|s| s.list_removed(10))?.is_empty());
+        assert!(!db.read(|s| s.has_version(at, true))?);
+        assert_eq!(db.write(|s| s.take_pending(at))?, Some(written));
+        assert_eq!(db.write(|s| s.take_pending(at))?, None, "taken once");
+        // Another version of the file came through the feed: the wait is over.
+        let again = row(NodeId::new(), NodeId::ROOT, "e", None);
+        db.write(|s| s.put_pending(&again))?;
+        assert!(db.write(|s| s.delete_pending(again.file_id))?);
+        assert!(!db.read(|s| s.has_pending(again.remote_ref()))?);
         Ok(())
     }
 
@@ -682,7 +708,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 7);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 8);
     Ok(())
 }
 

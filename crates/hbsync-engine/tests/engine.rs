@@ -2542,3 +2542,53 @@ fn a_power_cut_after_a_folder_came_back_keeps_one() -> R {
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
+
+/// The feed comes slim first (odin-core #1967): this device's own writes coming back are
+/// versions it knows, so its pages are never read whole; its removals reach Recently deleted
+/// from the slim rows, with the server's times. Another device, to which they are new, reads
+/// them whole.
+#[test]
+fn own_writes_come_back_slim() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    for i in 0..20 {
+        a.write(&format!("Photos/{i}.jpg"), format!("{i}"))?;
+    }
+    a.write("Photos/2024/y.jpg", "y")?;
+    a.sync()?;
+    fs::rename(a.root.join("Photos/0.jpg"), a.root.join("Photos/zero.jpg"))?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    a.sync()?;
+    {
+        let faults = a.remote.faults();
+        assert_eq!(faults.full_pages, 0, "its own writes, slim");
+        assert!(faults.ref_pages > 0);
+    }
+    let listed = a.recently_deleted(100)?;
+    assert_eq!(listed.len(), 23, "{listed:?}");
+    let photos = listed
+        .iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    assert!(listed.iter().all(|i| i.root == photos.node), "{listed:?}");
+    let server_times: Vec<i64> = server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .removed()
+        .filter_map(|h| h.removed_at)
+        .collect();
+    assert!(
+        listed
+            .iter()
+            .all(|i| server_times.contains(&i.removed_at_ms)),
+        "the server's times: {listed:?}"
+    );
+
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert!(b.remote.faults().full_pages > 0, "new to b: read whole");
+    assert_eq!(b.recently_deleted(100)?.len(), 23);
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
+    Ok(())
+}

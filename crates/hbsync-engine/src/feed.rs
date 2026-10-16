@@ -8,9 +8,9 @@
 
 use std::ops::DerefMut;
 
-use hbsync_remote::{Remote, RemoteBody, RemoteError, RemoteHeader};
+use hbsync_remote::{ChangeRef, Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
-use hbsync_types::{NodeId, NodeKind, RemoteRef};
+use hbsync_types::{NodeId, NodeKind, RemoteFileId, RemoteRef};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -40,6 +40,11 @@ impl std::ops::AddAssign for FeedReport {
 
 /// Reads the feed from the stored cursor until it has no more rows. The DB is taken from `db`
 /// for each step, and let go while a page is on its way: others use it meanwhile.
+///
+/// Each page comes as [`ChangeRef`]s first. One whose rows are all known (versions the store
+/// has, this device's own writes coming back) or tombstones is applied from them alone; one
+/// with anything new is read again whole from the same cursor and applied from that, whose
+/// cursor it continues from (a file changed in between has moved further along the feed).
 pub fn pull<G: DerefMut<Target = StateDb>>(
     db: impl Fn() -> G,
     remote: &dyn Remote,
@@ -48,27 +53,100 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
     let mut report = FeedReport::default();
     loop {
         let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
-        let mut page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
-        report.skipped.append(&mut page.skipped);
-        db().write(|s| {
-            for header in &page.entries {
-                if apply(s, header)? {
+        let refs = with_retries(|| remote.change_refs(cursor.as_deref(), page_size))?;
+        // Checked where it is applied: a commit in between may have changed what is known.
+        let known = db().write(|s| {
+            if !refs
+                .refs
+                .iter()
+                .try_fold(true, |all, r| Ok::<_, StateError>(all && is_known(s, r)?))?
+            {
+                return Ok(false);
+            }
+            for r in &refs.refs {
+                if apply_ref(s, r)? {
                     report.live += 1;
                 } else {
                     report.deleted += 1;
                 }
             }
-            // Unchanged on an idle pull: no write, so nothing to sync.
-            if !page.entries.is_empty() || cursor.as_deref() != Some(page.cursor.as_str()) {
-                s.set_account_kv(keys::REMOTE_CURSOR, &page.cursor)?;
-            }
-            Ok(())
+            save_cursor(s, cursor.as_deref(), !refs.refs.is_empty(), &refs.cursor)?;
+            Ok(true)
         })?;
+        let has_more = if known {
+            refs.has_more
+        } else {
+            let mut page = with_retries(|| remote.changes(cursor.as_deref(), page_size))?;
+            report.skipped.append(&mut page.skipped);
+            db().write(|s| {
+                for header in &page.entries {
+                    if apply(s, header)? {
+                        report.live += 1;
+                    } else {
+                        report.deleted += 1;
+                    }
+                }
+                save_cursor(s, cursor.as_deref(), !page.entries.is_empty(), &page.cursor)
+            })?;
+            page.has_more
+        };
         report.pages += 1;
-        if !page.has_more {
+        if !has_more {
             return Ok(report);
         }
     }
+}
+
+/// Stores the cursor after a page; unchanged on an idle pull: no write, so nothing to sync.
+fn save_cursor(s: &Store<'_>, old: Option<&str>, rows: bool, new: &str) -> Result<(), StateError> {
+    if rows || old != Some(new) {
+        s.set_account_kv(keys::REMOTE_CURSOR, new)?;
+    }
+    Ok(())
+}
+
+/// Whether a ref says nothing the store doesn't know: a tombstone (its file id is all it
+/// takes), or a version the store has, as a node, in Recently deleted, or as this device's
+/// own removal waiting for the feed.
+fn is_known(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
+    let at = RemoteRef {
+        file_id: r.file_id,
+        version: r.version,
+    };
+    Ok(r.deleted
+        || if r.removed_at.is_some() {
+            s.has_version(at, true)? || s.has_pending(at)?
+        } else {
+            s.has_version(at, false)?
+        })
+}
+
+/// Applies a known ref ([`is_known`]) as [`apply`] would its header. Returns `true` for a
+/// node in the tree.
+fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
+    if r.deleted {
+        s.delete_pending(r.file_id)?;
+        s.delete_removed_file(r.file_id)?;
+        gone(s, r.file_id)?;
+        return Ok(false);
+    }
+    let at = RemoteRef {
+        file_id: r.file_id,
+        version: r.version,
+    };
+    let Some(removed_at) = r.removed_at else {
+        // The token can't have changed with the version; the time matters in a removed folder.
+        if let (Some(changed_at), Some(row)) = (r.changed_at, s.mirror_by_file(r.file_id)?) {
+            s.refresh_time(r.file_id, row.parent, changed_at)?;
+        }
+        return Ok(true);
+    };
+    // This device's own removal: into Recently deleted with the server's time.
+    if let Some(row) = s.take_pending(at)? {
+        gone(s, r.file_id)?;
+        s.put_removed(&RemovedRow { row, removed_at })?;
+    }
+    Ok(false)
 }
 
 /// Retries transient errors a few times with exponential backoff (50, 100, 200 ms).
@@ -89,9 +167,11 @@ pub fn with_retries<T>(mut f: impl FnMut() -> Result<T, RemoteError>) -> Result<
 /// Applies one header to the mirror. Returns `true` for a node in the tree, `false` for one
 /// that left it (deleted, or removed to Recently deleted).
 pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
+    // Whatever version this is, the file's row comes from here now.
+    s.delete_pending(header.file_id)?;
     if header.is_deleted() {
         s.delete_removed_file(header.file_id)?;
-        gone(s, header)?;
+        gone(s, header.file_id)?;
         return Ok(false);
     }
     // A live file without its payload changes nothing: it must never read as a delete.
@@ -108,7 +188,7 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     }
     if let Some(removed_at) = removed_at {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
-        gone(s, header)?;
+        gone(s, header.file_id)?;
         s.put_removed(&RemovedRow { row, removed_at })?;
         return Ok(false);
     }
@@ -117,11 +197,11 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     Ok(true)
 }
 
-/// The mirror without the file of `header`, its node marked to plan again where it was
+/// The mirror without file `file_id`, its node marked to plan again where it was
 /// held. A tombstone has no node id: the node is found by file id.
-fn gone(s: &Store<'_>, header: &RemoteHeader) -> Result<(), StateError> {
-    if s.delete_mirror(header.file_id)?.is_none()
-        && let Some(node) = s.node_of_file(header.file_id)?
+fn gone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
+    if s.delete_mirror(file_id)?.is_none()
+        && let Some(node) = s.node_of_file(file_id)?
     {
         // Its place went with its row: the folders holding it are the ones concerned.
         s.fan_out(node, NodeId::ROOT)?;

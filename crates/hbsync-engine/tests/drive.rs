@@ -42,7 +42,7 @@ fn pulls_asked_at_once_are_merged() -> R {
     let before = {
         let mut faults = remote.faults();
         faults.latency = Duration::from_millis(100);
-        faults.requests
+        faults.ref_pages
     };
     let start = Barrier::new(8);
     std::thread::scope(|scope| {
@@ -62,7 +62,8 @@ fn pulls_asked_at_once_are_merged() -> R {
     let reads = {
         let mut faults = remote.faults();
         faults.latency = Duration::ZERO;
-        faults.requests - before
+        // A pull reads each page slim first (and whole only when it holds something new).
+        faults.ref_pages - before
     };
     assert!((1..=2).contains(&reads), "{reads} feed reads for 8 asks");
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;

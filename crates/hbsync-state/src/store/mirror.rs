@@ -122,12 +122,20 @@ impl Store<'_> {
         }
         if let Some(at) = row.changed_at
             && !removed
-            && self.in_removed_folder(row.parent)?
         {
+            self.refresh_time(row.file_id, row.parent, at)?;
+        }
+        Ok(())
+    }
+
+    /// Records the server's time of the version the mirror has as `file_id` in `parent`, where
+    /// it matters: a node in a removed folder whose time isn't known yet.
+    pub fn refresh_time(&self, file_id: RemoteFileId, parent: NodeId, at: i64) -> Result<()> {
+        if self.in_removed_folder(parent)? {
             self.prep(
                 "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NULL",
             )?
-            .execute(params![row.file_id.0.as_bytes(), at])?;
+            .execute(params![file_id.0.as_bytes(), at])?;
         }
         Ok(())
     }

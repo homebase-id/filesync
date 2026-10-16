@@ -121,6 +121,41 @@ pub struct ChangesPage {
     pub skipped: Vec<String>,
 }
 
+/// One row of the change feed as a slim page carries it: which version of which file changed,
+/// without the header (Homebase's minimal `query-batch`, odin-core #1967).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeRef {
+    pub file_id: RemoteFileId,
+    pub version: VersionTag,
+    /// A tombstone.
+    pub deleted: bool,
+    /// As in [`RemoteHeader`].
+    pub removed_at: Option<i64>,
+    /// As in [`RemoteHeader`].
+    pub changed_at: Option<i64>,
+}
+
+impl ChangeRef {
+    pub fn of(header: &RemoteHeader) -> ChangeRef {
+        ChangeRef {
+            file_id: header.file_id,
+            version: header.version,
+            deleted: header.is_deleted(),
+            removed_at: header.removed_at,
+            changed_at: header.changed_at,
+        }
+    }
+}
+
+/// One page of the change feed in [`ChangeRef`]s: the same rows and cursor as
+/// [`Remote::changes`] gives for the same cursor and limit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefsPage {
+    pub refs: Vec<ChangeRef>,
+    pub cursor: String,
+    pub has_more: bool,
+}
+
 /// A node's header as a client writes it, on create and on every update. Homebase replaces
 /// the whole header on update, so an update sends all of it again, node id and kind included.
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +270,18 @@ pub trait Remote: Send + Sync {
     /// Includes tombstones.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage>;
 
+    /// The same page as [`Remote::changes`], each row only as a [`ChangeRef`]: what a client
+    /// that has most of it compares before reading the page whole. A row the remote can't
+    /// read as a node is in it too (it is unknown, so the page is read whole and skips it).
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
+        let page = self.changes(cursor, limit)?;
+        Ok(RefsPage {
+            refs: page.entries.iter().map(ChangeRef::of).collect(),
+            cursor: page.cursor,
+            has_more: page.has_more,
+        })
+    }
+
     /// The current header of a file, live or deleted.
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader>;
 
@@ -272,6 +319,10 @@ pub trait Remote: Send + Sync {
 impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         (**self).changes(cursor, limit)
+    }
+
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
+        (**self).change_refs(cursor, limit)
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {

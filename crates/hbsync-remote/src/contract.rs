@@ -14,7 +14,7 @@ use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags, Target};
 
-use crate::{NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
+use crate::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
 
 pub type Outcome = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -62,6 +62,7 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
     ),
     ("hash_mismatch_stores_nothing", hash_mismatch_stores_nothing),
     ("feed_pages_and_resumes", feed_pages_and_resumes),
+    ("slim_pages_match_whole_ones", slim_pages_match_whole_ones),
     (
         "every_write_shows_up_promptly",
         every_write_shows_up_promptly,
@@ -572,6 +573,43 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
         "not restored: {back:?}"
     );
     ensure!(b.read(w.file_id, None)? == b"edited", "the restore's bytes");
+    Ok(())
+}
+
+/// The feed slim ([`Remote::change_refs`]) has the rows of the feed whole, page by page, with
+/// the same cursor: what lets the engine read a page whole only when it holds something new.
+fn slim_pages_match_whole_ones(b: &Bench) -> Outcome {
+    let cursor = b.cursor_now()?;
+    let (d, dw) = b.folder("d")?;
+    let (f, fw) = b.file("f", b"one")?;
+    let (g, gw) = b.file("g", b"two")?;
+    let (_, hw) = b.file("h", b"three")?;
+    b.update(fw, &with(&f, NodeContent::file("f2", 1, 3, false)), None)?;
+    b.update(gw, &removed(&g), None)?;
+    b.remote.delete(hw.file_id, hw.version)?;
+    b.update(dw, &removed(&d), None)?;
+    std::thread::sleep(b.settle);
+    let mut at = Some(cursor);
+    let mut rows = 0;
+    loop {
+        let refs = b.remote.change_refs(at.as_deref(), 2)?;
+        let page = b.remote.changes(at.as_deref(), 2)?;
+        ensure!(page.skipped.is_empty(), "rows skipped: {:?}", page.skipped);
+        let whole: Vec<_> = page.entries.iter().map(ChangeRef::of).collect();
+        ensure!(refs.refs == whole, "slim {:?}, whole {whole:?}", refs.refs);
+        ensure!(
+            (&refs.cursor, refs.has_more) == (&page.cursor, page.has_more),
+            "slim pages on to {:?}, whole to {:?}",
+            (&refs.cursor, refs.has_more),
+            (&page.cursor, page.has_more)
+        );
+        rows += whole.len();
+        if !page.has_more {
+            break;
+        }
+        at = Some(page.cursor);
+    }
+    ensure!(rows >= 4, "{rows} rows for 4 files");
     Ok(())
 }
 

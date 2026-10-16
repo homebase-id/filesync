@@ -39,6 +39,66 @@ impl Store<'_> {
         self.fan_out(row.node, row.parent)
     }
 
+    /// Keeps this device's own removal, as written, until the feed brings it back
+    /// ([`Store::take_pending`]): Recently deleted gets it then, with the server's time.
+    pub fn put_pending(&self, row: &MirrorRow) -> Result<()> {
+        let Some(row) = &self.on_drive(row)? else {
+            return Ok(());
+        };
+        let f = row.file.as_ref();
+        self.prep(
+            "INSERT OR REPLACE INTO pending (file_id, node, version_tag, parent, kind, name, \
+                 hash, size, mtime_ms, executable, content_extra, token) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        )?
+        .execute(params![
+            row.file_id.0.as_bytes(),
+            row.node.0.as_bytes(),
+            row.version.0.as_bytes(),
+            row.parent.0.as_bytes(),
+            codec::kind_to(row.kind),
+            row.name,
+            f.map(|f| codec::hash_to(&f.hash)),
+            f.map(|f| f.size as i64),
+            f.map(|f| f.mtime_ms),
+            f.is_some_and(|f| f.executable),
+            row.content_extra,
+            row.token.as_ref().map(|t| &t.0[..]),
+        ])?;
+        Ok(())
+    }
+
+    /// Whether this device's own removal of that version is waiting for the feed.
+    pub fn has_pending(&self, at: RemoteRef) -> Result<bool> {
+        Ok(self
+            .prep("SELECT 1 FROM pending WHERE file_id = ?1 AND version_tag = ?2")?
+            .exists([at.file_id.0.as_bytes(), at.version.0.as_bytes()])?)
+    }
+
+    /// This device's own removal of that version, out of waiting: the feed brought it.
+    pub fn take_pending(&self, at: RemoteRef) -> Result<Option<MirrorRow>> {
+        let row = self
+            .one(
+                &format!("{PENDING_SELECT} WHERE file_id = ?1"),
+                at.file_id.0.as_bytes(),
+                mirror_row,
+            )?
+            .filter(|row| row.version == at.version);
+        self.delete_pending(at.file_id)?;
+        match row {
+            Some(row) => self.seen(row),
+            None => Ok(None),
+        }
+    }
+
+    /// Forgets a removal waiting for the feed: the feed brought that file another way.
+    pub fn delete_pending(&self, file_id: RemoteFileId) -> Result<bool> {
+        self.change(
+            "DELETE FROM pending WHERE file_id = ?1",
+            file_id.0.as_bytes(),
+        )
+    }
+
     pub fn removed_by_node(&self, node: NodeId) -> Result<Option<RemovedRow>> {
         match self.one(
             &format!("{REMOVED_SELECT} WHERE node = ?1"),

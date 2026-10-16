@@ -9,7 +9,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_remote::{
-    ChangesPage, NodeMeta, Remote, RemoteError, RemoteHeader, Result as RemoteResult, Upload,
+    ChangesPage, NodeMeta, RefsPage, Remote, RemoteError, RemoteHeader, Result as RemoteResult,
+    Upload,
 };
 use hbsync_state::Coords;
 use hbsync_types::{NodeId, RemoteFileId, Role, Target, VersionTag};
@@ -154,6 +155,9 @@ impl ScopedRemote {
 impl Remote for ScopedRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
         self.inner.changes(cursor, limit)
+    }
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
+        self.inner.change_refs(cursor, limit)
     }
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
