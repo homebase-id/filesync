@@ -1837,13 +1837,17 @@ fn recently_deleted_lists_deletes_with_counts_and_finds_items() -> R {
 
     let mut reader =
         hbsync_engine::root::AccountReader::open(&a.db_path(), "test.example")?.ok_or("no db")?;
-    let deletes = reader.deletes(10)?;
+    let (deletes, summary) = reader.deletes(10)?;
     let mut shown: Vec<_> = deletes.iter().map(|(d, n)| (d.path.as_str(), *n)).collect();
     shown.sort();
     assert_eq!(shown, [("d", 30), ("z.txt", 0)]);
-    assert_eq!(reader.deletes(1)?.len(), 1, "cut by deletes");
+    assert_eq!((summary.deletes, summary.items), (2, 32));
+    assert!(summary.until > 0 && summary.open.is_empty(), "{summary:?}");
+    let (cut, summary) = reader.deletes(1)?;
+    assert_eq!(cut.len(), 1, "cut by deletes");
+    assert_eq!(summary.items, 32, "the summary counts everything");
 
-    let all = reader.find_deleted(&Default::default(), true)?;
+    let all = reader.all_deleted()?;
     assert_eq!(all.len(), 32);
     let child = all
         .iter()
@@ -1851,9 +1855,10 @@ fn recently_deleted_lists_deletes_with_counts_and_finds_items() -> R {
         .ok_or("f7")?
         .0
         .node;
-    let found = reader.find_deleted(&[child].into_iter().collect(), false)?;
-    assert_eq!(found.len(), 1);
-    assert_eq!((found[0].0.path.as_str(), found[0].1), ("d/f7.txt", 0));
+    let folder = all.iter().find(|(d, _)| d.path == "d").ok_or("d")?.0.node;
+    let found = reader.find_deleted(&[child, folder])?;
+    let found: Vec<_> = found.iter().map(|(d, n)| (d.path.as_str(), *n)).collect();
+    assert_eq!(found, [("d/f7.txt", 0), ("d", 30)]);
     Ok(())
 }
 

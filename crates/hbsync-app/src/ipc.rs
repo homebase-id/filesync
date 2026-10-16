@@ -23,9 +23,11 @@ use crate::protocol::{Ask, OTHER_PROTOCOL, PROTOCOL, Reply, Request};
 
 /// How long either side waits for the other's line.
 const PATIENCE: Duration = Duration::from_secs(10);
-/// Longer lines are refused: the socket is local and this user's, and the longest line is a
+/// Longer requests are refused by the daemon (the largest names a few items).
+const MAX_REQUEST: u64 = 1 << 20;
+/// Longer replies are refused by a client: the daemon is this user's, and its longest line is a
 /// list (about 300 bytes a delete of Recently deleted, listed by deletes).
-const MAX_LINE: u64 = 64 << 20;
+const MAX_REPLY: u64 = 64 << 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IpcError {
@@ -46,7 +48,7 @@ pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
     patience(&stream)?;
     let mut stream = BufReader::new(stream);
     stream.get_mut().write_all(format!("{line}\n").as_bytes())?;
-    let reply = read_line(&mut stream)?.ok_or(IpcError::Protocol("no answer".into()))?;
+    let reply = read_line(&mut stream, MAX_REPLY)?.ok_or(IpcError::Protocol("no answer".into()))?;
     serde_json::from_str(&reply).map_err(|e| IpcError::Protocol(e.to_string()))
 }
 
@@ -99,7 +101,7 @@ pub fn serve(listener: Listener, answer: impl Fn(Request) -> Reply + Send + Sync
 fn handle(conn: Stream, answer: &(dyn Fn(Request) -> Reply + Sync)) -> Result<(), IpcError> {
     patience(&conn)?;
     let mut conn = BufReader::new(conn);
-    let Some(line) = read_line(&mut conn)? else {
+    let Some(line) = read_line(&mut conn, MAX_REQUEST)? else {
         return Ok(());
     };
     // The version first: a request of another protocol may not parse here.
@@ -134,10 +136,10 @@ fn patience(stream: &Stream) -> io::Result<()> {
     }
 }
 
-/// One line, without its end; `None` at the end of the stream.
-fn read_line(stream: &mut BufReader<Stream>) -> Result<Option<String>, IpcError> {
+/// One line of at most `max` bytes, without its end; `None` at the end of the stream.
+fn read_line(stream: &mut BufReader<Stream>, max: u64) -> Result<Option<String>, IpcError> {
     let mut line = String::new();
-    let n = stream.by_ref().take(MAX_LINE).read_line(&mut line)?;
+    let n = stream.by_ref().take(max).read_line(&mut line)?;
     if n == 0 {
         return Ok(None);
     }
@@ -304,8 +306,11 @@ mod tests {
                     let _ = tx.lock().map(|tx| tx.send(c));
                     Reply::Done
                 }
-                // A large list: one line far over a request's size.
-                Ask::Deleted { limit } => Reply::Deleted((0..limit).map(deleted).collect()),
+                // A large reply: one line far over a request's bound.
+                Ask::Deleted { limit } => Reply::Deleted(crate::protocol::DeletedList {
+                    items: (0..limit).map(deleted).collect(),
+                    accounts: Vec::new(),
+                }),
                 Ask::FindDeleted { .. } => Reply::Refused("not here".into()),
                 Ask::AddFolder { .. }
                 | Ask::RemoveFolder { .. }
@@ -349,7 +354,7 @@ mod tests {
         }
         // Thousands of deletes, megabytes in one reply line.
         match call(&paths, &Request::new(Ask::Deleted { limit: 20_000 }))? {
-            Reply::Deleted(list) => assert_eq!(list.len(), 20_000),
+            Reply::Deleted(list) => assert_eq!(list.items.len(), 20_000),
             other => panic!("{other:?}"),
         }
 
@@ -372,28 +377,24 @@ mod tests {
     #[test]
     fn requests_look_as_documented() -> Result<(), serde_json::Error> {
         let json = |ask| serde_json::to_string(&Request::new(ask));
-        // The documented lines, with this build's protocol.
-        let doc = |line: &str| line.replace("\"protocol\":5", &format!("\"protocol\":{PROTOCOL}"));
-        assert_eq!(json(Ask::Status)?, doc(r#"{"protocol":5,"ask":"status"}"#));
-        assert_eq!(json(Ask::Stop)?, doc(r#"{"protocol":5,"ask":"stop"}"#));
+        assert_eq!(json(Ask::Status)?, r#"{"protocol":5,"ask":"status"}"#);
+        assert_eq!(json(Ask::Stop)?, r#"{"protocol":5,"ask":"stop"}"#);
         assert_eq!(
             json(Ask::Control(Control::Daemon(DaemonControl::SyncNow)))?,
-            doc(r#"{"protocol":5,"ask":{"control":{"daemon":"sync_now"}}}"#)
+            r#"{"protocol":5,"ask":{"control":{"daemon":"sync_now"}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Daemon(DaemonControl::Pause {
                 until: Some(1_800_000_000)
             })))?,
-            doc(r#"{"protocol":5,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#)
+            r#"{"protocol":5,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Folder {
                 path: PathBuf::from("/h"),
                 control: FolderControl::ConfirmDeletes { token: "t".into() }
             }))?,
-            doc(
-                r#"{"protocol":5,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
-            )
+            r#"{"protocol":5,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
         );
         let node = hbsync_types::NodeId(hbsync_types::Uuid::from_u128(1));
         assert_eq!(
@@ -401,32 +402,28 @@ mod tests {
                 identity: "a.example".into(),
                 control: AccountControl::Restore { nodes: vec![node] }
             }))?,
-            doc(
-                r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}}}"#
-            )
+            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Account {
                 identity: "a.example".into(),
-                control: AccountControl::EmptyDeletedUntil { at_ms: 7 }
+                control: AccountControl::EmptyListed { until: 7, mark: 3 }
             }))?,
-            doc(
-                r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_deleted_until":{"at_ms":7}}}}}}"#
-            )
+            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"until":7,"mark":3}}}}}}"#
         );
         assert_eq!(
             json(Ask::Recent { limit: 10 })?,
-            doc(r#"{"protocol":5,"ask":{"recent":{"limit":10}}}"#)
+            r#"{"protocol":5,"ask":{"recent":{"limit":10}}}"#
         );
         assert_eq!(
             json(Ask::Deleted { limit: 100 })?,
-            doc(r#"{"protocol":5,"ask":{"deleted":{"limit":100}}}"#)
+            r#"{"protocol":5,"ask":{"deleted":{"limit":100}}}"#
         );
         assert_eq!(
             json(Ask::FindDeleted {
                 items: vec!["Photos/2024".into()]
             })?,
-            doc(r#"{"protocol":5,"ask":{"find_deleted":{"items":["Photos/2024"]}}}"#)
+            r#"{"protocol":5,"ask":{"find_deleted":{"items":["Photos/2024"]}}}"#
         );
         assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);
         Ok(())

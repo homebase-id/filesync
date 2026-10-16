@@ -5,9 +5,9 @@
 //! Its folders' runners sync until the daemon stops, or until it starts over with new
 //! credentials.
 
-use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -24,7 +24,8 @@ use hbsync_types::activity::Deleted;
 
 use super::DaemonError;
 use crate::protocol::{
-    AccountControl, AccountStatus, DeletedItem, FolderStatus, Hints, RecentItem, State, Until,
+    AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Hints, RecentItem,
+    State, Until,
 };
 use crate::runner::schedule::Announced;
 use crate::runner::{Backoff, Command, Handle, Runner, RunnerConfig, RunnerError, lock, slept};
@@ -52,11 +53,24 @@ pub(crate) struct Account {
     /// A connection to its DB for the control socket's answers (recent, deleted), opened on
     /// first use.
     reader: Mutex<Option<AccountReader>>,
+    /// The removals still open when Recently deleted was last listed, by mark: an empty of
+    /// everything as listed takes them ([`AccountControl::EmptyListed`]). The newest few.
+    marks: Mutex<VecDeque<(u64, Vec<NodeId>)>>,
 }
+
+/// How many listings' open removals an account keeps.
+const MARKS: usize = 16;
+/// The next mark, unique in the daemon.
+static NEXT_MARK: AtomicU64 = AtomicU64::new(1);
 
 /// What the account's thread is asked to do.
 pub(crate) enum Request {
     Deleted(AccountControl),
+    /// Empty Recently deleted of what was removed until `until`, and of the `open` removals.
+    EmptyListed {
+        until: i64,
+        open: Vec<NodeId>,
+    },
     /// Start syncing this folder.
     AddFolder(PathBuf),
     /// Stop syncing this folder.
@@ -97,6 +111,7 @@ impl Account {
             requests,
             ended: AtomicBool::new(false),
             reader: Mutex::new(None),
+            marks: Mutex::new(VecDeque::new()),
         };
         (Arc::new(account), rx)
     }
@@ -214,8 +229,21 @@ impl Account {
         if let Some(why) = self.not_running() {
             return Err(why);
         }
+        let request = match control {
+            AccountControl::EmptyListed { until, mark } => {
+                let open = lock(&self.marks)
+                    .iter()
+                    .find(|(m, _)| *m == mark)
+                    .map(|(_, open)| open.clone())
+                    .ok_or_else(|| {
+                        "Recently deleted changed since it was listed: look at it again".to_owned()
+                    })?;
+                Request::EmptyListed { until, open }
+            }
+            control => Request::Deleted(control),
+        };
         self.requests
-            .send(Request::Deleted(control))
+            .send(request)
             .map_err(|_| "the account has stopped".to_owned())
     }
 
@@ -249,19 +277,41 @@ impl Account {
     }
 
     /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
-    /// items it took along.
-    pub fn deleted(&self, limit: usize) -> Vec<DeletedItem> {
-        self.items(self.read(|db| db.deletes(limit)))
+    /// items it took along; and, when it holds anything, all of it as listed now.
+    pub fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
+        let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
+            return (Vec::new(), None);
+        };
+        let account = (summary.items > 0).then(|| {
+            let mark = NEXT_MARK.fetch_add(1, Ordering::Relaxed);
+            let mut marks = lock(&self.marks);
+            if marks.len() == MARKS {
+                marks.pop_front();
+            }
+            marks.push_back((mark, summary.open));
+            DeletedAccount {
+                identity: self.identity.clone(),
+                deletes: summary.deletes,
+                items: summary.items,
+                until: summary.until,
+                mark,
+            }
+        });
+        (self.items(deletes), account)
     }
 
-    /// The items of its Recently deleted that are `nodes`, or every one when `all`.
-    pub fn find_deleted(&self, nodes: &HashSet<NodeId>, all: bool) -> Vec<DeletedItem> {
-        self.items(self.read(|db| db.find_deleted(nodes, all)))
+    /// The items of its Recently deleted that are `nodes`.
+    pub fn find_deleted(&self, nodes: &[NodeId]) -> Vec<DeletedItem> {
+        self.items(self.read(|db| db.find_deleted(nodes)).unwrap_or_default())
     }
 
-    fn items(&self, found: Option<Vec<(Deleted, usize)>>) -> Vec<DeletedItem> {
+    /// Every item of its Recently deleted, newest first.
+    pub fn all_deleted(&self) -> Vec<DeletedItem> {
+        self.items(self.read(|db| db.all_deleted()).unwrap_or_default())
+    }
+
+    fn items(&self, found: Vec<(Deleted, usize)>) -> Vec<DeletedItem> {
         found
-            .unwrap_or_default()
             .into_iter()
             .map(|(deleted, along)| DeletedItem {
                 identity: self.identity.clone(),
@@ -427,6 +477,16 @@ impl Account {
             while let Ok(request) = requests.try_recv() {
                 match request {
                     Request::Deleted(control) => run_request(&drive, control),
+                    Request::EmptyListed { until, open } => {
+                        let emptied =
+                            drive
+                                .empty_until(until)
+                                .and_then(|n| match open.is_empty() {
+                                    true => Ok(n),
+                                    false => Ok(n + drive.empty(&open)?),
+                                });
+                        report_emptied(emptied);
+                    }
                     // Started below, once no runner of the folder is left (one removed a moment
                     // ago may still be finishing an operation).
                     Request::AddFolder(folder) => {
@@ -817,7 +877,8 @@ fn run_request(drive: &Drive, control: AccountControl) {
             Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
         },
         AccountControl::EmptyDeleted { nodes } => report_emptied(drive.empty(&nodes)),
-        AccountControl::EmptyDeletedUntil { at_ms } => report_emptied(drive.empty_until(at_ms)),
+        // Resolved to [`Request::EmptyListed`] when asked.
+        AccountControl::EmptyListed { .. } => {}
     }
 }
 

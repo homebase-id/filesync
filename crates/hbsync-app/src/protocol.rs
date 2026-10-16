@@ -82,8 +82,10 @@ pub enum Reply {
     Status(Box<DaemonStatus>),
     /// Newest first.
     Recent(Vec<RecentItem>),
-    /// Newest first.
-    Deleted(Vec<DeletedItem>),
+    /// The newest deletes, and each account's Recently deleted as a whole.
+    Deleted(DeletedList),
+    /// The items asked for, in the order asked.
+    Found(Vec<DeletedItem>),
     Done,
     Refused(String),
 }
@@ -128,9 +130,10 @@ pub enum AccountControl {
     Restore { nodes: Vec<NodeId> },
     /// Delete these items of Recently deleted for good, each with what was deleted with it.
     EmptyDeleted { nodes: Vec<NodeId> },
-    /// Delete everything in Recently deleted removed until then (Unix ms) for good: what the
-    /// user saw, nothing removed since.
-    EmptyDeletedUntil { at_ms: i64 },
+    /// Delete for good everything Recently deleted held when it was listed ([`DeletedAccount`]:
+    /// removed until `until`, and the removals still open then, noted by the daemon as
+    /// `mark`), nothing removed since. Refused when the daemon no longer has that mark.
+    EmptyListed { until: i64, mark: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,6 +151,36 @@ pub struct RecentItem {
     pub folder: PathBuf,
     #[serde(flatten)]
     pub synced: Synced,
+}
+
+/// Recently deleted's newest deletes, every account's, newest first, and each account's that
+/// holds anything, as a whole.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DeletedList {
+    pub items: Vec<DeletedItem>,
+    pub accounts: Vec<DeletedAccount>,
+}
+
+impl DeletedList {
+    /// Every item, the ones the deletes took along too.
+    pub fn total(&self) -> usize {
+        self.accounts.iter().map(|a| a.items).sum()
+    }
+}
+
+/// An account's Recently deleted as a whole, when listed: what emptying all of it takes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeletedAccount {
+    pub identity: String,
+    /// The items deleted on their own.
+    pub deletes: usize,
+    /// Every item, the ones its deletes took along too.
+    pub items: usize,
+    /// The newest removal time the server confirmed then (Unix ms).
+    pub until: i64,
+    /// The daemon's note of the removals still open then (this device's own, newer than any
+    /// confirmed one).
+    pub mark: u64,
 }
 
 /// An item of an account's Recently deleted.

@@ -48,9 +48,8 @@ impl Server {
     /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
     /// newest first.
     pub(super) fn deleted_page(&self) -> String {
-        // One more than shown: whether there are more.
-        let mut items = match control::deleted(&self.paths, MAX_DELETED + 1) {
-            Ok(Some(items)) => items,
+        let list = match control::deleted(&self.paths, MAX_DELETED) {
+            Ok(Some(list)) => list,
             Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
             Err(e) => {
                 return format!(
@@ -59,20 +58,18 @@ impl Server {
                 );
             }
         };
-        if items.is_empty() {
+        if list.accounts.is_empty() {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
-        let more = items.len() > MAX_DELETED;
-        items.truncate(MAX_DELETED);
         let now = words::now();
-        let shown = control::Shown::of(&items);
         let main = control::configured(&self.paths)
             .ok()
             .flatten()
             .map(|r| r.folder);
         // Shown: the items deleted on their own, each with how many items its delete took
         // along: its restore brings them back.
-        let rows: String = items
+        let rows: String = list
+            .items
             .iter()
             .map(|item| {
                 let d = &item.deleted;
@@ -96,24 +93,15 @@ impl Server {
             "<h1>Recently deleted</h1>\
              <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
              A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>\
-             <form method=post action=\"{empty}\"><input type=hidden name=count value={count}>\
-             <input type=hidden name=until value={until}>\
-             <input type=hidden name=open value=\"{open}\">\
+             <form method=post action=\"{empty}\">\
+             <input type=hidden name=count value=\"{count}\">\
+             <input type=hidden name=listed value=\"{listed}\">\
              <button class=secondary>Empty now…</button></form>",
             days = self.keep_days(),
             empty = self.pages.url("deleted/empty"),
-            count = {
-                let n: usize = items.iter().map(|i| i.count()).sum();
-                // Emptying takes what is older too.
-                if more {
-                    format!("more than {n}")
-                } else {
-                    n.to_string()
-                }
-            },
-            // What the user sees, nothing deleted after this look.
-            until = shown.until,
-            open = escape(&shown.open_field()),
+            count = list.total(),
+            // What emptying everything takes: all it held now, nothing deleted after this look.
+            listed = escape(&control::listed_field(&list.accounts)),
         )
     }
 
@@ -123,13 +111,12 @@ impl Server {
             "<h1>Empty Recently deleted?</h1>\
              <p>The {count} items in it are deleted for good, from your Homebase and every \
              device. This can't be undone.</p>\
-             <form method=post action=\"{url}\"><input type=hidden name=until value=\"{until}\">\
-             <input type=hidden name=open value=\"{open}\">\
+             <form method=post action=\"{url}\">\
+             <input type=hidden name=listed value=\"{listed}\">\
              <button>Delete them for good</button></form>\
              <p class=small>Changed your mind? Leave this page: nothing is deleted.</p>",
             count = field("count"),
-            until = field("until"),
-            open = field("open"),
+            listed = field("listed"),
             url = self.pages.url("deleted/empty/yes"),
         )
     }
@@ -150,26 +137,22 @@ impl Server {
         )
     }
 
-    /// Empties Recently deleted of what the page showed (deleted until then): every account's,
-    /// as anything deleted after the look is newer.
+    /// Empties Recently deleted of everything it held when the page listed it, in the accounts
+    /// that held anything.
     pub(super) fn empty(&self, form: &HashMap<String, String>) -> String {
-        let Some(at_ms) = form.get("until").and_then(|t| t.parse().ok()) else {
+        let listed = control::listed_from_field(form.get("listed").map_or("", String::as_str));
+        if listed.is_empty() {
             return "Nothing was deleted.".into();
-        };
-        let shown =
-            control::Shown::with_open_field(at_ms, form.get("open").map_or("", String::as_str));
-        let emptied = control::status(&self.paths).and_then(|status| {
-            let identities: Vec<String> = status
-                .map(|s| s.accounts.into_iter().map(|a| a.identity).collect())
-                .unwrap_or_default();
-            control::empty_shown(&self.paths, &identities, &shown)
-        });
-        match emptied {
+        }
+        match control::empty_listed(&self.paths, &listed) {
             Ok(()) => {
                 (self.send)(Event::Wake);
                 "Emptying Recently deleted.".into()
             }
-            Err(e) => format!("That didn't work: {e}"),
+            Err(e) => {
+                (self.send)(Event::Wake);
+                format!("That didn't work everywhere: {e}")
+            }
         }
     }
 

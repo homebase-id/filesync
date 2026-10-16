@@ -104,7 +104,15 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
     /// Recently deleted, as the daemon answers it (a connection that only reads).
     pub fn recently_deleted(&self, limit: usize) -> Res<Vec<hbsync_types::activity::Deleted>> {
         let mut reader = AccountReader::open(&self.db_path(), IDENTITY)?.ok_or("no state DB")?;
-        Ok(reader.recently_deleted(limit)?)
+        // The newest `limit` deletes, each with what it took along.
+        let (deletes, _) = reader.deletes(limit)?;
+        let shown: std::collections::HashSet<_> = deletes.iter().map(|(d, _)| d.node).collect();
+        Ok(reader
+            .all_deleted()?
+            .into_iter()
+            .map(|(d, _)| d)
+            .filter(|d| shown.contains(&d.root))
+            .collect())
     }
 
     /// Scan, then sync until idle (six passes at most), `before` each pass; every pass's

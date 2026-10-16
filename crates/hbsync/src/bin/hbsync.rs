@@ -1,6 +1,5 @@
 //! The Homebase Filesync command line: sets syncing up and controls the daemon (`hbsyncd`).
 
-use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -9,12 +8,10 @@ use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop};
 use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Taken};
-use hbsync_app::protocol::{
-    AccountControl, DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints,
-};
+use hbsync_app::protocol::{DaemonControl, DaemonStatus, FolderStatus, Hints};
 use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
-use hbsync_types::{NodeId, Role};
+use hbsync_types::Role;
 
 type Res<T> = hbsync_app::control::Result<T>;
 
@@ -97,7 +94,7 @@ enum Command {
     },
     /// Shows Recently deleted, newest first: what can still be restored.
     Deleted {
-        /// How many items.
+        /// How many deletes (a deleted folder is one, with everything in it).
         #[arg(short = 'n', default_value_t = 50)]
         limit: usize,
     },
@@ -249,7 +246,7 @@ fn run(command: Command) -> Res<ExitCode> {
             daemon::daemon(&paths, DaemonControl::Resume)?;
             println!("Resumed.");
         }
-        Command::Deleted { limit } => match daemon::deleted(&paths, limit)? {
+        Command::Deleted { limit } => match daemon::deleted(&paths, limit)?.map(|l| l.items) {
             Some(list) if list.is_empty() => println!("Recently deleted is empty."),
             Some(list) => {
                 let now = words::now();
@@ -270,9 +267,7 @@ fn run(command: Command) -> Res<ExitCode> {
             let Some(found) = daemon::find_deleted(&paths, items)? else {
                 return Ok(not_running());
             };
-            for (identity, nodes) in by_account(&found) {
-                daemon::account(&paths, &identity, AccountControl::Restore { nodes })?;
-            }
+            daemon::restore(&paths, &found)?;
             println!("Restoring; the next sync brings it back.");
         }
         Command::EmptyDeleted { items, yes } if !items.is_empty() => {
@@ -283,30 +278,27 @@ fn run(command: Command) -> Res<ExitCode> {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
-            for (identity, nodes) in by_account(&found) {
-                daemon::account(&paths, &identity, AccountControl::EmptyDeleted { nodes })?;
-            }
+            daemon::empty(&paths, &found)?;
             println!("Deleting for good.");
         }
         Command::EmptyDeleted { yes, .. } => {
-            // Everything listed now, nothing deleted after this look.
-            let Some(list) = daemon::deleted(&paths, usize::MAX)? else {
+            // Everything it holds now, nothing deleted after this look: the counts only.
+            let Some(list) = daemon::deleted(&paths, 0)? else {
                 return Ok(not_running());
             };
-            if list.is_empty() {
+            if list.accounts.is_empty() {
                 println!("Recently deleted is empty.");
                 return Ok(ExitCode::SUCCESS);
             }
-            let count: usize = list.iter().map(|i| i.count()).sum();
-            let question = format!("Delete the {count} items in Recently deleted for good?");
+            let question = format!(
+                "Delete the {} items in Recently deleted for good?",
+                list.total()
+            );
             if !yes && !ask_yes(&question)? {
                 println!("Nothing deleted.");
                 return Ok(ExitCode::SUCCESS);
             }
-            let mut identities: Vec<String> = list.iter().map(|i| i.identity.clone()).collect();
-            identities.sort_unstable();
-            identities.dedup();
-            daemon::empty_shown(&paths, &identities, &daemon::Shown::of(&list))?;
+            daemon::empty_listed(&paths, &list.accounts)?;
             println!("Deleting for good.");
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
@@ -418,18 +410,6 @@ fn run(command: Command) -> Res<ExitCode> {
 
 fn parse_role(s: &str) -> Result<Role, String> {
     s.parse()
-}
-
-/// `found`'s nodes by account.
-fn by_account(found: &[DeletedItem]) -> BTreeMap<String, Vec<NodeId>> {
-    let mut picked: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
-    for item in found {
-        picked
-            .entry(item.identity.clone())
-            .or_default()
-            .push(item.deleted.node);
-    }
-    picked
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.

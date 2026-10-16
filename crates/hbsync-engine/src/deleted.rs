@@ -21,41 +21,60 @@ use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
 
-/// Recently deleted, newest first: the drive's newest `limit` items (what a delete of its own
-/// took out, [`Deleted::root`] itself) with what each took along, each with the folder of this
-/// device it comes back to and its path below that folder's top.
-pub fn list(s: &Store<'_>, limit: usize) -> Result<Vec<Deleted>, StateError> {
-    let mut listing = Listing::read(s)?;
-    let shown: HashSet<NodeId> = listing
-        .deletes()
-        .take(limit)
-        .map(|i| listing.roots[i])
-        .collect();
-    let picked: Vec<usize> = (0..listing.roots.len())
-        .filter(|&i| shown.contains(&listing.roots[i]))
-        .collect();
-    picked.into_iter().map(|i| listing.describe(i)).collect()
+/// Recently deleted as a whole: how much it holds, and what emptying all of it as it is now
+/// takes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeletedSummary {
+    /// The items deleted on their own.
+    pub deletes: usize,
+    /// Every item, those its deletes took along too.
+    pub items: usize,
+    /// The newest removal time the server confirmed (Unix ms; 0: none).
+    pub until: i64,
+    /// This device's own removals whose time is still open: newer than any confirmed one.
+    pub open: Vec<NodeId>,
 }
 
 /// The drive's newest `limit` deletes of Recently deleted, newest first, each with how many
-/// items it took along: [`list`] without those items.
-pub fn deletes(s: &Store<'_>, limit: usize) -> Result<Vec<(Deleted, usize)>, StateError> {
+/// items it took along, and the summary of all of it.
+pub fn deletes(
+    s: &Store<'_>,
+    limit: usize,
+) -> Result<(Vec<(Deleted, usize)>, DeletedSummary), StateError> {
     let mut listing = Listing::read(s)?;
+    let rows = &listing.rows.rows[..listing.roots.len()];
+    let summary = DeletedSummary {
+        deletes: listing.deletes().count(),
+        items: rows.len(),
+        until: rows.iter().filter_map(|r| r.removed_at).max().unwrap_or(0),
+        open: rows
+            .iter()
+            .filter(|r| r.removed_at.is_none())
+            .map(|r| r.row.node)
+            .collect(),
+    };
     let picked = listing.deletes().take(limit).collect();
-    listing.with_along(picked)
+    Ok((listing.with_along(picked)?, summary))
 }
 
-/// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, or
-/// every one when `all` (to be picked by place), each with how many items it took along.
-pub fn find(
-    s: &Store<'_>,
-    nodes: &HashSet<NodeId>,
-    all: bool,
-) -> Result<Vec<(Deleted, usize)>, StateError> {
+/// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, each
+/// with how many items it took along: only those rows are read, and walked up from.
+pub fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, StateError> {
+    let mut listing = Listing::lazy(s)?;
+    let mut found = Vec::new();
+    for &node in nodes {
+        if let Some(item) = listing.describe_node(node)? {
+            found.push(item);
+        }
+    }
+    Ok(found)
+}
+
+/// Every item of Recently deleted, newest first, each with how many items it took along: to be
+/// picked by its place, or listed whole (tests).
+pub fn all(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::read(s)?;
-    let picked = (0..listing.roots.len())
-        .filter(|&i| all || nodes.contains(&listing.rows.rows[i].row.node))
-        .collect();
+    let picked = (0..listing.roots.len()).collect();
     listing.with_along(picked)
 }
 
@@ -72,7 +91,8 @@ struct Listing<'a, 's> {
 }
 
 impl<'a, 's> Listing<'a, 's> {
-    fn read(s: &'a Store<'s>) -> Result<Self, StateError> {
+    /// Nothing read yet: rows come as [`Listing::describe_node`] asks for them.
+    fn lazy(s: &'a Store<'s>) -> Result<Self, StateError> {
         let folders: HashMap<NodeId, String> =
             s.folders()?.into_iter().map(|f| (f.top, f.path)).collect();
         let tops = folders
@@ -80,23 +100,44 @@ impl<'a, 's> Listing<'a, 's> {
             .copied()
             .chain(Role::ALL.iter().map(|r| r.node()))
             .collect();
-        let listed = s.list_removed(usize::MAX)?;
-        let count = listed.len();
-        let mut rows = RemovedRows::new(s, listed);
-        let mut deleted_by = HashMap::new();
-        let roots = (0..count)
-            .map(|i| {
-                let node = rows.rows[i].row.node;
-                deleted_by_item(&mut rows, node, &mut deleted_by)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Listing {
-            rows,
-            roots,
+            rows: RemovedRows::new(s, Vec::new()),
+            roots: Vec::new(),
             folders,
             tops,
             places: HashMap::new(),
         })
+    }
+
+    /// Every row, each with its item.
+    fn read(s: &'a Store<'s>) -> Result<Self, StateError> {
+        let mut listing = Listing::lazy(s)?;
+        let listed = s.list_removed(usize::MAX)?;
+        let count = listed.len();
+        listing.rows = RemovedRows::new(s, listed);
+        let mut deleted_by = HashMap::new();
+        listing.roots = (0..count)
+            .map(|i| {
+                let node = listing.rows.rows[i].row.node;
+                deleted_by_item(&mut listing.rows, node, &mut deleted_by)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(listing)
+    }
+
+    /// `node`'s row, if it is in Recently deleted, with how many items its delete took along
+    /// (0 for an item a delete took along itself).
+    fn describe_node(&mut self, node: NodeId) -> Result<Option<(Deleted, usize)>, StateError> {
+        let Some(top) = self.rows.get(node)?.cloned() else {
+            return Ok(None);
+        };
+        let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
+        let along = match root == node {
+            true => group(self.rows.s, top, false)?.len() - 1,
+            false => 0,
+        };
+        let i = self.rows.index[&node].unwrap_or_default();
+        Ok(Some((self.describe_as(i, root)?, along)))
     }
 
     /// The rows of the items deleted on their own, newest first (the items' own rows give
@@ -131,6 +172,12 @@ impl<'a, 's> Listing<'a, 's> {
 
     /// Row `i` as listed: where it comes back to and its path there.
     fn describe(&mut self, i: usize) -> Result<Deleted, StateError> {
+        let root = self.roots[i];
+        self.describe_as(i, root)
+    }
+
+    /// Row `i`, deleted with `root`'s delete.
+    fn describe_as(&mut self, i: usize, root: NodeId) -> Result<Deleted, StateError> {
         let r = &self.rows.rows[i];
         let (node, parent, name) = (r.row.node, r.row.parent, r.row.name.clone());
         let (kind, size, removed_at_ms) = (r.row.kind, r.row.file.map(|f| f.size), r.removed_at);
@@ -142,7 +189,7 @@ impl<'a, 's> Listing<'a, 's> {
             kind,
             size,
             removed_at_ms,
-            root: self.roots[i],
+            root,
             folder: self.folders.get(&top).cloned(),
         })
     }
@@ -336,7 +383,9 @@ struct RestorePlan {
 /// deleted with their folder ([`deleted_with`]), and the live ones written no later than its
 /// removal (node schema: their own removal was still on its way), which count as removed then.
 /// What was deleted from it before stays out.
-fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
+///
+/// Without `live`, only the removed items: what Recently deleted lists with it.
+fn group(s: &Store<'_>, top: RemovedRow, live: bool) -> Result<Vec<RemovedRow>, StateError> {
     // Each node once: removed rows may form a cycle (left by a remote one).
     let mut seen = HashSet::from([top.row.node]);
     let mut rows = vec![top];
@@ -348,8 +397,11 @@ fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> 
                 .removed_children(folder.row.node)?
                 .into_iter()
                 .filter(|r| deleted_with(r.time(), folder));
-            let live = s
-                .mirror_children(folder.row.node)?
+            let along = match live {
+                true => s.mirror_children(folder.row.node)?,
+                false => Vec::new(),
+            };
+            let along = along
                 .into_iter()
                 .filter(|m| m.changed_at.is_none_or(|at| at <= folder.time()))
                 .map(|row| RemovedRow {
@@ -357,7 +409,7 @@ fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> 
                     removed_at: folder.removed_at,
                 });
             let with: Vec<RemovedRow> = removed
-                .chain(live)
+                .chain(along)
                 .filter(|r| seen.insert(r.row.node))
                 .collect();
             rows.extend(with);
@@ -385,7 +437,7 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     // is live still comes back with its folder by itself.
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for r in chain.into_iter().chain(group(s, top)?) {
+    for r in chain.into_iter().chain(group(s, top, true)?) {
         if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
             rows.push(r);
         }
@@ -496,7 +548,7 @@ fn delete_groups(
     let mut rows = db.read(|s| {
         let mut rows = Vec::new();
         for top in tops {
-            rows.extend(group(s, top)?);
+            rows.extend(group(s, top, true)?);
         }
         Ok(rows)
     })?;
@@ -579,7 +631,7 @@ mod tests {
         })?;
         let plan = db.read(|s| plan_restore(s, a))?.map(|p| p.rows.len());
         assert_eq!(plan, Some(2));
-        let items = db.read(|s| list(s, 10))?;
+        let items = db.read(all)?;
         assert_eq!(items.len(), 2);
         Ok(())
     }
@@ -601,9 +653,9 @@ mod tests {
             .map(|p| p.rows.iter().map(|r| r.row.node).collect());
         assert_eq!(plan, Some(vec![f, with, deeper]));
         let tops: HashMap<NodeId, NodeId> = db
-            .read(|s| list(s, 10))?
+            .read(all)?
             .into_iter()
-            .map(|d| (d.node, d.root))
+            .map(|(d, _)| (d.node, d.root))
             .collect();
         assert_eq!(tops[&early], early, "deleted on its own");
         assert_eq!(

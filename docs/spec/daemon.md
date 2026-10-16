@@ -192,7 +192,7 @@ account (its Recently deleted) or to one folder (its held deletes):
 {"protocol":5,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
 {"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
 {"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
-{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted_until":{"at_ms":1800000000000}}}}}}  // all removed until then
+{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"until":1800000000000,"mark":7}}}}}}  // all it held when listed
 {"protocol":5,"ask":{"recent":{"limit":10}}}
 {"protocol":5,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
 {"protocol":5,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
@@ -219,12 +219,18 @@ Replies:
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
   that tell a client what is new.
 - `{"recent":[…]}` (each entry with its `folder`), newest first.
-- `{"deleted":[…]}`: for `deleted`, the newest `limit` deletes, newest first, each an item
-  deleted on its own with its account's `identity` and `along`, how many items its delete took
-  along (not those items: a deleted folder of thousands of files is one entry). For
-  `find_deleted`, the items named (a node id, or the place `hbsync deleted` shows), whether
+- `{"deleted":{"items":[…],"accounts":[…]}}`: the newest `limit` deletes, newest first, each an
+  item deleted on its own with its account's `identity` and `along`, how many items its delete
+  took along (not those items: a deleted folder of thousands of files is one entry); and, for
+  each account holding anything, its `deletes` and `items` in all, and what emptying all of it
+  as listed takes: `until` (the newest removal time the server confirmed) and `mark` (the
+  daemon's note of this device's removals whose time was still open). `empty_listed` with those
+  empties exactly what was listed, nothing removed since; a mark the daemon no longer has is
+  refused (look again).
+- `{"found":[…]}`: for `find_deleted`, the items named (a node id, or the place `hbsync deleted`
+  shows: the newest one there; a name shaped like a node id that isn't one is tried as a place),
   deleted on their own or along with a folder; refused naming the first one that isn't there.
-  Restore and empty pick through it, so no client needs Recently deleted whole.
+  Restore and empty pick through it, so no client reads Recently deleted whole.
 - `"done"`, `{"refused":"why"}`.
 
 Only the user can connect:
