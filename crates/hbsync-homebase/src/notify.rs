@@ -62,17 +62,16 @@ pub struct Notifier {
 
 impl Notifier {
     /// Connects to `client`'s identity and subscribes to `drive`, reconnecting as needed;
-    /// events go to `events` until it is closed or the notifier dropped.
-    pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> Self {
+    /// events go to `events` until it is closed or the notifier dropped. An error: its thread
+    /// couldn't start (then never connected: the caller reads the drive on a timer).
+    pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
         let (flag, kick) = (stop.clone(), reconnect.clone());
-        // Without a thread there are no hints and no reconnects to catch up on (daemon.md,
-        // "No poll"): the drive's changes then wait for a local change, a request or a restart.
-        let _ = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("hbsync-notify".into())
-            .spawn(move || run(&client, drive, &events, &flag, &kick));
-        Notifier { stop, reconnect }
+            .spawn(move || run(&client, drive, &events, &flag, &kick))?;
+        Ok(Notifier { stop, reconnect })
     }
 
     /// Drops the connection and connects again at once, without waiting out a backoff: after
@@ -119,16 +118,17 @@ fn run(
             backoff = FIRST;
             continue;
         }
-        let pause = if refused {
-            backoff.max(REFUSED_PAUSE)
-        } else if events.send(Event::Lost(why)).is_err() {
+        if !refused && events.send(Event::Lost(why)).is_err() {
             return;
-        } else {
-            backoff
-        };
-        // Jitter of ±20%, so clients of one identity don't reconnect in lockstep.
+        }
+        // Jitter of ±20%, so clients of one identity don't reconnect in lockstep; after a
+        // refusal above its floor.
         let jitter = random::<1>().map_or(0, |b| b[0]) as f64 / 255.0;
-        let wait = pause.mul_f64(0.8 + 0.4 * jitter);
+        let wait = if refused {
+            backoff.max(REFUSED_PAUSE).mul_f64(1.0 + 0.2 * jitter)
+        } else {
+            backoff.mul_f64(0.8 + 0.4 * jitter)
+        };
         let until = Instant::now() + wait;
         while Instant::now() < until
             && !stop.load(Ordering::Relaxed)

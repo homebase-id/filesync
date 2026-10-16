@@ -154,7 +154,7 @@ const NAMES: &[&str] = &[
     "lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll.TXT",
 ];
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct ServerNode {
     state: NodeState,
     remote: RemoteRef,
@@ -1825,6 +1825,42 @@ impl Sim {
             }
             if !any_planned || (self.ops_executed == before && self.all_settled()) {
                 return true;
+            }
+        }
+        false
+    }
+
+    /// Like [`Sim::quiesce`], but as the daemon syncs, without a poll: a client syncs only when
+    /// something asks it to: at start, when the server changed by another's hand (the change
+    /// announced, or caught up on at a reconnect), and when the user confirms what the guard
+    /// held. A sync plans and runs until a plan does nothing. Returns whether every client is
+    /// then settled (planning one unasked finds nothing: a timer would have nothing to do)
+    /// within `max_syncs` syncs.
+    pub fn quiesce_announced(&mut self, max_syncs: usize) -> bool {
+        let mut asked = vec![true; self.clients.len()];
+        for _ in 0..max_syncs {
+            let Some(c) = asked.iter().position(|a| *a) else {
+                return self.all_settled();
+            };
+            asked[c] = false;
+            let server = (self.server.live.clone(), self.server.removed.clone());
+            for _ in 0..30 {
+                let before = self.ops_executed;
+                self.plan(c);
+                if self.guard.is_some() && !self.clients[c].held.is_empty() {
+                    // The user confirms what is held: a request.
+                    self.run(&[Event::Confirm { client: c }]);
+                    self.plan(c);
+                }
+                while self.step(c) {}
+                if self.ops_executed == before {
+                    break;
+                }
+            }
+            if (&self.server.live, &self.server.removed) != (&server.0, &server.1) {
+                for (other, a) in asked.iter_mut().enumerate() {
+                    *a |= other != c;
+                }
             }
         }
         false

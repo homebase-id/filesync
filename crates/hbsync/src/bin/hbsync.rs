@@ -7,6 +7,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop};
+use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Taken};
 use hbsync_app::protocol::{
     AccountControl, DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints,
@@ -497,10 +498,14 @@ fn print_status(status: &DaemonStatus) {
         match &a.hints {
             Hints::Off | Hints::Connected => {}
             Hints::Connecting => println!("  notifications: connecting"),
-            Hints::Lost(why) => println!("  notifications: lost ({why}), reconnecting"),
-            Hints::Refused(why) => {
-                println!("  notifications: refused ({why}); syncing every minute")
-            }
+            Hints::Lost(why) => println!(
+                "  notifications: lost ({why}), reconnecting; meanwhile the drive is read every {} min",
+                UNANNOUNCED_READ.as_secs() / 60
+            ),
+            Hints::Refused(why) => println!(
+                "  notifications: refused ({why}), asked again later; meanwhile the drive is read every {} min",
+                UNANNOUNCED_READ.as_secs() / 60
+            ),
         }
         if let Some(w) = &a.credentials_warning {
             println!("  credentials: {w}");

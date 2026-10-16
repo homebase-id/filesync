@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::{Remote, RemoteError};
@@ -20,6 +20,9 @@ use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
+
+/// Start-up's pull is the first sync's if the local catch-up ended within this of it.
+const FRESH_PULL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -121,6 +124,10 @@ pub struct SyncReport {
     pub synced: Vec<Synced>,
     /// The drive is out of storage: uploads wait until there is room.
     pub full: bool,
+    /// Work is left that another try may do: the sweep was cut short by the round limit, or
+    /// operations were skipped or failed with nodes still pending. Deletes held for a
+    /// confirmation never count: another try doesn't let them through.
+    pub unfinished: bool,
 }
 
 impl SyncReport {
@@ -128,14 +135,8 @@ impl SyncReport {
         self.ops_done == 0 && self.pending == 0
     }
 
-    /// The nodes left that another try may do: what is pending, but the deletes held for a
-    /// confirmation (another try doesn't let those through).
-    pub fn unfinished(&self) -> u64 {
-        self.pending.saturating_sub(self.held.len() as u64)
-    }
-
-    /// Adds a later sync's report to this one: counts and lists add up, `held` and `pending`
-    /// are the later sync's.
+    /// Adds a later sync's report to this one: counts and lists add up, `held`, `pending` and
+    /// `unfinished` are the later sync's.
     pub fn absorb(&mut self, later: SyncReport) {
         self.feed += later.feed;
         self.rounds += later.rounds;
@@ -149,6 +150,7 @@ impl SyncReport {
         self.stopped = later.stopped;
         self.synced.extend(later.synced);
         self.full = later.full;
+        self.unfinished = later.unfinished;
     }
 }
 
@@ -292,11 +294,16 @@ impl Engine {
             let local =
                 scope.spawn(|| -> Result<CatchUp, EngineError> { Ok(observer.catch_up(db)?) });
             let feed = drive.pull(Some(folder));
-            (local.join(), feed)
+            (local.join(), (feed, Instant::now()))
         });
         let local = local.map_err(|_| EngineError::Panic("local catch-up"))??;
-        let feed = feed?;
-        // Just pulled: the first sync plans from it (a change since is announced).
+        let (feed, pulled) = feed;
+        let mut feed = feed?;
+        // The first sync plans from that pull, unless a long local catch-up (a walk) made it
+        // old: then what came meanwhile is pulled too.
+        if pulled.elapsed() > FRESH_PULL {
+            feed += drive.pull(Some(folder))?;
+        }
         let sync = self.sync_with(date, Some(feed))?;
         Ok(StartupReport { local, sync })
     }
@@ -465,6 +472,8 @@ impl Engine {
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
         self.sweep_after = after;
         report.pending = self.db.read(|s| s.dirty_count())?;
+        report.unfinished = !swept
+            || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
         if report.ops_done > 0 || report.feed.deleted > 0 {
             // Ids of nodes gone everywhere.
             self.db.write(|s| s.collect_nodes())?;

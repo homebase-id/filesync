@@ -68,8 +68,9 @@ pub(crate) enum Synced {
     Done,
     /// Stopped by a pause or a stop: the rest waits for resume.
     Stopped,
-    /// This many nodes left that another try may do (`SyncReport::unfinished`).
-    Unfinished(u64),
+    /// Work left that another try may do (`SyncReport::unfinished`); `progressed`: this sync
+    /// did some.
+    Unfinished { progressed: bool },
 }
 
 #[derive(Debug)]
@@ -84,9 +85,9 @@ pub(crate) struct Schedule {
     /// Paused: until then (Unix seconds), or until resumed (`None`).
     pause: Option<Until>,
     backoff: Backoff,
-    /// Work a sync left unfinished: tried again then, with how much was left. A timer of its
-    /// own, with its own backoff, so a change meanwhile still syncs at once.
-    retry: Option<(Instant, u64)>,
+    /// Work a sync left unfinished: tried again then. A timer of its own, with its own
+    /// backoff, so a change meanwhile still syncs at once.
+    retry: Option<Instant>,
     retry_backoff: Backoff,
 }
 
@@ -122,6 +123,16 @@ impl Schedule {
         self.backoff = Backoff::new();
     }
 
+    /// The drive can be reached again (the notifications connected): a sync that waits, for a
+    /// failure's backoff or to try unfinished work again, goes now, its backoff forgotten.
+    /// One that waits for nothing doesn't.
+    pub fn online(&mut self, now: Instant) {
+        if self.retry.is_some() || now < self.not_before {
+            self.woke(now);
+            self.retry_backoff = Backoff::new();
+        }
+    }
+
     pub fn pause(&mut self, until: Until) {
         self.pause = Some(until);
     }
@@ -151,17 +162,10 @@ impl Schedule {
         true
     }
 
-    /// A rescan of a folder without a watcher ended: a sync if it found a change.
-    pub fn rescanned(&mut self, changed: bool) {
-        if changed {
-            self.want();
-        }
-    }
-
     /// Whether to sync now: wanted (or unfinished work's retry has come), not paused, not
     /// backing off.
     pub fn due(&self, now: Instant) -> bool {
-        let retry = self.retry.is_some_and(|(at, _)| now >= at);
+        let retry = self.retry.is_some_and(|at| now >= at);
         self.pause.is_none() && (self.wanted || retry) && now >= self.not_before
     }
 
@@ -173,8 +177,8 @@ impl Schedule {
     }
 
     /// A sync ended. Work it left unfinished is tried again after a backoff (5 s, doubling to
-    /// 5 min, from the start again when less is left), so stuck work isn't a full sync every
-    /// minute.
+    /// 5 min while the tries do nothing, from the start again after one that did some), so
+    /// stuck work isn't a full sync every few seconds.
     pub fn synced(&mut self, now: Instant, outcome: Synced) {
         self.backoff = Backoff::new();
         match outcome {
@@ -184,13 +188,12 @@ impl Schedule {
                 self.retry = None;
                 self.retry_backoff = Backoff::new();
             }
-            Synced::Unfinished(left) => {
+            Synced::Unfinished { progressed } => {
                 self.wanted = false;
-                if self.retry.is_none_or(|(_, before)| left < before) {
+                if progressed {
                     self.retry_backoff = Backoff::new();
                 }
-                let wait = self.retry_backoff.after(State::Failing);
-                self.retry = Some((now + wait, left));
+                self.retry = Some(now + self.retry_backoff.after(State::Failing));
             }
         }
     }
@@ -239,41 +242,48 @@ mod tests {
         assert!(!s.due(t0 + LOOK * 100));
     }
 
-    /// Work a sync left unfinished is tried again after a backoff that doubles while nothing
-    /// gets done, starts over when less is left, and holds back nothing else.
+    /// Work a sync left unfinished is tried again after a backoff that doubles while the tries
+    /// do nothing, starts over after one that did some, and holds back nothing else.
     #[test]
     fn unfinished_work_backs_off_without_holding_back_changes() {
         let t0 = Instant::now();
         let s5 = Duration::from_secs(5);
+        let stuck = Synced::Unfinished { progressed: false };
         let mut s = Schedule::new(t0, LOOK, None);
-        s.synced(t0, Synced::Unfinished(3));
+        s.synced(t0, stuck);
         assert!(!s.due(t0 + s5 - ms(1)));
         assert!(s.due(t0 + s5));
         // Stuck: twice as long each time.
-        s.synced(t0, Synced::Unfinished(3));
+        s.synced(t0, stuck);
         assert!(!s.due(t0 + s5 * 2 - ms(1)));
         assert!(s.due(t0 + s5 * 2));
         // A change meanwhile syncs at once.
         s.want();
         assert!(s.due(t0 + ms(1)));
-        // Less left: from the start again.
-        s.synced(t0, Synced::Unfinished(2));
+        // A try that did some: from the start again.
+        s.synced(t0, Synced::Unfinished { progressed: true });
         assert!(s.due(t0 + s5));
         // Finished: nothing more.
         s.synced(t0, Synced::Done);
         assert!(!s.due(t0 + LOOK * 100));
     }
 
-    /// Without a watcher, a rescan asks for a sync only when it found a change.
+    /// The drive reachable again: waiting work goes at once; a folder waiting for nothing
+    /// doesn't sync.
     #[test]
-    fn a_rescan_syncs_only_what_it_found() {
+    fn online_lets_waiting_work_go() {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, None);
         s.synced(t0, Synced::Done);
-        s.rescanned(false);
-        assert!(!s.due(t0 + ms(1)));
-        s.rescanned(true);
-        assert!(s.due(t0 + ms(1)));
+        s.online(t0);
+        assert!(!s.due(t0), "nothing waits");
+        s.synced(t0, Synced::Unfinished { progressed: false });
+        s.online(t0 + ms(1));
+        assert!(s.due(t0 + ms(1)), "unfinished work");
+        s.synced(t0, Synced::Done);
+        s.failed(t0, State::Offline);
+        s.online(t0 + ms(2));
+        assert!(s.due(t0 + ms(2)), "a failure's backoff");
     }
 
     /// A folder that is gone is looked for again at the next look.

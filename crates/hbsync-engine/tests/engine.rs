@@ -1694,6 +1694,10 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
     let report = b.sync()?;
     assert!(!report.held.is_empty(), "{report:?}");
     assert!(b.root.join("src/f0.txt").exists(), "held");
+    assert!(
+        !report.unfinished,
+        "held deletes aren't retried: {report:?}"
+    );
 
     b.engine
         .confirm_deletes(report.held.iter().map(|op| op.node()));
@@ -1701,6 +1705,31 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
     assert!(report.held.is_empty(), "{report:?}");
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 6);
+    Ok(())
+}
+
+/// Deletes held for a confirmation leave nodes pending that another sync can't do anything
+/// about: the sync isn't unfinished, however many nodes one held delete covers.
+#[test]
+fn held_deletes_leave_no_unfinished_work() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.mass_delete_min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    assert!(report.pending > report.held.len() as u64, "{report:?}");
+    assert!(
+        !report.unfinished,
+        "held deletes aren't retried: {report:?}"
+    );
     Ok(())
 }
 

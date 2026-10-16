@@ -51,15 +51,26 @@ fn run_with(
     setup: fn(Sim) -> Sim,
     events: &[Event],
 ) -> Result<(), TestCaseError> {
+    run_settled(clients, guard, setup, |sim| sim.quiesce(30), events)
+}
+
+/// [`run_with`], the clients settling as `settle` lets them (whether they did).
+fn run_settled(
+    clients: usize,
+    guard: Option<usize>,
+    setup: fn(Sim) -> Sim,
+    settle: fn(&mut Sim) -> bool,
+    events: &[Event],
+) -> Result<(), TestCaseError> {
     let outcome = |verbose: bool| {
         let mut sim = setup(Sim::new(clients));
         sim.guard = guard;
         sim.verbose = verbose;
         sim.run(events);
-        let result = if sim.quiesce(30) {
+        let result = if settle(&mut sim) {
             sim.check()
         } else {
-            Err("no convergence after 30 rounds".into())
+            Err("no convergence".into())
         };
         (result, sim.trace)
     };
@@ -95,6 +106,17 @@ proptest! {
     #[test]
     fn three_clients_converge_without_loss(events in proptest::collection::vec(event(3), 0..120)) {
         run(3, &events)?;
+    }
+
+    /// No poll (daemon.md): clients that sync only when asked (at start, when another changed
+    /// the drive, when the user confirms what the guard held) converge without loss, and then
+    /// a sync nobody asked for finds nothing to do: a timer never would.
+    #[test]
+    fn clients_converge_when_asked_only(
+        events in proptest::collection::vec(guarded_event(3), 0..120),
+        min in 1usize..4,
+    ) {
+        run_settled(3, Some(min), |sim| sim, |sim| sim.quiesce_announced(300), &events)?;
     }
 
     /// With the mass-delete guard on (a low limit, so it trips often), no plan deletes more

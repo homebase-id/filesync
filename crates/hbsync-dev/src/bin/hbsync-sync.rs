@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use hbsync_app::daemon::Notifications;
+use hbsync_app::daemon::{Notifications, Puller};
 use hbsync_app::{Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
@@ -58,23 +58,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         remote.drive().alias.simple(),
     );
     // The identity's notifications, taken as the daemon's account takes them.
-    let _notifier = (!cfg.once).then(|| {
+    let _notifier = if cfg.once {
+        None
+    } else {
         let (tx, events) = mpsc::channel();
-        let notifier = Notifier::spawn(client, remote.drive(), tx);
-        let drive = Arc::clone(&drive);
+        let notifier = Notifier::spawn(client, remote.drive(), tx)?;
+        let puller = Puller::spawn(Arc::clone(&drive));
         std::thread::spawn(move || {
-            let mut notifications = Notifications::default();
+            let now = std::time::Instant::now;
+            let mut notifications = Notifications::new(puller, now());
             loop {
                 match events.recv_timeout(Duration::from_millis(200)) {
-                    Ok(event) => drop(notifications.event(event, &drive)),
+                    Ok(event) => drop(notifications.event(event, now(), false)),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
                 }
-                notifications.tick(&drive, std::time::Instant::now());
+                notifications.tick(now(), false);
             }
         });
-        notifier
-    });
+        Some(notifier)
+    };
     let (handle, thread) = Runner::spawn(cfg, drive)?;
     while !thread.is_finished() {
         std::thread::sleep(Duration::from_millis(500));

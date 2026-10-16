@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use hbsync_app::daemon::Notifications;
+use hbsync_app::daemon::{Notifications, Puller, UNANNOUNCED_READ};
 use hbsync_app::runner::RunnerError;
 use hbsync_app::{Command, FolderStatus, Handle, Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
@@ -19,11 +19,13 @@ type R = Result<(), Box<dyn std::error::Error>>;
 const PATIENCE: Duration = Duration::from_secs(30);
 
 struct Device {
-    _dir: tempfile::TempDir,
     root: PathBuf,
     handle: Handle,
     thread: Option<JoinHandle<Result<(), RunnerError>>>,
     drive: Arc<Drive>,
+    /// Last: removed after the drive has closed the state DB in it (Windows can't remove an
+    /// open file).
+    _dir: tempfile::TempDir,
 }
 
 impl Device {
@@ -38,12 +40,23 @@ impl Device {
         let drive = drive(&cfg, server)?;
         let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
         Ok(Device {
-            _dir: dir,
             root,
             handle,
             thread: Some(thread),
             drive,
+            _dir: dir,
         })
+    }
+
+    /// The account's notifications, as the daemon runs them (none come in these tests).
+    fn notifications(&self, now: Instant) -> Notifications {
+        Notifications::new(Puller::spawn(Arc::clone(&self.drive)), now)
+    }
+
+    /// What the account does when its notifications connect (again).
+    fn connected(&self) {
+        let now = Instant::now();
+        self.notifications(now).event(Event::Connected, now, false);
     }
 
     fn write(&self, rel: &str, data: &str) -> std::io::Result<()> {
@@ -112,7 +125,7 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     a.write("one.txt", "1")?;
     wait_until("one.txt is up", || on_server(&server, "one.txt"))?;
     // b's account hears of it (no notifications in these tests).
-    Notifications::default().event(Event::Connected, &b.drive);
+    b.connected();
     wait_until("b has one.txt", || b.has("one.txt"))?;
     wait_until("b is idle", || b.status().state == State::Idle)?;
     assert!(b.status().last_sync.is_some());
@@ -168,10 +181,39 @@ fn a_reconnect_catches_up_on_what_wasnt_announced() -> R {
     std::thread::sleep(Duration::from_millis(500));
     assert!(!b.has("x.txt"), "nothing announced yet");
     // The notifications connect again: the account pulls, which wakes the folder.
-    Notifications::default().event(Event::Connected, &b.drive);
+    b.connected();
     wait_until("b has all three", || {
         ["x.txt", "y.txt", "z.txt"].iter().all(|n| b.has(n))
     })?;
+    Ok(())
+}
+
+/// The drive is read on a timer only while the notifications aren't connected (a proxy, a
+/// refusal), and not while paused; never while they are connected.
+#[test]
+fn the_drive_is_read_on_a_timer_only_while_not_connected() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    wait_until("b started", || b.status().last_sync.is_some())?;
+    let t0 = Instant::now();
+    let mut n = b.notifications(t0);
+    a.write("x.txt", "x")?;
+    wait_until("x.txt is up", || on_server(&server, "x.txt"))?;
+    n.tick(t0 + UNANNOUNCED_READ - Duration::from_millis(1), false);
+    n.tick(t0 + UNANNOUNCED_READ, true);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!b.has("x.txt"), "too soon, or paused");
+    n.tick(t0 + UNANNOUNCED_READ, false);
+    wait_until("b read the drive", || b.has("x.txt"))?;
+
+    // Connected (while paused: no pull either): no timer any more.
+    n.event(Event::Connected, t0, true);
+    a.write("y.txt", "y")?;
+    wait_until("y.txt is up", || on_server(&server, "y.txt"))?;
+    n.tick(t0 + UNANNOUNCED_READ * 10, false);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!b.has("y.txt"), "read on a timer while connected");
     Ok(())
 }
 

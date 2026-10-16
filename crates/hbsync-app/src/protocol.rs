@@ -192,7 +192,7 @@ impl AccountStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Hints {
-    /// None: syncs come from local changes and requests; the drive's changes wait for them.
+    /// Not yet: the account waits for its credentials or for the identity to answer.
     Off,
     Connecting,
     Connected,

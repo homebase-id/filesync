@@ -105,6 +105,9 @@ impl RunnerConfig {
 pub enum Command {
     /// Sync now, without waiting out a backoff.
     SyncNow,
+    /// The drive can be reached again (the notifications connected): a sync waiting for a
+    /// backoff or to try unfinished work again goes now.
+    Online,
     /// Pause until then (Unix seconds), or until resumed (`None`).
     Pause {
         until: Until,
@@ -343,6 +346,7 @@ impl Runner {
                         // The user may have made room on the drive.
                         self.drive.clear_full();
                     }
+                    Ok(Command::Online) => schedule.online(Instant::now()),
                     Ok(Command::Pause { until }) => {
                         schedule.pause(until);
                         self.set(|s| s.paused_until = until);
@@ -397,7 +401,8 @@ impl Runner {
                     && !p.observer.has_watcher()
                 {
                     match p.engine.scan_local() {
-                        Ok(scan) => schedule.rescanned(scan.dirty > 0),
+                        Ok(scan) if scan.dirty > 0 => schedule.want(),
+                        Ok(_) => {}
                         Err(e) => tracing::warn!("scanning the folder failed: {e}"),
                     }
                 }
@@ -473,10 +478,14 @@ impl Runner {
             match result {
                 Ok(report) => {
                     started = true;
-                    let outcome = match report.unfinished() {
-                        _ if report.stopped => Synced::Stopped,
-                        0 => Synced::Done,
-                        left => Synced::Unfinished(left),
+                    let outcome = if report.stopped {
+                        Synced::Stopped
+                    } else if report.unfinished {
+                        Synced::Unfinished {
+                            progressed: report.ops_done > 0,
+                        }
+                    } else {
+                        Synced::Done
                     };
                     schedule.synced(Instant::now(), outcome);
                     self.record(&mut p.engine, &report, began.elapsed())?;

@@ -323,11 +323,24 @@ impl Account {
             return Ok(());
         };
         let (tx, events) = channel();
-        let notifier = Notifier::spawn(client, remote.drive(), tx);
-        lock(&self.status).hints = Hints::Connecting;
+        let notifier = match Notifier::spawn(client, remote.drive(), tx) {
+            Ok(n) => {
+                lock(&self.status).hints = Hints::Connecting;
+                Some(n)
+            }
+            // Not connected, for good: the drive is read on a timer (Notifications).
+            Err(e) => {
+                tracing::error!(
+                    "can't start the notifications ({e}); reading the drive now and then"
+                );
+                lock(&self.status).hints = Hints::Lost(format!("can't start: {e}"));
+                None
+            }
+        };
         let drive = Drive::open(&self.db, &self.identity, remote)
             .map_err(|e| DaemonError::Runner(e.into()))?;
-        let mut notifications = Notifications::default();
+        let mut notifications =
+            Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now());
         let mut runners: Vec<Running> = Vec::new();
         // A runner that couldn't start: the account stops its runners and ends with it, the
         // daemon with it (restarted whole). One that ended with an error is started again after a
@@ -368,15 +381,23 @@ impl Account {
                 SystemTime::now().duration_since(wall).ok(),
                 mono.elapsed(),
                 false,
-            ) {
-                notifier.reconnect();
+            ) && let Some(n) = &notifier
+            {
+                n.reconnect();
             }
+            let paused = lock(&self.paused).is_some();
             while let Ok(event) = events.try_recv() {
-                if let Some(hints) = notifications.event(event, &drive) {
+                if let Some(hints) = notifications.event(event, Instant::now(), paused) {
+                    // Connected again: what waits for the drive goes now.
+                    if hints == Hints::Connected {
+                        for r in &runners {
+                            r.handle.send(Command::Online);
+                        }
+                    }
                     lock(&self.status).hints = hints;
                 }
             }
-            notifications.tick(&drive, Instant::now());
+            notifications.tick(Instant::now(), paused);
             let mut changed = false;
             while let Ok(request) = requests.try_recv() {
                 match request {
@@ -562,52 +583,124 @@ impl Account {
     }
 }
 
+/// While the notifications aren't connected (not yet, not any more, or never: a proxy, a
+/// refusal), the drive is read this often; never while they are.
+pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
+
 /// What the identity's notifications do to its drive: a change announced is pulled once the
 /// announcements have quieted (a burst of deletes reaches the mass-delete guard whole);
-/// connecting (again) pulls at once, as changes made meanwhile weren't announced. A pull wakes
-/// the folders its changes concern.
-#[derive(Debug, Default)]
+/// connecting (again) pulls at once, as changes made meanwhile weren't announced; while not
+/// connected, the drive is read every [`UNANNOUNCED_READ`]. Nothing is pulled while paused.
+/// A pull wakes the folders its changes concern.
+#[derive(Debug)]
 pub struct Notifications {
+    puller: Puller,
     announced: Announced,
+    connected: bool,
+    /// While not connected: the next read of the drive.
+    next_read: Instant,
 }
 
 impl Notifications {
-    /// Takes `event`; the account's notification status when it changed.
-    pub fn event(&mut self, event: Event, drive: &Drive) -> Option<Hints> {
+    /// Not connected yet: the first read of the drive comes [`UNANNOUNCED_READ`] after `now`
+    /// (the folders' start-up has just read it).
+    pub fn new(puller: Puller, now: Instant) -> Self {
+        Notifications {
+            puller,
+            announced: Announced::default(),
+            connected: false,
+            next_read: now + UNANNOUNCED_READ,
+        }
+    }
+
+    /// Takes `event` at `now`; the account's notification status when it changed.
+    pub fn event(&mut self, event: Event, now: Instant, paused: bool) -> Option<Hints> {
         match event {
             Event::Connected => {
-                pull(drive);
+                self.connected = true;
+                // This pull takes what was announced so far too.
+                self.announced = Announced::default();
+                if !paused {
+                    self.puller.ask();
+                }
                 Some(Hints::Connected)
             }
             Event::Changed => {
-                self.announced.note(Instant::now());
+                self.announced.note(now);
                 None
             }
             Event::Lost(why) => {
                 tracing::info!("notifications lost ({why}); reconnecting");
+                self.disconnected(now);
                 Some(Hints::Lost(why))
             }
             Event::Refused(why) => {
                 tracing::warn!("notifications refused ({why}); asking again later");
+                self.disconnected(now);
                 Some(Hints::Refused(why))
             }
         }
     }
 
-    /// Pulls what was announced, once it has quieted.
-    pub fn tick(&mut self, drive: &Drive, now: Instant) {
+    fn disconnected(&mut self, now: Instant) {
+        if std::mem::take(&mut self.connected) {
+            self.next_read = now + UNANNOUNCED_READ;
+        }
+    }
+
+    /// Pulls what was announced once it has quieted, and the drive every [`UNANNOUNCED_READ`]
+    /// while not connected; nothing while `paused` (a resume syncs every folder anyway).
+    pub fn tick(&mut self, now: Instant, paused: bool) {
+        if paused {
+            return;
+        }
         if self.announced.due(now) {
-            pull(drive);
+            self.puller.ask();
+        }
+        if !self.connected && now >= self.next_read {
+            self.next_read = now + UNANNOUNCED_READ;
+            self.puller.ask();
         }
     }
 }
 
-/// Pulls the drive's changes, waking the folders they concern; when that fails, the folders'
-/// syncs pull (and back off) themselves.
-fn pull(drive: &Drive) {
-    if let Err(e) = drive.pull(None) {
-        tracing::info!("pulling the drive's changes failed ({e}); the folders' syncs will");
-        drive.wake_all();
+/// Pulls the drive's changes on a thread of its own, so whoever asks (the account's loop)
+/// never waits for the network: asks while a pull runs are answered by one more. A pull wakes
+/// the folders its changes concern; when it fails, or the thread couldn't start, every folder
+/// is woken, and their syncs pull (and back off) themselves.
+#[derive(Debug, Clone)]
+pub struct Puller {
+    asks: Sender<()>,
+    drive: Arc<Drive>,
+}
+
+impl Puller {
+    pub fn spawn(drive: Arc<Drive>) -> Puller {
+        let (asks, rx) = channel::<()>();
+        let mine = Arc::clone(&drive);
+        let started = std::thread::Builder::new()
+            .name("hbsync-pull".into())
+            .spawn(move || {
+                while rx.recv().is_ok() {
+                    rx.try_iter().for_each(drop);
+                    if let Err(e) = mine.pull(None) {
+                        tracing::info!(
+                            "pulling the drive's changes failed ({e}); the folders' syncs will"
+                        );
+                        mine.wake_all();
+                    }
+                }
+            });
+        if let Err(e) = started {
+            tracing::error!("can't start reading the drive on its own ({e}): the folders will");
+        }
+        Puller { asks, drive }
+    }
+
+    pub fn ask(&self) {
+        if self.asks.send(()).is_err() {
+            self.drive.wake_all();
+        }
     }
 }
 
