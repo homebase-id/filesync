@@ -141,6 +141,69 @@ fn announced_changes_are_taken_without_reading_what_is_known() -> R {
     Ok(())
 }
 
+/// Announcements that arrive late change nothing they shouldn't: a version the mirror has moved
+/// on from, or a removal undone since, isn't known (the feed is read, the rows stay), and a
+/// file deleted for good touches only its own file id, not the node made again since.
+#[test]
+fn late_announcements_dont_move_the_mirror_back() -> R {
+    use hbsync_remote::ChangeRef;
+    use hbsync_remote::contract::removed;
+
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    let docs = folder("Docs");
+    let v1 = remote.create(&docs, None)?;
+    let file = v1.at.file_id;
+    let stale = ChangeRef::of(&remote.header(file)?);
+    let v2 = remote.update(&v1, &docs, None)?;
+    drive.pull(None)?;
+    let version = |db: &mut StateDb| -> Result<_, Box<dyn std::error::Error>> {
+        Ok(db.read(|s| s.mirror_by_file(file))?.map(|r| r.version))
+    };
+    assert!(!drive.announced(&[stale])?, "v1 after v2: not known");
+    assert_eq!(
+        version(&mut db)?,
+        Some(v2.at.version),
+        "the mirror stays at v2"
+    );
+
+    // Removed, then restored: the removal's announcement comes late.
+    let gone = remote.update(&v2, &removed(&docs), None)?;
+    let late_removal = ChangeRef::of(&remote.header(file)?);
+    let back = remote.update(&gone, &docs, None)?;
+    drive.pull(None)?;
+    assert!(
+        !drive.announced(&[late_removal])?,
+        "a removal undone since: not known"
+    );
+    assert_eq!(
+        version(&mut db)?,
+        Some(back.at.version),
+        "live, as restored"
+    );
+    assert!(db.read(|s| s.removed_by_node(docs.node))?.is_none());
+
+    // Deleted for good, the node made again (a new file id), then the delete is announced.
+    let late_delete = ChangeRef {
+        deleted: true,
+        parent: None,
+        removed_at: None,
+        changed_at: None,
+        ..ChangeRef::of(&remote.header(file)?)
+    };
+    remote.delete(file, back.at.version)?;
+    let again = remote.create(&docs, None)?;
+    assert_ne!(again.at.file_id, file, "a new file id");
+    drive.pull(None)?;
+    assert!(drive.announced(&[late_delete])?);
+    let row = db
+        .read(|s| s.mirror_by_file(again.at.file_id))?
+        .expect("the node made again stays");
+    assert_eq!(row.version, again.at.version);
+    Ok(())
+}
+
 /// A change pulled by one folder's engine wakes the folders it concerns: not itself, and not
 /// one whose part of the drive it isn't in.
 #[test]
