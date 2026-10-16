@@ -54,11 +54,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         drive.alias.simple(),
         drive.drive_type.simple()
     );
-    println!(
-        "The app's circle '{}': {}",
-        hbsync_homebase::app::CIRCLE.slug,
-        prepared.circle
-    );
+    match prepared.circle {
+        Some(id) => println!(
+            "The app's circle '{}': {id}",
+            hbsync_homebase::app::CIRCLE.slug
+        ),
+        None => println!("The app's circle wasn't found (see the log)."),
+    }
     println!(
         "The sync drive's feed works: {} change(s) on the first page.",
         prepared.feed_entries

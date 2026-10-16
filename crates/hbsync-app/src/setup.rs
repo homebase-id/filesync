@@ -1,6 +1,6 @@
 //! Setting the app up on an identity: authorizing this device (the owner approves in the
-//! browser), then the one-time work on the identity (the app's circle) and a first look at the
-//! sync drive.
+//! browser), then a first look at the sync drive and, best effort, the app's circle (found by its
+//! slug on every setup; nothing uses it yet).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,25 +46,42 @@ pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, Homeba
 
 /// What [`prepare`] found and did.
 #[derive(Debug)]
-pub struct Prepared {
-    pub remote: HomebaseRemote,
-    /// The app's circle ([`app::app_circle`]).
-    pub circle: uuid::Uuid,
+pub struct Prepared<R = HomebaseRemote> {
+    pub remote: R,
+    /// The app's circle ([`app::app_circle`]), unless finding it failed.
+    pub circle: Option<uuid::Uuid>,
     /// Changes on the first page of the drive's feed: it answers.
     pub feed_entries: usize,
 }
 
-/// Gets the identity ready for syncing once this device is authorized: finds the sync drive, finds
-/// the app's circle by its slug (installing the app created it; made now if not), and reads the
-/// drive's change feed.
+/// Gets the identity ready for syncing once this device is authorized: finds the sync drive,
+/// reads its change feed, and finds the app's circle by its slug (installing the app created it;
+/// made now if not).
 pub fn prepare(creds: &Credentials) -> Result<Prepared, HomebaseError> {
     let remote = HomebaseRemote::connect(Client::new(creds)?)?;
-    let circle = app::app_circle(&remote)?;
-    let feed_entries = remote
-        .change_refs(None, 10)
-        .map_err(|e| HomebaseError::Protocol(format!("the sync drive's feed: {e}")))?
-        .refs
-        .len();
+    prepared(
+        remote,
+        |remote| Ok(remote.change_refs(None, 10)?.refs.len()),
+        app::app_circle,
+    )
+}
+
+/// [`prepare`] on a connected `remote`: its feed must answer (what proves this device's
+/// authorization, with the drive found), its circle is best effort. Nothing uses the circle yet
+/// (it is for sharing), so a failure to find it (refused, say) is logged and fails nothing: it
+/// is never taken for a revoked authorization.
+fn prepared<R>(
+    remote: R,
+    feed: impl FnOnce(&R) -> Result<usize, hbsync_remote::RemoteError>,
+    circle: impl FnOnce(&R) -> Result<uuid::Uuid, HomebaseError>,
+) -> Result<Prepared<R>, HomebaseError> {
+    let feed_entries = feed(&remote).map_err(|e| match e {
+        hbsync_remote::RemoteError::Denied(why) => HomebaseError::Denied(why),
+        e => HomebaseError::Protocol(format!("the sync drive's feed: {e}")),
+    })?;
+    let circle = circle(&remote)
+        .inspect_err(|e| tracing::warn!("the app's circle: {e}"))
+        .ok();
     Ok(Prepared {
         remote,
         circle,
@@ -462,6 +479,34 @@ pub fn set_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused circle fails nothing: setup goes on without it (and so keeps the credentials).
+    /// Only a refused drive or feed is a revoked authorization.
+    #[test]
+    fn a_refused_circle_fails_nothing() {
+        let refused = |_: &()| Err(HomebaseError::Denied("403 on circles/create".into()));
+        let prepared_ = prepared((), |_| Ok(3), refused);
+        assert!(
+            matches!(
+                prepared_,
+                Ok(Prepared {
+                    circle: None,
+                    feed_entries: 3,
+                    ..
+                })
+            ),
+            "{prepared_:?}"
+        );
+        let revoked = prepared(
+            (),
+            |_| Err(hbsync_remote::RemoteError::Denied("401".into())),
+            |_| Ok(uuid::Uuid::nil()),
+        );
+        assert!(
+            matches!(revoked, Err(HomebaseError::Denied(_))),
+            "{revoked:?}"
+        );
+    }
 
     type R = control::Result<()>;
 

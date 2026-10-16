@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use uuid::{Uuid, uuid};
 
 use crate::HomebaseError;
-use crate::drive::HomebaseRemote;
+use crate::drive::{HomebaseRemote, TargetDrive};
 
 /// The app's id on every identity. Never change it: it is how an identity recognises the app.
 pub const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
@@ -108,8 +108,9 @@ pub fn circle_declaration() -> serde_json::Value {
     })
 }
 
-/// [`CIRCLE`] as `circles/create` asks for it, by its slug.
-pub fn circle_request() -> serde_json::Value {
+/// [`CIRCLE`] as `circles/create` asks for it, by its slug, on `drive`: the sync drive this
+/// device found (at install, [`circle_declaration`] can only name the one it asks for).
+pub fn circle_request(drive: TargetDrive) -> serde_json::Value {
     json!({
         "name": CIRCLE.name,
         "slug": CIRCLE.slug,
@@ -118,8 +119,8 @@ pub fn circle_request() -> serde_json::Value {
         "driveGrants": [{
             "permissionedDrive": {
                 "drive": {
-                    "alias": SYNC_DRIVE.alias.simple().to_string(),
-                    "type": SYNC_DRIVE.drive_type.simple().to_string(),
+                    "alias": drive.alias.simple().to_string(),
+                    "type": drive.drive_type.simple().to_string(),
                 },
                 "permission": CIRCLE.drive_permission,
             }
@@ -151,9 +152,10 @@ pub fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::
 /// changes nothing (verified: `CircleMembershipService.CreateAppCircleAsync`), so every device
 /// finds the same circle.
 pub fn app_circle(remote: &HomebaseRemote) -> Result<Uuid, HomebaseError> {
-    let id: Value = remote
-        .client()
-        .post("/api/v2/connections/circles/create", &circle_request())?;
+    let id: Value = remote.client().post(
+        "/api/v2/connections/circles/create",
+        &circle_request(remote.drive()),
+    )?;
     Ok(serde_json::from_value(id)?)
 }
 

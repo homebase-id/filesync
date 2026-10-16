@@ -29,23 +29,26 @@ fn the_contract_holds_on_a_live_drive() -> R {
 }
 
 /// Every registration finds the app's one circle by its slug: asking twice, or from a second
-/// registration of the app (`hbsync-register --as b` saves it as `<identity>.b`), gives the same
-/// id; nothing is created when the app holds the slug.
+/// registration of the app on the same identity (its credentials in `<identity>.b.json` next to
+/// the first's, client "b"), gives the same id; nothing is created when the app holds the slug.
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn the_app_circle_is_found_by_its_slug() -> R {
     let identity = live_identity()?;
     let circle = hbsync_homebase::app::app_circle(&live_remote()?)?;
     assert_eq!(hbsync_homebase::app::app_circle(&live_remote()?)?, circle);
-    let second = format!("{identity}.b");
-    if hbsync_dev::credentials_path(&second)?.exists() {
-        let other = HomebaseRemote::connect(saved_client(&second)?)?;
-        assert_eq!(
-            hbsync_homebase::app::app_circle(&other)?,
-            circle,
-            "{second}"
+    let path = hbsync_dev::credentials_path(&format!("{identity}.b"))?;
+    let Some(second) = hbsync_homebase::Credentials::load(&path)? else {
+        println!(
+            "skipped the second registration: no credentials at {}",
+            path.display()
         );
-    }
+        return Ok(());
+    };
+    assert_eq!(second.identity, identity);
+    let other = HomebaseRemote::connect(hbsync_homebase::Client::new(&second)?)?;
+    assert_eq!(hbsync_homebase::app::app_circle(&other)?, circle);
+    println!("both registrations find the circle {circle}");
     Ok(())
 }
 
