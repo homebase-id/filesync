@@ -250,11 +250,17 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   and with the option 1.46, 1.34 and 1.28 MB received in all (the echoes alone would add 2.7,
   2.8 and 4.4 MB). The rows of the own writes stay in the feed, each file's last only, and are
   read slim at the next read the client makes anyway.
-- **Write answers carry the write's time** (odin-core #1971 at fcfc3b422, and fe067124b:
-  the time after the request's own last change; **[verified]**
+- **Write answers carry the write's time** (odin-core #1971; **[verified at fe067124b]**
   `CreateFileResult.Updated`, `UpdateFileResult.Updated`, `DeleteFileResultV2.Updated`,
-  `UpdateArchivalStatusResultV2.Updated`, all set from `GetUpdatedAfterWrite`, the header's
-  `updated` read after the whole write; `UnixTimeUtc` serializes as Unix ms): create and update
+  `UpdateArchivalStatusResultV2.Updated`; `UnixTimeUtc` serializes as Unix ms). It is the
+  file's modified time after the request's own last change to it, not a header read after the
+  write: every drive event published with the request's context records the file's `updated`
+  (`RequestOwnWrites.Record`, from `TryPublishAsync`), and the answer takes the later of that
+  and the time its own header write returned (`UpdatedAfterOwnWrites`); a soft delete's is
+  the tombstone's final time (clearing the reaction summary moves it once more, and the
+  tombstone and its `fileDeleted` event carry that). Changes made within the request on
+  others' behalf (inbox items, synced posts, reaction summaries) and later work aren't in it.
+  (At fcfc3b422 the answer read the header after the whole write instead.) Create and update
   answer `updated` next to `fileId` and `newVersionTag` (null only for a peer-only update);
   a delete (single, batch, by group) the tombstone's time, null when `localFileNotFound`; the
   archival-status batch per result, null with an `errorCode`. Hard-delete-batch answers none.
