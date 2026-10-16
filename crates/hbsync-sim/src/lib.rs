@@ -83,7 +83,8 @@ pub enum Action {
     Restore {
         node: usize,
     },
-    /// The purge: everything in Recently deleted is deleted for good.
+    /// The purge: everything in Recently deleted is deleted for good, as the engine selects it
+    /// ([`hbsync_engine::deleted::select`]): never a live node, so a folder holding one stays.
     Purge,
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
@@ -191,8 +192,8 @@ struct Server {
     dangling: Option<String>,
     /// The last listing of Recently deleted ([`Action::ListDeleted`]): each node at its version.
     listed: Option<BTreeSet<(NodeId, VersionTag)>>,
-    /// The first node emptying as listed deleted for good that wasn't a removed row listed at
-    /// that version (a live node, say), or a folder holding anything not going after it.
+    /// The first node emptying or the purge deleted for good that wasn't a removed row chosen
+    /// at that version (a live node, say), or a folder holding anything not going after it.
     emptied_unlisted: Option<String>,
 }
 
@@ -203,6 +204,11 @@ fn time(version: VersionTag) -> i64 {
 }
 
 impl Server {
+    /// A row of Recently deleted as a listing names it: its node at its version.
+    fn at((node, n): (&NodeId, &ServerNode)) -> (NodeId, VersionTag) {
+        (*node, n.remote.version)
+    }
+
     fn uuid(&mut self) -> Uuid {
         self.next += 1;
         Uuid::from_u128(self.next)
@@ -829,9 +835,7 @@ impl Sim {
                 }
             }
             Action::ListDeleted => {
-                let listed = self.server.removed.iter();
-                let listed = listed.map(|(n, r)| (*n, r.remote.version)).collect();
-                self.server.listed = Some(listed);
+                self.server.listed = Some(self.server.removed.iter().map(Server::at).collect());
             }
             Action::EmptyListed => self.empty_listed(),
             Action::EditTaken { pick } => {
@@ -854,10 +858,8 @@ impl Sim {
                 }
             }
             Action::Purge => {
-                self.server.removed_at.clear();
-                for (_, n) in std::mem::take(&mut self.server.removed) {
-                    self.supersede(n.state.content);
-                }
+                let all: BTreeSet<_> = self.server.removed.iter().map(Server::at).collect();
+                self.delete_for_good(&all);
             }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];
@@ -986,17 +988,23 @@ impl Sim {
         self.server.live.insert(node, n);
     }
 
-    /// [`Action::EmptyListed`]: the engine's own selection ([`deleted::select`]) over the rows
-    /// still as listed, with what the folders hold on the server, deleted in its order.
+    /// [`Action::EmptyListed`].
     fn empty_listed(&mut self) {
-        let Some(listed) = self.server.listed.clone() else {
-            return;
-        };
+        if let Some(listed) = self.server.listed.clone() {
+            self.delete_for_good(&listed);
+        }
+    }
+
+    /// Deletes for good the rows of Recently deleted still at a version in `chosen`, as the
+    /// engine selects them ([`deleted::select`], with what the folders hold on the server), in
+    /// its order. Records the first it deletes that it mustn't: one not chosen at that version
+    /// (a live node, say), or a folder holding anything not going after it.
+    fn delete_for_good(&mut self, chosen: &BTreeSet<(NodeId, VersionTag)>) {
         let server = &self.server;
-        let chosen: Vec<deleted::Chosen> = server
+        let rows: Vec<deleted::Chosen> = server
             .removed
             .iter()
-            .filter(|(n, r)| listed.contains(&(**n, r.remote.version)))
+            .filter(|(n, r)| chosen.contains(&Server::at((n, r))))
             .map(|(n, r)| deleted::Chosen {
                 node: *n,
                 parent: r.state.parent,
@@ -1013,18 +1021,15 @@ impl Sim {
             .map(|n| n.state.parent)
             .filter(|p| server.removed.contains_key(p))
             .collect();
-        let mut pending: BTreeSet<NodeId> = BTreeSet::new();
-        let order = deleted::select(&chosen, &holdings);
-        pending.extend(&order);
+        let order = deleted::select(&rows, &holdings);
+        let mut pending: BTreeSet<NodeId> = order.iter().copied().collect();
         for n in order {
             pending.remove(&n);
-            // Only a removed row listed at that version, never a live node; and no folder while
-            // it holds anything not going after it.
-            let listed_row = self
+            let was_chosen = self
                 .server
                 .removed
-                .get(&n)
-                .is_some_and(|r| listed.contains(&(n, r.remote.version)));
+                .get_key_value(&n)
+                .is_some_and(|row| chosen.contains(&Server::at(row)));
             let held = self
                 .server
                 .live
@@ -1032,7 +1037,7 @@ impl Sim {
                 .chain(&self.server.removed)
                 .find(|(c, s)| s.state.parent == n && !pending.contains(*c))
                 .map(|(c, _)| *c);
-            if (!listed_row || held.is_some()) && self.server.emptied_unlisted.is_none() {
+            if (!was_chosen || held.is_some()) && self.server.emptied_unlisted.is_none() {
                 self.server.emptied_unlisted = Some(format!("{n:?} (holding {held:?})"));
             }
             self.server.removed_at.remove(&n);
@@ -2094,9 +2099,7 @@ impl Sim {
             return Err(format!("a folder was removed after what is in it: {what}"));
         }
         if let Some(what) = &self.server.emptied_unlisted {
-            return Err(format!(
-                "emptying as listed deleted what it mustn't: {what}"
-            ));
+            return Err(format!("deleting for good took what it mustn't: {what}"));
         }
         // No folder wrote outside its part of the drive.
         if let Some(op) = &self.scope_breach {

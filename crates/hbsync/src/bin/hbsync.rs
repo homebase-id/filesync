@@ -289,6 +289,20 @@ fn run(command: Command) -> Res<ExitCode> {
                 println!("Recently deleted is empty.");
                 return Ok(ExitCode::SUCCESS);
             }
+            if list.total() == 0 {
+                // Every folder in it still holds a live item: nothing goes for good yet.
+                let shown = daemon::deleted(&paths, 20)?
+                    .map(|l| l.items)
+                    .unwrap_or_default();
+                println!(
+                    "Nothing in Recently deleted can be emptied yet: the folders in it still \
+                     hold items that aren't deleted. In it:"
+                );
+                for what in described(&paths, &shown)? {
+                    println!("  {what}");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
             let question = format!(
                 "Delete the {} items in Recently deleted for good?",
                 list.total()

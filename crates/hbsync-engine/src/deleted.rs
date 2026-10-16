@@ -88,9 +88,9 @@ struct Listing<'a, 's> {
     rows: RemovedRows<'a, 's>,
     /// For each of the first rows (the listed ones), its item: itself, deleted on its own.
     roots: Vec<NodeId>,
-    /// Of the listed rows, how many emptying all of them deletes for good, and of those, how many
-    /// each delete took along.
+    /// Of the listed rows, how many emptying all of them deletes for good ([`select`]).
     going: usize,
+    /// How many rows each delete took along: its members, which its restore restores.
     along: HashMap<NodeId, usize>,
     folders: HashMap<NodeId, String>,
     /// Where a walk up stops: a folder's top (here or not), the role folders whether synced
@@ -133,39 +133,27 @@ impl<'a, 's> Listing<'a, 's> {
                 deleted_by_item(&mut listing.rows, node, &mut deleted_by)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        // What emptying all of it deletes: from the rows read, and one query.
         let rows = &listing.rows.rows[..count];
-        let mut holdings = Holdings {
-            live: s.removed_holding_live()?,
-            removed: HashMap::new(),
-        };
-        for r in rows {
-            *holdings.removed.entry(r.row.parent).or_default() += 1;
-        }
-        let chosen: Vec<Chosen> = rows.iter().map(Chosen::of).collect();
-        let going: HashSet<NodeId> = select(&chosen, &holdings).into_iter().collect();
-        listing.going = going.len();
         for (r, root) in rows.iter().zip(&listing.roots) {
-            if *root != r.row.node && going.contains(&r.row.node) {
+            if *root != r.row.node {
                 *listing.along.entry(*root).or_default() += 1;
             }
         }
+        // What emptying all of it deletes.
+        let chosen: Vec<Chosen> = rows.iter().map(Chosen::of).collect();
+        listing.going = select(&chosen, &holdings(s)?).len();
         Ok(listing)
     }
 
     /// `node`'s row, if it is in Recently deleted, with how many items its delete took along
-    /// (0 for an item a delete took along itself).
+    /// (its members, as the listing counts them; 0 for an item a delete took along itself).
     fn describe_node(&mut self, node: NodeId) -> Result<Option<(Deleted, usize)>, StateError> {
         let Some(top) = self.rows.get(node)?.cloned() else {
             return Ok(None);
         };
         let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
-        // What emptying it deletes, but itself.
         let along = match root == node {
-            true => {
-                let going = going(self.rows.s, group(self.rows.s, top, false)?)?;
-                going.iter().filter(|r| r.row.node != node).count()
-            }
+            true => group(self.rows.s, top, false)?.len() - 1,
             false => 0,
         };
         let i = self.rows.index[&node].unwrap_or_default();
@@ -178,7 +166,7 @@ impl<'a, 's> Listing<'a, 's> {
         (0..self.roots.len()).filter(|&i| self.roots[i] == self.rows.rows[i].row.node)
     }
 
-    /// Rows `picked`, described, each with how many items it took along that emptying deletes.
+    /// Rows `picked`, described, each with how many items it took along.
     fn with_along(&mut self, picked: Vec<usize>) -> Result<Vec<(Deleted, usize)>, StateError> {
         picked
             .into_iter()
@@ -284,7 +272,8 @@ fn deleted_by_item(
     let item = match up.end {
         End::At(at) => known.get(&at).copied().unwrap_or(at),
         // At the top, or past any depth a path may have: the last row walked. Cut off deep,
-        // that row is a delete of its own (remembered below), so the listing lists it.
+        // that row is a delete of its own (remembered below), so the listing lists it. (A chain
+        // that deep is no path: only a malicious drive makes one; it lists, in pieces.)
         End::Top | End::Deep => up.items.last().copied().unwrap_or(node),
         // Removed rows in a cycle (left by a remote one): one of them, the same whichever row
         // the walk started from.
@@ -580,19 +569,23 @@ pub fn listed_here(s: &Store<'_>, listed: &Listed) -> Result<bool, StateError> {
 }
 
 /// What emptying `chosen` (rows of Recently deleted) deletes for good ([`select`]), in that
-/// order: what the folders hold read in two queries.
+/// order.
 fn going(s: &Store<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<RemovedRow>, StateError> {
-    let holdings = Holdings {
-        live: s.removed_holding_live()?,
-        removed: s.removed_per_folder()?,
-    };
     let picked: Vec<Chosen> = chosen.iter().map(Chosen::of).collect();
     let mut rows: HashMap<NodeId, RemovedRow> =
         chosen.into_iter().map(|r| (r.row.node, r)).collect();
-    Ok(select(&picked, &holdings)
+    Ok(select(&picked, &holdings(s)?)
         .into_iter()
         .filter_map(|n| rows.remove(&n))
         .collect())
+}
+
+/// What the folders of Recently deleted hold on the drive, read once (two queries).
+fn holdings(s: &Store<'_>) -> Result<Holdings, StateError> {
+    Ok(Holdings {
+        live: s.removed_holding_live()?,
+        removed: s.removed_per_folder()?,
+    })
 }
 
 /// A row of Recently deleted as emptying sees it.
@@ -922,9 +915,11 @@ mod tests {
                 .into_iter()
                 .map(|(d, n)| (d.node, n))
                 .collect();
-            assert_eq!((along[&outer], along[&g], along[&h]), (1, 0, 0));
+            // Each delete counts its members (its restore restores them), whatever emptying
+            // can take now; a pick counts the same.
+            assert_eq!((along[&outer], along[&g], along[&h]), (2, 0, 0));
             let found = db.read(|s| find(s, &[outer]))?;
-            assert_eq!(found[0].1, 1, "a pick counts the same");
+            assert_eq!(found[0].1, 2, "a pick counts the same");
             let went = match how {
                 "listed" => {
                     // The count it shows is what emptying takes.

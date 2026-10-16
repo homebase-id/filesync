@@ -221,10 +221,12 @@ Replies:
 - `{"recent":[…]}` (each entry with its `folder`), newest first.
 - `{"deleted":{"items":[…],"accounts":[…]}}`: the newest `limit` deletes, newest first, each an
   item deleted on its own with its account's `identity` and `along`, how many items its delete
-  took along (not those items: a deleted folder of thousands of files is one entry); and, for
+  took along: the removed ones deleted with it, which restoring it restores, whatever emptying
+  can take now (not those items: a deleted folder of thousands of files is one entry); and, for
   each account holding anything, its `deletes`, its `items` (what emptying all of it deletes
   for good: removed nodes only, the deletes and what they took along, but a folder holding a
-  live node or a removal that stays), and what the listing saw:
+  live node or a removal that stays: 0 when nothing can be emptied yet, which clients say
+  instead of offering to empty), and what the listing saw:
   `db`, the account's state DB (a random id made with it, so one made again is another), and
   `seq`, the counter of this device's order of recording removals (each version of a node
   removed gets the next when first recorded; recorded again, its server time confirmed, it keeps

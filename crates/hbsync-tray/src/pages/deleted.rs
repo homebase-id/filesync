@@ -92,16 +92,9 @@ impl Server {
         format!(
             "<h1>Recently deleted</h1>\
              <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
-             A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>\
-             <form method=post action=\"{empty}\">\
-             <input type=hidden name=count value=\"{count}\">\
-             <input type=hidden name=listed value=\"{listed}\">\
-             <button class=secondary>Empty now…</button></form>",
+             A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>{empty}",
             days = self.keep_days(),
-            empty = self.pages.url("deleted/empty"),
-            count = list.total(),
-            // What emptying everything takes: all it held now, nothing deleted after this look.
-            listed = escape(&control::listed_field(&list.accounts)),
+            empty = empty_offer(&list, &self.pages.url("deleted/empty")),
         )
     }
 
@@ -205,5 +198,51 @@ impl Server {
             }
             Err(e) => format!("Not confirmed: {e}"),
         }
+    }
+}
+
+/// The button that empties Recently deleted as listed (`url`): all it held now, nothing deleted
+/// after this look. When emptying would take nothing (every folder in it still holds a live
+/// item), it says so instead.
+fn empty_offer(list: &hbsync_app::protocol::DeletedList, url: &str) -> String {
+    if list.total() == 0 {
+        return "<p class=small>Nothing in it can be emptied yet: the folders in it still hold \
+                items that aren't deleted. You can restore them.</p>"
+            .into();
+    }
+    format!(
+        "<form method=post action=\"{url}\">\
+         <input type=hidden name=count value=\"{count}\">\
+         <input type=hidden name=listed value=\"{listed}\">\
+         <button class=secondary>Empty now…</button></form>",
+        count = list.total(),
+        listed = escape(&control::listed_field(&list.accounts)),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_app::protocol::{DeletedAccount, DeletedList};
+
+    /// Empty is offered only when emptying takes something; else the page says why not.
+    #[test]
+    fn empty_is_offered_only_when_it_takes_something() {
+        let list = |items| DeletedList {
+            items: Vec::new(),
+            accounts: vec![DeletedAccount {
+                identity: "a.example".into(),
+                deletes: 1,
+                items,
+                db: "d1".into(),
+                seq: 3,
+            }],
+        };
+        assert!(empty_offer(&list(2), "/e").contains("Empty now"));
+        let none = empty_offer(&list(0), "/e");
+        assert!(
+            !none.contains("<form") && none.contains("can be emptied yet"),
+            "{none}"
+        );
     }
 }

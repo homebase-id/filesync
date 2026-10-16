@@ -1200,8 +1200,8 @@ fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
 /// The device deleting a folder stops after the folder's removal: what is in it is still live,
 /// unmarked, taken along by the folder's removal (node schema, Recently deleted). Emptying the
 /// folder from Recently deleted, on another device, deletes for good only what is removed: the
-/// folder stays while it holds live nodes, which emptying never deletes for good (the purge
-/// marks them removed first). Taken along, they show nowhere.
+/// folder stays while it holds live nodes, which emptying never deletes for good (marking them
+/// removed first is the purge's, still to come). Taken along, they show nowhere.
 #[test]
 fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     let server = server();

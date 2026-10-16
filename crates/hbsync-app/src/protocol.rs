@@ -191,9 +191,9 @@ pub struct DeletedItem {
     pub identity: String,
     #[serde(flatten)]
     pub deleted: Deleted,
-    /// How many items its delete took along (restoring it restores them, emptying it empties
-    /// them; a deleted folder of thousands of files is one item with its count): 0 for an item
-    /// a delete took along itself.
+    /// How many items its delete took along: the removed ones deleted with it, which restoring
+    /// it restores (a deleted folder of thousands of files is one item with its count), whatever
+    /// emptying can take now; 0 for an item a delete took along itself.
     #[serde(default)]
     pub along: usize,
 }

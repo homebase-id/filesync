@@ -953,9 +953,9 @@ fn restore_and_purge_converge() {
 
 /// Emptying Recently deleted as listed while other devices work: after the listing a listed
 /// folder comes back, and (or not) the phone saves an edit of a file a listed folder's delete
-/// took along (its own removal still on its way). What was listed goes, but never a live node:
-/// the folder holding the file stays, and comes back with the edit; nothing written is lost,
-/// and the clients converge.
+/// took along (its own removal still on its way). What was listed goes (or, purged, all of
+/// Recently deleted), but never a live node: the folder holding the file stays, and comes back
+/// with the edit; nothing written is lost, and the clients converge.
 #[test]
 fn emptying_as_listed_spares_what_came_after_the_listing() {
     use Action::*;
@@ -979,7 +979,7 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
     };
     let mut sync0 = vec![Event::Plan { client: 0 }];
     sync0.extend([Event::Step { client: 0 }; 12]);
-    for edited in [false, true] {
+    for (edited, purge) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut sim = Sim::new(2);
         create(&mut sim, "", a, false);
         create(&mut sim, "", b, false);
@@ -1005,17 +1005,21 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
         if edited {
             sim.run(&[act(0, EditTaken { pick: 0 })]);
         }
-        sim.run(&[act(0, EmptyListed)]);
+        sim.run(&[act(0, if purge { Purge } else { EmptyListed })]);
         assert!(sim.is_removed(node_a), "`a` holds a live node: it stays");
         assert!(sim.quiesce(30), "no convergence");
         if let Err(e) = sim.check() {
-            panic!("edited {edited}: {e}");
+            panic!("edited {edited}, purge {purge}: {e}");
         }
         let mut expected = vec!["b", "b/c.txt"];
         if edited {
             expected.splice(0..0, ["a", "a/c.txt"]);
         }
-        assert_eq!(sim.server_paths(), expected, "edited {edited}");
+        assert_eq!(
+            sim.server_paths(),
+            expected,
+            "edited {edited}, purge {purge}"
+        );
     }
 }
 

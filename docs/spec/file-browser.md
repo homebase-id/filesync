@@ -109,7 +109,11 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   written no later than the folder's removal is deleted with it too: it doesn't show anywhere, and comes back
   with the folder; one written after it keeps the folder alive (node schema, "Recently deleted").
 - **Lists:** the whole drive with `archivalStatus: [2]`. The items are the ones not deleted with their folder;
-  each counts the items deleted with it, below it.
+  each counts the items deleted with it, below it: what restoring it restores (filesync's `along`).
+- **Deleting for good** (emptying, or the 30-day purge) takes removed nodes only, never a live node: a folder
+  holding a live node, or a removed node that isn't going, stays with the folders it is in, emptied of the
+  rest; until the purge marks what a folder's delete took along removed (to come), such a folder stays.
+  Files go first, then each folder after what is in it.
 - **Never write to a removed node** except to restore it: no rename, no sharing or sending to another
   identity, no reactions or comments, no local app data (local tags, local content, read time). odin-core
   counts each as a change, which moves its `updated`, its removal time.
