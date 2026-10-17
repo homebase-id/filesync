@@ -62,9 +62,15 @@ daemon runs.
 In the OS keychain, service `Homebase Filesync`, account = identity, value = the credentials
 JSON (identity, client auth token, shared secret):
 
-- macOS: Keychain Services, the login keychain;
-- Windows: Credential Manager;
-- Linux: the Secret Service (GNOME Keyring, KWallet) over D-Bus.
+- macOS: Keychain Services, the login keychain, which Migration Assistant carries to a new Mac
+  (keeping the item on this Mac, `AfterFirstUnlockThisDeviceOnly`, needs the data protection
+  keychain, and that a provisioning profile and keychain-access-groups entitlement the app
+  doesn't have);
+- Windows: Credential Manager, with `CRED_PERSIST_LOCAL_MACHINE` persistence: a roaming
+  profile doesn't carry it to another computer (an entry written before, roaming, is written
+  again so when read);
+- Linux: the Secret Service (GNOME Keyring, KWallet) over D-Bus, which has no notion of
+  keeping an item on one computer: a copied keyring carries it.
 
 When no keychain answers (a Linux without a Secret Service, say), the credentials go to
 `<config>/credentials/<identity>.json`, mode 0600 in a 0700 folder (on Windows the profile
