@@ -5,6 +5,24 @@ use super::*;
 impl Reconciler<'_> {
     // ---- 3: invariants on the merged tree ----
 
+    /// The node whose fork makes the conflict copy `copy`, if one does.
+    fn forked_into(&self, copy: NodeId) -> Option<NodeId> {
+        self.forks
+            .iter()
+            .find_map(|(&node, &c)| (c == copy).then_some(node))
+    }
+
+    /// The fork of `node` can't make its copy in this plan (its folder waits, §6.3): never one
+    /// named "". The node waits with it, as it is, and says so instead of its conflicts.
+    pub(super) fn fork_waits(&mut self, node: NodeId) {
+        self.forks.remove(&node);
+        self.scope.remove(&node);
+        self.origin.remove(&node);
+        self.plan.conflicts.retain(|c| c.node() != node);
+        self.plan.conflicts.push(Conflict::CopyWaits { node });
+        self.defer(node);
+    }
+
     /// A repair puts `node` at `state` in the merged tree; ops follow for it.
     pub(super) fn retarget(&mut self, node: NodeId, state: NodeState) {
         self.merged.insert(node, state);
@@ -80,6 +98,10 @@ impl Reconciler<'_> {
                     withdrawn.insert(node);
                     if self.input.dirty.contains(&node) {
                         self.deferred.insert(node);
+                    }
+                    // A conflict copy taken out: its fork waits, before the names are judged.
+                    if let Some(original) = self.forked_into(node) {
+                        self.fork_waits(original);
                     }
                 }
             }

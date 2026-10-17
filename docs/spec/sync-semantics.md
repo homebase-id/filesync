@@ -118,6 +118,14 @@ When both sides edited a file to different content:
 - The local version is renamed in place to `<stem> (conflict <device> <YYYY-MM-DD>)<ext>` and
   becomes a new node that is uploaded normally.
 - No bytes are ever dropped: the local bytes are moved by rename, never re-written.
+- The copy's node id comes from the node, the local bytes (hash and executable bit), the base
+  version and the computer (its state DB's own id for the account): planned again on that
+  computer, it is the same copy. Each computer makes its own copy: two computers with the same
+  bytes against the same version give two copies, each uploaded (rare, and accepted). A state
+  DB copied to a second computer (a backup restored there) gives both the same id: accepted.
+- A copy that can't be placed yet (its folder waits for its own parent, §6.3) isn't made: the
+  node waits with it, its conflicts (the edits, a move) aren't reported yet, and the folder's
+  notes say that a conflict copy is waiting for its folder.
 
 ## 6. Invariants on the merged tree
 
@@ -251,11 +259,11 @@ expected fingerprint is treated as done.
   skipped and reported, not retried; conflict names are shortened to fit 255 bytes.
 - **Conflict copies are write-ahead.** The fork is recorded before the rename and the record
   is removed with the DB update after it; recovery runs before any scan and completes or
-  forgets an interrupted fork. A copy id derives from the node, the local bytes and the base's
-  remote version: stable when one conflict is replanned, new for the next conflict. Two devices
-  with the same bytes make the same copy, so it may exist remotely already, named to fit its
-  folder there; if that name is held in the local folder by something that stays, the fork
-  takes the first free numbered name, and a later plan moves the copy where it belongs.
+  forgets an interrupted fork. A copy id derives from the node, the local bytes, the base's
+  remote version and the computer (section 5): stable when one conflict is replanned there,
+  new for the next conflict, and another computer's copy is another node. If the copy's name is
+  held in the local folder by something that stays, the fork takes the first free numbered
+  name, and a later plan moves the copy where it belongs.
 - **Case-insensitive volumes** (probed once): a name's occupant is any sibling with the same
   name key; a node may take its own name in another case.
 - **Orphans.** With a fully drained feed, a remote node whose parent is unknown everywhere (a
@@ -495,6 +503,7 @@ and the purge (by age, with every folder's trash) are the account's too. A chang
 is planned in the folders it concerns: those holding the node, and the one whose part of the
 drive its place is in (every folder when that place isn't known).
 
-A detached item's new id is fixed for the node and the device, so a replan picks the same one,
+A detached item's new id is fixed for the node and the computer (the state DB's own id, as
+for conflict copies, section 5), so a replan picks the same one,
 but never one in use here: the same node detached again while its first copy lives gets the
 next.

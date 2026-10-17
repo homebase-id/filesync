@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use hbsync_platform::name::name_key;
-use hbsync_types::{ContentHash, ContentState, NodeId, NodeKind, NodeState, Tags, VersionTag};
+use hbsync_types::{ContentState, FileContent, NodeId, NodeKind, NodeState, Tags, VersionTag};
 
 use crate::mask::Masks;
 use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
@@ -62,7 +62,13 @@ enum Origin {
 }
 
 pub fn reconcile(input: &Input, opts: &Options) -> Plan {
-    let masks = Masks::of(input, &opts.filter, &opts.scope, &opts.device, &opts.taken);
+    let masks = Masks::of(
+        input,
+        &opts.filter,
+        &opts.scope,
+        &opts.computer,
+        &opts.taken,
+    );
     let input = masks.input.as_ref().unwrap_or(input);
     Reconciler::new(input, opts, &masks).run()
 }
@@ -141,29 +147,31 @@ impl<'a> Reconciler<'a> {
     }
 }
 
-/// A deterministic id for the conflict copy of `node`'s local bytes. The same conflict
-/// (same bytes, same base version) gets the same id when it is replanned after a crash; a later
-/// conflict, even with identical bytes, has another base version and gets another id.
+/// A deterministic id for the conflict copy of `node`'s local bytes made on `computer`
+/// ([`Options::computer`]). The same conflict (same bytes and executable bit, same base
+/// version) gets the same id when it is replanned on this computer after a crash; a later
+/// conflict, even with identical bytes, has another base version and gets another id. Another
+/// computer's copy of the same conflict has another id: two computers never share a copy (with
+/// the same bytes, the drive gets two).
 fn fork_id(
     node: NodeId,
-    local_hash: Option<ContentHash>,
+    local: Option<FileContent>,
     base_version: Option<VersionTag>,
+    computer: &str,
 ) -> NodeId {
-    let mut bytes = *node.0.as_bytes();
-    if let Some(h) = local_hash {
-        for (b, x) in bytes.iter_mut().zip(h.bytes) {
-            *b ^= x;
-        }
-    }
-    if let Some(v) = base_version {
-        for (b, x) in bytes.iter_mut().zip(v.0.as_bytes().iter().rev()) {
-            *b = b.rotate_left(3) ^ x;
-        }
-    }
-    bytes[0] ^= 0xA5;
-    bytes[6] = (bytes[6] & 0x0F) | 0x40; // keep it a well-formed v4 UUID
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-    NodeId(hbsync_types::Uuid::from_bytes(bytes))
+    let hash = local.map(|c| c.hash.bytes);
+    let executable = [u8::from(local.is_some_and(|c| c.executable))];
+    let version = base_version.map(|v| *v.0.as_bytes());
+    crate::id::derived_id(
+        &[
+            node.0.as_bytes(),
+            hash.as_ref().map_or(&[], |h| &h[..]),
+            &executable,
+            version.as_ref().map_or(&[], |v| &v[..]),
+            computer.as_bytes(),
+        ],
+        b"fork",
+    )
 }
 
 fn content_changed(c: Change) -> bool {
@@ -199,4 +207,29 @@ pub fn reconcile_with_known(
         plan = reconcile(input, &opts);
     }
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Conflict copy ids are stored and on the drive: the same conflict on the same computer
+    /// keeps its id, release after release.
+    #[test]
+    fn fork_ids_are_pinned() {
+        let uuid = |s: &str| s.parse::<hbsync_types::Uuid>().expect("uuid");
+        let content = FileContent {
+            hash: hbsync_fileio::hash_bytes(b"mine", hbsync_fileio::HashAlgorithm::Blake3),
+            size: 4,
+            mtime_ms: 0,
+            executable: false,
+        };
+        let id = fork_id(
+            NodeId(uuid("0274575b-c2cf-4ac7-b39b-d56b2c121b75")),
+            Some(content),
+            Some(VersionTag(uuid("9b2f4c1e-0d7a-4e3b-8c55-2a6f1e9d0b47"))),
+            "0123456789abcdef0123456789abcdef",
+        );
+        assert_eq!(id.0.to_string(), "703c54e5-af51-4afd-a3cf-21549310332c");
+    }
 }

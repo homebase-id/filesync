@@ -1237,15 +1237,14 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
     }
 }
 
-/// Found by a 150,000-case run (2026-10-16), failing on main too: two devices hold the same
-/// file without a base, both edited against the drive, and fork it to the same copy id
-/// (`fork_id`: same node, same bytes, no base version). The first device's copy is on the drive
-/// (detached) when the second plans its fork: the copy's merged state is the drive's node, not
-/// the fork's, so the fork takes no name (`emit`: `unwrap_or_default`) and the copy is created
-/// on the drive as "". Kept until the fork id is fixed.
+/// Found by a 150,000-case run (2026-10-16): two devices hold the same file without a base,
+/// both edited against the drive, and fork it. The copy id was the same for both (`fork_id`:
+/// same node, same bytes, no base version), and the first device's copy was on the drive
+/// (detached) when the second planned its fork: the copy's merged state was the drive's node,
+/// not the fork's, so the fork took no name and the copy was created on the drive as "". Each
+/// computer now makes its own copy, under its own id.
 #[test]
-#[ignore = "a conflict copy forked under an id another device's copy has (fork_id)"]
-fn regression_two_devices_fork_to_one_copy_id() {
+fn regression_two_devices_fork_their_own_copies() {
     use hbsync_sim::Action::*;
     use hbsync_sim::Event::*;
     let events = [

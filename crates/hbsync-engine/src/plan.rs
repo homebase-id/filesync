@@ -31,6 +31,9 @@ pub struct BaseExtra {
 pub struct Options {
     /// Device name used in conflict-copy names.
     pub device: String,
+    /// This computer's id for the account (its state DB's own id): a conflict copy's id
+    /// includes it, so two computers never make the same copy.
+    pub computer: String,
     /// Today's date (`YYYY-MM-DD`) for conflict-copy names. Passed in to keep this pure.
     pub date: String,
     /// Deletes above `max(mass_delete_min, mass_delete_fraction × synced files)` are held.
@@ -58,6 +61,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             device: "device".into(),
+            computer: String::new(),
             date: "1970-01-01".into(),
             mass_delete_min: 50,
             mass_delete_fraction: 0.25,
@@ -518,6 +522,24 @@ pub enum Conflict {
     Cycle { node: NodeId },
     /// The node's folder no longer exists anywhere; it was moved to the root.
     Orphan { node: NodeId },
+    /// Both sides edited the file, and the local version's conflict copy can't be made yet
+    /// (its folder waits for its own): both versions stay as they are until it can.
+    CopyWaits { node: NodeId },
+}
+
+impl Conflict {
+    /// The node the conflict is about.
+    pub fn node(&self) -> NodeId {
+        match self {
+            Conflict::EditEdit { node, .. }
+            | Conflict::MoveMove { node }
+            | Conflict::EditDelete { node }
+            | Conflict::NameClash { node }
+            | Conflict::Cycle { node }
+            | Conflict::Orphan { node }
+            | Conflict::CopyWaits { node } => *node,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
