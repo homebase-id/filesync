@@ -57,8 +57,13 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
                     .flat_map(|a| a.find_deleted(nodes))
                     .collect()
             };
-            let every = || accounts.iter().flat_map(|a| a.all_deleted()).collect();
-            match find_deleted(by_node, every, &items, main) {
+            let by_name = |names: &[String]| {
+                accounts
+                    .iter()
+                    .flat_map(|a| a.named_deleted(names))
+                    .collect()
+            };
+            match find_deleted(by_node, by_name, &items, main) {
                 Ok(found) => Reply::Found(found),
                 Err(why) => Reply::Refused(why),
             }
@@ -95,11 +100,12 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
 /// [`words::deleted_place`] shows. A place names what `hbsync deleted` lists there: a delete
 /// (the newest, if there are more); only where none is, an item a delete took along. Refused
 /// naming the first pick that isn't there. `by_node` gives the items that are those nodes;
-/// `every` all of them, and `main` the main folder (it names places), both asked only when a
-/// pick names a place (a pick shaped like a node id that isn't one is tried as a place too).
+/// `by_name` the items with the names the places' items have ([`words::deleted_place_name`]),
+/// and `main` the main folder (it names places), both asked only when a pick names a place (a
+/// pick shaped like a node id that isn't one is tried as a place too).
 fn find_deleted(
     by_node: impl Fn(&[NodeId]) -> Vec<DeletedItem>,
-    every: impl Fn() -> Vec<DeletedItem>,
+    by_name: impl Fn(&[String]) -> Vec<DeletedItem>,
     picks: &[String],
     main: impl Fn() -> Result<Option<PathBuf>, String>,
 ) -> Result<Vec<DeletedItem>, String> {
@@ -115,9 +121,14 @@ fn find_deleted(
     let found = |p: &String| p.parse().ok().map(NodeId).and_then(|id| by_id.get(&id));
     // Each place's item: a delete before an item taken along, the newest of either.
     let mut by_place: HashMap<String, DeletedItem> = HashMap::new();
-    if picks.iter().any(|p| found(p).is_none()) {
+    let names: Vec<String> = picks
+        .iter()
+        .filter(|p| found(p).is_none())
+        .map(|p| words::deleted_place_name(p).to_owned())
+        .collect();
+    if !names.is_empty() {
         let main = main()?;
-        let mut all = every();
+        let mut all = by_name(&names);
         all.sort_by_key(|i| {
             (
                 i.deleted.root != i.deleted.node,
@@ -245,10 +256,10 @@ mod tests {
         i
     }
 
-    /// A pick by node id asks only for those nodes, and needs no config; a place asks for
-    /// everything once and names what `hbsync deleted` lists there: the newest delete, an item
-    /// taken along only where no delete is; a node-id-shaped name that isn't one is tried as a
-    /// place.
+    /// A pick by node id asks only for those nodes, and needs no config; a place asks once for
+    /// the items with its item's name, and names what `hbsync deleted` lists there: the newest
+    /// delete, an item taken along only where no delete is; a node-id-shaped name that isn't one
+    /// is tried as a place; a place no folder here syncs is found as listed.
     #[test]
     fn picks_are_found_by_id_or_place_in_any_account() {
         let uuid_name = Uuid::from_u128(77).to_string();
@@ -260,6 +271,14 @@ mod tests {
             along(6, "Old/x.txt", 40, 9),
             item("bob.example", 2, "notes.txt", 20, 0),
             item("bob.example", 4, &uuid_name, 5, 0),
+            // In no folder here.
+            DeletedItem {
+                deleted: Deleted {
+                    folder: None,
+                    ..item("bob.example", 8, "cv.txt", 50, 0).deleted
+                },
+                ..item("bob.example", 8, "cv.txt", 50, 0)
+            },
         ];
         let everything = std::cell::Cell::new(0);
         let by_node = |nodes: &[NodeId]| {
@@ -268,9 +287,13 @@ mod tests {
                 .cloned()
                 .collect()
         };
-        let every = || {
+        // As the engine finds them: by the item's own name.
+        let every = |names: &[String]| {
             everything.set(everything.get() + 1);
-            all.to_vec()
+            all.iter()
+                .filter(|i| names.iter().any(|n| n == words::last_name(&i.deleted.path)))
+                .cloned()
+                .collect()
         };
         let main = || Ok(Some(PathBuf::from("/home/a/Homebase")));
         let broken = || Err("reading the config: bad".to_owned());
@@ -298,6 +321,9 @@ mod tests {
             node(6),
             "taken along, where no delete is"
         );
+
+        let found = find_deleted(by_node, every, &picks(&["(on the drive) cv.txt"]), main);
+        assert_eq!(found.map(|f| f[0].deleted.node), Ok(node(8)));
 
         assert_eq!(
             find_deleted(by_node, every, &picks(&["Photos", "gone.txt"]), main),

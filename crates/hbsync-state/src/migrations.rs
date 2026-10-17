@@ -276,6 +276,10 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE placing ADD COLUMN prior_tags TEXT;
     ALTER TABLE placing ADD COLUMN base_at BLOB;
     ALTER TABLE placing ADD COLUMN held_ms INTEGER;",
+    // 12: no index on a removal's `seq`: each removal recorded wrote to it (about two pages a
+    // commit, a sixth of what deleting a folder of files writes), and only emptying as listed
+    // reads by it, a scan of Recently deleted then.
+    "DROP INDEX removed_seq;",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.
@@ -555,6 +559,21 @@ mod tests {
             apply(&mut conn)?;
             assert_eq!(id(&conn)?.len(), 32, "{missing}");
         }
+        Ok(())
+    }
+
+    /// A removal's `seq` has no index (12).
+    #[test]
+    fn no_index_on_a_removals_seq() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        apply(&mut conn)?;
+        let indexed: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master \
+             WHERE type = 'index' AND name = 'removed_seq')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(!indexed);
         Ok(())
     }
 

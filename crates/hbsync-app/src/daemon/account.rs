@@ -297,9 +297,9 @@ impl Account {
         self.items(self.read(|db| db.find_deleted(nodes)).unwrap_or_default())
     }
 
-    /// Every item of its Recently deleted, newest first.
-    pub fn all_deleted(&self) -> Vec<DeletedItem> {
-        self.items(self.read(|db| db.all_deleted()).unwrap_or_default())
+    /// The items of its Recently deleted named `names`.
+    pub fn named_deleted(&self, names: &[String]) -> Vec<DeletedItem> {
+        self.items(self.read(|db| db.named_deleted(names)).unwrap_or_default())
     }
 
     fn items(&self, found: Vec<(Deleted, usize)>) -> Vec<DeletedItem> {
@@ -555,6 +555,7 @@ impl Account {
                 *lock(&self.phase) = Phase::Running(shown(&runners));
             }
             if runners.is_empty() {
+                notifications.finish();
                 return result;
             }
         }
@@ -677,7 +678,7 @@ pub struct Notifications {
     announced: Announced,
     /// The live changes announced since the last take, up to [`MAX_LIVE_REFS`], and whether
     /// the feed is to be read too (an announcement didn't say which file, or there were more).
-    /// A hard delete isn't gathered: it is taken at once.
+    /// A hard delete isn't gathered here: the puller takes it within [`GATHER_WINDOW`].
     changes: Vec<ChangeRef>,
     unsaid: bool,
     connected: bool,
@@ -720,8 +721,8 @@ impl Notifications {
             }
             Event::Changed(change) => {
                 match change {
-                    // In no feed: taken at once, also while paused (it writes only the
-                    // account's DB; the folders sync it at the resume).
+                    // In no feed: taken within the puller's window, also while paused (it
+                    // writes only the account's DB; the folders sync it at the resume).
                     Some(change) if change.deleted => self.puller.take(vec![change], false),
                     Some(change) => {
                         self.announced.note(now);
@@ -764,6 +765,11 @@ impl Notifications {
         self.unsaid = true;
     }
 
+    /// The account is ending: the puller takes what it gathered, and ends.
+    pub fn finish(&self) {
+        self.puller.finish();
+    }
+
     /// Hands what was announced to the puller.
     fn take(&mut self) {
         self.puller.take(
@@ -803,6 +809,8 @@ impl Notifications {
 #[derive(Debug, Clone)]
 pub struct Puller {
     asks: Arc<Mutex<Sender<Asked>>>,
+    /// Its thread, joined when the account ends ([`Puller::finish`]).
+    thread: Arc<Mutex<Option<JoinHandle<()>>>>,
     drive: Arc<Drive>,
     /// Rounds done (taken and read), for tests.
     rounds: Arc<AtomicUsize>,
@@ -819,22 +827,38 @@ const HELD_RETRY_MAX: Duration = Duration::from_secs(300);
 /// Hard deletes kept while taking them fails, one per file; more are left stale (written to
 /// next, a file deleted for good answers not found).
 const MAX_HELD: usize = 10_000;
+/// A round that takes announced changes gathers what is announced for this long after its first
+/// ask, or until it holds this many changes: one write for a burst (a folder of thousands of
+/// files deleted is a notification per file), not one each. A change waits this long at most; a
+/// plain read of the feed doesn't wait.
+const GATHER_WINDOW: Duration = Duration::from_secs(1);
+const GATHER_MAX: usize = 500;
 
 impl Puller {
     pub fn spawn(drive: Arc<Drive>) -> Puller {
         let rounds = Arc::new(AtomicUsize::new(0));
-        let asks = match start(&drive, &rounds) {
-            Ok(asks) => asks,
+        let (asks, thread) = match start(&drive, &rounds) {
+            Ok((asks, thread)) => (asks, Some(thread)),
             Err(e) => {
                 tracing::error!("can't start reading the drive on its own ({e}): trying again");
                 // A sender whose thread is gone: the first ask starts one.
-                channel().0
+                (channel().0, None)
             }
         };
         Puller {
             asks: Arc::new(Mutex::new(asks)),
+            thread: Arc::new(Mutex::new(thread)),
             drive,
             rounds,
+        }
+    }
+
+    /// Ends the puller's thread once it has taken what it gathered: the account is ending. A
+    /// hard delete announced is in no feed; only a crash loses one gathered (a second's worth).
+    pub fn finish(&self) {
+        *lock(&self.asks) = channel().0;
+        if let Some(thread) = lock(&self.thread).take() {
+            let _ = thread.join();
         }
     }
 
@@ -868,10 +892,11 @@ impl Puller {
         };
         // Never on the asker's thread (the account's loop): a thread of its own again.
         match start(&self.drive, &self.rounds) {
-            Ok(again) => {
+            Ok((again, thread)) => {
                 tracing::warn!("reading the drive had stopped: started again");
                 let _ = again.send(ask);
                 *asks = again;
+                *lock(&self.thread) = Some(thread);
             }
             Err(e) => {
                 tracing::error!("can't start reading the drive ({e}): the folders will");
@@ -882,11 +907,14 @@ impl Puller {
 }
 
 /// Starts the puller's thread: it takes what is announced and reads the feed, one round at a
-/// time, until every sender is gone.
-fn start(drive: &Arc<Drive>, rounds: &Arc<AtomicUsize>) -> std::io::Result<Sender<Asked>> {
+/// time, until every sender is gone (what it gathered taken first).
+fn start(
+    drive: &Arc<Drive>,
+    rounds: &Arc<AtomicUsize>,
+) -> std::io::Result<(Sender<Asked>, JoinHandle<()>)> {
     let (asks, rx) = channel::<Asked>();
     let (mine, done) = (Arc::clone(drive), Arc::clone(rounds));
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("hbsync-pull".into())
         .spawn(move || {
             let (mut held, mut wait) = (Vec::new(), HELD_RETRY);
@@ -901,7 +929,7 @@ fn start(drive: &Arc<Drive>, rounds: &Arc<AtomicUsize>) -> std::io::Result<Sende
                     }
                 };
                 let Some(first) = first else { break };
-                let (changes, pull) = merge(held, std::iter::once(first).chain(rx.try_iter()));
+                let (changes, pull) = merge(held, gathered(first, &rx, GATHER_WINDOW));
                 held = round(
                     changes,
                     pull,
@@ -916,16 +944,42 @@ fn start(drive: &Arc<Drive>, rounds: &Arc<AtomicUsize>) -> std::io::Result<Sende
                 done.fetch_add(1, Ordering::SeqCst);
             }
         })?;
-    Ok(asks)
+    Ok((asks, thread))
+}
+
+/// The asks of one round: `first`, and when it takes changes, what comes within `window` of
+/// it, until they hold [`GATHER_MAX`] changes (the rest wait for the next round); a plain read
+/// takes only what is waiting already.
+fn gathered(first: Asked, rx: &Receiver<Asked>, window: Duration) -> Vec<Asked> {
+    if first.0.is_empty() {
+        return std::iter::once(first).chain(rx.try_iter()).collect();
+    }
+    let until = Instant::now() + window;
+    let mut count = first.0.len();
+    let mut asks = vec![first];
+    while count < GATHER_MAX {
+        let Some(left) = until.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        match rx.recv_timeout(left) {
+            Ok(ask) => {
+                count += ask.0.len();
+                asks.push(ask);
+            }
+            Err(_) => break,
+        }
+    }
+    asks
 }
 
 /// The asks of one round, after the hard deletes `held` from the last: all their changes, and
 /// whether the feed is to be read.
-fn merge(held: Vec<ChangeRef>, asks: impl Iterator<Item = Asked>) -> (Vec<ChangeRef>, bool) {
-    asks.fold((held, false), |(mut changes, read), (more, also)| {
-        changes.extend(more);
-        (changes, read || also)
-    })
+fn merge(held: Vec<ChangeRef>, asks: impl IntoIterator<Item = Asked>) -> (Vec<ChangeRef>, bool) {
+    asks.into_iter()
+        .fold((held, false), |(mut changes, read), (more, also)| {
+            changes.extend(more);
+            (changes, read || also)
+        })
 }
 
 /// The hard deletes of `changes`, one per file, at most [`MAX_HELD`].
@@ -955,23 +1009,33 @@ fn pause_ran_out(paused: &mut Option<Until>, unix: u64) -> bool {
     false
 }
 
-/// One round of the puller: takes `changes` (`announced`), reads the feed when asked or when
+/// One round of the puller: takes `changes` (`announced`), the hard deletes first and on
+/// their own (a failure of the rest can't hold them back), reads the feed when asked or when
 /// they leave something unknown (`read`), and wakes every folder when the read fails. Returns
 /// the hard deletes still to take: taking failed, and they are in no feed.
 fn round(
     changes: Vec<ChangeRef>,
     mut pull: bool,
-    announced: impl FnOnce(&[ChangeRef]) -> Result<bool, String>,
+    mut announced: impl FnMut(&[ChangeRef]) -> Result<bool, String>,
     read: impl FnOnce() -> Result<(), String>,
     wake_all: impl FnOnce(),
 ) -> Vec<ChangeRef> {
     let mut held = Vec::new();
-    match announced(&changes) {
-        Ok(all) => pull |= !all,
-        Err(e) => {
-            tracing::info!("taking announced changes failed ({e}); reading them");
-            held = keep(changes);
-            pull = true;
+    let (hard, live): (Vec<ChangeRef>, Vec<ChangeRef>) =
+        changes.into_iter().partition(|c| c.deleted);
+    for (changes, hard) in [(hard, true), (live, false)] {
+        if changes.is_empty() {
+            continue;
+        }
+        match announced(&changes) {
+            Ok(all) => pull |= !all,
+            Err(e) => {
+                tracing::info!("taking announced changes failed ({e}); reading them");
+                if hard {
+                    held = keep(changes);
+                }
+                pull = true;
+            }
         }
     }
     if pull && let Err(e) = read() {
@@ -1259,10 +1323,10 @@ mod tests {
         Ok(())
     }
 
-    /// A hard delete announced is taken at once, also while paused (it writes only the
-    /// account's DB): never held where a crash or a pause could lose it.
+    /// A hard delete announced is taken within the puller's window, also while paused (it writes
+    /// only the account's DB): never held where a pause could lose it.
     #[test]
-    fn a_hard_delete_is_taken_at_once_even_paused() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_hard_delete_is_taken_even_paused() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
         let (mut n, puller, _drive, on_drive) = notifications(home.path())?;
         n.event(
@@ -1274,6 +1338,27 @@ mod tests {
         let mut db = hbsync_state::StateDb::open_account(&home.path().join("state.db"))?;
         assert!(db.read(|s| s.mirror_by_file(on_drive.file_id))?.is_none());
         assert!(n.waiting().0.is_empty(), "nothing gathered");
+        Ok(())
+    }
+
+    /// A hard delete gathered when the account ends is taken before its puller ends: only a
+    /// crash loses one.
+    #[test]
+    fn a_hard_delete_gathered_is_taken_when_the_account_ends()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let (mut n, puller, _drive, on_drive) = notifications(home.path())?;
+        n.event(
+            Event::Changed(Some(on_drive.tombstone())),
+            Instant::now(),
+            false,
+        );
+        let began = Instant::now();
+        n.finish();
+        assert!(began.elapsed() < GATHER_WINDOW * 3);
+        assert_eq!(puller.rounds(), 1, "taken before the end");
+        let mut db = hbsync_state::StateDb::open_account(&home.path().join("state.db"))?;
+        assert!(db.read(|s| s.mirror_by_file(on_drive.file_id))?.is_none());
         Ok(())
     }
 
@@ -1335,15 +1420,77 @@ mod tests {
         assert!(!pause_ran_out(&mut None, 100));
     }
 
+    /// A burst of announced changes (a notification each) is taken in rounds of
+    /// [`GATHER_MAX`], not one write each; a lone one waits the window at most; a plain read
+    /// doesn't wait.
+    #[test]
+    fn a_burst_is_taken_in_few_rounds() {
+        let window = Duration::from_millis(20);
+        let (tx, rx) = channel::<Asked>();
+        for _ in 0..2000 {
+            let _ = tx.send((vec![a_ref(false)], false));
+        }
+        let mut sizes = Vec::new();
+        while let Ok(first) = rx.try_recv() {
+            let (changes, read) = merge(Vec::new(), gathered(first, &rx, window));
+            assert!(!read);
+            sizes.push(changes.len());
+        }
+        assert_eq!(sizes, [GATHER_MAX; 4]);
+
+        let _ = tx.send((vec![a_ref(true)], false));
+        let began = Instant::now();
+        let asks = rx.recv().map(|first| gathered(first, &rx, window));
+        assert_eq!(asks.map(|a| a.len()), Ok(1));
+        let took = began.elapsed();
+        assert!(took >= window && took < window * 50, "{took:?}");
+
+        let began = Instant::now();
+        let asks = gathered((Vec::new(), true), &rx, Duration::from_secs(60));
+        assert_eq!(asks.len(), 1);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "a plain read goes at once"
+        );
+    }
+
+    /// The hard deletes of a round are taken first, on their own: taking the live changes
+    /// failing doesn't hold them back (they are read from the feed instead).
+    #[test]
+    fn hard_deletes_are_taken_before_live_changes() {
+        let (gone, live) = (a_ref(true), a_ref(false));
+        let calls = std::cell::RefCell::new(Vec::new());
+        let reads = std::cell::Cell::new(0);
+        let held = round(
+            vec![live, gone],
+            false,
+            |c| {
+                calls.borrow_mut().push(c.to_vec());
+                match c.iter().all(|c| c.deleted) {
+                    true => Ok(true),
+                    false => Err("timed out".into()),
+                }
+            },
+            || {
+                reads.set(reads.get() + 1);
+                Ok(())
+            },
+            || {},
+        );
+        assert_eq!(*calls.borrow(), vec![vec![gone], vec![live]]);
+        assert!(held.is_empty(), "the hard delete was taken");
+        assert_eq!(reads.get(), 1, "the live change is read instead");
+    }
+
     /// A take and a plain ask in one round: the changes are taken and the feed is read, once.
     #[test]
     fn a_take_merges_with_a_pull() {
         let (gone, live) = (a_ref(true), a_ref(false));
         let held = vec![gone];
-        let (changes, read) = merge(held, [(vec![live], false), (Vec::new(), true)].into_iter());
+        let (changes, read) = merge(held, [(vec![live], false), (Vec::new(), true)]);
         assert_eq!(changes, vec![gone, live]);
         assert!(read);
-        assert!(!merge(Vec::new(), [(vec![live], false)].into_iter()).1);
+        assert!(!merge(Vec::new(), [(vec![live], false)]).1);
     }
 
     /// Taking announced changes that fails keeps the hard deletes for the next round (they
@@ -1366,7 +1513,7 @@ mod tests {
         assert_eq!(reads.get(), 1, "the live change is read instead");
         let taken = std::cell::RefCell::new(Vec::new());
         let held = round(
-            merge(held, std::iter::empty()).0,
+            merge(held, []).0,
             false,
             |c| {
                 taken.borrow_mut().extend_from_slice(c);

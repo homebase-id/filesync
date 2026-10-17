@@ -502,6 +502,9 @@ enum Step {
     /// Announcements delivered: these of the queued ones (by index, wrapped), late, out of
     /// order and some twice.
     Announce(Vec<usize>),
+    /// A round of the daemon's puller: what it gathered of the queued ones, the hard deletes
+    /// taken first and on their own, then the rest.
+    Round(Vec<usize>),
 }
 
 const ITEMS: usize = 4;
@@ -515,6 +518,7 @@ fn step() -> impl proptest::strategy::Strategy<Value = Step> {
         (0..ITEMS).prop_map(Step::HardDelete),
         Just(Step::Pull),
         proptest::collection::vec(0..64usize, 0..6).prop_map(Step::Announce),
+        proptest::collection::vec(0..64usize, 0..24).prop_map(Step::Round),
     ]
 }
 
@@ -594,6 +598,18 @@ fn mirror_follows_the_drive(steps: Vec<Step>) -> Result<(), proptest::test_runne
                 }
                 let refs: Vec<ChangeRef> = picks.iter().map(|k| queued[k % queued.len()]).collect();
                 ok(drive.announced(&refs))?;
+            }
+            Step::Round(picks) => {
+                if queued.is_empty() {
+                    continue;
+                }
+                let refs = picks.iter().map(|k| queued[k % queued.len()]);
+                let (gone, live): (Vec<ChangeRef>, Vec<ChangeRef>) = refs.partition(|r| r.deleted);
+                for refs in [gone, live] {
+                    if !refs.is_empty() {
+                        ok(drive.announced(&refs))?;
+                    }
+                }
             }
         }
     }

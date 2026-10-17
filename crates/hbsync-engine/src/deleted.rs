@@ -75,8 +75,18 @@ pub fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, St
     Ok(found)
 }
 
-/// Every item of Recently deleted, newest first, each with how many items it took along: to be
-/// picked by its place, or listed whole (tests).
+/// The items of Recently deleted named `names` (deletes, or items a delete took along), each
+/// with how many items it took along: to pick by their places, which end in those names. Only
+/// those rows are read whole, and walked up from.
+pub fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
+    let names: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let names: Vec<&str> = names.into_iter().collect();
+    find(s, &s.removed_named(&names)?)
+}
+
+/// Every item of Recently deleted, newest first, each with how many items it took along: listed
+/// whole (tests).
+#[cfg(any(test, feature = "testkit"))]
 pub fn all(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::read(s)?;
     let picked = (0..listing.roots.len()).collect();
@@ -1086,6 +1096,56 @@ mod tests {
         assert_eq!(select(&chosen, &holdings), expected);
         holdings.live.insert(chain[0]);
         assert_eq!(select(&chosen, &holdings), [file]);
+    }
+
+    /// Items picked by name are those rows alone, described and counted as the listing does
+    /// them: a delete with its members, an item taken along with none.
+    #[test]
+    fn items_are_found_by_name() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let [run, data, file, other, other_data] = [(); 5].map(|_| NodeId::new());
+        let named = |node, parent, name: &str, at| RemovedRow {
+            row: MirrorRow {
+                name: name.into(),
+                ..removed(node, parent, at).row
+            },
+            ..removed(node, parent, at)
+        };
+        db.write(|s| {
+            s.put_removed(&named(run, NodeId::ROOT, "run", 10))?;
+            s.put_removed(&named(data, run, "data", 10))?;
+            s.put_removed(&named(file, data, "f.bin", 10))?;
+            s.put_removed(&named(other, NodeId::ROOT, "other", 20))?;
+            s.put_removed(&named(other_data, other, "data", 5))
+        })?;
+        let mut found: Vec<(NodeId, NodeId, usize)> = db
+            .read(named_items)?
+            .into_iter()
+            .map(|(d, n)| (d.node, d.root, n))
+            .collect();
+        found.sort();
+        let listed: HashMap<NodeId, (NodeId, usize)> = db
+            .read(all)?
+            .into_iter()
+            .map(|(d, n)| (d.node, (d.root, n)))
+            .collect();
+        let mut expected = vec![
+            (data, listed[&data].0, listed[&data].1),
+            (other_data, listed[&other_data].0, listed[&other_data].1),
+        ];
+        expected.sort();
+        assert_eq!(found, expected);
+        assert_eq!(listed[&data], (run, 0), "taken along");
+        assert_eq!(
+            listed[&other_data],
+            (other_data, 0),
+            "deleted on its own, before"
+        );
+        Ok(())
+    }
+
+    fn named_items(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
+        named(s, &["data".to_owned()])
     }
 
     /// A folder's restore brings back what was removed with it or after it, not what was removed
