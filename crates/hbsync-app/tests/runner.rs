@@ -291,6 +291,36 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
     Ok(())
 }
 
+/// A change announced that the feed doesn't show yet (the server kept an answer from before
+/// the write: odin-core keeps answers by query) is read for again a moment later, with another
+/// query: the notified device gets it all the same.
+#[test]
+fn an_announced_change_a_kept_answer_hid_is_read_for_again() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    let _heard = a.listen();
+    for d in [&a, &b] {
+        wait_until("idle", || {
+            let s = d.status();
+            s.last_sync.is_some() && s.state == State::Idle && s.pending == 0
+        })?;
+    }
+    // The read at connecting done; the answer to a's next read kept through b's write.
+    std::thread::sleep(Duration::from_millis(300));
+    let cursor = hbsync_state::StateDb::open_account(&db_of(&a.root))?
+        .read(|s| s.account_kv(hbsync_state::keys::REMOTE_CURSOR))?;
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .keep_answer(cursor.as_deref(), a.drive.next_page_size())?;
+    let reads = a.feed_reads();
+    b.write("news.txt", "n")?;
+    wait_until("a has news.txt", || a.has("news.txt"))?;
+    assert!(a.feed_reads() >= reads + 2, "read again for it");
+    Ok(())
+}
+
 #[test]
 fn sync_now_reads_the_drive_unannounced() -> R {
     let server = server();

@@ -190,6 +190,29 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   a minimal one 588 (the encrypted envelope and its base64 included).
 - How the client reads with it: `hbsync_engine::feed::pull`. A server without `fileRefs` in
   its answer is refused, not read as an empty page.
+- **A kept answer can hide a write** (odin-core at fe067124b; **[tried]** on frodo, the
+  diagnostics `a_page_read_during_a_write_may_be_kept_stale` and
+  `another_clients_write_is_in_the_feed_at_once` in `hbsync-dev/tests/live.rs`):
+  `QueryBatchCached` keeps a query-batch answer under a key made of the query's parameters
+  (drive, `maxRecords`, cursor, sorting, filters; not the caller, so every client of the drive
+  shares it) for 2 h (`AbstractTableCaching.DefaultTtl`), and a write clears the drive's
+  answers after its commit (`TransactionalCache.InvalidateAsync`, a post-commit action)
+  **[verified]**. When the same query is being answered while a write commits, that answer,
+  from before the write, is kept after the clearing **[inferred]** (the cache stores what its
+  factory returns once it returns; FusionCache's internals not read). Tried: a thread reading
+  the feed from a cursor at the end again and again while client b created a folder, then one
+  read with the same query 1.1 s after b's answer: 70 of 70 rounds the folder wasn't there
+  (`hasMoreRows` false), while the same read with `maxRecords` 99 instead of 100 had it every
+  time; 11 s later the same query still didn't show it. Without a read in flight during the
+  write, the next read has it at once. A client that read to the end of the feed shares its
+  cursor with every other client that did: one device's read can hide another device's
+  write from all of them until the next write to the drive. The client never repeats a
+  query (page sizes, `Drive::page_size`) and reads again for an announced version a read
+  didn't bring (`daemon.md`, when the feed is read).
+- **Rows held back**: a row written in the server's last millisecond or so is held back,
+  answered as an empty or short page with `hasMoreRows` true (`QueryBatch.HoldBackWindowMs`,
+  1000 ms, **[verified]**); tried: 3 of 60 reads right after another client's write, for 9 to
+  12 ms. `feed::pull` reads on while `hasMoreRows`, so it costs a read.
 
 ## Errors
 **[verified]** `ExceptionHandlingMiddleware.cs`: plaintext `application/problem+json` (never

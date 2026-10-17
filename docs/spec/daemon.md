@@ -150,7 +150,11 @@ a failure (service managers restart it then).
   - at a folder's start (and once more if its local catch-up, a walk, took long);
   - when the notifications connect (again): the account pulls, as changes made meanwhile
     weren't announced;
-  - when an announced version isn't known, or an event didn't say which file;
+  - when an announced version isn't known, or an event didn't say which file; an announced
+    version that read didn't bring is read for again 1.1 s later (past the server's hold-back
+    of rows written in its last second), then twice as long each time, six reads at most,
+    after which the next reconnect's read is left to bring it (the server may keep a stale
+    answer for a while: `homebase-api-notes.md`, the change feed);
   - every 5 min while the notifications aren't connected;
   - by a sync while the account's picture isn't current: the notifications aren't connected,
     or its last pull failed (the folders' syncs then read for it);
@@ -159,7 +163,9 @@ a failure (service managers restart it then).
   - before Recently deleted's restore, emptying and the daily purge, while not current;
   - when this device makes a role folder that another device made meanwhile.
   A sync woken by a local change or by the account's drive reads nothing while current,
-  and none reads after its own writes.
+  and none reads after its own writes. Each read asks for pages of a few rows less than the
+  one before (500 down to 437, round after round, from a random start), so it never asks
+  the server the very query an answer may have been kept for.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start

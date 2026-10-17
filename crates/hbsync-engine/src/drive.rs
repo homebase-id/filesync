@@ -19,8 +19,11 @@ use crate::engine::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
 use crate::root::{RootError, SyncRoot};
 
-/// Rows of the change feed read per request.
+/// Rows of the change feed read per request, at most: each read asks for a few less than the
+/// last ([`Drive::page_size`]).
 pub const FEED_PAGE: usize = 500;
+/// How many page sizes the reads go through.
+const PAGE_SIZES: u64 = 64;
 /// Skipped feed rows kept until a folder's runner reports them, at most.
 const MAX_SKIPPED: usize = 1000;
 
@@ -42,6 +45,8 @@ pub struct Drive {
     announcing: AtomicBool,
     /// The last pull failed: changes may have been announced and not taken.
     behind: AtomicBool,
+    /// Feed reads so far, from a random start: the next read's page size.
+    reads: AtomicU64,
 }
 
 /// How long uploads are held after the drive said it is full: then one is tried again.
@@ -76,6 +81,7 @@ impl Drive {
             full: Mutex::default(),
             announcing: AtomicBool::new(false),
             behind: AtomicBool::new(false),
+            reads: AtomicU64::new(NodeId::new().0.as_u128() as u64 % PAGE_SIZES),
         })
     }
 
@@ -90,6 +96,49 @@ impl Drive {
     /// sync (this device's own writes are recorded from their answers); else a sync reads it.
     pub fn current(&self) -> bool {
         self.announcing.load(Ordering::Relaxed) && !self.behind.load(Ordering::Relaxed)
+    }
+
+    /// The page size of the next read of the feed: a little smaller each time, round after
+    /// round. odin-core keeps a query's answer by the query (cursor and page size, not who asks:
+    /// `QueryBatchCached`), and an answer computed while a write commits can be kept after it,
+    /// hiding that write from the same query until the next write to the drive or for hours
+    /// (`homebase-api-notes.md`, the change feed). A read never asks what the last one did, nor
+    /// as another client most likely just did.
+    fn page_size(&self) -> usize {
+        let n = self.reads.fetch_add(1, Ordering::Relaxed) % PAGE_SIZES;
+        FEED_PAGE - n as usize
+    }
+
+    /// The page size the next read of the feed will use (tests: to keep its answer).
+    #[doc(hidden)]
+    pub fn next_page_size(&self) -> usize {
+        FEED_PAGE - (self.reads.load(Ordering::Relaxed) % PAGE_SIZES) as usize
+    }
+
+    /// Of announced `refs`, the live ones the account's picture doesn't show yet: neither that
+    /// version nor a later write of the file (by the server's time) is in it, and the file
+    /// wasn't deleted for good. A read of the feed that should have brought them didn't: the
+    /// server may hold a row back (its write is in this millisecond, or kept out by a stale
+    /// answer, see [`Drive::page_size`]); they are read again a moment later.
+    pub fn unseen(&self, refs: &[ChangeRef]) -> Result<Vec<ChangeRef>, StateError> {
+        let mut db = self.account();
+        db.read(|s| {
+            let mut unseen = Vec::new();
+            for r in refs.iter().filter(|r| !r.deleted) {
+                if s.known(&[(r.at(), r.removed_at.is_some())])? || s.file_gone(r.file_id)? {
+                    continue;
+                }
+                let at = r.changed_at.or(r.removed_at);
+                let later = match (s.file_time(r.file_id)?, at) {
+                    (Some(have), Some(at)) => have >= at,
+                    _ => false,
+                };
+                if !later {
+                    unseen.push(*r);
+                }
+            }
+            Ok(unseen)
+        })
     }
 
     /// Reads the feed ([`Drive::pull`]) unless the picture is [`Drive::current`].
@@ -146,7 +195,7 @@ impl Drive {
         }
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
-        let pulled = feed::pull(|| self.account(), self.remote(), FEED_PAGE);
+        let pulled = feed::pull(|| self.account(), self.remote(), self.page_size());
         self.behind.store(pulled.is_err(), Ordering::Relaxed);
         if pulled.is_ok() {
             *answered = covers;

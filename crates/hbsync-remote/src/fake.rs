@@ -16,7 +16,10 @@
 //!   ([`FakeServer::subscribe`]), except to those that exclude their own client's writes
 //!   (`excludeOwnWrites`, odin-core #1971): each [`FakeRemote::new`] is a client registration
 //!   (a token) of its own. A write not made through a client (a test's, on the server) is
-//!   announced to all, as Homebase does when it can't tell whose write it is.
+//!   announced to all, as Homebase does when it can't tell whose write it is;
+//! - a kept answer ([`FakeServer::keep_answer`]): odin-core keeps a feed query's answer by the
+//!   query (cursor and page size), and one computed while a write commits can be kept after
+//!   it, hiding that write from the same query until the drive's next write.
 //!
 //! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter does:
 //! a delete refused for its version (4160) is read once more and counts as done when the file
@@ -98,6 +101,10 @@ pub struct FakeServer {
     /// Deterministic id source.
     next_id: u64,
     subscribers: Vec<Subscriber>,
+    /// Feed answers kept by query (cursor, page size), each until the write count passes its
+    /// mark ([`FakeServer::keep_answer`]).
+    kept: HashMap<(String, usize), (ChangesPage, u64)>,
+    writes: u64,
     next_client: u64,
 }
 
@@ -113,6 +120,8 @@ impl FakeServer {
             next_row: 1,
             next_id: 1,
             subscribers: Vec::new(),
+            kept: HashMap::new(),
+            writes: 0,
             next_client: 1,
         }))
     }
@@ -142,6 +151,9 @@ impl FakeServer {
     /// A write of `file_id` by `writer` (`None`: not through a client) landed: its new place
     /// in the feed, and its announcement.
     fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
+        self.writes += 1;
+        let writes = self.writes;
+        self.kept.retain(|_, (_, until)| writes <= *until);
         let modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
             self.feed.remove(&(f.modified, f.row));
@@ -398,7 +410,24 @@ impl FakeServer {
             .ok_or(RemoteError::NotFound)
     }
 
+    /// Keeps the feed's answer to a read from `cursor` with pages of `limit` as it is now,
+    /// through the next write (the one it raced with) until the one after: the same query
+    /// gets it meanwhile, another page size reads the feed as it is.
+    pub fn keep_answer(&mut self, cursor: Option<&str>, limit: usize) -> Result<()> {
+        let page = self.read_feed(cursor, limit)?;
+        let key = (cursor.unwrap_or("").to_owned(), limit);
+        self.kept.insert(key, (page, self.writes + 1));
+        Ok(())
+    }
+
     pub fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
+        if let Some((page, _)) = self.kept.get(&(cursor.unwrap_or("").to_owned(), limit)) {
+            return Ok(page.clone());
+        }
+        self.read_feed(cursor, limit)
+    }
+
+    fn read_feed(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let after = match cursor {
             None => None,
             Some(c) => Some(parse_cursor(c)?),
@@ -541,6 +570,8 @@ pub struct Faults {
     pub ref_pages: usize,
     /// Slim pages say one of their rows couldn't be read (a row the client doesn't decode).
     pub unread_refs: bool,
+    /// The page size of the last feed read, for assertions.
+    pub last_page: Option<usize>,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -687,7 +718,11 @@ fn replay<T>(
 impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
-        self.faults().full_pages += 1;
+        {
+            let mut faults = self.faults();
+            faults.full_pages += 1;
+            faults.last_page = Some(limit);
+        }
         self.server().changes(cursor, limit)
     }
 
@@ -696,6 +731,7 @@ impl Remote for FakeRemote {
         let unread = {
             let mut faults = self.faults();
             faults.ref_pages += 1;
+            faults.last_page = Some(limit);
             usize::from(faults.unread_refs)
         };
         Ok(RefsPage {

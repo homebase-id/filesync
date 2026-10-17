@@ -199,6 +199,17 @@ impl Store<'_> {
             .exists([file_id.0.as_bytes()])?)
     }
 
+    /// The server's time of the latest version of file `file_id` the store has: its mirror
+    /// row's, or its removal's in Recently deleted; `None` when it has neither or no time.
+    pub fn file_time(&self, file_id: RemoteFileId) -> Result<Option<i64>> {
+        Ok(self
+            .prep(
+                "SELECT MAX(t) FROM (SELECT changed_at AS t FROM remote WHERE file_id = ?1 \
+                 UNION ALL SELECT removed_at FROM removed WHERE file_id = ?1)",
+            )?
+            .query_row([file_id.0.as_bytes()], |r| r.get(0))?)
+    }
+
     pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let Some(row) = self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),

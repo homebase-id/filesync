@@ -926,14 +926,20 @@ fn write_answers_carry_the_feeds_time() -> R {
 
 /// Whether another client's write is in the feed as soon as its answer came: client b creates a
 /// folder, and this client reads the feed from the cursor it had before, at once; when the row
-/// isn't there yet, it reads again until it is. Half the rounds read from the cursor once first
-/// (an empty answer the server may keep), as a client that just read to the end has. Prints
-/// how often and how long the row was missing.
+/// isn't there yet, it reads again every 20 ms until it is. Odd rounds read from the cursor once
+/// first (an empty answer the server may keep: `QueryBatchCached`), as a client that just read
+/// to the end has. Prints, per late round, the row's `updated` against the time b's answer
+/// came (Unix ms, this machine's clock, the server's too on the dev host), the first reads'
+/// answers, and how long the row was missing. `FEED_AT_ONCE_ROUNDS` sets the rounds (40).
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn another_clients_write_is_in_the_feed_at_once() -> R {
     use hbsync_remote::contract::folder;
     use std::time::Instant;
+    let rounds = std::env::var("FEED_AT_ONCE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40usize);
     let identity = live_identity()?;
     let remote = live_remote()?;
     let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
@@ -942,40 +948,141 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
         let (dir, _) = bench.folder("d")?;
         let mut cursor = bench.cursor_now()?;
         let mut late = Vec::new();
-        for i in 0..40 {
+        for i in 0..rounds {
             let primed = i % 2 == 1;
             if primed {
                 let page = remote.change_refs(Some(&cursor), 100)?;
                 assert!(page.refs.is_empty() && !page.has_more, "nothing new yet");
             }
-            let w = other.create(&folder(&format!("f{i}"), dir.node), None)?.at;
-            bench.track(w.file_id);
-            let written = Instant::now();
-            let mut reads = 0;
+            let w = other.create(&folder(&format!("f{i}"), dir.node), None)?;
+            bench.track(w.at.file_id);
+            let (written, answered_ms) = (Instant::now(), hbsync_types::unix_now_ms());
+            let mut misses = Vec::new();
             loop {
                 let page = remote.change_refs(Some(&cursor), 100)?;
-                reads += 1;
-                if page.refs.iter().any(|r| r.file_id == w.file_id) {
+                if let Some(r) = page.refs.iter().find(|r| r.file_id == w.at.file_id) {
+                    if !misses.is_empty() {
+                        late.push(format!(
+                            "round {i} primed={primed}: missing for {:?} ({} reads: {misses:?}); \
+                             row updated {:?}, answer's updated {:?}, answer came at {answered_ms}",
+                            written.elapsed(),
+                            misses.len(),
+                            r.changed_at,
+                            w.changed_at
+                        ));
+                    }
                     cursor = page.cursor;
                     break;
                 }
+                misses.push(format!(
+                    "{} rows more={} at +{}ms",
+                    page.refs.len(),
+                    page.has_more,
+                    written.elapsed().as_millis()
+                ));
                 assert!(
                     written.elapsed() < Duration::from_secs(10),
-                    "round {i}: not in the feed after 10 s"
+                    "round {i}: not in the feed after 10 s: {misses:?}"
                 );
                 std::thread::sleep(Duration::from_millis(20));
             }
-            if reads > 1 {
-                late.push((i, primed, reads, written.elapsed()));
+        }
+        println!("{} of {rounds} rounds read the write late", late.len());
+        for l in &late {
+            println!("  {l}");
+        }
+        assert!(
+            late.is_empty(),
+            "{} of {rounds} rounds read it late",
+            late.len()
+        );
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
+}
+
+/// A diagnostic for odin-core: whether a query-batch answer computed while another client's
+/// write commits can be kept (`QueryBatchCached`, keyed by the query, not by who asks) and keep
+/// hiding that write. A thread reads the feed from a cursor at the end over and over (pages of
+/// 100, as a client caught up would), while client b creates a folder; once b's answer came,
+/// one read from the same cursor (the same cache key) and one with pages of 99 (another key)
+/// say whether the row is there. Prints the rounds where only the other key saw it.
+/// `CACHE_RACE_ROUNDS` sets the rounds (60).
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
+fn a_page_read_during_a_write_may_be_kept_stale() -> R {
+    use hbsync_remote::contract::folder;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let rounds = std::env::var("CACHE_RACE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60usize);
+    let identity = live_identity()?;
+    let remote = live_remote()?;
+    let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
+    let bench = Bench::new(&remote, &run_name("cache-race"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let (dir, _) = bench.folder("d")?;
+        let mut stale = Vec::new();
+        let mut end = bench.cursor_now()?;
+        for i in 0..rounds {
+            let cursor = end.clone();
+            let stop = AtomicBool::new(false);
+            let (seen_same, seen_other) = std::thread::scope(|scope| -> Result<_, String> {
+                let reader = scope.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = remote.change_refs(Some(&cursor), 100);
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(5));
+                let w = other
+                    .create(&folder(&format!("f{i}"), dir.node), None)
+                    .map_err(|e| e.to_string())?;
+                bench.track(w.at.file_id);
+                stop.store(true, Ordering::Relaxed);
+                let _ = reader.join();
+                // Past the hold-back window: a row not shown now is hidden, not held back.
+                std::thread::sleep(Duration::from_millis(1100));
+                let has = |limit| -> Result<(bool, bool), String> {
+                    let p = remote
+                        .change_refs(Some(&cursor), limit)
+                        .map_err(|e| e.to_string())?;
+                    Ok((p.refs.iter().any(|r| r.file_id == w.at.file_id), p.has_more))
+                };
+                let (same, other_key) = (has(100)?, has(99)?);
+                // How long it stays hidden without another write: the first round looks again
+                // ten seconds on.
+                if i == 0 && !same.0 {
+                    std::thread::sleep(Duration::from_secs(10));
+                    println!(
+                        "round 0, 11 s after the write: same key (seen, more) {:?}",
+                        has(100)?
+                    );
+                }
+                Ok((same, other_key))
+            })?;
+            // The feed's end again, for the next round.
+            loop {
+                let p = remote.change_refs(Some(&end), 500)?;
+                end = p.cursor;
+                if !p.has_more {
+                    break;
+                }
+            }
+            if !seen_same.0 {
+                stale.push(format!(
+                    "round {i}: same key {seen_same:?}, another key {seen_other:?} (seen, more)"
+                ));
             }
         }
         println!(
-            "rounds where the first read missed the write (round, primed, reads, until seen):"
+            "{} of {rounds} rounds: the write hidden from the same query",
+            stale.len()
         );
-        for l in &late {
-            println!("  {l:?}");
+        for s in &stale {
+            println!("  {s}");
         }
-        assert!(late.is_empty(), "{} of 40 rounds read it late", late.len());
         Ok(())
     })();
     bench.cleanup()?;
