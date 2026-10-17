@@ -730,7 +730,7 @@ impl Notifications {
                     // In no feed: taken within the puller's window, also while paused (it
                     // writes only the account's DB; the folders sync it at the resume).
                     Some(change) if change.deleted => {
-                        self.puller.send(vec![change], false, self.connected);
+                        self.puller.send(vec![change], Read::No, self.connected);
                     }
                     Some(change) => {
                         self.announced.note(now);
@@ -773,7 +773,7 @@ impl Notifications {
     /// The read that follows connecting.
     fn read_connected(&mut self) {
         self.connect_read = false;
-        self.puller.send(Vec::new(), true, self.connected);
+        self.puller.send(Vec::new(), Read::Asked, self.connected);
     }
 
     /// The live changes announced are read from the feed instead.
@@ -789,11 +789,12 @@ impl Notifications {
 
     /// Hands what was announced to the puller.
     fn take(&mut self) {
-        self.puller.send(
-            std::mem::take(&mut self.changes),
-            std::mem::take(&mut self.unsaid),
-            self.connected,
-        );
+        let read = match std::mem::take(&mut self.unsaid) {
+            true => Read::Unsaid,
+            false => Read::No,
+        };
+        self.puller
+            .send(std::mem::take(&mut self.changes), read, self.connected);
     }
 
     /// Pulls what was announced once it has quieted, and the drive every [`UNANNOUNCED_READ`]
@@ -839,10 +840,20 @@ pub struct Puller {
     await_retry: Duration,
 }
 
-/// What the puller is asked: changes announced, whether to read the feed (a plain ask: none
-/// and `true`), and the notifications' connection it was asked at, if connected: a read that
-/// works for it means the drive's changes are announced ([`Drive::announcing_from`]).
-type Asked = (Vec<ChangeRef>, bool, Option<u64>);
+/// What the puller is asked: changes announced, whether to read the feed, and the
+/// notifications' connection it was asked at, if connected: a read that works for it means
+/// the drive's changes are announced ([`Drive::announcing_from`]).
+type Asked = (Vec<ChangeRef>, Read, Option<u64>);
+
+/// Whether the puller reads the feed: no, asked to (a plain ask), or for changes announced
+/// without saying which (an event without a file, or too many). Those can't be looked for
+/// after the read ([`Drive::unseen`]): the read is confirmed by another past the hold-back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Read {
+    No,
+    Asked,
+    Unsaid,
+}
 
 /// Hard deletes not taken (taking them failed) are tried again after this, then twice as
 /// long each time up to [`HELD_RETRY_MAX`].
@@ -915,13 +926,14 @@ impl Puller {
 
     /// Reads the feed.
     pub fn ask(&self) {
-        self.send(Vec::new(), true, None);
+        self.send(Vec::new(), Read::Asked, None);
     }
 
     /// Takes announced `changes`, reading the feed for what they leave unknown or when one
     /// announcement didn't say which file (`unsaid`).
     pub fn take(&self, changes: Vec<ChangeRef>, unsaid: bool) {
-        self.send(changes, unsaid, None);
+        let read = if unsaid { Read::Unsaid } else { Read::No };
+        self.send(changes, read, None);
     }
 
     /// Rounds the puller's thread has done.
@@ -936,7 +948,7 @@ impl Puller {
         *lock(&self.asks) = channel().0;
     }
 
-    fn send(&self, changes: Vec<ChangeRef>, read: bool, connection: Option<u64>) {
+    fn send(&self, changes: Vec<ChangeRef>, read: Read, connection: Option<u64>) {
         let mut asks = lock(&self.asks);
         let Err(SendError(ask)) = asks.send((changes, read, connection)) else {
             return;
@@ -973,27 +985,36 @@ fn start(
             // for each.
             let (mut held, mut held_wait) = (Vec::<ChangeRef>::new(), HELD_RETRY);
             let mut awaited: Vec<(ChangeRef, u32)> = Vec::new();
+            // A read for changes announced without saying which is read again past the
+            // hold-back, with another page size: when.
+            let mut confirm: Option<Instant> = None;
             loop {
                 let wait = awaited
                     .iter()
                     .map(|(_, tries)| await_retry * 2u32.pow(tries - 1))
                     .chain((!held.is_empty()).then_some(held_wait))
+                    .chain(confirm.map(|at| at.saturating_duration_since(Instant::now())))
                     .min();
                 let first = match wait {
                     None => rx.recv().ok(),
                     Some(wait) => match rx.recv_timeout(wait) {
                         Ok(ask) => Some(ask),
-                        Err(RecvTimeoutError::Timeout) => Some((Vec::new(), false, None)),
+                        Err(RecvTimeoutError::Timeout) => Some((Vec::new(), Read::No, None)),
                         Err(RecvTimeoutError::Disconnected) => None,
                     },
                 };
                 let Some(first) = first else { break };
                 let carried = held.drain(..).chain(awaited.iter().map(|(r, _)| *r));
-                let (changes, pull, connection) =
+                let (changes, mut read, connection) =
                     merge(carried.collect(), gathered(first, &rx, GATHER_WINDOW));
+                let confirming = confirm.is_some_and(|at| Instant::now() >= at);
+                if confirming {
+                    confirm = None;
+                    read = read.max(Read::Asked);
+                }
                 let r = round(
                     changes,
-                    pull,
+                    read != Read::No,
                     |c| mine.announced(c).map_err(|e| e.to_string()),
                     || mine.pull(None).map(drop).map_err(|e| e.to_string()),
                     |c| mine.unseen(c).map_err(|e| e.to_string()),
@@ -1003,6 +1024,14 @@ fn start(
                     && let Some(connection) = connection
                 {
                     mine.announcing_from(connection);
+                }
+                if read == Read::Unsaid && r.read {
+                    confirm = Some(Instant::now() + await_retry);
+                }
+                if confirming && !r.read {
+                    tracing::info!("a read confirming unsaid changes failed: behind");
+                    mine.set_behind();
+                    mine.wake_all();
                 }
                 held_wait = match r.held.is_empty() {
                     true => HELD_RETRY,
@@ -1079,10 +1108,10 @@ fn still_awaited(
 /// the feed is to be read, and the latest connection asked at.
 fn merge(carried: Vec<ChangeRef>, asks: impl IntoIterator<Item = Asked>) -> Asked {
     asks.into_iter().fold(
-        (carried, false, None),
+        (carried, Read::No, None),
         |(mut changes, read, at), (more, also, connection)| {
             changes.extend(more);
-            (changes, read || also, connection.or(at))
+            (changes, read.max(also), connection.or(at))
         },
     )
 }
@@ -1579,6 +1608,39 @@ mod tests {
         Ok(())
     }
 
+    /// Changes announced without saying which are read, and read again past the hold-back with
+    /// another page size: a read the server answered from before the write doesn't hide them.
+    #[test]
+    fn an_unsaid_change_is_read_again() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        let home = tempfile::tempdir()?;
+        let (drive, remote) = fake_drive(home.path())?;
+        let puller = Puller::spawn_timed(Arc::clone(&drive), Duration::from_millis(20));
+        let mut n = Notifications::new(puller, Instant::now());
+        n.event(Event::Connected, Instant::now(), false);
+        wait_for("the read after connecting", || drive.current())?;
+        // The answer to the next read kept from before another client's write.
+        let mut db = hbsync_state::StateDb::open_account(&home.path().join("state.db"))?;
+        let cursor = db.read(|s| s.account_kv(hbsync_state::keys::REMOTE_CURSOR))?;
+        remote
+            .server()
+            .keep_answer(cursor.as_deref(), drive.next_page_size())?;
+        let other = FakeRemote::new(remote.server_handle());
+        let made = other.create(
+            &hbsync_remote::contract::folder("From b", hbsync_types::NodeId::ROOT),
+            None,
+        )?;
+        n.event(Event::Changed(None), Instant::now(), false);
+        n.tick(Instant::now() + Duration::from_secs(5), false);
+        let db = Mutex::new(db);
+        wait_for("read again", || {
+            lock(&db)
+                .read(|s| s.mirror_by_file(made.at.file_id))
+                .is_ok_and(|m| m.is_some())
+        })?;
+        Ok(())
+    }
+
     /// An announced change the feed never shows is read for a few times, then given up,
     /// leaving the account behind: every folder's next sync reads the feed.
     #[test]
@@ -1614,17 +1676,17 @@ mod tests {
         let window = Duration::from_millis(20);
         let (tx, rx) = channel::<Asked>();
         for _ in 0..2000 {
-            let _ = tx.send((vec![a_ref(false)], false, None));
+            let _ = tx.send((vec![a_ref(false)], Read::No, None));
         }
         let mut sizes = Vec::new();
         while let Ok(first) = rx.try_recv() {
             let (changes, read, _) = merge(Vec::new(), gathered(first, &rx, window));
-            assert!(!read);
+            assert_eq!(read, Read::No);
             sizes.push(changes.len());
         }
         assert_eq!(sizes, [GATHER_MAX; 4]);
 
-        let _ = tx.send((vec![a_ref(true)], false, None));
+        let _ = tx.send((vec![a_ref(true)], Read::No, None));
         let began = Instant::now();
         let asks = rx.recv().map(|first| gathered(first, &rx, window));
         assert_eq!(asks.map(|a| a.len()), Ok(1));
@@ -1632,7 +1694,11 @@ mod tests {
         assert!(took >= window && took < window * 50, "{took:?}");
 
         let began = Instant::now();
-        let asks = gathered((Vec::new(), true, None), &rx, Duration::from_secs(60));
+        let asks = gathered(
+            (Vec::new(), Read::Asked, None),
+            &rx,
+            Duration::from_secs(60),
+        );
         assert_eq!(asks.len(), 1);
         assert!(
             began.elapsed() < Duration::from_secs(1),
@@ -1674,12 +1740,18 @@ mod tests {
     fn a_take_merges_with_a_pull() {
         let (gone, live) = (a_ref(true), a_ref(false));
         let held = vec![gone];
-        let asks = [(vec![live], false, Some(1)), (Vec::new(), true, None)];
+        let asks = [
+            (vec![live], Read::No, Some(1)),
+            (Vec::new(), Read::Asked, None),
+        ];
         let (changes, read, connection) = merge(held, asks);
         assert_eq!(changes, vec![gone, live]);
-        assert!(read);
+        assert_eq!(read, Read::Asked);
         assert_eq!(connection, Some(1), "asked while connected");
-        assert!(!merge(Vec::new(), [(vec![live], false, None)].into_iter()).1);
+        assert_eq!(
+            merge(Vec::new(), [(vec![live], Read::No, None)]).1,
+            Read::No
+        );
     }
 
     /// Taking announced changes that fails keeps the hard deletes for the next round (they

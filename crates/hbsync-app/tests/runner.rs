@@ -273,7 +273,8 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
     // a's removal has the server's time, from its answer.
     let deleted: Vec<_> = AccountReader::open(&db_of(&a.root), "test.example")?
         .ok_or("no state DB")?
-        .all_deleted()?
+        .deletes(100)?
+        .0
         .into_iter()
         .map(|(d, _)| d)
         .collect();

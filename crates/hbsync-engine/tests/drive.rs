@@ -786,5 +786,88 @@ fn an_unreadable_row_is_not_awaited() -> R {
     assert_eq!(drive.unseen(&[announced])?, vec![announced], "not read yet");
     drive.pull(None)?;
     assert_eq!(drive.unseen(&[announced])?, Vec::new(), "read, and skipped");
+    // A later version of that file is awaited as any other.
+    let header = remote.header(made.at.file_id)?;
+    let again = other.update(
+        &hbsync_types::Target {
+            at: hbsync_types::RemoteRef {
+                file_id: header.file_id,
+                version: header.version,
+            },
+            token: header.token.clone(),
+            changed_at: None,
+        },
+        &NodeMeta {
+            content: NodeContent::folder("Renamed"),
+            ..node_meta_of(&header)?
+        },
+        None,
+    )?;
+    let newer = ChangeRef::of(&remote.header(again.at.file_id)?);
+    assert_eq!(
+        drive.unseen(&[newer])?,
+        vec![newer],
+        "a newer version is awaited"
+    );
+    Ok(())
+}
+
+/// The node meta a header has (a folder or a file at its place).
+fn node_meta_of(h: &hbsync_remote::RemoteHeader) -> Result<NodeMeta, Box<dyn std::error::Error>> {
+    let hbsync_remote::RemoteBody::Live { node, content, .. } = &h.body else {
+        return Err("a tombstone".into());
+    };
+    Ok(NodeMeta {
+        node: *node,
+        parent: h.parent,
+        kind: h.kind,
+        content: content.clone(),
+        removed: false,
+    })
+}
+
+/// A doubt that comes while a read of the feed runs isn't cleared by that read: the account
+/// stays behind until a read that started after it.
+#[test]
+fn a_read_clears_only_the_doubts_from_before_it() -> R {
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    drive.announcing_from(drive.connection());
+    assert!(drive.current());
+    remote.faults().latency = Duration::from_millis(300);
+    std::thread::scope(|scope| -> R {
+        let reading = scope.spawn(|| drive.pull(None).map(drop));
+        std::thread::sleep(Duration::from_millis(100));
+        drive.set_behind();
+        reading.join().map_err(|_| "panicked")??;
+        Ok(())
+    })?;
+    assert!(!drive.current(), "the doubt came during the read");
+    drive.pull(None)?;
+    assert!(drive.current());
+    Ok(())
+}
+
+/// A restore is the user's: it reads the feed first, whatever the notifications say; a write
+/// of it whose answer didn't come (it may have landed) leaves the account behind.
+#[test]
+fn a_restore_reads_first_and_a_lost_answer_is_behind() -> R {
+    use hbsync_remote::contract::removed;
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let docs = folder("Docs");
+    let made = remote.create(&docs, None)?;
+    remote.update(&made, &removed(&docs), None)?;
+    drive.pull(None)?;
+    drive.announcing_from(drive.connection());
+    let pages = || {
+        let f = remote.faults();
+        f.ref_pages + f.full_pages
+    };
+    let before = pages();
+    remote.faults().fail_writes_named = Some("Docs".into());
+    assert!(drive.restore(&[docs.node]).is_err(), "the write failed");
+    assert!(pages() > before, "read first");
+    assert!(!drive.current(), "its answer didn't come: behind");
     Ok(())
 }

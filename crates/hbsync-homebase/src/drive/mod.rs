@@ -393,11 +393,20 @@ impl Remote for HomebaseRemote {
                     skipped.push(why);
                     #[derive(serde::Deserialize)]
                     #[serde(rename_all = "camelCase")]
+                    struct Version {
+                        version_tag: Uuid,
+                    }
+                    #[derive(serde::Deserialize)]
+                    #[serde(rename_all = "camelCase")]
                     struct Id {
                         file_id: Uuid,
+                        file_metadata: Version,
                     }
-                    if let Ok(Id { file_id }) = serde_json::from_str(row.get()) {
-                        skipped_files.push(RemoteFileId(file_id));
+                    if let Ok(id) = serde_json::from_str::<Id>(row.get()) {
+                        skipped_files.push(RemoteRef {
+                            file_id: RemoteFileId(id.file_id),
+                            version: VersionTag(id.file_metadata.version_tag),
+                        });
                     }
                 }
             }

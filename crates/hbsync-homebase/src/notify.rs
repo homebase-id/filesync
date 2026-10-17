@@ -454,7 +454,11 @@ fn classify(body: &[u8]) -> Notification {
     if kind("deviceHandshakeSuccess") {
         Notification::Handshake
     } else if kind("fileAdded") || kind("fileModified") || kind("fileDeleted") {
-        Notification::Changed(data.as_deref().and_then(|d| change(d, kind("fileDeleted"))))
+        match data.as_deref() {
+            // Another app's file on the drive: not the client's, nothing to read or await.
+            Some(d) if not_a_node(d) => Notification::Other,
+            d => Notification::Changed(d.and_then(|d| change(d, kind("fileDeleted")))),
+        }
     } else if kind("authenticationError") {
         Notification::Refused(format!("refused: {}", data.as_deref().unwrap_or("")))
     } else {
@@ -470,6 +474,16 @@ struct KindOnly {
 }
 
 /// The file a drive event announces; `None` if the event doesn't say.
+/// Whether a drive event names a file that isn't a sync node (its type, now or before).
+fn not_a_node(data: &str) -> bool {
+    serde_json::from_str::<DriveEvent>(data).is_ok_and(|e| {
+        e.file_ref
+            .as_ref()
+            .or(e.previous_file_ref.as_ref())
+            .is_some_and(FileRef::not_a_node)
+    })
+}
+
 fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
     match serde_json::from_str::<DriveEvent>(data) {
         Ok(event) => match (event.file_ref, event.previous_file_ref) {
@@ -538,6 +552,25 @@ mod tests {
             "00000000000000000000000000000001"
         );
         assert_eq!(request(true)["excludeOwnWrites"], false);
+    }
+
+    /// An event of another app's file on the drive (a type not a sync node's) is no change of
+    /// the client's: nothing to read or await. A sync node's is.
+    #[test]
+    fn another_apps_file_is_not_announced() {
+        let event = |file_type: i32| {
+            let data = json!({"fileRef": {"fileId": uuid::Uuid::new_v4(),
+                "versionTag": uuid::Uuid::new_v4(), "fileState": "active", "updated": 1,
+                "fileType": file_type}});
+            classify(
+                json!({"notificationType": "fileAdded", "data": data.to_string()})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        assert_eq!(event(100), Notification::Other);
+        assert!(matches!(event(7102), Notification::Changed(Some(_))));
+        assert!(matches!(event(7101), Notification::Changed(Some(_))));
     }
 
     #[test]

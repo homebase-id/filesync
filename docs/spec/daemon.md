@@ -143,9 +143,15 @@ a failure (service managers restart it then).
   passes that row; it never asks for a read. The rows of its own writes stay in the feed
   ahead of the cursor and are read slim (versions it has) at its next read. The account's
   other folders hear of the writes through the account's drive, which they share, not the
-  socket. Two computers on one token (a copied credentials file, a restored backup) don't
-  hear each other's writes; each catches up on the other's only at a reconnect or with a
-  change from elsewhere it doesn't know.
+  socket.
+- **Known limitation: one login per computer.** The notifications leave out every write made
+  with the computer's own login (its client registration), so two computers using the same
+  login don't hear each other's changes: a credentials file or keychain entry copied to
+  another computer, a backup restored onto a second machine, a home folder moved over while
+  the old computer still runs. Each then gets the other's changes only when its
+  notifications reconnect, at its start, or with a change from a third computer it doesn't
+  know, which can be hours. Nothing detects this yet: log in again on the second computer
+  (`hbsync logout`, then `hbsync setup`), which registers it as a computer of its own.
 - **When the feed is read**, and only then:
   - at a folder's start (and once more if its local catch-up, a walk, took long);
   - when the notifications connect (again): the account pulls, as changes made meanwhile

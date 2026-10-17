@@ -141,7 +141,8 @@ impl Executor<'_> {
         written: Option<Target>,
     ) -> Step {
         let node = meta.node;
-        let row = written.map(|w| written_row(w, &meta, hash));
+        let row = written
+            .map(|w| MirrorRow::written(w, meta.node, meta.parent, meta.kind, &meta.content, hash));
         self.finish(&[Settle::node(node)], |s| match after {
             After::Created => {
                 s.delete_removed(node)?;

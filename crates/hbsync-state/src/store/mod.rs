@@ -170,8 +170,6 @@ pub struct MirrorFile {
 pub struct DirtyCursor(i64);
 
 impl MirrorRow {
-    /// The row of a node written as `content`, now at `at`. A file has its payload's content
-    /// hash; a file without one has no [`MirrorFile`].
     /// The row of a node this device wrote as `content` (a file of content `hash`), as the
     /// write's answer (`written`) has it: with its token and the server's time of the version.
     pub fn written(
@@ -189,6 +187,8 @@ impl MirrorRow {
         }
     }
 
+    /// The row of a node written as `content`, now at `at`. A file has its payload's content
+    /// hash; a file without one has no [`MirrorFile`].
     pub fn from_content(
         at: RemoteRef,
         node: NodeId,

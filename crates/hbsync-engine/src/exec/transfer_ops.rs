@@ -301,7 +301,14 @@ impl Executor<'_> {
             }
             (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
                 let node = meta.node;
-                let row = written_row(written, &meta, Some(hash));
+                let row = MirrorRow::written(
+                    written,
+                    meta.node,
+                    meta.parent,
+                    meta.kind,
+                    &meta.content,
+                    Some(hash),
+                );
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 let how = Settle {
                     same_bytes: true,

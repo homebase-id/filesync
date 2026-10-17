@@ -2900,3 +2900,27 @@ fn a_kept_feed_answer_hides_no_write_from_a_sync() -> R {
     );
     Ok(())
 }
+
+/// A write whose answer didn't come (it landed: a timeout after the server wrote) isn't sent
+/// again blind, a large upload twice: the drive is behind, the feed is read first, and the
+/// file settles as uploaded.
+#[test]
+fn a_write_whose_answer_was_lost_isnt_sent_again() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.sync()?;
+    a.announced();
+    a.remote.faults().lose_answer_named = Some("big.bin".into());
+    a.write("big.bin", vec![7u8; 1 << 20])?;
+    a.sync_unasked()?;
+    a.remote.faults().lose_answer_named = None;
+    a.sync_unasked()?;
+    assert_eq!(a.remote.faults().uploads, 1, "sent once");
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["big.bin"]
+    );
+    assert_eq!(a.tree_text(""), ["big.bin = <1048576 bytes>"]);
+    assert!(a.sync_unasked()?.ops_done == 0, "settled");
+    Ok(())
+}

@@ -573,6 +573,11 @@ pub struct Faults {
     pub unread_refs: bool,
     /// The page size of the last feed read, for assertions.
     pub last_page: Option<usize>,
+    /// Creates and updates of nodes with this name land, but their answer is lost
+    /// ([`RemoteError::Transient`], a timeout after the server wrote).
+    pub lose_answer_named: Option<String>,
+    /// Payloads received, for assertions.
+    pub uploads: usize,
     /// Rows of these files can't be read (as the Homebase adapter skips a row that doesn't
     /// decrypt): whole pages leave them out, with why.
     pub unreadable: std::collections::HashSet<RemoteFileId>,
@@ -658,6 +663,16 @@ impl FakeRemote {
 }
 
 impl FakeRemote {
+    /// Loses the answer to a write that landed, of a node named `name`, if that is injected.
+    fn answered(&self, name: &str) -> Result<()> {
+        match self.faults().lose_answer_named.as_deref() == Some(name) {
+            true => Err(RemoteError::Transient(
+                "injected: the answer was lost".into(),
+            )),
+            false => Ok(()),
+        }
+    }
+
     /// Fails a write to a node named `name` if that is injected.
     fn gate_name(&self, name: &str) -> Result<()> {
         if self.faults().deny_writes {
@@ -680,7 +695,11 @@ impl FakeRemote {
         let Some(upload) = payload else {
             return Ok(None);
         };
-        let cut = self.faults().cut_upload_after.take();
+        let cut = {
+            let mut faults = self.faults();
+            faults.uploads += 1;
+            faults.cut_upload_after.take()
+        };
         let mut bytes = Vec::with_capacity(upload.size as usize);
         let mut buf = [0u8; 64 * 1024];
         loop {
@@ -743,7 +762,10 @@ impl Remote for FakeRemote {
             let h: RemoteHeader = h;
             page.skipped
                 .push(format!("{:?}: injected: unreadable", h.file_id));
-            page.skipped_files.push(h.file_id);
+            page.skipped_files.push(RemoteRef {
+                file_id: h.file_id,
+                version: h.version,
+            });
         }
         Ok(page)
     }
@@ -773,9 +795,11 @@ impl Remote for FakeRemote {
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
-        replay(received, |upload| {
+        let written = replay(received, |upload| {
             self.server().create_by(Some(self.client), node, upload)
-        })
+        })?;
+        self.answered(&node.content.name)?;
+        Ok(written)
     }
 
     fn update(
@@ -798,10 +822,12 @@ impl Remote for FakeRemote {
         self.gate()?;
         self.gate_name(&meta.content.name)?;
         let received = self.receive(payload)?;
-        replay(received, |upload| {
+        let written = replay(received, |upload| {
             self.server()
                 .update_by(Some(self.client), file_id, target.at.version, meta, upload)
-        })
+        })?;
+        self.answered(&meta.content.name)?;
+        Ok(written)
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {

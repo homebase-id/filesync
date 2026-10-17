@@ -28,9 +28,9 @@ pub struct FeedReport {
     pub deleted: usize,
     /// Rows the client can't read (not encrypted, another key, not a sync node), with why.
     pub skipped: Vec<String>,
-    /// The files of rows the feed holds but the mirror doesn't take: those rows (where they
-    /// say which file), and live files without a payload.
-    pub unreadable: Vec<RemoteFileId>,
+    /// The rows the feed holds but the mirror doesn't take, by file and version: those it
+    /// couldn't read (where they say which), and live files without a payload.
+    pub unreadable: Vec<RemoteRef>,
 }
 
 impl std::ops::AddAssign for FeedReport {
@@ -120,7 +120,10 @@ fn read_whole<G: DerefMut<Target = StateDb>>(
         page.entries
             .iter()
             .filter(|h| !h.is_deleted() && mirror_row(h).is_none())
-            .map(|h| h.file_id),
+            .map(|h| RemoteRef {
+                file_id: h.file_id,
+                version: h.version,
+            }),
     );
     let nothing_new = db().write(|s| {
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();

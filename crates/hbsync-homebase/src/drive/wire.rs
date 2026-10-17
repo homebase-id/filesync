@@ -100,7 +100,7 @@ pub struct QueryBatchResponse {
 }
 
 /// One row of a minimal `query-batch` page (odin-core #1967 `QueryBatchFileRef`, **[verified]**):
-/// the fields the client reads; the others (fileType, created, uniqueId, …) are skipped.
+/// the fields the client reads; the others (created, uniqueId, …) are skipped.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRef {
@@ -114,6 +114,18 @@ pub struct FileRef {
     /// Unix ms, as the header's `updated`.
     #[serde(default)]
     pub updated: i64,
+    /// A sync node's ([`FILE_TYPE_FOLDER`], [`FILE_TYPE_FILE`]), or another app's file on the
+    /// drive.
+    #[serde(default)]
+    pub file_type: Option<i32>,
+}
+
+impl FileRef {
+    /// Whether the row is another app's file, not a sync node (its type says so).
+    pub fn not_a_node(&self) -> bool {
+        self.file_type
+            .is_some_and(|t| t != FILE_TYPE_FOLDER && t != FILE_TYPE_FILE)
+    }
 }
 
 impl FileRef {
