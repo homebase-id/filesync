@@ -48,6 +48,13 @@ Read these first:
 - `docs/spec/file-browser.md`: the guide for the file browser (chat-kmp's Filesync mini-app),
   which lists and opens the drive's files on demand: how it reads and writes what we sync.
 
+The over-arching goal: be mindful of resources and leave Dropbox in the dust. CPU, memory, disk
+writes, network bytes and requests, and the cost of sitting idle all count. Sacrifices in features or
+convenience are acceptable for it; data safety is not. Weigh every design and review finding by
+its cost as well as its correctness, measure before and after a change that affects performance,
+prefer the cheaper of two sound designs, and name a trade-off ("this costs X per file") rather
+than accepting extra cost silently.
+
 Ground rules:
 - Never lose data. The reconciler is a pure function; all OS and network work sits behind traits.
 - Build against a fake remote that models the real node schema before touching Homebase.
