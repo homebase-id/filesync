@@ -9,12 +9,15 @@
 //!   subscription is `establishConnectionRequest`, answered by `deviceHandshakeSuccess`;
 //! - server frames are `{isEncrypted, payload}`; drive changes are `fileAdded`,
 //!   `fileModified`, `fileDeleted` (reactions also send `fileModified`), as minimal rows
-//!   (odin-core #1970, `homebase-api-notes.md`).
+//!   (odin-core #1970, `homebase-api-notes.md`);
+//! - with `excludeOwnWrites` (odin-core #1971) the socket isn't told of writes made with its
+//!   own token: this client records each of its writes from the write's answer, its server
+//!   time included (`daemon.md`, the sync loop).
 
 use std::borrow::Cow;
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -57,26 +60,84 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A refused subscription isn't asked again sooner (the sync's own refusals wait as long).
 const REFUSED_PAUSE: Duration = Duration::from_secs(300);
 
+/// Whether the subscription hears of the drive writes this client makes itself (measurements:
+/// the `dev` feature).
+#[cfg(feature = "dev")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OwnWrites {
+    /// Not told (`excludeOwnWrites`, odin-core #1971): the server leaves out the writes made
+    /// with this client's token. Another computer's writes (its own client registration) are
+    /// still announced; two computers sharing one token would miss each other's.
+    #[default]
+    Excluded,
+    /// Told of every write, this client's own coming back as echoes (for measurements).
+    Heard,
+}
+
+/// What the connection received so far, over all its connections: server frames, and their
+/// bytes as text frames (the encrypted envelope included; TLS and WebSocket framing not).
+/// Counted always, read with the `dev` feature.
+#[derive(Debug, Default)]
+pub struct Received {
+    pub frames: AtomicU64,
+    pub bytes: AtomicU64,
+}
+
 /// The notification connection, on its own thread. Stops when dropped: the thread ends at
 /// its next check (it isn't waited for, as it may be in the middle of connecting).
 #[derive(Debug)]
 pub struct Notifier {
     stop: Arc<AtomicBool>,
     reconnect: Arc<AtomicBool>,
+    /// Counted by the connection's thread, read with the `dev` feature.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
+    received: Arc<Received>,
 }
 
 impl Notifier {
     /// Connects to `client`'s identity and subscribes to `drive`, reconnecting as needed;
-    /// events go to `events` until it is closed or the notifier dropped. An error: its thread
+    /// events go to `events` until it is closed or the notifier dropped. Writes made with
+    /// `client`'s own token aren't announced (`excludeOwnWrites`). An error: its thread
     /// couldn't start (then never connected: the caller reads the drive on a timer).
     pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> io::Result<Self> {
+        Self::subscribe(client, Subscription { drive, own: false }, events)
+    }
+
+    /// [`Notifier::spawn`], hearing this client's `own` writes or not (measurements).
+    #[cfg(feature = "dev")]
+    pub fn spawn_with(
+        client: Client,
+        drive: TargetDrive,
+        own: OwnWrites,
+        events: Sender<Event>,
+    ) -> io::Result<Self> {
+        let own = own == OwnWrites::Heard;
+        Self::subscribe(client, Subscription { drive, own }, events)
+    }
+
+    fn subscribe(
+        client: Client,
+        subscription: Subscription,
+        events: Sender<Event>,
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
-        let (flag, kick) = (stop.clone(), reconnect.clone());
+        let received = Arc::new(Received::default());
+        let (flag, kick, counts) = (stop.clone(), reconnect.clone(), received.clone());
         std::thread::Builder::new()
             .name("hbsync-notify".into())
-            .spawn(move || run(&client, drive, &events, &flag, &kick))?;
-        Ok(Notifier { stop, reconnect })
+            .spawn(move || run(&client, subscription, &events, &flag, &kick, &counts))?;
+        Ok(Notifier {
+            stop,
+            reconnect,
+            received,
+        })
+    }
+
+    /// What it received so far (measurements).
+    #[cfg(feature = "dev")]
+    pub fn received(&self) -> &Received {
+        &self.received
     }
 
     /// Drops the connection and connects again at once, without waiting out a backoff: after
@@ -93,12 +154,35 @@ impl Drop for Notifier {
     }
 }
 
+/// What the connection subscribes to.
+#[derive(Debug, Clone, Copy)]
+struct Subscription {
+    drive: TargetDrive,
+    /// Hears this client's own writes too (measurements).
+    own: bool,
+}
+
+impl Subscription {
+    /// The `establishConnectionRequest`'s data.
+    fn request(&self) -> serde_json::Value {
+        json!({
+            "drives": [{
+                "alias": self.drive.alias.simple().to_string(),
+                "type": self.drive.drive_type.simple().to_string(),
+            }],
+            "resultShape": "minimal",
+            "excludeOwnWrites": !self.own,
+        })
+    }
+}
+
 fn run(
     client: &Client,
-    drive: TargetDrive,
+    subscription: Subscription,
     events: &Sender<Event>,
     stop: &AtomicBool,
     reconnect: &AtomicBool,
+    received: &Received,
 ) {
     const FIRST: Duration = Duration::from_secs(1);
     let mut backoff = FIRST;
@@ -106,10 +190,10 @@ fn run(
         let (mut connected, mut refused) = (false, false);
         let result = session(
             client,
-            drive,
+            subscription,
             events,
-            stop,
-            reconnect,
+            (stop, reconnect),
+            received,
             &mut connected,
             &mut refused,
         );
@@ -154,10 +238,10 @@ type Socket = WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>
 /// One connection, until it breaks or is `refused` (`Err`) or the notifier stops (`Ok`).
 fn session(
     client: &Client,
-    drive: TargetDrive,
+    subscription: Subscription,
     events: &Sender<Event>,
-    stop: &AtomicBool,
-    reconnect: &AtomicBool,
+    (stop, reconnect): (&AtomicBool, &AtomicBool),
+    received: &Received,
     connected: &mut bool,
     refused: &mut bool,
 ) -> Result<(), String> {
@@ -166,14 +250,7 @@ fn session(
         &mut socket,
         client,
         "establishConnectionRequest",
-        &json!({
-            "drives": [{
-                "alias": drive.alias.simple().to_string(),
-                "type": drive.drive_type.simple().to_string(),
-            }],
-            "resultShape": "minimal",
-        })
-        .to_string(),
+        &subscription.request().to_string(),
     )?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
@@ -189,6 +266,10 @@ fn session(
         match socket.read() {
             Ok(Message::Text(text)) => {
                 last_frame = Instant::now();
+                received.frames.fetch_add(1, Ordering::Relaxed);
+                received
+                    .bytes
+                    .fetch_add(text.len() as u64, Ordering::Relaxed);
                 let event = match notification(client, text.as_str()) {
                     Notification::Handshake if !*connected => {
                         *connected = true;
@@ -373,7 +454,11 @@ fn classify(body: &[u8]) -> Notification {
     if kind("deviceHandshakeSuccess") {
         Notification::Handshake
     } else if kind("fileAdded") || kind("fileModified") || kind("fileDeleted") {
-        Notification::Changed(data.as_deref().and_then(|d| change(d, kind("fileDeleted"))))
+        match data.as_deref() {
+            // Another app's file on the drive: not the client's, nothing to read or await.
+            Some(d) if not_a_node(d) => Notification::Other,
+            d => Notification::Changed(d.and_then(|d| change(d, kind("fileDeleted")))),
+        }
     } else if kind("authenticationError") {
         Notification::Refused(format!("refused: {}", data.as_deref().unwrap_or("")))
     } else {
@@ -389,6 +474,16 @@ struct KindOnly {
 }
 
 /// The file a drive event announces; `None` if the event doesn't say.
+/// Whether a drive event names a file that isn't a sync node (its type, now or before).
+fn not_a_node(data: &str) -> bool {
+    serde_json::from_str::<DriveEvent>(data).is_ok_and(|e| {
+        e.file_ref
+            .as_ref()
+            .or(e.previous_file_ref.as_ref())
+            .is_some_and(FileRef::not_a_node)
+    })
+}
+
 fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
     match serde_json::from_str::<DriveEvent>(data) {
         Ok(event) => match (event.file_ref, event.previous_file_ref) {
@@ -438,6 +533,44 @@ mod tests {
 
     fn n(body: serde_json::Value) -> Notification {
         classify(body.to_string().as_bytes())
+    }
+
+    /// The subscription asks for minimal events, without this client's own writes unless it
+    /// wants to hear them.
+    #[test]
+    fn the_subscription_leaves_out_own_writes() {
+        let drive = TargetDrive {
+            alias: uuid::Uuid::from_u128(1),
+            drive_type: uuid::Uuid::from_u128(2),
+        };
+        let request = |own| Subscription { drive, own }.request();
+        let excluded = request(false);
+        assert_eq!(excluded["excludeOwnWrites"], true);
+        assert_eq!(excluded["resultShape"], "minimal");
+        assert_eq!(
+            excluded["drives"][0]["alias"],
+            "00000000000000000000000000000001"
+        );
+        assert_eq!(request(true)["excludeOwnWrites"], false);
+    }
+
+    /// An event of another app's file on the drive (a type not a sync node's) is no change of
+    /// the client's: nothing to read or await. A sync node's is.
+    #[test]
+    fn another_apps_file_is_not_announced() {
+        let event = |file_type: i32| {
+            let data = json!({"fileRef": {"fileId": uuid::Uuid::new_v4(),
+                "versionTag": uuid::Uuid::new_v4(), "fileState": "active", "updated": 1,
+                "fileType": file_type}});
+            classify(
+                json!({"notificationType": "fileAdded", "data": data.to_string()})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        assert_eq!(event(100), Notification::Other);
+        assert!(matches!(event(7102), Notification::Changed(Some(_))));
+        assert!(matches!(event(7101), Notification::Changed(Some(_))));
     }
 
     #[test]

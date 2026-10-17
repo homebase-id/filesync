@@ -1,7 +1,9 @@
 //! Two clients syncing two folders through a live identity:
 //! `HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-dev --test live_e2e -- --ignored`.
 //! Needs the credentials `hbsync-register` saves. Both clients sync the whole drive; the test
-//! works and checks inside one top-level folder of its own and deletes it at the end.
+//! works and checks inside one top-level folder of its own and deletes it at the end. The two
+//! share one client registration: they sync when the test says, never on a notification, so
+//! that the socket leaves out a client's own writes (`excludeOwnWrites`) doesn't concern them.
 
 use std::fs;
 use std::ops::{Deref, DerefMut};
@@ -50,10 +52,49 @@ impl Client {
         Ok(())
     }
 
+    /// Why this client's tree under `run` isn't `other`'s, for a failure message: the feed read
+    /// again from its cursor (rows it would take now), and whether one more sync converges.
+    fn why_not_like(&mut self, other: &Client, run: &str) -> String {
+        use hbsync_remote::Remote;
+        let cursor = hbsync_state::StateDb::open_account(&self.db_path())
+            .and_then(|mut db| db.read(|s| s.account_kv(hbsync_state::keys::REMOTE_CURSOR)));
+        let cursor = match cursor {
+            Ok(c) => c,
+            Err(e) => return format!("no cursor: {e}"),
+        };
+        let again = self.remote.change_refs(cursor.as_deref(), 500);
+        let rows = again
+            .as_ref()
+            .map(|p| format!("{} rows, more: {}", p.refs.len(), p.has_more));
+        std::thread::sleep(Duration::from_secs(1));
+        // The rows from that cursor now, with their times (`updated`), to set against the
+        // cursor's time.
+        let later = self.remote.change_refs(cursor.as_deref(), 500).map(|p| {
+            p.refs
+                .iter()
+                .map(|r| {
+                    format!(
+                        "{:?} deleted={} at={:?}",
+                        r.file_id,
+                        r.deleted,
+                        r.changed_at.or(r.removed_at)
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        let synced = self.sync().map(|r| (r.feed, r.synced.len()));
+        format!(
+            "{}'s cursor {cursor:?}; read again from it: {rows:?}; a second later: {later:?}; \
+             another sync: {synced:?}, now converged: {}",
+            self.name,
+            self.tree_text(run) == other.tree_text(run)
+        )
+    }
+
     /// Scan, then sync until idle: nothing may fail or be skipped.
     fn sync(&mut self) -> Res<SyncReport> {
         // Homebase holds back feed rows of the current millisecond.
-        let total = self.0.sync_until_idle(&hbsync_app::today(), || {
+        let total = self.0.sync_until_idle(&hbsync_app::today(), true, || {
             std::thread::sleep(Duration::from_millis(20));
         })?;
         assert!(
@@ -211,7 +252,14 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.sync()?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(a.tree_text(run), b.tree_text(run));
+    if a.tree_text(run) != b.tree_text(run) {
+        let why = a.why_not_like(b, run);
+        panic!(
+            "after a rename and move on b: a {:?}, b {:?}\n{why}",
+            a.tree_text(run),
+            b.tree_text(run)
+        );
+    }
     assert_eq!(b.read(&at("doc.txt"))?, b"v2");
     assert!(a.root.join(at("x-moved.txt")).is_file());
 
@@ -230,8 +278,19 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.sync()?;
     let report = b.sync()?;
     assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
-    a.sync()?;
-    assert_eq!(a.tree_text(run), b.tree_text(run));
+    let ra = a.sync()?;
+    if a.tree_text(run) != b.tree_text(run) {
+        let why = a.why_not_like(b, run);
+        panic!(
+            "after the conflict: a {:?}, b {:?}\nb: {:?} feed {:?}\na: {:?} feed {:?}\n{why}",
+            a.tree_text(run),
+            b.tree_text(run),
+            report.synced,
+            report.feed,
+            ra.synced,
+            ra.feed
+        );
+    }
     let versions: Vec<String> = a
         .tree_text(run)
         .into_iter()

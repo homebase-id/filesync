@@ -308,26 +308,6 @@ pub(super) fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String
         .map(str::to_owned)
 }
 
-/// The mirror row of a node written as `meta` (a file with its content `hash`): the file as
-/// written, with its token.
-pub(super) fn written_row(
-    written: Target,
-    meta: &NodeMeta,
-    hash: Option<hbsync_types::ContentHash>,
-) -> MirrorRow {
-    MirrorRow {
-        token: written.token,
-        ..MirrorRow::from_content(
-            written.at,
-            meta.node,
-            meta.parent,
-            meta.kind,
-            &meta.content,
-            hash,
-        )
-    }
-}
-
 /// A metadata-only update of a node to `meta` if it's still at `target` (its payload, of
 /// content `hash`, stays); its mirror row after.
 pub(crate) fn update_meta(
@@ -337,7 +317,14 @@ pub(crate) fn update_meta(
     hash: Option<hbsync_types::ContentHash>,
 ) -> Result<MirrorRow, RemoteError> {
     let written = remote.update(target, meta, None)?;
-    Ok(written_row(written, meta, hash))
+    Ok(MirrorRow::written(
+        written,
+        meta.node,
+        meta.parent,
+        meta.kind,
+        &meta.content,
+        hash,
+    ))
 }
 
 /// The tags a write over a drive version sends: `ours` merged with that version's, which may

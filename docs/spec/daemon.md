@@ -123,11 +123,10 @@ a failure (service managers restart it then).
   once.
 - **Announced changes** name their file (a minimal row, odin-core #1970): a file deleted for
   good is gone from the account's picture within a second (a hard delete leaves no row in the
-  feed), and versions the account has already (this device's own writes coming back) are taken as
-  a slim feed page's rows, an own removal getting the server's time; the feed is read only
-  when something announced isn't known, or an event didn't say which file. One ref per file
-  counts (a delete for good ends it; else the newest), so an own write made twice, or made
-  then deleted, needs no read. A hard delete announced is taken within a second (what is
+  feed), and versions the account has already are taken as a slim feed page's rows; the feed
+  is read only when something announced isn't known, or an event didn't say which file. One
+  ref per file counts (a delete for good ends it; else the newest), so a write made twice, or
+  made then deleted, needs no read. A hard delete announced is taken within a second (what is
   announced within a second of it, up to 500 changes, is taken in one write, hard deletes
   before the rest), also while paused (it is in no feed; it writes only the account's DB, the
   folders sync it at the resume), kept and tried again with a growing pause when that fails,
@@ -139,6 +138,54 @@ a failure (service managers restart it then).
   Announced changes are taken one at a time with the pulls, on the account's pull thread
   (started again if it ended), never on the account's loop. A timed pause runs out for the
   account as for its folders.
+- **Own writes aren't announced** (`excludeOwnWrites`, odin-core #1971): the socket leaves
+  out the writes made with this computer's own token (its client registration), so what is
+  announced is another computer's (or the phone's) doing. Nothing waits for an echo, and no
+  feed is read for them: the executor records each write from its answer (version, token,
+  and `updated`, the server's time the feed shows for it: a version's time, an own
+  removal's for Recently deleted and the purge). An answer without `updated` (null: only
+  for a peer-only update, which this client never makes) leaves that time unknown, a
+  removal's shown as just now and never purged, until a feed read the client makes anyway
+  passes that row; it never asks for a read. The rows of its own writes stay in the feed
+  ahead of the cursor and are read slim (versions it has) at its next read. The account's
+  other folders hear of the writes through the account's drive, which they share, not the
+  socket.
+- **Known limitation: one login per computer.** The notifications leave out every write made
+  with the computer's own login (its client registration), so two computers using the same
+  login don't hear each other's changes: each gets the other's only when its notifications
+  reconnect, at its start, or with a change from a third computer it doesn't know, which can
+  be hours. The credentials are kept for this device only (the keychain entry isn't carried
+  to another computer by a migration or a backup), so this takes a credentials file copied
+  by hand. Nothing detects it: log in again on the second computer (`hbsync logout`, then
+  `hbsync setup`), which registers it as a computer of its own.
+- **When the feed is read**, and only then:
+  - at a folder's start (and once more if its local catch-up, a walk, took long);
+  - when the notifications connect (again): the account pulls, as changes made meanwhile
+    weren't announced (connected while paused: at the resume). Only once that read worked
+    are the drive's changes taken as announced (the account's picture *current*);
+  - when an announced version isn't known, or an event didn't say which file; an announced
+    version that read didn't bring is read for again 1.1 s later (past the server's hold-back
+    of rows written in its last second), then twice as long each time, six reads for each
+    such change at most, after which the account is *behind* (the server may keep a stale
+    answer for a while, odin-core #1909, filesync #90: `homebase-api-notes.md`, the change
+    feed);
+  - every 5 min while the notifications aren't connected;
+  - by a sync while the account's picture isn't current: the notifications aren't connected
+    or their read after connecting hasn't worked, or the account is behind. It is behind
+    when it can't be sure its picture is complete: a pull failed, the notifications were
+    lost or refused, an announced change never showed, looking for it failed, or the drive
+    refused a write for its state (a version moved on, a node id taken, a file gone: a
+    change it wasn't told of, or an earlier try of its own write that landed unanswered).
+    After such a refused write the sync reads at once; a read that works ends it;
+  - by a sync the user asked for (sync now, a resume, confirming held deletes) or the
+    machine waking up; asked until a sync ended, so a failed one asks again;
+  - before Recently deleted's restore, emptying and the daily purge, while not current;
+  - when this device makes a role folder that another device made meanwhile.
+  A sync woken by a local change or by the account's drive reads nothing while current,
+  and none reads after its own writes. Each read asks for pages of a few rows less than the
+  one before (500 down to 437, round after round, from a random start), so it never asks
+  the server the very query an answer may have been kept for (odin-core #1909, filesync
+  #90).
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start

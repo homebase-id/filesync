@@ -2757,3 +2757,170 @@ fn own_writes_come_back_slim() -> R {
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     Ok(())
 }
+
+/// The feed pages `c` read so far, slim and whole.
+fn feed_reads(c: &Client) -> usize {
+    let f = c.remote.faults();
+    f.ref_pages + f.full_pages
+}
+
+/// A folder made by another client, as `b` writes it.
+fn folder_meta(name: &str) -> NodeMeta {
+    hbsync_remote::contract::folder(name, NodeId::ROOT)
+}
+
+/// With the drive's changes announced and this device's own writes left out of them
+/// (`excludeOwnWrites`, odin-core #1971), its syncs read no feed at all: each write is
+/// recorded from its answer, a version's server time and a removal's alike, and nothing of its
+/// own comes back to it. Another computer's change, announced and unknown, is what reads it.
+#[test]
+fn own_writes_are_recorded_from_their_answers() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.sync()?; // start: reads the feed, as at every start
+    a.announced();
+    let heard = a.remote.subscribe(true);
+    let before = feed_reads(&a);
+    a.write("doc.txt", "x")?;
+    a.write("dir/in.txt", "y")?;
+    a.sync_unasked()?;
+    fs::rename(a.root.join("doc.txt"), a.root.join("renamed.txt"))?;
+    a.sync_unasked()?;
+    assert_eq!(feed_reads(&a), before, "a's own writes read the feed");
+
+    // Each version's time is the server's.
+    let mut db = StateDb::open_account(&a.db_path())?;
+    let headers: Vec<RemoteHeader> = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        s.live().cloned().collect()
+    };
+    assert_eq!(headers.len(), 3, "dir, in.txt, renamed.txt: {headers:?}");
+    for h in &headers {
+        let row = db
+            .read(|s| s.mirror_by_file(h.file_id))?
+            .ok_or("not in the mirror")?;
+        assert_eq!(row.version, h.version);
+        assert_eq!(row.changed_at, h.changed_at, "{h:?}");
+    }
+
+    // A removal's time too, without a feed read.
+    fs::remove_dir_all(a.root.join("dir"))?;
+    fs::remove_file(a.root.join("renamed.txt"))?;
+    a.sync_unasked()?;
+    assert_eq!(feed_reads(&a), before, "a's own removals read the feed");
+    let on_server: HashMap<RemoteFileId, Option<i64>> = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        s.removed().map(|h| (h.file_id, h.removed_at)).collect()
+    };
+    assert_eq!(on_server.len(), 3);
+    let deleted = a.recently_deleted(10)?;
+    assert_eq!(deleted.len(), 3, "{deleted:?}");
+    for d in deleted {
+        let row = db
+            .read(|s| s.removed_by_node(d.node))?
+            .ok_or("not removed")?;
+        assert!(d.removed_at_ms.is_some(), "{} open", d.path);
+        assert_eq!(d.removed_at_ms, on_server[&row.row.file_id], "{}", d.path);
+    }
+    assert_eq!(heard.try_iter().count(), 0, "a heard its own writes");
+
+    // Another computer's write, announced: news, so the feed is read for it.
+    let b = FakeRemote::new(server.clone());
+    b.create(&folder_meta("from b"), None)?;
+    let announced: Vec<_> = heard.try_iter().collect();
+    assert_eq!(announced.len(), 1);
+    assert!(!a.engine.drive().announced(&announced)?, "news: read");
+    a.engine.drive().pull(None)?;
+    assert!(feed_reads(&a) > before, "the news is read");
+    a.sync_unasked()?;
+    assert!(a.root.join("from b").is_dir());
+    Ok(())
+}
+
+/// A write the drive refuses for its state (another device changed the file, unannounced to
+/// this one) leaves the drive behind: the sync reads the feed at once, though the
+/// notifications run and nothing else would read, and the next try settles it.
+#[test]
+fn a_write_refused_for_the_drives_state_reads_the_feed() -> R {
+    let server = server();
+    let (mut a, mut b) = (Client::new(&server, "a")?, Client::new(&server, "b")?);
+    a.write("doc.txt", "a1")?;
+    a.sync()?;
+    b.sync()?;
+    a.announced();
+    // b's edit, never announced to a.
+    b.write("doc.txt", "b2")?;
+    b.sync()?;
+    a.write("doc.txt", "a2")?;
+    // The refused write reads the feed; the retry of the unfinished work (the runner's, a few
+    // seconds on) settles it, with no read of its own.
+    let refused = a.sync_unasked()?;
+    assert!(refused.unfinished && refused.feed.live > 0, "{refused:?}");
+    let reads = feed_reads(&a);
+    a.sync_unasked()?;
+    assert_eq!(feed_reads(&a), reads, "the retry reads nothing");
+    let texts: Vec<String> = a
+        .entries("")
+        .into_iter()
+        .map(|(_, t)| String::from_utf8_lossy(&t).into_owned())
+        .collect();
+    assert!(
+        texts.contains(&"b2".to_owned()) && texts.contains(&"a2".to_owned()),
+        "{texts:?}"
+    );
+    Ok(())
+}
+
+/// A feed answer the server kept from before a write (odin-core keeps answers by query, and
+/// one computed while a write commits can outlive it) doesn't hide that write from a client
+/// that syncs only on request: no read asks what the one before it did ([`Drive::page_size`]).
+#[test]
+fn a_kept_feed_answer_hides_no_write_from_a_sync() -> R {
+    let server = server();
+    let (mut a, mut b) = (Client::new(&server, "a")?, Client::new(&server, "b")?);
+    b.write("one.txt", "1")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read_text("one.txt")?, "1");
+    // The answer to a's last read, kept through b's next write.
+    let cursor = StateDb::open_account(&a.db_path())?
+        .read(|s| s.account_kv(hbsync_state::keys::REMOTE_CURSOR))?;
+    let page = a.remote.faults().last_page.ok_or("a read the feed")?;
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .keep_answer(cursor.as_deref(), page)?;
+    b.write("two.txt", "2")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(
+        a.read_text("two.txt")?,
+        "2",
+        "the kept answer hid b's write"
+    );
+    Ok(())
+}
+
+/// A write whose answer didn't come (it landed: a timeout after the server wrote) isn't sent
+/// again blind, a large upload twice: the drive is behind, the feed is read first, and the
+/// file settles as uploaded.
+#[test]
+fn a_write_whose_answer_was_lost_isnt_sent_again() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.sync()?;
+    a.announced();
+    a.remote.faults().lose_answer_named = Some("big.bin".into());
+    a.write("big.bin", vec![7u8; 1 << 20])?;
+    a.sync_unasked()?;
+    a.remote.faults().lose_answer_named = None;
+    a.sync_unasked()?;
+    assert_eq!(a.remote.faults().uploads, 1, "sent once");
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["big.bin"]
+    );
+    assert_eq!(a.tree_text(""), ["big.bin = <1048576 bytes>"]);
+    assert!(a.sync_unasked()?.ops_done == 0, "settled");
+    Ok(())
+}

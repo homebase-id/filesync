@@ -1,7 +1,10 @@
 //! The runner on real folders and the fake server: syncing on its own, pause and resume, sync
 //! now, confirming held deletes, ignore rules edited while it runs.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -12,7 +15,9 @@ use hbsync_app::{Command, FolderStatus, Handle, Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
 use hbsync_engine::root::{AccountReader, RootError, SyncRoot};
 use hbsync_homebase::notify::Event;
+use hbsync_remote::ChangeRef;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+use hbsync_types::RemoteFileId;
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -23,7 +28,7 @@ struct Device {
     handle: Handle,
     thread: Option<JoinHandle<Result<(), RunnerError>>>,
     drive: Arc<Drive>,
-    /// The drive's client of the fake server (its counters).
+    /// The drive's client of the fake server: its own registration, and its counters.
     remote: FakeRemote,
     /// Last: removed after the drive has closed the state DB in it (Windows can't remove an
     /// open file).
@@ -57,9 +62,44 @@ impl Device {
         Puller::spawn(Arc::clone(&self.drive))
     }
 
+    /// The account's notifications as the daemon takes them, from the server's announcements
+    /// to this device's client, its own writes left out (`excludeOwnWrites`). Connected from
+    /// the start; stops when dropped.
+    fn listen(&self) -> Listening {
+        let events = self.remote.subscribe(true);
+        let puller = Puller::spawn(Arc::clone(&self.drive));
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (log, stopped) = (Arc::clone(&heard), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut n = Notifications::new(puller, Instant::now());
+            n.event(Event::Connected, Instant::now(), false);
+            while !stopped.load(Ordering::Relaxed) {
+                match events.recv_timeout(Duration::from_millis(50)) {
+                    Ok(change) => {
+                        log.lock().unwrap_or_else(|e| e.into_inner()).push(change);
+                        n.event(Event::Changed(Some(change)), Instant::now(), false);
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+                n.tick(Instant::now(), false);
+            }
+        });
+        Listening { heard, stop }
+    }
+
     /// The account's notifications, as the daemon runs them (none come in these tests).
     fn notifications(&self, now: Instant) -> Notifications {
         Notifications::new(self.puller(), now)
+    }
+
+    /// Waits until it is idle with nothing pending.
+    fn wait_idle(&self) -> R {
+        wait_until("idle", || {
+            let s = self.status();
+            s.state == State::Idle && s.pending == 0
+        })
     }
 
     /// The feed pages read so far: slim and whole.
@@ -106,6 +146,27 @@ impl Drop for Device {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+/// A device's notifications ([`Device::listen`]).
+struct Listening {
+    /// The changes announced to it so far.
+    heard: Arc<Mutex<Vec<ChangeRef>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Listening {
+    /// The files announced so far.
+    fn files(&self) -> HashSet<RemoteFileId> {
+        let heard = self.heard.lock().unwrap_or_else(|e| e.into_inner());
+        heard.iter().map(|c| c.file_id).collect()
+    }
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -160,6 +221,97 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     wait_until("b has two.txt", || b.has("two.txt"))?;
     wait_until("three.txt is up", || on_server(&server, "three.txt"))?;
     b.stop()?;
+    Ok(())
+}
+
+/// Each computer is told of the other's writes and not of its own (`excludeOwnWrites`): a
+/// change made on one reaches the other through its announcement alone, and the writer's own
+/// syncs read no feed at all (each write, an own removal's time included, is recorded from
+/// its answer); the feed is read for the other's news.
+#[test]
+fn another_computers_changes_are_announced_and_own_ones_not() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    let (heard_a, heard_b) = (a.listen(), b.listen());
+    wait_until("both started", || {
+        a.status().last_sync.is_some() && b.status().last_sync.is_some()
+    })?;
+    let file_of = |name: &str| -> Option<RemoteFileId> {
+        let s = server.lock().ok()?;
+        s.live()
+            .chain(s.removed())
+            .find(|h| matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == name))
+            .map(|h| h.file_id)
+    };
+    // The reads at connecting done.
+    std::thread::sleep(Duration::from_millis(300));
+    a.wait_idle()?;
+    let quiet = a.feed_reads();
+    a.write("from-a.txt", "a")?;
+    wait_until("b has from-a.txt", || b.has("from-a.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(a.feed_reads(), quiet, "a's own upload read the feed");
+    b.write("from-b.txt", "b")?;
+    wait_until("a has from-b.txt", || a.has("from-b.txt"))?;
+    a.wait_idle()?;
+    let news = a.feed_reads();
+    assert!(news > quiet, "b's news was read");
+    std::fs::remove_file(a.root.join("from-a.txt"))?;
+    wait_until("b lost from-a.txt", || !b.has("from-a.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(a.feed_reads(), news, "a's own removal read the feed");
+    for d in [&a, &b] {
+        d.wait_idle()?;
+    }
+    let (ours, theirs) = (
+        file_of("from-a.txt").ok_or("from-a.txt")?,
+        file_of("from-b.txt").ok_or("from-b.txt")?,
+    );
+    assert_eq!(heard_a.files(), HashSet::from([theirs]), "a heard only b's");
+    assert_eq!(heard_b.files(), HashSet::from([ours]), "b heard only a's");
+    // a's removal has the server's time, from its answer.
+    let deleted: Vec<_> = AccountReader::open(&db_of(&a.root), "test.example")?
+        .ok_or("no state DB")?
+        .deletes(100)?
+        .0
+        .into_iter()
+        .map(|(d, _)| d)
+        .collect();
+    assert!(
+        deleted
+            .iter()
+            .any(|d| d.path == "from-a.txt" && d.removed_at_ms.is_some()),
+        "{deleted:?}"
+    );
+    Ok(())
+}
+
+/// A change announced that the feed doesn't show yet (the server kept an answer from before
+/// the write: odin-core keeps answers by query) is read for again a moment later, with another
+/// query: the notified device gets it all the same.
+#[test]
+fn an_announced_change_a_kept_answer_hid_is_read_for_again() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    let _heard = a.listen();
+    for d in [&a, &b] {
+        wait_until("started", || d.status().last_sync.is_some())?;
+        d.wait_idle()?;
+    }
+    // The read at connecting done; the answer to a's next read kept through b's write.
+    std::thread::sleep(Duration::from_millis(300));
+    let cursor = hbsync_state::StateDb::open_account(&db_of(&a.root))?
+        .read(|s| s.account_kv(hbsync_state::keys::REMOTE_CURSOR))?;
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .keep_answer(cursor.as_deref(), a.drive.next_page_size())?;
+    let reads = a.feed_reads();
+    b.write("news.txt", "n")?;
+    wait_until("a has news.txt", || a.has("news.txt"))?;
+    assert!(a.feed_reads() >= reads + 2, "read again for it");
     Ok(())
 }
 
@@ -221,16 +373,23 @@ fn the_drive_is_read_on_a_timer_only_while_not_connected() -> R {
     assert!(!b.has("x.txt"), "too soon, or paused");
     n.tick(t0 + UNANNOUNCED_READ, false);
     wait_until("b read the drive", || b.has("x.txt"))?;
-    // The sync that brought it reads the feed once more at its end: done before y.txt.
     wait_until("b is idle", || b.status().state == State::Idle)?;
 
-    // Connected (while paused: no pull either): no timer any more.
+    // Connected while paused: the read that follows connecting waits for the resume.
     n.event(Event::Connected, t0, true);
     a.write("y.txt", "y")?;
     wait_until("y.txt is up", || on_server(&server, "y.txt"))?;
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!b.has("y.txt"), "read while paused");
+    n.tick(t0, false);
+    wait_until("the read after connecting", || b.has("y.txt"))?;
+    b.wait_idle()?;
+    // Connected: no timer any more.
+    a.write("z.txt", "z")?;
+    wait_until("z.txt is up", || on_server(&server, "z.txt"))?;
     n.tick(t0 + UNANNOUNCED_READ * 10, false);
     std::thread::sleep(Duration::from_millis(500));
-    assert!(!b.has("y.txt"), "read on a timer while connected");
+    assert!(!b.has("z.txt"), "read on a timer while connected");
     Ok(())
 }
 
@@ -254,8 +413,9 @@ fn a_syncs_own_writes_start_no_sync() -> R {
     Ok(())
 }
 
-/// A change announced that the drive has already (its own write coming back) brings no read
-/// of the feed; one it doesn't have is read and synced.
+/// A change announced that the drive has already (its own write coming back, from a server
+/// that doesn't leave them out) brings no read of the feed; one it doesn't have is read and
+/// synced.
 #[test]
 fn announced_changes_are_read_only_when_new() -> R {
     use hbsync_remote::{ChangeRef, Remote, RemoteBody};
@@ -274,20 +434,18 @@ fn announced_changes_are_read_only_when_new() -> R {
     };
     b.write("mine.txt", "m")?;
     wait_until("mine.txt is up", || on_server(&server, "mine.txt"))?;
-    wait_until("b is idle", || {
-        let s = b.status();
-        s.state == State::Idle && s.pending == 0
-    })?;
+    b.wait_idle()?;
     let t0 = Instant::now();
     let puller = b.puller();
     let mut n = Notifications::new(puller.clone(), t0);
-    n.event(Event::Connected, t0, true); // connected; paused, so not pulled now
+    n.event(Event::Connected, t0, false);
+    wait_until("the read after connecting", || puller.rounds() == 1)?;
     a.write("x.txt", "x")?;
     wait_until("x.txt is up", || on_server(&server, "x.txt"))?;
     let reads = b.feed_reads();
     n.event(announce("mine.txt")?, t0, false);
     n.tick(t0 + Duration::from_secs(4), false);
-    wait_until("the puller took it", || puller.rounds() == 1)?;
+    wait_until("the puller took it", || puller.rounds() == 2)?;
     assert_eq!(b.feed_reads(), reads, "the feed was read for b's own write");
     assert!(!b.has("x.txt"));
 
@@ -312,10 +470,7 @@ fn a_hard_delete_announced_before_a_reconnect_is_taken() -> R {
     b.connected();
     wait_until("b has z.txt", || b.has("z.txt"))?;
     // Its sync that brought z.txt done (the delete isn't to race with that sync).
-    wait_until("b is idle", || {
-        let s = b.status();
-        s.state == State::Idle && s.pending == 0
-    })?;
+    b.wait_idle()?;
     let gone = {
         let mut s = server.lock().map_err(|_| "poisoned")?;
         let header = s
@@ -346,10 +501,7 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
         a.write(&format!("f{i:02}.txt"), &i.to_string())?;
     }
     wait_until("all 60 are up", || live_names(&server).len() == 60)?;
-    wait_until("a is idle", || {
-        let s = a.status();
-        s.state == State::Idle && s.pending == 0
-    })?;
+    a.wait_idle()?;
     for i in 0..60 {
         std::fs::remove_file(a.root.join(format!("f{i:02}.txt")))?;
     }

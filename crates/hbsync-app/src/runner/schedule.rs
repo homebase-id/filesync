@@ -80,6 +80,9 @@ pub(crate) struct Schedule {
     next_look: Instant,
     /// Something asked for a sync since the last one.
     wanted: bool,
+    /// The next sync reads the feed first, whatever the notifications say: it was asked for
+    /// (sync now, a resume, a wake-up).
+    read: bool,
     /// No sync before then (a failure's backoff, a folder that is gone).
     not_before: Instant,
     /// Paused: until then (Unix seconds), or until resumed (`None`).
@@ -98,6 +101,7 @@ impl Schedule {
             look,
             next_look: now + look,
             wanted: true,
+            read: false,
             not_before: now,
             pause,
             backoff: Backoff::new(),
@@ -111,10 +115,18 @@ impl Schedule {
         self.wanted = true;
     }
 
-    /// A sync asked for now (sync now, a confirmation): without waiting out a backoff.
+    /// A sync asked for now (sync now, a confirmation, a resume, a wake-up): without waiting
+    /// out a backoff, reading the feed first.
     pub fn asked(&mut self, now: Instant) {
         self.wanted = true;
+        self.read = true;
         self.not_before = now;
+    }
+
+    /// Whether the sync starting now reads the feed first whatever the notifications say.
+    /// Asked until a sync ended ([`Schedule::synced`]: it read first): a failed one asks again.
+    pub fn read(&self) -> bool {
+        self.read
     }
 
     /// The machine woke up: sync now, the backoff forgotten.
@@ -181,6 +193,7 @@ impl Schedule {
     /// stuck work isn't a full sync every few seconds.
     pub fn synced(&mut self, now: Instant, outcome: Synced) {
         self.backoff = Backoff::new();
+        self.read = false;
         match outcome {
             Synced::Stopped => {}
             Synced::Done => {
@@ -362,5 +375,20 @@ mod tests {
         let mut s = Schedule::new(t0, LOOK, None);
         s.synced(t0, Synced::Stopped);
         assert!(s.due(t0));
+    }
+
+    /// A sync asked for reads the feed first; one that failed leaves that for the next try,
+    /// one that ended doesn't.
+    #[test]
+    fn an_asked_read_outlives_a_failed_sync() {
+        let t0 = Instant::now();
+        let mut s = Schedule::new(t0, LOOK, None);
+        assert!(!s.read(), "a start reads anyway");
+        s.asked(t0);
+        assert!(s.read());
+        s.failed(t0, State::Failing);
+        assert!(s.read(), "the failed sync may not have read");
+        s.synced(t0, Synced::Done);
+        assert!(!s.read());
     }
 }

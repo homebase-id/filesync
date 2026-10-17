@@ -358,7 +358,14 @@ fn join(folder: &str, name: &str) -> String {
 /// Restores `node` with what was deleted with it, and the folders it was in that are in
 /// Recently deleted too (just those, not their other contents). Returns how many items came
 /// back; 0 when `node` isn't in Recently deleted (any more).
-pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<usize, EngineError> {
+/// `moved` is set when the drive refused a write for its state (changed or deleted for good
+/// meanwhile): the account's picture lacks that.
+pub fn restore(
+    db: &mut StateDb,
+    remote: &dyn Remote,
+    node: NodeId,
+    moved: &mut bool,
+) -> Result<usize, EngineError> {
     let Some(plan) = db.read(|s| plan_restore(s, node))? else {
         return Ok(0);
     };
@@ -394,7 +401,10 @@ pub fn restore(db: &mut StateDb, remote: &dyn Remote, node: NodeId) -> Result<us
         let back = match update_meta(remote, &row.target(), &meta, row.file.map(|f| f.hash)) {
             Ok(back) => back,
             // Changed or deleted for good meanwhile: the feed tells what it is now.
-            Err(RemoteError::VersionMismatch | RemoteError::NotFound) => continue,
+            Err(RemoteError::VersionMismatch | RemoteError::NotFound) => {
+                *moved = true;
+                continue;
+            }
             Err(e) => return Err(EngineError::Remote(e)),
         };
         names.insert(name_key(&name));

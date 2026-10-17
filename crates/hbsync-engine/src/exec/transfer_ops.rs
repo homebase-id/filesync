@@ -263,6 +263,15 @@ impl Executor<'_> {
 
     /// Records what a job did: `job` is the one that ran, given back by the pool.
     pub(super) fn commit(&mut self, ctx: Ctx, job: Job, result: JobResult) -> Step {
+        // Refused for the drive's state (a version moved on, a node id taken, a file gone), or
+        // an earlier try that landed without its answer: the account's picture lacks a write
+        // no announcement brings back (this device's own, or one not taken yet).
+        if let JobResult::Failed(JobError::Remote(
+            RemoteError::AlreadyExists | RemoteError::VersionMismatch | RemoteError::NotFound,
+        )) = &result
+        {
+            self.report.drive_moved = true;
+        }
         match (ctx, job, result) {
             (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }, JobResult::Written(w)) => {
                 self.commit_meta(meta, hash, after, Some(w))
@@ -292,7 +301,14 @@ impl Executor<'_> {
             }
             (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
                 let node = meta.node;
-                let row = written_row(written, &meta, Some(hash));
+                let row = MirrorRow::written(
+                    written,
+                    meta.node,
+                    meta.parent,
+                    meta.kind,
+                    &meta.content,
+                    Some(hash),
+                );
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 let how = Settle {
                     same_bytes: true,

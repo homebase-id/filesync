@@ -473,8 +473,9 @@ impl Runner {
                 }
             });
             let today = crate::today();
+            let read = schedule.read();
             let result = if started {
-                p.engine.sync_once(&today)
+                p.engine.sync(&today, read)
             } else {
                 p.engine.start_up(&mut p.observer, &today).map(|r| r.sync)
             };

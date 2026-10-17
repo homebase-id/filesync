@@ -122,13 +122,19 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
     }
 
     /// Scan, then sync until idle (six passes at most), `before` each pass; every pass's
-    /// report together.
-    pub fn sync_until_idle(&mut self, today: &str, mut before: impl FnMut()) -> Res<SyncReport> {
+    /// report together. Each pass reads the feed first if `read`, else only when the drive
+    /// isn't current ([`crate::Engine::sync`]), as the daemon syncs a local change.
+    pub fn sync_until_idle(
+        &mut self,
+        today: &str,
+        read: bool,
+        mut before: impl FnMut(),
+    ) -> Res<SyncReport> {
         let mut total = SyncReport::default();
         for _ in 0..6 {
             before();
             self.engine.scan_local()?;
-            let pass = self.engine.sync_once(today)?;
+            let pass = self.engine.sync(today, read)?;
             let idle = pass.ops_done == 0;
             total.absorb(pass);
             if idle {

@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use hbsync_dev::{live_identity, run_name, saved_client};
+use hbsync_dev::{
+    OTHER_CLIENT, cursor_at_end, live_identity, on_threads, run_name, saved_client, saved_client_as,
+};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_remote::Remote;
@@ -29,15 +31,15 @@ fn the_contract_holds_on_a_live_drive() -> R {
 }
 
 /// Every registration finds the app's one circle by its slug: asking twice, or from a second
-/// registration of the app on the same identity (its credentials in `<identity>.b.json` next to
-/// the first's, client "b"), gives the same id; nothing is created when the app holds the slug.
+/// registration of the app on the same identity (`hbsync-register <identity> --as b`), gives
+/// the same id; nothing is created when the app holds the slug.
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn the_app_circle_is_found_by_its_slug() -> R {
     let identity = live_identity()?;
     let circle = hbsync_homebase::app::app_circle(&live_remote()?)?;
     assert_eq!(hbsync_homebase::app::app_circle(&live_remote()?)?, circle);
-    let path = hbsync_dev::credentials_path(&format!("{identity}.b"))?;
+    let path = hbsync_dev::credentials_path_as(&identity, Some(OTHER_CLIENT))?;
     let Some(second) = hbsync_homebase::Credentials::load(&path)? else {
         println!(
             "skipped the second registration: no credentials at {}",
@@ -52,35 +54,78 @@ fn the_app_circle_is_found_by_its_slug() -> R {
     Ok(())
 }
 
+/// Another client's write is announced with the file and version written (a minimal event);
+/// this client's own isn't, unless it asks to hear its own writes (`excludeOwnWrites`,
+/// odin-core #1971). The other client is a registration of its own (`hbsync-register <identity>
+/// --as b`), as another computer is.
 #[test]
-#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+#[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn a_change_on_the_drive_is_announced() -> R {
+    use hbsync_homebase::notify::OwnWrites;
+    use hbsync_remote::contract::folder;
+    use std::sync::mpsc::Receiver;
+    use std::time::Instant;
+
+    let identity = live_identity()?;
     let remote = live_remote()?;
+    let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
     let bench = Bench::new(&remote, &run_name("notify"), Duration::ZERO)?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    let notifier = Notifier::spawn(remote.client().clone(), remote.drive(), tx);
-    let wait = |what: &dyn Fn(&Event) -> bool| -> Result<(), String> {
+    let listen = |own| -> Result<(Notifier, Receiver<Event>), Box<dyn std::error::Error>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let n = Notifier::spawn_with(remote.client().clone(), remote.drive(), own, tx)?;
+        Ok((n, rx))
+    };
+    let (quiet, quiet_rx) = listen(OwnWrites::Excluded)?;
+    let (loud, loud_rx) = listen(OwnWrites::Heard)?;
+    // The first event `what` takes within `patience`: `None` if none came.
+    let wait = |rx: &Receiver<Event>,
+                patience: Duration,
+                what: &dyn Fn(&Event) -> bool|
+     -> Result<Option<Duration>, String> {
+        let start = Instant::now();
         loop {
-            match rx.recv_timeout(Duration::from_secs(15)) {
-                Ok(e) if what(&e) => return Ok(()),
+            let left = patience.saturating_sub(start.elapsed());
+            match rx.recv_timeout(left) {
+                Ok(e) if what(&e) => return Ok(Some(start.elapsed())),
                 Ok(Event::Lost(why) | Event::Refused(why)) => return Err(why),
                 Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return Ok(None),
                 Err(e) => return Err(format!("waiting: {e}")),
             }
         }
     };
+    let connected = |e: &Event| *e == Event::Connected;
     let result = (|| -> R {
-        wait(&|e| *e == Event::Connected)?;
-        let start = std::time::Instant::now();
-        let (_, at) = bench.folder("inside")?;
-        // The write is announced with the file and version written (a minimal event).
-        wait(&|e| matches!(e, Event::Changed(Some(r)) if r.at() == at && !r.deleted))?;
-        let took = start.elapsed();
+        for rx in [&quiet_rx, &loud_rx] {
+            wait(rx, Duration::from_secs(15), &connected)?.ok_or("never connected")?;
+        }
+        let (inside, _) = bench.folder("inside")?;
+
+        // Another client's write: announced.
+        let theirs = other.create(&folder("theirs", inside.node), None)?.at;
+        bench.track(theirs.file_id);
+        let is = |at: hbsync_types::RemoteRef| move |e: &Event| matches!(e, Event::Changed(Some(r)) if r.at() == at && !r.deleted);
+        let took = wait(&quiet_rx, Duration::from_secs(15), &is(theirs))?
+            .ok_or("another client's write wasn't announced")?;
         assert!(took < Duration::from_secs(2), "announced after {took:?}");
-        println!("announced {took:?} after the write returned");
+        println!("another client's write announced {took:?} after it returned");
+
+        // This client's own: heard only by the subscription that asks for it.
+        let mine = bench.folder("mine")?.1;
+        wait(&loud_rx, Duration::from_secs(15), &is(mine))?
+            .ok_or("an own write wasn't heard with OwnWrites::Heard")?;
+        let echo = wait(
+            &quiet_rx,
+            Duration::from_secs(3),
+            &|e| matches!(e, Event::Changed(Some(r)) if r.file_id == mine.file_id),
+        )?;
+        assert!(
+            echo.is_none(),
+            "an own write came back with excludeOwnWrites"
+        );
         Ok(())
     })();
-    drop(notifier);
+    drop((quiet, loud));
     bench.cleanup()?;
     result
 }
@@ -273,6 +318,7 @@ fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
         let stale = Target {
             at,
             token: Some(FileToken(vec![0x5a; 64].into())),
+            changed_at: None,
         };
         let renamed = with(&meta, NodeContent::file("g.txt", 1, 3, false));
         let written = remote.update(&stale, &renamed, None)?;
@@ -315,7 +361,7 @@ fn feed_sizes() -> R {
             made.lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push((meta, at));
-            Ok(())
+            Ok::<_, hbsync_remote::RemoteError>(())
         })?;
         let made = made.into_inner().unwrap_or_else(|e| e.into_inner());
         assert_eq!((created, made.len()), (n, n), "every create went through");
@@ -323,7 +369,7 @@ fn feed_sizes() -> R {
         let removed_count = on_threads(n, |i| {
             let (meta, at) = &made[i];
             remote.update(&bench.target(*at), &removed(meta), None)?;
-            Ok(())
+            Ok::<_, hbsync_remote::RemoteError>(())
         })?;
         assert_eq!(removed_count, n, "every removal went through");
         std::thread::sleep(Duration::from_millis(50));
@@ -362,39 +408,6 @@ fn feed_sizes() -> R {
 }
 
 const PAGE: usize = 500;
-
-/// `work` for each of `0..n` on 8 threads: how many went through, or the first error.
-fn on_threads(
-    n: usize,
-    work: impl Fn(usize) -> Result<(), hbsync_remote::RemoteError> + Sync,
-) -> Result<usize, hbsync_remote::RemoteError> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    std::thread::scope(|scope| {
-        let threads: Vec<_> = (0..8)
-            .map(|_| {
-                scope.spawn(|| {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= n {
-                            return Ok(());
-                        }
-                        work(i)?;
-                        done.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-            })
-            .collect();
-        threads.into_iter().try_for_each(|t| {
-            t.join().unwrap_or_else(|_| {
-                Err(hbsync_remote::RemoteError::Fatal(
-                    "a thread panicked".into(),
-                ))
-            })
-        })
-    })?;
-    Ok(done.into_inner())
-}
 
 #[derive(Clone, Copy)]
 enum Read {
@@ -473,4 +486,564 @@ fn socket_bytes() -> Result<u64, Box<dyn std::error::Error>> {
         }
     }
     Ok(total)
+}
+
+/// What this computer's own writes cost it on the notification socket, with and without
+/// `excludeOwnWrites` (odin-core #1971): one folder synced as the daemon syncs it (the engine,
+/// the notifications taken by `Notifications` and the `Puller`; a local change's sync reads
+/// the feed only while the picture isn't current), through `n` files
+/// (`ECHO_FILES`, 2,000 by default) created, deleted (to Recently deleted), then deleted for
+/// good. Per phase: the bytes this process received (all its connections, [`socket_bytes`]),
+/// the notification frames (every server frame, pongs too) and their bytes (text frames as
+/// received), and the feed pages read
+/// slim and whole (the engine's own reads and those the announcements asked for). Prints a
+/// table. Works in a top-level folder of its own and deletes it for good at the end.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
+fn own_write_echoes() -> R {
+    use hbsync_homebase::notify::OwnWrites;
+    let n = std::env::var("ECHO_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000usize);
+    println!("{n} files created, deleted, then deleted for good by this computer");
+    println!(
+        "{:<9} {:<8} {:>12} {:>7} {:>11} {:>9} {:>6} {:>6}",
+        "own", "phase", "bytes in", "frames", "frame B", "B/frame", "slim", "whole"
+    );
+    for own in [OwnWrites::Heard, OwnWrites::Excluded] {
+        for row in echo_run(own, n)? {
+            println!("{row}");
+        }
+    }
+    Ok(())
+}
+
+/// One run of [`own_write_echoes`]: a table row per phase.
+fn echo_run(
+    own: hbsync_homebase::notify::OwnWrites,
+    n: usize,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    use hbsync_app::daemon::{Notifications, Puller};
+    use hbsync_engine::EngineConfig;
+    use hbsync_engine::testkit::TestClient;
+    use hbsync_local::Filter;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    let remote = Counted::new(live_remote()?);
+    let run = run_name("echoes");
+    let mut a = TestClient::new(remote.clone(), "a", |cfg: &mut EngineConfig| {
+        cfg.allow_mass_delete = true;
+        cfg.exec.filter = Arc::new(Filter::load(&cfg.exec.root, cfg.exec.case_insensitive)?);
+        Ok(())
+    })?;
+    // Only the run's folder: nothing else on the drive is downloaded.
+    let ignore = hbsync_local::layout::ignore_file(&a.root);
+    std::fs::create_dir_all(ignore.parent().ok_or("ignore file")?)?;
+    std::fs::write(&ignore, format!("/*\n!/{run}/\n"))?;
+    a.restart()?;
+    // Until idle, reading the feed first (`read`) or as the daemon syncs a local change: only
+    // if the account's picture isn't current (the notifications connected, as `Notifications`
+    // sets it).
+    let sync = |a: &mut TestClient<Counted>, read: bool| -> R {
+        loop {
+            let report = a.sync_until_idle(&hbsync_app::today(), read, || {
+                std::thread::sleep(Duration::from_millis(20));
+            })?;
+            assert!(report.failed.is_empty(), "failed {:?}", report.failed);
+            if report.ops_done == 0 {
+                return Ok(());
+            }
+        }
+    };
+    a.write(&format!("{run}/readme.txt"), "echoes")?;
+    sync(&mut a, true)?;
+
+    // The notifications, as the daemon's account takes them.
+    let (tx, events) = std::sync::mpsc::channel();
+    let notifier =
+        Notifier::spawn_with(remote.inner.client().clone(), remote.inner.drive(), own, tx)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let taking = {
+        let (puller, stop) = (Puller::spawn(Arc::clone(a.engine.drive())), stop.clone());
+        std::thread::spawn(move || -> Result<(), String> {
+            let mut notes = Notifications::new(puller, Instant::now());
+            while !stop.load(Ordering::Relaxed) {
+                match events.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Event::Lost(why) | Event::Refused(why)) => return Err(why),
+                    Ok(event) => drop(notes.event(event, Instant::now(), false)),
+                    Err(_) => {}
+                }
+                notes.tick(Instant::now(), false);
+            }
+            Ok(())
+        })
+    };
+    // Announcements still on their way once a phase's work is done, and taken (1 s quiet).
+    let settle = || std::thread::sleep(Duration::from_secs(4));
+    settle();
+    let mut rows = Vec::new();
+    let result = (|| -> R {
+        let mut phase = |name: &str, work: &mut dyn FnMut() -> R| -> R {
+            let (bytes, frames, frame_bytes) = (
+                socket_bytes()?,
+                notifier.received().frames.load(Ordering::Relaxed),
+                notifier.received().bytes.load(Ordering::Relaxed),
+            );
+            let (slim, whole) = remote.pages();
+            work()?;
+            settle();
+            let frames = notifier.received().frames.load(Ordering::Relaxed) - frames;
+            let frame_bytes = notifier.received().bytes.load(Ordering::Relaxed) - frame_bytes;
+            let (slim2, whole2) = remote.pages();
+            rows.push(format!(
+                "{:<9} {name:<8} {:>12} {frames:>7} {frame_bytes:>11} {:>9} {:>6} {:>6}",
+                format!("{own:?}"),
+                socket_bytes()?.saturating_sub(bytes),
+                frame_bytes / frames.max(1),
+                slim2 - slim,
+                whole2 - whole,
+            ));
+            Ok(())
+        };
+        phase("create", &mut || {
+            for i in 0..n {
+                a.write(&format!("{run}/files/f{i:05}.txt"), format!("file {i}"))?;
+            }
+            sync(&mut a, false)
+        })?;
+        phase("delete", &mut || {
+            std::fs::remove_dir_all(a.root.join(&run).join("files"))?;
+            sync(&mut a, false)
+        })?;
+        phase("empty", &mut || {
+            let nodes: Vec<_> = a
+                .recently_deleted(10_000)?
+                .into_iter()
+                .filter(|d| d.path == format!("{run}/files"))
+                .map(|d| d.node)
+                .collect();
+            assert_eq!(nodes.len(), 1, "{run}/files in Recently deleted");
+            let gone = a.engine.drive().empty(&nodes)?;
+            assert_eq!(gone, n + 1, "every file and their folder");
+            Ok(())
+        })?;
+        Ok(())
+    })();
+    stop.store(true, Ordering::Relaxed);
+    let taken = taking
+        .join()
+        .map_err(|_| "the notifications' thread panicked")?;
+    drop(notifier);
+    // The run's folder, deleted for good.
+    std::fs::remove_dir_all(a.root.join(&run))?;
+    sync(&mut a, true)?;
+    let top: Vec<_> = a
+        .recently_deleted(10_000)?
+        .into_iter()
+        .filter(|d| d.path == run)
+        .map(|d| d.node)
+        .collect();
+    a.engine.drive().empty(&top)?;
+    result?;
+    taken?;
+    Ok(rows)
+}
+
+/// A remote that counts the feed pages read through it, slim and whole.
+#[derive(Clone)]
+struct Counted {
+    inner: std::sync::Arc<HomebaseRemote>,
+    slim: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    whole: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Counted {
+    fn new(inner: HomebaseRemote) -> Self {
+        Counted {
+            inner: std::sync::Arc::new(inner),
+            slim: Default::default(),
+            whole: Default::default(),
+        }
+    }
+
+    /// Feed pages read so far: slim, whole.
+    fn pages(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (self.slim.load(Relaxed), self.whole.load(Relaxed))
+    }
+}
+
+impl Remote for Counted {
+    fn changes(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> hbsync_remote::Result<hbsync_remote::ChangesPage> {
+        self.whole
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.changes(cursor, limit)
+    }
+
+    fn change_refs(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> hbsync_remote::Result<hbsync_remote::RefsPage> {
+        self.slim.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.change_refs(cursor, limit)
+    }
+
+    fn header(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+    ) -> hbsync_remote::Result<hbsync_remote::RemoteHeader> {
+        self.inner.header(file_id)
+    }
+
+    fn create(
+        &self,
+        node: &hbsync_remote::NodeMeta,
+        payload: Option<hbsync_remote::Upload<'_>>,
+    ) -> hbsync_remote::Result<hbsync_types::Target> {
+        self.inner.create(node, payload)
+    }
+
+    fn update(
+        &self,
+        target: &hbsync_types::Target,
+        meta: &hbsync_remote::NodeMeta,
+        payload: Option<hbsync_remote::Upload<'_>>,
+    ) -> hbsync_remote::Result<hbsync_types::Target> {
+        self.inner.update(target, meta, payload)
+    }
+
+    fn delete(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+        expected: hbsync_types::VersionTag,
+    ) -> hbsync_remote::Result<()> {
+        self.inner.delete(file_id, expected)
+    }
+
+    fn read(
+        &self,
+        file_id: hbsync_types::RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn std::io::Write,
+    ) -> hbsync_remote::Result<u64> {
+        self.inner.read(file_id, range, sink)
+    }
+}
+
+/// Each write's answer carries `updated`, the time the feed then shows for it (odin-core
+/// #1971): a create, a new version, a removal and a restore (PATCH), the archival-status batch,
+/// and a delete
+/// (the tombstone's). One file per kind, as the feed shows only a file's last write; their rows
+/// are read minimal from a cursor taken before. Prints a table.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn write_answers_carry_the_feeds_time() -> R {
+    use hbsync_homebase::drive::wire::{Shape, feed_query};
+    use hbsync_remote::contract::{file, removed};
+    use std::collections::HashMap;
+
+    let remote = live_remote()?;
+    let bench = Bench::new(&remote, &run_name("answer-times"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let cursor = bench.cursor_now()?;
+        let (dir, _) = bench.folder("d")?;
+        let made = |name: &str| -> Result<_, Box<dyn std::error::Error>> {
+            let meta = file(name, dir.node, name.as_bytes());
+            let written = remote.create(
+                &meta,
+                Some(hbsync_remote::contract::upload(&mut std::io::Cursor::new(
+                    name.as_bytes(),
+                ))),
+            )?;
+            bench.track(written.at.file_id);
+            Ok((meta, written))
+        };
+        // (what, file, version, the answer's updated)
+        let mut answers = Vec::new();
+        let (_, created) = made("created")?;
+        answers.push(("create (POST)", created.at, created.changed_at));
+        let (meta, w) = made("edited")?;
+        let data = b"a new version";
+        let edited = remote.update(
+            &w,
+            &hbsync_remote::contract::with(
+                &meta,
+                hbsync_types::schema::NodeContent::file("edited", 1, data.len() as u64, false),
+            ),
+            Some(hbsync_remote::contract::upload(&mut std::io::Cursor::new(
+                &data[..],
+            ))),
+        )?;
+        answers.push(("version (PATCH)", edited.at, edited.changed_at));
+        let (meta, w) = made("removed")?;
+        let gone = remote.update(&w, &removed(&meta), None)?;
+        answers.push(("removal (PATCH)", gone.at, gone.changed_at));
+        let (meta, w) = made("restored")?;
+        let gone = remote.update(&w, &removed(&meta), None)?;
+        let back = remote.update(&gone, &meta, None)?;
+        answers.push(("restore (PATCH)", back.at, back.changed_at));
+        let (_, w) = made("archived")?;
+        let batch: serde_json::Value = remote.client().post(
+            &format!("{}/update-archival-status-batch", remote.files()),
+            &serde_json::json!({"archivalStatus": 2, "files": [
+                {"fileId": w.at.file_id.0, "versionTag": w.at.version.0}
+            ]}),
+        )?;
+        let r = &batch["results"][0];
+        assert!(r["errorCode"].is_null(), "{batch}");
+        let version = hbsync_types::VersionTag(
+            r["newVersionTag"]
+                .as_str()
+                .ok_or("newVersionTag")?
+                .parse()?,
+        );
+        answers.push((
+            "archival-status batch",
+            hbsync_types::RemoteRef {
+                file_id: w.at.file_id,
+                version,
+            },
+            r["updated"].as_i64(),
+        ));
+        let (_, w) = made("deleted")?;
+        let deleted: serde_json::Value = remote.client().post(
+            &format!("{}/delete", remote.file(w.at.file_id)),
+            &serde_json::json!({"recipients": [], "versionTag": w.at.version.0}),
+        )?;
+        let tomb = remote.header(w.at.file_id)?;
+        answers.push((
+            "delete (tombstone)",
+            hbsync_types::RemoteRef {
+                file_id: w.at.file_id,
+                version: tomb.version,
+            },
+            deleted["updated"].as_i64(),
+        ));
+
+        // The feed's rows since the cursor: each file's last write.
+        std::thread::sleep(Duration::from_millis(50));
+        let mut rows: HashMap<String, (String, Option<i64>)> = HashMap::new();
+        let mut cursor = Some(cursor);
+        loop {
+            let page: serde_json::Value = remote.client().post(
+                &format!("{}/query-batch", remote.files()),
+                &feed_query(cursor.as_deref(), 1000, Shape::Minimal),
+            )?;
+            for row in page["fileRefs"].as_array().into_iter().flatten() {
+                rows.insert(
+                    row["fileId"].as_str().unwrap_or_default().replace('-', ""),
+                    (
+                        row["versionTag"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .replace('-', ""),
+                        row["updated"].as_i64(),
+                    ),
+                );
+            }
+            cursor = page["cursorState"].as_str().map(str::to_owned).or(cursor);
+            if page["hasMoreRows"].as_bool() != Some(true) {
+                break;
+            }
+        }
+        println!(
+            "{:<24} {:>15} {:>15} {:>8}",
+            "write", "answer updated", "feed updated", "equal"
+        );
+        let mut unequal = Vec::new();
+        for (what, at, answered) in &answers {
+            let (version, fed) = rows
+                .get(&at.file_id.0.simple().to_string())
+                .cloned()
+                .ok_or(format!("{what}: no feed row"))?;
+            let same = answered.is_some()
+                && *answered == fed
+                && version == at.version.0.simple().to_string();
+            println!(
+                "{what:<24} {:>15} {:>15} {same:>8}",
+                answered.map_or("null".into(), |t| t.to_string()),
+                fed.map_or("null".into(), |t| t.to_string()),
+            );
+            if !same {
+                unequal.push(*what);
+            }
+        }
+        assert!(unequal.is_empty(), "not the feed's time: {unequal:?}");
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
+}
+
+/// Whether another client's write is in the feed as soon as its answer came: client b creates a
+/// folder, and this client reads the feed from the cursor it had before, at once; when the row
+/// isn't there yet, it reads again every 20 ms until it is. Odd rounds read from the cursor once
+/// first (an empty answer the server may keep: `QueryBatchCached`), as a client that just read
+/// to the end has. Prints, per late round, the row's `updated` against the time b's answer
+/// came (Unix ms, this machine's clock, the server's too on the dev host), the first reads'
+/// answers, and how long the row was missing; fails only when a read said no more rows
+/// without it. `FEED_AT_ONCE_ROUNDS` sets the rounds (40).
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
+fn another_clients_write_is_in_the_feed_at_once() -> R {
+    use hbsync_remote::contract::folder;
+    use std::time::Instant;
+    let rounds = std::env::var("FEED_AT_ONCE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40usize);
+    let identity = live_identity()?;
+    let remote = live_remote()?;
+    let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
+    let bench = Bench::new(&remote, &run_name("feed-at-once"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let (dir, _) = bench.folder("d")?;
+        let mut cursor = bench.cursor_now()?;
+        let mut late = Vec::new();
+        for i in 0..rounds {
+            // Other tests may write meanwhile: from the feed's end, and primed only where the
+            // read there came back empty.
+            cursor = cursor_at_end(&remote, Some(&cursor))?;
+            let primed = i % 2 == 1 && {
+                let page = remote.change_refs(Some(&cursor), 100)?;
+                page.refs.is_empty() && !page.has_more
+            };
+            let w = other.create(&folder(&format!("f{i}"), dir.node), None)?;
+            bench.track(w.at.file_id);
+            let (written, answered_ms) = (Instant::now(), hbsync_types::unix_now_ms());
+            let mut misses = Vec::new();
+            loop {
+                let page = remote.change_refs(Some(&cursor), 100)?;
+                if let Some(r) = page.refs.iter().find(|r| r.file_id == w.at.file_id) {
+                    if !misses.is_empty() {
+                        late.push(format!(
+                            "round {i} primed={primed}: missing for {:?} ({} reads: {misses:?}); \
+                             row updated {:?}, answer's updated {:?}, answer came at {answered_ms}",
+                            written.elapsed(),
+                            misses.len(),
+                            r.changed_at,
+                            w.changed_at
+                        ));
+                    }
+                    cursor = page.cursor;
+                    break;
+                }
+                // Other rows first: on through them.
+                if !page.refs.is_empty() && page.has_more {
+                    cursor = page.cursor;
+                    continue;
+                }
+                misses.push(format!(
+                    "{} rows more={} at +{}ms",
+                    page.refs.len(),
+                    page.has_more,
+                    written.elapsed().as_millis()
+                ));
+                assert!(
+                    written.elapsed() < Duration::from_secs(10),
+                    "round {i}: not in the feed after 10 s: {misses:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        println!("{} of {rounds} rounds read the write late", late.len());
+        for l in &late {
+            println!("  {l}");
+        }
+        // Held back (more rows to come) costs a read; hidden (no more rows) would miss it.
+        let hidden: Vec<&String> = late.iter().filter(|l| l.contains("more=false")).collect();
+        assert!(hidden.is_empty(), "hidden, not held back: {hidden:#?}");
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
+}
+
+/// A diagnostic for odin-core: whether a query-batch answer computed while another client's
+/// write commits can be kept (`QueryBatchCached`, keyed by the query, not by who asks) and keep
+/// hiding that write. A thread reads the feed from a cursor at the end over and over (pages of
+/// 100, as a client caught up would), while client b creates a folder; once b's answer came,
+/// one read from the same cursor (the same cache key) and one with pages of 99 (another key)
+/// say whether the row is there. Prints the rounds where only the other key saw it.
+/// `CACHE_RACE_ROUNDS` sets the rounds (60).
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
+fn a_page_read_during_a_write_may_be_kept_stale() -> R {
+    use hbsync_remote::contract::folder;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let rounds = std::env::var("CACHE_RACE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60usize);
+    let identity = live_identity()?;
+    let remote = live_remote()?;
+    let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
+    let bench = Bench::new(&remote, &run_name("cache-race"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let (dir, _) = bench.folder("d")?;
+        let mut stale = Vec::new();
+        let mut end = bench.cursor_now()?;
+        for i in 0..rounds {
+            let cursor = end.clone();
+            let stop = AtomicBool::new(false);
+            let (seen_same, seen_other) = std::thread::scope(|scope| -> Result<_, String> {
+                let reader = scope.spawn(|| {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = remote.change_refs(Some(&cursor), 100);
+                    }
+                });
+                std::thread::sleep(Duration::from_millis(5));
+                let w = other
+                    .create(&folder(&format!("f{i}"), dir.node), None)
+                    .map_err(|e| e.to_string())?;
+                bench.track(w.at.file_id);
+                stop.store(true, Ordering::Relaxed);
+                let _ = reader.join();
+                // Past the hold-back window: a row not shown now is hidden, not held back.
+                std::thread::sleep(Duration::from_millis(1100));
+                let has = |limit| -> Result<(bool, bool), String> {
+                    let p = remote
+                        .change_refs(Some(&cursor), limit)
+                        .map_err(|e| e.to_string())?;
+                    Ok((p.refs.iter().any(|r| r.file_id == w.at.file_id), p.has_more))
+                };
+                let (same, other_key) = (has(100)?, has(99)?);
+                // How long it stays hidden without another write: the first round looks again
+                // ten seconds on.
+                if i == 0 && !same.0 {
+                    std::thread::sleep(Duration::from_secs(10));
+                    println!(
+                        "round 0, 11 s after the write: same key (seen, more) {:?}",
+                        has(100)?
+                    );
+                }
+                Ok((same, other_key))
+            })?;
+            // The feed's end again, for the next round.
+            end = cursor_at_end(&remote, Some(&end))?;
+            if !seen_same.0 {
+                stale.push(format!(
+                    "round {i}: same key {seen_same:?}, another key {seen_other:?} (seen, more)"
+                ));
+            }
+        }
+        println!(
+            "{} of {rounds} rounds: the write hidden from the same query",
+            stale.len()
+        );
+        for s in &stale {
+            println!("  {s}");
+        }
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
 }

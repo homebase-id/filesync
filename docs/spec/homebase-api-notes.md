@@ -190,6 +190,37 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   a minimal one 588 (the encrypted envelope and its base64 included).
 - How the client reads with it: `hbsync_engine::feed::pull`. A server without `fileRefs` in
   its answer is refused, not read as an empty page.
+- **A kept answer can hide a write** (odin-core #1909; fixed on its branch
+  `cache-fill-race-1909` at 2f0ff3592, not released: tried there, 0 of 20 rounds hid the
+  write; tracked in filesync #90;
+  odin-core at fe067124b; **[tried]** on frodo, the
+  diagnostics `a_page_read_during_a_write_may_be_kept_stale` and
+  `another_clients_write_is_in_the_feed_at_once` in `hbsync-dev/tests/live.rs`):
+  `QueryBatchCached` keeps a query-batch answer under a key made of the query's parameters
+  (drive, `maxRecords`, cursor, sorting, filters; not the caller, so every client of the drive
+  shares it) for 2 h (`AbstractTableCaching.DefaultTtl`), and a write clears the drive's
+  answers after its commit (`TransactionalCache.InvalidateAsync`, a post-commit action)
+  **[verified]**. When the same query is being answered while a write commits, that answer,
+  from before the write, is kept after the clearing **[inferred]** (the cache stores what its
+  factory returns once it returns; FusionCache's internals not read). Tried: a thread reading
+  the feed from a cursor at the end again and again while client b created a folder, then one
+  read with the same query 1.1 s after b's answer: 70 of 70 rounds the folder wasn't there
+  (`hasMoreRows` false), while the same read with `maxRecords` 99 instead of 100 had it every
+  time; 11 s later the same query still didn't show it. Without a read in flight during the
+  write, the next read has it at once. A client that read to the end of the feed shares its
+  cursor with every other client that did: one device's read can hide another device's
+  write from all of them until the next write to the drive. The client never repeats a
+  query (page sizes, `Drive::page_size`) and reads again for an announced version a read
+  didn't bring (`daemon.md`, when the feed is read). Once #1909 is fixed: every read asks for
+  `FEED_PAGE` again (`Drive::page_size`, `next_page_size` and the fake's `keep_answer` go),
+  the puller's re-reads stay for the hold-back alone (one read past it), and these notes say
+  so. The same family was filesync #1 (odin-core #1905, fixed by #1906 on 2026-10-09): an
+  answer that held rows back was cached; that fix doesn't cover a fill in flight during a
+  write.
+- **Rows held back**: a row written in the server's last millisecond or so is held back,
+  answered as an empty or short page with `hasMoreRows` true (`QueryBatch.HoldBackWindowMs`,
+  1000 ms, **[verified]**); tried: 3 of 60 reads right after another client's write, for 9 to
+  12 ms. `feed::pull` reads on while `hasMoreRows`, so it costs a read.
 
 ## Errors
 **[verified]** `ExceptionHandlingMiddleware.cs`: plaintext `application/problem+json` (never
@@ -228,6 +259,49 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   `previousFileRef`. The client takes them as slim feed rows (`daemon.md`, the sync loop).
   Measured once on frodo at 5cbd1d363 (2,000 files, text frames as received): an add or update
   event 4,514 B full → 1,355–1,376 B minimal, a delete 7,438 → 2,217 B.
+- `excludeOwnWrites: true` in the subscription (odin-core #1971, not merged; **[verified]** on
+  its branch at 50923aa02: `EstablishConnectionOptions.ApplyTo`, `AppNotificationDispatcher`,
+  `OdinContext.RequestTokenId`; **[tried]** on frodo): no drive events for writes made by a
+  request with the socket's own token, the client registration's (`AccessRegistrationId`):
+  creates, updates, deletes and hard deletes, and what the same request changed on the side.
+  Still sent: writes with another token (another computer's registration), peer files and
+  read receipts arriving, the outbox's transfer-history updates, reaction previews, and any
+  write the server can't attribute to a request (jobs, system work: `OriginTokenId` null).
+  Sockets sharing one token (a copied credentials file) miss each other's writes. A peer
+  socket asking for it is refused (`InvalidQuery`). A server without #1971 ignores the key
+  **[inferred]** (an unknown JSON property): the echoes come, and are taken as known versions.
+  Measured on frodo at 50923aa02 (`own_write_echoes` in `hbsync-dev/tests/live.rs`: one folder
+  synced as the daemon syncs it, 2,000 files created, deleted to Recently deleted, deleted for
+  good): without the option 2,001 frames a phase, 1,355 / 1,377 / 2,217 B each (2.7, 2.8 and
+  4.4 MB), and the process received 5.4, 5.3 and 5.7 MB in all; with it no drive event at all
+  (one pong), and 2.6, 2.5 and 1.2 MB in all. The feed reads are the same either way (8 slim
+  pages for each of the first two phases, 1 for the last, none whole): the echoes were taken
+  as known versions and never needed the feed. Again at fe067124b, with each write's time
+  taken from its answer and no feed read after own writes: no feed page at all in any phase,
+  and with the option 1.46, 1.34 and 1.28 MB received in all (the echoes alone would add 2.7,
+  2.8 and 4.4 MB). The rows of the own writes stay in the feed, each file's last only, and are
+  read slim at the next read the client makes anyway.
+- **Write answers carry the write's time** (odin-core #1971; **[verified at fe067124b]**
+  `CreateFileResult.Updated`, `UpdateFileResult.Updated`, `DeleteFileResultV2.Updated`,
+  `UpdateArchivalStatusResultV2.Updated`; `UnixTimeUtc` serializes as Unix ms). It is the
+  file's modified time after the request's own last change to it, not a header read after the
+  write: every drive event published with the request's context records the file's `updated`
+  (`RequestOwnWrites.Record`, from `TryPublishAsync`), and the answer takes the later of that
+  and the time its own header write returned (`UpdatedAfterOwnWrites`); a soft delete's is
+  the tombstone's final time (clearing the reaction summary moves it once more, and the
+  tombstone and its `fileDeleted` event carry that). Changes made within the request on
+  others' behalf (inbox items, synced posts, reaction summaries) and later work aren't in it.
+  (At fcfc3b422 the answer read the header after the whole write instead.) Create and update
+  answer `updated` next to `fileId` and `newVersionTag` (null only for a peer-only update);
+  a delete (single, batch, by group) the tombstone's time, null when `localFileNotFound`; the
+  archival-status batch per result, null with an `errorCode`. Hard-delete-batch answers none.
+  It is the time the feed shows for that write (odin-core `WriteResponseUpdatedTests`;
+  **[tried]** on frodo at fe067124b for a create, a new version, a removal and a restore by
+  PATCH, the archival-status batch and a delete: `write_answers_carry_the_feeds_time`). The
+  client records a version's and a removal's time from it (`drive::HomebaseRemote`'s
+  `Target::changed_at`) and reads no feed after its writes. It doesn't read a delete's: a
+  tombstone isn't kept. Before #1971 the answers had no time (`payloads[].lastModified` is
+  the payload's, not the header's `updated`).
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

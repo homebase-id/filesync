@@ -139,6 +139,7 @@ impl<'a> Bench<'a> {
         Target {
             at,
             token: self.token(at.file_id),
+            changed_at: None,
         }
     }
 
@@ -648,8 +649,15 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
         ..upload(&mut reader)
     };
     ensure_err!(
-        b.remote
-            .update(&Target { at, token: None }, &f, Some(lying)),
+        b.remote.update(
+            &Target {
+                at,
+                token: None,
+                changed_at: None,
+            },
+            &f,
+            Some(lying),
+        ),
         RemoteError::HashMismatch
     );
     ensure!(b.read(at.file_id, None)? == b"real", "the old bytes stay");

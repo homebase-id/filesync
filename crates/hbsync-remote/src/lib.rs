@@ -119,6 +119,8 @@ pub struct ChangesPage {
     /// Rows left out because they can't be read as nodes (another app's file, one that doesn't
     /// decrypt), each with why.
     pub skipped: Vec<String>,
+    /// The files of those rows and their versions, where the row says which.
+    pub skipped_files: Vec<RemoteRef>,
 }
 
 /// One row of the change feed as a slim page carries it: which version of which file changed,

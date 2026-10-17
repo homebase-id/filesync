@@ -57,11 +57,16 @@ struct DriveAnswer {
     target_drive: TargetDrive,
 }
 
+/// A create's or update's answer (`CreateFileResult`, `UpdateFileResult`): the version written
+/// and its time, the one the feed shows for it (`updated`, odin-core #1971; null only for a
+/// peer-only update, which this client never makes).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WriteResult {
     file_id: Uuid,
     new_version_tag: Uuid,
+    #[serde(default)]
+    updated: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -205,12 +210,14 @@ impl HomebaseRemote {
             Ok(WriteResult {
                 file_id,
                 new_version_tag,
+                updated,
             }) => Ok(Target {
                 at: RemoteRef {
                     file_id: RemoteFileId(file_id),
                     version: VersionTag(new_version_tag),
                 },
                 token: Some(key.token(self.client.key())),
+                changed_at: updated,
             }),
             // odin-core answers a content update of a file deleted meanwhile with 500 (a null
             // payload list in `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002: look
@@ -375,14 +382,33 @@ impl Remote for HomebaseRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
         let mut entries = Vec::with_capacity(page.search_results.len());
-        let mut skipped = Vec::new();
+        let (mut skipped, mut skipped_files) = (Vec::new(), Vec::new());
         for row in &page.search_results {
             match serde_json::from_str::<wire::FileHeader>(row.get())
                 .map_err(|e| format!("unreadable header: {e}"))
                 .and_then(|h| wire::to_remote(h, self.client.key()))
             {
                 Ok(header) => entries.push(header),
-                Err(why) => skipped.push(why),
+                Err(why) => {
+                    skipped.push(why);
+                    #[derive(serde::Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Version {
+                        version_tag: Uuid,
+                    }
+                    #[derive(serde::Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Id {
+                        file_id: Uuid,
+                        file_metadata: Version,
+                    }
+                    if let Ok(id) = serde_json::from_str::<Id>(row.get()) {
+                        skipped_files.push(RemoteRef {
+                            file_id: RemoteFileId(id.file_id),
+                            version: VersionTag(id.file_metadata.version_tag),
+                        });
+                    }
+                }
             }
         }
         Ok(ChangesPage {
@@ -390,6 +416,7 @@ impl Remote for HomebaseRemote {
             cursor,
             has_more: page.has_more_rows,
             skipped,
+            skipped_files,
         })
     }
 

@@ -185,6 +185,10 @@ pub struct ExecReport {
     pub full: bool,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
+    /// A remote write was refused for the drive's state, an earlier try of it had landed
+    /// unanswered, or one's answer didn't come: the account's picture may lack something, so
+    /// the feed is to be read.
+    pub drive_moved: bool,
 }
 
 /// Why a run stopped before its plan was done.
@@ -861,6 +865,21 @@ impl<'a> Executor<'a> {
                     let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1));
                     self.resume_at = Some(Instant::now() + pause);
                 }
+                if matches!(
+                    op,
+                    Op::RemoteCreate { .. }
+                        | Op::RemoteUpdate { .. }
+                        | Op::RemoteTags { .. }
+                        | Op::RemoteDelete { .. }
+                ) {
+                    // A write whose answer didn't come may have landed: not sent again blind
+                    // (a large upload twice), but planned again from the feed, read first.
+                    let node = op.node();
+                    self.db.write(|s| s.mark_dirty(node))?;
+                    self.report.drive_moved = true;
+                    self.report.skipped.push((op, Skip::Waiting(why)));
+                    return Ok(());
+                }
                 self.retry_or_fail(op, attempts, why);
             }
             Outcome::Retry(why) => self.retry_or_fail(op, attempts, why),
@@ -1257,7 +1276,7 @@ use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub(crate) use settle::update_meta;
-use settle::{Placed, mark_children, merged_with_drive, settle_placement, written_row};
+use settle::{Placed, mark_children, merged_with_drive, settle_placement};
 pub use settle::{Settle, settle};
 pub use transfer_ops::tags_lost;
 

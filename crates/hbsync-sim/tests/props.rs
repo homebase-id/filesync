@@ -1788,11 +1788,11 @@ fn regression_a_file_put_into_a_deleted_role_folder_stays_its() {
     }
 }
 
-/// A device's own folder removal has no time until its feed brings it back: a plan made before
-/// that sees the time open, the newest of all, so what is in the folder still went with it,
-/// and a restore of the folder brings it all back.
+/// A device's own folder removal has its time from the write's answer (odin-core #1971): the
+/// plan made right after it, before any feed read, sees that time, so what is in the folder
+/// went with it, and a restore of the folder brings it all back.
 #[test]
-fn regression_an_open_removal_time_takes_along_what_is_in_the_folder() {
+fn regression_an_own_removal_time_takes_along_what_is_in_the_folder() {
     use Action::*;
     use hbsync_types::NodeId;
     let mut sim = Sim::new(2);
@@ -1827,7 +1827,7 @@ fn regression_an_open_removal_time_takes_along_what_is_in_the_folder() {
     assert!(sim.quiesce(30), "no convergence");
     let photos = sim.item(0, "d").expect("d");
     let node = sim.pick(0, photos, false).expect("d");
-    // The folder goes first; the next plan comes before the feed brings its time back.
+    // The folder goes first; the next plan comes before any feed read.
     run(
         &mut sim,
         &[
@@ -1840,7 +1840,6 @@ fn regression_an_open_removal_time_takes_along_what_is_in_the_folder() {
             Event::Plan { client: 0 },
         ],
     );
-    assert!(sim.open_times > 0, "the second plan saw the time open");
     assert!(sim.quiesce(30), "no convergence");
     if let Err(e) = sim.check() {
         panic!("{e}");

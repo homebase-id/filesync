@@ -2,12 +2,15 @@
 //! finds the app's circle, and checks access to the sync drive.
 //!
 //! ```text
-//! hbsync-register <identity> [--browser <command>]
+//! hbsync-register <identity> [--as <client>] [--browser <command>]
 //! ```
 //!
 //! Opens the identity's authorize page in a browser (the owner logs in and approves the app
 //! and its drive), keeps the credentials in `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json`
-//! (mode 0600), and is safe to run again: a saved registration is reused.
+//! (mode 0600), and is safe to run again: a saved registration is reused. `--as <client>`
+//! registers another client of this machine, as another computer would be
+//! (`<identity>.<client>.json`, the device named "<computer> (<client>)"): the live tests'
+//! second computer is `--as b`.
 
 use hbsync_app::setup;
 use hbsync_homebase::Credentials;
@@ -22,14 +25,14 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(identity) = args.first().cloned() else {
-        return Err("usage: hbsync-register <identity> [--browser <command>]".into());
+        return Err(
+            "usage: hbsync-register <identity> [--as <client>] [--browser <command>]".into(),
+        );
     };
-    let browser = args
-        .iter()
-        .position(|a| a == "--browser")
-        .and_then(|i| args.get(i + 1))
-        .cloned();
-    let path = hbsync_dev::credentials_path(&identity)?;
+    let option = |name| hbsync_dev::option(&args, name);
+    let browser = option("--browser");
+    let client = option("--as");
+    let path = hbsync_dev::credentials_path_as(&identity, client.as_deref())?;
 
     let creds = match Credentials::load(&path)? {
         Some(c) => {
@@ -37,7 +40,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             c
         }
         None => {
-            let device = hbsync_platform::host::device_name();
+            let device = match &client {
+                None => hbsync_platform::host::device_name(),
+                Some(c) => format!("{} ({c})", hbsync_platform::host::device_name()),
+            };
             println!("Opening the browser to authorize Homebase Filesync on {identity}...");
             let creds = setup::authorize(&identity, &device, browser.as_deref(), |url| {
                 println!("If it doesn't open, visit:\n{url}\n");

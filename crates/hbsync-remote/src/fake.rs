@@ -11,7 +11,15 @@
 //!   millisecond shows up once the clock moves on);
 //! - payload hashes: the stored hash is checked over the received bytes (4175), unencrypted
 //!   payloads need `contentHash == storedHash` (here: one hash), and a drive can require
-//!   hashes (4177).
+//!   hashes (4177);
+//! - notifications: every write is announced to the subscribers as its file's row
+//!   ([`FakeServer::subscribe`]), except to those that exclude their own client's writes
+//!   (`excludeOwnWrites`, odin-core #1971): each [`FakeRemote::new`] is a client registration
+//!   (a token) of its own. A write not made through a client (a test's, on the server) is
+//!   announced to all, as Homebase does when it can't tell whose write it is;
+//! - a kept answer ([`FakeServer::keep_answer`]): odin-core keeps a feed query's answer by the
+//!   query (cursor and page size), and one computed while a write commits can be kept after
+//!   it, hiding that write from the same query until the drive's next write.
 //!
 //! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter does:
 //! a delete refused for its version (4160) is read once more and counts as done when the file
@@ -19,6 +27,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Write;
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -29,8 +38,8 @@ use hbsync_types::{
 };
 
 use crate::{
-    ChangesPage, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader,
-    Result, Upload,
+    ChangeRef, ChangesPage, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody, RemoteError,
+    RemoteHeader, Result, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -66,6 +75,18 @@ impl Default for ServerConfig {
     }
 }
 
+/// A client registration: whose token a write was made with. Each [`FakeRemote::new`] is one;
+/// its clones share it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ClientId(u64);
+
+/// A notification subscription: what it is told, and whose writes it leaves out.
+#[derive(Debug)]
+struct Subscriber {
+    events: Sender<ChangeRef>,
+    excluded: Option<ClientId>,
+}
+
 /// The shared in-memory drive.
 #[derive(Debug)]
 pub struct FakeServer {
@@ -79,6 +100,12 @@ pub struct FakeServer {
     next_row: u64,
     /// Deterministic id source.
     next_id: u64,
+    subscribers: Vec<Subscriber>,
+    /// Feed answers kept by query (cursor, page size), each until the write count passes its
+    /// mark ([`FakeServer::keep_answer`]).
+    kept: HashMap<(String, usize), (ChangesPage, u64)>,
+    writes: u64,
+    next_client: u64,
 }
 
 impl FakeServer {
@@ -92,6 +119,10 @@ impl FakeServer {
             clock_ms: hbsync_types::unix_now_ms(),
             next_row: 1,
             next_id: 1,
+            subscribers: Vec::new(),
+            kept: HashMap::new(),
+            writes: 0,
+            next_client: 1,
         }))
     }
 
@@ -117,16 +148,40 @@ impl FakeServer {
         meta.removed.then_some(self.clock_ms)
     }
 
-    fn touch(&mut self, file_id: RemoteFileId) {
+    /// A write of `file_id` by `writer` (`None`: not through a client) landed: its new place
+    /// in the feed, and its announcement.
+    fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
+        self.writes += 1;
+        let writes = self.writes;
+        self.kept.retain(|_, (_, until)| writes <= *until);
         let modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
             self.feed.remove(&(f.modified, f.row));
             f.modified = modified;
             self.feed.insert((modified, f.row), file_id);
+            let change = ChangeRef::of(&f.header);
+            // A subscriber that went away is dropped.
+            self.subscribers.retain(|s| {
+                (writer.is_some() && s.excluded == writer) || s.events.send(change).is_ok()
+            });
         }
         if self.config.auto_tick {
             self.tick();
         }
+    }
+
+    /// A new client registration.
+    fn new_client(&mut self) -> ClientId {
+        self.next_client += 1;
+        ClientId(self.next_client)
+    }
+
+    /// Subscribes to the drive's notifications: every write from now on, as its file's row,
+    /// but those of `excluded` (a client's own writes, with `excludeOwnWrites`).
+    pub fn subscribe(&mut self, excluded: Option<ClientId>) -> Receiver<ChangeRef> {
+        let (events, rx) = channel();
+        self.subscribers.push(Subscriber { events, excluded });
+        rx
     }
 
     /// Reads an upload, checking its hash.
@@ -176,6 +231,17 @@ impl FakeServer {
     // ---- server operations (the HTTP API) ----
 
     pub fn create(&mut self, node: &NodeMeta, upload: Option<Upload<'_>>) -> Result<RemoteRef> {
+        self.create_by(None, node, upload).map(|w| w.at)
+    }
+
+    /// A create by `writer`, answered as Homebase answers it: the file as written, with its
+    /// token and the write's time (`updated`, odin-core #1971).
+    fn create_by(
+        &mut self,
+        writer: Option<ClientId>,
+        node: &NodeMeta,
+        upload: Option<Upload<'_>>,
+    ) -> Result<Target> {
         if self.by_node.contains_key(&node.node) {
             return Err(RemoteError::AlreadyExists);
         }
@@ -209,8 +275,9 @@ impl FakeServer {
         );
         self.feed.insert((0, row), file_id);
         self.by_node.insert(node.node, file_id);
-        self.touch(file_id);
-        Ok(RemoteRef { file_id, version })
+        let at = self.clock_ms;
+        self.touch(file_id, writer);
+        Ok(written(RemoteRef { file_id, version }, at))
     }
 
     pub fn update(
@@ -220,6 +287,19 @@ impl FakeServer {
         meta: &NodeMeta,
         upload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
+        self.update_by(None, file_id, expected, meta, upload)
+            .map(|w| w.at)
+    }
+
+    /// An update by `writer`, answered as [`FakeServer::create_by`] is.
+    fn update_by(
+        &mut self,
+        writer: Option<ClientId>,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+        meta: &NodeMeta,
+        upload: Option<Upload<'_>>,
+    ) -> Result<Target> {
         let current = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
         if current.header.version != expected {
             return Err(RemoteError::VersionMismatch);
@@ -265,13 +345,23 @@ impl FakeServer {
             content: meta.content.clone(),
             payload,
         };
-        self.touch(file_id);
-        Ok(RemoteRef { file_id, version })
+        let at = self.clock_ms;
+        self.touch(file_id, writer);
+        Ok(written(RemoteRef { file_id, version }, at))
     }
 
     /// Deletes a file if it is still at `expected` (4160 otherwise). Like Homebase, deleting a
     /// tombstone at its own version rewrites it: a new version and a new feed row.
     pub fn delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
+        self.delete_by(None, file_id, expected)
+    }
+
+    fn delete_by(
+        &mut self,
+        writer: Option<ClientId>,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+    ) -> Result<()> {
         let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
         if f.header.version != expected {
             return Err(RemoteError::VersionMismatch);
@@ -287,7 +377,7 @@ impl FakeServer {
         f.header.changed_at = None;
         f.header.token = None;
         f.bytes = None;
-        self.touch(file_id);
+        self.touch(file_id, writer);
         Ok(())
     }
 
@@ -320,7 +410,24 @@ impl FakeServer {
             .ok_or(RemoteError::NotFound)
     }
 
+    /// Keeps the feed's answer to a read from `cursor` with pages of `limit` as it is now,
+    /// through the next write (the one it raced with) until the one after: the same query
+    /// gets it meanwhile, another page size reads the feed as it is.
+    pub fn keep_answer(&mut self, cursor: Option<&str>, limit: usize) -> Result<()> {
+        let page = self.read_feed(cursor, limit)?;
+        let key = (cursor.unwrap_or("").to_owned(), limit);
+        self.kept.insert(key, (page, self.writes + 1));
+        Ok(())
+    }
+
     pub fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
+        if let Some((page, _)) = self.kept.get(&(cursor.unwrap_or("").to_owned(), limit)) {
+            return Ok(page.clone());
+        }
+        self.read_feed(cursor, limit)
+    }
+
+    fn read_feed(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let after = match cursor {
             None => None,
             Some(c) => Some(parse_cursor(c)?),
@@ -349,6 +456,7 @@ impl FakeServer {
             cursor,
             has_more,
             skipped: Vec::new(),
+            skipped_files: Vec::new(),
         })
     }
 
@@ -463,6 +571,16 @@ pub struct Faults {
     pub ref_pages: usize,
     /// Slim pages say one of their rows couldn't be read (a row the client doesn't decode).
     pub unread_refs: bool,
+    /// The page size of the last feed read, for assertions.
+    pub last_page: Option<usize>,
+    /// Creates and updates of nodes with this name land, but their answer is lost
+    /// ([`RemoteError::Transient`], a timeout after the server wrote).
+    pub lose_answer_named: Option<String>,
+    /// Payloads received, for assertions.
+    pub uploads: usize,
+    /// Rows of these files can't be read (as the Homebase adapter skips a row that doesn't
+    /// decrypt): whole pages leave them out, with why.
+    pub unreadable: std::collections::HashSet<RemoteFileId>,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -470,18 +588,52 @@ pub struct Faults {
 pub struct FakeRemote {
     server: Arc<Mutex<FakeServer>>,
     faults: Arc<Mutex<Faults>>,
+    /// Its client registration: whose writes these are.
+    client: ClientId,
 }
 
 impl FakeRemote {
+    /// A client of `server` with a registration of its own.
     pub fn new(server: Arc<Mutex<FakeServer>>) -> Self {
+        let client = server
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .new_client();
         FakeRemote {
             server,
             faults: Arc::default(),
+            client,
         }
+    }
+
+    /// Another client on this one's registration (a copied credentials file): faults of its
+    /// own, the same token.
+    pub fn sharing_token(&self) -> Self {
+        FakeRemote {
+            server: Arc::clone(&self.server),
+            faults: Arc::default(),
+            client: self.client,
+        }
+    }
+
+    pub fn client(&self) -> ClientId {
+        self.client
+    }
+
+    /// Subscribes to the drive's notifications ([`FakeServer::subscribe`]), leaving out the
+    /// writes made with this client's token if `exclude_own_writes`.
+    pub fn subscribe(&self, exclude_own_writes: bool) -> Receiver<ChangeRef> {
+        self.server()
+            .subscribe(exclude_own_writes.then_some(self.client))
     }
 
     pub fn faults(&self) -> MutexGuard<'_, Faults> {
         self.faults.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The server it is a client of, to make another client of it.
+    pub fn server_handle(&self) -> Arc<Mutex<FakeServer>> {
+        Arc::clone(&self.server)
     }
 
     pub fn server(&self) -> MutexGuard<'_, FakeServer> {
@@ -511,6 +663,16 @@ impl FakeRemote {
 }
 
 impl FakeRemote {
+    /// Loses the answer to a write that landed, of a node named `name`, if that is injected.
+    fn answered(&self, name: &str) -> Result<()> {
+        match self.faults().lose_answer_named.as_deref() == Some(name) {
+            true => Err(RemoteError::Transient(
+                "injected: the answer was lost".into(),
+            )),
+            false => Ok(()),
+        }
+    }
+
     /// Fails a write to a node named `name` if that is injected.
     fn gate_name(&self, name: &str) -> Result<()> {
         if self.faults().deny_writes {
@@ -533,7 +695,11 @@ impl FakeRemote {
         let Some(upload) = payload else {
             return Ok(None);
         };
-        let cut = self.faults().cut_upload_after.take();
+        let cut = {
+            let mut faults = self.faults();
+            faults.uploads += 1;
+            faults.cut_upload_after.take()
+        };
         let mut bytes = Vec::with_capacity(upload.size as usize);
         let mut buf = [0u8; 64 * 1024];
         loop {
@@ -552,11 +718,12 @@ impl FakeRemote {
     }
 }
 
-/// The file written at `at`, with its token.
-fn written(at: RemoteRef) -> Target {
+/// The file written at `at` at server time `changed_at`, with its token.
+fn written(at: RemoteRef, changed_at: i64) -> Target {
     Target {
         at,
         token: Some(token_of(at.file_id)),
+        changed_at: Some(changed_at),
     }
 }
 
@@ -579,8 +746,28 @@ fn replay<T>(
 impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
-        self.faults().full_pages += 1;
-        self.server().changes(cursor, limit)
+        let unreadable = {
+            let mut faults = self.faults();
+            faults.full_pages += 1;
+            faults.last_page = Some(limit);
+            faults.unreadable.clone()
+        };
+        let mut page = self.server().changes(cursor, limit)?;
+        let (gone, entries) = page
+            .entries
+            .into_iter()
+            .partition(|h| unreadable.contains(&h.file_id));
+        page.entries = entries;
+        for h in gone {
+            let h: RemoteHeader = h;
+            page.skipped
+                .push(format!("{:?}: injected: unreadable", h.file_id));
+            page.skipped_files.push(RemoteRef {
+                file_id: h.file_id,
+                version: h.version,
+            });
+        }
+        Ok(page)
     }
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
@@ -588,7 +775,8 @@ impl Remote for FakeRemote {
         let unread = {
             let mut faults = self.faults();
             faults.ref_pages += 1;
-            usize::from(faults.unread_refs)
+            faults.last_page = Some(limit);
+            usize::from(faults.unread_refs || !faults.unreadable.is_empty())
         };
         Ok(RefsPage {
             unread,
@@ -607,8 +795,11 @@ impl Remote for FakeRemote {
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
-        let at = replay(received, |upload| self.server().create(node, upload))?;
-        Ok(written(at))
+        let written = replay(received, |upload| {
+            self.server().create_by(Some(self.client), node, upload)
+        })?;
+        self.answered(&node.content.name)?;
+        Ok(written)
     }
 
     fn update(
@@ -631,11 +822,12 @@ impl Remote for FakeRemote {
         self.gate()?;
         self.gate_name(&meta.content.name)?;
         let received = self.receive(payload)?;
-        let at = replay(received, |upload| {
+        let written = replay(received, |upload| {
             self.server()
-                .update(file_id, target.at.version, meta, upload)
+                .update_by(Some(self.client), file_id, target.at.version, meta, upload)
         })?;
-        Ok(written(at))
+        self.answered(&meta.content.name)?;
+        Ok(written)
     }
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
@@ -644,7 +836,9 @@ impl Remote for FakeRemote {
         if let RemoteBody::Live { content, .. } = body {
             self.gate_name(&content.name)?;
         }
-        let result = self.server().delete(file_id, expected);
+        let result = self
+            .server()
+            .delete_by(Some(self.client), file_id, expected);
         match result {
             // A retry, as the Homebase adapter takes it.
             Err(RemoteError::VersionMismatch)
@@ -690,6 +884,59 @@ impl Remote for FakeRemote {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A subscriber that leaves out its own writes hears another client's, and one with the
+    /// same token (a copied credentials file) is taken for itself.
+    #[test]
+    fn own_writes_are_left_out_only_for_their_client() -> Result<()> {
+        let server = FakeServer::new(ServerConfig::default());
+        let (a, b) = (
+            FakeRemote::new(server.clone()),
+            FakeRemote::new(server.clone()),
+        );
+        let copy = a.sharing_token();
+        let (quiet, all) = (a.subscribe(true), a.subscribe(false));
+        let folder = |name: &str| NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder(name),
+            removed: false,
+        };
+        let mine = a.create(&folder("mine"), None)?;
+        let theirs = b.create(&folder("theirs"), None)?;
+        let copied = copy.create(&folder("copied"), None)?;
+        a.delete(mine.at.file_id, mine.at.version)?;
+        let seeded = server
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .create(&folder("seeded"), None)?;
+        let heard = |rx: &Receiver<ChangeRef>| -> Vec<RemoteFileId> {
+            rx.try_iter().map(|r| r.file_id).collect()
+        };
+        assert_eq!(
+            heard(&quiet),
+            [theirs.at.file_id, seeded.file_id],
+            "a's and its copy's writes left out"
+        );
+        assert_eq!(
+            heard(&all),
+            [
+                mine.at.file_id,
+                theirs.at.file_id,
+                copied.at.file_id,
+                mine.at.file_id,
+                seeded.file_id
+            ]
+        );
+        // The delete is announced as the tombstone.
+        let header = server
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .header(mine.at.file_id)?;
+        assert!(ChangeRef::of(&header).deleted);
+        Ok(())
+    }
 
     #[test]
     fn fresh_ids_are_unique_and_look_like_v4() {

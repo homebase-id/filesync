@@ -28,6 +28,9 @@ pub struct FeedReport {
     pub deleted: usize,
     /// Rows the client can't read (not encrypted, another key, not a sync node), with why.
     pub skipped: Vec<String>,
+    /// The rows the feed holds but the mirror doesn't take, by file and version: those it
+    /// couldn't read (where they say which), and live files without a payload.
+    pub unreadable: Vec<RemoteRef>,
 }
 
 impl std::ops::AddAssign for FeedReport {
@@ -36,6 +39,7 @@ impl std::ops::AddAssign for FeedReport {
         self.live += other.live;
         self.deleted += other.deleted;
         self.skipped.extend(other.skipped);
+        self.unreadable.extend(other.unreadable);
     }
 }
 
@@ -44,8 +48,8 @@ impl std::ops::AddAssign for FeedReport {
 ///
 /// A page is read slim first ([`Remote::change_refs`]: which version of which file changed).
 /// If the store knows every row (a version it has: this device's own writes coming back; a
-/// tombstone), the page is applied from them alone; this device's own removals are known from
-/// their write on, their time open until the feed confirms it. A page with anything new is
+/// tombstone), the page is applied from them alone (this device's own writes are known, with
+/// their times, from their answers; a time an answer didn't give comes from the row). A page with anything new is
 /// read again whole from the same cursor, and the feed continues from that page's cursor (a
 /// file changed in between has moved further along the feed). Changes from elsewhere come in
 /// runs, so after a page with something new the next is read whole at once, as is a first read
@@ -111,6 +115,16 @@ fn read_whole<G: DerefMut<Target = StateDb>>(
 ) -> Result<(bool, bool), FeedError> {
     let mut page = with_retries(|| remote.changes(cursor, page_size))?;
     report.skipped.append(&mut page.skipped);
+    report.unreadable.append(&mut page.skipped_files);
+    report.unreadable.extend(
+        page.entries
+            .iter()
+            .filter(|h| !h.is_deleted() && mirror_row(h).is_none())
+            .map(|h| RemoteRef {
+                file_id: h.file_id,
+                version: h.version,
+            }),
+    );
     let nothing_new = db().write(|s| {
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
         let nothing_new = known(s, &refs)?;
