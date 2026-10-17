@@ -382,33 +382,14 @@ impl Remote for HomebaseRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
         let mut entries = Vec::with_capacity(page.search_results.len());
-        let (mut skipped, mut skipped_files) = (Vec::new(), Vec::new());
+        let mut skipped = Vec::new();
         for row in &page.search_results {
             match serde_json::from_str::<wire::FileHeader>(row.get())
                 .map_err(|e| format!("unreadable header: {e}"))
                 .and_then(|h| wire::to_remote(h, self.client.key()))
             {
                 Ok(header) => entries.push(header),
-                Err(why) => {
-                    skipped.push(why);
-                    #[derive(serde::Deserialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct Version {
-                        version_tag: Uuid,
-                    }
-                    #[derive(serde::Deserialize)]
-                    #[serde(rename_all = "camelCase")]
-                    struct Id {
-                        file_id: Uuid,
-                        file_metadata: Version,
-                    }
-                    if let Ok(id) = serde_json::from_str::<Id>(row.get()) {
-                        skipped_files.push(RemoteRef {
-                            file_id: RemoteFileId(id.file_id),
-                            version: VersionTag(id.file_metadata.version_tag),
-                        });
-                    }
-                }
+                Err(why) => skipped.push(why),
             }
         }
         Ok(ChangesPage {
@@ -416,7 +397,6 @@ impl Remote for HomebaseRemote {
             cursor,
             has_more: page.has_more_rows,
             skipped,
-            skipped_files,
         })
     }
 

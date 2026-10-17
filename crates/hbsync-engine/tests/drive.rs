@@ -772,60 +772,6 @@ fn a_role_folder_made_leaves_recently_deleted() -> R {
     Ok(())
 }
 
-/// An announced change of a file the feed holds but can't be read as a node (not encrypted,
-/// another key, no payload) is no change to wait for: the read that skipped it brought it.
-#[test]
-fn an_unreadable_row_is_not_awaited() -> R {
-    use hbsync_remote::ChangeRef;
-    let dir = tempfile::tempdir()?;
-    let (drive, remote) = drive(dir.path())?;
-    let other = FakeRemote::new(remote.server_handle());
-    let made = other.create(&folder("Not ours"), None)?;
-    remote.faults().unreadable.insert(made.at.file_id);
-    let announced = ChangeRef::of(&remote.header(made.at.file_id)?);
-    assert_eq!(drive.unseen(&[announced])?, vec![announced], "not read yet");
-    drive.pull(None)?;
-    assert_eq!(drive.unseen(&[announced])?, Vec::new(), "read, and skipped");
-    // A later version of that file is awaited as any other.
-    let header = remote.header(made.at.file_id)?;
-    let again = other.update(
-        &hbsync_types::Target {
-            at: hbsync_types::RemoteRef {
-                file_id: header.file_id,
-                version: header.version,
-            },
-            token: header.token.clone(),
-            changed_at: None,
-        },
-        &NodeMeta {
-            content: NodeContent::folder("Renamed"),
-            ..node_meta_of(&header)?
-        },
-        None,
-    )?;
-    let newer = ChangeRef::of(&remote.header(again.at.file_id)?);
-    assert_eq!(
-        drive.unseen(&[newer])?,
-        vec![newer],
-        "a newer version is awaited"
-    );
-    Ok(())
-}
-
-/// The node meta a header has (a folder or a file at its place).
-fn node_meta_of(h: &hbsync_remote::RemoteHeader) -> Result<NodeMeta, Box<dyn std::error::Error>> {
-    let hbsync_remote::RemoteBody::Live { node, content, .. } = &h.body else {
-        return Err("a tombstone".into());
-    };
-    Ok(NodeMeta {
-        node: *node,
-        parent: h.parent,
-        kind: h.kind,
-        content: content.clone(),
-        removed: false,
-    })
-}
-
 /// A doubt that comes while a read of the feed runs isn't cleared by that read: the account
 /// stays behind until a read that started after it.
 #[test]

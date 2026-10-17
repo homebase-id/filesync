@@ -2871,36 +2871,6 @@ fn a_write_refused_for_the_drives_state_reads_the_feed() -> R {
     Ok(())
 }
 
-/// A feed answer the server kept from before a write (odin-core keeps answers by query, and
-/// one computed while a write commits can outlive it) doesn't hide that write from a client
-/// that syncs only on request: no read asks what the one before it did ([`Drive::page_size`]).
-#[test]
-fn a_kept_feed_answer_hides_no_write_from_a_sync() -> R {
-    let server = server();
-    let (mut a, mut b) = (Client::new(&server, "a")?, Client::new(&server, "b")?);
-    b.write("one.txt", "1")?;
-    b.sync()?;
-    a.sync()?;
-    assert_eq!(a.read_text("one.txt")?, "1");
-    // The answer to a's last read, kept through b's next write.
-    let cursor = StateDb::open_account(&a.db_path())?
-        .read(|s| s.account_kv(hbsync_state::keys::REMOTE_CURSOR))?;
-    let page = a.remote.faults().last_page.ok_or("a read the feed")?;
-    server
-        .lock()
-        .map_err(|_| "poisoned")?
-        .keep_answer(cursor.as_deref(), page)?;
-    b.write("two.txt", "2")?;
-    b.sync()?;
-    a.sync()?;
-    assert_eq!(
-        a.read_text("two.txt")?,
-        "2",
-        "the kept answer hid b's write"
-    );
-    Ok(())
-}
-
 /// A write whose answer didn't come (it landed: a timeout after the server wrote) isn't sent
 /// again blind, a large upload twice: the drive is behind, the feed is read first, and the
 /// file settles as uploaded.

@@ -890,7 +890,8 @@ fn write_answers_carry_the_feeds_time() -> R {
 /// to the end has. Prints, per late round, the row's `updated` against the time b's answer
 /// came (Unix ms, this machine's clock, the server's too on the dev host), the first reads'
 /// answers, and how long the row was missing; fails only when a read said no more rows
-/// without it. `FEED_AT_ONCE_ROUNDS` sets the rounds (40).
+/// without it (the client reads on only while there are: odin-core #1906, #1909).
+/// `FEED_AT_ONCE_ROUNDS` sets the rounds (40).
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn another_clients_write_is_in_the_feed_at_once() -> R {
@@ -967,13 +968,15 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
     result
 }
 
-/// A diagnostic for odin-core: whether a query-batch answer computed while another client's
-/// write commits can be kept (`QueryBatchCached`, keyed by the query, not by who asks) and keep
-/// hiding that write. A thread reads the feed from a cursor at the end over and over (pages of
-/// 100, as a client caught up would), while client b creates a folder; once b's answer came,
-/// one read from the same cursor (the same cache key) and one with pages of 99 (another key)
-/// say whether the row is there. Prints the rounds where only the other key saw it.
-/// `CACHE_RACE_ROUNDS` sets the rounds (60).
+/// A regression check of odin-core #1909 (fixed by its #1973, 4eb50e5db): a query-batch
+/// answer computed while another client's write commits must not be kept (`QueryBatchCached`,
+/// keyed by the query, not by who asks) and hide that write. The client relies on it: every
+/// read asks the same query, and an announced change is read for once. A thread reads the feed
+/// from a cursor at the end over and over (pages of 100, as a client caught up would), while
+/// client b creates a folder; once b's answer came, a read from the same cursor (the same
+/// cache key) and one with pages of 99 (another key) say whether the row is there, reading on
+/// while more rows follow (other tests' writes may come first). Fails on a round where the
+/// same query hid it. `CACHE_RACE_ROUNDS` sets the rounds (60).
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn a_page_read_during_a_write_may_be_kept_stale() -> R {
@@ -1009,19 +1012,34 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
                 let _ = reader.join();
                 // Past the hold-back window: a row not shown now is hidden, not held back.
                 std::thread::sleep(Duration::from_millis(1100));
-                let has = |limit| -> Result<(bool, bool), String> {
-                    let p = remote
-                        .change_refs(Some(&cursor), limit)
-                        .map_err(|e| e.to_string())?;
-                    Ok((p.refs.iter().any(|r| r.file_id == w.at.file_id), p.has_more))
+                // Whether the first page from the cursor has the row and says more rows follow,
+                // and whether reading on, as the client does (other tests' writes may come
+                // first), finds it.
+                let has = |limit| -> Result<(bool, bool, bool), String> {
+                    let read = |at: &str| {
+                        remote
+                            .change_refs(Some(at), limit)
+                            .map_err(|e| e.to_string())
+                    };
+                    let mut p = read(&cursor)?;
+                    let seen = |p: &hbsync_remote::RefsPage| {
+                        p.refs.iter().any(|r| r.file_id == w.at.file_id)
+                    };
+                    let (first, more) = (seen(&p), p.has_more);
+                    let mut found = first;
+                    while !found && p.has_more {
+                        p = read(&p.cursor.clone())?;
+                        found = seen(&p);
+                    }
+                    Ok((first, more, found))
                 };
                 let (same, other_key) = (has(100)?, has(99)?);
                 // How long it stays hidden without another write: the first round looks again
                 // ten seconds on.
-                if i == 0 && !same.0 {
+                if i == 0 && !same.2 {
                     std::thread::sleep(Duration::from_secs(10));
                     println!(
-                        "round 0, 11 s after the write: same key (seen, more) {:?}",
+                        "round 0, 11 s after the write: same key (seen, more, read on) {:?}",
                         has(100)?
                     );
                 }
@@ -1029,10 +1047,13 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
             })?;
             // The feed's end again, for the next round.
             end = cursor_at_end(&remote, Some(&end))?;
-            if !seen_same.0 {
+            if !seen_same.2 {
                 stale.push(format!(
-                    "round {i}: same key {seen_same:?}, another key {seen_other:?} (seen, more)"
+                    "round {i}: same key {seen_same:?}, another key {seen_other:?} \
+                     (seen, more, read on)"
                 ));
+            } else if !seen_same.0 {
+                println!("round {i}: past the first page: {seen_same:?} (seen, more, read on)");
             }
         }
         println!(
@@ -1042,6 +1063,10 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
         for s in &stale {
             println!("  {s}");
         }
+        assert!(
+            stale.is_empty(),
+            "a kept answer hid a write (odin-core #1909)"
+        );
         Ok(())
     })();
     bench.cleanup()?;
