@@ -562,6 +562,9 @@ impl Engine {
         if exec.full {
             self.drive.set_full();
         }
+        if exec.drive_moved {
+            self.drive.set_behind();
+        }
         // What was done counts, and the folders it asks to look at are looked at, however
         // the run ended.
         report.ops_done += exec.done;
@@ -585,6 +588,11 @@ impl Engine {
                 return Ok(plan.held);
             }
             Some(stopped) => return Err(stopped.into()),
+        }
+        // A write the drive refused for its state: the next round plans from the feed read
+        // now (the drive being behind, it is read whether the notifications run or not).
+        if exec.drive_moved {
+            report.feed += self.drive.catch_up(Some(self.db.folder()))?;
         }
         Ok(plan.held)
     }

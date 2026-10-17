@@ -4,7 +4,9 @@
 
 use std::time::Duration;
 
-use hbsync_dev::{OTHER_CLIENT, live_identity, run_name, saved_client, saved_client_as};
+use hbsync_dev::{
+    OTHER_CLIENT, cursor_at_end, live_identity, on_threads, run_name, saved_client, saved_client_as,
+};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_remote::Remote;
@@ -359,7 +361,7 @@ fn feed_sizes() -> R {
             made.lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push((meta, at));
-            Ok(())
+            Ok::<_, hbsync_remote::RemoteError>(())
         })?;
         let made = made.into_inner().unwrap_or_else(|e| e.into_inner());
         assert_eq!((created, made.len()), (n, n), "every create went through");
@@ -367,7 +369,7 @@ fn feed_sizes() -> R {
         let removed_count = on_threads(n, |i| {
             let (meta, at) = &made[i];
             remote.update(&bench.target(*at), &removed(meta), None)?;
-            Ok(())
+            Ok::<_, hbsync_remote::RemoteError>(())
         })?;
         assert_eq!(removed_count, n, "every removal went through");
         std::thread::sleep(Duration::from_millis(50));
@@ -406,39 +408,6 @@ fn feed_sizes() -> R {
 }
 
 const PAGE: usize = 500;
-
-/// `work` for each of `0..n` on 8 threads: how many went through, or the first error.
-fn on_threads(
-    n: usize,
-    work: impl Fn(usize) -> Result<(), hbsync_remote::RemoteError> + Sync,
-) -> Result<usize, hbsync_remote::RemoteError> {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    std::thread::scope(|scope| {
-        let threads: Vec<_> = (0..8)
-            .map(|_| {
-                scope.spawn(|| {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= n {
-                            return Ok(());
-                        }
-                        work(i)?;
-                        done.fetch_add(1, Ordering::Relaxed);
-                    }
-                })
-            })
-            .collect();
-        threads.into_iter().try_for_each(|t| {
-            t.join().unwrap_or_else(|_| {
-                Err(hbsync_remote::RemoteError::Fatal(
-                    "a thread panicked".into(),
-                ))
-            })
-        })
-    })?;
-    Ok(done.into_inner())
-}
 
 #[derive(Clone, Copy)]
 enum Read {
@@ -575,9 +544,12 @@ fn echo_run(
     std::fs::create_dir_all(ignore.parent().ok_or("ignore file")?)?;
     std::fs::write(&ignore, format!("/*\n!/{run}/\n"))?;
     a.restart()?;
-    let sync = |a: &mut TestClient<Counted>| -> R {
+    // Until idle, reading the feed first (`read`) or as the daemon syncs a local change: only
+    // if the account's picture isn't current (the notifications connected, as `Notifications`
+    // sets it).
+    let sync = |a: &mut TestClient<Counted>, read: bool| -> R {
         loop {
-            let report = a.sync_until_idle(&hbsync_app::today(), || {
+            let report = a.sync_until_idle(&hbsync_app::today(), read, || {
                 std::thread::sleep(Duration::from_millis(20));
             })?;
             assert!(report.failed.is_empty(), "failed {:?}", report.failed);
@@ -587,20 +559,7 @@ fn echo_run(
         }
     };
     a.write(&format!("{run}/readme.txt"), "echoes")?;
-    sync(&mut a)?;
-    // From now on as the daemon syncs a local change: the feed is read only if the account's
-    // picture isn't current (the notifications connected, set by `Notifications`).
-    let local_sync = |a: &mut TestClient<Counted>| -> R {
-        for _ in 0..50 {
-            a.engine.scan_local()?;
-            let report = a.engine.sync(&hbsync_app::today(), false)?;
-            assert!(report.failed.is_empty(), "failed {:?}", report.failed);
-            if report.ops_done == 0 {
-                return Ok(());
-            }
-        }
-        Err("not idle after 50 syncs".into())
-    };
+    sync(&mut a, true)?;
 
     // The notifications, as the daemon's account takes them.
     let (tx, events) = std::sync::mpsc::channel();
@@ -653,11 +612,11 @@ fn echo_run(
             for i in 0..n {
                 a.write(&format!("{run}/files/f{i:05}.txt"), format!("file {i}"))?;
             }
-            local_sync(&mut a)
+            sync(&mut a, false)
         })?;
         phase("delete", &mut || {
             std::fs::remove_dir_all(a.root.join(&run).join("files"))?;
-            local_sync(&mut a)
+            sync(&mut a, false)
         })?;
         phase("empty", &mut || {
             let nodes: Vec<_> = a
@@ -680,7 +639,7 @@ fn echo_run(
     drop(notifier);
     // The run's folder, deleted for good.
     std::fs::remove_dir_all(a.root.join(&run))?;
-    sync(&mut a)?;
+    sync(&mut a, true)?;
     let top: Vec<_> = a
         .recently_deleted(10_000)?
         .into_iter()
@@ -1062,13 +1021,7 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
                 Ok((same, other_key))
             })?;
             // The feed's end again, for the next round.
-            loop {
-                let p = remote.change_refs(Some(&end), 500)?;
-                end = p.cursor;
-                if !p.has_more {
-                    break;
-                }
-            }
+            end = cursor_at_end(&remote, Some(&end))?;
             if !seen_same.0 {
                 stale.push(format!(
                     "round {i}: same key {seen_same:?}, another key {seen_other:?} (seen, more)"

@@ -190,7 +190,8 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   a minimal one 588 (the encrypted envelope and its base64 included).
 - How the client reads with it: `hbsync_engine::feed::pull`. A server without `fileRefs` in
   its answer is refused, not read as an empty page.
-- **A kept answer can hide a write** (odin-core at fe067124b; **[tried]** on frodo, the
+- **A kept answer can hide a write** (odin-core #1909, open; tracked in filesync #90;
+  odin-core at fe067124b; **[tried]** on frodo, the
   diagnostics `a_page_read_during_a_write_may_be_kept_stale` and
   `another_clients_write_is_in_the_feed_at_once` in `hbsync-dev/tests/live.rs`):
   `QueryBatchCached` keeps a query-batch answer under a key made of the query's parameters
@@ -208,7 +209,12 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   cursor with every other client that did: one device's read can hide another device's
   write from all of them until the next write to the drive. The client never repeats a
   query (page sizes, `Drive::page_size`) and reads again for an announced version a read
-  didn't bring (`daemon.md`, when the feed is read).
+  didn't bring (`daemon.md`, when the feed is read). Once #1909 is fixed: every read asks for
+  `FEED_PAGE` again (`Drive::page_size`, `next_page_size` and the fake's `keep_answer` go),
+  the puller's re-reads stay for the hold-back alone (one read past it), and these notes say
+  so. The same family was filesync #1 (odin-core #1905, fixed by #1906 on 2026-10-09): an
+  answer that held rows back was cached; that fix doesn't cover a fill in flight during a
+  write.
 - **Rows held back**: a row written in the server's last millisecond or so is held back,
   answered as an empty or short page with `hasMoreRows` true (`QueryBatch.HoldBackWindowMs`,
   1000 ms, **[verified]**); tried: 3 of 60 reads right after another client's write, for 9 to

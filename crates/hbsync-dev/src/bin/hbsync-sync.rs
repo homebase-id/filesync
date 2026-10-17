@@ -45,11 +45,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
-    let as_client = args
-        .iter()
-        .position(|a| a == "--as")
-        .and_then(|i| args.get(i + 1));
-    let client = hbsync_dev::saved_client_as(identity, as_client.map(String::as_str))?;
+    let as_client = hbsync_dev::option(&args, "--as");
+    let client = hbsync_dev::saved_client_as(identity, as_client.as_deref())?;
     let remote = Arc::new(HomebaseRemote::connect(client.clone())?);
     std::fs::create_dir_all(folder)?;
     let root = std::fs::canonicalize(folder)?;

@@ -141,7 +141,6 @@ impl Executor<'_> {
         written: Option<Target>,
     ) -> Step {
         let node = meta.node;
-        let at = written.as_ref().and_then(|w| w.changed_at);
         let row = written.map(|w| written_row(w, &meta, hash));
         self.finish(&[Settle::node(node)], |s| match after {
             After::Created => {
@@ -155,8 +154,8 @@ impl Executor<'_> {
                 s.delete_mirror(file_id)?;
                 if let Some(row) = row {
                     s.put_removed(&RemovedRow {
+                        removed_at: row.changed_at,
                         row,
-                        removed_at: at,
                     })?;
                 }
                 s.mark_dirty(node)

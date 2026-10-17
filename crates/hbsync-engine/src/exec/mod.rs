@@ -185,6 +185,9 @@ pub struct ExecReport {
     pub full: bool,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
+    /// A remote write was refused for the drive's state, or an earlier try of it had landed
+    /// unanswered: the account's picture lacks something, so the feed is to be read.
+    pub drive_moved: bool,
 }
 
 /// Why a run stopped before its plan was done.

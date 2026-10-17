@@ -27,7 +27,10 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hbsync_dev::{OTHER_CLIENT, credentials_path_as, live_identity, run_name, saved_client_as};
+use hbsync_dev::{
+    OTHER_CLIENT, credentials_path_as, cursor_at_end, live_identity, on_threads, run_name,
+    saved_client_as,
+};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier, OwnWrites};
 use hbsync_remote::contract::{file, folder, removed, upload, with};
@@ -218,16 +221,7 @@ struct Mark {
 impl Harness {
     fn new(computers: Vec<Computer>, run: &str) -> Res<Harness> {
         // The feed's end, once: each computer's check reads on from a copy of it.
-        let a = &computers[0].remote;
-        let mut cursor: Option<String> = None;
-        loop {
-            let page = a.change_refs(cursor.as_deref(), 1000)?;
-            cursor = Some(page.cursor);
-            if !page.has_more {
-                break;
-            }
-        }
-        let cursor = cursor.unwrap_or_default();
+        let cursor = cursor_at_end(&computers[0].remote, None)?;
         let top = folder(run, NodeId::ROOT);
         let h = Harness {
             cursors: Mutex::new(vec![cursor; computers.len()]),
@@ -646,31 +640,6 @@ fn ms(at: Instant, since: Instant) -> f64 {
         (at - since).as_secs_f64() * 1e3
     } else {
         -((since - at).as_secs_f64() * 1e3)
-    }
-}
-
-/// `work` for each of `0..n` on 8 threads; the first error.
-fn on_threads(n: usize, work: impl Fn(usize) -> Res + Sync) -> Res {
-    let next = AtomicUsize::new(0);
-    let failed = Mutex::new(None::<String>);
-    std::thread::scope(|scope| {
-        for _ in 0..8 {
-            scope.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n || lock(&failed).is_some() {
-                        return;
-                    }
-                    if let Err(e) = work(i) {
-                        lock(&failed).get_or_insert(e.to_string());
-                    }
-                }
-            });
-        }
-    });
-    match failed.into_inner().unwrap_or_else(|e| e.into_inner()) {
-        Some(e) => Err(e.into()),
-        None => Ok(()),
     }
 }
 

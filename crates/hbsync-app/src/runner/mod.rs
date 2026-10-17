@@ -473,7 +473,7 @@ impl Runner {
                 }
             });
             let today = crate::today();
-            let read = schedule.take_read();
+            let read = schedule.read();
             let result = if started {
                 p.engine.sync(&today, read)
             } else {

@@ -9,8 +9,7 @@ use hbsync_engine::exec::{CrashPoint, FailPoint};
 use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{
-    ChangesPage, NodeMeta, RefsPage, Remote, RemoteBody, RemoteHeader, Result as RemoteResult,
-    Upload,
+    ChangesPage, NodeMeta, RefsPage, Remote, RemoteHeader, Result as RemoteResult, Upload,
 };
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
@@ -2759,89 +2758,35 @@ fn own_writes_come_back_slim() -> R {
     Ok(())
 }
 
-/// With the notifications leaving out a client's own writes (`excludeOwnWrites`, odin-core
-/// #1971), nothing of a's own comes back to it, and nothing needs it to: a's removal has the
-/// server's time once its sync ends (from the write's answer), and another computer's change
-/// is still announced, which a's drive doesn't know yet and reads.
-#[test]
-fn own_writes_need_no_echo() -> R {
-    let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
-    let heard = a.remote.subscribe(true);
-    a.write("doc.txt", "x")?;
-    a.write("dir/in.txt", "y")?;
-    a.sync()?;
-    fs::remove_file(a.root.join("doc.txt"))?;
-    fs::remove_dir_all(a.root.join("dir"))?;
-    a.sync()?;
-    assert_eq!(heard.try_iter().count(), 0, "a heard its own writes");
-
-    let on_server: HashMap<String, Option<i64>> = {
-        let s = server.lock().map_err(|_| "poisoned")?;
-        s.removed()
-            .filter_map(|h| match &h.body {
-                RemoteBody::Live { content, .. } => Some((content.name.clone(), h.removed_at)),
-                RemoteBody::Deleted => None,
-            })
-            .collect()
-    };
-    let deleted = a.recently_deleted(10)?;
-    assert_eq!(deleted.len(), 3, "{deleted:?}");
-    for d in &deleted {
-        let name = d.path.rsplit('/').next().unwrap_or_default();
-        assert!(d.removed_at_ms.is_some(), "{} still open", d.path);
-        assert_eq!(d.removed_at_ms, on_server[name], "{}", d.path);
-    }
-
-    // Another computer: its write is announced to a, and is news there.
-    let b = FakeRemote::new(server.clone());
-    let made = b.create(
-        &NodeMeta {
-            node: NodeId::new(),
-            parent: NodeId::ROOT,
-            kind: hbsync_types::NodeKind::Folder,
-            content: hbsync_types::schema::NodeContent::folder("from b"),
-            removed: false,
-        },
-        None,
-    )?;
-    let announced: Vec<_> = heard.try_iter().collect();
-    assert_eq!(announced.len(), 1);
-    assert_eq!(announced[0].at(), made.at);
-    assert!(!a.engine.drive().announced(&announced)?, "news: read");
-    Ok(())
+/// The feed pages `c` read so far, slim and whole.
+fn feed_reads(c: &Client) -> usize {
+    let f = c.remote.faults();
+    f.ref_pages + f.full_pages
 }
 
-/// With the notifications connected (the account's picture current), a sync of this device's
-/// own changes reads no feed at all: each write is recorded from its answer, with the
-/// server's time (odin-core #1971), a version's and a removal's alike. Another computer's
-/// change, announced and unknown, is what reads the feed.
+/// A folder made by another client, as `b` writes it.
+fn folder_meta(name: &str) -> NodeMeta {
+    hbsync_remote::contract::folder(name, NodeId::ROOT)
+}
+
+/// With the drive's changes announced and this device's own writes left out of them
+/// (`excludeOwnWrites`, odin-core #1971), its syncs read no feed at all: each write is
+/// recorded from its answer, a version's server time and a removal's alike, and nothing of its
+/// own comes back to it. Another computer's change, announced and unknown, is what reads it.
 #[test]
 fn own_writes_are_recorded_from_their_answers() -> R {
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
     a.sync()?; // start: reads the feed, as at every start
-    a.engine.drive().set_announcing(true);
-    let pages = |a: &Client| {
-        let f = a.remote.faults();
-        f.ref_pages + f.full_pages
-    };
-    let before = pages(&a);
-    let sync = |a: &mut Client| -> R {
-        for _ in 0..6 {
-            a.engine.scan_local()?;
-            if a.engine.sync("2026-10-16", false)?.ops_done == 0 {
-                return Ok(());
-            }
-        }
-        Err("not idle".into())
-    };
+    a.announced();
+    let heard = a.remote.subscribe(true);
+    let before = feed_reads(&a);
     a.write("doc.txt", "x")?;
     a.write("dir/in.txt", "y")?;
-    sync(&mut a)?;
+    a.sync_unasked()?;
     fs::rename(a.root.join("doc.txt"), a.root.join("renamed.txt"))?;
-    sync(&mut a)?;
-    assert_eq!(pages(&a), before, "a's own writes read the feed");
+    a.sync_unasked()?;
+    assert_eq!(feed_reads(&a), before, "a's own writes read the feed");
 
     // Each version's time is the server's.
     let mut db = StateDb::open_account(&a.db_path())?;
@@ -2861,40 +2806,68 @@ fn own_writes_are_recorded_from_their_answers() -> R {
     // A removal's time too, without a feed read.
     fs::remove_dir_all(a.root.join("dir"))?;
     fs::remove_file(a.root.join("renamed.txt"))?;
-    sync(&mut a)?;
-    assert_eq!(pages(&a), before, "a's own removals read the feed");
+    a.sync_unasked()?;
+    assert_eq!(feed_reads(&a), before, "a's own removals read the feed");
     let on_server: HashMap<RemoteFileId, Option<i64>> = {
         let s = server.lock().map_err(|_| "poisoned")?;
         s.removed().map(|h| (h.file_id, h.removed_at)).collect()
     };
     assert_eq!(on_server.len(), 3);
-    for d in a.recently_deleted(10)? {
+    let deleted = a.recently_deleted(10)?;
+    assert_eq!(deleted.len(), 3, "{deleted:?}");
+    for d in deleted {
         let row = db
             .read(|s| s.removed_by_node(d.node))?
             .ok_or("not removed")?;
         assert!(d.removed_at_ms.is_some(), "{} open", d.path);
         assert_eq!(d.removed_at_ms, on_server[&row.row.file_id], "{}", d.path);
     }
+    assert_eq!(heard.try_iter().count(), 0, "a heard its own writes");
 
     // Another computer's write, announced: news, so the feed is read for it.
     let b = FakeRemote::new(server.clone());
-    let heard = a.remote.subscribe(true);
-    b.create(
-        &NodeMeta {
-            node: NodeId::new(),
-            parent: NodeId::ROOT,
-            kind: hbsync_types::NodeKind::Folder,
-            content: hbsync_types::schema::NodeContent::folder("from b"),
-            removed: false,
-        },
-        None,
-    )?;
+    b.create(&folder_meta("from b"), None)?;
     let announced: Vec<_> = heard.try_iter().collect();
-    assert!(!a.engine.drive().announced(&announced)?);
+    assert_eq!(announced.len(), 1);
+    assert!(!a.engine.drive().announced(&announced)?, "news: read");
     a.engine.drive().pull(None)?;
-    assert!(pages(&a) > before, "the news is read");
-    sync(&mut a)?;
+    assert!(feed_reads(&a) > before, "the news is read");
+    a.sync_unasked()?;
     assert!(a.root.join("from b").is_dir());
+    Ok(())
+}
+
+/// A write the drive refuses for its state (another device changed the file, unannounced to
+/// this one) leaves the drive behind: the sync reads the feed at once, though the
+/// notifications run and nothing else would read, and the next try settles it.
+#[test]
+fn a_write_refused_for_the_drives_state_reads_the_feed() -> R {
+    let server = server();
+    let (mut a, mut b) = (Client::new(&server, "a")?, Client::new(&server, "b")?);
+    a.write("doc.txt", "a1")?;
+    a.sync()?;
+    b.sync()?;
+    a.announced();
+    // b's edit, never announced to a.
+    b.write("doc.txt", "b2")?;
+    b.sync()?;
+    a.write("doc.txt", "a2")?;
+    // The refused write reads the feed; the retry of the unfinished work (the runner's, a few
+    // seconds on) settles it, with no read of its own.
+    let refused = a.sync_unasked()?;
+    assert!(refused.unfinished && refused.feed.live > 0, "{refused:?}");
+    let reads = feed_reads(&a);
+    a.sync_unasked()?;
+    assert_eq!(feed_reads(&a), reads, "the retry reads nothing");
+    let texts: Vec<String> = a
+        .entries("")
+        .into_iter()
+        .map(|(_, t)| String::from_utf8_lossy(&t).into_owned())
+        .collect();
+    assert!(
+        texts.contains(&"b2".to_owned()) && texts.contains(&"a2".to_owned()),
+        "{texts:?}"
+    );
     Ok(())
 }
 

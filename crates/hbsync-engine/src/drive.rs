@@ -10,9 +10,11 @@ use std::time::{Duration, Instant};
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
-use hbsync_types::NodeId;
+use std::collections::HashSet;
+
+use hbsync_state::MirrorRow;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeKind, Role};
+use hbsync_types::{NodeId, NodeKind, RemoteFileId, Role};
 
 use crate::deleted;
 use crate::engine::EngineError;
@@ -41,10 +43,18 @@ pub struct Drive {
     skipped: Mutex<Vec<String>>,
     /// The drive refused an upload, out of storage: until when uploads are held.
     full: Mutex<Option<Instant>>,
-    /// The identity announces the drive's changes (the notifications are connected).
+    /// The identity announces the drive's changes: the notifications are connected, and the
+    /// read that followed their connecting worked.
     announcing: AtomicBool,
-    /// The last pull failed: changes may have been announced and not taken.
+    /// Counts the connections the notifications lost: a read asked for at a connection that
+    /// was lost since says nothing about announcements ([`Drive::announcing_from`]).
+    connections: AtomicU64,
+    /// The account's picture may lack something: the last pull failed, a write was refused for
+    /// the drive's state, an announced change never showed. The next read is due.
     behind: AtomicBool,
+    /// Files whose rows the feed holds but the mirror doesn't take (not readable as nodes, live
+    /// without a payload): an announced change of one is no change to wait for.
+    unreadable: Mutex<HashSet<RemoteFileId>>,
     /// Feed reads so far, from a random start: the next read's page size.
     reads: AtomicU64,
 }
@@ -80,15 +90,38 @@ impl Drive {
             skipped: Mutex::default(),
             full: Mutex::default(),
             announcing: AtomicBool::new(false),
+            connections: AtomicU64::new(0),
             behind: AtomicBool::new(false),
+            unreadable: Mutex::default(),
             reads: AtomicU64::new(NodeId::new().0.as_u128() as u64 % PAGE_SIZES),
         })
     }
 
-    /// Whether the identity announces the drive's changes from now on (the notifications
-    /// connected; `false`: they are lost, refused, never were).
-    pub fn set_announcing(&self, on: bool) {
-        self.announcing.store(on, Ordering::Relaxed);
+    /// The notifications connected: the mark of this connection, for
+    /// [`Drive::announcing_from`] once the read that follows worked.
+    pub fn connection(&self) -> u64 {
+        self.connections.load(Ordering::SeqCst)
+    }
+
+    /// The read asked for when the notifications connected (`connection`) worked: unless that
+    /// connection was lost since, the drive's changes are announced from now on.
+    pub fn announcing_from(&self, connection: u64) {
+        if self.connections.load(Ordering::SeqCst) == connection {
+            self.announcing.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The notifications are lost or refused: changes go unannounced, and what was announced
+    /// meanwhile may not have been taken, so the account is behind.
+    pub fn not_announcing(&self) {
+        self.connections.fetch_add(1, Ordering::SeqCst);
+        self.announcing.store(false, Ordering::SeqCst);
+        self.set_behind();
+    }
+
+    /// The account's picture may lack something: the next sync reads the feed.
+    pub fn set_behind(&self) {
+        self.behind.store(true, Ordering::SeqCst);
     }
 
     /// Whether the account's picture of the drive is as current as the announcements make it:
@@ -98,47 +131,51 @@ impl Drive {
         self.announcing.load(Ordering::Relaxed) && !self.behind.load(Ordering::Relaxed)
     }
 
-    /// The page size of the next read of the feed: a little smaller each time, round after
-    /// round. odin-core keeps a query's answer by the query (cursor and page size, not who asks:
-    /// `QueryBatchCached`), and an answer computed while a write commits can be kept after it,
-    /// hiding that write from the same query until the next write to the drive or for hours
-    /// (`homebase-api-notes.md`, the change feed). A read never asks what the last one did, nor
-    /// as another client most likely just did.
-    fn page_size(&self) -> usize {
-        let n = self.reads.fetch_add(1, Ordering::Relaxed) % PAGE_SIZES;
-        FEED_PAGE - n as usize
+    /// The page size of the read of the feed numbered `read`: a little smaller each time,
+    /// round after round. odin-core keeps a query's answer by the query (cursor and page size,
+    /// not who asks: `QueryBatchCached`), and an answer computed while a write commits can be
+    /// kept after it, hiding that write from the same query until the next write to the drive
+    /// or for hours (`homebase-api-notes.md`, the change feed). A read never asks what the last
+    /// one did, nor as another client most likely just did. A workaround for odin-core #1909
+    /// (tracked in filesync #90): once that is fixed, every read asks for [`FEED_PAGE`].
+    fn page_size(read: u64) -> usize {
+        FEED_PAGE - (read % PAGE_SIZES) as usize
     }
 
     /// The page size the next read of the feed will use (tests: to keep its answer).
     #[doc(hidden)]
     pub fn next_page_size(&self) -> usize {
-        FEED_PAGE - (self.reads.load(Ordering::Relaxed) % PAGE_SIZES) as usize
+        Drive::page_size(self.reads.load(Ordering::Relaxed))
     }
 
     /// Of announced `refs`, the live ones the account's picture doesn't show yet: neither that
-    /// version nor a later write of the file (by the server's time) is in it, and the file
-    /// wasn't deleted for good. A read of the feed that should have brought them didn't: the
-    /// server may hold a row back (its write is in this millisecond, or kept out by a stale
-    /// answer, see [`Drive::page_size`]); they are read again a moment later.
+    /// version nor a later write of the file (by the server's time) is in it, the file wasn't
+    /// deleted for good, and the feed didn't hold its row unreadable. A read of the feed that
+    /// should have brought them didn't: the server may hold a row back (its write is in this
+    /// millisecond, or kept out by a stale answer, odin-core #1909, filesync #90, see
+    /// [`Drive::page_size`]); they are read for again a moment later.
     pub fn unseen(&self, refs: &[ChangeRef]) -> Result<Vec<ChangeRef>, StateError> {
-        let mut db = self.account();
-        db.read(|s| {
-            let mut unseen = Vec::new();
-            for r in refs.iter().filter(|r| !r.deleted) {
-                if s.known(&[(r.at(), r.removed_at.is_some())])? || s.file_gone(r.file_id)? {
-                    continue;
-                }
-                let at = r.changed_at.or(r.removed_at);
-                let later = match (s.file_time(r.file_id)?, at) {
-                    (Some(have), Some(at)) => have >= at,
-                    _ => false,
-                };
-                if !later {
-                    unseen.push(*r);
-                }
-            }
-            Ok(unseen)
-        })
+        let unreadable = self
+            .unreadable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let live: Vec<&ChangeRef> = refs
+            .iter()
+            .filter(|r| !r.deleted && !unreadable.contains(&r.file_id))
+            .collect();
+        let versions: Vec<_> = live
+            .iter()
+            .map(|r| {
+                (
+                    r.at(),
+                    r.removed_at.is_some(),
+                    r.changed_at.or(r.removed_at),
+                )
+            })
+            .collect();
+        let unseen = self.account().read(|s| s.unseen(&versions))?;
+        Ok(unseen.into_iter().map(|i| *live[i]).collect())
     }
 
     /// Reads the feed ([`Drive::pull`]) unless the picture is [`Drive::current`].
@@ -195,7 +232,8 @@ impl Drive {
         }
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
-        let pulled = feed::pull(|| self.account(), self.remote(), self.page_size());
+        let page = Drive::page_size(self.reads.fetch_add(1, Ordering::Relaxed));
+        let pulled = feed::pull(|| self.account(), self.remote(), page);
         self.behind.store(pulled.is_err(), Ordering::Relaxed);
         if pulled.is_ok() {
             *answered = covers;
@@ -205,6 +243,10 @@ impl Drive {
         self.wake_touched(&mut self.account(), from);
         drop(answered);
         let mut report = pulled?;
+        self.unreadable
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(report.unreadable.drain(..));
         let mut skipped = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
         let room = MAX_SKIPPED.saturating_sub(skipped.len());
         skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));
@@ -286,20 +328,20 @@ impl Drive {
             match self.remote().create(&meta, None) {
                 // Recorded from the answer, as the executor records its writes.
                 Ok(written) => {
-                    let row = hbsync_state::MirrorRow {
-                        token: written.token,
-                        changed_at: written.changed_at,
-                        ..hbsync_state::MirrorRow::from_content(
-                            written.at,
-                            meta.node,
-                            meta.parent,
-                            meta.kind,
-                            &meta.content,
-                            None,
-                        )
-                    };
+                    let row = MirrorRow::written(
+                        written,
+                        meta.node,
+                        meta.parent,
+                        meta.kind,
+                        &meta.content,
+                        None,
+                    );
                     let mut db = self.account();
-                    db.write(|s| s.put_mirror(&row))?;
+                    // As the executor records a folder it made: out of Recently deleted too.
+                    db.write(|s| {
+                        s.delete_removed(top)?;
+                        s.put_mirror(&row)
+                    })?;
                     self.wake_touched(&mut db, None);
                 }
                 // Another device made it (or deleted it) meanwhile: read it.

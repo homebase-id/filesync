@@ -308,25 +308,21 @@ pub(super) fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String
         .map(str::to_owned)
 }
 
-/// The mirror row of a node written as `meta` (a file with its content `hash`): the file as
-/// written, with its token and the server's time of the version (the write's answer has both).
+/// The mirror row of a node written as `meta` (a file with its content `hash`), as the write's
+/// answer has it ([`MirrorRow::written`]).
 pub(super) fn written_row(
     written: Target,
     meta: &NodeMeta,
     hash: Option<hbsync_types::ContentHash>,
 ) -> MirrorRow {
-    MirrorRow {
-        token: written.token,
-        changed_at: written.changed_at,
-        ..MirrorRow::from_content(
-            written.at,
-            meta.node,
-            meta.parent,
-            meta.kind,
-            &meta.content,
-            hash,
-        )
-    }
+    MirrorRow::written(
+        written,
+        meta.node,
+        meta.parent,
+        meta.kind,
+        &meta.content,
+        hash,
+    )
 }
 
 /// A metadata-only update of a node to `meta` if it's still at `target` (its payload, of

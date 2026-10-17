@@ -56,7 +56,20 @@ impl Client {
 
     /// Scan, then sync until idle. The report accumulates every pass.
     pub fn sync(&mut self) -> Res<SyncReport> {
-        self.0.sync_until_idle("2026-10-08", || {})
+        self.0.sync_until_idle("2026-10-08", true, || {})
+    }
+
+    /// Syncs until idle as the daemon syncs a local change: reading the feed only if the
+    /// drive isn't current.
+    pub fn sync_unasked(&mut self) -> Res<SyncReport> {
+        self.0.sync_until_idle("2026-10-08", false, || {})
+    }
+
+    /// Takes the drive's changes as announced from now on, as when the notifications connect
+    /// and the read that follows works.
+    pub fn announced(&self) {
+        let drive = self.engine.drive();
+        drive.announcing_from(drive.connection());
     }
 }
 

@@ -738,3 +738,53 @@ fn a_new_login_forgets_the_tokens() -> R {
     assert_eq!(token()?, None);
     Ok(())
 }
+
+/// A role folder this device makes takes its place out of Recently deleted, as any folder the
+/// executor makes does: one there that couldn't come back (deleted for good meanwhile) isn't
+/// left beside the new one.
+#[test]
+fn a_role_folder_made_leaves_recently_deleted() -> R {
+    use hbsync_remote::contract::removed;
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let top = Role::Documents.node();
+    let meta = NodeMeta {
+        node: top,
+        parent: NodeId::ROOT,
+        kind: NodeKind::Folder,
+        content: NodeContent::folder(Role::Documents.name()),
+        removed: false,
+    };
+    let made = remote.create(&meta, None)?;
+    let gone = remote.update(&made, &removed(&meta), None)?;
+    drive.pull(None)?;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    assert!(db.read(|s| s.removed_by_node(top))?.is_some());
+    // Deleted for good, not yet read: the restore finds nothing, and the folder is made anew.
+    remote.delete(gone.at.file_id, gone.at.version)?;
+    drive.announcing_from(drive.connection());
+    drive.ensure_role(Role::Documents)?;
+    assert!(db.read(|s| s.get_mirror(top))?.is_some(), "made");
+    assert!(
+        db.read(|s| s.removed_by_node(top))?.is_none(),
+        "out of Recently deleted"
+    );
+    Ok(())
+}
+
+/// An announced change of a file the feed holds but can't be read as a node (not encrypted,
+/// another key, no payload) is no change to wait for: the read that skipped it brought it.
+#[test]
+fn an_unreadable_row_is_not_awaited() -> R {
+    use hbsync_remote::ChangeRef;
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let other = FakeRemote::new(remote.server_handle());
+    let made = other.create(&folder("Not ours"), None)?;
+    remote.faults().unreadable.insert(made.at.file_id);
+    let announced = ChangeRef::of(&remote.header(made.at.file_id)?);
+    assert_eq!(drive.unseen(&[announced])?, vec![announced], "not read yet");
+    drive.pull(None)?;
+    assert_eq!(drive.unseen(&[announced])?, Vec::new(), "read, and skipped");
+    Ok(())
+}

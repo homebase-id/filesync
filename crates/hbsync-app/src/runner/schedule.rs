@@ -123,10 +123,10 @@ impl Schedule {
         self.not_before = now;
     }
 
-    /// Whether the sync starting now reads the feed first whatever the notifications say;
-    /// asked once.
-    pub fn take_read(&mut self) -> bool {
-        std::mem::take(&mut self.read)
+    /// Whether the sync starting now reads the feed first whatever the notifications say.
+    /// Asked until a sync ended ([`Schedule::synced`]: it read first): a failed one asks again.
+    pub fn read(&self) -> bool {
+        self.read
     }
 
     /// The machine woke up: sync now, the backoff forgotten.
@@ -193,6 +193,7 @@ impl Schedule {
     /// stuck work isn't a full sync every few seconds.
     pub fn synced(&mut self, now: Instant, outcome: Synced) {
         self.backoff = Backoff::new();
+        self.read = false;
         match outcome {
             Synced::Stopped => {}
             Synced::Done => {
@@ -374,5 +375,20 @@ mod tests {
         let mut s = Schedule::new(t0, LOOK, None);
         s.synced(t0, Synced::Stopped);
         assert!(s.due(t0));
+    }
+
+    /// A sync asked for reads the feed first; one that failed leaves that for the next try,
+    /// one that ended doesn't.
+    #[test]
+    fn an_asked_read_outlives_a_failed_sync() {
+        let t0 = Instant::now();
+        let mut s = Schedule::new(t0, LOOK, None);
+        assert!(!s.read(), "a start reads anyway");
+        s.asked(t0);
+        assert!(s.read());
+        s.failed(t0, State::Failing);
+        assert!(s.read(), "the failed sync may not have read");
+        s.synced(t0, Synced::Done);
+        assert!(!s.read());
     }
 }

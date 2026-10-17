@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 hbsync-app.workspace = true
 hbsync-engine.workspace = true
-hbsync-homebase.workspace = true
+hbsync-homebase = { workspace = true, features = ["dev"] }
 hbsync-local.workspace = true
 hbsync-platform.workspace = true
 hbsync-remote.workspace = true

@@ -29,12 +29,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "usage: hbsync-register <identity> [--as <client>] [--browser <command>]".into(),
         );
     };
-    let option = |name: &str| {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i + 1))
-            .cloned()
-    };
+    let option = |name| hbsync_dev::option(&args, name);
     let browser = option("--browser");
     let client = option("--as");
     let path = hbsync_dev::credentials_path_as(&identity, client.as_deref())?;

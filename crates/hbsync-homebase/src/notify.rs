@@ -11,8 +11,8 @@
 //!   `fileModified`, `fileDeleted` (reactions also send `fileModified`), as minimal rows
 //!   (odin-core #1970, `homebase-api-notes.md`);
 //! - with `excludeOwnWrites` (odin-core #1971) the socket isn't told of writes made with its
-//!   own token: this client records its writes itself, and the feed read at the end of each
-//!   batch confirms them (`daemon.md`, the sync loop).
+//!   own token: this client records each of its writes from the write's answer, its server
+//!   time included (`daemon.md`, the sync loop).
 
 use std::borrow::Cow;
 use std::io;
@@ -60,7 +60,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// A refused subscription isn't asked again sooner (the sync's own refusals wait as long).
 const REFUSED_PAUSE: Duration = Duration::from_secs(300);
 
-/// Whether the subscription hears of the drive writes this client makes itself.
+/// Whether the subscription hears of the drive writes this client makes itself (measurements:
+/// the `dev` feature).
+#[cfg(feature = "dev")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OwnWrites {
     /// Not told (`excludeOwnWrites`, odin-core #1971): the server leaves out the writes made
@@ -74,6 +76,7 @@ pub enum OwnWrites {
 
 /// What the connection received so far, over all its connections: server frames, and their
 /// bytes as text frames (the encrypted envelope included; TLS and WebSocket framing not).
+/// Counted always, read with the `dev` feature.
 #[derive(Debug, Default)]
 pub struct Received {
     pub frames: AtomicU64,
@@ -86,30 +89,41 @@ pub struct Received {
 pub struct Notifier {
     stop: Arc<AtomicBool>,
     reconnect: Arc<AtomicBool>,
+    /// Counted by the connection's thread, read with the `dev` feature.
+    #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     received: Arc<Received>,
 }
 
 impl Notifier {
     /// Connects to `client`'s identity and subscribes to `drive`, reconnecting as needed;
     /// events go to `events` until it is closed or the notifier dropped. Writes made with
-    /// `client`'s own token aren't announced ([`OwnWrites::Excluded`]). An error: its thread
+    /// `client`'s own token aren't announced (`excludeOwnWrites`). An error: its thread
     /// couldn't start (then never connected: the caller reads the drive on a timer).
     pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> io::Result<Self> {
-        Self::spawn_with(client, drive, OwnWrites::Excluded, events)
+        Self::subscribe(client, Subscription { drive, own: false }, events)
     }
 
-    /// [`Notifier::spawn`], hearing this client's `own` writes or not.
+    /// [`Notifier::spawn`], hearing this client's `own` writes or not (measurements).
+    #[cfg(feature = "dev")]
     pub fn spawn_with(
         client: Client,
         drive: TargetDrive,
         own: OwnWrites,
         events: Sender<Event>,
     ) -> io::Result<Self> {
+        let own = own == OwnWrites::Heard;
+        Self::subscribe(client, Subscription { drive, own }, events)
+    }
+
+    fn subscribe(
+        client: Client,
+        subscription: Subscription,
+        events: Sender<Event>,
+    ) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let reconnect = Arc::new(AtomicBool::new(false));
         let received = Arc::new(Received::default());
         let (flag, kick, counts) = (stop.clone(), reconnect.clone(), received.clone());
-        let subscription = Subscription { drive, own };
         std::thread::Builder::new()
             .name("hbsync-notify".into())
             .spawn(move || run(&client, subscription, &events, &flag, &kick, &counts))?;
@@ -120,7 +134,8 @@ impl Notifier {
         })
     }
 
-    /// What it received so far.
+    /// What it received so far (measurements).
+    #[cfg(feature = "dev")]
     pub fn received(&self) -> &Received {
         &self.received
     }
@@ -143,7 +158,8 @@ impl Drop for Notifier {
 #[derive(Debug, Clone, Copy)]
 struct Subscription {
     drive: TargetDrive,
-    own: OwnWrites,
+    /// Hears this client's own writes too (measurements).
+    own: bool,
 }
 
 impl Subscription {
@@ -155,7 +171,7 @@ impl Subscription {
                 "type": self.drive.drive_type.simple().to_string(),
             }],
             "resultShape": "minimal",
-            "excludeOwnWrites": self.own == OwnWrites::Excluded,
+            "excludeOwnWrites": !self.own,
         })
     }
 }
@@ -514,14 +530,14 @@ mod tests {
             drive_type: uuid::Uuid::from_u128(2),
         };
         let request = |own| Subscription { drive, own }.request();
-        let excluded = request(OwnWrites::default());
+        let excluded = request(false);
         assert_eq!(excluded["excludeOwnWrites"], true);
         assert_eq!(excluded["resultShape"], "minimal");
         assert_eq!(
             excluded["drives"][0]["alias"],
             "00000000000000000000000000000001"
         );
-        assert_eq!(request(OwnWrites::Heard)["excludeOwnWrites"], false);
+        assert_eq!(request(true)["excludeOwnWrites"], false);
     }
 
     #[test]

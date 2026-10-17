@@ -149,23 +149,31 @@ a failure (service managers restart it then).
 - **When the feed is read**, and only then:
   - at a folder's start (and once more if its local catch-up, a walk, took long);
   - when the notifications connect (again): the account pulls, as changes made meanwhile
-    weren't announced;
+    weren't announced (connected while paused: at the resume). Only once that read worked
+    are the drive's changes taken as announced (the account's picture *current*);
   - when an announced version isn't known, or an event didn't say which file; an announced
     version that read didn't bring is read for again 1.1 s later (past the server's hold-back
-    of rows written in its last second), then twice as long each time, six reads at most,
-    after which the next reconnect's read is left to bring it (the server may keep a stale
-    answer for a while: `homebase-api-notes.md`, the change feed);
+    of rows written in its last second), then twice as long each time, six reads for each
+    such change at most, after which the account is *behind* (the server may keep a stale
+    answer for a while, odin-core #1909, filesync #90: `homebase-api-notes.md`, the change
+    feed);
   - every 5 min while the notifications aren't connected;
-  - by a sync while the account's picture isn't current: the notifications aren't connected,
-    or its last pull failed (the folders' syncs then read for it);
+  - by a sync while the account's picture isn't current: the notifications aren't connected
+    or their read after connecting hasn't worked, or the account is behind. It is behind
+    when it can't be sure its picture is complete: a pull failed, the notifications were
+    lost or refused, an announced change never showed, looking for it failed, or the drive
+    refused a write for its state (a version moved on, a node id taken, a file gone: a
+    change it wasn't told of, or an earlier try of its own write that landed unanswered).
+    After such a refused write the sync reads at once; a read that works ends it;
   - by a sync the user asked for (sync now, a resume, confirming held deletes) or the
-    machine waking up;
+    machine waking up; asked until a sync ended, so a failed one asks again;
   - before Recently deleted's restore, emptying and the daily purge, while not current;
   - when this device makes a role folder that another device made meanwhile.
   A sync woken by a local change or by the account's drive reads nothing while current,
   and none reads after its own writes. Each read asks for pages of a few rows less than the
   one before (500 down to 437, round after round, from a random start), so it never asks
-  the server the very query an answer may have been kept for.
+  the server the very query an answer may have been kept for (odin-core #1909, filesync
+  #90).
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start

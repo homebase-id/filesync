@@ -382,14 +382,24 @@ impl Remote for HomebaseRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
         let mut entries = Vec::with_capacity(page.search_results.len());
-        let mut skipped = Vec::new();
+        let (mut skipped, mut skipped_files) = (Vec::new(), Vec::new());
         for row in &page.search_results {
             match serde_json::from_str::<wire::FileHeader>(row.get())
                 .map_err(|e| format!("unreadable header: {e}"))
                 .and_then(|h| wire::to_remote(h, self.client.key()))
             {
                 Ok(header) => entries.push(header),
-                Err(why) => skipped.push(why),
+                Err(why) => {
+                    skipped.push(why);
+                    #[derive(serde::Deserialize)]
+                    #[serde(rename_all = "camelCase")]
+                    struct Id {
+                        file_id: Uuid,
+                    }
+                    if let Ok(Id { file_id }) = serde_json::from_str(row.get()) {
+                        skipped_files.push(RemoteFileId(file_id));
+                    }
+                }
             }
         }
         Ok(ChangesPage {
@@ -397,6 +407,7 @@ impl Remote for HomebaseRemote {
             cursor,
             has_more: page.has_more_rows,
             skipped,
+            skipped_files,
         })
     }
 

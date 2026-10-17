@@ -456,6 +456,7 @@ impl FakeServer {
             cursor,
             has_more,
             skipped: Vec::new(),
+            skipped_files: Vec::new(),
         })
     }
 
@@ -572,6 +573,9 @@ pub struct Faults {
     pub unread_refs: bool,
     /// The page size of the last feed read, for assertions.
     pub last_page: Option<usize>,
+    /// Rows of these files can't be read (as the Homebase adapter skips a row that doesn't
+    /// decrypt): whole pages leave them out, with why.
+    pub unreadable: std::collections::HashSet<RemoteFileId>,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -620,6 +624,11 @@ impl FakeRemote {
 
     pub fn faults(&self) -> MutexGuard<'_, Faults> {
         self.faults.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The server it is a client of, to make another client of it.
+    pub fn server_handle(&self) -> Arc<Mutex<FakeServer>> {
+        Arc::clone(&self.server)
     }
 
     pub fn server(&self) -> MutexGuard<'_, FakeServer> {
@@ -718,12 +727,25 @@ fn replay<T>(
 impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
-        {
+        let unreadable = {
             let mut faults = self.faults();
             faults.full_pages += 1;
             faults.last_page = Some(limit);
+            faults.unreadable.clone()
+        };
+        let mut page = self.server().changes(cursor, limit)?;
+        let (gone, entries) = page
+            .entries
+            .into_iter()
+            .partition(|h| unreadable.contains(&h.file_id));
+        page.entries = entries;
+        for h in gone {
+            let h: RemoteHeader = h;
+            page.skipped
+                .push(format!("{:?}: injected: unreadable", h.file_id));
+            page.skipped_files.push(h.file_id);
         }
-        self.server().changes(cursor, limit)
+        Ok(page)
     }
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
@@ -732,7 +754,7 @@ impl Remote for FakeRemote {
             let mut faults = self.faults();
             faults.ref_pages += 1;
             faults.last_page = Some(limit);
-            usize::from(faults.unread_refs)
+            usize::from(faults.unread_refs || !faults.unreadable.is_empty())
         };
         Ok(RefsPage {
             unread,

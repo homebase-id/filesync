@@ -31,5 +31,10 @@ uuid.workspace = true
 webpki-roots = "1"
 zeroize = "1.8"
 
+[features]
+# Measurements only (hbsync-dev): a subscription that hears this client's own writes, and the
+# frames and bytes it received.
+dev = []
+
 [lints]
 workspace = true

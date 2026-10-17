@@ -28,6 +28,9 @@ pub struct FeedReport {
     pub deleted: usize,
     /// Rows the client can't read (not encrypted, another key, not a sync node), with why.
     pub skipped: Vec<String>,
+    /// The files of rows the feed holds but the mirror doesn't take: those rows (where they
+    /// say which file), and live files without a payload.
+    pub unreadable: Vec<RemoteFileId>,
 }
 
 impl std::ops::AddAssign for FeedReport {
@@ -36,6 +39,7 @@ impl std::ops::AddAssign for FeedReport {
         self.live += other.live;
         self.deleted += other.deleted;
         self.skipped.extend(other.skipped);
+        self.unreadable.extend(other.unreadable);
     }
 }
 
@@ -111,6 +115,13 @@ fn read_whole<G: DerefMut<Target = StateDb>>(
 ) -> Result<(bool, bool), FeedError> {
     let mut page = with_retries(|| remote.changes(cursor, page_size))?;
     report.skipped.append(&mut page.skipped);
+    report.unreadable.append(&mut page.skipped_files);
+    report.unreadable.extend(
+        page.entries
+            .iter()
+            .filter(|h| !h.is_deleted() && mirror_row(h).is_none())
+            .map(|h| h.file_id),
+    );
     let nothing_new = db().write(|s| {
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
         let nothing_new = known(s, &refs)?;

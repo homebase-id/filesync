@@ -33,15 +33,7 @@ impl Computer {
         let home = Home::new()?;
         let credentials = home.path().join("credentials");
         std::fs::create_dir_all(&credentials)?;
-        let saved = hbsync_dev::credentials_path_as(identity, client)?;
-        if !saved.exists() {
-            let register = client.map_or(String::new(), |c| format!(" --as {c}"));
-            return Err(format!(
-                "no credentials at {}: run hbsync-register {identity}{register} first",
-                saved.display()
-            )
-            .into());
-        }
+        let saved = hbsync_dev::credentials_or_hint(identity, client)?;
         std::fs::copy(saved, credentials.join(format!("{identity}.json")))?;
         let folder = home.path().join("Homebase");
         std::fs::create_dir_all(folder.join(".hbsync"))?;

@@ -94,6 +94,14 @@ impl Device {
         Notifications::new(self.puller(), now)
     }
 
+    /// Waits until it is idle with nothing pending.
+    fn wait_idle(&self) -> R {
+        wait_until("idle", || {
+            let s = self.status();
+            s.state == State::Idle && s.pending == 0
+        })
+    }
+
     /// The feed pages read so far: slim and whole.
     fn feed_reads(&self) -> usize {
         let faults = self.remote.faults();
@@ -236,38 +244,25 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
             .find(|h| matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == name))
             .map(|h| h.file_id)
     };
-    let idle = |d: &Device| {
-        wait_until("idle", || {
-            let s = d.status();
-            s.state == State::Idle && s.pending == 0
-        })
-    };
-    let pages = |d: &Device| {
-        let f = d.remote.faults();
-        f.ref_pages + f.full_pages
-    };
     // The reads at connecting done.
     std::thread::sleep(Duration::from_millis(300));
-    idle(&a)?;
-    let quiet = pages(&a);
+    a.wait_idle()?;
+    let quiet = a.feed_reads();
     a.write("from-a.txt", "a")?;
     wait_until("b has from-a.txt", || b.has("from-a.txt"))?;
-    idle(&a)?;
-    assert_eq!(pages(&a), quiet, "a's own upload read the feed");
+    a.wait_idle()?;
+    assert_eq!(a.feed_reads(), quiet, "a's own upload read the feed");
     b.write("from-b.txt", "b")?;
     wait_until("a has from-b.txt", || a.has("from-b.txt"))?;
-    idle(&a)?;
-    let news = pages(&a);
+    a.wait_idle()?;
+    let news = a.feed_reads();
     assert!(news > quiet, "b's news was read");
     std::fs::remove_file(a.root.join("from-a.txt"))?;
     wait_until("b lost from-a.txt", || !b.has("from-a.txt"))?;
-    idle(&a)?;
-    assert_eq!(pages(&a), news, "a's own removal read the feed");
+    a.wait_idle()?;
+    assert_eq!(a.feed_reads(), news, "a's own removal read the feed");
     for d in [&a, &b] {
-        wait_until("idle", || {
-            let s = d.status();
-            s.state == State::Idle && s.pending == 0
-        })?;
+        d.wait_idle()?;
     }
     let (ours, theirs) = (
         file_of("from-a.txt").ok_or("from-a.txt")?,
@@ -301,10 +296,8 @@ fn an_announced_change_a_kept_answer_hid_is_read_for_again() -> R {
     let b = Device::start(&server, "b")?;
     let _heard = a.listen();
     for d in [&a, &b] {
-        wait_until("idle", || {
-            let s = d.status();
-            s.last_sync.is_some() && s.state == State::Idle && s.pending == 0
-        })?;
+        wait_until("started", || d.status().last_sync.is_some())?;
+        d.wait_idle()?;
     }
     // The read at connecting done; the answer to a's next read kept through b's write.
     std::thread::sleep(Duration::from_millis(300));
@@ -381,13 +374,21 @@ fn the_drive_is_read_on_a_timer_only_while_not_connected() -> R {
     wait_until("b read the drive", || b.has("x.txt"))?;
     wait_until("b is idle", || b.status().state == State::Idle)?;
 
-    // Connected (while paused: no pull either): no timer any more.
+    // Connected while paused: the read that follows connecting waits for the resume.
     n.event(Event::Connected, t0, true);
     a.write("y.txt", "y")?;
     wait_until("y.txt is up", || on_server(&server, "y.txt"))?;
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!b.has("y.txt"), "read while paused");
+    n.tick(t0, false);
+    wait_until("the read after connecting", || b.has("y.txt"))?;
+    b.wait_idle()?;
+    // Connected: no timer any more.
+    a.write("z.txt", "z")?;
+    wait_until("z.txt is up", || on_server(&server, "z.txt"))?;
     n.tick(t0 + UNANNOUNCED_READ * 10, false);
     std::thread::sleep(Duration::from_millis(500));
-    assert!(!b.has("y.txt"), "read on a timer while connected");
+    assert!(!b.has("z.txt"), "read on a timer while connected");
     Ok(())
 }
 
@@ -432,20 +433,18 @@ fn announced_changes_are_read_only_when_new() -> R {
     };
     b.write("mine.txt", "m")?;
     wait_until("mine.txt is up", || on_server(&server, "mine.txt"))?;
-    wait_until("b is idle", || {
-        let s = b.status();
-        s.state == State::Idle && s.pending == 0
-    })?;
+    b.wait_idle()?;
     let t0 = Instant::now();
     let puller = b.puller();
     let mut n = Notifications::new(puller.clone(), t0);
-    n.event(Event::Connected, t0, true); // connected; paused, so not pulled now
+    n.event(Event::Connected, t0, false);
+    wait_until("the read after connecting", || puller.rounds() == 1)?;
     a.write("x.txt", "x")?;
     wait_until("x.txt is up", || on_server(&server, "x.txt"))?;
     let reads = b.feed_reads();
     n.event(announce("mine.txt")?, t0, false);
     n.tick(t0 + Duration::from_secs(4), false);
-    wait_until("the puller took it", || puller.rounds() == 1)?;
+    wait_until("the puller took it", || puller.rounds() == 2)?;
     assert_eq!(b.feed_reads(), reads, "the feed was read for b's own write");
     assert!(!b.has("x.txt"));
 
@@ -470,10 +469,7 @@ fn a_hard_delete_announced_before_a_reconnect_is_taken() -> R {
     b.connected();
     wait_until("b has z.txt", || b.has("z.txt"))?;
     // Its sync that brought z.txt done (the delete isn't to race with that sync).
-    wait_until("b is idle", || {
-        let s = b.status();
-        s.state == State::Idle && s.pending == 0
-    })?;
+    b.wait_idle()?;
     let gone = {
         let mut s = server.lock().map_err(|_| "poisoned")?;
         let header = s
@@ -504,10 +500,7 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
         a.write(&format!("f{i:02}.txt"), &i.to_string())?;
     }
     wait_until("all 60 are up", || live_names(&server).len() == 60)?;
-    wait_until("a is idle", || {
-        let s = a.status();
-        s.state == State::Idle && s.pending == 0
-    })?;
+    a.wait_idle()?;
     for i in 0..60 {
         std::fs::remove_file(a.root.join(format!("f{i:02}.txt")))?;
     }

@@ -94,7 +94,7 @@ impl Client {
     /// Scan, then sync until idle: nothing may fail or be skipped.
     fn sync(&mut self) -> Res<SyncReport> {
         // Homebase holds back feed rows of the current millisecond.
-        let total = self.0.sync_until_idle(&hbsync_app::today(), || {
+        let total = self.0.sync_until_idle(&hbsync_app::today(), true, || {
             std::thread::sleep(Duration::from_millis(20));
         })?;
         assert!(
