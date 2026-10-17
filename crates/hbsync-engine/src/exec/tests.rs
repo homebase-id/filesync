@@ -3066,9 +3066,24 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
         if tags::express(&held, h.cfg.os).as_ref() != Some(&held) {
             continue;
         }
-        let (node, at) = h.seed("x", b"B")?;
         let here = Tags::new(vec![held.clone()]);
         let there = Tags::new(drive.clone());
+        // On the drive, edited, with what the base holds of the tag (red, its colour unchanged
+        // there).
+        let mut content = NodeContent::file("x", 0, 1, false);
+        content.set_tags(&there);
+        let (node, seeded) = h.seed("x", b"B")?;
+        let meta = NodeMeta {
+            node,
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            content: content.clone(),
+            removed: false,
+        };
+        let at = h
+            .remote
+            .server()
+            .update(seeded.file_id, seeded.version, &meta, None)?;
         h.local_file("x", node, b"A")?;
         tags::write_on(&h.at("x")?, &here)?;
         // Read again as the scan would, tags and all.
@@ -3076,9 +3091,6 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
         h.scanned_with("x", here.clone())?;
         let (a, b) = (h.content(b"A"), h.content(b"B"));
         let before = some_version();
-        // The drive holds what the base does of the tag (red, its colour unchanged there).
-        let mut content = NodeContent::file("x", 0, 1, false);
-        content.set_tags(&there);
         h.db.write(|s| {
             s.put_base(&BaseRow {
                 local_hash: Some(a.hash),
