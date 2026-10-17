@@ -230,6 +230,29 @@ pub fn build_input(
     Ok(b.input)
 }
 
+/// Whether the mirror no longer has `node` as the plan reads it: not there, or taken along by
+/// the folder in Recently deleted its folders reach first in this folder's part of the drive,
+/// written no later than that folder's removal (the reconciler's `taken_along`; one outside,
+/// as the view leaves it out, isn't this folder's to bring back).
+pub(crate) fn gone_on_drive(
+    s: &Store<'_>,
+    node: NodeId,
+    scope: &Scope,
+) -> Result<bool, StateError> {
+    let Some(row) = s.get_mirror(node)? else {
+        return Ok(true);
+    };
+    let coords = s.coords()?;
+    let Some((folder, at)) = s.removed_above(coords.to_drive(row.parent), coords.top)? else {
+        return Ok(false);
+    };
+    if scope.outside.contains(&coords.from_drive(folder)) {
+        return Ok(false);
+    }
+    let removed = hbsync_types::activity::removal_time(at);
+    Ok(row.changed_at.is_none_or(|c| c <= removed))
+}
+
 struct Builder<'s, 'c> {
     s: &'s Store<'c>,
     os: Os,

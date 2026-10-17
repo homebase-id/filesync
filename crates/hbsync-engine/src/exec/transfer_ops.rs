@@ -110,23 +110,26 @@ impl Executor<'_> {
         let target = self.target_path(parent, name)?;
         let created_ms = mirror.created_ms();
         // What it acts on: the drive's version the plan saw, only while the mirror still holds
-        // it. Where the drive moved on since (another folder's engine pulled the next version,
-        // or this run wrote one), the next plan decides on that. Its commit settles against it;
-        // kept until then, its tags not known until written.
+        // it, or the one this run's own write made of it since, the bytes the same (a tag
+        // write, a move: the base is there). Where the drive moved on otherwise (another
+        // folder's engine pulled the next version), the next plan decides on that. Its commit
+        // settles against it; kept until then, its tags not known until written.
+        let ours = self.settled.get(&node).copied();
+        let own = |d: &DriveVersion| {
+            ours == Some(mirror.remote_ref())
+                && base_at == ours.map(|o| o.version)
+                && d.state.content.map(|c| c.hash) == Some(expected)
+        };
         let acted = match drive {
-            Some(d) if d.at != mirror.remote_ref() => {
+            Some(d) if d.at == mirror.remote_ref() => d.clone(),
+            Some(d) if !own(d) => {
                 return Err(Outcome::stale("changed on the drive since the plan"));
             }
-            Some(d) => d.clone(),
-            None => DriveVersion {
-                state: mirror.state().ok_or_else(|| Outcome::stale("not a file"))?,
-                at: mirror.remote_ref(),
-                base_at,
-            },
+            _ => DriveVersion::of(&mirror, base_at).ok_or_else(|| Outcome::stale("not a file"))?,
         };
         // It claims the tags it is to write (the empty set too), as they read back once
         // written: where the volume keeps none, not known.
-        let kept = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
+        let kept = self.tags_kept();
         let record = Placing {
             base: BaseRow::new(node, acted.state, acted.at),
             target,
@@ -318,7 +321,7 @@ impl Executor<'_> {
             mut record,
             current,
             created_ms,
-            tags,
+            tags: to_write,
         } = placement;
         let (node, target) = (record.base.node, record.target.clone());
         let target = &target;
@@ -334,21 +337,24 @@ impl Executor<'_> {
         // file can be seen there: only that costs a commit.
         // Only a volume that keeps no tags says so for the rest: a set that fails or reads
         // back as nothing to go by doesn't.
-        let tags = match tags::write_on(done.path(), &tags) {
-            Ok(tags::Written::Unsupported) => {
-                let _ = self.cfg.tags_kept.set(false);
-                None
-            }
-            Ok(tags::Written::Done(read)) => {
-                let _ = self.cfg.tags_kept.set(true);
-                read
-            }
-            Err(_) => None,
-        };
-        if tags != record.placed_tags {
-            record.placed_tags = tags.clone();
+        let left = self.write_tags(done.path(), &to_write);
+        // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
+        // not sent up yet): not put in place then, for a retry, the plan sending it up
+        // meanwhile; unless the drive refused it for good this run (then as ever: placed).
+        if left.failed
+            && !self.tags_refused.contains(&node)
+            && let Some(held) = current.as_ref().and_then(|r| r.tags.as_ref())
+            && tags_lost(held, &to_write, &record.base.state.tags)
+        {
+            done.keep_for_retry();
+            return Ok(Outcome::Retry("its tags weren't written".into()));
+        }
+        if left.claimed != record.placed_tags {
+            record.placed_tags = left.claimed;
             self.write_durable(|s| s.put_placing(&record))?;
         }
+        // The record claims only what read back; the row holds what the file holds.
+        let tags = left.held;
         let placed = match &current {
             Some(row) if &row.path == target => self.put(target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
@@ -358,11 +364,27 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                if let Err(e) = self.move_to_trash(&row.path, node)? {
-                    done.keep_for_retry();
-                    return Ok(io_outcome(e));
+                let entry = match self.move_to_trash(&row.path, node)? {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        done.keep_for_retry();
+                        return Ok(io_outcome(e));
+                    }
+                };
+                let placed = match self.fails(FailPoint::AfterTrash) {
+                    true => Err(FileIoError::Io(io::Error::other(
+                        "not put in place (a test)",
+                    ))),
+                    false => self.put(target, |at| done.persist_new(at, created_ms))?,
+                };
+                // Not put in place: the old version comes back at once, which nothing can have
+                // taken since (left in the trash, the next plan takes its absence for the user
+                // deleting it, against the drive's edit: a conflict, and the download again).
+                // Where that fails it stays there, as nothing else is worse.
+                if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_))) {
+                    self.restore_from_trash(&entry, &row.path)?.ok();
                 }
-                self.put(target, |at| done.persist_new(at, created_ms))?
+                placed
             }
             None => {
                 if !self.free_target(target, Some(node))? {
@@ -373,9 +395,9 @@ impl Executor<'_> {
             }
         };
         let placed = match placed {
-            Ok(_) if self.read_fails() => Err(FileIoError::PlacedUnread(io::Error::other(
-                "its read failed (a test)",
-            ))),
+            Ok(_) if self.fails(FailPoint::PlacedRead) => Err(FileIoError::PlacedUnread(
+                io::Error::other("its read failed (a test)"),
+            )),
             placed => placed,
         };
         let meta = match placed {
@@ -394,8 +416,8 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
         let target = target.clone();
-        let os = self.cfg.os;
-        let fails = self.commit_fails();
+        let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
+        let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {
                 return Err(StateError::Conflict("the commit failed (a test)".into()));
@@ -414,7 +436,7 @@ impl Executor<'_> {
                 tags,
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
-            settle_placement(s, &record, os)
+            settle_placement(s, &record, &scope, os).map(Placed::at)
         });
         // The DB failing stops the run; the record is the next sync's recovery's.
         let at = match committed {
@@ -424,4 +446,11 @@ impl Executor<'_> {
         self.note([(node, at)]);
         Ok(Outcome::Settled)
     }
+}
+
+/// Whether a download whose tag write failed loses a tag: one the item there holds (`held`) as
+/// the download was to write it, that the drive doesn't hold so (a colour changed here too).
+pub fn tags_lost(held: &Tags, to_write: &Tags, drive: &Tags) -> bool {
+    held.iter()
+        .any(|t| to_write.get(&t.name) == Some(t) && drive.get(&t.name) != Some(t))
 }

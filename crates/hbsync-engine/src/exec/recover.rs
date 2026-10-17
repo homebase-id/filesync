@@ -14,7 +14,7 @@ pub fn recover(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), StateError> {
     recover_forks(db, &cfg.root)?;
     unpark(db, cfg)?;
     sweep_tmp(db, &cfg.root)?;
-    recover_placements(db, &cfg.root, cfg.os, cfg.algorithm)
+    recover_placements(db, cfg)
 }
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
@@ -69,12 +69,8 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateEr
 /// node is (the next batch writes its own); kept when it can't be told yet (its file not
 /// hashed, its folder unreadable), for a later recovery, for [`UNHASHED_HOLD`] at most from
 /// when it was first found so.
-pub fn recover_placements(
-    db: &mut StateDb,
-    root: &Path,
-    os: Os,
-    algorithm: hbsync_fileio::HashAlgorithm,
-) -> Result<(), StateError> {
+pub fn recover_placements(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), StateError> {
+    let (root, os, algorithm) = (cfg.root.as_path(), cfg.os, cfg.algorithm);
     // Each record with the scan's row at its target: the node's own (or a new one), or another
     // node's.
     let found = db.read(|s| {
@@ -108,11 +104,11 @@ pub fn recover_placements(
                 (OnDisk::Absent, _) => Judged::Drop,
                 (OnDisk::Unreadable, _) => Judged::Keep,
                 (OnDisk::There(_), Scanned::Other) => Judged::Drop,
-                (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row), now),
+                (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
                 // On disk, not scanned yet: read as the scan would.
                 (OnDisk::There(meta), Scanned::None) => {
                     let row = read_row(root, &p.target, p.base.node, &meta, algorithm);
-                    judge(root, &p, Some(row), now)
+                    judge(root, &p, Some(row))
                 }
             };
             (p, judged)
@@ -121,7 +117,7 @@ pub fn recover_placements(
     db.write(|s| {
         judged
             .into_iter()
-            .try_for_each(|(p, judged)| apply(s, &p, judged, os, now).map(drop))
+            .try_for_each(|(p, judged)| apply(s, &p, judged, &cfg.scope, os, now).map(drop))
     })
 }
 
@@ -156,18 +152,14 @@ pub(super) enum Applied {
     Dropped,
 }
 
-/// Judges record `p` by the item at its target (`row`, of the node or new), as of `now`: one
-/// file there not hashed yet holds the record for [`UNHASHED_HOLD`] from when it was first
-/// found so.
-pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>, now: i64) -> Judged {
+/// Judges record `p` by the item at its target (`row`, of the node or new); one file there not
+/// hashed yet is kept ([`hold`] says how long).
+pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>) -> Judged {
     let Some(row) = row else {
         return Judged::Drop;
     };
     if row.kind == NodeKind::File && row.hash.is_none() {
-        let held = p
-            .held_ms
-            .is_none_or(|since| now.saturating_sub(since) < UNHASHED_HOLD.as_millis() as i64);
-        return if held { Judged::Keep } else { Judged::Drop };
+        return Judged::Keep;
     }
     let there = match &p.base.state.content {
         Some(c) => row.kind == NodeKind::File && adopt::same_bytes(root, &row, &c.hash, c.size),
@@ -188,20 +180,13 @@ pub(super) fn apply(
     s: &Store<'_>,
     p: &Placing,
     judged: Judged,
+    scope: &crate::scope::Scope,
     os: Os,
     now: i64,
 ) -> Result<Applied, StateError> {
     let node = p.base.node;
     match judged {
-        Judged::Keep => {
-            if p.held_ms.is_none() {
-                s.put_placing(&Placing {
-                    held_ms: Some(now),
-                    ..p.clone()
-                })?;
-            }
-            Ok(Applied::Kept)
-        }
+        Judged::Keep => hold(s, p, now),
         Judged::Drop => {
             // Not put in place (or changed since): nothing to settle.
             s.delete_placing(node)?;
@@ -226,10 +211,35 @@ pub(super) fn apply(
             }
             // What the commit does: the record goes with the base written, or stays until the
             // item can be read (its folder scanned).
-            let at = settle_placement(s, p, os)?;
-            s.mark_dirty(node)?;
-            Ok(Applied::Settled(at))
+            match settle_placement(s, p, scope, os)? {
+                // Its node gone on the drive, its item not one the drive takes (its name): held
+                // as a file not hashed yet is, then dropped.
+                Placed::Kept => hold(s, p, now),
+                Placed::Settled(at) => {
+                    s.mark_dirty(node)?;
+                    Ok(Applied::Settled(at))
+                }
+            }
         }
+    }
+}
+
+/// Holds record `p` as of `now`: from now, if it wasn't held yet; dropped once held for
+/// [`UNHASHED_HOLD`].
+fn hold(s: &Store<'_>, p: &Placing, now: i64) -> Result<Applied, StateError> {
+    match p.held_ms {
+        None => {
+            s.put_placing(&Placing {
+                held_ms: Some(now),
+                ..p.clone()
+            })?;
+            Ok(Applied::Kept)
+        }
+        Some(since) if now.saturating_sub(since) >= UNHASHED_HOLD.as_millis() as i64 => {
+            s.delete_placing(p.base.node)?;
+            Ok(Applied::Dropped)
+        }
+        Some(_) => Ok(Applied::Kept),
     }
 }
 

@@ -141,7 +141,7 @@ impl Store<'_> {
         let unknown = self
             .prep("SELECT 1 FROM remote WHERE file_id = ?1 AND changed_at IS NULL")?
             .exists([file_id.0.as_bytes()])?;
-        if unknown && self.in_removed_folder(parent)? {
+        if unknown && self.removed_above(parent, NodeId::ROOT)?.is_some() {
             self.prep(
                 "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NULL",
             )?
@@ -150,30 +150,37 @@ impl Store<'_> {
         Ok(())
     }
 
-    /// Whether the drive's folder `folder`, or one above it in the mirror, is in Recently
-    /// deleted.
-    fn in_removed_folder(&self, folder: NodeId) -> Result<bool> {
+    /// The folder in Recently deleted that the drive's folder `folder` is, or is in through the
+    /// mirror's folders, below `top` (the drive's root, or a role folder's top): the first one
+    /// missing from the mirror, if it is there, with when it went there (`None`: open, this
+    /// device's own removal). A folder the mirror has is live, whatever row Recently deleted
+    /// may still hold for it.
+    pub fn removed_above(
+        &self,
+        folder: NodeId,
+        top: NodeId,
+    ) -> Result<Option<(NodeId, Option<i64>)>> {
         let mut parent = self.prep(MIRROR_PARENT)?;
+        let mut removed = self.prep("SELECT removed_at FROM removed WHERE node = ?1")?;
         let mut at = folder;
         for _ in 0..MAX_DEPTH {
-            if at.is_root() {
-                return Ok(false);
-            }
-            if self
-                .prep("SELECT 1 FROM removed WHERE node = ?1")?
-                .exists([at.0.as_bytes()])?
-            {
-                return Ok(true);
+            if at.is_root() || at == top {
+                return Ok(None);
             }
             match parent
                 .query_row([at.0.as_bytes()], |r| r.get::<_, Vec<u8>>(0))
                 .optional()?
             {
                 Some(up) => at = codec::node(&up)?,
-                None => return Ok(false),
+                None => {
+                    return Ok(removed
+                        .query_row([at.0.as_bytes()], |r| r.get::<_, Option<i64>>(0))
+                        .optional()?
+                        .map(|when| (at, when)));
+                }
             }
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns

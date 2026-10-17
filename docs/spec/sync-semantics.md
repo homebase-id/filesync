@@ -24,7 +24,9 @@ The **root** is implicit: it has the fixed id from the node schema and is never 
   Tags count one by one: one both sides agree on (both hold it, or both lack it) takes that
   value, one they differ on keeps the base's. A local write settles against the drive's version
   it acted on (the one the plan saw; a download runs only while the mirror still holds that
-  version, and is planned again otherwise), not a later one, even where the mirror has moved on
+  version, or the one the run's own remote write made of it with the same bytes (a tag write, a
+  move) while the base is there, which it acts on then; it is planned again otherwise), not a
+  later one, even where the mirror has moved on
   or lost the node since; the base records that version. Its tags record exactly what it wrote,
   tag by tag, never a recomputation: each tag the write changed on the item takes the written
   value where that version holds it, and every other tag keeps the base's. A write that writes
@@ -136,7 +138,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    so while it does, a removed folder holds live nodes. A remote node in a folder in Recently
    deleted (directly or through live folders) written no later than the folder's removal, by
    the server's times, is remotely deleted with it; one written after (an edit or a new file from
-   a device that didn't know yet) keeps the folder alive: restored. A removed folder outside this
+   a device that didn't know yet) keeps the folder alive: restored. Made here before its
+   restore on the drive, the folder has the removed version as its base until the restore
+   settles (another device may restore it first, with changes of its own: a tag it removed
+   stays removed). A removed folder outside this
    folder's part of the drive, or one it filters (§10), isn't its to bring back: a node written
    into it waits for the folder that syncs that part, or, filtered, goes to the root as an
    orphan does.
@@ -152,7 +157,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 - **Local deletes go to trash.** Removing a local file or folder because of a remote delete
   moves it into the sync root's internal trash (`.hbsync/trash/`), never `unlink` (one rename:
   junk and anything that appears meanwhile go along). The daily purge empties entries older
-  than `keep_deleted_days`, of those made since it began.
+  than `keep_deleted_days`, of those made since it began. A download that moves a file to
+  another folder puts the old version there; where the new one then can't be put in place, the
+  old one comes back at once (gone, it would read as the user deleting it, against the drive's
+  edit: a conflict, and the download again), and its emptied entry goes. Where that fails, or
+  a crash came between, it stays in the trash.
 - **Fingerprint guard.** Before deleting, overwriting or moving a local item, the executor
   checks that the local fingerprint still equals the one the plan was made from. On mismatch
   the operation is skipped and the node is re-planned.
@@ -268,7 +277,13 @@ expected fingerprint is treated as done.
   both, against the same version), its tags as the record says the write changed them, a tag
   the user changed since being their change; where it claims none, the base's tags start
   afresh, each one the item holds and the drive holds too, so a tag only the drive has is
-  written on the item and one only the item has goes up. A folder's recovery, like its commit, marks what is in it on
+  written on the item and one only the item has goes up. Where the mirror no longer has the
+  node as the plan reads it (deleted, in Recently deleted, or taken along by a folder there in
+  this folder's part, §6.3), the commit and
+  recovery alike settle the item at the record's version whatever the plan saw (its recorded
+  spelling and the rest of the base as any settling keeps them), so the removal reaches it:
+  never read as an edit, which would bring the node back; one whose item isn't the drive's to
+  take (its name) is held as a file not hashed yet is, then goes. A folder's recovery, like its commit, marks what is in it on
   the drive dirty. Later changes on the drive are plain changes against it. A record goes once
   its base is written, by the commit or by recovery, or when the operation that wrote it, in
   that run, fails before its own item is in place, or its batch stops before it starts (so no
@@ -421,7 +436,15 @@ then reads the tags. Tags that couldn't be read are tried again at the next scan
 Downloads write the tags onto the temp file before it is put in place: a file without them
 would read as the user removing them. An item with more than about 2,000 bytes of tags
 isn't tag-synced: it reads as "can't tell", and keeps what the drive has; so do tags that can't
-be read or written for a moment (a failed tag write never fails the operation). A node with no
+be read or written for a moment (a failed tag write never fails the operation). An item whose
+tag write fails (a tag change, a download, a folder made) holds what it holds, as read, and its
+row says so; "can't tell" only where that can't be read either: read so, it looked as if
+holding the drive's tags, the next scan took their absence for the user removing them, and a
+tag only the item had never went up. A placement's record then claims nothing (not known),
+and the next plan writes the drive's tags again. A download whose failed write would lose a
+tag the file it replaces holds and the drive doesn't (the user's, not sent up yet) isn't put in
+place: it is tried again, the plan sending the tag up meanwhile, unless the drive refused that
+for good in the run (access, read-only): then it is placed. A node with no
 base gets one when place and content agree, with the tags both sides have: the merge then
 brings each side the other's (a copy proven equal only across hash algorithms can't be proven
 again later).

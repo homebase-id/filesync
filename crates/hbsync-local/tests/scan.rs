@@ -207,6 +207,15 @@ fn a_new_file_id_at_a_path_is_an_edit_unless_a_synced_file_was_moved_onto_it() -
     f.write(".doc2.txt.tmp", b"doc2 v2")?;
     f.scan()?;
     let root = f.root().to_path_buf();
+    // Every file replaced below stays open until the scan, so no file made after it gets the id
+    // it frees (ext4 hands a freed inode out again at once: a new notes.txt took the old
+    // notes.txt~'s, which reads as the two swapping). An open handle doesn't hold a rename over
+    // a file on Unix.
+    #[cfg(unix)]
+    let held = ["doc.txt", "doc2.txt", "notes.txt~", "x", "h"]
+        .iter()
+        .map(|name| fs::File::open(root.join(name)))
+        .collect::<Result<Vec<_>, _>>()?;
     let mv = |from: &str, to: &str| fs::rename(root.join(from), root.join(to));
     mv(".doc2.txt.tmp", "doc2.txt")?;
     mv("d", "y")?; // d steps aside, and c takes its name
@@ -224,6 +233,8 @@ fn a_new_file_id_at_a_path_is_an_edit_unless_a_synced_file_was_moved_onto_it() -
     mv("notes.txt", "notes.txt~")?;
     f.write("notes.txt", b"notes v2")?;
     let (report, _) = f.scan()?;
+    #[cfg(unix)]
+    drop(held);
 
     let mut expect = |path: &str, was: &str| -> R {
         assert_eq!(f.node(path)?, nodes[was], "{path} holds {was}");
