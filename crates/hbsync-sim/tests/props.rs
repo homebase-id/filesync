@@ -2480,10 +2480,10 @@ fn regression_a_restore_during_a_folder_delete_isnt_a_write_outside() {
     assert!(sim.is_removed(file), "the file is in Recently deleted");
 }
 
-/// A folder restored from Recently deleted, made here before its RemoteCreate runs, has no base:
-/// a tag another device removes meanwhile comes back. Kept until that is fixed.
+/// A folder restored from Recently deleted, made here before its RemoteCreate runs: another
+/// device restores it first, with a tag removed. The folder made here has the removed version
+/// as its base, so the removal wins (with no base, the tag read as added here, and came back).
 #[test]
-#[ignore = "the restored folder's LocalMkdir before its RemoteCreate leaves no base, so a removed tag comes back"]
 fn regression_a_tag_removed_while_a_restored_folder_has_no_base() {
     use hbsync_sim::Action::*;
     use hbsync_sim::Event::*;

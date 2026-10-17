@@ -56,6 +56,7 @@ impl EngineConfig {
                 crash_at: None,
                 fail_commits: Arc::default(),
                 fail_reads: Arc::default(),
+                fail_tag_writes: Arc::default(),
             },
             device: device.to_owned(),
             max_rounds: 8,

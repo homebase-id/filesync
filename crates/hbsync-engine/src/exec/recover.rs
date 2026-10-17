@@ -224,6 +224,25 @@ pub(super) fn apply(
                 s.delete_parked(node)?;
                 s.put_local(&row)?;
             }
+            // Gone on the drive since (deleted, in Recently deleted, or taken along by a folder
+            // there): the base is the record's, whatever the plan saw, so the drive's removal
+            // reaches here. Settled otherwise, a base that moved meanwhile left the item the
+            // node's, read as an edit, and the next plan uploaded it again.
+            if gone_on_drive(s, node)? {
+                // Only an item that reads as a node (its name one the drive takes).
+                let reads =
+                    crate::view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some());
+                if !reads {
+                    return Ok(Applied::Kept);
+                }
+                s.put_base(&BaseRow {
+                    local_hash: row.hash,
+                    ..p.base.clone()
+                })?;
+                s.delete_placing(node)?;
+                s.mark_dirty(node)?;
+                return Ok(Applied::Settled(None));
+            }
             // What the commit does: the record goes with the base written, or stays until the
             // item can be read (its folder scanned).
             let at = settle_placement(s, p, os)?;
@@ -244,6 +263,26 @@ pub(super) enum OnDisk {
 }
 
 /// What is at `path` (under `root`), as both recoveries read it.
+/// Whether the drive no longer has `node` as the reconciler reads it: not in the mirror, or in a
+/// folder in Recently deleted, written no later than that folder's removal (taken along).
+fn gone_on_drive(s: &Store<'_>, node: NodeId) -> Result<bool, StateError> {
+    let Some(row) = s.get_mirror(node)? else {
+        return Ok(true);
+    };
+    let mut seen = HashSet::from([node]);
+    let mut at = row.parent;
+    while !at.is_root() && seen.insert(at) {
+        if let Some(folder) = s.removed_by_node(at)? {
+            return Ok(row.changed_at.is_none_or(|c| c <= folder.time()));
+        }
+        match s.get_mirror(at)? {
+            Some(up) => at = up.parent,
+            None => break,
+        }
+    }
+    Ok(false)
+}
+
 pub(super) fn look(root: &Path, path: &RelPath) -> OnDisk {
     let meta = match hbsync_platform::stat(&path.to_native(root)) {
         Ok(m) => m,

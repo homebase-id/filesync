@@ -2210,6 +2210,334 @@ fn a_folder_taken_over_holds_its_tags_before_the_write() -> R {
     Ok(())
 }
 
+/// A download or a folder made, tagged work on the drive, whose tag write fails: the item
+/// holds none. Its row and the base hold what it holds, so the next plan writes work again,
+/// and never takes it off the drive. Read as not known, the item looked as if holding the
+/// drive's tags, the base took work, and the next scan's none read as the user removing it.
+fn a_failed_tag_write_removes_nothing(folder: bool) -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.cfg.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let work = Tags::new(vec![Tag::new("Work", 0)]);
+    let mut content = match folder {
+        true => NodeContent::folder("x"),
+        false => NodeContent::file("x", 0, 1, false),
+    };
+    content.set_tags(&work);
+    let (node, at) = match folder {
+        true => (NodeId::new(), some_version()),
+        false => {
+            // On the drive, tagged.
+            let (node, seeded) = h.seed("x", b"A")?;
+            let meta = NodeMeta {
+                node,
+                parent: NodeId::ROOT,
+                kind: NodeKind::File,
+                content: content.clone(),
+                removed: false,
+            };
+            let at = h
+                .remote
+                .server()
+                .update(seeded.file_id, seeded.version, &meta, None)?;
+            (node, at)
+        }
+    };
+    let state = NodeState {
+        tags: work.clone(),
+        ..match folder {
+            true => NodeState::folder(NodeId::ROOT, "x"),
+            false => NodeState::file(NodeId::ROOT, "x", h.content(b"A")),
+        }
+    };
+    let kind = if folder {
+        NodeKind::Folder
+    } else {
+        NodeKind::File
+    };
+    let hash = (!folder).then(|| h.content(b"A").hash);
+    h.db.write(|s| {
+        s.put_mirror(&MirrorRow::from_content(
+            at,
+            node,
+            NodeId::ROOT,
+            kind,
+            &content,
+            hash,
+        ))?;
+        // A folder synced before, deleted here: made again, with a record.
+        if folder {
+            s.put_base(&BaseRow::new(node, state.clone(), at))?;
+        }
+        Ok(())
+    })?;
+    let base_at = folder.then_some(at.version);
+    let drive = Some(Box::new(DriveVersion { state, at, base_at }));
+    let op = match folder {
+        true => Op::LocalMkdir {
+            node,
+            parent: NodeId::ROOT,
+            name: "x".into(),
+            tags: work.clone(),
+            drive,
+        },
+        false => Op::LocalDownload {
+            node,
+            parent: NodeId::ROOT,
+            name: "x".into(),
+            replace: false,
+            tags: work.clone(),
+            drive,
+        },
+    };
+    h.cfg
+        .fail_tag_writes
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    let report = h.run(vec![op])?;
+    assert_eq!(report.done, 1, "{report:?}");
+    // The next scan reads what the item holds.
+    let path = h.cfg.root.join("x");
+    assert_eq!(tags::read(&path), Some(Tags::default()));
+    h.scanned_with("x", Tags::default())?;
+    let plan = plan_of(&mut h, &[node])?;
+    assert!(
+        !plan.ops.iter().any(|op| match op {
+            Op::RemoteTags { tags, .. } | Op::RemoteUpdate { tags, .. } =>
+                tags.get("Work").is_none(),
+            _ => false,
+        }),
+        "folder {folder}: work taken off the drive: {:?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops.iter().any(
+            |op| matches!(op, Op::LocalTags { node: n, tags, .. } if *n == node && *tags == work)
+        ),
+        "folder {folder}: work isn't written again: {:?}",
+        plan.ops
+    );
+    Ok(())
+}
+
+#[test]
+fn a_failed_tag_write_on_a_download_removes_nothing() -> R {
+    a_failed_tag_write_removes_nothing(false)
+}
+
+#[test]
+fn a_failed_tag_write_on_a_folder_made_removes_nothing() -> R {
+    a_failed_tag_write_removes_nothing(true)
+}
+
+/// A download that moves a file to another folder and updates it puts the old version in the
+/// trash, then can't put the new one in place (its folder went from the disk meanwhile): the
+/// old version comes back. Left in the trash, the next plan took its absence for the user
+/// deleting it, and deleted it on the drive.
+#[test]
+fn an_old_version_comes_back_when_the_new_one_fails() -> R {
+    let mut h = Harness::new()?;
+    let (p1, p2) = (NodeId::new(), NodeId::new());
+    h.local_folder("p1", p1)?;
+    h.local_folder("p2", p2)?;
+    let (node, at) = h
+        .remote
+        .server()
+        .seed_file(p2, "f", b"B", h.cfg.algorithm)?;
+    h.local_file("p1/f", node, b"A")?;
+    let (a, b) = (h.content(b"A"), h.content(b"B"));
+    let before = some_version();
+    h.db.write(|s| {
+        s.put_base(&BaseRow {
+            local_hash: Some(a.hash),
+            ..BaseRow::new(node, NodeState::file(p1, "f", a), before)
+        })?;
+        s.put_mirror(&MirrorRow::from_content(
+            at,
+            node,
+            p2,
+            NodeKind::File,
+            &NodeContent::file("f", 0, 1, false),
+            Some(b.hash),
+        ))
+    })?;
+    // p2 goes from the disk; its row is still there.
+    fs::remove_dir(h.cfg.root.join("p2"))?;
+    h.run(vec![Op::LocalDownload {
+        node,
+        parent: p2,
+        name: "f".into(),
+        replace: true,
+        tags: Tags::default(),
+        drive: Some(Box::new(DriveVersion {
+            state: NodeState::file(p2, "f", b),
+            at,
+            base_at: Some(before.version),
+        })),
+    }])?;
+    assert_eq!(fs::read(h.cfg.root.join("p1/f"))?, b"A");
+    Ok(())
+}
+
+/// A download replacing a synced file, the run settling the node's base at the drive's version
+/// first (as its own write of a tag would), then crashing once the file is in place; meanwhile
+/// the drive deleted the node. Recovery finds the fetched file there and settles it as the
+/// node with the record's base, so the drive's delete reaches here: the next plan puts it in
+/// the trash. Settled against the base the plan saw, which had moved, the base kept the old
+/// bytes, the fetched file read as an edit, and the edit won over the delete: the node was
+/// uploaded again.
+#[test]
+fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
+    for removed in [false, true] {
+        let mut h = Harness::new()?;
+        let (node, at) = h.seed("f", b"B")?;
+        let content = NodeContent::file("f", 0, 1, false);
+        h.local_file("f", node, b"A")?;
+        let (old, new) = (h.content(b"A"), h.content(b"B"));
+        h.db.write(|s| {
+            s.put_base(&BaseRow {
+                local_hash: Some(old.hash),
+                ..BaseRow::new(
+                    node,
+                    NodeState::file(NodeId::ROOT, "f", old),
+                    some_version(),
+                )
+            })?;
+            s.put_mirror(&MirrorRow::from_content(
+                at,
+                node,
+                NodeId::ROOT,
+                NodeKind::File,
+                &content,
+                Some(new.hash),
+            ))
+        })?;
+        let planned = h.base(node)?.map(|b| b.remote.version);
+        let download = Op::LocalDownload {
+            node,
+            parent: NodeId::ROOT,
+            name: "f".into(),
+            replace: true,
+            tags: Tags::default(),
+            drive: Some(Box::new(DriveVersion {
+                state: NodeState::file(NodeId::ROOT, "f", new),
+                at,
+                base_at: planned,
+            })),
+        };
+        h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+        assert!(h.run(vec![Op::Settle { node }, download]).is_err());
+        // The drive deletes it: gone, or in Recently deleted.
+        h.db.write(|s| {
+            let row = s.delete_mirror(at.file_id)?.expect("its row");
+            match removed {
+                true => s.put_removed(&RemovedRow {
+                    row,
+                    removed_at: Some(1),
+                }),
+                false => Ok(()),
+            }
+        })?;
+        h.local_file("f", node, b"B")?;
+        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+        assert_eq!(h.records()?, []);
+        let plan = plan_of(&mut h, &[node])?;
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::RemoteCreate { .. } | Op::RemoteUpdate { .. })),
+            "removed {removed}: the node comes back on the drive: {:?}",
+            plan.ops
+        );
+        assert!(
+            plan.ops
+                .iter()
+                .any(|op| matches!(op, Op::LocalTrash { node: n, .. } if *n == node)),
+            "removed {removed}: {:?}",
+            plan.ops
+        );
+    }
+    Ok(())
+}
+
+/// The same, the node taken along by its folder going to Recently deleted: recovery reads it
+/// as gone, as the plan does.
+#[test]
+fn a_record_doesnt_bring_back_a_node_taken_along() -> R {
+    let mut h = Harness::new()?;
+    let folder = NodeId::new();
+    h.local_folder("d", folder)?;
+    let (node, at) = h
+        .remote
+        .server()
+        .seed_file(folder, "f", b"B", h.cfg.algorithm)?;
+    h.local_file("d/f", node, b"A")?;
+    let (old, new) = (h.content(b"A"), h.content(b"B"));
+    let folder_at = some_version();
+    h.db.write(|s| {
+        s.put_base(&BaseRow::new(
+            folder,
+            NodeState::folder(NodeId::ROOT, "d"),
+            folder_at,
+        ))?;
+        s.put_base(&BaseRow {
+            local_hash: Some(old.hash),
+            ..BaseRow::new(node, NodeState::file(folder, "f", old), some_version())
+        })?;
+        s.put_mirror(&MirrorRow::from_content(
+            at,
+            node,
+            folder,
+            NodeKind::File,
+            &NodeContent::file("f", 0, 1, false),
+            Some(new.hash),
+        ))
+    })?;
+    let planned = h.base(node)?.map(|b| b.remote.version);
+    let download = Op::LocalDownload {
+        node,
+        parent: folder,
+        name: "f".into(),
+        replace: true,
+        tags: Tags::default(),
+        drive: Some(Box::new(DriveVersion {
+            state: NodeState::file(folder, "f", new),
+            at,
+            base_at: planned,
+        })),
+    };
+    h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+    assert!(h.run(vec![Op::Settle { node }, download]).is_err());
+    // The folder goes to Recently deleted, after the file's version; the file is still live.
+    h.db.write(|s| {
+        s.put_removed(&RemovedRow {
+            row: MirrorRow::from_content(
+                folder_at,
+                folder,
+                NodeId::ROOT,
+                NodeKind::Folder,
+                &NodeContent::folder("d"),
+                None,
+            ),
+            removed_at: Some(i64::MAX / 2),
+        })
+    })?;
+    h.local_file("d/f", node, b"B")?;
+    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    assert_eq!(h.records()?, []);
+    let plan = plan_of(&mut h, &[folder, node])?;
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { .. } | Op::RemoteUpdate { .. })),
+        "the node comes back on the drive: {:?}",
+        plan.ops
+    );
+    Ok(())
+}
+
 /// Tags written but too large to sync read back as nothing to go by: that says nothing of the
 /// volume, which still keeps tags. Only an unsupported volume marks the root as keeping none.
 #[test]
@@ -2256,6 +2584,14 @@ fn recovery_checks_the_base_the_record_saw() -> R {
         ..BaseRow::new(node, file.clone(), since)
     };
     h.db.write(|s| {
+        s.put_mirror(&MirrorRow::from_content(
+            at,
+            node,
+            NodeId::ROOT,
+            NodeKind::File,
+            &NodeContent::file("f", 0, 1, false),
+            Some(h_content_hash(b"A")),
+        ))?;
         s.put_base(&base)?;
         s.put_placing(&Placing {
             base: BaseRow::new(node, file, at),
@@ -2271,5 +2607,140 @@ fn recovery_checks_the_base_the_record_saw() -> R {
     recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
     assert_eq!(h.base(node)?, Some(base));
     assert!(h.db.read(|s| s.is_dirty(node))?);
+    Ok(())
+}
+
+/// A file edited on the drive and tagged red here: the plan writes red to the drive and
+/// downloads the edit. The download acts on the version the tag write left (the bytes it
+/// fetches are the same, the base is there), so the run leaves nothing for another: the next
+/// plan has nothing to do, after a crash and recovery too. Acting only on the version the plan
+/// saw, the download went stale behind the run's own write, and the next plan downloaded it
+/// again. Returns the base it leaves.
+fn a_download_after_the_runs_own_tag_write(
+    crash: bool,
+) -> Result<Option<BaseRow>, Box<dyn std::error::Error>> {
+    let mut h = Harness::new()?;
+    let (node, _) = h.seed("f", b"B")?;
+    let red = Tags::new(vec![Tag::new("Red", 0)]);
+    h.local_file("f", node, b"A")?;
+    tags::write_on(&h.cfg.root.join("f"), &red)?;
+    // Read again as the scan would, tags and all.
+    h.local_file("f", node, b"A")?;
+    h.scanned_with("f", red)?;
+    let old = h.content(b"A");
+    h.db.write(|s| {
+        s.put_base(&BaseRow {
+            local_hash: Some(old.hash),
+            ..BaseRow::new(
+                node,
+                NodeState::file(NodeId::ROOT, "f", old),
+                some_version(),
+            )
+        })
+    })?;
+    let plan = plan_of(&mut h, &[node])?;
+    assert!(
+        matches!(
+            plan.ops[..],
+            [Op::RemoteTags { .. }, Op::LocalDownload { .. }]
+        ),
+        "{:?}",
+        plan.ops
+    );
+    if crash {
+        h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+    }
+    let ran = h.run(plan.ops);
+    if crash {
+        assert!(ran.is_err(), "the crash point wasn't reached");
+        let read = tags::read(&h.cfg.root.join("f"));
+        h.local_file("f", node, b"B")?;
+        h.scanned_with("f", read.unwrap_or_default())?;
+        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+        assert_eq!(h.records()?, []);
+    } else {
+        let report = ran?;
+        assert_eq!(report.done, 2, "{report:?}");
+    }
+    assert_eq!(fs::read(h.cfg.root.join("f"))?, b"B");
+    let again = plan_of(&mut h, &[node])?;
+    assert!(again.ops.is_empty(), "crash {crash}: {:?}", again.ops);
+    Ok(h.base(node)?.map(|b| BaseRow {
+        node: NodeId::ROOT,
+        ..b
+    }))
+}
+
+#[test]
+fn a_download_follows_the_runs_own_tag_write() -> R {
+    if !tags_kept(&Harness::new()?.cfg.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let committed = a_download_after_the_runs_own_tag_write(false)?;
+    assert!(committed.is_some());
+    assert_eq!(committed, a_download_after_the_runs_own_tag_write(true)?);
+    Ok(())
+}
+
+/// A folder in Recently deleted, tagged work, made here as its restore begins (its RemoteCreate
+/// to follow); another device restores it first, work removed. The folder made here has the
+/// removed version as its base, so the next plan takes work off it. With no base, work read
+/// as added here, and the plan wrote it back to the drive.
+#[test]
+fn a_restored_folder_made_here_keeps_a_removal_from_the_drive() -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.cfg.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let node = NodeId::new();
+    let work = Tags::new(vec![Tag::new("Work", 0)]);
+    let mut tagged = NodeContent::folder("a");
+    tagged.set_tags(&work);
+    let at = some_version();
+    h.db.write(|s| {
+        s.put_removed(&RemovedRow {
+            row: MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::Folder, &tagged, None),
+            removed_at: Some(1),
+        })
+    })?;
+    let report = h.run(vec![Op::LocalMkdir {
+        node,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        tags: work.clone(),
+        drive: None,
+    }])?;
+    assert_eq!(report.done, 1, "{report:?}");
+    // Restored elsewhere first, without work.
+    h.db.write(|s| {
+        s.delete_removed(node)?;
+        s.put_mirror(&MirrorRow::from_content(
+            RemoteRef {
+                file_id: at.file_id,
+                version: some_version().version,
+            },
+            node,
+            NodeId::ROOT,
+            NodeKind::Folder,
+            &NodeContent::folder("a"),
+            None,
+        ))
+    })?;
+    let plan = plan_of(&mut h, &[node])?;
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteTags { .. } | Op::RemoteUpdate { .. })),
+        "work comes back: {:?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops.iter().any(
+            |op| matches!(op, Op::LocalTags { node: n, tags, .. } if *n == node && tags.is_empty())
+        ),
+        "{:?}",
+        plan.ops
+    );
     Ok(())
 }

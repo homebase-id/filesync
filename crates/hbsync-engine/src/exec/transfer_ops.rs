@@ -110,12 +110,29 @@ impl Executor<'_> {
         let target = self.target_path(parent, name)?;
         let created_ms = mirror.created_ms();
         // What it acts on: the drive's version the plan saw, only while the mirror still holds
-        // it. Where the drive moved on since (another folder's engine pulled the next version,
-        // or this run wrote one), the next plan decides on that. Its commit settles against it;
-        // kept until then, its tags not known until written.
+        // it, or the one this run's own write made of it since, the bytes the same (a tag
+        // write, a move: the base is there). Where the drive moved on otherwise (another
+        // folder's engine pulled the next version), the next plan decides on that. Its commit
+        // settles against it; kept until then, its tags not known until written.
+        let ours = self.settled.get(&node).copied();
         let acted = match drive {
             Some(d) if d.at != mirror.remote_ref() => {
-                return Err(Outcome::stale("changed on the drive since the plan"));
+                let same_bytes =
+                    |m: &NodeState| m.content.map(|c| c.hash) == d.state.content.map(|c| c.hash);
+                match mirror.state() {
+                    Some(state)
+                        if ours == Some(mirror.remote_ref())
+                            && base_at == ours.map(|o| o.version)
+                            && same_bytes(&state) =>
+                    {
+                        DriveVersion {
+                            state,
+                            at: mirror.remote_ref(),
+                            base_at,
+                        }
+                    }
+                    _ => return Err(Outcome::stale("changed on the drive since the plan")),
+                }
             }
             Some(d) => d.clone(),
             None => DriveVersion {
@@ -334,7 +351,9 @@ impl Executor<'_> {
         // file can be seen there: only that costs a commit.
         // Only a volume that keeps no tags says so for the rest: a set that fails or reads
         // back as nothing to go by doesn't.
-        let tags = match tags::write_on(done.path(), &tags) {
+        let write = self.write_placed_tags(done.path(), &tags);
+        let failed = write.is_err();
+        let tags = match write {
             Ok(tags::Written::Unsupported) => {
                 let _ = self.cfg.tags_kept.set(false);
                 None
@@ -349,6 +368,8 @@ impl Executor<'_> {
             record.placed_tags = tags.clone();
             self.write_durable(|s| s.put_placing(&record))?;
         }
+        // The record claims only what read back; the row holds what the file holds.
+        let tags = self.placed_tags(done.path(), (!failed).then_some(tags));
         let placed = match &current {
             Some(row) if &row.path == target => self.put(target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
@@ -358,11 +379,21 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                if let Err(e) = self.move_to_trash(&row.path, node)? {
-                    done.keep_for_retry();
-                    return Ok(io_outcome(e));
+                let trashed = match self.move_to_trash(&row.path, node)? {
+                    Ok(trashed) => trashed,
+                    Err(e) => {
+                        done.keep_for_retry();
+                        return Ok(io_outcome(e));
+                    }
+                };
+                let placed = self.put(target, |at| done.persist_new(at, created_ms))?;
+                // Not put in place: the old version comes back from the trash, where the next
+                // plan would take its absence for the user deleting it.
+                if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_))) {
+                    let back = self.abs(&row.path);
+                    let _ = rename_ordered(self.db, &trashed, &back)?;
                 }
-                self.put(target, |at| done.persist_new(at, created_ms))?
+                placed
             }
             None => {
                 if !self.free_target(target, Some(node))? {

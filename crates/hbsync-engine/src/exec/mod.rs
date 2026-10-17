@@ -73,6 +73,9 @@ pub struct ExecConfig {
     /// folder's stat, a file's metadata): recovery settles them in the run.
     #[doc(hidden)]
     pub fail_reads: Arc<std::sync::atomic::AtomicUsize>,
+    /// Tests only: this many placements' tag writes fail (the item keeps what it held).
+    #[doc(hidden)]
+    pub fail_tag_writes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Places where a test can make the executor stop as if it crashed.
@@ -647,6 +650,34 @@ impl<'a> Executor<'a> {
             .fail_commits
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
             .is_ok()
+    }
+
+    /// Writes `tags` on the placed item at `path` ([`tags::write_on`]); for a test, fails
+    /// ([`ExecConfig::fail_tag_writes`]).
+    fn write_placed_tags(&self, path: &Path, tags: &Tags) -> io::Result<tags::Written> {
+        let fails = self
+            .cfg
+            .fail_tag_writes
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok();
+        match fails {
+            true => Err(io::Error::other("its tag write failed (a test)")),
+            false => tags::write_on(path, tags),
+        }
+    }
+
+    /// What a placed item at `path` holds of tags after its tag write (`written`: what it left,
+    /// `None` where it failed): what the write left, or, where the volume keeps tags and the
+    /// write failed, what the item holds as read (none where that can't be read either: it was
+    /// made without). Never "not known" there: the item would read as holding the drive's tags,
+    /// and the next scan take their absence for the user removing them.
+    fn placed_tags(&self, path: &Path, written: Option<Option<Tags>>) -> Option<Tags> {
+        let kept = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
+        match written {
+            Some(left) => left,
+            None if kept => Some(tags::read(path).unwrap_or_default()),
+            None => None,
+        }
     }
 
     /// Whether reading a placed item back fails, for a test ([`ExecConfig::fail_reads`]).

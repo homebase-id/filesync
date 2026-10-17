@@ -136,7 +136,12 @@ impl Executor<'_> {
         if !adopt && self.crash_here(CrashPoint::AfterPlaced) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        let tags = write_tags(&abs, tags);
+        let written = match self.write_placed_tags(&abs, tags) {
+            Ok(tags::Written::Done(read)) => Some(read),
+            Ok(tags::Written::Unsupported) => Some(None),
+            Err(_) => None,
+        };
+        let tags = written.clone().flatten();
         // Tags written: the record claims what the folder holds now, before its commit. A
         // folder taken over held its own: a failed write left those, not known (none claimed).
         if kept_tags
@@ -174,7 +179,7 @@ impl Executor<'_> {
             fingerprint: meta.fingerprint(),
             executable: None,
             hash: None,
-            tags,
+            tags: self.placed_tags(&abs, written),
         };
         let os = self.cfg.os;
         let fails = self.commit_fails();
@@ -187,6 +192,16 @@ impl Executor<'_> {
                 Some(r) => settle_placement(s, r, os),
                 None => {
                     let at = settle(s, Settle::placed(node, None, TagWrite::Agreed), os)?;
+                    // Made from Recently deleted (its folder restored, its RemoteCreate to
+                    // follow): the version there is what it was made of, the base until the
+                    // restore settles. Without one, a tag removed on the drive meanwhile read
+                    // as this device adding it, and came back.
+                    if s.get_base(node)?.is_none()
+                        && let Some(removed) = s.removed_by_node(node)?
+                        && let Some(state) = removed.row.state()
+                    {
+                        s.put_base(&BaseRow::new(node, state, removed.row.remote_ref()))?;
+                    }
                     mark_children(s, node)?;
                     Ok(at)
                 }
@@ -438,7 +453,7 @@ impl Executor<'_> {
         &mut self,
         path: &RelPath,
         node: NodeId,
-    ) -> Result<io::Result<()>, StateError> {
+    ) -> Result<io::Result<PathBuf>, StateError> {
         let trash = layout::trash_dir(&self.cfg.root);
         let dir = trash.join(format!("{}-{}", hbsync_types::unix_now(), node.0.simple()));
         // The trash folder too, made with the first item in it.
@@ -447,6 +462,6 @@ impl Executor<'_> {
             return Ok(Err(e));
         }
         let to = dir.join(path.name().unwrap_or("item"));
-        rename_ordered(self.db, &self.abs(path), &to)
+        Ok(rename_ordered(self.db, &self.abs(path), &to)?.map(|()| to))
     }
 }
