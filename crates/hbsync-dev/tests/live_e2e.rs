@@ -232,8 +232,16 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.sync()?;
     let report = b.sync()?;
     assert_eq!(report.conflicts.len(), 1, "{:?}", report.conflicts);
-    a.sync()?;
-    assert_eq!(a.tree_text(run), b.tree_text(run));
+    let ra = a.sync()?;
+    assert_eq!(
+        a.tree_text(run),
+        b.tree_text(run),
+        "b: {:?} feed {:?}\na: {:?} feed {:?}",
+        report.synced,
+        report.feed,
+        ra.synced,
+        ra.feed
+    );
     let versions: Vec<String> = a
         .tree_text(run)
         .into_iter()
