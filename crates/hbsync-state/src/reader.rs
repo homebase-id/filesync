@@ -6,6 +6,9 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::{BUSY_TIMEOUT, NO_FOLDER, Result, StateError, Store, migrations};
 
+/// A reader's page cache: 256 KiB (SQLite's negative `cache_size`).
+const READER_CACHE_KIB: i64 = -256;
+
 /// A connection to a state DB that only reads, for what is answered or checked while others
 /// write it (the daemon's engines, another process): it makes no DB, writes no row, brings no
 /// schema up to date ([`StateError::Behind`]: a writer does) and never copies the log into the
@@ -32,6 +35,9 @@ impl Reader {
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
             true,
         )?;
+        // What it reads is answered and let go: a small cache, not the default 2 MB a listing
+        // of Recently deleted would fill and keep.
+        conn.pragma_update(None, "cache_size", READER_CACHE_KIB)?;
         match migrations::user_version(&conn)? {
             0 => Ok(None),
             migrations::VERSION => Ok(Some(Reader { conn })),
@@ -64,6 +70,20 @@ impl Reader {
 mod tests {
     use super::*;
     use crate::{StateDb, keys};
+
+    /// What a reader reads is answered and let go: its page cache is small.
+    #[test]
+    fn a_reader_keeps_a_small_cache() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(|e| StateError::Conflict(e.to_string()))?;
+        let path = dir.path().join("state.db");
+        StateDb::open_account(&path)?.write(|s| s.set_account_kv(keys::IDENTITY, "a.example"))?;
+        let reader = Reader::open(&path)?.ok_or(StateError::Corrupt("no DB".into()))?;
+        let size: i64 = reader
+            .conn
+            .pragma_query_value(None, "cache_size", |r| r.get(0))?;
+        assert_eq!(size, READER_CACHE_KIB);
+        Ok(())
+    }
 
     #[test]
     fn a_reader_reads_what_was_written_and_writes_nothing() -> Result<()> {

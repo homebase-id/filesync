@@ -253,6 +253,15 @@ impl Store<'_> {
         )
     }
 
+    /// The nodes in Recently deleted named `name`.
+    pub fn removed_named(&self, name: &str) -> Result<Vec<NodeId>> {
+        let c = self.coords()?;
+        let nodes = self.many("SELECT node FROM removed WHERE name = ?1", [name], |r| {
+            codec::node(&r.get::<_, Vec<u8>>(0)?)
+        })?;
+        Ok(nodes.into_iter().filter(|n| !c.hides(*n)).collect())
+    }
+
     /// What was removed before `at_ms` (Unix ms), oldest first; an open time isn't.
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.removed_rows(

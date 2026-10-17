@@ -297,9 +297,9 @@ impl Account {
         self.items(self.read(|db| db.find_deleted(nodes)).unwrap_or_default())
     }
 
-    /// Every item of its Recently deleted, newest first.
-    pub fn all_deleted(&self) -> Vec<DeletedItem> {
-        self.items(self.read(|db| db.all_deleted()).unwrap_or_default())
+    /// The items of its Recently deleted named `names`.
+    pub fn named_deleted(&self, names: &[String]) -> Vec<DeletedItem> {
+        self.items(self.read(|db| db.named_deleted(names)).unwrap_or_default())
     }
 
     fn items(&self, found: Vec<(Deleted, usize)>) -> Vec<DeletedItem> {
@@ -819,6 +819,11 @@ const HELD_RETRY_MAX: Duration = Duration::from_secs(300);
 /// Hard deletes kept while taking them fails, one per file; more are left stale (written to
 /// next, a file deleted for good answers not found).
 const MAX_HELD: usize = 10_000;
+/// A round gathers what is announced for this long after its first ask, or until it holds this
+/// many changes: one write for a burst (a folder of thousands of files deleted is a notification
+/// per file), not one each. A change waits this long at most.
+const GATHER_WINDOW: Duration = Duration::from_millis(100);
+const GATHER_MAX: usize = 500;
 
 impl Puller {
     pub fn spawn(drive: Arc<Drive>) -> Puller {
@@ -901,7 +906,7 @@ fn start(drive: &Arc<Drive>, rounds: &Arc<AtomicUsize>) -> std::io::Result<Sende
                     }
                 };
                 let Some(first) = first else { break };
-                let (changes, pull) = merge(held, std::iter::once(first).chain(rx.try_iter()));
+                let (changes, pull) = merge(held, gathered(first, &rx).into_iter());
                 held = round(
                     changes,
                     pull,
@@ -917,6 +922,27 @@ fn start(drive: &Arc<Drive>, rounds: &Arc<AtomicUsize>) -> std::io::Result<Sende
             }
         })?;
     Ok(asks)
+}
+
+/// The asks of one round: `first`, and what comes within [`GATHER_WINDOW`] of it, until they
+/// hold [`GATHER_MAX`] changes (the rest wait for the next round).
+fn gathered(first: Asked, rx: &Receiver<Asked>) -> Vec<Asked> {
+    let until = Instant::now() + GATHER_WINDOW;
+    let mut count = first.0.len();
+    let mut asks = vec![first];
+    while count < GATHER_MAX {
+        let Some(left) = until.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        match rx.recv_timeout(left) {
+            Ok(ask) => {
+                count += ask.0.len();
+                asks.push(ask);
+            }
+            Err(_) => break,
+        }
+    }
+    asks
 }
 
 /// The asks of one round, after the hard deletes `held` from the last: all their changes, and
@@ -1333,6 +1359,34 @@ mod tests {
         assert!(!pause_ran_out(&mut for_good, u64::MAX));
         assert_eq!(for_good, Some(None));
         assert!(!pause_ran_out(&mut None, 100));
+    }
+
+    /// A burst of announced changes (a notification each) is taken in rounds of
+    /// [`GATHER_MAX`], not one write each; a lone one waits [`GATHER_WINDOW`] at most.
+    #[test]
+    fn a_burst_is_taken_in_few_rounds() {
+        let (tx, rx) = channel::<Asked>();
+        for _ in 0..2000 {
+            let _ = tx.send((vec![a_ref(false)], false));
+        }
+        let mut sizes = Vec::new();
+        while let Ok(first) = rx.try_recv() {
+            let (changes, read) = merge(Vec::new(), gathered(first, &rx).into_iter());
+            assert!(!read);
+            sizes.push(changes.len());
+        }
+        assert_eq!(sizes, [GATHER_MAX; 4]);
+
+        let _ = tx.send((vec![a_ref(true)], false));
+        let began = Instant::now();
+        let first = rx.recv().map_err(|e| e.to_string());
+        let asks = first.map(|first| gathered(first, &rx));
+        assert_eq!(asks.map(|a| a.len()), Ok(1));
+        let took = began.elapsed();
+        assert!(
+            took >= GATHER_WINDOW && took < GATHER_WINDOW * 10,
+            "{took:?}"
+        );
     }
 
     /// A take and a plain ask in one round: the changes are taken and the feed is read, once.

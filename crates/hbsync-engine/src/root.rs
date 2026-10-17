@@ -301,6 +301,11 @@ impl AccountReader {
     pub fn all_deleted(&mut self) -> Result<Vec<(Deleted, usize)>, StateError> {
         self.db.read(crate::deleted::all)
     }
+
+    /// The items of Recently deleted named `names` ([`crate::deleted::named`]).
+    pub fn named_deleted(&mut self, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
+        self.db.read(|s| crate::deleted::named(s, names))
+    }
 }
 
 #[cfg(test)]
