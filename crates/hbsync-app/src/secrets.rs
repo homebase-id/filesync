@@ -15,6 +15,14 @@ use crate::Paths;
 /// The keychain entries' service name; the account is the identity.
 const SERVICE: &str = "Homebase Filesync";
 
+/// How entries are written: on Windows kept on this computer (`Local` persistence), not
+/// `Enterprise`, the store's default, which travels with a roaming profile.
+const MODIFIERS: &[(&str, &str)] = if cfg!(windows) {
+    &[("persistence", "Local")]
+} else {
+    &[]
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum CredentialError {
     #[error("credentials file: {0}")]
@@ -122,6 +130,7 @@ impl CredentialStore {
                 }) {
                 Ok(json) => {
                     let creds = serde_json::from_str(&json).map_err(CredentialError::Corrupt)?;
+                    self.keep_here(identity, &json);
                     return Ok(Some((creds, Location::Keychain)));
                 }
                 Err(failed) => failed.map(Err),
@@ -163,9 +172,26 @@ impl CredentialStore {
 
     fn keychain_entry(&self, identity: &str) -> Result<keyring_core::Entry, String> {
         let keychain = self.keychain.as_ref().map_err(Clone::clone)?;
+        let modifiers: std::collections::HashMap<&str, &str> = MODIFIERS.iter().copied().collect();
         keychain
-            .build(SERVICE, identity, None)
+            .build(SERVICE, identity, Some(&modifiers))
             .map_err(|e| e.to_string())
+    }
+
+    /// An entry written before entries were kept on this computer is written again so (Windows:
+    /// one with another persistence than `Local`). Best effort: it is read either way.
+    fn keep_here(&self, identity: &str, json: &str) {
+        #[cfg(windows)]
+        if let Ok(entry) = self.keychain_entry(identity)
+            && entry
+                .get_attributes()
+                .is_ok_and(|a| a.get("persistence").is_some_and(|p| p != "Local"))
+            && let Err(e) = entry.set_password(json)
+        {
+            tracing::warn!("keeping the credentials of {identity} on this computer: {e}");
+        }
+        #[cfg(not(windows))]
+        let _ = (identity, json);
     }
 }
 
@@ -276,6 +302,32 @@ mod tests {
         if cfg!(any(windows, target_os = "macos")) {
             assert_eq!(location, Location::Keychain, "{:?}", store.keychain());
             assert!(!store.file(&identity).exists());
+        }
+        // On Windows kept on this computer: written so, and an entry from before (roaming)
+        // written again so when read.
+        #[cfg(windows)]
+        {
+            let persistence = || -> Result<String, CredentialError> {
+                let entry = store
+                    .keychain_entry(&identity)
+                    .map_err(CredentialError::Keychain)?;
+                let attributes = entry
+                    .get_attributes()
+                    .map_err(|e| CredentialError::Keychain(e.to_string()))?;
+                Ok(attributes.get("persistence").cloned().unwrap_or_default())
+            };
+            assert_eq!(persistence()?, "Local");
+            let roaming = std::collections::HashMap::from([("persistence", "Enterprise")]);
+            let keychain = os_keychain().map_err(|e| CredentialError::Keychain(e.to_string()))?;
+            let old = keychain
+                .build(SERVICE, &identity, Some(&roaming))
+                .map_err(|e| CredentialError::Keychain(e.to_string()))?;
+            let json = serde_json::to_string(&creds).map_err(HomebaseError::from)?;
+            old.set_password(&json)
+                .map_err(|e| CredentialError::Keychain(e.to_string()))?;
+            assert_eq!(persistence()?, "Enterprise");
+            store.load(&identity)?;
+            assert_eq!(persistence()?, "Local", "written again on this computer");
         }
         let (back, at) = store.load(&identity)?.expect("saved");
         assert!(same(&back, &creds));
