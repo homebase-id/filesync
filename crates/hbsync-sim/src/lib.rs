@@ -460,6 +460,8 @@ pub struct Sim {
     /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
     /// them to the original too, as that client's add.
     tags_forked: BTreeSet<(usize, NodeId, String)>,
+    /// Tag adds a client's remote write sent up: they stand once the item goes from it.
+    tags_sent: BTreeSet<(usize, NodeId, String)>,
     deleted: BTreeSet<NodeId>,
     /// What the phone deleted with the role folder, brought back with it.
     role_folder_deleted_with: Vec<NodeId>,
@@ -509,6 +511,7 @@ impl Sim {
             unguarded: None,
             tags_added: BTreeSet::new(),
             tags_forked: BTreeSet::new(),
+            tags_sent: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
             tags_cleared: BTreeSet::new(),
             deleted: BTreeSet::new(),
@@ -1925,6 +1928,18 @@ impl Sim {
             }
         }
         if outcome == Outcome::Done {
+            // A remote write sends up what this client's user added to the node's tags.
+            if let Op::RemoteTags { tags, .. }
+            | Op::RemoteUpdate { tags, .. }
+            | Op::RemoteCreate { tags, .. } = &op
+            {
+                for tag in tags.iter() {
+                    let add = (c, node, tag.name.clone());
+                    if self.tags_added.contains(&add) {
+                        self.tags_sent.insert(add);
+                    }
+                }
+            }
             if matches!(
                 op,
                 Op::LocalMove { .. }
@@ -2590,9 +2605,11 @@ impl Sim {
             let client = &mut self.clients[c];
             client.local.remove(n);
             client.parked.remove(&n);
-            // Tag changes made here and not synced yet went to the trash with the item.
+            // Tag changes made here and not synced yet went to the trash with the item; an add
+            // sent up stands.
+            let sent = &self.tags_sent;
             self.tags_added
-                .retain(|(at, node, _)| (*at, *node) != (c, n));
+                .retain(|add| (add.0, add.1) != (c, n) || sent.contains(add));
             self.tags_cleared
                 .retain(|(by, node, _)| (*by, *node) != (c, n));
         }
