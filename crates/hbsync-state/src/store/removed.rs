@@ -132,7 +132,7 @@ impl Store<'_> {
     /// Recently deleted's rows recorded up to `seq`: what a listing that read it saw.
     pub fn recorded_upto(&self, seq: u64) -> Result<Vec<Recorded>> {
         self.recorded_rows(
-            &format!("{REMOVED_SELECT} WHERE seq <= ?1"),
+            &format!("{REMOVED_SELECT} WHERE seq <= ?1 ORDER BY seq"),
             [i64::try_from(seq).unwrap_or(i64::MAX)],
         )
     }

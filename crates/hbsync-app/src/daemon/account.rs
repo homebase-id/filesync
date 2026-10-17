@@ -677,7 +677,7 @@ pub struct Notifications {
     announced: Announced,
     /// The live changes announced since the last take, up to [`MAX_LIVE_REFS`], and whether
     /// the feed is to be read too (an announcement didn't say which file, or there were more).
-    /// A hard delete isn't gathered: it is taken at once.
+    /// A hard delete isn't gathered here: the puller takes it within [`GATHER_WINDOW`].
     changes: Vec<ChangeRef>,
     unsaid: bool,
     connected: bool,
@@ -720,8 +720,8 @@ impl Notifications {
             }
             Event::Changed(change) => {
                 match change {
-                    // In no feed: taken at once, also while paused (it writes only the
-                    // account's DB; the folders sync it at the resume).
+                    // In no feed: taken within the puller's window, also while paused (it
+                    // writes only the account's DB; the folders sync it at the resume).
                     Some(change) if change.deleted => self.puller.take(vec![change], false),
                     Some(change) => {
                         self.announced.note(now);
@@ -822,7 +822,7 @@ const MAX_HELD: usize = 10_000;
 /// A round gathers what is announced for this long after its first ask, or until it holds this
 /// many changes: one write for a burst (a folder of thousands of files deleted is a notification
 /// per file), not one each. A change waits this long at most.
-const GATHER_WINDOW: Duration = Duration::from_millis(100);
+const GATHER_WINDOW: Duration = Duration::from_secs(1);
 const GATHER_MAX: usize = 500;
 
 impl Puller {
@@ -1285,8 +1285,8 @@ mod tests {
         Ok(())
     }
 
-    /// A hard delete announced is taken at once, also while paused (it writes only the
-    /// account's DB): never held where a crash or a pause could lose it.
+    /// A hard delete announced is taken within the puller's window, also while paused (it writes
+    /// only the account's DB): never held where a pause could lose it.
     #[test]
     fn a_hard_delete_is_taken_at_once_even_paused() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;

@@ -116,12 +116,14 @@ a failure (service managers restart it then).
   doubling to 5 min. When the socket connects again, a folder waiting for either goes at
   once.
 - **Announced changes** name their file (a minimal row, odin-core #1970): a file deleted for
-  good is gone from the account's picture at once (a hard delete leaves no row in the feed),
+  good is gone from the account's picture within a second (a hard delete leaves no row in the
+  feed),
   and versions the account has already (this device's own writes coming back) are taken as
   a slim feed page's rows, an own removal getting the server's time; the feed is read only
   when something announced isn't known, or an event didn't say which file. One ref per file
   counts (a delete for good ends it; else the newest), so an own write made twice, or made
-  then deleted, needs no read. A hard delete announced is taken at once, also while paused
+  then deleted, needs no read. A hard delete announced is taken within a second (what is
+  announced within a second of it, up to 500 changes, is taken in one write), also while paused
   (it is in no feed; it writes only the account's DB, the folders sync it at the resume),
   kept and tried again with a growing pause when that fails, and its file id is never let
   back in by a later row; live changes beyond 2,000 are read from the feed instead.
