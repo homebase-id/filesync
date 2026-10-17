@@ -1570,6 +1570,63 @@ fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
     Ok(())
 }
 
+/// A device whose rules leave it one top-level folder of the drive (`/*`, `!/mine/`) takes
+/// nothing else down and writes nothing else: not another folder's files, nor the name clash
+/// in it (two files of one name, which a device that sees them renames on the drive). How the
+/// live end-to-end tests keep to their own folder on a drive other tests share.
+#[test]
+fn a_device_kept_to_one_folder_touches_nothing_else_on_the_drive() -> R {
+    use hbsync_remote::Remote;
+    let server = server();
+    let other = FakeRemote::new(server.clone());
+    let elsewhere = hbsync_remote::contract::folder("elsewhere", NodeId::ROOT);
+    other.create(&elsewhere, None)?;
+    for data in [b"one", b"two"] {
+        server.lock().map_err(|_| "poisoned")?.seed_file(
+            elsewhere.node,
+            "f",
+            data,
+            hbsync_fileio::HashAlgorithm::Blake3,
+        )?;
+    }
+    let versions = || -> Result<Vec<_>, Box<dyn std::error::Error>> {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        let mut v: Vec<_> = srv.live().map(|h| (h.file_id, h.version)).collect();
+        v.sort_by_key(|(f, _)| f.0);
+        Ok(v)
+    };
+    let before = versions()?;
+
+    let mut a = Client::with_config(&server, "a", ignoring("/*\n!/mine/\n"))?;
+    let mut b = Client::with_config(&server, "b", ignoring("/*\n!/mine/\n"))?;
+    a.write("mine/x.txt", "x")?;
+    a.sync()?;
+    b.sync()?;
+    a.sync()?;
+    for c in [&a, &b] {
+        assert_eq!(c.tree_text(""), ["mine/", "mine/x.txt = x"], "{}", c.name);
+    }
+    let after: Vec<_> = versions()?
+        .into_iter()
+        .filter(|(f, _)| before.iter().any(|(g, _)| g == f))
+        .collect();
+    assert_eq!(after, before, "nothing else on the drive was written");
+
+    // A device that sees the folder resolves the clash on the drive.
+    let mut c = Client::new(&server, "c")?;
+    c.sync()?;
+    assert!(
+        server
+            .lock()
+            .map_err(|_| "poisoned")?
+            .live_names()
+            .iter()
+            .any(|n| n.starts_with("f (")),
+        "renamed"
+    );
+    Ok(())
+}
+
 #[test]
 fn a_file_moved_into_a_folder_one_device_ignores_leaves_that_device_only() -> R {
     let server = server();

@@ -129,6 +129,8 @@ fn exists(p: &Path) -> Res<bool> {
 fn two_computers_sync_through_the_daemon() -> Res<()> {
     let identity = hbsync_dev::live_identity()?;
     let run = hbsync_dev::run_name("daemon");
+    // Deleted for good at the end, also when the test fails before its own cleanup.
+    let _guard = hbsync_dev::RunFolder::new(&run)?;
     let a = Computer::set_up(&identity, &run, None)?;
     // A client of its own, as another computer has: it hears a's writes.
     let b = Computer::set_up(&identity, &run, Some(hbsync_dev::OTHER_CLIENT))?;

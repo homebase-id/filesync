@@ -1,8 +1,9 @@
 //! Two clients syncing two folders through a live identity:
 //! `HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-dev --test live_e2e -- --ignored`.
-//! Needs the credentials `hbsync-register` saves. Both clients sync the whole drive; the test
-//! works and checks inside one top-level folder of its own and deletes it at the end. The two
-//! share one client registration: they sync when the test says, never on a notification, so
+//! Needs the credentials `hbsync-register` saves. Each client syncs only the test's own
+//! top-level folder (an ignore rule masks the rest of the drive: other tests' folders, those
+//! left by runs that ended early, a gigabyte each at times); the test works and checks inside
+//! it and deletes it at the end. The two share one client registration: they sync when the test says, never on a notification, so
 //! that the socket leaves out a client's own writes (`excludeOwnWrites`) doesn't concern them.
 
 use std::fs;
@@ -16,7 +17,7 @@ use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_local::Filter;
 use hbsync_platform::tags::{self, Tag, Tags};
 
-struct Client(TestClient<Arc<HomebaseRemote>>);
+struct Client(TestClient<Arc<HomebaseRemote>>, String);
 
 impl Deref for Client {
     type Target = TestClient<Arc<HomebaseRemote>>;
@@ -31,21 +32,51 @@ impl DerefMut for Client {
     }
 }
 
+/// The ignore rules that leave a client only the test's folder `run`: the drive is shared with
+/// other tests and with what runs that ended early left behind.
+fn only(run: &str) -> String {
+    format!("/*\n!/{run}/\n")
+}
+
 impl Client {
-    fn new(identity: &str, name: &str) -> Res<Self> {
+    /// A client of `identity` that syncs only the folder `run`.
+    fn new(identity: &str, name: &str, run: &str) -> Res<Self> {
         let remote = Arc::new(HomebaseRemote::connect(hbsync_dev::saved_client(
             identity,
         )?)?);
-        let configure = |cfg: &mut EngineConfig| -> Res<()> {
+        let rules = only(run);
+        let configure = move |cfg: &mut EngineConfig| -> Res<()> {
             cfg.allow_mass_delete = true; // the test deletes its whole folder at the end
+            // Before the first start; a restart keeps the rules a scenario set.
+            let ignore = hbsync_local::layout::ignore_file(&cfg.exec.root);
+            if !ignore.exists() {
+                fs::write(&ignore, &rules)?;
+            }
             cfg.exec.filter = Arc::new(Filter::load(&cfg.exec.root, cfg.exec.case_insensitive)?);
             Ok(())
         };
-        Ok(Client(TestClient::new(remote, name, configure)?))
+        Ok(Client(
+            TestClient::new(remote, name, configure)?,
+            run.to_owned(),
+        ))
     }
 
-    /// A restart with the ignore rules `rules`.
+    /// The top-level entries of its root, the state folder left out: the test's folder at most.
+    fn top_level(&self) -> Res<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name != hbsync_local::STATE_DIR {
+                names.push(name);
+            }
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// A restart with the ignore rules `rules`, besides those that keep it to the test's folder.
     fn restart_ignoring(&mut self, rules: &str) -> Res<()> {
+        let rules = format!("{}{rules}", only(&self.1));
         fs::write(hbsync_local::layout::ignore_file(&self.root), rules)?;
         self.restart()?;
         assert!(self.engine.apply_filter_change()?);
@@ -91,18 +122,27 @@ impl Client {
         )
     }
 
-    /// Scan, then sync until idle: nothing may fail or be skipped.
+    /// Scan, then sync until idle: nothing may fail or be skipped. A failure names the test's
+    /// line that synced, and each step that failed with its error.
+    #[track_caller]
     fn sync(&mut self) -> Res<SyncReport> {
         // Homebase holds back feed rows of the current millisecond.
         let total = self.0.sync_until_idle(&hbsync_app::today(), true, || {
             std::thread::sleep(Duration::from_millis(20));
         })?;
-        assert!(
-            total.failed.is_empty(),
-            "{}: failed {:?}",
-            self.name,
-            total.failed
-        );
+        if !total.failed.is_empty() {
+            let steps: Vec<String> = total
+                .failed
+                .iter()
+                .map(|(op, e)| format!("  {op:?}\n    error: {e}"))
+                .collect();
+            panic!(
+                "{}: {} sync steps failed:\n{}",
+                self.name,
+                steps.len(),
+                steps.join("\n")
+            );
+        }
         let skipped = self.0.engine.drive().take_skipped();
         assert!(
             skipped.is_empty(),
@@ -118,8 +158,10 @@ impl Client {
 fn two_clients_converge_through_homebase() -> Res<()> {
     let identity = hbsync_dev::live_identity()?;
     let run = hbsync_dev::run_name("e2e");
-    let mut a = Client::new(&identity, "a")?;
-    let mut b = Client::new(&identity, "b")?;
+    // Deleted for good at the end, whatever happens; the test's own cleanup syncs a delete.
+    let _guard = hbsync_dev::RunFolder::new(&run)?;
+    let mut a = Client::new(&identity, "a", &run)?;
+    let mut b = Client::new(&identity, "b", &run)?;
     let result = scenarios(&run, &mut a, &mut b);
 
     // Clean up whatever happened: delete the run folder on both sides.
@@ -143,8 +185,10 @@ fn two_clients_converge_through_homebase() -> Res<()> {
 fn photos_restore_without_what_was_deleted_from_it_before() -> Res<()> {
     let identity = hbsync_dev::live_identity()?;
     let run = hbsync_dev::run_name("photos");
-    let mut a = Client::new(&identity, "a")?;
-    let mut b = Client::new(&identity, "b")?;
+    // Deleted for good at the end, whatever happens; the test's own cleanup syncs a delete.
+    let _guard = hbsync_dev::RunFolder::new(&run)?;
+    let mut a = Client::new(&identity, "a", &run)?;
+    let mut b = Client::new(&identity, "b", &run)?;
     let result = photos(&run, &mut a, &mut b);
     let _ = fs::remove_dir_all(a.root.join(&run));
     let cleanup = a.sync().and_then(|_| b.sync());
@@ -161,6 +205,11 @@ fn photos(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     a.write(&at("Photos/2024/c.jpg"), "c")?;
     a.sync()?;
     b.sync()?;
+    // Nothing else of the drive came down (other tests' folders, a run's leftovers).
+    assert_eq!(
+        (a.top_level()?, b.top_level()?),
+        (vec![run.to_owned()], vec![run.to_owned()])
+    );
     fs::remove_file(a.root.join(at("Photos/a.jpg")))?; // Monday
     a.sync()?;
     fs::remove_dir_all(a.root.join(at("Photos")))?; // Tuesday
@@ -236,6 +285,11 @@ fn scenarios(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
     fs::create_dir_all(a.root.join(at("empty")))?;
     a.sync()?;
     b.sync()?;
+    // Nothing else of the drive came down (other tests' folders, a run's leftovers).
+    assert_eq!(
+        (a.top_level()?, b.top_level()?),
+        (vec![run.to_owned()], vec![run.to_owned()])
+    );
     assert_eq!(b.tree_text(run), a.tree_text(run));
     assert!(
         b.read(&at("big.bin"))? == big,
