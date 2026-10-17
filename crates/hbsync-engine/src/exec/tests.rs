@@ -3076,6 +3076,9 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
         h.scanned_with("x", here.clone())?;
         let (a, b) = (h.content(b"A"), h.content(b"B"));
         let before = some_version();
+        // The drive holds what the base does of the tag (red, its colour unchanged there).
+        let mut content = NodeContent::file("x", 0, 1, false);
+        content.set_tags(&there);
         h.db.write(|s| {
             s.put_base(&BaseRow {
                 local_hash: Some(a.hash),
@@ -3087,7 +3090,15 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
                     },
                     before,
                 )
-            })
+            })?;
+            s.put_mirror(&MirrorRow::from_content(
+                at,
+                node,
+                NodeId::ROOT,
+                NodeKind::File,
+                &content,
+                Some(b.hash),
+            ))
         })?;
         h.cfg.faults.fail(FailPoint::TagWrite, 10);
         h.run(vec![Op::LocalDownload {
