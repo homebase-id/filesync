@@ -923,3 +923,61 @@ fn write_answers_carry_the_feeds_time() -> R {
     bench.cleanup()?;
     result
 }
+
+/// Whether another client's write is in the feed as soon as its answer came: client b creates a
+/// folder, and this client reads the feed from the cursor it had before, at once; when the row
+/// isn't there yet, it reads again until it is. Half the rounds read from the cursor once first
+/// (an empty answer the server may keep), as a client that just read to the end has. Prints
+/// how often and how long the row was missing.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
+fn another_clients_write_is_in_the_feed_at_once() -> R {
+    use hbsync_remote::contract::folder;
+    use std::time::Instant;
+    let identity = live_identity()?;
+    let remote = live_remote()?;
+    let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
+    let bench = Bench::new(&remote, &run_name("feed-at-once"), Duration::ZERO)?;
+    let result = (|| -> R {
+        let (dir, _) = bench.folder("d")?;
+        let mut cursor = bench.cursor_now()?;
+        let mut late = Vec::new();
+        for i in 0..40 {
+            let primed = i % 2 == 1;
+            if primed {
+                let page = remote.change_refs(Some(&cursor), 100)?;
+                assert!(page.refs.is_empty() && !page.has_more, "nothing new yet");
+            }
+            let w = other.create(&folder(&format!("f{i}"), dir.node), None)?.at;
+            bench.track(w.file_id);
+            let written = Instant::now();
+            let mut reads = 0;
+            loop {
+                let page = remote.change_refs(Some(&cursor), 100)?;
+                reads += 1;
+                if page.refs.iter().any(|r| r.file_id == w.file_id) {
+                    cursor = page.cursor;
+                    break;
+                }
+                assert!(
+                    written.elapsed() < Duration::from_secs(10),
+                    "round {i}: not in the feed after 10 s"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if reads > 1 {
+                late.push((i, primed, reads, written.elapsed()));
+            }
+        }
+        println!(
+            "rounds where the first read missed the write (round, primed, reads, until seen):"
+        );
+        for l in &late {
+            println!("  {l:?}");
+        }
+        assert!(late.is_empty(), "{} of 40 rounds read it late", late.len());
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
+}
