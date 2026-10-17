@@ -190,7 +190,9 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   a minimal one 588 (the encrypted envelope and its base64 included).
 - How the client reads with it: `hbsync_engine::feed::pull`. A server without `fileRefs` in
   its answer is refused, not read as an empty page.
-- **A kept answer can hide a write** (odin-core #1909, open; tracked in filesync #90;
+- **A kept answer can hide a write** (odin-core #1909; fixed on its branch
+  `cache-fill-race-1909` at 2f0ff3592, not released: tried there, 0 of 20 rounds hid the
+  write; tracked in filesync #90;
   odin-core at fe067124b; **[tried]** on frodo, the
   diagnostics `a_page_read_during_a_write_may_be_kept_stale` and
   `another_clients_write_is_in_the_feed_at_once` in `hbsync-dev/tests/live.rs`):
