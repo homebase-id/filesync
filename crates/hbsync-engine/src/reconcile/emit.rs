@@ -29,13 +29,10 @@ impl Reconciler<'_> {
             let depth = |tree: &Tree| tree.ancestors(node).len();
 
             if let Some(copy) = forked {
-                // A copy the repairs took out (its folder waits, §6.3) isn't made, never under
-                // the name "": the node waits with it, and says so instead of what it would
-                // have done.
+                // The repairs made the fork wait where they took the copy out: one without its
+                // state here is never made under the name "".
                 let Some(name) = self.merged.get(copy).map(|s| s.name.clone()) else {
-                    self.deferred.insert(node);
-                    self.plan.conflicts.retain(|c| c.node() != node);
-                    self.plan.conflicts.push(Conflict::CopyWaits { node });
+                    self.fork_waits(node);
                     continue;
                 };
                 forks.push(Op::LocalFork {

@@ -1052,3 +1052,48 @@ fn local_writes_carry_the_drive_version_the_plan_saw() {
     }
     assert_eq!(drive(tagged).map(|d| &d.state), Some(&red));
 }
+
+/// A fork whose copy has to wait makes its node wait before the names are judged: the node
+/// keeps the name it holds on the drive, and a new file wanting that name yields to it, the
+/// same whichever id is lower. (Judged as if the node went ahead, it lost to a lower id: the
+/// plan renamed it, but it waited, and the other file went up under the name it still held.)
+#[test]
+fn a_waiting_fork_keeps_its_name_and_a_new_file_yields() {
+    let [d, a, b] = ids(3)[..] else {
+        unreachable!()
+    };
+    for (f, x) in [(a, b), (b, a)] {
+        for x_on_drive in [false, true] {
+            let mut w = World::default();
+            w.synced(f, file(ROOT, "a.txt", "v1"));
+            // Here: edited, in a folder that waits for its own; on the drive: edited, moved.
+            w.local(f, Some(file(d, "a.txt", "mine")));
+            w.remote(f, Some(file(ROOT, "x.txt", "theirs")));
+            let other = Some(file(ROOT, "x.txt", "other"));
+            if x_on_drive {
+                w.remote(x, other);
+            } else {
+                w.local(x, other);
+            }
+            let plan = w.plan();
+            assert!(plan.ops.iter().all(|op| op.node() != f), "{plan:?}");
+            assert!(plan.deferred.contains(&f), "{plan:?}");
+            let mut conflicts = plan.conflicts.clone();
+            conflicts.sort_by_key(|c| c.node() == x);
+            assert_eq!(
+                conflicts,
+                [
+                    Conflict::CopyWaits { node: f },
+                    Conflict::NameClash { node: x }
+                ]
+            );
+            let renamed = |op: &Op| match op {
+                Op::RemoteCreate { node, name, .. } | Op::RemoteUpdate { node, name, .. } => {
+                    *node == x && name == "x (conflict 1).txt"
+                }
+                _ => false,
+            };
+            assert!(plan.ops.iter().any(renamed), "{plan:?}");
+        }
+    }
+}
