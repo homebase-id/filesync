@@ -14,7 +14,8 @@ impl Executor<'_> {
                 name,
                 replace,
                 tags,
-            } => self.prepare_download(*node, *parent, name, *replace, tags),
+                drive,
+            } => self.prepare_download(*node, *parent, name, *replace, tags, drive.as_deref()),
             Op::RemoteCreate {
                 node,
                 parent,
@@ -79,13 +80,21 @@ impl Executor<'_> {
         name: &str,
         replace: bool,
         tags: &Tags,
+        drive: Option<&DriveVersion>,
     ) -> Step<(Job, Ctx)> {
-        let (mirror, current) = self
-            .db
-            .read(|s| Ok((s.get_mirror(node)?, s.local_by_node(node)?)))?;
+        let (mirror, current, base_at) = self.db.read(|s| {
+            Ok((
+                s.get_mirror(node)?,
+                s.local_by_node(node)?,
+                s.get_base(node)?.map(|b| b.remote.version),
+            ))
+        })?;
         let Some(mirror) = mirror else {
             return Err(Outcome::stale("gone remotely"));
         };
+        if self.placing_earlier(node)? {
+            return Err(Outcome::stale("an earlier placement isn't settled yet"));
+        }
         let Some(file) = mirror.file else {
             return Err(Outcome::stale("not a file"));
         };
@@ -100,8 +109,36 @@ impl Executor<'_> {
         }
         let target = self.target_path(parent, name)?;
         let created_ms = mirror.created_ms();
-        // What its commit records, as the drive has it now: kept until then.
-        let record = Placing::of(&mirror, target.clone()).map(Box::new);
+        // What it acts on: the drive's version the plan saw, only while the mirror still holds
+        // it. Where the drive moved on since (another folder's engine pulled the next version,
+        // or this run wrote one), the next plan decides on that. Its commit settles against it;
+        // kept until then, its tags not known until written.
+        let acted = match drive {
+            Some(d) if d.at != mirror.remote_ref() => {
+                return Err(Outcome::stale("changed on the drive since the plan"));
+            }
+            Some(d) => d.clone(),
+            None => DriveVersion {
+                state: mirror.state().ok_or_else(|| Outcome::stale("not a file"))?,
+                at: mirror.remote_ref(),
+                base_at,
+            },
+        };
+        // It claims the tags it is to write (the empty set too), as they read back once
+        // written: where the volume keeps none, not known.
+        let kept = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
+        let record = Placing {
+            base: BaseRow::new(node, acted.state, acted.at),
+            target,
+            placed_tags: kept.then(|| tags.held_by(self.cfg.os)),
+            // What the file it replaces held; nothing where there was none.
+            prior_tags: match &current {
+                Some(row) => row.tags.clone(),
+                None => Some(Tags::default()),
+            },
+            base_at: acted.base_at.into(),
+            held_ms: None,
+        };
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -115,14 +152,12 @@ impl Executor<'_> {
         });
         Ok((
             job,
-            Ctx::Download {
-                node,
-                target,
+            Ctx::Download(Box::new(Placement {
+                record,
                 current,
                 created_ms,
                 tags: tags.clone(),
-                record,
-            },
+            })),
         ))
     }
 
@@ -179,7 +214,7 @@ impl Executor<'_> {
             // In Recently deleted: restored with these bytes (an edit wins over the delete).
             None if let Some(r) = &removed => {
                 content.unknown = r.row.carried_keys();
-                tags = restored_tags(base.as_ref(), &tags, r);
+                tags = merged_with_drive(base.as_ref(), &tags, &r.row.tags());
                 Some(r.row.target())
             }
             // A new node: the file's own creation time, kept from then on.
@@ -192,6 +227,7 @@ impl Executor<'_> {
                     return Err(Outcome::stale("gone remotely"));
                 };
                 content.unknown = mirror.carried_keys();
+                tags = merged_with_drive(base.as_ref(), &tags, &mirror.tags());
                 // A node from before creation times, or from a client that sends none.
                 if content.created_ms().is_none() {
                     content.set_created_ms(ops::created_ms(&path));
@@ -238,29 +274,28 @@ impl Executor<'_> {
                 Job::Meta { meta, .. },
                 JobResult::Failed(JobError::Remote(RemoteError::NotFound)),
             ) => self.commit_meta(meta, hash, after, None),
+            // An earlier try landed, with whatever the file held then: the bytes count as
+            // agreed only where the drive's hash is the local one (an edit since goes up).
+            (_, job, JobResult::Failed(JobError::Remote(RemoteError::AlreadyExists))) => {
+                self.finish(&[Settle::node(job.node())], |_| Ok(()))
+            }
             (_, _, JobResult::Failed(e)) => Ok(match e {
-                JobError::Remote(RemoteError::AlreadyExists) => Outcome::Done, // an earlier try landed
                 JobError::Remote(r) => remote_outcome(r),
                 // Local file errors (locked, changed mid-read, short) are worth another try.
                 e => Outcome::Retry(e.to_string()),
             }),
-            (
-                Ctx::Download {
-                    node,
-                    target,
-                    current,
-                    created_ms,
-                    tags,
-                    ..
-                },
-                _,
-                JobResult::Downloaded { file, local_hash },
-            ) => self.place_download(node, &target, current, created_ms, &tags, file, local_hash),
+            (Ctx::Download(d), _, JobResult::Downloaded { file, local_hash }) => {
+                self.place_download(*d, file, local_hash)
+            }
             (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
                 let node = meta.node;
                 let row = written_row(written, &meta, Some(hash));
                 // The bytes were just sent: equal even if the hashes use other algorithms.
-                self.finish(&[(node, true)], |s| {
+                let how = Settle {
+                    same_bytes: true,
+                    ..Settle::node(node)
+                };
+                self.finish(&[how], |s| {
                     s.delete_removed(node)?;
                     s.put_mirror(&row)
                 })
@@ -273,17 +308,20 @@ impl Executor<'_> {
 
     /// Puts a verified download into place: over the old version (if it's still what the plan
     /// saw) or as a new file; an old version at another path goes to the trash first.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn place_download(
+    fn place_download(
         &mut self,
-        node: NodeId,
-        target: &RelPath,
-        current: Option<LocalRow>,
-        created_ms: Option<i64>,
-        tags: &Tags,
+        placement: Placement,
         done: hbsync_fileio::CompletedFile,
         local_hash: hbsync_types::ContentHash,
     ) -> Step {
+        let Placement {
+            mut record,
+            current,
+            created_ms,
+            tags,
+        } = placement;
+        let (node, target) = (record.base.node, record.target.clone());
+        let target = &target;
         if let Some(row) = &current
             && self.db.read(|s| s.local_by_node(node))?.as_ref() != Some(row)
         {
@@ -291,8 +329,26 @@ impl Executor<'_> {
             return Ok(Outcome::stale("local item changed during the transfer"));
         }
         // The tags go on before the file is in place: a scan in between would read none, and
-        // take that for the user removing them.
-        let tags = write_tags(done.path(), tags);
+        // take that for the user removing them. Where they turn out other than its record
+        // claims (the write failed, or the volume keeps none), the record says so before the
+        // file can be seen there: only that costs a commit.
+        // Only a volume that keeps no tags says so for the rest: a set that fails or reads
+        // back as nothing to go by doesn't.
+        let tags = match tags::write_on(done.path(), &tags) {
+            Ok(tags::Written::Unsupported) => {
+                let _ = self.cfg.tags_kept.set(false);
+                None
+            }
+            Ok(tags::Written::Done(read)) => {
+                let _ = self.cfg.tags_kept.set(true);
+                read
+            }
+            Err(_) => None,
+        };
+        if tags != record.placed_tags {
+            record.placed_tags = tags.clone();
+            self.write_durable(|s| s.put_placing(&record))?;
+        }
         let placed = match &current {
             Some(row) if &row.path == target => self.put(target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
@@ -316,20 +372,38 @@ impl Executor<'_> {
                 self.put(target, |at| done.persist_new(at, created_ms))?
             }
         };
+        let placed = match placed {
+            Ok(_) if self.read_fails() => Err(FileIoError::PlacedUnread(io::Error::other(
+                "its read failed (a test)",
+            ))),
+            placed => placed,
+        };
         let meta = match placed {
             Ok(m) => m,
             Err(FileIoError::TargetChanged) => return Ok(rescan(&mut self.report, target)),
+            // In place, its metadata unread: recovery's.
+            Err(FileIoError::PlacedUnread(_)) => {
+                self.placed(node);
+                return self.placed_not_committed(node);
+            }
             Err(FileIoError::Io(e)) => return Ok(io_outcome(e)),
             Err(e) => return Ok(Outcome::Retry(e.to_string())),
         };
+        self.placed(node);
+        if self.crash_here(CrashPoint::AfterPlaced) {
+            return Ok(Outcome::Retry("crash point reached".into()));
+        }
         let target = target.clone();
-        // The bytes were just fetched: equal even if the hashes use other algorithms.
-        self.finish(&[(node, true)], |s| {
+        let os = self.cfg.os;
+        let fails = self.commit_fails();
+        let committed = self.db.write(|s| {
+            if fails {
+                return Err(StateError::Conflict("the commit failed (a test)".into()));
+            }
             if let Some(row) = &current {
                 s.delete_local(row.node)?;
             }
             s.delete_parked(node)?;
-            s.delete_placing(node)?;
             s.put_local(&LocalRow {
                 path: target.clone(),
                 node,
@@ -338,7 +412,16 @@ impl Executor<'_> {
                 executable: meta.executable,
                 hash: Some(local_hash),
                 tags,
-            })
-        })
+            })?;
+            // The bytes were just fetched: equal even if the hashes use other algorithms.
+            settle_placement(s, &record, os)
+        });
+        // The DB failing stops the run; the record is the next sync's recovery's.
+        let at = match committed {
+            Ok(at) => at,
+            Err(e) => return Ok(Outcome::Fatal(e)),
+        };
+        self.note([(node, at)]);
+        Ok(Outcome::Settled)
     }
 }

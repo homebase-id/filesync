@@ -27,12 +27,15 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::{NameIssue, name_key};
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{
+    BaseRow, LocalRow, MirrorRow, Placing, PlannedBase, RemovedRow, StateDb, StateError, Store,
+};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{ContentState, NodeId, NodeKind, Tags, Target};
+use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags, Target};
 
 use crate::activity::{self, Counters};
+use crate::plan::{Against, DriveVersion, TagWrite};
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::view;
@@ -56,9 +59,20 @@ pub struct ExecConfig {
     pub case_insensitive: bool,
     /// What this device never syncs (sync semantics §10).
     pub filter: std::sync::Arc<hbsync_local::Filter>,
+    /// Whether the root's volume keeps tags, learned at the first tag write on it: a
+    /// download's record claims the tags it is to write only where it does.
+    pub tags_kept: Arc<std::sync::OnceLock<bool>>,
     /// Tests only: stop the run at this point, as if the process died there.
     #[doc(hidden)]
     pub crash_at: Option<CrashPoint>,
+    /// Tests only: this many placements' commit writes fail once their item is in place: the
+    /// run stops, the record kept for the next sync's recovery.
+    #[doc(hidden)]
+    pub fail_commits: Arc<std::sync::atomic::AtomicUsize>,
+    /// Tests only: this many placements fail to read their item back once it is in place (a
+    /// folder's stat, a file's metadata): recovery settles them in the run.
+    #[doc(hidden)]
+    pub fail_reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Places where a test can make the executor stop as if it crashed.
@@ -69,6 +83,9 @@ pub enum CrashPoint {
     AfterParkRename,
     /// After a conflict-copy rename on disk, before the rows follow.
     AfterForkRename,
+    /// After a download is moved into place, or a folder made in place (before its tags are
+    /// written), before its commit.
+    AfterPlaced,
 }
 
 /// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
@@ -144,6 +161,8 @@ enum Outcome {
     Stop(String),
     /// The drive is out of storage: hold this and every later upload of the run.
     Full,
+    /// The state DB failed (a placement's commit, say): the run stops, as at a crash.
+    Fatal(StateError),
 }
 
 impl Outcome {
@@ -209,6 +228,13 @@ pub struct Executor<'a> {
     urgent: HashSet<NodeId>,
     /// Set when a test's crash point was reached: the run stops.
     crashed: bool,
+    /// Nodes whose operation wrote a placement record and hasn't put its item in place yet: only
+    /// such a record its failure removes. Once in place, a record is recovery's to settle; and
+    /// no operation places over one it didn't write.
+    records: HashSet<NodeId>,
+    /// Where this run's operations settled each node's base: a later operation's compare and
+    /// set takes the base there as the one its plan saw.
+    settled: HashMap<NodeId, RemoteRef>,
     /// Transient remote errors in a row, and until when the run waits because of them.
     streak: u32,
     resume_at: Option<Instant>,
@@ -266,7 +292,7 @@ impl Batch {
                     self.created.insert(node);
                 }
             }
-            Ctx::Download { .. } => {}
+            Ctx::Download(_) => {}
         }
         if let Some(target) = target {
             self.moved.insert(node);
@@ -298,18 +324,21 @@ impl Batch {
     }
 }
 
+/// What a download's commit needs to know.
+struct Placement {
+    /// Its write-ahead record (`recover_placements`): the node, where it goes, and the
+    /// version it acts on, with the bytes fetched (its commit settles against it).
+    record: Placing,
+    current: Option<LocalRow>,
+    /// The node's, given to the file once in place.
+    created_ms: Option<i64>,
+    /// What it writes on the file.
+    tags: Tags,
+}
+
 /// What the commit of a transfer needs to know.
 enum Ctx {
-    Download {
-        node: NodeId,
-        target: RelPath,
-        current: Option<LocalRow>,
-        /// The node's, given to the file once in place.
-        created_ms: Option<i64>,
-        tags: Tags,
-        /// Its write-ahead record (`recover_placements`).
-        record: Option<Box<Placing>>,
-    },
+    Download(Box<Placement>),
     /// `from`: the folder on the drive an updated file is in now.
     Upload {
         hash: hbsync_types::ContentHash,
@@ -344,6 +373,8 @@ impl<'a> Executor<'a> {
             report: ExecReport::default(),
             urgent: HashSet::new(),
             crashed: false,
+            records: HashSet::new(),
+            settled: HashMap::new(),
             streak: 0,
             resume_at: None,
             stop: None,
@@ -521,28 +552,109 @@ impl<'a> Executor<'a> {
             self.queue.pop_front();
         }
         let os = self.cfg.os;
-        self.db
-            .write(|s| nodes.iter().try_for_each(|n| settle(s, *n, os, false)))?;
+        let settled = self.db.write(|s| {
+            nodes
+                .iter()
+                .map(|n| Ok((*n, settle(s, Settle::node(*n), os)?)))
+                .collect::<Result<Vec<_>, StateError>>()
+        })?;
+        self.note(settled);
         self.report.done += nodes.len();
         Ok(())
     }
 
-    /// Writes an operation's DB changes and settles `nodes` (with whether the operation made
-    /// their bytes equal) in the same transaction: the base can't fall behind what was done,
-    /// and it costs one commit.
+    /// Writes an operation's DB changes and settles `nodes` in the same transaction: the base
+    /// can't fall behind what was done, and it costs one commit.
     fn finish(
         &mut self,
-        nodes: &[(NodeId, bool)],
+        nodes: &[Settle<'_>],
         f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
     ) -> Step {
         let os = self.cfg.os;
-        self.db.write(|s| {
+        let nodes: Vec<Settle<'_>> = nodes.iter().map(|how| self.ours(*how)).collect();
+        let settled = self.db.write(|s| {
             f(s)?;
             nodes
                 .iter()
-                .try_for_each(|(node, same_bytes)| settle(s, *node, os, *same_bytes))
+                .map(|how| Ok((how.node, settle(s, *how, os)?)))
+                .collect::<Result<Vec<_>, StateError>>()
         })?;
+        self.note(settled);
         Ok(Outcome::Settled)
+    }
+
+    /// Whether a placement record this operation didn't write waits for `node` (one recovery
+    /// keeps until its item can be read, or one an earlier operation left with its item in
+    /// place): no placement runs over it; the node stays dirty, and the next round's recovery
+    /// settles it.
+    fn placing_earlier(&mut self, node: NodeId) -> Result<bool, StateError> {
+        Ok(!self.records.contains(&node) && self.db.read(|s| s.is_placing(node))?)
+    }
+
+    /// Notes that `node`'s placement put its item in place: its record is recovery's now.
+    fn placed(&mut self, node: NodeId) {
+        self.records.remove(&node);
+    }
+
+    /// A placement whose item is in place and whose commit failed ends here: recovery settles
+    /// it right away (the one way an item put in place settles then), judging its record by its
+    /// item alone, read off the disk: no other item is read, nor its row touched. One it can't
+    /// settle yet (a file not hashed yet) stays, for a later recovery.
+    fn placed_not_committed(&mut self, node: NodeId) -> Step {
+        let Some(record) = self.db.read(|s| s.get_placing(node))? else {
+            return Ok(Outcome::stale("put in place, its record gone"));
+        };
+        let (root, now) = (&self.cfg.root, hbsync_types::unix_now_ms());
+        let judged = match look(root, &record.target) {
+            OnDisk::Absent => Judged::Drop,
+            OnDisk::Unreadable => Judged::Keep,
+            OnDisk::There(meta) => {
+                let row = read_row(root, &record.target, node, &meta, self.cfg.algorithm);
+                judge(root, &record, Some(row), now)
+            }
+        };
+        let os = self.cfg.os;
+        match self.db.write(|s| apply(s, &record, judged, os, now))? {
+            Applied::Settled(at) => {
+                self.note([(node, at)]);
+                Ok(Outcome::Settled)
+            }
+            Applied::Kept => Ok(Outcome::stale("put in place: recovery settles it later")),
+            Applied::Dropped => Ok(Outcome::stale("put in place, not there since")),
+        }
+    }
+
+    /// `how`, with where this run's operations settled its node's base.
+    fn ours<'s>(&self, how: Settle<'s>) -> Settle<'s> {
+        Settle {
+            ours: self.settled.get(&how.node).copied(),
+            ..how
+        }
+    }
+
+    /// Notes where this run's operations settled bases.
+    fn note(&mut self, settled: impl IntoIterator<Item = (NodeId, Option<RemoteRef>)>) {
+        for (node, at) in settled {
+            if let Some(at) = at {
+                self.settled.insert(node, at);
+            }
+        }
+    }
+
+    /// Whether a placement's commit write fails, for a test ([`ExecConfig::fail_commits`]).
+    fn commit_fails(&self) -> bool {
+        self.cfg
+            .fail_commits
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+    }
+
+    /// Whether reading a placed item back fails, for a test ([`ExecConfig::fail_reads`]).
+    fn read_fails(&self) -> bool {
+        self.cfg
+            .fail_reads
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
     }
 
     /// Whether the test crash point `at` is reached; the run then stops.
@@ -588,6 +700,16 @@ impl<'a> Executor<'a> {
         outcome: Outcome,
         gone: Option<String>,
     ) -> Result<(), StateError> {
+        // A placement that failed before its item was in place leaves no record: recovery
+        // never takes an item the user puts at that place for it (a retry writes its own).
+        if matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. })
+            && self.records.remove(&op.node())
+            && !matches!(outcome, Outcome::Done | Outcome::Settled)
+            && !self.crashed
+        {
+            let node = op.node();
+            self.db.write(|s| s.delete_placing(node))?;
+        }
         if matches!(
             outcome,
             Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full
@@ -612,8 +734,12 @@ impl<'a> Executor<'a> {
                 self.record(&op, gone)?;
                 self.report.done += 1;
                 let os = self.cfg.os;
-                let same_bytes = op.is_transfer();
-                self.db.write(|s| settle(s, op.node(), os, same_bytes))?;
+                let how = self.ours(Settle {
+                    same_bytes: op.is_transfer(),
+                    ..Settle::node(op.node())
+                });
+                let at = self.db.write(|s| settle(s, how, os))?;
+                self.note([(how.node, at)]);
             }
             Outcome::Settled => {
                 self.record(&op, gone)?;
@@ -650,6 +776,7 @@ impl<'a> Executor<'a> {
                 self.full = true;
                 self.report.full = true;
             }
+            Outcome::Fatal(e) => return Err(e),
         }
         Ok(())
     }
@@ -745,11 +872,8 @@ impl<'a> Executor<'a> {
         let mut jobs = Vec::new();
         let mut records = Vec::new();
         for (job, p) in std::mem::take(batch).jobs {
-            if let Ctx::Download {
-                record: Some(r), ..
-            } = &p.ctx
-            {
-                records.push(Placing::clone(r));
+            if let Ctx::Download(d) = &p.ctx {
+                records.push(d.record.clone());
             }
             pending.insert(job.node(), p);
             jobs.push((self.urgent.contains(&job.node()), job));
@@ -758,6 +882,7 @@ impl<'a> Executor<'a> {
         // by its record (`recover_placements`).
         if !records.is_empty() {
             self.write_durable(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
+            self.records.extend(records.iter().map(|r| r.base.node));
         } else if !self.ids_durable {
             self.db.flush()?;
             self.ids_durable = true;
@@ -798,6 +923,23 @@ impl<'a> Executor<'a> {
                 first_error.is_none() && !self.should_stop() && self.resume_at.is_none()
             },
         );
+        // What never started leaves no record (one that runs later writes its own).
+        if !self.crashed && !pending.is_empty() {
+            let unstarted: Vec<NodeId> = pending
+                .keys()
+                .filter(|n| self.records.contains(*n))
+                .copied()
+                .collect();
+            for n in &unstarted {
+                self.records.remove(n);
+            }
+            let gone = self
+                .db
+                .write(|s| unstarted.iter().try_for_each(|n| s.delete_placing(*n)));
+            if first_error.is_none() {
+                gone?;
+            }
+        }
         if let Some(e) = first_error {
             return Err(e);
         }
@@ -824,9 +966,15 @@ impl<'a> Executor<'a> {
                 parent,
                 name,
                 tags,
-            } => self.mkdir(*node, *parent, name, tags),
-            Op::LocalMove { node, parent, name } => self.local_move(*node, *parent, name),
-            Op::LocalTags { node, tags } => self.local_tags(*node, tags),
+                drive,
+            } => self.mkdir(*node, *parent, name, tags, drive.as_deref()),
+            Op::LocalMove {
+                node,
+                parent,
+                name,
+                drive,
+            } => self.local_move(*node, *parent, name, drive.as_deref()),
+            Op::LocalTags { node, tags, drive } => self.local_tags(*node, tags, drive.as_deref()),
             Op::LocalTrash { node, subtree } => self.trash(*node, subtree, false),
             Op::LocalDownload { .. }
             | Op::RemoteCreate { .. }
@@ -996,13 +1144,17 @@ mod remote;
 mod settle;
 mod transfer_ops;
 
+#[cfg(test)]
+mod tests;
+
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};
-pub use recover::recover;
+use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
+pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
-pub use settle::settle;
 pub(crate) use settle::update_meta;
-use settle::{recorded_name, restored_tags, write_tags, written_row};
+pub use settle::{Settle, settle};
+use settle::{mark_children, merged_with_drive, settle_placement, write_tags, written_row};
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the
 // order the state DB needs with its durable commits (its docs on durability). Tags and times

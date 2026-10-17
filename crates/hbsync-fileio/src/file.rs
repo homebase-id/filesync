@@ -31,6 +31,9 @@ pub enum FileIoError {
     SizeMismatch { expected: u64, actual: u64 },
     #[error("target changed since it was planned")]
     TargetChanged,
+    /// The file is in place, but reading it back there failed.
+    #[error("put in place, but not read back: {0}")]
+    PlacedUnread(io::Error),
 }
 
 /// A file's hash plus the metadata it was taken under.
@@ -219,13 +222,14 @@ impl CompletedFile {
 
 /// The file just put at `target`: its creation time set (once in place, after the mtime: NTFS
 /// "tunneling" gives a name removed and made again within seconds the old file's), its folder
-/// flushed, its metadata read.
+/// flushed, its metadata read. It is in place whatever fails here
+/// ([`FileIoError::PlacedUnread`]).
 fn placed(target: &Path, created_ms: Option<i64>) -> Result<LocalMeta, FileIoError> {
     // Only shown, never synced on: a file system that won't take it fails nothing.
     if let Some(t) = created_ms {
         let _ = ops::set_created(target, t);
     }
-    Ok(hbsync_platform::stat(target)?)
+    hbsync_platform::stat(target).map_err(FileIoError::PlacedUnread)
 }
 
 #[cfg(test)]

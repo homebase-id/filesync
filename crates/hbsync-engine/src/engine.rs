@@ -14,7 +14,7 @@ use hbsync_types::activity::Synced;
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
 use crate::drive::Drive;
-use crate::exec::{ExecConfig, Executor, Stopped, recover};
+use crate::exec::{ExecConfig, Executor, Stopped, record_dirs, recover, recover_placements};
 use crate::feed::{FeedError, FeedReport};
 use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
 use crate::root::{RootError, SyncRoot};
@@ -52,7 +52,10 @@ impl EngineConfig {
                 transfer: crate::transfer::TransferConfig::default(),
                 case_insensitive: crate::exec::probe_case_insensitive(root),
                 filter: Default::default(),
+                tags_kept: Default::default(),
                 crash_at: None,
+                fail_commits: Arc::default(),
+                fail_reads: Arc::default(),
             },
             device: device.to_owned(),
             max_rounds: 8,
@@ -171,6 +174,9 @@ pub struct Engine {
     confirmed: std::collections::HashSet<NodeId>,
     /// How far the current sync is.
     progress: Arc<Counters>,
+    /// Nodes whose placement records the current sync pass rescanned for: each once (a file
+    /// that can't be hashed yet isn't read again every round).
+    rescanned: std::collections::HashSet<NodeId>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -219,6 +225,7 @@ impl Engine {
             stop: Arc::default(),
             confirmed: Default::default(),
             progress: Arc::default(),
+            rescanned: Default::default(),
         }
     }
 
@@ -377,6 +384,8 @@ impl Engine {
     ) -> Result<SyncReport, EngineError> {
         let mut report = SyncReport::default();
         self.progress.reset();
+        self.rescanned.clear();
+        self.rescan_records()?;
         recover(&mut self.db, &self.cfg.exec)?;
         report.feed = match pulled {
             Some(feed) => feed,
@@ -487,6 +496,28 @@ impl Engine {
         Ok(report)
     }
 
+    /// Rescans the folders that downloads and folders being placed go into (their records), and
+    /// those their nodes' items are in now (an old version a download replaced from another
+    /// folder went to the trash), so recovery judges what is on disk: an item put in place but
+    /// not committed has its row then, and a record is never dropped only because its item had
+    /// none yet. Each record's folders once a sync pass. One query when there is no record.
+    fn rescan_records(&mut self) -> Result<(), EngineError> {
+        let rescanned = &mut self.rescanned;
+        let dirs: Vec<hbsync_platform::RelPath> = self.db.read(|s| {
+            let mut dirs = Vec::new();
+            for p in s.all_placing()? {
+                if rescanned.insert(p.base.node) {
+                    dirs.extend(record_dirs(s, &p)?);
+                }
+            }
+            Ok(dirs)
+        })?;
+        if !dirs.is_empty() {
+            rescan_dirs(&mut self.db, &self.cfg.exec.root, &dirs, &self.scan_opts)?;
+        }
+        Ok(())
+    }
+
     /// Plans one page of dirty nodes and executes the plan; then pulls the feed again.
     /// Returns the deletes the mass-delete guard held.
     fn plan_and_execute(
@@ -496,6 +527,15 @@ impl Engine {
         report: &mut SyncReport,
     ) -> Result<Vec<Op>, EngineError> {
         let os = self.cfg.exec.os;
+        // What an earlier round left placed (its operation failed after), as at the start of a
+        // sync: no round places over a record it didn't write. One query when there is none.
+        self.rescan_records()?;
+        recover_placements(
+            &mut self.db,
+            &self.cfg.exec.root,
+            os,
+            self.cfg.exec.algorithm,
+        )?;
         let input = self
             .db
             .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter, &self.cfg.scope))?;

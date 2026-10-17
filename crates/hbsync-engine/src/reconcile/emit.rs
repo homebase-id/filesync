@@ -114,7 +114,15 @@ impl Reconciler<'_> {
                 (None, None) => {}
             }
 
-            // Local side (a fork copy already exists locally).
+            // Local side (a fork copy already exists locally). A local write carries the
+            // drive's version the plan saw: the base settles against it.
+            let drive = || {
+                Some(Box::new(DriveVersion {
+                    state: i.remote.get(node)?.clone(),
+                    at: *i.remote_refs.get(&node)?,
+                    base_at: i.base_extra.get(&node).and_then(|e| e.version),
+                }))
+            };
             let mut local_ops = false;
             if !fork_copies.contains(&node) {
                 match (&target, local_real.filter(|_| forked.is_none())) {
@@ -138,6 +146,7 @@ impl Reconciler<'_> {
                                     parent: t.parent,
                                     name: t.name.clone(),
                                     tags: t.tags.clone(),
+                                    drive: drive(),
                                 },
                             ));
                             local_ops = true;
@@ -148,6 +157,7 @@ impl Reconciler<'_> {
                                 name: t.name.clone(),
                                 replace: false,
                                 tags: t.tags.clone(),
+                                drive: drive(),
                             });
                             local_ops = true;
                         }
@@ -164,6 +174,7 @@ impl Reconciler<'_> {
                                 name: t.name.clone(),
                                 replace: true,
                                 tags: t.tags.clone(),
+                                drive: drive(),
                             });
                             local_ops = true;
                         } else {
@@ -172,6 +183,7 @@ impl Reconciler<'_> {
                                     node,
                                     parent: t.parent,
                                     name: t.name.clone(),
+                                    drive: drive(),
                                 });
                                 local_ops = true;
                             }
@@ -179,6 +191,7 @@ impl Reconciler<'_> {
                                 content.push(Op::LocalTags {
                                     node,
                                     tags: t.tags.clone(),
+                                    drive: drive(),
                                 });
                                 local_ops = true;
                             }

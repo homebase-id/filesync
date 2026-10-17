@@ -45,22 +45,35 @@ pub struct BaseRow {
     pub local_hash: Option<hbsync_types::ContentHash>,
 }
 
-/// A download about to be put in place (written before its batch runs): the base its commit
-/// writes (the node as the drive has it at the version fetched), and where it goes.
+/// A download (or folder) about to be put in place (written before its batch runs): the base
+/// its commit settles against (the drive's version it acts on, with the bytes fetched), where
+/// it goes, what the item holds of tags there and what the item there held before (`None`: not
+/// known; none where there was no item), and the version of the base its plan saw, which its
+/// commit checks the base is still at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placing {
     pub base: BaseRow,
     pub target: RelPath,
+    pub placed_tags: Option<Tags>,
+    pub prior_tags: Option<Tags>,
+    pub base_at: PlannedBase,
+    /// Since when recovery has held it, its file there but not hashed yet, Unix milliseconds.
+    pub held_ms: Option<i64>,
 }
 
-impl Placing {
-    /// The record of `mirror`'s node put at `target` (`None` for a file the mirror lacks the
-    /// content of).
-    pub fn of(mirror: &MirrorRow, target: RelPath) -> Option<Placing> {
-        Some(Placing {
-            base: BaseRow::new(mirror.node, mirror.state()?, mirror.remote_ref()),
-            target,
-        })
+/// The base a placement's plan saw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedBase {
+    /// A record from before this was kept: settled against the base as it is.
+    Unchecked,
+    /// No base.
+    Absent,
+    At(VersionTag),
+}
+
+impl From<Option<VersionTag>> for PlannedBase {
+    fn from(version: Option<VersionTag>) -> Self {
+        version.map_or(PlannedBase::Absent, PlannedBase::At)
     }
 }
 

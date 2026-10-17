@@ -1,10 +1,10 @@
 //! One test per rule of `docs/spec/sync-semantics.md`.
 
-use hbsync_engine::{BaseExtra, Conflict, Input, Op, Options, reconcile};
+use hbsync_engine::{BaseExtra, Conflict, DriveVersion, Input, Op, Options, reconcile};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Tags, Uuid, VersionTag,
+    Tag, Tags, Uuid, VersionTag,
 };
 
 fn h(data: &str) -> ContentHash {
@@ -202,18 +202,20 @@ fn edits_and_moves_propagate() {
         upload: true,
         tags: Tags::default(),
     }));
-    assert!(plan.ops.contains(&Op::LocalDownload {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalDownload {
         node: b,
         parent: ROOT,
         name: "b".into(),
         replace: true,
         tags: Tags::default(),
+        drive: None,
     }));
     assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, upload: false, name, .. } if *node == c && name == "c-renamed")));
-    assert!(plan.ops.contains(&Op::LocalMove {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalMove {
         node: d,
         parent: ROOT,
-        name: "d-renamed".into()
+        name: "d-renamed".into(),
+        drive: None,
     }));
     assert!(plan.conflicts.is_empty());
 }
@@ -310,7 +312,12 @@ fn move_move_remote_wins() {
         [Op::LocalMove {
             node: f,
             parent: b,
-            name: "f".into()
+            name: "f".into(),
+            drive: Some(Box::new(DriveVersion {
+                state: file(b, "f", "1"),
+                at: w.input.remote_refs[&f],
+                base_at: None,
+            })),
         }]
     );
     assert_eq!(plan.conflicts, [Conflict::MoveMove { node: f }]);
@@ -329,12 +336,13 @@ fn edit_beats_delete_both_ways() {
     w.local(y, Some(file(ROOT, "y", "local edit")))
         .remote(y, None);
     let plan = w.plan();
-    assert!(plan.ops.contains(&Op::LocalDownload {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalDownload {
         node: x,
         parent: ROOT,
         name: "x".into(),
         replace: false,
         tags: Tags::default(),
+        drive: None,
     }));
     assert!(plan.ops.contains(&Op::RemoteCreate {
         node: y,
@@ -358,18 +366,20 @@ fn live_child_resurrects_a_deleted_folder() {
     w.local(d, None).local(old, None);
     w.remote(new, Some(file(d, "new", "2")));
     let plan = w.plan();
-    assert!(plan.ops.contains(&Op::LocalMkdir {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalMkdir {
         node: d,
         parent: ROOT,
         name: "d".into(),
         tags: Tags::default(),
+        drive: None,
     }));
-    assert!(plan.ops.contains(&Op::LocalDownload {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalDownload {
         node: new,
         parent: d,
         name: "new".into(),
         replace: false,
         tags: Tags::default(),
+        drive: None,
     }));
     // The other child's delete still goes through.
     assert!(
@@ -406,15 +416,17 @@ fn crossing_moves_are_not_a_cycle() {
         .remote(b, Some(folder(a, "b")));
     let plan = w.plan();
     // The local move (a into b) is undone; the remote move (b into a) is applied.
-    assert!(plan.ops.contains(&Op::LocalMove {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalMove {
         node: a,
         parent: ROOT,
-        name: "a".into()
+        name: "a".into(),
+        drive: None,
     }));
-    assert!(plan.ops.contains(&Op::LocalMove {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalMove {
         node: b,
         parent: a,
-        name: "b".into()
+        name: "b".into(),
+        drive: None,
     }));
     assert!(
         !plan
@@ -438,12 +450,13 @@ fn name_clash_lower_id_keeps_the_name() {
         assert_eq!(plan.conflicts, [Conflict::NameClash { node: high }]);
         if high == remote_node {
             assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, name, .. } if *node == high && name == "X (conflict 1).TXT")));
-            assert!(plan.ops.contains(&Op::LocalDownload {
+            assert!(without_drive(&plan.ops).contains(&Op::LocalDownload {
                 node: high,
                 parent: ROOT,
                 name: "X (conflict 1).TXT".into(),
                 replace: false,
                 tags: Tags::default(),
+                drive: None,
             }));
         } else {
             assert!(plan.ops.contains(&Op::RemoteCreate {
@@ -453,10 +466,11 @@ fn name_clash_lower_id_keeps_the_name() {
                 kind: NodeKind::File,
                 tags: Tags::default(),
             }));
-            assert!(plan.ops.contains(&Op::LocalMove {
+            assert!(without_drive(&plan.ops).contains(&Op::LocalMove {
                 node: high,
                 parent: ROOT,
-                name: "x (conflict 1).txt".into()
+                name: "x (conflict 1).txt".into(),
+                drive: None,
             }));
         }
     }
@@ -585,11 +599,12 @@ fn orphan_with_unknown_parent_moves_to_root_when_mirror_is_complete() {
     w.input.remote_complete = true;
     let plan = w.plan();
     assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == child && *parent == ROOT)));
-    assert!(plan.ops.contains(&Op::LocalMkdir {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalMkdir {
         node: child,
         parent: ROOT,
         name: "kept".into(),
         tags: Tags::default(),
+        drive: None,
     }));
     assert_eq!(plan.conflicts, [Conflict::Orphan { node: child }]);
 }
@@ -644,12 +659,13 @@ fn a_file_still_being_written_keeps_its_name() {
     let plan = w.plan();
     // The remote file comes down under another name; the local one isn't touched.
     assert!(plan.ops.iter().all(|op| op.node() != writing), "{plan:#?}");
-    assert!(plan.ops.contains(&Op::LocalDownload {
+    assert!(without_drive(&plan.ops).contains(&Op::LocalDownload {
         node: first,
         parent: ROOT,
         name: "Report (conflict 1).txt".into(),
         replace: false,
         tags: Tags::default(),
+        drive: None,
     }));
 }
 
@@ -892,4 +908,62 @@ fn a_file_brought_back_into_view_keeps_its_place_over_a_remote_move() {
     let plan = w.plan();
     assert_eq!(kinds(&plan.ops), ["rename"], "{plan:?}");
     assert!(plan.conflicts.is_empty(), "{plan:?}");
+}
+
+/// The plan's ops without the drive version their local writes carry (compared by value).
+fn without_drive(ops: &[Op]) -> Vec<Op> {
+    ops.iter()
+        .cloned()
+        .map(|mut op| {
+            if let Op::LocalMkdir { drive, .. }
+            | Op::LocalMove { drive, .. }
+            | Op::LocalDownload { drive, .. }
+            | Op::LocalTags { drive, .. } = &mut op
+            {
+                *drive = None;
+            }
+            op
+        })
+        .collect()
+}
+
+/// A local write carries the drive's version the plan saw (its base settles against that
+/// version, not a later one): a folder made, a file fetched, a move and a tag change.
+#[test]
+fn local_writes_carry_the_drive_version_the_plan_saw() {
+    let [d, f, moved, tagged] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.remote(d, Some(folder(ROOT, "d")))
+        .remote(f, Some(file(d, "f", "1")));
+    w.synced(moved, file(ROOT, "m", "2"))
+        .remote(moved, Some(file(d, "m", "2")));
+    let red = NodeState {
+        tags: Tags::new(vec![Tag::new("Red", 6)]),
+        ..file(ROOT, "t", "3")
+    };
+    w.synced(tagged, file(ROOT, "t", "3"))
+        .remote(tagged, Some(red.clone()));
+    let plan = w.plan();
+    let drive = |node| {
+        plan.ops
+            .iter()
+            .find(|op| op.node() == node)
+            .and_then(Op::drive)
+    };
+    for (node, op) in [
+        (d, "mkdir"),
+        (f, "download"),
+        (moved, "move"),
+        (tagged, "local-tags"),
+    ] {
+        let seen = DriveVersion {
+            state: w.input.remote.get(node).cloned().expect("on the drive"),
+            at: w.input.remote_refs[&node],
+            base_at: None,
+        };
+        assert_eq!(drive(node), Some(&seen), "{op} carries what the plan saw");
+    }
+    assert_eq!(drive(tagged).map(|d| &d.state), Some(&red));
 }

@@ -326,7 +326,8 @@ fn differs(row: &LocalRow, meta: &LocalMeta) -> bool {
         || (tags::CAN_TAG && row.tags.is_none())
 }
 
-fn kind_of(meta: &LocalMeta) -> NodeKind {
+/// The node kind of an entry the scan keeps (a folder, else a file).
+pub fn kind_of(meta: &LocalMeta) -> NodeKind {
     if meta.kind == EntryKind::Dir {
         NodeKind::Folder
     } else {
@@ -684,7 +685,8 @@ fn tags_changed(old: &Option<Tags>, new: &Option<Tags>) -> bool {
     }
 }
 
-fn row_from(
+/// The row of the item at `path` the scan keeps, as `node`, with what was read of it.
+pub fn row_from(
     path: &RelPath,
     node: NodeId,
     meta: &LocalMeta,

@@ -118,16 +118,20 @@ pub enum Op {
         new_node: NodeId,
         name: String,
     },
+    /// `drive` (here and in the other local writes): the drive's version the plan saw, which
+    /// the write acts on; the base settles against it, not a later one.
     LocalMkdir {
         node: NodeId,
         parent: NodeId,
         name: String,
         tags: Tags,
+        drive: Option<Box<DriveVersion>>,
     },
     LocalMove {
         node: NodeId,
         parent: NodeId,
         name: String,
+        drive: Option<Box<DriveVersion>>,
     },
     /// Fetch the remote content of `node`. `replace`: a local file exists and is overwritten
     /// (only if it still has the fingerprint the plan saw).
@@ -137,9 +141,14 @@ pub enum Op {
         name: String,
         replace: bool,
         tags: Tags,
+        drive: Option<Box<DriveVersion>>,
     },
     /// Give the local item of `node` these tags (only the tags changed).
-    LocalTags { node: NodeId, tags: Tags },
+    LocalTags {
+        node: NodeId,
+        tags: Tags,
+        drive: Option<Box<DriveVersion>>,
+    },
     /// Move the local item and everything below it to the sync root's trash. `subtree` is
     /// every node the plan expects there (sorted, `node` included): if the folder holds
     /// anything else by the time this runs, it is not trashed.
@@ -226,6 +235,17 @@ impl Op {
             | Op::Settle { node }
             | Op::LocalDetach { node, .. }
             | Op::Forget { node, .. } => *node,
+        }
+    }
+
+    /// The drive's version a local write acts on (the plan saw it).
+    pub fn drive(&self) -> Option<&DriveVersion> {
+        match self {
+            Op::LocalMkdir { drive, .. }
+            | Op::LocalMove { drive, .. }
+            | Op::LocalDownload { drive, .. }
+            | Op::LocalTags { drive, .. } => drive.as_deref(),
+            _ => None,
         }
     }
 
@@ -322,6 +342,102 @@ pub enum Requirement {
     FolderFirst(NodeId),
 }
 
+/// A version of a node on the drive: what it holds, and which version it is; for a local
+/// write, also the version of the base the plan saw (`None`: none), which its commit checks
+/// the base is still at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveVersion {
+    pub state: NodeState,
+    pub at: RemoteRef,
+    pub base_at: Option<VersionTag>,
+}
+
+/// What an operation did to its item's tags, for the base's (sync semantics §11). The base
+/// records exactly what a local write wrote, tag by tag, never a recomputation against an
+/// older version: the next plan compares the drive's newer value with the written one, and
+/// the scan reports what the user changed after the write. The commit, recovery and the
+/// simulator settle tags through [`TagWrite::settle`] alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TagWrite<'a> {
+    /// Not a local write (a remote write, settling): agreed tag by tag against the drive as
+    /// settled against.
+    Agreed,
+    /// Wrote none (a move, a folder made without tags): the base's stay.
+    Nothing,
+    /// The item held `before` and the write left `written` on it.
+    Wrote { before: &'a Tags, written: &'a Tags },
+    /// Wrote a whole set over an item whose tags (before, or as written) aren't known: the
+    /// base's start afresh, each one the item holds and the version holds too.
+    Unknown,
+}
+
+impl TagWrite<'_> {
+    /// The base's tags after the write, from the base's `base` (none without one), the item
+    /// read as `local`, against the drive's version it acted on (`acted`). A tag the write
+    /// changed takes the written value where the version holds it (both sides do then); every
+    /// other tag keeps the base's.
+    pub fn settle(self, base: &Tags, local: &Tags, acted: &Tags) -> Tags {
+        match self {
+            TagWrite::Agreed => Tags::agreed(base, local, acted),
+            TagWrite::Nothing => base.clone(),
+            TagWrite::Wrote { before, written } => {
+                let names: BTreeSet<&str> = base
+                    .iter()
+                    .chain(before.iter())
+                    .chain(written.iter())
+                    .map(|t| t.name.as_str())
+                    .collect();
+                Tags::new(names.into_iter().filter_map(|name| {
+                    let w = written.get(name);
+                    let recorded = before.get(name) != w && w == acted.get(name);
+                    if recorded { w } else { base.get(name) }.cloned()
+                }))
+            }
+            TagWrite::Unknown => Tags::agreed(&Tags::default(), local, acted),
+        }
+    }
+}
+
+/// What an operation's base settles against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Against<'a> {
+    /// The drive as the mirror has it now.
+    Mirror,
+    /// The drive's version a local write acted on without putting the item in place (its
+    /// tags): the mirror may have moved on, or lost the node, since.
+    Acted(&'a DriveVersion),
+    /// The drive's version a local write put the item in place from (made, fetched or moved
+    /// it; a download's with the bytes it fetched).
+    Placed(&'a DriveVersion),
+}
+
+impl<'a> Against<'a> {
+    /// A write that acted on `drive`, if it knows it; the mirror otherwise.
+    pub fn acted(drive: Option<&'a DriveVersion>) -> Self {
+        drive.map_or(Against::Mirror, Against::Acted)
+    }
+
+    /// A write that put the item in place from `drive`, if it knows it; the mirror otherwise
+    /// (which it didn't place from: no base on content alone).
+    pub fn placed(drive: Option<&'a DriveVersion>) -> Self {
+        drive.map_or(Against::Mirror, Against::Placed)
+    }
+
+    /// The version settled against, if not the mirror.
+    pub fn drive(self) -> Option<&'a DriveVersion> {
+        match self {
+            Against::Mirror => None,
+            Against::Acted(d) | Against::Placed(d) => Some(d),
+        }
+    }
+
+    /// Whether the item was put in place from the version settled against: a node without a
+    /// base gets one on content alone then ([`Agreement::settle`]).
+    pub fn placed_from(self) -> bool {
+        matches!(self, Against::Placed(_))
+    }
+}
+
 /// Which attributes of a node both sides hold once an operation is done. Settling records
 /// exactly those in the base (sync-semantics: the base only takes a value when both sides
 /// hold it).
@@ -329,7 +445,6 @@ pub enum Requirement {
 pub struct Agreement {
     pub place: bool,
     pub content: bool,
-    pub tags: bool,
 }
 
 impl Agreement {
@@ -344,23 +459,24 @@ impl Agreement {
         Agreement {
             place: local.same_place(remote),
             content,
-            tags: local.tags == remote.tags,
         }
     }
 
-    /// The base after settling: the agreed attributes are taken from `remote`. A node without a
-    /// base gets one when both sides agree on place and content (bytes proven equal across
-    /// hash algorithms can't be proven again later), with the tags both sides have: the merge
-    /// then brings each side the other's (§11).
+    /// The base after settling: the agreed attributes are taken from `remote`, the tags one
+    /// by one ([`Tags::agreed`]). A node without a base gets one when both sides agree on
+    /// place and content (bytes proven equal across hash algorithms can't be proven again),
+    /// or on content where a local write put the item in place from `remote` (`placed`): that
+    /// version is what both sides came from.
     pub fn settle(
         self,
         base: Option<NodeState>,
         local: &NodeState,
         remote: &NodeState,
+        placed: bool,
     ) -> Option<NodeState> {
         let Some(mut b) = base else {
-            return (self.place && self.content).then(|| NodeState {
-                tags: local.tags.intersection(&remote.tags),
+            return (self.content && (self.place || placed)).then(|| NodeState {
+                tags: Tags::agreed(&Tags::default(), &local.tags, &remote.tags),
                 ..remote.clone()
             });
         };
@@ -371,9 +487,7 @@ impl Agreement {
         if self.content {
             b.content = remote.content;
         }
-        if self.tags {
-            b.tags = remote.tags.clone();
-        }
+        b.tags = Tags::agreed(&b.tags, &local.tags, &remote.tags);
         Some(b)
     }
 }

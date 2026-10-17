@@ -80,7 +80,11 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usi
                 // A match proven by hashing with the remote's algorithm is recorded right away:
                 // the reconciler can't compare hashes of different algorithms by itself.
                 if *proven_equal {
-                    crate::exec::settle(s, *remote_node, os, true)?;
+                    let how = crate::exec::Settle {
+                        same_bytes: true,
+                        ..crate::exec::Settle::node(*remote_node)
+                    };
+                    crate::exec::settle(s, how, os)?;
                 }
             }
             Ok(())

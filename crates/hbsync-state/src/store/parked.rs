@@ -101,8 +101,9 @@ impl Store<'_> {
         );
         self.prep(
             "INSERT OR REPLACE INTO placing (folder, id, path, parent, name, kind, hash, size, \
-             mtime_ms, executable, remote_file_id, version_tag, tags) \
-             VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             mtime_ms, executable, remote_file_id, version_tag, tags, placed_tags, prior_tags, \
+             base_at, held_ms) \
+             VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )?
         .execute(params![
             id,
@@ -117,25 +118,41 @@ impl Store<'_> {
             b.remote.file_id.0.as_bytes(),
             b.remote.version.0.as_bytes(),
             (!b.state.tags.is_empty()).then(|| tags_to_string(&b.state.tags)),
+            p.placed_tags.as_ref().map(tags_to_string),
+            p.prior_tags.as_ref().map(tags_to_string),
+            match p.base_at {
+                PlannedBase::Unchecked => None,
+                PlannedBase::Absent => Some(Vec::new()),
+                PlannedBase::At(v) => Some(v.0.as_bytes().to_vec()),
+            },
+            p.held_ms,
         ])?;
         Ok(())
     }
 
     /// Every download being placed.
     pub fn all_placing(&self) -> Result<Vec<Placing>> {
-        // The columns of a base row, then the target.
-        self.many(
-            "SELECT n.uuid, p.uuid, k.name, k.kind, k.hash, k.size, k.mtime_ms, k.executable, \
-             k.remote_file_id, k.version_tag, 0, NULL, NULL, k.tags, k.path FROM placing k \
-             JOIN nodes n ON n.id = k.id JOIN nodes p ON p.id = k.parent WHERE k.folder = $F",
-            [],
-            |r| {
-                Ok(Placing {
-                    base: base_row(r)?,
-                    target: codec::rel_path(&r.get::<_, String>(14)?)?,
-                })
-            },
+        self.many(PLACING_SELECT, [], placing_row)
+    }
+
+    /// The record of `node`'s download or folder being placed, if any.
+    pub fn get_placing(&self, node: NodeId) -> Result<Option<Placing>> {
+        self.one(
+            &format!("{PLACING_SELECT} AND k.id = {ID_OF}"),
+            node.0.as_bytes(),
+            placing_row,
         )
+    }
+
+    /// Whether `node` has a download or folder being placed.
+    pub fn is_placing(&self, node: NodeId) -> Result<bool> {
+        Ok(self
+            .prep(&format!(
+                "SELECT 1 FROM placing WHERE folder = $F AND id = {ID_OF}"
+            ))?
+            .query_row([node.0.as_bytes()], |_| Ok(()))
+            .optional()?
+            .is_some())
     }
 
     pub fn delete_placing(&self, node: NodeId) -> Result<()> {
@@ -145,4 +162,32 @@ impl Store<'_> {
         )?;
         Ok(())
     }
+}
+
+/// The columns of a base row, then the target and the tags put on it.
+const PLACING_SELECT: &str = "SELECT n.uuid, p.uuid, k.name, k.kind, k.hash, k.size, k.mtime_ms, k.executable, \
+             k.remote_file_id, k.version_tag, 0, NULL, NULL, k.tags, k.path, k.placed_tags, \
+             k.base_at, k.prior_tags, k.held_ms \
+             FROM placing k \
+             JOIN nodes n ON n.id = k.id JOIN nodes p ON p.id = k.parent WHERE k.folder = $F";
+
+fn placing_row(r: &Row<'_>) -> Result<Placing> {
+    Ok(Placing {
+        base: base_row(r)?,
+        target: codec::rel_path(&r.get::<_, String>(14)?)?,
+        placed_tags: r
+            .get::<_, Option<String>>(15)?
+            .as_deref()
+            .map(tags_from_str),
+        prior_tags: r
+            .get::<_, Option<String>>(17)?
+            .as_deref()
+            .map(tags_from_str),
+        base_at: match r.get::<_, Option<Vec<u8>>>(16)?.as_deref() {
+            None => PlannedBase::Unchecked,
+            Some([]) => PlannedBase::Absent,
+            Some(v) => PlannedBase::At(codec::version(v)?),
+        },
+        held_ms: r.get::<_, Option<i64>>(18)?,
+    })
 }
