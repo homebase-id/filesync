@@ -117,16 +117,19 @@ a failure (service managers restart it then).
   once.
 - **Announced changes** name their file (a minimal row, odin-core #1970): a file deleted for
   good is gone from the account's picture within a second (a hard delete leaves no row in the
-  feed),
-  and versions the account has already (this device's own writes coming back) are taken as
+  feed), and versions the account has already (this device's own writes coming back) are taken as
   a slim feed page's rows, an own removal getting the server's time; the feed is read only
   when something announced isn't known, or an event didn't say which file. One ref per file
   counts (a delete for good ends it; else the newest), so an own write made twice, or made
   then deleted, needs no read. A hard delete announced is taken within a second (what is
-  announced within a second of it, up to 500 changes, is taken in one write), also while paused
-  (it is in no feed; it writes only the account's DB, the folders sync it at the resume),
-  kept and tried again with a growing pause when that fails, and its file id is never let
-  back in by a later row; live changes beyond 2,000 are read from the feed instead.
+  announced within a second of it, up to 500 changes, is taken in one write, hard deletes
+  before the rest), also while paused (it is in no feed; it writes only the account's DB, the
+  folders sync it at the resume), kept and tried again with a growing pause when that fails,
+  and its file id is never let back in by a later row. When the daemon stops, what was
+  gathered is taken first; only a crash in that second loses a hard delete, and then the file's
+  row is stale until it is next written (a file deleted for good answers not found). A read
+  of the feed asked for (connecting, the timer while not connected) doesn't wait. Live changes
+  beyond 2,000 are read from the feed instead.
   Announced changes are taken one at a time with the pulls, on the account's pull thread
   (started again if it ended), never on the account's loop. A timed pause runs out for the
   account as for its folders.

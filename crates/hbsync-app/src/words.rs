@@ -126,6 +126,9 @@ pub fn deleted(d: &Deleted, main: Option<&Path>, now: u64) -> String {
     format!("{place}{folder}{size}, deleted {when}")
 }
 
+/// Before a deleted item's path in a part of the drive no folder here syncs.
+const ON_THE_DRIVE: &str = "(on the drive) ";
+
 /// Where a deleted item was, as people name it (and `hbsync restore` takes it): its path in
 /// the main folder (`main`), the folder's path before it in another folder of this computer,
 /// `(on the drive) ` before it in a part of the drive no folder here syncs.
@@ -133,8 +136,20 @@ pub fn deleted_place(d: &Deleted, main: Option<&Path>) -> String {
     match d.folder.as_deref() {
         Some(f) if f.is_empty() || main.is_some_and(|m| m == Path::new(f)) => d.path.clone(),
         Some(f) => format!("{}/{}", f.trim_end_matches(['/', '\\']), d.path),
-        None => format!("(on the drive) {}", d.path),
+        None => format!("{ON_THE_DRIVE}{}", d.path),
     }
+}
+
+/// The name of the item at `place` ([`deleted_place`], a `/` after it or not): the last name
+/// of its path.
+pub fn deleted_place_name(place: &str) -> &str {
+    let place = place.trim_end_matches('/');
+    last_name(place.strip_prefix(ON_THE_DRIVE).unwrap_or(place))
+}
+
+/// The last name of a drive path (`/` between names).
+pub fn last_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {

@@ -568,7 +568,8 @@ mod tests {
         let mut conn = Connection::open_in_memory()?;
         apply(&mut conn)?;
         let indexed: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'removed_seq')",
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master \
+             WHERE type = 'index' AND name = 'removed_seq')",
             [],
             |r| r.get(0),
         )?;

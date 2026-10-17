@@ -79,15 +79,14 @@ pub fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, St
 /// with how many items it took along: to pick by their places, which end in those names. Only
 /// those rows are read whole, and walked up from.
 pub fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
-    let mut nodes = Vec::new();
-    for name in names.iter().collect::<HashSet<_>>() {
-        nodes.extend(s.removed_named(name)?);
-    }
-    find(s, &nodes)
+    let names: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let names: Vec<&str> = names.into_iter().collect();
+    find(s, &s.removed_named(&names)?)
 }
 
 /// Every item of Recently deleted, newest first, each with how many items it took along: listed
 /// whole (tests).
+#[cfg(any(test, feature = "testkit"))]
 pub fn all(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::read(s)?;
     let picked = (0..listing.roots.len()).collect();

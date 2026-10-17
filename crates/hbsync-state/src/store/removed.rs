@@ -253,12 +253,18 @@ impl Store<'_> {
         )
     }
 
-    /// The nodes in Recently deleted named `name`.
-    pub fn removed_named(&self, name: &str) -> Result<Vec<NodeId>> {
+    /// The nodes in Recently deleted named one of `names`: one read.
+    pub fn removed_named(&self, names: &[&str]) -> Result<Vec<NodeId>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
         let c = self.coords()?;
-        let nodes = self.many("SELECT node FROM removed WHERE name = ?1", [name], |r| {
-            codec::node(&r.get::<_, Vec<u8>>(0)?)
-        })?;
+        let marks = vec!["?"; names.len()].join(", ");
+        let nodes = self.many(
+            &format!("SELECT node FROM removed WHERE name IN ({marks})"),
+            rusqlite::params_from_iter(names),
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )?;
         Ok(nodes.into_iter().filter(|n| !c.hides(*n)).collect())
     }
 
