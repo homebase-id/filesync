@@ -1997,23 +1997,27 @@ impl Sim {
                 Op::LocalMove { .. } => TagWrite::Nothing,
                 _ => TagWrite::Agreed,
             };
-            // A folder made from Recently deleted (restored, its RemoteCreate to follow): the
-            // version there is its base until the restore settles, as the executor's.
-            if let Op::LocalMkdir { drive: None, .. } = &op
-                && !self.clients[c].base.contains(node)
-                && let Some(r) = self.server.removed.get(&node).cloned()
-            {
-                let coords = self.clients[c].coords;
-                let client = &mut self.clients[c];
-                let state = NodeState {
-                    parent: coords.from_drive(r.state.parent),
-                    ..r.state.clone()
-                };
-                client
-                    .extra
-                    .insert(node, extra(&state, Some(r.remote.version)));
-                client.base.insert(node, state);
-            }
+            // A folder made from Recently deleted (restored, its RemoteCreate to follow) settles
+            // against the version there, as any placement does: the base until the restore
+            // settles, as the executor's.
+            let coords = self.clients[c].coords;
+            let restored = match &op {
+                Op::LocalMkdir { drive: None, .. } if !self.clients[c].base.contains(node) => {
+                    self.server.removed.get(&node).map(|r| DriveVersion {
+                        state: NodeState {
+                            parent: coords.from_drive(r.state.parent),
+                            ..r.state.clone()
+                        },
+                        at: r.remote,
+                        base_at: None,
+                    })
+                }
+                _ => None,
+            };
+            let against = match &restored {
+                Some(d) => Against::placed(Some(d)),
+                None => against,
+            };
             let at = self.settle_against(c, node, against, op.is_transfer() && !landed, tags, ours);
             if let Some(at) = at {
                 self.clients[c].run_settled.insert(node, at);
