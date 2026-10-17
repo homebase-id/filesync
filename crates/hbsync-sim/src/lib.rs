@@ -460,6 +460,8 @@ pub struct Sim {
     /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
     /// them to the original too, as that client's add.
     tags_forked: BTreeSet<(usize, NodeId, String)>,
+    /// Tag adds a client's remote write sent up: they stand once the item goes from it.
+    tags_sent: BTreeSet<(usize, NodeId, String)>,
     deleted: BTreeSet<NodeId>,
     /// What the phone deleted with the role folder, brought back with it.
     role_folder_deleted_with: Vec<NodeId>,
@@ -509,6 +511,7 @@ impl Sim {
             unguarded: None,
             tags_added: BTreeSet::new(),
             tags_forked: BTreeSet::new(),
+            tags_sent: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
             tags_cleared: BTreeSet::new(),
             deleted: BTreeSet::new(),
@@ -1412,10 +1415,15 @@ impl Sim {
             .retain(|(_, n, name)| *n != node || held.contains(name));
     }
 
-    /// A client put `node` in place: where a user's delete of it lost, it is no longer
-    /// deleted. A lost delete settles nothing: what other clients did to its tags still counts.
+    /// A client put `node` in place: where a user's delete of it lost (the drive has it), it is
+    /// no longer deleted. A lost delete settles nothing: what other clients did to its tags
+    /// still counts. One the drive doesn't have (a folder made here to restore it, its
+    /// RemoteCreate to follow) is back once the drive has it again ([`Sim::restored_on_drive`]):
+    /// a delete that won settles the tags then.
     fn placed_back(&mut self, node: NodeId) {
-        self.deleted.remove(&node);
+        if self.server.live.contains_key(&node) {
+            self.deleted.remove(&node);
+        }
     }
 
     /// [`Action::EmptyListed`].
@@ -1925,6 +1933,18 @@ impl Sim {
             }
         }
         if outcome == Outcome::Done {
+            // A remote write sends up what this client's user added to the node's tags.
+            if let Op::RemoteTags { tags, .. }
+            | Op::RemoteUpdate { tags, .. }
+            | Op::RemoteCreate { tags, .. } = &op
+            {
+                for tag in tags.iter() {
+                    let add = (c, node, tag.name.clone());
+                    if self.tags_added.contains(&add) {
+                        self.tags_sent.insert(add);
+                    }
+                }
+            }
             if matches!(
                 op,
                 Op::LocalMove { .. }
@@ -2590,9 +2610,11 @@ impl Sim {
             let client = &mut self.clients[c];
             client.local.remove(n);
             client.parked.remove(&n);
-            // Tag changes made here and not synced yet went to the trash with the item.
+            // Tag changes made here and not synced yet went to the trash with the item; an add
+            // sent up stands.
+            let sent = &self.tags_sent;
             self.tags_added
-                .retain(|(at, node, _)| (*at, *node) != (c, n));
+                .retain(|add| (add.0, add.1) != (c, n) || sent.contains(add));
             self.tags_cleared
                 .retain(|(by, node, _)| (*by, *node) != (c, n));
         }
@@ -3364,12 +3386,14 @@ mod tests {
         sim.check().unwrap_or_else(|e| panic!("{e}"));
     }
 
-    /// A folder never synced, made again where a user's delete of it lost, and the client dies
-    /// before its commit: it is back all the same (no longer deleted), as a step that commits.
+    /// A folder never synced, made again where a user's delete of it lost (the drive has it),
+    /// and the client dies before its commit: it is back all the same (no longer deleted), as a
+    /// step that commits.
     #[test]
     fn a_folder_made_back_without_a_record_is_no_longer_deleted() {
         let mut sim = Sim::new(1);
         let node = NodeId::new();
+        sim.server.put(node, NodeState::folder(NodeId::ROOT, "d"));
         sim.deleted.insert(node);
         sim.clients[0].plan.push_back((
             Op::LocalMkdir {
