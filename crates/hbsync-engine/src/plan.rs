@@ -522,6 +522,24 @@ pub enum Conflict {
     Cycle { node: NodeId },
     /// The node's folder no longer exists anywhere; it was moved to the root.
     Orphan { node: NodeId },
+    /// Both sides edited the file, and the local version's conflict copy can't be made yet
+    /// (its folder waits for its own): both versions stay as they are until it can.
+    CopyWaits { node: NodeId },
+}
+
+impl Conflict {
+    /// The node the conflict is about.
+    pub fn node(&self) -> NodeId {
+        match self {
+            Conflict::EditEdit { node, .. }
+            | Conflict::MoveMove { node }
+            | Conflict::EditDelete { node }
+            | Conflict::NameClash { node }
+            | Conflict::Cycle { node }
+            | Conflict::Orphan { node }
+            | Conflict::CopyWaits { node } => *node,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

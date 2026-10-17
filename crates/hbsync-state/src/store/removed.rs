@@ -131,6 +131,19 @@ impl Store<'_> {
         Ok(self.account_kv(crate::keys::DB_ID)?.unwrap_or_default())
     }
 
+    /// [`Store::db_id`], made now if the DB has none (opening gives it one): never empty. It
+    /// names this computer for the account too (conflict copies, detached items).
+    pub fn ensure_db_id(&self) -> Result<String> {
+        match self.account_kv(crate::keys::DB_ID)? {
+            Some(id) if !id.is_empty() => Ok(id),
+            _ => {
+                let id = hbsync_types::Uuid::new_v4().simple().to_string();
+                self.set_account_kv(crate::keys::DB_ID, &id)?;
+                Ok(id)
+            }
+        }
+    }
+
     /// Recently deleted's rows recorded up to `seq`: what a listing that read it saw.
     pub fn recorded_upto(&self, seq: u64) -> Result<Vec<Recorded>> {
         self.recorded_rows(
@@ -334,5 +347,24 @@ impl Store<'_> {
 
     pub fn mirror_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM remote")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Result, StateDb};
+
+    /// The DB's id is never empty: one made on open, kept, and made again where it went blank.
+    #[test]
+    fn a_db_id_is_never_empty() -> Result<()> {
+        let mut db = StateDb::open_in_memory()?;
+        let id = db.write(|s| s.ensure_db_id())?;
+        assert_eq!(id.len(), 32);
+        assert_eq!(db.write(|s| s.ensure_db_id())?, id, "kept");
+        db.write(|s| s.set_account_kv(crate::keys::DB_ID, ""))?;
+        let again = db.write(|s| s.ensure_db_id())?;
+        assert_eq!(again.len(), 32);
+        assert_eq!(db.read(|s| s.db_id())?, again);
+        Ok(())
     }
 }

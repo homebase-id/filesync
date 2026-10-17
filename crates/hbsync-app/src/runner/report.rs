@@ -214,6 +214,10 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
             "{}: its folder was deleted everywhere; it was moved to the top folder",
             path(*node)?
         ),
+        Conflict::CopyWaits { node } => format!(
+            "{}: edited on two devices; a conflict copy is waiting for its folder",
+            path(*node)?
+        ),
     })
 }
 

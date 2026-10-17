@@ -30,12 +30,12 @@ impl Reconciler<'_> {
 
             if let Some(copy) = forked {
                 // A copy the repairs took out (its folder waits, §6.3) isn't made, never under
-                // the name "": the node waits with it, its conflict not reported yet.
+                // the name "": the node waits with it, and says so instead of what it would
+                // have done.
                 let Some(name) = self.merged.get(copy).map(|s| s.name.clone()) else {
                     self.deferred.insert(node);
-                    self.plan
-                        .conflicts
-                        .retain(|c| *c != Conflict::EditEdit { node, copy });
+                    self.plan.conflicts.retain(|c| c.node() != node);
+                    self.plan.conflicts.push(Conflict::CopyWaits { node });
                     continue;
                 };
                 forks.push(Op::LocalFork {

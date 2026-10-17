@@ -62,7 +62,13 @@ enum Origin {
 }
 
 pub fn reconcile(input: &Input, opts: &Options) -> Plan {
-    let masks = Masks::of(input, &opts.filter, &opts.scope, &opts.device, &opts.taken);
+    let masks = Masks::of(
+        input,
+        &opts.filter,
+        &opts.scope,
+        &opts.computer,
+        &opts.taken,
+    );
     let input = masks.input.as_ref().unwrap_or(input);
     Reconciler::new(input, opts, &masks).run()
 }
@@ -156,26 +162,16 @@ fn fork_id(
     let hash = local.map(|c| c.hash.bytes);
     let executable = [u8::from(local.is_some_and(|c| c.executable))];
     let version = base_version.map(|v| *v.0.as_bytes());
-    let mut bytes = [0u8; 16];
-    for (half, out) in bytes.chunks_mut(8).enumerate() {
-        let mut h = hbsync_fileio::FNV1A64_OFFSET ^ half as u64;
-        for part in [
-            node.0.as_bytes().as_slice(),
-            hash.as_ref().map_or(&[][..], |h| &h[..]),
+    crate::id::derived_id(
+        &[
+            node.0.as_bytes(),
+            hash.as_ref().map_or(&[], |h| &h[..]),
             &executable,
-            version.as_ref().map_or(&[][..], |v| &v[..]),
+            version.as_ref().map_or(&[], |v| &v[..]),
             computer.as_bytes(),
-            b"fork",
-        ] {
-            // Each part's length first: no two different parts read as the same bytes.
-            h = hbsync_fileio::fnv1a64_from(h, &(part.len() as u64).to_le_bytes());
-            h = hbsync_fileio::fnv1a64_from(h, part);
-        }
-        out.copy_from_slice(&h.to_le_bytes());
-    }
-    bytes[6] = (bytes[6] & 0x0F) | 0x40; // keep it a well-formed v4 UUID
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-    NodeId(hbsync_types::Uuid::from_bytes(bytes))
+        ],
+        b"fork",
+    )
 }
 
 fn content_changed(c: Change) -> bool {
@@ -211,4 +207,29 @@ pub fn reconcile_with_known(
         plan = reconcile(input, &opts);
     }
     plan
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Conflict copy ids are stored and on the drive: the same conflict on the same computer
+    /// keeps its id, release after release.
+    #[test]
+    fn fork_ids_are_pinned() {
+        let uuid = |s: &str| s.parse::<hbsync_types::Uuid>().expect("uuid");
+        let content = FileContent {
+            hash: hbsync_fileio::hash_bytes(b"mine", hbsync_fileio::HashAlgorithm::Blake3),
+            size: 4,
+            mtime_ms: 0,
+            executable: false,
+        };
+        let id = fork_id(
+            NodeId(uuid("0274575b-c2cf-4ac7-b39b-d56b2c121b75")),
+            Some(content),
+            Some(VersionTag(uuid("9b2f4c1e-0d7a-4e3b-8c55-2a6f1e9d0b47"))),
+            "0123456789abcdef0123456789abcdef",
+        );
+        assert_eq!(id.0.to_string(), "703c54e5-af51-4afd-a3cf-21549310332c");
+    }
 }

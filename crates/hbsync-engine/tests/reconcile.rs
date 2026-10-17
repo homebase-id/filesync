@@ -320,8 +320,8 @@ fn a_conflict_copy_id_is_the_same_on_a_replan_and_its_computers_own() {
 }
 
 /// A fork whose copy has no folder yet (the file's folder here waits for its own parent: the
-/// repairs take the copy out) waits: no copy, never one named "", no conflict reported yet,
-/// and nothing done to the node.
+/// repairs take the copy out) waits: no copy, never one named "", and nothing done to the
+/// node. Its conflicts (the edits, the moves) aren't reported yet: that it waits is.
 #[test]
 fn a_fork_whose_copy_has_to_wait_waits() {
     let [d, f] = ids(2)[..] else { unreachable!() };
@@ -338,13 +338,7 @@ fn a_fork_whose_copy_has_to_wait_waits() {
         "{plan:?}"
     );
     assert!(plan.deferred.contains(&f), "{plan:?}");
-    assert!(
-        !plan
-            .conflicts
-            .iter()
-            .any(|c| matches!(c, Conflict::EditEdit { .. })),
-        "{plan:?}"
-    );
+    assert_eq!(plan.conflicts, [Conflict::CopyWaits { node: f }]);
 }
 
 #[test]
@@ -835,6 +829,33 @@ fn a_local_edit_of_a_file_moved_into_an_ignored_folder_stays_as_a_new_file() {
         kind: NodeKind::File,
         tags: Tags::default(),
     }));
+}
+
+/// A detached item's new id is its computer's: the same on a replan, another on another
+/// computer, even one with the same device name.
+#[test]
+fn a_detached_items_id_is_its_computers() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let detached = |computer: &str| {
+        let mut w = World {
+            opts: ignoring("build/\n"),
+            ..World::default()
+        };
+        w.opts.device = "laptop".into();
+        w.opts.computer = computer.into();
+        w.synced(f, file(ROOT, "a.txt", "v1"));
+        w.local(f, Some(file(ROOT, "a.txt", "local v2")));
+        w.remote(b, Some(folder(ROOT, "build")))
+            .remote(f, Some(file(b, "a.txt", "v1")));
+        let plan = w.plan();
+        match plan.ops.first() {
+            Some(&Op::LocalDetach { new_node, .. }) => new_node,
+            _ => panic!("{plan:?}"),
+        }
+    };
+    let one = detached("one computer's db id");
+    assert_eq!(detached("one computer's db id"), one);
+    assert_ne!(detached("another computer's db id"), one);
 }
 
 #[test]

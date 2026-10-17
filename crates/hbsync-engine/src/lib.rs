@@ -8,6 +8,7 @@ pub mod drive;
 pub mod engine;
 pub mod exec;
 pub mod feed;
+mod id;
 pub mod mask;
 pub mod plan;
 pub mod reconcile;

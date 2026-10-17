@@ -169,6 +169,8 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     /// Nodes whose held deletes the user confirmed, until they are done (or undone).
     confirmed: std::collections::HashSet<NodeId>,
+    /// This computer's id for the account ([`Options::computer`]), once read.
+    computer: Option<String>,
     /// How far the current sync is.
     progress: Arc<Counters>,
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
@@ -221,6 +223,7 @@ impl Engine {
             sweep_after: None,
             stop: Arc::default(),
             confirmed: Default::default(),
+            computer: None,
             progress: Arc::default(),
             rescanned: Default::default(),
         }
@@ -405,7 +408,15 @@ impl Engine {
         // confirmed deletes don't count. Confirmations of nodes with nothing left to do are
         // dropped (those whose plan no longer deletes them, in plan_and_execute).
         let confirmed = std::mem::take(&mut self.confirmed);
-        let (pending_deletes, synced_files, confirmed, computer) = self.db.read(|s| {
+        let computer = match &self.computer {
+            Some(id) => id.clone(),
+            None => {
+                let id = self.db.write(|s| s.ensure_db_id())?;
+                self.computer = Some(id.clone());
+                id
+            }
+        };
+        let (pending_deletes, synced_files, confirmed) = self.db.read(|s| {
             let (here, there) = s.pending_file_deletes()?;
             let mut still = std::collections::HashSet::new();
             // Each file once, however many confirmed trashes it is under.
@@ -426,7 +437,7 @@ impl Engine {
                 0 => 0,
                 _ => s.base_file_count()?,
             };
-            Ok((pending, synced, still, s.db_id()?))
+            Ok((pending, synced, still))
         })?;
         self.confirmed = confirmed;
         let opts = Options {
