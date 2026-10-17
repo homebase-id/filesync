@@ -118,7 +118,6 @@ impl Executor<'_> {
             prior_tags: prior,
             base_at: a.base_at.into(),
             held_ms: None,
-            trashed: None,
         });
         let kept = !adopt && synced_before;
         if !adopt {
@@ -186,19 +185,28 @@ impl Executor<'_> {
             }
             s.put_local(&row)?;
             match &record {
-                Some(r) => settle_placement(s, r, os).map(|p| p.at),
+                Some(r) => settle_placement(s, r, os, &mut HashMap::new()).map(|p| p.at),
                 None => {
-                    let at = settle(s, Settle::placed(node, None, TagWrite::Agreed), os)?;
                     // Made from Recently deleted (its folder restored, its RemoteCreate to
-                    // follow): the version there is what it was made of, the base until the
-                    // restore settles. Without one, a tag removed on the drive meanwhile read
-                    // as this device adding it, and came back.
-                    if s.get_base(node)?.is_none()
-                        && let Some(removed) = s.removed_by_node(node)?
-                        && let Some(state) = removed.row.state()
-                    {
-                        s.put_base(&BaseRow::new(node, state, removed.row.remote_ref()))?;
-                    }
+                    // follow): it settles against the version there, what it was made of, as
+                    // any placement does (its spelling recorded): the base until the restore
+                    // settles. Without one, a tag removed on the drive meanwhile read as this
+                    // device adding it, and came back.
+                    let removed = match s.get_base(node)? {
+                        None => s.removed_by_node(node)?.and_then(|r| {
+                            Some(DriveVersion {
+                                state: r.row.state()?,
+                                at: r.row.remote_ref(),
+                                base_at: None,
+                            })
+                        }),
+                        Some(_) => None,
+                    };
+                    let at = settle(
+                        s,
+                        Settle::placed(node, removed.as_ref(), TagWrite::Agreed),
+                        os,
+                    )?;
                     mark_children(s, node)?;
                     Ok(at)
                 }
@@ -453,69 +461,36 @@ impl Executor<'_> {
         &mut self,
         path: &RelPath,
         node: NodeId,
-    ) -> Result<io::Result<()>, StateError> {
-        let Some(entry) = trash_entry(path, node) else {
-            return Ok(Err(io::Error::other("no name in the trash")));
-        };
-        self.move_to_trash_as(path, &entry)
-    }
-
-    /// Moves the item at `path` into the trash as `entry` ([`trash_entry`]).
-    pub(super) fn move_to_trash_as(
-        &mut self,
-        path: &RelPath,
-        entry: &RelPath,
-    ) -> Result<io::Result<()>, StateError> {
+    ) -> Result<io::Result<PathBuf>, StateError> {
         let trash = layout::trash_dir(&self.cfg.root);
-        let to = entry.to_native(&trash);
+        // Its own entry folder, named by when and by the node (one name: a native path).
+        let dir = trash.join(format!("{}-{}", hbsync_types::unix_now(), node.0.simple()));
         // The trash folder too, made with the first item in it.
         self.db.changed(&trash);
-        if let Some(dir) = to.parent()
-            && let Err(e) = put_ordered(self.db, dir, |dir| fs::create_dir_all(dir))?
-        {
+        if let Err(e) = put_ordered(self.db, &dir, |dir| fs::create_dir_all(dir))? {
             return Ok(Err(e));
         }
-        rename_ordered(self.db, &self.abs(path), &to)
+        let to = dir.join(path.name().unwrap_or("item"));
+        Ok(rename_ordered(self.db, &self.abs(path), &to)?.map(|()| to))
     }
 
-    /// Brings the old version a download put in the trash as `entry` back to `path`, and
-    /// removes its entry's folder, empty then.
+    /// Brings an old version a download just put in the trash (at `entry`) back to `path`, and
+    /// removes its entry's folder, empty then (one that can't be removed, not empty after
+    /// all, stays for the daily purge).
     pub(super) fn restore_from_trash(
         &mut self,
-        entry: &RelPath,
+        entry: &Path,
         path: &RelPath,
     ) -> Result<io::Result<()>, StateError> {
         if Self::take_one(&self.cfg.fail_restores) {
             return Ok(Err(io::Error::other("bringing it back failed (a test)")));
         }
-        let back = restore_entry(self.db, &self.cfg.root, entry, path)?;
+        let back = rename_ordered(self.db, entry, &self.abs(path))?;
+        if back.is_ok()
+            && let Some(dir) = entry.parent()
+        {
+            drop(fs::remove_dir(dir));
+        }
         Ok(back)
     }
-}
-
-/// The trash entry (relative to the trash folder) an item at `path` of `node` goes to now: a
-/// folder of its own, named by when and by the node.
-pub(super) fn trash_entry(path: &RelPath, node: NodeId) -> Option<RelPath> {
-    RelPath::new(&format!("{}-{}", hbsync_types::unix_now(), node.0.simple()))
-        .and_then(|dir| dir.join(path.name().unwrap_or("item")))
-        .ok()
-}
-
-/// Brings the item in trash entry `entry` back to `path` (under `root`), ordered as any rename
-/// ([`rename_ordered`]: no row about it is durable before it), and removes the entry's folder,
-/// empty then (one that can't be removed, not empty after all, stays for the daily purge).
-pub(super) fn restore_entry(
-    db: &mut StateDb,
-    root: &Path,
-    entry: &RelPath,
-    path: &RelPath,
-) -> Result<io::Result<()>, StateError> {
-    let from = entry.to_native(&layout::trash_dir(root));
-    let back = rename_ordered(db, &from, &path.to_native(root))?;
-    if back.is_ok()
-        && let Some(dir) = from.parent()
-    {
-        drop(fs::remove_dir(dir));
-    }
-    Ok(back)
 }

@@ -80,12 +80,9 @@ pub struct ExecConfig {
     #[doc(hidden)]
     pub fail_tag_reads: Arc<std::sync::atomic::AtomicUsize>,
     /// Tests only: this many downloads fail to put the new version in place after the old one
-    /// went to the trash (`fail_after_trash`; with a DB error: `fail_db_after_trash`), and this
-    /// many bringing it back fail.
+    /// went to the trash, and this many bringing it back fail.
     #[doc(hidden)]
     pub fail_after_trash: Arc<std::sync::atomic::AtomicUsize>,
-    #[doc(hidden)]
-    pub fail_db_after_trash: Arc<std::sync::atomic::AtomicUsize>,
     #[doc(hidden)]
     pub fail_restores: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -101,9 +98,6 @@ pub enum CrashPoint {
     /// After a download is moved into place, or a folder made in place (before its tags are
     /// written), before its commit.
     AfterPlaced,
-    /// After a download put the old version it replaces from another folder in the trash,
-    /// before the new one is in place.
-    AfterTrashed,
 }
 
 /// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
@@ -250,6 +244,9 @@ pub struct Executor<'a> {
     /// such a record its failure removes. Once in place, a record is recovery's to settle; and
     /// no operation places over one it didn't write.
     records: HashSet<NodeId>,
+    /// Nodes whose tags the drive refused this run for good (access, a drive that won't take
+    /// it): a tag only the item here has can't go up now, so a download no longer waits for it.
+    tags_refused: HashSet<NodeId>,
     /// Where this run's operations settled each node's base: a later operation's compare and
     /// set takes the base there as the one its plan saw.
     settled: HashMap<NodeId, RemoteRef>,
@@ -392,6 +389,7 @@ impl<'a> Executor<'a> {
             urgent: HashSet::new(),
             crashed: false,
             records: HashSet::new(),
+            tags_refused: HashSet::new(),
             settled: HashMap::new(),
             streak: 0,
             resume_at: None,
@@ -628,11 +626,14 @@ impl<'a> Executor<'a> {
             OnDisk::Unreadable => Judged::Keep,
             OnDisk::There(meta) => {
                 let row = read_row(root, &record.target, node, &meta, self.cfg.algorithm);
-                judge(root, &record, Some(row), now)
+                judge(root, &record, Some(row))
             }
         };
         let os = self.cfg.os;
-        match self.db.write(|s| apply(s, &record, judged, os, now))? {
+        match self
+            .db
+            .write(|s| apply(s, &record, judged, os, now, &mut HashMap::new()))?
+        {
             Applied::Settled(at) => {
                 self.note([(node, at)]);
                 Ok(Outcome::Settled)
@@ -773,6 +774,15 @@ impl<'a> Executor<'a> {
             && let Some(pending) = self.pending(&op)
         {
             pending.remove(&op.node());
+        }
+        if matches!(
+            op,
+            Op::RemoteTags { .. } | Op::RemoteUpdate { .. } | Op::RemoteCreate { .. }
+        ) && matches!(
+            outcome,
+            Outcome::Skip(Skip::Unsyncable(_)) | Outcome::Stop(_)
+        ) {
+            self.tags_refused.insert(op.node());
         }
         if matches!(op, Op::RemoteDelete { .. })
             && !matches!(
@@ -1200,7 +1210,6 @@ mod transfer_ops;
 #[cfg(test)]
 mod tests;
 
-use local::{restore_entry, trash_entry};
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};

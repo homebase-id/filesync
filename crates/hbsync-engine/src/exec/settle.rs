@@ -63,6 +63,7 @@ pub(super) fn settle_placement(
     s: &Store<'_>,
     record: &Placing,
     os: Os,
+    above: &mut HashMap<NodeId, Option<i64>>,
 ) -> Result<Placed, StateError> {
     let node = record.base.node;
     // Gone on the drive since (deleted, in Recently deleted, or taken along by a folder there):
@@ -70,7 +71,8 @@ pub(super) fn settle_placement(
     // Against a base that moved meanwhile, the item read as an edit, which won over the delete
     // and brought the node back. Only an item that reads as the node (its name one the drive
     // takes): the record stays otherwise.
-    let gone = gone_on_drive(s, node)?;
+    let scope = crate::scope::Scope::of(s.coords()?.top);
+    let gone = view::gone_on_drive(s, node, &scope, above)?;
     if gone && !view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some()) {
         return Ok(Placed { at: None, gone });
     }
@@ -105,30 +107,6 @@ pub(super) fn settle_placement(
 pub(super) struct Placed {
     pub(super) at: Option<RemoteRef>,
     pub(super) gone: bool,
-}
-
-/// Whether the drive no longer has `node` as the reconciler reads it: not in the mirror, or in a
-/// folder in Recently deleted, written no later than that folder's removal (taken along).
-fn gone_on_drive(s: &Store<'_>, node: NodeId) -> Result<bool, StateError> {
-    let Some(row) = s.get_mirror(node)? else {
-        return Ok(true);
-    };
-    // Nothing in Recently deleted: nothing taken along (the walk up costs a query a level).
-    if !s.has_removed()? {
-        return Ok(false);
-    }
-    let mut seen = HashSet::from([node]);
-    let mut at = row.parent;
-    while !at.is_root() && seen.insert(at) {
-        if let Some(folder) = s.removed_by_node(at)? {
-            return Ok(row.changed_at.is_none_or(|c| c <= folder.time()));
-        }
-        match s.get_mirror(at)? {
-            Some(up) => at = up.parent,
-            None => break,
-        }
-    }
-    Ok(false)
 }
 
 /// Marks what is in folder `node` on the drive dirty.

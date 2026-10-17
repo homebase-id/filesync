@@ -45,14 +45,6 @@ pub struct BaseRow {
     pub local_hash: Option<hbsync_types::ContentHash>,
 }
 
-/// An old version a download put in the trash: from where, and its entry in the trash (relative
-/// to the trash folder).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Trashed {
-    pub from: RelPath,
-    pub to: RelPath,
-}
-
 /// A download (or folder) about to be put in place (written before its batch runs): the base
 /// its commit settles against (the drive's version it acts on, with the bytes fetched), where
 /// it goes, what the item holds of tags there and what the item there held before (`None`: not
@@ -67,9 +59,6 @@ pub struct Placing {
     pub base_at: PlannedBase,
     /// Since when recovery has held it, its file there but not hashed yet, Unix milliseconds.
     pub held_ms: Option<i64>,
-    /// The old version it replaces from another folder, put in the trash: noted before it
-    /// goes there, so recovery can bring it back.
-    pub trashed: Option<Trashed>,
 }
 
 /// The base a placement's plan saw.

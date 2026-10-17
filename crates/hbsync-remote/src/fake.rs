@@ -447,6 +447,9 @@ pub struct Faults {
     /// Creates, updates and deletes are refused with [`RemoteError::Denied`] (the app lost
     /// write access to the drive); reads still work.
     pub deny_writes: bool,
+    /// Creates, updates and deletes are refused with [`RemoteError::Fatal`] (a drive that won't
+    /// take them, read-only); reads still work.
+    pub refuse_writes: bool,
     /// Added to every request.
     pub latency: Duration,
     /// Requests seen, for assertions.
@@ -512,6 +515,9 @@ impl FakeRemote {
     fn gate_name(&self, name: &str) -> Result<()> {
         if self.faults().deny_writes {
             return Err(RemoteError::Denied("injected: no write access".into()));
+        }
+        if self.faults().refuse_writes {
+            return Err(RemoteError::Fatal("injected: read-only".into()));
         }
         if self.faults().fail_writes_named.as_deref() == Some(name) {
             return Err(RemoteError::Transient("injected write failure".into()));

@@ -101,66 +101,29 @@ pub fn recover_placements(
     }
     // Outside the write: a file of another client's hash algorithm is hashed.
     let now = hbsync_types::unix_now_ms();
-    // Each judged, and whether its item verifiably isn't in place (nothing there, or another
-    // node's): only then may an old version it put in the trash come back.
-    let judged: Vec<(Placing, Judged, bool)> = found
+    let judged: Vec<(Placing, Judged)> = found
         .into_iter()
         .map(|(p, scanned)| {
-            let at_target = look(root, &p.target);
-            let not_placed =
-                matches!(at_target, OnDisk::Absent) || matches!(scanned, Scanned::Other);
-            let judged = match (at_target, scanned) {
+            let judged = match (look(root, &p.target), scanned) {
                 (OnDisk::Absent, _) => Judged::Drop,
                 (OnDisk::Unreadable, _) => Judged::Keep,
                 (OnDisk::There(_), Scanned::Other) => Judged::Drop,
-                (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row), now),
+                (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
                 // On disk, not scanned yet: read as the scan would.
                 (OnDisk::There(meta), Scanned::None) => {
                     let row = read_row(root, &p.target, p.base.node, &meta, algorithm);
-                    judge(root, &p, Some(row), now)
+                    judge(root, &p, Some(row))
                 }
             };
-            (p, judged, not_placed)
+            (p, judged)
         })
         .collect();
-    // An old version a download put in the trash comes back where the new one verifiably isn't
-    // in place (never where a file is there, with other bytes or not hashed in time) and its
-    // place is free (on disk; in the DB, but for the node's own row).
-    let mut restored = Vec::with_capacity(judged.len());
-    for (p, judged, not_placed) in judged {
-        let Some(t) = p.trashed.as_ref().filter(|_| not_placed) else {
-            restored.push((p, judged));
-            continue;
-        };
-        let in_trash = fs::symlink_metadata(t.to.to_native(&layout::trash_dir(root))).is_ok();
-        let free = matches!(look(root, &t.from), OnDisk::Absent)
-            && db
-                .read(|s| s.get_local(&t.from))?
-                .is_none_or(|r| r.node == p.base.node);
-        if !in_trash || !free {
-            restored.push((p, judged));
-            continue;
-        }
-        let judged = match restore_entry(db, root, &t.to, &t.from)? {
-            Ok(()) => match look(root, &t.from) {
-                OnDisk::There(meta) => {
-                    Judged::Restored(read_row(root, &t.from, p.base.node, &meta, algorithm))
-                }
-                _ => Judged::Drop,
-            },
-            // Its folder gone since (the user deleted it): it stays in the trash, as what was
-            // in that folder would have gone there.
-            Err(e) if hbsync_platform::nothing_there(&e) => judged,
-            // Tried again by the next recovery.
-            Err(_) => Judged::Keep,
-        };
-        restored.push((p, judged));
-    }
-    let judged = restored;
+    // What is above each folder, found once for the batch.
+    let mut above = HashMap::new();
     db.write(|s| {
         judged
             .into_iter()
-            .try_for_each(|(p, judged)| apply(s, &p, judged, os, now).map(drop))
+            .try_for_each(|(p, judged)| apply(s, &p, judged, os, now, &mut above).map(drop))
     })
 }
 
@@ -185,9 +148,6 @@ pub(super) enum Judged {
     /// It can't be told yet (its file not hashed, its folder unreadable): the record stays, for
     /// a later recovery.
     Keep,
-    /// Not put in place, the old version it put in the trash brought back (its row this one):
-    /// the record goes.
-    Restored(LocalRow),
 }
 
 /// What recovery did with a record.
@@ -201,15 +161,12 @@ pub(super) enum Applied {
 /// Judges record `p` by the item at its target (`row`, of the node or new), as of `now`: one
 /// file there not hashed yet holds the record for [`UNHASHED_HOLD`] from when it was first
 /// found so.
-pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>, now: i64) -> Judged {
+pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>) -> Judged {
     let Some(row) = row else {
         return Judged::Drop;
     };
     if row.kind == NodeKind::File && row.hash.is_none() {
-        let held = p
-            .held_ms
-            .is_none_or(|since| now.saturating_sub(since) < UNHASHED_HOLD.as_millis() as i64);
-        return if held { Judged::Keep } else { Judged::Drop };
+        return Judged::Keep;
     }
     let there = match &p.base.state.content {
         Some(c) => row.kind == NodeKind::File && adopt::same_bytes(root, &row, &c.hash, c.size),
@@ -232,30 +189,14 @@ pub(super) fn apply(
     judged: Judged,
     os: Os,
     now: i64,
+    above: &mut HashMap<NodeId, Option<i64>>,
 ) -> Result<Applied, StateError> {
     let node = p.base.node;
     match judged {
-        Judged::Keep => {
-            if p.held_ms.is_none() {
-                s.put_placing(&Placing {
-                    held_ms: Some(now),
-                    ..p.clone()
-                })?;
-            }
-            Ok(Applied::Kept)
-        }
+        Judged::Keep => hold(s, p, now),
         Judged::Drop => {
             // Not put in place (or changed since): nothing to settle.
             s.delete_placing(node)?;
-            Ok(Applied::Dropped)
-        }
-        Judged::Restored(row) => {
-            if s.local_by_node(node)?.is_some_and(|r| r.path != row.path) {
-                s.delete_local(node)?;
-            }
-            s.put_local(&row)?;
-            s.delete_placing(node)?;
-            s.mark_dirty(node)?;
             Ok(Applied::Dropped)
         }
         Judged::Settle(row) => {
@@ -277,7 +218,7 @@ pub(super) fn apply(
             }
             // What the commit does: the record goes with the base written, or stays until the
             // item can be read (its folder scanned).
-            let placed = settle_placement(s, p, os)?;
+            let placed = settle_placement(s, p, os, above)?;
             // Its node gone on the drive, its item not one the drive takes (its name): held as
             // a file not hashed yet is, then dropped.
             if placed.gone && s.is_placing(node)? {

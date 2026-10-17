@@ -57,7 +57,7 @@ pub use coords::Coords;
 pub use reader::Reader;
 pub use store::{
     BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing,
-    PlannedBase, Recorded, RemovedRow, Store, Trashed,
+    PlannedBase, Recorded, RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -252,12 +252,6 @@ pub mod testkit {
     }
 
     impl StateDb {
-        /// Whether the folder `dir` waits to be synced before the next durable commit (an
-        /// entry changed in it, [`StateDb::changed`]).
-        pub fn folder_unsynced(&self, dir: &Path) -> bool {
-            lock(&self.shared.gate).dirs.contains(dir)
-        }
-
         /// Copies the DB as of its last commit to a new file at `to`.
         pub fn copy_to(&mut self, to: &Path) -> Result<()> {
             self.conn

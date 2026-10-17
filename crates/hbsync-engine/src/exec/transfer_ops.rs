@@ -2,7 +2,6 @@
 //! what the remote writes of `remote.rs` did).
 
 use super::*;
-use hbsync_state::Trashed;
 
 impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
@@ -156,7 +155,6 @@ impl Executor<'_> {
             },
             base_at: acted.base_at.into(),
             held_ms: None,
-            trashed: None,
         };
         let job = Job::Download(Download {
             node,
@@ -357,8 +355,9 @@ impl Executor<'_> {
         let failed = left.is_none();
         // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
         // not sent up yet): not put in place then, for a retry, the plan sending it up
-        // meanwhile.
+        // meanwhile; unless the drive refused it for good this run (then as ever: placed).
         if failed
+            && !self.tags_refused.contains(&node)
             && let Some(held) = current.as_ref().and_then(|r| r.tags.as_ref())
             && tags_lost(held, &to_write, &record.base.state.tags)
         {
@@ -366,26 +365,8 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }
         let tags = left.flatten();
-        // Replacing a file from another folder, the old version goes in the trash: where, noted
-        // before it goes (with the tags, one write): should the new one not get in place, it
-        // comes back (in the run, or by recovery), where the next plan would take its absence
-        // for the user deleting it.
-        let trashed = match &current {
-            Some(row) if &row.path != target => {
-                let Some(entry) = trash_entry(&row.path, node) else {
-                    done.keep_for_retry();
-                    return Ok(Outcome::Retry("no name in the trash".into()));
-                };
-                Some(Trashed {
-                    from: row.path.clone(),
-                    to: entry,
-                })
-            }
-            _ => None,
-        };
-        if tags != record.placed_tags || trashed.is_some() {
+        if tags != record.placed_tags {
             record.placed_tags = tags.clone();
-            record.trashed = trashed;
             self.write_durable(|s| s.put_placing(&record))?;
         }
         // The record claims only what read back; the row holds what the file holds.
@@ -399,36 +380,25 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                let entry = match &record.trashed {
-                    Some(t) => t.to.clone(),
-                    None => return Err(Outcome::stale("no trash noted")),
+                let entry = match self.move_to_trash(&row.path, node)? {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        done.keep_for_retry();
+                        return Ok(io_outcome(e));
+                    }
                 };
-                if let Err(e) = self.move_to_trash_as(&row.path, &entry)? {
-                    done.keep_for_retry();
-                    return Ok(io_outcome(e));
-                }
-                // In the trash: the record is recovery's from here, whatever leaves this (a DB
-                // error too), unless the old version comes back in the run.
-                self.placed(node);
-                if self.crash_here(CrashPoint::AfterTrashed) {
-                    return Ok(Outcome::Retry("crash point reached".into()));
-                }
-                if Self::take_one(&self.cfg.fail_db_after_trash) {
-                    return Err(StateError::Conflict("the DB failed (a test)".into()).into());
-                }
                 let placed = match Self::take_one(&self.cfg.fail_after_trash) {
                     true => Err(FileIoError::Io(io::Error::other(
                         "not put in place (a test)",
                     ))),
                     false => self.put(target, |at| done.persist_new(at, created_ms))?,
                 };
+                // Not put in place: the old version comes back at once, which nothing can have
+                // taken since (left in the trash, the next plan takes its absence for the user
+                // deleting it, against the drive's edit: a conflict, and the download again).
+                // Where that fails it stays there, as nothing else is worse.
                 if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_))) {
-                    if let Err(e) = self.restore_from_trash(&entry, &row.path)? {
-                        // Still in the trash: the record stays, for recovery to bring it back.
-                        return Ok(io_outcome(e));
-                    }
-                    // Back: nothing of it is anywhere else, and the record goes.
-                    self.db.write(|s| s.delete_placing(node))?;
+                    self.restore_from_trash(&entry, &row.path)?.ok();
                 }
                 placed
             }
@@ -482,7 +452,7 @@ impl Executor<'_> {
                 tags,
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
-            settle_placement(s, &record, os).map(|p| p.at)
+            settle_placement(s, &record, os, &mut HashMap::new()).map(|p| p.at)
         });
         // The DB failing stops the run; the record is the next sync's recovery's.
         let at = match committed {

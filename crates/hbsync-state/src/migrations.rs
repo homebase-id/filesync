@@ -280,11 +280,6 @@ const MIGRATIONS: &[&str] = &[
     // commit, a sixth of what deleting a folder of files writes), and only emptying as listed
     // reads by it, a scan of Recently deleted then.
     "DROP INDEX removed_seq;",
-    // 13: where a download put the old version it replaces from another folder in the trash
-    // (its path, and its entry in the trash), noted before it goes there: recovery brings it
-    // back where the new one isn't in place.
-    "ALTER TABLE placing ADD COLUMN trashed_from TEXT;
-    ALTER TABLE placing ADD COLUMN trashed_to TEXT;",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.

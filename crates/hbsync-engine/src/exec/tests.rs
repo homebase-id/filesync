@@ -231,7 +231,6 @@ fn recovery_writes_the_commits_base() -> R {
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
         held_ms: None,
-        trashed: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
     recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
@@ -274,7 +273,6 @@ fn recovery_reads_the_tags_the_item_was_placed_with() -> R {
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
         held_ms: None,
-        trashed: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
     recover_placements(&mut h.db, &h.cfg.root, Os::Linux, h.cfg.algorithm)?;
@@ -341,7 +339,6 @@ fn a_record_it_cannot_settle(gone: bool) -> Result<(Harness, Placing), Box<dyn s
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
         held_ms: None,
-        trashed: None,
     };
     h.db.write(|s| {
         if !gone {
@@ -482,7 +479,6 @@ fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
             prior_tags: None,
             base_at: PlannedBase::Unchecked,
             held_ms: None,
-            trashed: None,
         })
     })?;
     // The scan finds the folder, made without tags.
@@ -838,7 +834,6 @@ fn a_removed_tag_stays_removed_through_recovery() -> R {
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(base.version),
             held_ms: None,
-            trashed: None,
         })
     })?;
     // The scan finds the new bytes, untagged.
@@ -967,7 +962,6 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::Absent,
             held_ms: None,
-            trashed: None,
         })?;
         // Pulled before: nothing marked now.
         s.clear_dirty(child)
@@ -1423,7 +1417,6 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::Absent,
             held_ms: None,
-            trashed: None,
         },
         Placing {
             base: BaseRow::new(folder, folder_state.clone(), folder_at),
@@ -1432,7 +1425,6 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(folder_at.version),
             held_ms: None,
-            trashed: None,
         },
     ];
     h.db.write(|s| {
@@ -2019,7 +2011,6 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
         held_ms: None,
-        trashed: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
     let row = LocalRow {
@@ -2033,7 +2024,7 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
     };
     let os = h.cfg.os;
     let applied =
-        h.db.write(|s| apply(s, &record, Judged::Settle(row), os, 0))?;
+        h.db.write(|s| apply(s, &record, Judged::Settle(row), os, 0, &mut HashMap::new()))?;
     assert!(matches!(applied, Applied::Kept));
     assert_eq!(h.records()?, [record]);
     let path = RelPath::new("f")?;
@@ -2066,7 +2057,6 @@ fn a_record_in_an_unreadable_folder_stays() -> R {
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
         held_ms: None,
-        trashed: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
     let p = h.cfg.root.join("p");
@@ -2451,8 +2441,9 @@ fn trash_harnesses() -> Result<Vec<Harness>, Box<dyn std::error::Error>> {
 }
 
 /// The download puts the old version in the trash, then can't put the new one in place: the
-/// old version comes back, and its emptied entry in the trash goes. Left in the trash, the next
-/// plan took its absence for the user deleting it, and deleted it on the drive.
+/// old version comes back at once, and its emptied entry in the trash goes. Left in the trash,
+/// the next plan took its absence for the user deleting it (against the drive's edit: a
+/// conflict, and the download again).
 #[test]
 fn an_old_version_comes_back_when_the_new_one_fails() -> R {
     for mut h in trash_harnesses()? {
@@ -2466,138 +2457,33 @@ fn an_old_version_comes_back_when_the_new_one_fails() -> R {
         assert_eq!(h.records()?, []);
         let row = h.db.read(|s| s.local_by_node(node))?;
         assert_eq!(row.map(|r| r.path.to_string()), Some("p1/f".into()));
+        let plan = plan_of(&mut h, &[node])?;
+        assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
     }
     Ok(())
 }
 
-/// The same, bringing it back failing too: the record, noting where it went, stays, and
-/// recovery brings it back.
+/// The same, bringing it back failing too: it stays in the trash, as on main, and nothing holds
+/// the node: the next plan downloads the new version.
 #[test]
-fn recovery_brings_back_an_old_version_the_run_couldnt() -> R {
-    for mut h in trash_harnesses()? {
-        let (node, op) = a_download_from_another_folder(&mut h)?;
-        h.cfg
-            .fail_after_trash
-            .store(1, std::sync::atomic::Ordering::Relaxed);
-        h.cfg
-            .fail_restores
-            .store(1, std::sync::atomic::Ordering::Relaxed);
-        h.run(vec![op])?;
-        assert!(!h.at("p1/f")?.exists());
-        assert!(h.records()?[0].trashed.is_some());
-        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
-        assert_eq!(fs::read(h.at("p1/f")?)?, b"A");
-        assert_eq!(h.records()?, []);
-        assert_eq!(trash_entries(&h), Vec::<String>::new());
-        let row = h.db.read(|s| s.local_by_node(node))?;
-        assert_eq!(row.map(|r| r.path.to_string()), Some("p1/f".into()));
-    }
-    Ok(())
-}
-
-/// The same, the DB failing once the old version is in the trash: the operation fails, the
-/// record noting where it went stays (its failure doesn't drop it), and recovery brings it
-/// back.
-#[test]
-fn a_db_failure_after_the_trash_keeps_the_record() -> R {
+fn an_old_version_that_cant_come_back_stays_in_the_trash() -> R {
     let mut h = Harness::new()?;
-    let (_, op) = a_download_from_another_folder(&mut h)?;
+    let (node, op) = a_download_from_another_folder(&mut h)?;
     h.cfg
-        .fail_db_after_trash
+        .fail_after_trash
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg
+        .fail_restores
         .store(1, std::sync::atomic::Ordering::Relaxed);
     h.run(vec![op])?;
     assert!(!h.at("p1/f")?.exists());
-    assert!(h.records()?[0].trashed.is_some());
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
-    assert_eq!(fs::read(h.at("p1/f")?)?, b"A");
-    assert_eq!(h.records()?, []);
-    Ok(())
-}
-
-/// The same, a crash between putting the old version in the trash and the new one in place,
-/// the scan at the next start finding the old one gone: recovery brings it back, as the node's,
-/// so the next plan deletes nothing; ordered as any rename (its folder synced before a commit
-/// is made durable, the row's too).
-#[test]
-fn recovery_brings_back_an_old_version_a_crash_left_in_the_trash() -> R {
-    for mut h in trash_harnesses()? {
-        let (node, op) = a_download_from_another_folder(&mut h)?;
-        h.cfg.crash_at = Some(CrashPoint::AfterTrashed);
-        assert!(h.run(vec![op]).is_err());
-        assert!(!h.at("p1/f")?.exists());
-        h.db.write(|s| s.delete_local(node))?;
-        // What the crashed run left to sync is synced: a new start.
-        h.db.write_durable(|s| s.clear_dirty(node))?;
-        let p1 = h.at("p1")?;
-        assert!(!h.db.folder_unsynced(&p1));
-        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
-        assert!(h.db.folder_unsynced(&p1));
-        assert_eq!(fs::read(h.at("p1/f")?)?, b"A");
-        assert_eq!(h.records()?, []);
-        let row = h.db.read(|s| s.local_by_node(node))?;
-        assert_eq!(row.map(|r| r.path.to_string()), Some("p1/f".into()));
-        let plan = plan_of(&mut h, &[node])?;
-        assert!(
-            !plan
-                .ops
-                .iter()
-                .any(|op| matches!(op, Op::RemoteDelete { .. } | Op::LocalTrash { .. })),
-            "{:?}",
-            plan.ops
-        );
-    }
-    Ok(())
-}
-
-/// The same, the old version's folder deleted here meanwhile: it stays in the trash (as what
-/// was in that folder went there), and its record goes instead of holding the node for ever.
-#[test]
-fn recovery_leaves_an_old_version_whose_folder_went() -> R {
-    let mut h = Harness::new()?;
-    let (_, op) = a_download_from_another_folder(&mut h)?;
-    h.cfg.crash_at = Some(CrashPoint::AfterTrashed);
-    assert!(h.run(vec![op]).is_err());
-    fs::remove_dir(h.at("p1")?)?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
-    assert_eq!(h.records()?, []);
     assert_eq!(trash_entries(&h).len(), 1);
-    Ok(())
-}
-
-/// The new version put in place and its commit lost, then, before recovery settles it, its
-/// file held too long unhashed, or changed (other bytes): its record goes, and the old version
-/// stays in the trash. The new file is there: bringing the old one back would make two.
-#[test]
-fn recovery_leaves_the_old_version_where_the_new_one_is_there() -> R {
-    for changed in [false, true] {
-        let mut h = Harness::new()?;
-        let (node, op) = a_download_from_another_folder(&mut h)?;
-        h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
-        assert!(h.run(vec![op]).is_err());
-        assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
-        let record = h.records()?.remove(0);
-        assert!(record.trashed.is_some());
-        // The scan finds the old version gone, and the new one.
-        h.db.write(|s| s.delete_local(node))?;
-        if changed {
-            h.local_file("p2/f", node, b"C")?;
-        } else {
-            // Not hashed, and held for longer than the hold.
-            h.local_file("p2/f", node, b"B")?;
-            let row = h.db.read(|s| s.local_by_node(node))?.expect("its row");
-            let since = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
-            h.db.write(|s| {
-                s.put_local(&LocalRow { hash: None, ..row })?;
-                s.put_placing(&Placing {
-                    held_ms: Some(since),
-                    ..record
-                })
-            })?;
-        }
-        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
-        assert_eq!(h.records()?, []);
-        assert!(!h.at("p1/f")?.exists(), "changed {changed}: brought back");
-    }
+    assert_eq!(h.records()?, []);
+    // The scan finds the old version gone.
+    h.db.write(|s| s.delete_local(node))?;
+    let plan = plan_of(&mut h, &[node])?;
+    h.run(plan.ops)?;
+    assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
     Ok(())
 }
 
@@ -2827,7 +2713,6 @@ fn recovery_checks_the_base_the_record_saw() -> R {
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(planned.version),
             held_ms: None,
-            trashed: None,
         })?;
         s.clear_dirty(node)
     })?;
@@ -3047,7 +2932,6 @@ fn recovery_of_a_deleted_folder_marks_what_is_in_it() -> R {
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::At(some_version().version),
         held_ms: None,
-        trashed: None,
     };
     let content = h.content(b"A");
     h.db.write(|s| {
@@ -3254,4 +3138,129 @@ fn a_recoloured_tag_counts_as_not_sent_up() {
     assert!(!super::transfer_ops::tags_lost(&red3, &red3, &red3));
     // Not to be written so (the drive's colour won): nothing lost.
     assert!(!super::transfer_ops::tags_lost(&red3, &red0, &red0));
+}
+
+/// The same, its tag write failing: the folder holds none. It settles against the removed
+/// version as any placement does (the tags both sides agree on), so its base doesn't claim work,
+/// which the next plan would read as this device taking it off.
+#[test]
+fn a_restored_folder_made_here_settles_as_a_placement() -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.cfg.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let node = NodeId::new();
+    let work = Tags::new(vec![Tag::new("Work", 0)]);
+    let mut tagged = NodeContent::folder("a");
+    tagged.set_tags(&work);
+    let at = some_version();
+    h.db.write(|s| {
+        s.put_removed(&RemovedRow {
+            row: MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::Folder, &tagged, None),
+            removed_at: Some(1),
+        })
+    })?;
+    h.cfg
+        .fail_tag_writes
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    let report = h.run(vec![Op::LocalMkdir {
+        node,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        tags: work,
+        drive: None,
+    }])?;
+    assert_eq!(report.done, 1, "{report:?}");
+    let base = h.base(node)?.expect("a base");
+    assert_eq!(base.remote, at);
+    assert_eq!(base.state.tags, Tags::default());
+    Ok(())
+}
+
+/// A file tagged blue here, edited on the drive, and a drive that won't take writes (read-only):
+/// sending blue up fails for good this run, so the download whose tag write fails doesn't wait
+/// for it: it is put in place, as ever.
+#[test]
+fn a_download_doesnt_wait_for_a_tag_the_drive_refused() -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.cfg.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let (node, at) = h.seed("x", b"B")?;
+    let blue = Tags::new(vec![Tag::new("Blue", 0)]);
+    h.local_file("x", node, b"A")?;
+    tags::write_on(&h.at("x")?, &blue)?;
+    h.local_file("x", node, b"A")?;
+    h.scanned_with("x", blue.clone())?;
+    let (a, b) = (h.content(b"A"), h.content(b"B"));
+    let before = some_version();
+    h.db.write(|s| {
+        s.put_base(&BaseRow {
+            local_hash: Some(a.hash),
+            ..BaseRow::new(node, NodeState::file(NodeId::ROOT, "x", a), before)
+        })
+    })?;
+    h.remote.faults().refuse_writes = true;
+    h.cfg
+        .fail_tag_writes
+        .store(10, std::sync::atomic::Ordering::Relaxed);
+    h.run(vec![
+        Op::RemoteTags {
+            node,
+            file_id: at.file_id,
+            expected: at.version,
+            tags: blue.clone(),
+        },
+        Op::LocalDownload {
+            node,
+            parent: NodeId::ROOT,
+            name: "x".into(),
+            replace: true,
+            tags: blue,
+            drive: Some(Box::new(DriveVersion {
+                state: NodeState::file(NodeId::ROOT, "x", b),
+                at,
+                base_at: Some(before.version),
+            })),
+        },
+    ])?;
+    assert_eq!(fs::read(h.at("x")?)?, b"B");
+    Ok(())
+}
+
+/// A node in a role folder in Recently deleted, as the main folder reads it: that folder isn't
+/// the main folder's to bring back (§6.3), so the node isn't taken along from here, as the plan
+/// reads it too.
+#[test]
+fn a_removed_folder_outside_this_part_takes_nothing_along() -> R {
+    let mut h = Harness::new()?;
+    let scope = crate::scope::Scope::main();
+    let role = *scope.outside.iter().next().expect("a role folder");
+    let (node, at) = (NodeId::new(), some_version());
+    let hash = h.content(b"A").hash;
+    h.db.write(|s| {
+        s.put_removed(&RemovedRow {
+            row: MirrorRow::from_content(
+                some_version(),
+                role,
+                NodeId::ROOT,
+                NodeKind::Folder,
+                &NodeContent::folder("Documents"),
+                None,
+            ),
+            removed_at: Some(i64::MAX / 2),
+        })?;
+        s.put_mirror(&MirrorRow::from_content(
+            at,
+            node,
+            role,
+            NodeKind::File,
+            &NodeContent::file("f", 0, 1, false),
+            Some(hash),
+        ))
+    })?;
+    let gone =
+        h.db.read(|s| view::gone_on_drive(s, node, &scope, &mut HashMap::new()))?;
+    assert!(!gone);
+    Ok(())
 }
