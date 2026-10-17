@@ -9,12 +9,12 @@
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
 //! node parked under a temporary name is reported at its original place ([`parked_place`]).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use hbsync_local::Filter;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, RemovedRow, StateError, Store};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
 
 use crate::exec::parked_name;
@@ -213,7 +213,8 @@ pub fn build_input(
     // (node schema, Recently deleted).
     for mut folder in b.input.remote.missing_parents() {
         while !b.input.removed.contains_key(&folder)
-            && let Some(r) = removed_folder(s, folder, scope)?
+            && !scope.outside.contains(&folder)
+            && let Some(r) = s.removed_by_node(folder)?
             && let Some(state) = r.row.state()
         {
             b.input.removed.insert(
@@ -229,55 +230,27 @@ pub fn build_input(
     Ok(b.input)
 }
 
-/// Folder `folder`, missing from the mirror, in Recently deleted as the plan reads it: none
-/// outside this folder's part of the drive (it isn't this folder's to bring back, §6.3).
-fn removed_folder(
-    s: &Store<'_>,
-    folder: NodeId,
-    scope: &Scope,
-) -> Result<Option<RemovedRow>, StateError> {
-    if scope.outside.contains(&folder) {
-        return Ok(None);
-    }
-    s.removed_by_node(folder)
-}
-
 /// Whether the mirror no longer has `node` as the plan reads it: not there, or taken along by
-/// the folder in Recently deleted its folders reach first, written no later than that folder's
-/// removal (the reconciler's `taken_along`, by [`removed_folder`]). `above` keeps what was
-/// found above each folder, for the rest of a batch.
+/// the folder in Recently deleted its folders reach first in this folder's part of the drive,
+/// written no later than that folder's removal (the reconciler's `taken_along`; one outside,
+/// as the view leaves it out, isn't this folder's to bring back).
 pub(crate) fn gone_on_drive(
     s: &Store<'_>,
     node: NodeId,
     scope: &Scope,
-    above: &mut HashMap<NodeId, Option<i64>>,
 ) -> Result<bool, StateError> {
     let Some(row) = s.get_mirror(node)? else {
         return Ok(true);
     };
-    // Nothing in Recently deleted: nothing taken along (the walk up costs a query a level).
-    if !s.has_removed()? {
+    let coords = s.coords()?;
+    let Some((folder, at)) = s.removed_above(coords.to_drive(row.parent), coords.top)? else {
+        return Ok(false);
+    };
+    if scope.outside.contains(&coords.from_drive(folder)) {
         return Ok(false);
     }
-    let mut chain = Vec::new();
-    let mut at = row.parent;
-    let found = loop {
-        if let Some(known) = above.get(&at) {
-            break *known;
-        }
-        if at.is_root() || chain.contains(&at) {
-            break None;
-        }
-        chain.push(at);
-        match s.get_mirror(at)? {
-            Some(up) => at = up.parent,
-            None => break removed_folder(s, at, scope)?.map(|r| r.time()),
-        }
-    };
-    for folder in chain {
-        above.insert(folder, found);
-    }
-    Ok(found.is_some_and(|removed| row.changed_at.is_none_or(|c| c <= removed)))
+    let removed = hbsync_types::activity::removal_time(at);
+    Ok(row.changed_at.is_none_or(|c| c <= removed))
 }
 
 struct Builder<'s, 'c> {

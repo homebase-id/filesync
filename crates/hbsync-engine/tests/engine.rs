@@ -5,7 +5,7 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use hbsync_engine::exec::CrashPoint;
+use hbsync_engine::exec::{CrashPoint, FailPoint};
 use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;
 use hbsync_remote::{
@@ -684,12 +684,12 @@ fn a_placement_whose_commit_failed_is_kept(
     names: &[&str],
 ) -> R {
     let server = server();
-    let faults = Arc::new(AtomicUsize::new(0));
+    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
     let failing = Arc::clone(&faults);
     let mut b = Client::with_config(&server, "b", move |c| {
         c.batch = 1;
-        c.exec.fail_commits = Arc::clone(&failing);
+        c.exec.faults = Arc::clone(&failing);
     })?;
     setup(&a)?;
     a.sync()?;
@@ -705,10 +705,10 @@ fn a_placement_whose_commit_failed_is_kept(
     change(&a)?;
     a.write("g", "new")?;
     a.sync()?;
-    faults.store(usize::MAX, Ordering::Relaxed);
+    faults.fail(FailPoint::Commit, usize::MAX);
     b.engine.scan_local()?;
     assert!(b.engine.sync_once("2026-10-08").is_err(), "the run stops");
-    faults.store(0, Ordering::Relaxed);
+    faults.fail(FailPoint::Commit, 0);
     // The next sync, before any scan: its recovery looks at the disk itself, and takes the
     // item for its node.
     b.engine.sync_once("2026-10-08")?;
@@ -2349,7 +2349,7 @@ fn seed_role(
 }
 
 fn unscoped(cfg: &mut hbsync_engine::EngineConfig) {
-    cfg.scope = Arc::new(hbsync_engine::scope::Scope {
+    cfg.exec.scope = Arc::new(hbsync_engine::scope::Scope {
         top: hbsync_types::NodeId::ROOT,
         outside: Default::default(),
     });

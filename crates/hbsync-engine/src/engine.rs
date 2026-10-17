@@ -36,8 +36,6 @@ pub struct EngineConfig {
     pub mass_delete_min: usize,
     pub mass_delete_fraction: f64,
     pub allow_mass_delete: bool,
-    /// The part of the drive this engine syncs (§12).
-    pub scope: Arc<Scope>,
 }
 
 impl EngineConfig {
@@ -53,13 +51,9 @@ impl EngineConfig {
                 case_insensitive: crate::exec::probe_case_insensitive(root),
                 filter: Default::default(),
                 tags_kept: Default::default(),
+                scope: Arc::new(Scope::main()),
                 crash_at: None,
-                fail_commits: Arc::default(),
-                fail_reads: Arc::default(),
-                fail_tag_writes: Arc::default(),
-                fail_tag_reads: Arc::default(),
-                fail_after_trash: Arc::default(),
-                fail_restores: Arc::default(),
+                faults: Arc::default(),
             },
             device: device.to_owned(),
             max_rounds: 8,
@@ -67,7 +61,6 @@ impl EngineConfig {
             mass_delete_min: 50,
             mass_delete_fraction: 0.25,
             allow_mass_delete: false,
-            scope: Arc::new(Scope::main()),
         }
     }
 }
@@ -212,12 +205,12 @@ impl Engine {
         let top = db
             .read(|s| Ok(s.coords()?.top))
             .unwrap_or(hbsync_types::NodeId::ROOT);
-        if cfg.scope.top != top {
-            cfg.scope = Arc::new(Scope::of(top));
+        if cfg.exec.scope.top != top {
+            cfg.exec.scope = Arc::new(Scope::of(top));
         }
         let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
         scan_opts.filter = Arc::clone(&cfg.exec.filter);
-        let remote = cfg.scope.remote(drive.shared_remote());
+        let remote = cfg.exec.scope.remote(drive.shared_remote());
         Engine {
             db,
             drive,
@@ -325,7 +318,7 @@ impl Engine {
     /// the new fingerprint, so a crash can't skip it.
     pub fn apply_filter_change(&mut self) -> Result<bool, StateError> {
         let fingerprint = self.cfg.exec.filter.fingerprint();
-        let scope = self.cfg.scope.fingerprint();
+        let scope = self.cfg.exec.scope.fingerprint();
         self.db.write(|s| {
             // A new scope (§12) changes what is in view remotely only: no walk. The folders it
             // or the last one left out are planned again from their tops, which brings what
@@ -333,7 +326,7 @@ impl Engine {
             let last = s.get_kv(keys::SCOPE)?;
             if last.as_deref() != Some(scope.as_str()) {
                 let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
-                last.union(&self.cfg.scope.outside)
+                last.union(&self.cfg.exec.scope.outside)
                     .try_for_each(|n| s.mark_dirty(*n))?;
                 s.set_kv(keys::SCOPE, &scope)?;
             }
@@ -396,14 +389,14 @@ impl Engine {
             None => self.drive.pull(Some(self.db.folder()))?,
         };
         // A role folder's top on the drive: joined, restored, or made.
-        if let Some(role) = hbsync_types::Role::of(self.cfg.scope.top) {
+        if let Some(role) = hbsync_types::Role::of(self.cfg.exec.scope.top) {
             self.drive.ensure_role(role)?;
         }
         report.adopted = adopt(
             &mut self.db,
             &self.cfg.exec.root,
             self.cfg.exec.os,
-            &self.cfg.scope,
+            &self.cfg.exec.scope,
         )?;
 
         // The guard must judge the whole delete, even when it is planned in several batches;
@@ -444,7 +437,7 @@ impl Engine {
             confirmed: Arc::new(self.confirmed.clone()),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
             filter: Arc::clone(&self.cfg.exec.filter),
-            scope: Arc::clone(&self.cfg.scope),
+            scope: Arc::clone(&self.cfg.exec.scope),
             taken: Arc::default(),
         };
         // The dirty set is planned page by page in node id order and swept round after
@@ -534,15 +527,10 @@ impl Engine {
         // What an earlier round left placed (its operation failed after), as at the start of a
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
-        recover_placements(
-            &mut self.db,
-            &self.cfg.exec.root,
-            os,
-            self.cfg.exec.algorithm,
-        )?;
-        let input = self
-            .db
-            .read(|s| view::build_input(s, dirty, os, &self.cfg.exec.filter, &self.cfg.scope))?;
+        recover_placements(&mut self.db, &self.cfg.exec)?;
+        let input = self.db.read(|s| {
+            view::build_input(s, dirty, os, &self.cfg.exec.filter, &self.cfg.exec.scope)
+        })?;
         let db = &mut self.db;
         let plan = reconcile_with_known(&input, opts, |id| {
             db.read(|s| s.knows_node(id)).unwrap_or(true)

@@ -115,35 +115,21 @@ impl Executor<'_> {
         // folder's engine pulled the next version), the next plan decides on that. Its commit
         // settles against it; kept until then, its tags not known until written.
         let ours = self.settled.get(&node).copied();
+        let own = |d: &DriveVersion| {
+            ours == Some(mirror.remote_ref())
+                && base_at == ours.map(|o| o.version)
+                && d.state.content.map(|c| c.hash) == Some(expected)
+        };
         let acted = match drive {
-            Some(d) if d.at != mirror.remote_ref() => {
-                let same_bytes =
-                    |m: &NodeState| m.content.map(|c| c.hash) == d.state.content.map(|c| c.hash);
-                match mirror.state() {
-                    Some(state)
-                        if ours == Some(mirror.remote_ref())
-                            && base_at == ours.map(|o| o.version)
-                            && same_bytes(&state) =>
-                    {
-                        DriveVersion {
-                            state,
-                            at: mirror.remote_ref(),
-                            base_at,
-                        }
-                    }
-                    _ => return Err(Outcome::stale("changed on the drive since the plan")),
-                }
+            Some(d) if d.at == mirror.remote_ref() => d.clone(),
+            Some(d) if !own(d) => {
+                return Err(Outcome::stale("changed on the drive since the plan"));
             }
-            Some(d) => d.clone(),
-            None => DriveVersion {
-                state: mirror.state().ok_or_else(|| Outcome::stale("not a file"))?,
-                at: mirror.remote_ref(),
-                base_at,
-            },
+            _ => DriveVersion::of(&mirror, base_at).ok_or_else(|| Outcome::stale("not a file"))?,
         };
         // It claims the tags it is to write (the empty set too), as they read back once
         // written: where the volume keeps none, not known.
-        let kept = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
+        let kept = self.tags_kept();
         let record = Placing {
             base: BaseRow::new(node, acted.state, acted.at),
             target,
@@ -351,12 +337,11 @@ impl Executor<'_> {
         // file can be seen there: only that costs a commit.
         // Only a volume that keeps no tags says so for the rest: a set that fails or reads
         // back as nothing to go by doesn't.
-        let left = self.write_tags_left(done.path(), &to_write);
-        let failed = left.is_none();
+        let left = self.write_tags(done.path(), &to_write);
         // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
         // not sent up yet): not put in place then, for a retry, the plan sending it up
         // meanwhile; unless the drive refused it for good this run (then as ever: placed).
-        if failed
+        if left.failed
             && !self.tags_refused.contains(&node)
             && let Some(held) = current.as_ref().and_then(|r| r.tags.as_ref())
             && tags_lost(held, &to_write, &record.base.state.tags)
@@ -364,13 +349,12 @@ impl Executor<'_> {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }
-        let tags = left.flatten();
-        if tags != record.placed_tags {
-            record.placed_tags = tags.clone();
+        if left.claimed != record.placed_tags {
+            record.placed_tags = left.claimed;
             self.write_durable(|s| s.put_placing(&record))?;
         }
         // The record claims only what read back; the row holds what the file holds.
-        let tags = self.tags_after_write(done.path(), (!failed).then_some(tags));
+        let tags = left.held;
         let placed = match &current {
             Some(row) if &row.path == target => self.put(target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
@@ -387,7 +371,7 @@ impl Executor<'_> {
                         return Ok(io_outcome(e));
                     }
                 };
-                let placed = match Self::take_one(&self.cfg.fail_after_trash) {
+                let placed = match self.fails(FailPoint::AfterTrash) {
                     true => Err(FileIoError::Io(io::Error::other(
                         "not put in place (a test)",
                     ))),
@@ -411,9 +395,9 @@ impl Executor<'_> {
             }
         };
         let placed = match placed {
-            Ok(_) if self.read_fails() => Err(FileIoError::PlacedUnread(io::Error::other(
-                "its read failed (a test)",
-            ))),
+            Ok(_) if self.fails(FailPoint::PlacedRead) => Err(FileIoError::PlacedUnread(
+                io::Error::other("its read failed (a test)"),
+            )),
             placed => placed,
         };
         let meta = match placed {
@@ -432,8 +416,8 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
         let target = target.clone();
-        let os = self.cfg.os;
-        let fails = self.commit_fails();
+        let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
+        let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {
                 return Err(StateError::Conflict("the commit failed (a test)".into()));
@@ -452,7 +436,7 @@ impl Executor<'_> {
                 tags,
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
-            settle_placement(s, &record, os, &mut HashMap::new()).map(|p| p.at)
+            settle_placement(s, &record, &scope, os).map(Placed::at)
         });
         // The DB failing stops the run; the record is the next sync's recovery's.
         let at = match committed {
@@ -466,7 +450,7 @@ impl Executor<'_> {
 
 /// Whether a download whose tag write failed loses a tag: one the item there holds (`held`) as
 /// the download was to write it, that the drive doesn't hold so (a colour changed here too).
-pub(super) fn tags_lost(held: &Tags, to_write: &Tags, drive: &Tags) -> bool {
+pub fn tags_lost(held: &Tags, to_write: &Tags, drive: &Tags) -> bool {
     held.iter()
         .any(|t| to_write.get(&t.name) == Some(t) && drive.get(&t.name) != Some(t))
 }

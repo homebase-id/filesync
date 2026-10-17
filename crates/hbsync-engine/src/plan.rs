@@ -352,6 +352,17 @@ pub struct DriveVersion {
     pub base_at: Option<VersionTag>,
 }
 
+impl DriveVersion {
+    /// The version mirror row `m` holds, for a write over it, the base having been at `base_at`.
+    pub fn of(m: &hbsync_state::MirrorRow, base_at: Option<VersionTag>) -> Option<DriveVersion> {
+        Some(DriveVersion {
+            state: m.state()?,
+            at: m.remote_ref(),
+            base_at,
+        })
+    }
+}
+
 /// What an operation did to its item's tags, for the base's (sync semantics §11). The base
 /// records exactly what a local write wrote, tag by tag, never a recomputation against an
 /// older version: the next plan compares the drive's newer value with the written one, and

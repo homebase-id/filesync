@@ -1847,9 +1847,7 @@ impl Sim {
             if let Op::LocalDownload { tags, .. } = &op
                 && let Some(record) = &self.placed_from
                 && before_tags.as_ref().is_some_and(|held| {
-                    held.iter().any(|t| {
-                        tags.get(&t.name).is_some() && record.state.tags.get(&t.name).is_none()
-                    })
+                    hbsync_engine::exec::tags_lost(held, tags, &record.state.tags)
                 })
             {
                 self.placed_from = None;

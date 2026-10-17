@@ -83,14 +83,9 @@ impl Executor<'_> {
         };
         // What it acts on: the drive's version the plan saw (for one synced before, the
         // mirror's if the plan saw none, for the record). The base settles against it.
-        let acted = drive.cloned().or_else(|| {
-            let m = mirror.as_ref().filter(|_| synced_before)?;
-            Some(DriveVersion {
-                state: m.state()?,
-                at: m.remote_ref(),
-                base_at,
-            })
-        });
+        let acted = drive
+            .cloned()
+            .or_else(|| DriveVersion::of(mirror.as_ref().filter(|_| synced_before)?, base_at));
         // Its write-ahead record, kept for a folder this device synced before: with the commit
         // lost, the scan would find it as a new folder, which adoption doesn't pair with a node
         // that has a base (`recover_placements` does, by this record). Its base is the version
@@ -109,7 +104,7 @@ impl Executor<'_> {
         };
         // Where the volume keeps no tags (this OS none), what it holds of them is never known:
         // it claims none, as a download does.
-        let kept_tags = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
+        let kept_tags = self.tags_kept();
         let none = tags.held_by(self.cfg.os).is_empty();
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
@@ -136,8 +131,8 @@ impl Executor<'_> {
         if !adopt && self.crash_here(CrashPoint::AfterPlaced) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        let written = self.write_tags_left(&abs, tags);
-        let tags = written.clone().flatten();
+        let left = self.write_tags(&abs, tags);
+        let tags = left.claimed.clone();
         // Tags written: the record claims what the folder holds now, before its commit. A
         // folder taken over held its own: a failed write left those, not known (none claimed).
         if kept_tags
@@ -153,7 +148,7 @@ impl Executor<'_> {
         if let Some(ct) = created_ms {
             let _ = ops::set_created(&abs, ct);
         }
-        let stat = match self.read_fails() {
+        let stat = match self.fails(FailPoint::PlacedRead) {
             true => Err(io::Error::other("its read failed (a test)")),
             false => hbsync_platform::stat(&abs),
         };
@@ -175,32 +170,28 @@ impl Executor<'_> {
             fingerprint: meta.fingerprint(),
             executable: None,
             hash: None,
-            tags: self.tags_after_write(&abs, written),
+            tags: left.held,
         };
-        let os = self.cfg.os;
-        let fails = self.commit_fails();
+        let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
+        let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {
                 return Err(StateError::Conflict("the commit failed (a test)".into()));
             }
             s.put_local(&row)?;
             match &record {
-                Some(r) => settle_placement(s, r, os, &mut HashMap::new()).map(|p| p.at),
+                Some(r) => settle_placement(s, r, &scope, os).map(Placed::at),
                 None => {
                     // Made from Recently deleted (its folder restored, its RemoteCreate to
                     // follow): it settles against the version there, what it was made of, as
-                    // any placement does (its spelling recorded): the base until the restore
-                    // settles. Without one, a tag removed on the drive meanwhile read as this
-                    // device adding it, and came back.
-                    let removed = match s.get_base(node)? {
-                        None => s.removed_by_node(node)?.and_then(|r| {
-                            Some(DriveVersion {
-                                state: r.row.state()?,
-                                at: r.row.remote_ref(),
-                                base_at: None,
-                            })
-                        }),
-                        Some(_) => None,
+                    // any placement does: the base until the restore settles. Without one, a
+                    // tag removed on the drive meanwhile read as this device adding it, and
+                    // came back.
+                    let removed = match s.get_base(node)?.is_none() {
+                        true => s
+                            .removed_by_node(node)?
+                            .and_then(|r| DriveVersion::of(&r.row, None)),
+                        false => None,
                     };
                     let at = settle(
                         s,
@@ -240,10 +231,9 @@ impl Executor<'_> {
         if !self.on_disk_unchanged(&row) || folder_retagged {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let written = self.write_tags_left(&abs, tags);
         // A failed write leaves the item what it held: read so, not as not known (which reads
         // as the drive's tags, and a tag only the item has would never go up).
-        let read = self.tags_after_write(&abs, written);
+        let read = self.write_tags(&abs, tags).held;
         // Writing tags moves the change time only (a folder's mtime moves with its children).
         // If anything else moved, the item changed meanwhile: the old row stays, and the
         // rescan looks at it.
@@ -482,7 +472,7 @@ impl Executor<'_> {
         entry: &Path,
         path: &RelPath,
     ) -> Result<io::Result<()>, StateError> {
-        if Self::take_one(&self.cfg.fail_restores) {
+        if self.fails(FailPoint::Restore) {
             return Ok(Err(io::Error::other("bringing it back failed (a test)")));
         }
         let back = rename_ordered(self.db, entry, &self.abs(path))?;

@@ -4,6 +4,7 @@
 use super::recover::recover_placements;
 use super::*;
 use crate::engine::EngineConfig;
+use crate::scope::Scope;
 use hbsync_fileio::hash_bytes;
 use hbsync_platform::tags;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
@@ -233,7 +234,7 @@ fn recovery_writes_the_commits_base() -> R {
         held_ms: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     let base = h.base(node)?.ok_or("no base")?;
     assert_eq!(base.state.content, Some(fetched));
     assert_eq!(base.remote, at);
@@ -275,7 +276,13 @@ fn recovery_reads_the_tags_the_item_was_placed_with() -> R {
         held_ms: None,
     };
     h.db.write(|s| s.put_placing(&record))?;
-    recover_placements(&mut h.db, &h.cfg.root, Os::Linux, h.cfg.algorithm)?;
+    recover_placements(
+        &mut h.db,
+        &ExecConfig {
+            os: Os::Linux,
+            ..h.cfg.clone()
+        },
+    )?;
     let base = h.base(node)?.ok_or("no base")?;
     assert_eq!(base.state.tags, work);
     Ok(())
@@ -289,7 +296,7 @@ fn recovery_reads_the_tags_the_item_was_placed_with() -> R {
 fn recovery_keeps_a_record_it_cannot_settle() -> R {
     let (mut h, record) = a_record_it_cannot_settle(false)?;
     let node = record.base.node;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.base(node)?, None);
     assert_eq!(h.db.read(|s| s.all_placing())?, [record]);
     // Taken over: the next recovery finds it as the node's.
@@ -304,7 +311,7 @@ fn recovery_keeps_a_record_it_cannot_settle() -> R {
 fn recovery_holds_a_record_of_a_deleted_node_it_cannot_settle() -> R {
     let (mut h, record) = a_record_it_cannot_settle(true)?;
     let node = record.base.node;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     let held = h.db.read(|s| s.get_placing(node))?.expect("held");
     assert!(held.held_ms.is_some(), "{held:?}");
     assert_eq!(h.base(node)?, None);
@@ -316,7 +323,7 @@ fn recovery_holds_a_record_of_a_deleted_node_it_cannot_settle() -> R {
             ..held
         })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
     Ok(())
 }
@@ -422,7 +429,7 @@ fn a_folder_made_before_its_tags_keeps_them_on_the_drive() -> R {
     // The scan finds the folder without tags.
     h.local_folder("d", NodeId::new())?;
     h.scanned_with("d", Tags::default())?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         !plan
@@ -484,7 +491,7 @@ fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
     // The scan finds the folder, made without tags.
     h.local_folder("d", NodeId::new())?;
     h.scanned_with("d", Tags::default())?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
     let plan = plan_of(&mut h, &[node])?;
     assert!(
@@ -591,7 +598,7 @@ fn no_placement_takes_tags_off_the_drive_where_none_are_kept() -> R {
                     true => h.local_folder("x", NodeId::new())?,
                     false => h.local_file("x", NodeId::new(), b"A")?,
                 }
-                recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+                recover_placements(&mut h.db, &h.cfg)?;
             } else {
                 h.run(vec![op])?;
             }
@@ -622,7 +629,13 @@ fn a_tag_added_before_recovery_goes_up() -> R {
     let red = Tags::new(vec![Tag::new("Red", 0)]);
     h.local_file("f", NodeId::new(), b"A")?;
     h.scanned_with("f", red.clone())?;
-    recover_placements(&mut h.db, &h.cfg.root, Os::Linux, h.cfg.algorithm)?;
+    recover_placements(
+        &mut h.db,
+        &ExecConfig {
+            os: Os::Linux,
+            ..h.cfg.clone()
+        },
+    )?;
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         plan.ops.iter().any(
@@ -756,7 +769,7 @@ fn base_after_a_download(crash: bool) -> Result<Option<BaseRow>, Box<dyn std::er
         let read = tags::read(&h.cfg.root.join("f"));
         h.local_file("f", node, b"B")?;
         h.scanned_with("f", read.unwrap_or_default())?;
-        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+        recover_placements(&mut h.db, &h.cfg)?;
         assert_eq!(h.records()?, []);
     }
     // Each harness has its own node: the rest is compared.
@@ -839,7 +852,13 @@ fn a_removed_tag_stays_removed_through_recovery() -> R {
     // The scan finds the new bytes, untagged.
     h.local_file("f", NodeId::new(), b"B")?;
     h.scanned_with("f", Tags::default())?;
-    recover_placements(&mut h.db, &h.cfg.root, Os::Linux, h.cfg.algorithm)?;
+    recover_placements(
+        &mut h.db,
+        &ExecConfig {
+            os: Os::Linux,
+            ..h.cfg.clone()
+        },
+    )?;
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         !plan.ops.iter().any(|op| matches!(op, Op::LocalTags { .. })),
@@ -901,7 +920,7 @@ fn a_tag_write_that_fails_is_never_claimed() -> R {
     // The scan finds the file; recovery writes what the commit would have: the drive's tags.
     let node = h.db.read(|s| s.all_placing())?[0].base.node;
     h.local_file("f", NodeId::new(), b"A")?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.base(node)?.ok_or("no base")?.state.tags, huge);
     Ok(())
 }
@@ -967,7 +986,7 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
         s.clear_dirty(child)
     })?;
     h.local_folder("d", NodeId::new())?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert!(h.base(folder)?.is_some());
     assert!(
         h.db.read(|s| s.is_dirty(child))?,
@@ -1512,7 +1531,7 @@ fn a_folder_a_round_left_is_taken_by_the_next() -> R {
     assert_eq!(h.records()?.len(), 1);
     h.cfg.crash_at = None;
     // The next round.
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
     assert!(h.base(node)?.is_some());
     let report = h.run(vec![mkdir()])?;
@@ -1769,9 +1788,7 @@ fn a_placement_whose_commit_fails_is_settled_by_recovery() -> R {
             })),
         },
     ];
-    h.cfg
-        .fail_reads
-        .store(2, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::PlacedRead, 2);
     let report = h.run(ops)?;
     assert_eq!(report.done, 2, "{report:?}");
     assert!(
@@ -1853,9 +1870,7 @@ fn files_go_into_a_folder_whose_commit_failed() -> R {
             })),
         });
     }
-    h.cfg
-        .fail_reads
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::PlacedRead, 1);
     let report = h.run(ops)?;
     assert!(report.failed.is_empty(), "{report:?}");
     assert_eq!(report.done, 3, "{report:?}");
@@ -1923,9 +1938,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
             })),
         },
     ];
-    h.cfg
-        .fail_reads
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::PlacedRead, 1);
     h.run(ops)?;
     assert_eq!(fs::read(h.cfg.root.join("b"))?, b"user's edit");
     assert!(h.base(a)?.is_some(), "a isn't settled");
@@ -1938,9 +1951,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
 fn a_new_folder_whose_commit_failed_is_taken_by_its_retry() -> R {
     let mut h = Harness::new()?;
     let node = NodeId::new();
-    h.cfg
-        .fail_reads
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::PlacedRead, 1);
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -2024,7 +2035,7 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
     };
     let os = h.cfg.os;
     let applied =
-        h.db.write(|s| apply(s, &record, Judged::Settle(row), os, 0, &mut HashMap::new()))?;
+        h.db.write(|s| apply(s, &record, Judged::Settle(row), &Scope::main(), os, 0))?;
     assert!(matches!(applied, Applied::Kept));
     assert_eq!(h.records()?, [record]);
     let path = RelPath::new("f")?;
@@ -2062,7 +2073,7 @@ fn a_record_in_an_unreadable_folder_stays() -> R {
     let p = h.cfg.root.join("p");
     fs::set_permissions(&p, fs::Permissions::from_mode(0o000))?;
     let readable = fs::metadata(p.join("f")).is_ok();
-    let recovered = recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm);
+    let recovered = recover_placements(&mut h.db, &h.cfg);
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755))?;
     recovered?;
     if readable {
@@ -2088,7 +2099,7 @@ fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
         let row = s.get_local(&path)?.expect("a row");
         s.put_local(&LocalRow { hash: None, ..row })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     let held = h.records()?.remove(0);
     let since = held.held_ms.expect("held from the first finding") - 5_000;
     h.db.write(|s| {
@@ -2098,7 +2109,7 @@ fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
         })
     })?;
     // A later finding doesn't hold it again.
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?[0].held_ms, Some(since));
     let old = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
     h.db.write(|s| {
@@ -2107,7 +2118,7 @@ fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
             ..held
         })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
     assert!(h.base(node)?.is_none());
     Ok(())
@@ -2127,7 +2138,7 @@ fn a_record_whose_file_cant_be_hashed_yet_stays() -> R {
         let row = s.get_local(&path)?.expect("a row");
         s.put_local(&LocalRow { hash: None, ..row })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?.len(), 1);
     assert!(h.base(node)?.is_none());
     // Hashed now.
@@ -2139,7 +2150,7 @@ fn a_record_whose_file_cant_be_hashed_yet_stays() -> R {
             ..row
         })
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
     assert!(h.base(node)?.is_some());
     Ok(())
@@ -2337,9 +2348,7 @@ fn a_failed_tag_write_removes_nothing(folder: bool) -> R {
             drive,
         },
     };
-    h.cfg
-        .fail_tag_writes
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::TagWrite, 1);
     let report = h.run(vec![op])?;
     assert_eq!(report.done, 1, "{report:?}");
     // The next scan reads what the item holds.
@@ -2448,9 +2457,7 @@ fn trash_harnesses() -> Result<Vec<Harness>, Box<dyn std::error::Error>> {
 fn an_old_version_comes_back_when_the_new_one_fails() -> R {
     for mut h in trash_harnesses()? {
         let (node, op) = a_download_from_another_folder(&mut h)?;
-        h.cfg
-            .fail_after_trash
-            .store(1, std::sync::atomic::Ordering::Relaxed);
+        h.cfg.faults.fail(FailPoint::AfterTrash, 1);
         h.run(vec![op])?;
         assert_eq!(fs::read(h.at("p1/f")?)?, b"A");
         assert_eq!(trash_entries(&h), Vec::<String>::new());
@@ -2469,12 +2476,8 @@ fn an_old_version_comes_back_when_the_new_one_fails() -> R {
 fn an_old_version_that_cant_come_back_stays_in_the_trash() -> R {
     let mut h = Harness::new()?;
     let (node, op) = a_download_from_another_folder(&mut h)?;
-    h.cfg
-        .fail_after_trash
-        .store(1, std::sync::atomic::Ordering::Relaxed);
-    h.cfg
-        .fail_restores
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::AfterTrash, 1);
+    h.cfg.faults.fail(FailPoint::Restore, 1);
     h.run(vec![op])?;
     assert!(!h.at("p1/f")?.exists());
     assert_eq!(trash_entries(&h).len(), 1);
@@ -2552,7 +2555,7 @@ fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
             }
         })?;
         h.local_file(local, node, b"B")?;
-        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+        recover_placements(&mut h.db, &h.cfg)?;
         assert_eq!(h.records()?, []);
         let plan = plan_of(&mut h, &[node])?;
         assert!(
@@ -2637,7 +2640,7 @@ fn a_record_doesnt_bring_back_a_node_taken_along() -> R {
         })
     })?;
     h.local_file("d/f", node, b"B")?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
     let plan = plan_of(&mut h, &[folder, node])?;
     assert!(
@@ -2717,7 +2720,7 @@ fn recovery_checks_the_base_the_record_saw() -> R {
         s.clear_dirty(node)
     })?;
     h.local_file("f", NodeId::new(), b"A")?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.base(node)?, Some(base));
     assert!(h.db.read(|s| s.is_dirty(node))?);
     Ok(())
@@ -2769,7 +2772,7 @@ fn a_download_after_the_runs_own_tag_write(
         let read = tags::read(&h.cfg.root.join("f"));
         h.local_file("f", node, b"B")?;
         h.scanned_with("f", read.unwrap_or_default())?;
-        recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+        recover_placements(&mut h.db, &h.cfg)?;
         assert_eq!(h.records()?, []);
     } else {
         let report = ran?;
@@ -2951,7 +2954,7 @@ fn recovery_of_a_deleted_folder_marks_what_is_in_it() -> R {
         s.put_placing(&record)?;
         s.clear_dirty(child)
     })?;
-    recover_placements(&mut h.db, &h.cfg.root, h.cfg.os, h.cfg.algorithm)?;
+    recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
     assert_eq!(h.base(folder)?.map(|b| b.remote), Some(at));
     assert!(h.db.read(|s| s.is_dirty(child))?);
@@ -2995,9 +2998,7 @@ fn a_failed_tag_write_keeps_what_the_item_holds() -> R {
         ))
     })?;
     let both = Tags::new(vec![Tag::new("Blue", 0), Tag::new("Work", 0)]);
-    h.cfg
-        .fail_tag_writes
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::TagWrite, 1);
     h.run(vec![Op::LocalTags {
         node,
         tags: both,
@@ -3034,12 +3035,8 @@ fn a_failed_tag_write_left_unread_is_not_known() -> R {
         return Ok(()); // nothing to tag with here
     }
     let node = NodeId::new();
-    h.cfg
-        .fail_tag_writes
-        .store(1, std::sync::atomic::Ordering::Relaxed);
-    h.cfg
-        .fail_tag_reads
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::TagWrite, 1);
+    h.cfg.faults.fail(FailPoint::TagRead, 1);
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -3092,9 +3089,7 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
                 )
             })
         })?;
-        h.cfg
-            .fail_tag_writes
-            .store(10, std::sync::atomic::Ordering::Relaxed);
+        h.cfg.faults.fail(FailPoint::TagWrite, 10);
         h.run(vec![Op::LocalDownload {
             node,
             parent: NodeId::ROOT,
@@ -3160,9 +3155,7 @@ fn a_restored_folder_made_here_settles_as_a_placement() -> R {
             removed_at: Some(1),
         })
     })?;
-    h.cfg
-        .fail_tag_writes
-        .store(1, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::TagWrite, 1);
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -3201,9 +3194,7 @@ fn a_download_doesnt_wait_for_a_tag_the_drive_refused() -> R {
         })
     })?;
     h.remote.faults().refuse_writes = true;
-    h.cfg
-        .fail_tag_writes
-        .store(10, std::sync::atomic::Ordering::Relaxed);
+    h.cfg.faults.fail(FailPoint::TagWrite, 10);
     h.run(vec![
         Op::RemoteTags {
             node,
@@ -3234,7 +3225,7 @@ fn a_download_doesnt_wait_for_a_tag_the_drive_refused() -> R {
 #[test]
 fn a_removed_folder_outside_this_part_takes_nothing_along() -> R {
     let mut h = Harness::new()?;
-    let scope = crate::scope::Scope::main();
+    let scope = Scope::main();
     let role = *scope.outside.iter().next().expect("a role folder");
     let (node, at) = (NodeId::new(), some_version());
     let hash = h.content(b"A").hash;
@@ -3259,8 +3250,7 @@ fn a_removed_folder_outside_this_part_takes_nothing_along() -> R {
             Some(hash),
         ))
     })?;
-    let gone =
-        h.db.read(|s| view::gone_on_drive(s, node, &scope, &mut HashMap::new()))?;
+    let gone = h.db.read(|s| view::gone_on_drive(s, node, &scope))?;
     assert!(!gone);
     Ok(())
 }

@@ -62,29 +62,76 @@ pub struct ExecConfig {
     /// Whether the root's volume keeps tags, learned at the first tag write on it: a
     /// download's record claims the tags it is to write only where it does.
     pub tags_kept: Arc<std::sync::OnceLock<bool>>,
+    /// The part of the drive this engine syncs (§12).
+    pub scope: Arc<crate::scope::Scope>,
     /// Tests only: stop the run at this point, as if the process died there.
     #[doc(hidden)]
     pub crash_at: Option<CrashPoint>,
-    /// Tests only: this many placements' commit writes fail once their item is in place: the
-    /// run stops, the record kept for the next sync's recovery.
+    /// Tests only: the steps that fail, and how often ([`FailPoint`]).
     #[doc(hidden)]
-    pub fail_commits: Arc<std::sync::atomic::AtomicUsize>,
-    /// Tests only: this many placements fail to read their item back once it is in place (a
-    /// folder's stat, a file's metadata): recovery settles them in the run.
-    #[doc(hidden)]
-    pub fail_reads: Arc<std::sync::atomic::AtomicUsize>,
-    /// Tests only: this many tag writes fail (the item keeps what it held).
-    #[doc(hidden)]
-    pub fail_tag_writes: Arc<std::sync::atomic::AtomicUsize>,
-    /// Tests only: this many reads of what a failed tag write left fail too.
-    #[doc(hidden)]
-    pub fail_tag_reads: Arc<std::sync::atomic::AtomicUsize>,
-    /// Tests only: this many downloads fail to put the new version in place after the old one
-    /// went to the trash, and this many bringing it back fail.
-    #[doc(hidden)]
-    pub fail_after_trash: Arc<std::sync::atomic::AtomicUsize>,
-    #[doc(hidden)]
-    pub fail_restores: Arc<std::sync::atomic::AtomicUsize>,
+    pub faults: Arc<Faults>,
+}
+
+/// Steps a test can make fail ([`Faults`]).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailPoint {
+    /// A placement's commit write, once its item is in place: the run stops, the record kept
+    /// for the next sync's recovery.
+    Commit,
+    /// Reading a placed item back (a folder's stat, a file's metadata): recovery settles it in
+    /// the run.
+    PlacedRead,
+    /// A tag write: the item keeps what it held.
+    TagWrite,
+    /// Reading what a failed tag write left: not known then.
+    TagRead,
+    /// Putting a download's new version in place, once the old one it replaces from another
+    /// folder is in the trash.
+    AfterTrash,
+    /// Bringing that old version back from the trash.
+    Restore,
+}
+
+/// Tests only: how many more times each [`FailPoint`] fails.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct Faults(std::sync::Mutex<HashMap<FailPoint, usize>>);
+
+impl Faults {
+    /// Makes `point` fail its next `n` times.
+    pub fn fail(&self, point: FailPoint, n: usize) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(point, n);
+    }
+
+    /// Whether `point` fails now (one of its failures taken).
+    pub fn fails(&self, point: FailPoint) -> bool {
+        let mut left = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        match left.get_mut(&point) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// What a tag write left on an item ([`Executor::write_tags`]).
+#[derive(Debug, Clone)]
+struct TagsLeft {
+    /// What read back, for a placement's record to claim (`None`: not known: the write failed,
+    /// read back as nothing to go by, or the volume keeps none).
+    claimed: Option<Tags>,
+    /// What the item holds, for its row: what read back, or where the write failed, what it
+    /// holds as read (not known only where that can't be read either). Taken for not known
+    /// while it can be read, the item read as holding the drive's tags, and the next scan took
+    /// their absence for the user removing them.
+    held: Option<Tags>,
+    failed: bool,
 }
 
 /// Places where a test can make the executor stop as if it crashed.
@@ -629,10 +676,10 @@ impl<'a> Executor<'a> {
                 judge(root, &record, Some(row))
             }
         };
-        let os = self.cfg.os;
+        let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
         match self
             .db
-            .write(|s| apply(s, &record, judged, os, now, &mut HashMap::new()))?
+            .write(|s| apply(s, &record, judged, &scope, os, now))?
         {
             Applied::Settled(at) => {
                 self.note([(node, at)]);
@@ -660,55 +707,49 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Whether a placement's commit write fails, for a test ([`ExecConfig::fail_commits`]).
-    fn commit_fails(&self) -> bool {
-        Self::take_one(&self.cfg.fail_commits)
+    /// Whether test fault `point` fails now ([`ExecConfig::faults`]).
+    fn fails(&self, point: FailPoint) -> bool {
+        self.cfg.faults.fails(point)
     }
 
-    /// Writes `tags` on the item at `path` ([`tags::write_on`]; for a test, fails:
-    /// [`ExecConfig::fail_tag_writes`]): what it left (`None` in it: nothing to go by, or a
-    /// volume that keeps none, which it notes), `None` where it failed.
-    fn write_tags_left(&self, path: &Path, tags: &Tags) -> Option<Option<Tags>> {
-        let written = match Self::take_one(&self.cfg.fail_tag_writes) {
+    /// Whether the root's volume keeps tags, as far as known (this OS keeps some, and no tag
+    /// write found it doesn't).
+    fn tags_kept(&self) -> bool {
+        tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false)
+    }
+
+    /// Writes `tags` on the item at `path` ([`tags::write_on`]), noting whether the volume
+    /// keeps tags, and says what that left ([`TagsLeft`]).
+    fn write_tags(&self, path: &Path, tags: &Tags) -> TagsLeft {
+        let written = match self.fails(FailPoint::TagWrite) {
             true => Err(io::Error::other("its tag write failed (a test)")),
             false => tags::write_on(path, tags),
         };
         match written {
             Ok(tags::Written::Unsupported) => {
                 let _ = self.cfg.tags_kept.set(false);
-                Some(None)
+                TagsLeft {
+                    claimed: None,
+                    held: None,
+                    failed: false,
+                }
             }
             Ok(tags::Written::Done(read)) => {
                 let _ = self.cfg.tags_kept.set(true);
-                Some(read)
+                TagsLeft {
+                    claimed: read.clone(),
+                    held: read,
+                    failed: false,
+                }
             }
-            Err(_) => None,
+            Err(_) => TagsLeft {
+                claimed: None,
+                held: (self.tags_kept() && !self.fails(FailPoint::TagRead))
+                    .then(|| tags::read(path))
+                    .flatten(),
+                failed: true,
+            },
         }
-    }
-
-    /// What an item at `path` holds of tags after a tag write (`written`: what it left, `None`
-    /// where it failed): what the write left, or, where the volume keeps tags and the write
-    /// failed, what the item holds as read; not known only where that can't be read either.
-    /// Taken for not known while it can be read, the item read as holding the drive's tags,
-    /// and the next scan took their absence for the user removing them.
-    fn tags_after_write(&self, path: &Path, written: Option<Option<Tags>>) -> Option<Tags> {
-        let kept = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
-        match written {
-            Some(left) => left,
-            None if kept && !Self::take_one(&self.cfg.fail_tag_reads) => tags::read(path),
-            None => None,
-        }
-    }
-
-    /// Takes one from test counter `n`, if it has one left.
-    fn take_one(n: &std::sync::atomic::AtomicUsize) -> bool {
-        n.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok()
-    }
-
-    /// Whether reading a placed item back fails, for a test ([`ExecConfig::fail_reads`]).
-    fn read_fails(&self) -> bool {
-        Self::take_one(&self.cfg.fail_reads)
     }
 
     /// Whether the test crash point `at` is reached; the run then stops.
@@ -1216,8 +1257,9 @@ use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub(crate) use settle::update_meta;
+use settle::{Placed, mark_children, merged_with_drive, settle_placement, written_row};
 pub use settle::{Settle, settle};
-use settle::{mark_children, merged_with_drive, settle_placement, written_row};
+pub use transfer_ops::tags_lost;
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the
 // order the state DB needs with its durable commits (its docs on durability). Tags and times

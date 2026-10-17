@@ -1,6 +1,7 @@
 //! Settling a node: recording what both sides agree on as its base.
 
 use super::*;
+use crate::scope::Scope;
 
 /// A node to settle after an operation, and what against.
 #[derive(Debug, Clone, Copy)]
@@ -62,8 +63,8 @@ impl<'a> Settle<'a> {
 pub(super) fn settle_placement(
     s: &Store<'_>,
     record: &Placing,
+    scope: &Scope,
     os: Os,
-    above: &mut HashMap<NodeId, Option<i64>>,
 ) -> Result<Placed, StateError> {
     let node = record.base.node;
     // Gone on the drive since (deleted, in Recently deleted, or taken along by a folder there):
@@ -71,13 +72,16 @@ pub(super) fn settle_placement(
     // Against a base that moved meanwhile, the item read as an edit, which won over the delete
     // and brought the node back. Only an item that reads as the node (its name one the drive
     // takes): the record stays otherwise.
-    let scope = crate::scope::Scope::of(s.coords()?.top);
-    let gone = view::gone_on_drive(s, node, &scope, above)?;
+    let gone = view::gone_on_drive(s, node, scope)?;
     if gone && !view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some()) {
-        return Ok(Placed { at: None, gone });
+        return Ok(Placed::Kept);
     }
-    let base_at = match record.base_at {
-        _ if gone => s.get_base(node)?.map(|b| b.remote.version),
+    let planned = if gone {
+        PlannedBase::Unchecked
+    } else {
+        record.base_at
+    };
+    let base_at = match planned {
         PlannedBase::Unchecked => s.get_base(node)?.map(|b| b.remote.version),
         PlannedBase::Absent => None,
         PlannedBase::At(v) => Some(v),
@@ -99,14 +103,25 @@ pub(super) fn settle_placement(
     if record.base.state.kind == NodeKind::Folder {
         mark_children(s, node)?;
     }
-    Ok(Placed { at, gone })
+    Ok(Placed::Settled(at))
 }
 
-/// What [`settle_placement`] did: where it put the base, if it did, and whether the node was
-/// gone on the drive.
-pub(super) struct Placed {
-    pub(super) at: Option<RemoteRef>,
-    pub(super) gone: bool,
+/// What [`settle_placement`] did.
+pub(super) enum Placed {
+    /// Settled: where it put the base, if it did (the record goes then).
+    Settled(Option<RemoteRef>),
+    /// Its node gone on the drive, its item not one the drive takes: the record stays.
+    Kept,
+}
+
+impl Placed {
+    /// Where it put the base, if it did.
+    pub(super) fn at(self) -> Option<RemoteRef> {
+        match self {
+            Placed::Settled(at) => at,
+            Placed::Kept => None,
+        }
+    }
 }
 
 /// Marks what is in folder `node` on the drive dirty.
