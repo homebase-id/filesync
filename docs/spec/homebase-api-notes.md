@@ -43,11 +43,20 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   `/owner/appreg`, which creates the requested drives and registers the app, then returns to
   the authorize URL (`YouAuthUnifiedController.cs:155-162` sets `return`), so the flow resumes
   by itself. An app cannot create drives itself.
-- **Circles** **[verified, tried]**: circles have no slug. An app creates its own after
-  registration: `POST /api/v2/connections/circles/create` with `{name, description, emoji,
-  driveGrants: [{permissionedDrive: {drive, permission}}], permissions: {keys}}`; only drives
-  the app owns and keys it holds (`CircleMembershipService.CreateAppCircleAsync`). Returns the
-  circle id. Filesync's circle grants Read on its drive and starts empty.
+- **Circles** **[verified]** (odin-core #1939, PR #1943, v0.1.960; odin-js #976): a circle has a
+  slug, unique within the app that owns it, immutable. An app declares its circles at
+  registration, in the YouAuth `ac` parameter (`YouAuthAppParameters.AppCirclesParamName`): a
+  JSON list in a string of `{s: slug (required), n: name (required), d, e, g: [{a, t, p}], k}`,
+  which the owner console shows on the install screen and sends as
+  `AppRegistrationRequest.Circles`; they are created with the app, and may grant only what the
+  registration grants it (`AssertDeclaredCirclesAsync`). Only the first install reads them, so a
+  device finds the circle with `POST /api/v2/connections/circles/create` and the same `slug`
+  (`{name, slug, description, emoji, driveGrants: [{permissionedDrive: {drive, permission}}],
+  permissions: {keys}}`): when the app holds that slug it returns that circle's id and changes
+  nothing (`CircleMembershipService.CreateAppCircleAsync`); without a slug every call makes a
+  new circle. Circles made before had slugs made from their names (`CircleSlugGenerator`:
+  "Filesync" is `filesync`, a second one `filesync-2`). Filesync's circle (`filesync`) grants
+  Read on its drive and starts empty.
 - **Desktop callback** **[tried]**: `http://localhost:{port}/authorization-code-callback`.
   Firefox may first open a connection the callback server can't read (an https attempt);
   ignore such connections rather than failing.

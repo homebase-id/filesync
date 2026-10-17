@@ -1,5 +1,5 @@
 //! Development tool: registers Homebase Filesync on an identity and authorizes this machine,
-//! creates the app's circle, and checks access to the sync drive.
+//! finds the app's circle, and checks access to the sync drive.
 //!
 //! ```text
 //! hbsync-register <identity> [--browser <command>]
@@ -31,7 +31,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .cloned();
     let path = hbsync_dev::credentials_path(&identity)?;
 
-    let mut creds = match Credentials::load(&path)? {
+    let creds = match Credentials::load(&path)? {
         Some(c) => {
             println!("Using the saved registration in {}", path.display());
             c
@@ -47,21 +47,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             creds
         }
     };
-    let prepared = setup::prepare(&mut creds, |c| c.save(&path))?;
+    let prepared = setup::prepare(&creds)?;
     let drive = prepared.remote.drive();
     println!(
         "Sync drive: alias {}, type {}",
         drive.alias.simple(),
         drive.drive_type.simple()
     );
-    match prepared.circle_created {
-        Some(id) => {
-            println!(
-                "Created the circle '{}' ({id})",
-                hbsync_homebase::app::CIRCLE_NAME
-            );
-        }
-        None => println!("Circle already created: {:?}", creds.circle_id),
+    match prepared.circle {
+        Some(id) => println!(
+            "The app's circle '{}': {id}",
+            hbsync_homebase::app::CIRCLE.slug
+        ),
+        None => println!("The app's circle wasn't found (see the log)."),
     }
     println!(
         "The sync drive's feed works: {} change(s) on the first page.",

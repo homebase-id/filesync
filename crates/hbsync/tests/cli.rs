@@ -33,7 +33,6 @@ impl Home {
             identity: IDENTITY.into(),
             client_auth_token: "Y2F0".into(),
             shared_secret: "AAECAwQFBgcICQoLDA0ODw==".into(),
-            circle_id: None,
         };
         creds.save(&self.credentials())?;
         Ok(folder)

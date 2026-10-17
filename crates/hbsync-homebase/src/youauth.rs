@@ -31,16 +31,12 @@ pub struct Credentials {
     pub client_auth_token: String,
     /// The shared secret, base64: the key of every request and response envelope.
     pub shared_secret: String,
-    /// The app's own circle, once created.
-    #[serde(default)]
-    pub circle_id: Option<uuid::Uuid>,
 }
 
 impl std::fmt::Debug for Credentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Credentials")
             .field("identity", &self.identity)
-            .field("circle_id", &self.circle_id)
             .finish_non_exhaustive()
     }
 }
@@ -176,7 +172,6 @@ impl Pending {
                 &answer.base64_shared_secret_cipher,
                 &answer.base64_shared_secret_iv,
             )?,
-            circle_id: None,
         })
     }
 }

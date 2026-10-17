@@ -60,7 +60,7 @@ daemon runs.
 ## Credentials
 
 In the OS keychain, service `Homebase Filesync`, account = identity, value = the credentials
-JSON (identity, client auth token, shared secret, circle id):
+JSON (identity, client auth token, shared secret):
 
 - macOS: Keychain Services, the login keychain;
 - Windows: Credential Manager;
