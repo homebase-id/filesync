@@ -7,8 +7,9 @@
 //! - a delete tombstones the file: `UniqueId`, content and payload are dropped, `fileId`,
 //!   `GroupId` and `FileType` stay; deletes are `VersionTag`-guarded too;
 //! - the change feed is `anyChangeDate` + `oldestFirst`, resumes after the last row seen, and
-//!   only returns rows modified strictly before "now" (a row written in the current
-//!   millisecond shows up once the clock moves on);
+//!   only returns rows modified strictly before "now": a row written in the current
+//!   millisecond is held back, the page saying more rows follow (odin-core #1906), and shows
+//!   up once the clock moves on, as it has by a client's next read ([`FakeRemote`]);
 //! - payload hashes: the stored hash is checked over the received bytes (4175), unencrypted
 //!   payloads need `contentHash == storedHash` (here: one hash), and a drive can require
 //!   hashes (4177);
@@ -16,10 +17,7 @@
 //!   ([`FakeServer::subscribe`]), except to those that exclude their own client's writes
 //!   (`excludeOwnWrites`, odin-core #1971): each [`FakeRemote::new`] is a client registration
 //!   (a token) of its own. A write not made through a client (a test's, on the server) is
-//!   announced to all, as Homebase does when it can't tell whose write it is;
-//! - a kept answer ([`FakeServer::keep_answer`]): odin-core keeps a feed query's answer by the
-//!   query (cursor and page size), and one computed while a write commits can be kept after
-//!   it, hiding that write from the same query until the drive's next write.
+//!   announced to all, as Homebase does when it can't tell whose write it is.
 //!
 //! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter does:
 //! a delete refused for its version (4160) is read once more and counts as done when the file
@@ -101,10 +99,6 @@ pub struct FakeServer {
     /// Deterministic id source.
     next_id: u64,
     subscribers: Vec<Subscriber>,
-    /// Feed answers kept by query (cursor, page size), each until the write count passes its
-    /// mark ([`FakeServer::keep_answer`]).
-    kept: HashMap<(String, usize), (ChangesPage, u64)>,
-    writes: u64,
     next_client: u64,
 }
 
@@ -120,8 +114,6 @@ impl FakeServer {
             next_row: 1,
             next_id: 1,
             subscribers: Vec::new(),
-            kept: HashMap::new(),
-            writes: 0,
             next_client: 1,
         }))
     }
@@ -151,9 +143,6 @@ impl FakeServer {
     /// A write of `file_id` by `writer` (`None`: not through a client) landed: its new place
     /// in the feed, and its announcement.
     fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
-        self.writes += 1;
-        let writes = self.writes;
-        self.kept.retain(|_, (_, until)| writes <= *until);
         let modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
             self.feed.remove(&(f.modified, f.row));
@@ -410,43 +399,40 @@ impl FakeServer {
             .ok_or(RemoteError::NotFound)
     }
 
-    /// Keeps the feed's answer to a read from `cursor` with pages of `limit` as it is now,
-    /// through the next write (the one it raced with) until the one after: the same query
-    /// gets it meanwhile, another page size reads the feed as it is.
-    pub fn keep_answer(&mut self, cursor: Option<&str>, limit: usize) -> Result<()> {
-        let page = self.read_feed(cursor, limit)?;
-        let key = (cursor.unwrap_or("").to_owned(), limit);
-        self.kept.insert(key, (page, self.writes + 1));
-        Ok(())
+    /// A client's read of the feed ([`FakeServer::changes`]): when it held rows back, the
+    /// clock has moved on by the client's next read.
+    fn read(&mut self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
+        let page = self.changes(cursor, limit)?;
+        if page.has_more && page.entries.len() < limit {
+            self.tick();
+        }
+        Ok(page)
     }
 
     pub fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
-        if let Some((page, _)) = self.kept.get(&(cursor.unwrap_or("").to_owned(), limit)) {
-            return Ok(page.clone());
-        }
-        self.read_feed(cursor, limit)
-    }
-
-    fn read_feed(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let after = match cursor {
             None => None,
             Some(c) => Some(parse_cursor(c)?),
         };
-        let visible = |&(modified, _): &(i64, u64)| modified < self.clock_ms;
-        let mut range = match after {
+        let rows = match after {
             None => self.feed.range(..),
             Some(pos) => self
                 .feed
                 .range((std::ops::Bound::Excluded(pos), std::ops::Bound::Unbounded)),
-        }
-        .filter(|(k, _)| visible(k));
+        };
         let mut entries = Vec::new();
         let mut last = after;
-        for (key, file_id) in range.by_ref().take(limit) {
+        let mut has_more = false;
+        for (key, file_id) in rows {
+            // A row of the current millisecond is held back, with more rows to come (the
+            // feed is in time order: so is everything after it).
+            if entries.len() == limit || key.0 >= self.clock_ms {
+                has_more = true;
+                break;
+            }
             entries.push(self.files[file_id].header.clone());
             last = Some(*key);
         }
-        let has_more = range.next().is_some();
         let cursor = match last {
             Some((t, r)) => format!("{t}:{r}"),
             None => cursor.unwrap_or("").to_owned(),
@@ -456,7 +442,6 @@ impl FakeServer {
             cursor,
             has_more,
             skipped: Vec::new(),
-            skipped_files: Vec::new(),
         })
     }
 
@@ -571,16 +556,11 @@ pub struct Faults {
     pub ref_pages: usize,
     /// Slim pages say one of their rows couldn't be read (a row the client doesn't decode).
     pub unread_refs: bool,
-    /// The page size of the last feed read, for assertions.
-    pub last_page: Option<usize>,
     /// Creates and updates of nodes with this name land, but their answer is lost
     /// ([`RemoteError::Transient`], a timeout after the server wrote).
     pub lose_answer_named: Option<String>,
     /// Payloads received, for assertions.
     pub uploads: usize,
-    /// Rows of these files can't be read (as the Homebase adapter skips a row that doesn't
-    /// decrypt): whole pages leave them out, with why.
-    pub unreadable: std::collections::HashSet<RemoteFileId>,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -746,28 +726,8 @@ fn replay<T>(
 impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
-        let unreadable = {
-            let mut faults = self.faults();
-            faults.full_pages += 1;
-            faults.last_page = Some(limit);
-            faults.unreadable.clone()
-        };
-        let mut page = self.server().changes(cursor, limit)?;
-        let (gone, entries) = page
-            .entries
-            .into_iter()
-            .partition(|h| unreadable.contains(&h.file_id));
-        page.entries = entries;
-        for h in gone {
-            let h: RemoteHeader = h;
-            page.skipped
-                .push(format!("{:?}: injected: unreadable", h.file_id));
-            page.skipped_files.push(RemoteRef {
-                file_id: h.file_id,
-                version: h.version,
-            });
-        }
-        Ok(page)
+        self.faults().full_pages += 1;
+        self.server().read(cursor, limit)
     }
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
@@ -775,12 +735,11 @@ impl Remote for FakeRemote {
         let unread = {
             let mut faults = self.faults();
             faults.ref_pages += 1;
-            faults.last_page = Some(limit);
-            usize::from(faults.unread_refs || !faults.unreadable.is_empty())
+            usize::from(faults.unread_refs)
         };
         Ok(RefsPage {
             unread,
-            ..RefsPage::of(&self.server().changes(cursor, limit)?)
+            ..RefsPage::of(&self.server().read(cursor, limit)?)
         })
     }
 

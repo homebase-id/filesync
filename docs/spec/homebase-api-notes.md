@@ -190,37 +190,40 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   a minimal one 588 (the encrypted envelope and its base64 included).
 - How the client reads with it: `hbsync_engine::feed::pull`. A server without `fileRefs` in
   its answer is refused, not read as an empty page.
-- **A kept answer can hide a write** (odin-core #1909; fixed on its branch
-  `cache-fill-race-1909` at 2f0ff3592, not released: tried there, 0 of 20 rounds hid the
-  write; tracked in filesync #90;
-  odin-core at fe067124b; **[tried]** on frodo, the
-  diagnostics `a_page_read_during_a_write_may_be_kept_stale` and
-  `another_clients_write_is_in_the_feed_at_once` in `hbsync-dev/tests/live.rs`):
-  `QueryBatchCached` keeps a query-batch answer under a key made of the query's parameters
-  (drive, `maxRecords`, cursor, sorting, filters; not the caller, so every client of the drive
-  shares it) for 2 h (`AbstractTableCaching.DefaultTtl`), and a write clears the drive's
-  answers after its commit (`TransactionalCache.InvalidateAsync`, a post-commit action)
-  **[verified]**. When the same query is being answered while a write commits, that answer,
-  from before the write, is kept after the clearing **[inferred]** (the cache stores what its
-  factory returns once it returns; FusionCache's internals not read). Tried: a thread reading
-  the feed from a cursor at the end again and again while client b created a folder, then one
-  read with the same query 1.1 s after b's answer: 70 of 70 rounds the folder wasn't there
-  (`hasMoreRows` false), while the same read with `maxRecords` 99 instead of 100 had it every
-  time; 11 s later the same query still didn't show it. Without a read in flight during the
-  write, the next read has it at once. A client that read to the end of the feed shares its
-  cursor with every other client that did: one device's read can hide another device's
-  write from all of them until the next write to the drive. The client never repeats a
-  query (page sizes, `Drive::page_size`) and reads again for an announced version a read
-  didn't bring (`daemon.md`, when the feed is read). Once #1909 is fixed: every read asks for
-  `FEED_PAGE` again (`Drive::page_size`, `next_page_size` and the fake's `keep_answer` go),
-  the puller's re-reads stay for the hold-back alone (one read past it), and these notes say
-  so. The same family was filesync #1 (odin-core #1905, fixed by #1906 on 2026-10-09): an
-  answer that held rows back was cached; that fix doesn't cover a fill in flight during a
-  write.
+- **A kept answer could hide a write** (odin-core #1909, fixed by #1973, merged as
+  4eb50e5db; filesync #90): `QueryBatchCached` keeps a query-batch answer under a key made
+  of the query's parameters (drive, `maxRecords`, cursor, sorting, filters; not the caller,
+  so every client of the drive shares it) for 2 h (`AbstractTableCaching.DefaultTtl`), and a
+  write clears the drive's answers after its commit (`TransactionalCache.InvalidateAsync`, a
+  post-commit action) **[verified]**. Before the fix, an answer computed while a write
+  committed was stored after the clearing and kept hiding the write from the same query
+  (FusionCache dates an entry by when it is stored). Tried on frodo at fe067124b: a thread
+  reading the feed from a cursor at the end again and again while client b created a
+  folder, then one read with the same query 1.1 s after b's answer: 70 of 70 rounds the
+  folder wasn't there (`hasMoreRows` false), still so 11 s later; with `maxRecords` 99 it
+  was there every time. Every caught-up client holds the same cursor, so one device's read
+  could hide another device's write from all of them. The fix counts the cache's removes,
+  and a fill that saw the count move doesn't store its answer **[verified]**
+  (`RemovalCounter.cs`, `FusionCacheWrapper.cs`); tried on frodo at 2f0ff3592: 0 of 20
+  rounds hid the write. Not covered by it **[verified]** in its PR: FusionCache's own tag
+  expiry across two hosts on one Redis, when the removing host's clock lags the storing
+  host's. The client relies on the fix: every read asks for pages of `FEED_PAGE` (500), and
+  an announced change is read for once. Until the fix it varied the page size per read and
+  read for an announced change again for up to six reads (removed with filesync #90). The
+  live checks `a_page_read_during_a_write_may_be_kept_stale` and
+  `another_clients_write_is_in_the_feed_at_once` (`hbsync-dev/tests/live.rs`) fail if the
+  server hides a write again.
 - **Rows held back**: a row written in the server's last millisecond or so is held back,
-  answered as an empty or short page with `hasMoreRows` true (`QueryBatch.HoldBackWindowMs`,
-  1000 ms, **[verified]**); tried: 3 of 60 reads right after another client's write, for 9 to
-  12 ms. `feed::pull` reads on while `hasMoreRows`, so it costs a read.
+  answered as an empty or short page with `hasMoreRows` true (odin-core #1906,
+  `QueryBatch.HoldBackWindowMs`, 1000 ms, **[verified]**); tried: 3 of 60 reads right after
+  another client's write, for 9 to 12 ms. `feed::pull` reads on while `hasMoreRows`, so it
+  costs a read, and the fake models it. A row further ahead than the window is left out
+  without more rows (#1923; **[inferred]** only when clocks disagree).
+- **A write is announced after it is visible** **[verified]**: `DriveStorageServiceBase`
+  publishes the drive notification after the write's transaction is disposed, and disposing
+  it commits and then awaits the post-commit actions, the cache clearing among them
+  (`ScopedConnectionFactory.DisposeAsync`). So a read the announcement starts finds the
+  row, or a page that says more rows follow.
 
 ## Errors
 **[verified]** `ExceptionHandlingMiddleware.cs`: plaintext `application/problem+json` (never
@@ -349,6 +352,11 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   `hasMoreRows: true`, and the next query returns the held-back rows. The contract scenario
   `every_write_shows_up_promptly` passes without any client workaround (odin-core #1905,
   filesync #1).
+- **A kept answer could hide a write for hours** (fixed by odin-core #1973, merged as
+  4eb50e5db, 2026-10-17) **[verified, tried]**: an answer computed while a write committed
+  outlived the write's cache clearing (odin-core #1909, filesync #90; the change feed,
+  above). The client's workaround (page sizes varied per read, announced changes read for
+  again) is gone.
 - **A content update of a deleted file is a 500** **[verified, tried]**: a PATCH with an
   `appendOrOverwrite` payload on a tombstone throws a NullReferenceException in
   `DriveStorageServiceBase.UpdateBatchCopyFilesAsync` / `ProcessAppendOrOverwrite` (the

@@ -5,8 +5,6 @@ use super::*;
 /// Versions [`Store::known`] asks in one query: three variables each, well under SQLite's
 /// limit (32,766 in the bundled SQLite, 999 in old ones).
 const KNOWN_CHUNK: usize = 300;
-/// [`Store::unseen`]'s, at five variables a version: under SQLite's old limit of 999.
-const UNSEEN_CHUNK: usize = 180;
 
 impl Store<'_> {
     // ---- Recently deleted ----
@@ -187,47 +185,6 @@ impl Store<'_> {
             }
         }
         Ok(true)
-    }
-
-    /// Which of `versions` (each `(version, removed, the server's time)`) the store shows
-    /// nothing of yet, by index: neither that version (in Recently deleted where `removed`,
-    /// else in the mirror), nor a write of its file at that time or later, nor the file
-    /// deleted for good. A query per [`UNSEEN_CHUNK`].
-    pub fn unseen(&self, versions: &[(RemoteRef, bool, Option<i64>)]) -> Result<Vec<usize>> {
-        let mut unseen = Vec::new();
-        for (n, chunk) in versions.chunks(UNSEEN_CHUNK).enumerate() {
-            let rows = vec!["(?, ?, ?, ?, ?)"; chunk.len()].join(", ");
-            let sql = format!(
-                "WITH q(i, f, v, r, t) AS (VALUES {rows}) SELECT i FROM q WHERE \
-                 NOT EXISTS (SELECT 1 FROM gone_files WHERE file_id = q.f) \
-                 AND CASE WHEN q.r THEN NOT EXISTS (SELECT 1 FROM removed \
-                     WHERE file_id = q.f AND version_tag = q.v) \
-                 ELSE NOT EXISTS (SELECT 1 FROM remote \
-                     WHERE file_id = q.f AND version_tag = q.v) END \
-                 AND (q.t IS NULL OR NOT EXISTS (SELECT 1 FROM remote \
-                     WHERE file_id = q.f AND changed_at >= q.t)) \
-                 AND (q.t IS NULL OR NOT EXISTS (SELECT 1 FROM removed \
-                     WHERE file_id = q.f AND removed_at >= q.t)) ORDER BY i"
-            );
-            let params = chunk.iter().enumerate().flat_map(|(i, (at, removed, t))| {
-                [
-                    rusqlite::types::Value::Integer((n * UNSEEN_CHUNK + i) as i64),
-                    rusqlite::types::Value::Blob(at.file_id.0.as_bytes().to_vec()),
-                    rusqlite::types::Value::Blob(at.version.0.as_bytes().to_vec()),
-                    rusqlite::types::Value::Integer(i64::from(*removed)),
-                    t.map_or(
-                        rusqlite::types::Value::Null,
-                        rusqlite::types::Value::Integer,
-                    ),
-                ]
-            });
-            let mut stmt = self.conn.prepare(&sql)?;
-            let found = stmt
-                .query_map(rusqlite::params_from_iter(params), |r| r.get::<_, i64>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            unseen.extend(found.into_iter().map(|i| i as usize));
-        }
-        Ok(unseen)
     }
 
     fn known_chunk(&self, versions: &[(RemoteRef, bool)]) -> Result<bool> {

@@ -99,16 +99,27 @@ fn hash_rules() -> R {
 }
 
 #[test]
-fn rows_of_the_current_millisecond_are_not_visible_yet() -> R {
+fn rows_of_the_current_millisecond_are_held_back() -> R {
     let server = FakeServer::new(ServerConfig {
         auto_tick: false,
         ..ServerConfig::default()
     });
     let r = FakeRemote::new(server.clone());
     r.create(&folder("now", NodeId::ROOT), None)?;
-    assert!(r.changes(None, 10)?.entries.is_empty());
+    let held = server.lock().map_err(|_| "poisoned")?.changes(None, 10)?;
+    assert!(held.entries.is_empty());
+    assert!(
+        held.has_more,
+        "held back, with more rows to come (odin-core #1906)"
+    );
     server.lock().map_err(|_| "poisoned")?.tick();
-    assert_eq!(r.changes(None, 10)?.entries.len(), 1);
+    let page = r.changes(None, 10)?;
+    assert_eq!((page.entries.len(), page.has_more), (1, false));
+    // A client's read that held a row back: by its next, the clock has moved on.
+    r.create(&folder("later", NodeId::ROOT), None)?;
+    let held = r.changes(Some(&page.cursor), 10)?;
+    assert!(held.entries.is_empty() && held.has_more);
+    assert_eq!(r.changes(Some(&held.cursor), 10)?.entries.len(), 1);
     Ok(())
 }
 
