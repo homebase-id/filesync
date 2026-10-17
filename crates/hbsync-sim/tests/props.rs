@@ -1159,7 +1159,8 @@ fn restore_and_purge_converge() {
     events.extend(sync(1));
     events.push(act(1, Delete { node: 0 }));
     events.extend(sync(1));
-    events.push(act(1, Purge));
+    // Daily purges, until what was deleted is old enough.
+    events.extend([act(1, Purge), act(1, Purge), act(1, Purge)]);
     run(2, &events)
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
@@ -1414,6 +1415,178 @@ fn regression_a_tag_lost_when_syncing_only_when_asked() {
     .unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// A folder moved into another after that one's removal (by a device that didn't know of the
+/// delete yet) is a change of its own: the purge takes nothing in it along, however old, and
+/// it keeps the folder it went into.
+#[test]
+fn regression_a_folder_moved_into_a_removed_one_keeps_what_is_in_it() {
+    use Action::*;
+    use hbsync_types::NodeId;
+    let mut sim = Sim::new(2);
+    let pick = |sim: &Sim, c: usize, path: &str, as_parent: bool| -> usize {
+        let node = if path.is_empty() {
+            NodeId::ROOT
+        } else {
+            sim.item(c, path).expect(path)
+        };
+        sim.pick(c, node, as_parent).expect(path)
+    };
+    let act = |client, action| Event::Act { client, action };
+    // NAMES: "a", "b", "c.txt" (client 1 ignores "d").
+    for name in [0, 1] {
+        let parent = pick(&sim, 0, "", true);
+        sim.run(&[act(0, CreateFolder { parent, name })]);
+    }
+    let parent = pick(&sim, 0, "b", true);
+    sim.run(&[act(0, CreateFile { parent, name: 3 })]);
+    assert!(sim.quiesce(30), "no convergence");
+    // Client 1 moves b into a, planned before client 0's delete of a lands.
+    let (node, parent) = (pick(&sim, 1, "b", false), pick(&sim, 1, "a", true));
+    sim.run(&[
+        act(
+            1,
+            Move {
+                node,
+                parent,
+                name: 1,
+            },
+        ),
+        Event::Plan { client: 1 },
+    ]);
+    let node = pick(&sim, 0, "a", false);
+    sim.run(&[
+        act(0, Delete { node }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 1 },
+        // Daily purges, until a's removal is old enough.
+        act(0, Purge),
+        act(0, Purge),
+        act(0, Purge),
+        act(0, Purge),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert!(
+        sim.server_paths().iter().any(|p| p == "a/b/c.txt"),
+        "b and c.txt stay, in a: {:?}",
+        sim.server_paths()
+    );
+}
+
+/// Purges after a folder's delete stopped half way (the folder removed, the file in it not
+/// marked yet): the purge touches neither (the file is live, and the folder holding it stays);
+/// the delete carried on is what removes the file, and the client that saw it and the one away
+/// since before it converge, nothing lost or back.
+#[test]
+fn regression_a_purge_mid_delete_leaves_what_the_folder_took_along() {
+    use Action::*;
+    use hbsync_types::NodeId;
+    let mut sim = Sim::new(2);
+    let folder = |sim: &Sim, path: &str| -> usize {
+        let node = if path.is_empty() {
+            NodeId::ROOT
+        } else {
+            sim.item(0, path).expect(path)
+        };
+        sim.pick(0, node, true).expect(path)
+    };
+    let act = |client, action| Event::Act { client, action };
+    let (d, a) = (5, 0); // NAMES: "d", "a"
+    let parent = folder(&sim, "");
+    sim.run(&[act(0, CreateFolder { parent, name: d })]);
+    let parent = folder(&sim, "d");
+    sim.run(&[act(0, CreateFile { parent, name: a })]);
+    assert!(sim.quiesce(30), "no convergence");
+    let node = sim.pick(0, sim.item(0, "d").expect("d"), false).expect("d");
+    // The folder goes first; the purge comes before the file's own removal, and client 1, away
+    // meanwhile, syncs before client 0 goes on.
+    sim.run(&[
+        act(0, Delete { node }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        // Daily purges, until the folder's removal is old enough.
+        act(0, Purge),
+        act(0, Purge),
+        act(0, Purge),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 1 },
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(
+        sim.server_paths(),
+        Vec::<String>::new(),
+        "nothing came back"
+    );
+}
+
+/// A file put into a folder after another device removed it (with what was in it) isn't in
+/// that delete: the purge leaves the folder while the file is live in it, so the file keeps its
+/// folder, which comes back, and nothing is lost.
+#[test]
+fn regression_a_file_written_into_a_removed_folder_holds_it_through_the_purge() {
+    use Action::*;
+    use hbsync_types::NodeId;
+    let mut sim = Sim::new(2);
+    let folder = |sim: &Sim, c: usize, path: &str| -> usize {
+        let node = if path.is_empty() {
+            NodeId::ROOT
+        } else {
+            sim.item(c, path).expect(path)
+        };
+        sim.pick(c, node, true).expect(path)
+    };
+    let act = |client, action| Event::Act { client, action };
+    // NAMES: "a", "c.txt", "b" (client 1 ignores "d").
+    let (folder_name, c, b) = (0, 3, 1);
+    let parent = folder(&sim, 0, "");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent,
+            name: folder_name,
+        },
+    )]);
+    let parent = folder(&sim, 0, "a");
+    sim.run(&[act(0, CreateFile { parent, name: c })]);
+    assert!(sim.quiesce(30), "no convergence");
+    // Client 1 plans its new file before client 0's delete of the folder lands; the upload
+    // goes into the removed folder.
+    let parent = folder(&sim, 1, "a");
+    sim.run(&[
+        act(1, CreateFile { parent, name: b }),
+        Event::Plan { client: 1 },
+    ]);
+    let node = sim.pick(0, sim.item(0, "a").expect("a"), false).expect("a");
+    sim.run(&[
+        act(0, Delete { node }),
+        Event::Plan { client: 0 },
+        // The folder, then the file in it.
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 1 },
+    ]);
+    sim.run(&[
+        // Daily purges, until the folder's removal is old enough.
+        act(0, Purge),
+        act(0, Purge),
+        act(0, Purge),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    // The file brings its folder back (not left at the top, the folder gone for good).
+    assert_eq!(sim.server_paths(), ["a", "a/b"]);
+}
+
 /// Tags meet on every device: a Mac's tag and colour change, a Linux tag (Linux keeps no
 /// colours, and keeps the Mac's), and a Windows device, which has no tags, keeps them through
 /// its own edit and rename. A tag removed anywhere goes everywhere.
@@ -1618,6 +1791,8 @@ fn regression_a_folder_tagged_elsewhere_doesnt_leave() {
         step(2),
         act(1, CreateFile { parent: 6, name: 0 }),
         act(0, Purge),
+        act(0, Purge),
+        act(0, Purge),
         plan(1),
         step(1),
     ];
@@ -1781,6 +1956,8 @@ fn regression_a_file_put_into_a_deleted_role_folder_stays_its() {
         act(0, DeleteRoleFolder),
         Event::Step { client: 4 },
         Event::Plan { client: 0 },
+        act(0, Purge),
+        act(0, Purge),
         act(0, Purge),
     ];
     if let Err(e) = run_with(3, None, Sim::with_new_role_devices, &events) {

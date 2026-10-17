@@ -268,10 +268,13 @@ impl Store<'_> {
         Ok(nodes.into_iter().filter(|n| !c.hides(*n)).collect())
     }
 
-    /// What was removed before `at_ms` (Unix ms), oldest first; an open time isn't.
+    /// What was removed before `at_ms` (Unix ms), oldest first; an open time isn't, nor a 0 (an
+    /// earlier build's for a header without one).
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
-            &format!("{REMOVED_SELECT} WHERE removed_at < ?1 ORDER BY removed_at"),
+            &format!(
+                "{REMOVED_SELECT} WHERE removed_at > 0 AND removed_at < ?1 ORDER BY removed_at"
+            ),
             [at_ms],
         )
     }

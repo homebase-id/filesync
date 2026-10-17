@@ -44,9 +44,9 @@ pub struct FileMetadata {
     #[serde(default)]
     pub is_encrypted: bool,
     pub payloads: Option<Vec<Payload>>,
-    /// Unix ms of the last change.
+    /// Unix ms of the last change; `None` if the header doesn't say.
     #[serde(default)]
-    pub updated: i64,
+    pub updated: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +97,27 @@ pub struct QueryBatchResponse {
     /// server without odin-core #1967. Raw, as `searchResults`: one row the client can't read
     /// doesn't fail the page.
     pub file_refs: Option<Vec<Box<serde_json::value::RawValue>>>,
+    /// The server's clock when it answered, Unix ms (odin-core `QueryBatchResponse.QueryTime`,
+    /// **[verified]** `DriveQueryServiceBase.cs`).
+    pub query_time: i64,
+}
+
+/// The file a feed row is about, if its `fileId` reads (a row that doesn't read as a node).
+pub fn file_id_of(row: &str) -> Option<Uuid> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Id {
+        file_id: Uuid,
+    }
+    serde_json::from_str::<Id>(row).ok().map(|id| id.file_id)
+}
+
+/// The time of the last change a feed cursor stands after: `cursorState` is odin-core's
+/// `QueryBatchCursor` as JSON, `{"paging": {"time": <Unix ms>, "row": …}, …}` (**[verified]**
+/// `QueryBatchCursor.cs`, `QueryBatchResponse.cs`).
+pub fn cursor_time(cursor: &str) -> Option<i64> {
+    let state: Value = serde_json::from_str(cursor).ok()?;
+    state["paging"]["time"].as_i64()
 }
 
 /// One row of a minimal `query-batch` page (odin-core #1967 `QueryBatchFileRef`, **[verified]**):
@@ -111,9 +132,9 @@ pub struct FileRef {
     pub archival_status: i32,
     /// The parent node, as the header's: omitted when empty.
     pub group_id: Option<Uuid>,
-    /// Unix ms, as the header's `updated`.
+    /// Unix ms, as the header's `updated`; `None` if the row doesn't say.
     #[serde(default)]
-    pub updated: i64,
+    pub updated: Option<i64>,
     /// A sync node's ([`FILE_TYPE_FOLDER`], [`FILE_TYPE_FILE`]), or another app's file on the
     /// drive.
     #[serde(default)]
@@ -152,17 +173,20 @@ pub struct Times {
     /// `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no sharing,
     /// reactions or local app data, which move it too).
     pub removed_at: Option<i64>,
-    /// The server's time of this version. A tombstone has neither.
+    /// The server's time of this version, a tombstone's too (when it may be deleted hard).
     pub changed_at: Option<i64>,
 }
 
 impl Times {
-    pub fn of(file_state: &str, archival_status: i32, updated: i64) -> Times {
+    /// A row whose `updated` is unknown has no time: removed, it counts as removed now
+    /// (`removal_time(None)`, the newest: never old enough to go without a trace).
+    pub fn of(file_state: &str, archival_status: i32, updated: Option<i64>) -> Times {
         let deleted = file_state == "deleted";
         Times {
             deleted,
-            removed_at: (!deleted && archival_status == ARCHIVAL_REMOVED).then_some(updated),
-            changed_at: (!deleted).then_some(updated),
+            removed_at: (!deleted && archival_status == ARCHIVAL_REMOVED)
+                .then(|| updated.unwrap_or(hbsync_types::activity::removal_time(None))),
+            changed_at: updated,
         }
     }
 }
@@ -197,6 +221,29 @@ pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
     })
 }
 
+/// The `query-batch` body for a page of the active files in `folders` (their `groupId`), of
+/// any type, minimal rows: what [`HomebaseRemote::holding_live`](super::HomebaseRemote) asks.
+/// odin-core filters on `groupId`, `fileState` and `archivalStatus` (**[verified]**
+/// `QueryBatch.cs:130-142, 351`); live is any status but removed, so that is read per row.
+pub fn children_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) -> Value {
+    let mut options = json!({
+        "maxRecords": limit.max(1),
+        "resultShape": "minimal",
+        "sorting": "anyChangeDate",
+        "ordering": "oldestFirst",
+    });
+    if let Some(cursor) = cursor.filter(|c| !c.is_empty()) {
+        options["cursorState"] = json!(cursor);
+    }
+    json!({
+        "queryParams": {
+            "groupId": folders.iter().map(|f| f.0).collect::<Vec<_>>(),
+            "fileState": ["active"],
+        },
+        "resultOptionsRequest": options,
+    })
+}
+
 /// A header as a [`RemoteHeader`], decrypted with `shared_secret`; `Err` says why it isn't a
 /// usable sync node.
 pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
@@ -208,7 +255,11 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         other => return Err(format!("file {id}: file type {other} isn't a sync node")),
     };
     let group = meta.app_data.group_id.map(NodeId);
-    let (mut removed_at, mut changed_at) = (None, None);
+    let times = Times::of(
+        &header.file_state,
+        meta.app_data.archival_status,
+        meta.updated,
+    );
     let (parent, body, token) = match header.file_state.as_str() {
         // A tombstone always comes through: dropping it would keep a deleted node alive. Its
         // parent isn't used, only its file id.
@@ -227,12 +278,6 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
                 .map_err(|e| format!("file {id}: content: {e}"))?;
             let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
-            let times = Times::of(
-                &header.file_state,
-                meta.app_data.archival_status,
-                meta.updated,
-            );
-            (removed_at, changed_at) = (times.removed_at, times.changed_at);
             // The stored size of an encrypted payload isn't the file's: only `size` tells it.
             if kind == NodeKind::File && content.size.is_none() {
                 return Err(format!("file {id}: no size (node schema v1)"));
@@ -266,8 +311,8 @@ pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader
         parent,
         kind,
         body,
-        removed_at,
-        changed_at,
+        removed_at: times.removed_at,
+        changed_at: times.changed_at,
         token,
     })
 }
@@ -692,13 +737,33 @@ mod tests {
         );
         assert_eq!(
             (refs[1].deleted, refs[1].removed_at, refs[1].changed_at),
-            (true, None, None)
+            (true, None, Some(10)),
+            "a tombstone's time: when it may go hard"
+        );
+        // A row that doesn't say when: no time, never old enough to go without a trace.
+        let unknown: FileRef = serde_json::from_str(
+            r#"{"fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
+                "archivalStatus": 2, "versionTag": "22222222-2222-2222-2222-222222222222"}"#,
+        )?;
+        let unknown = unknown.to_ref();
+        assert_eq!(
+            (unknown.removed_at, unknown.changed_at),
+            (Some(i64::MAX), None)
         );
         // A server without #1967 answers headers: no refs, not an empty page.
         let old: QueryBatchResponse =
-            serde_json::from_str(r#"{"cursorState": "c", "searchResults": []}"#)?;
+            serde_json::from_str(r#"{"cursorState": "c", "queryTime": 1, "searchResults": []}"#)?;
         assert!(old.file_refs.is_none());
         Ok(())
+    }
+
+    /// A cursor's time is its paging point's, as odin-core writes `cursorState`.
+    #[test]
+    fn a_cursor_tells_its_time() {
+        let cursor = r#"{"paging":{"time":1792134971335,"row":42},"stop":null,"next":null}"#;
+        assert_eq!(cursor_time(cursor), Some(1_792_134_971_335));
+        assert_eq!(cursor_time("not json"), None);
+        assert_eq!(cursor_time(r#"{"paging":null}"#), None);
     }
 
     #[test]

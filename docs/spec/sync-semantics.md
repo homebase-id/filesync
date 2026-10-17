@@ -51,7 +51,8 @@ The **root** is implicit: it has the fixed id from the node schema and is never 
   (made, fetched or moved it) makes that version the base where the bytes agree; a tag change
   alone doesn't, nor a move to where the item already is.
 - **Local**: what the local file system holds now, after identity matching (section 3).
-- **Remote**: the client's mirror of the drive, fed by the change cursor.
+- **Remote**: the client's mirror of the drive, fed by the change cursor; after 29 days away
+  it reads the whole feed again (node schema, "The purge", 4.).
 
 They live in the account's state DB (`daemon.md`, Files): the mirror once per account, base and
 local per sync root. Base, local and the dirty set of a root change only with that root.
@@ -153,7 +154,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 - **Deletes are removals.** A remote delete sets the node's `archivalStatus` to removed and
   keeps its bytes for `keep_deleted_days` (30): "Recently deleted" lists them, and a restore
   brings them back on every device (node schema, "Recently deleted"). The daily purge deletes
-  older ones for good. The reconciler sees a removed node as deleted.
+  older ones for good (node schema, "The purge"). The reconciler sees a removed node as
+  deleted.
 - **Local deletes go to trash.** Removing a local file or folder because of a remote delete
   moves it into the sync root's internal trash (`.hbsync/trash/`), never `unlink` (one rename:
   junk and anything that appears meanwhile go along). The daily purge empties entries older

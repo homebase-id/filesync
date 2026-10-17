@@ -5,17 +5,18 @@
 //! Facts: `docs/spec/homebase-api-notes.md`.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::rc::Rc;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    ChangesPage, NodeMeta, Paced, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
-    Upload,
+    ChangesPage, ForGood, NodeMeta, Paced, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader,
+    Result, Upload,
 };
-use hbsync_types::schema::{NodeContent, PAYLOAD_KEY};
-use hbsync_types::{ContentHash, RemoteFileId, RemoteRef, Target, VersionTag};
+use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
+use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -74,6 +75,34 @@ struct WriteResult {
 struct DeleteResult {
     #[serde(default)]
     local_file_not_found: bool,
+}
+
+/// Files a hard delete takes per request (odin-core `FileVersionTagBatchV2.MaxFiles`).
+pub const HARD_DELETE_BATCH: usize = 1000;
+
+#[derive(Deserialize)]
+struct HardDeleteAnswer {
+    results: Vec<HardDeleted>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HardDeleted {
+    file_id: Uuid,
+    /// `None`: gone. Else why it stayed, as `OdinClientErrorCode`'s camelCase name.
+    error_code: Option<String>,
+}
+
+/// One file's answer to a hard delete.
+fn hard_deleted(answer: &HardDeleted) -> Result<()> {
+    match answer.error_code.as_deref() {
+        None => Ok(()),
+        Some(code) if code.eq_ignore_ascii_case("versionTagMismatch") => {
+            Err(RemoteError::VersionMismatch)
+        }
+        Some(code) if code.eq_ignore_ascii_case("fileNotFound") => Err(RemoteError::NotFound),
+        Some(code) => Err(RemoteError::Fatal(format!("hard delete refused: {code}"))),
+    }
 }
 
 impl HomebaseRemote {
@@ -397,6 +426,7 @@ impl Remote for HomebaseRemote {
             cursor,
             has_more: page.has_more_rows,
             skipped,
+            server_time: page.query_time,
         })
     }
 
@@ -421,11 +451,58 @@ impl Remote for HomebaseRemote {
             cursor,
             has_more: page.has_more_rows,
             unread,
+            server_time: page.query_time,
         })
+    }
+
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        wire::cursor_time(cursor)
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         wire::to_remote(self.raw_header(file_id)?, self.client.key()).map_err(RemoteError::Fatal)
+    }
+
+    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>> {
+        let mut holding = HashSet::new();
+        for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {
+            let mut cursor: Option<String> = None;
+            loop {
+                let page: wire::QueryBatchResponse = self
+                    .client
+                    .post(
+                        &format!("{}/query-batch", self.files()),
+                        &wire::children_query(some, cursor.as_deref(), 500),
+                    )
+                    .map_err(remote_error)?;
+                for row in page.file_refs.iter().flatten() {
+                    // A row that doesn't read is something there all the same: its folder's.
+                    let Ok(r) = serde_json::from_str::<wire::FileRef>(row.get()) else {
+                        holding.extend(some.iter().copied());
+                        continue;
+                    };
+                    if r.archival_status != ARCHIVAL_REMOVED
+                        && let Some(folder) = r.group_id.map(NodeId)
+                    {
+                        holding.insert(folder);
+                    }
+                }
+                // A page may be empty with more to come (the query's hold-back).
+                match page.cursor_state {
+                    Some(next) if page.has_more_rows && Some(&next) != cursor.as_ref() => {
+                        cursor = Some(next)
+                    }
+                    _ => break,
+                }
+            }
+        }
+        Ok(holding)
+    }
+
+    /// odin-core's query leaves out what changed in its last second (`HoldBackWindowMs`, #1923,
+    /// homebase-api-notes), and a little more for the clocks.
+    fn hold_back(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(1100)
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
@@ -468,6 +545,33 @@ impl Remote for HomebaseRemote {
             return Err(RemoteError::NotFound);
         }
         Ok(())
+    }
+
+    /// One request per [`HARD_DELETE_BATCH`] files (`hard-delete-batch`, odin-core #1968): each
+    /// file goes only at its version, and one file's answer never stops the others.
+    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
+        in_batches(files, HARD_DELETE_BATCH, |batch| {
+            let body = json!({ "files": batch.iter().map(|f| json!({
+                "fileId": f.file_id.0,
+                "versionTag": f.version.0,
+            })).collect::<Vec<_>>() });
+            let answer: HardDeleteAnswer = self
+                .client
+                .post(&format!("{}/hard-delete-batch", self.files()), &body)
+                .map_err(remote_error)?;
+            if answer.results.len() != batch.len()
+                || answer
+                    .results
+                    .iter()
+                    .zip(batch)
+                    .any(|(a, f)| a.file_id != f.file_id.0)
+            {
+                return Err(RemoteError::Fatal(
+                    "hard-delete-batch answered other files than asked".into(),
+                ));
+            }
+            Ok(answer.results.iter().map(hard_deleted).collect())
+        })
     }
 
     /// Plaintext `range` of the payload, decrypted with the key that comes with the first
@@ -520,6 +624,31 @@ impl Remote for HomebaseRemote {
     }
 }
 
+/// `files` sent `size` at a time: each one's answer. A request that fails after earlier ones
+/// went keeps their answers and stops there: the files left weren't answered (nor deleted).
+/// One that fails first is the whole call's error.
+fn in_batches(
+    files: &[RemoteRef],
+    size: usize,
+    mut send: impl FnMut(&[RemoteRef]) -> Result<Vec<Result<()>>>,
+) -> Result<ForGood> {
+    let mut done = ForGood::default();
+    for batch in files.chunks(size) {
+        match send(batch) {
+            Ok(answers) => done.answers.extend(answers),
+            Err(e) if done.answers.is_empty() => return Err(e),
+            Err(e) => {
+                done.stopped = Some(e);
+                break;
+            }
+        }
+    }
+    Ok(done)
+}
+
+/// Folders asked about in one query ([`HomebaseRemote::holding_live`]).
+const CHILDREN_QUERY_FOLDERS: usize = 100;
+
 /// How a Homebase answer maps onto the trait's errors (`homebase-api-notes.md`, Errors).
 fn remote_error(e: HomebaseError) -> RemoteError {
     match e {
@@ -549,7 +678,8 @@ fn remote_error(e: HomebaseError) -> RemoteError {
             }
             let why = format!("{what}: {error}");
             match error.status {
-                404 | 410 | 416 => RemoteError::NotFound,
+                404 | 410 => RemoteError::NotFound,
+                416 => RemoteError::StaleRange(why),
                 507 => RemoteError::Full(why),
                 408 | 429 | 499 | 500..=599 => RemoteError::Transient(why),
                 _ => RemoteError::Fatal(why),
@@ -577,6 +707,35 @@ mod tests {
         }
     }
 
+    /// A batch that fails after others went keeps their answers and stops there: the files
+    /// left have no answer, whatever the request's error (a not found too).
+    #[test]
+    fn a_failed_batch_keeps_the_answers_before_it() -> std::result::Result<(), RemoteError> {
+        let files: Vec<RemoteRef> = (0..5)
+            .map(|_| RemoteRef {
+                file_id: RemoteFileId(Uuid::new_v4()),
+                version: VersionTag(Uuid::new_v4()),
+            })
+            .collect();
+        let mut sent = 0;
+        let done = in_batches(&files, 2, |batch| {
+            sent += 1;
+            match sent {
+                1 => Ok(batch.iter().map(|_| Ok(())).collect()),
+                _ => Err(RemoteError::NotFound),
+            }
+        })?;
+        assert_eq!(sent, 2, "none sent after the failure");
+        assert_eq!(done.answers.len(), 2, "{done:?}");
+        assert!(done.answers.iter().all(Result::is_ok));
+        assert!(matches!(done.stopped, Some(RemoteError::NotFound)));
+        assert!(
+            in_batches(&files, 2, |_| Err(RemoteError::Transient("cut".into()))).is_err(),
+            "the first fails: the call's error"
+        );
+        Ok(())
+    }
+
     #[test]
     fn errors_map_onto_the_trait() {
         let cases = [
@@ -588,6 +747,7 @@ mod tests {
             (api(400, Some("payloadHashMissing")), "HashMismatch"),
             (api(400, Some("payloadHashRequired")), "HashRequired"),
             (api(404, None), "NotFound"),
+            (api(416, None), "StaleRange"),
             (api(503, None), "Transient"),
             (api(507, None), "Full"),
             (api(400, Some("invalidUpload")), "Fatal"),

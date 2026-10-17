@@ -123,7 +123,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 ## Identity and tombstones
 - `uniqueId` is the node id. Creates are idempotent: a retry that gets `ExistingFileWithUniqueId`
   (4105) means the create already landed **[verified]** `FileSystemStreamWriterBase.cs:269-283`.
-- Tombstones come only from deleting a removed node for good (above).
+- Tombstones come only from a delete for good that leaves a trace (Recently deleted, below).
 - A tombstone keeps `fileId`, `groupId`, `fileType` and nulls `uniqueId`, `content` and payloads
   **[verified]** `DriveStorageServiceBase.cs:1923-1965`. Clients therefore map
   `fileId → node id` themselves.
@@ -151,24 +151,65 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   parent back first, and one whose parent is gone for good comes back at the top. If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
   meanwhile gets ` (restored)`.
-- After 30 days (the client's `keep_deleted_days`) any client deletes for good an item deleted
-  on its own, counted from its removal, with everything deleted with it, files before their
-  folders, each at the version the client knows: that leaves the tombstone below. Deleting for
-  good (this, or a user emptying Recently deleted) takes removed nodes only, never a live node:
-  a folder holding a live node (one its delete took along, its own removal still on its way:
-  see below) or a removed node that isn't going stays, with the folders it is in, emptied of
-  the rest. It goes once the purge has marked what it took along removed (to come: until then
-  such a folder stays in Recently deleted).
+- **The purge**, the one rule for deleting for good (a user emptying Recently deleted follows
+  it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
+  rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.
+  1. **What goes:** an item deleted on its own, with everything deleted with it, once all of it
+     is 30 days old (the client's `keep_deleted_days`), each node by its own removal: one
+     removed later (in a folder a live node held, say) has its own 30 days, and the item waits
+     with it. Files go before their folders, each at the version the client knows: one written
+     since stays. An item holding a removal whose time the client doesn't know yet waits for a
+     purge that knows it.
+  2. **Never a live node:** the purge and emptying delete removed nodes only, and write nothing
+     live. A folder holding a live node, or a removed node that isn't going, stays with the
+     folders it is in, emptied of the rest. So a removed folder still holding a live node (a
+     delete that stopped half way, before it removed what is in it; or a node written into it
+     since) stays in Recently deleted, restorable, until its delete finishes or someone
+     restores it: it never goes for good while it holds one, however old. A delete that never
+     finishes leaves it there indefinitely. Before a pass of folders goes, the server is asked,
+     in one question, whether a live file is in any of them (one this client doesn't read too:
+     homebase-api-notes, Change feed); as that query leaves out what changed in its last
+     second, the client asks 1.1 s after the pass begins, when it shows all written before (a
+     pass deleting no folder asks nothing, and doesn't wait).
+     What a client still misses (a live file written into a folder in the moment between the
+     question and the delete) is left with no folder: clients show it at the top (the "Lost
+     files" follow-up).
+  3. **Without a trace, or with one:** each node by its own trace and time. A removed node
+     removed 30 days ago or more goes without a trace (a hard delete: `hard-delete-batch`,
+     odin-core #1968), nothing of the file left, in the feed either. Anything else (a younger
+     node, and anything a user empties by hand) is deleted softly, leaving a tombstone, the
+     trace; any client deletes a tombstone hard 30 days after its own `updated`. A node whose
+     time isn't known never goes without a trace.
+  4. **Why 30 days:** the feed keeps a trace of a delete that long and no longer, so every
+     device that reads the feed at least every 30 days learns of every delete. One that hasn't
+     read it for 29 days (a day's margin) reads all of it again: what it has that the feed no
+     longer shows is asked of the server (the feed leaves out some rows it has, **[verified]**:
+     homebase-api-notes, Change feed) and gone only if the server says not found; one it can't
+     ask now stays, asked again at its next read (a hundred at a time). A re-read cut short and
+     taken up after as long starts over.
+  5. **Gone for good:** a hard delete is announced on the notification socket, and a device
+     takes it at once. A write at a version the client knows that finds the file not there,
+     and its header not found either (or a tombstone), forgets it: the next sync puts what the
+     device has up anew. A delete, soft or hard, answered not found for that file (not a failed
+     request) is checked the same way. A request that fails leaves the files it didn't answer
+     for the next purge, whatever its error. A client keeps the ids of files
+     deleted for good, so no stale row brings one back, and forgets one 30 days after it went
+     (its tombstone too, if it left one): no page can show it by then (a page shows only what
+     the server had when it read it, a pull applies its pages in order and never replays older
+     rows, and a re-read starts over after 29 days).
 - **The server's time decides** what a folder's delete took along. A live node in a removed
-  folder (directly, or through live folders in it) whose version was written no later than the
-  folder's removal (its header's `updated` against the folder's) was in the folder when it was
-  deleted: it is deleted with it, though its own removal may still be on its way (a folder goes
-  first). A client takes it as removed, and any client may mark it so; one that doesn't know
-  the node's time (its own write, not back from the feed yet) takes it as written before. A
-  node written after the removal (an edit, a new file, by a device that didn't know of the
-  delete yet) is a change of its own: it stays, and brings its folders back (the folders alone,
-  not what was deleted with them; sync-semantics §6.3). A removed folder outside the part of the
-  drive a device syncs, or one it ignores, isn't its to bring back.
+  folder (directly, or through live folders it took along too) whose version was written no
+  later than the removal of the nearest removed folder above it (its header's `updated`
+  against the folder's) was in the folder when it was deleted: it is deleted with it, though
+  its own removal may still be on its way (a folder goes first). A client takes it as removed,
+  and any client may mark it so; one that doesn't know the node's time (its own write, not
+  back from the feed yet) takes it as written before. Deleting for good leaves it alone: it is
+  live (The purge, 2.). A node written after the removal (an edit, a new file, a folder moved in, by
+  a device that didn't know of the delete yet) is a change of its own: it stays with all that
+  is in it, and brings its folders back (the folders alone, not what was deleted with them;
+  sync-semantics §6.3). One rule decides this for the reconciler and Recently deleted
+  (`crate::along::taken_along`). A removed folder outside the part of the drive a device
+  syncs, or one it ignores, isn't its to bring back.
 - Homebase gives `archivalStatus` no meaning: each app picks its values. `2` is odin-js mail's
   trash and the `Removed` of odin-js's and chat-kmp's types. It is replaced, like the whole
   header, on every update: a write that leaves it out sets it to `0` **[verified]**
@@ -211,6 +252,16 @@ write nodes this client syncs. The file browser's own guide, built on these rule
 ## Changes
 - 2026-10-16: emptying and the purge delete for good only removed nodes, never a live node: a
   folder holding a live node stays until the purge has marked those nodes removed (next).
+- 2026-10-17: the purge (above, the one rule for deleting for good): each node goes without a
+  trace once its own removal is 30 days old (a hard delete, odin-core #1968), else leaving a
+  tombstone, deleted hard 30 days on; a device away 29 days reads the whole feed again; ids of
+  files gone for good are kept 30 days. Any client purges, the mobile browser too. It never
+  writes a live node, so it doesn't mark what a delete took along (the "until the purge has
+  marked" above is dropped): a removed folder still holding a live node stays in Recently
+  deleted, restorable, until its delete finishes or it is restored, possibly indefinitely. The
+  server is asked about a pass's folders 1.1 s after the pass begins. An item goes once all of
+  it is 30 days old, each node by its own removal. A file is gone only by the server's answer
+  for it, confirmed by its header.
 - 2026-10-16: what a folder's delete took along goes by the server's time too: a live node in a
   removed folder written no later than the removal is deleted with it, one written after keeps
   its folders alive (an edit made before a folder's delete goes with it, into Recently deleted).

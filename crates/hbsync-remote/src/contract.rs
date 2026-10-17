@@ -51,6 +51,8 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
     ("guarded_updates", guarded_updates),
     ("content_round_trips", content_round_trips),
     ("deletes", deletes),
+    ("deletes_for_good", deletes_for_good),
+    ("live_children", live_children),
     ("tombstone_in_the_feed", tombstone_in_the_feed),
     (
         "removal_keeps_the_bytes_and_restores",
@@ -92,20 +94,28 @@ impl<'a> Bench<'a> {
             .collect()
     }
 
-    /// Deletes everything the scenarios (and the scratch folder) left, children first.
+    /// Deletes for good everything the scenarios (and the scratch folder) left, tombstones
+    /// too: nothing of them stays in the feed.
     pub fn cleanup(&self) -> Result<(), RemoteError> {
         let created = std::mem::take(&mut *self.created.lock().unwrap_or_else(|e| e.into_inner()));
-        for file_id in created.into_iter().rev() {
-            let header = match self.remote.header(file_id) {
-                Ok(h) => h,
-                Err(RemoteError::NotFound) => continue,
+        let mut left = Vec::new();
+        for file_id in created {
+            match self.remote.header(file_id) {
+                Ok(h) => left.push(RemoteRef {
+                    file_id,
+                    version: h.version,
+                }),
+                Err(RemoteError::NotFound) => {}
                 Err(e) => return Err(e),
-            };
-            if !header.is_deleted() {
-                match self.remote.delete(file_id, header.version) {
-                    Ok(()) | Err(RemoteError::NotFound) => {}
-                    Err(e) => return Err(e),
-                }
+            }
+        }
+        if left.is_empty() {
+            return Ok(());
+        }
+        for result in self.remote.delete_for_good(&left)?.into_answers()? {
+            match result {
+                Ok(()) | Err(RemoteError::NotFound) => {}
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -198,7 +208,7 @@ impl<'a> Bench<'a> {
     }
 
     /// Every change after `cursor` (all pages) and the cursor after them.
-    fn changes_after(
+    pub fn changes_after(
         &self,
         cursor: Option<&str>,
     ) -> Result<(Vec<RemoteHeader>, String), RemoteError> {
@@ -499,6 +509,74 @@ fn deletes(b: &Bench) -> Outcome {
         RemoteError::NotFound | RemoteError::VersionMismatch
     );
     ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
+    Ok(())
+}
+
+/// A folder holds a live file while a live, not removed file is in it: a removed one or a
+/// tombstone doesn't count, nor one in another folder. Several folders are asked at once.
+fn live_children(b: &Bench) -> Outcome {
+    let (dir, _) = b.folder("children")?;
+    let (other, _) = b.folder("other")?;
+    let (empty, _) = b.folder("empty")?;
+    let folders = [dir.node, other.node, empty.node];
+    let wait = || std::thread::sleep(b.remote.hold_back());
+    let holding = |expected: &[NodeId], why: &str| -> Outcome {
+        wait();
+        let mut got: Vec<NodeId> = b.remote.holding_live(&folders)?.into_iter().collect();
+        got.sort();
+        let mut want = expected.to_vec();
+        want.sort();
+        ensure!(got == want, "{why}: {got:?}");
+        Ok(())
+    };
+    holding(&[], "empty folders")?;
+    let f = file("f", dir.node, b"1");
+    let w = b.create(&f, Some(b"1"))?;
+    b.create(&file("g", other.node, b"2"), Some(b"2"))?;
+    holding(&[dir.node, other.node], "a live file in each")?;
+    let gone = b.update(w, &removed(&f), None)?;
+    holding(&[other.node], "only a removed one in dir")?;
+    let w = b.update(gone, &f, None)?;
+    holding(&[dir.node, other.node], "restored")?;
+    b.remote.delete(w.file_id, w.version)?;
+    holding(&[other.node], "only a tombstone in dir")?;
+    Ok(())
+}
+
+/// A delete for good leaves nothing, in the feed either, each file only at its version: a live
+/// file and a tombstone alike; one written since stays; a retry finds it gone.
+fn deletes_for_good(b: &Bench) -> Outcome {
+    let (f, w) = b.file("f", b"1")?;
+    let w2 = b.update(w, &with(&f, NodeContent::file("f", 2, 1, false)), None)?;
+    let (_, t) = b.file("t", b"2")?;
+    b.remote.delete(t.file_id, t.version)?;
+    let tomb = RemoteRef {
+        file_id: t.file_id,
+        version: b.remote.header(t.file_id)?.version,
+    };
+    let (_, o) = b.file("o", b"3")?;
+    let results = b.remote.delete_for_good(&[w, tomb, o])?.into_answers()?;
+    ensure!(results.len() == 3, "{} results for 3 files", results.len());
+    ensure_err!(&results[0], RemoteError::VersionMismatch);
+    ensure!(
+        results[1].is_ok() && results[2].is_ok(),
+        "the tombstone and the live file: {results:?}"
+    );
+    ensure!(!b.remote.header(w.file_id)?.is_deleted(), "deleted anyway");
+    ensure_err!(b.remote.header(o.file_id), RemoteError::NotFound);
+    ensure_err!(b.remote.header(t.file_id), RemoteError::NotFound);
+    let (feed, _) = b.changes_after(None)?;
+    ensure!(
+        !feed
+            .iter()
+            .any(|h| h.file_id == o.file_id || h.file_id == t.file_id),
+        "still in the feed"
+    );
+    // A retry: gone already; the file at its current version goes too.
+    let again = b.remote.delete_for_good(&[o, w2])?.into_answers()?;
+    ensure_err!(&again[0], RemoteError::NotFound);
+    ensure!(again[1].is_ok(), "{:?}", again[1]);
+    ensure_err!(b.remote.header(w.file_id), RemoteError::NotFound);
     Ok(())
 }
 

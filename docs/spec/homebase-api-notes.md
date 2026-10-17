@@ -83,7 +83,7 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
 | Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
-| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206. With odin-core PR #1921 (merged 2026-10-11) **[verified]**: offsets are 64-bit, reads stream, an end past the payload is cut short there, a start at or past it → 416. Before it: an end past the payload → 416, offsets `int` (#1893), every read buffered whole in server memory (#1892) |
+| Ranged payload | `GET .../files/{f}/payload/{key}/{start}/{length}` | a `Range: bytes=a-b` header here wins and gives 206. With odin-core PR #1921 (merged 2026-10-11) **[verified]**: offsets are 64-bit, reads stream, an end past the payload is cut short there, a start at or past it → 416 (the client's `StaleRange`: the file changed since its header was read; it reads the header again, never takes it for a delete). Before it: an end past the payload → 416, offsets `int` (#1893), every read buffered whole in server memory (#1892) |
 | Notify | `wss://{id}/api/v2/notify/ws-token` | see below |
 
 `appData.archivalStatus` (an int Homebase gives no meaning) is how the client removes a node
@@ -93,16 +93,34 @@ to Recently deleted (node schema): **[verified]** an update copies it from the r
 on it only when `archivalStatus` lists values (`QueryBatch.cs:130`), so the feed returns removed
 nodes. odin-js mail uses `1` archived and `2` trash, chat `2` deleted and `3` archived.
 
-The client only soft-deletes (a removed node, once its days in Recently deleted are over): the tombstone is how the other clients learn of a delete
-through the feed. A hard delete (`.../hard-delete`) leaves no trace in the feed **[verified]**
-(`DriveStorageServiceBase.cs`, tried on frodo); this client doesn't make one. It learns of one
-from its notification only (`fileDeleted` with just `previousFileRef`, below) and takes it at
-once, also while paused: no gathering, a commit to the account's DB (the folders sync it at
-the resume), and the file id is never let back in (`gone_files`). What can still miss one: a
-crash between the notification and that commit (moments), a commit that keeps failing until
-the daemon stops (kept and retried meanwhile, 10,000 at most), and a hard delete made while
-the client wasn't connected. Each leaves the file's row stale until it is next written to: a
-file deleted for good answers not found, which forgets the row (coming with the hard purge).
+A soft delete leaves a tombstone, how the other clients learn of a delete through the feed; a
+hard delete leaves no trace in the feed **[verified]** (`DriveStorageServiceBase.cs`, tried on
+frodo). Which the client uses when: node schema, "Recently deleted". It learns of another
+device's hard delete from its notification only (`fileDeleted` with just `previousFileRef`,
+below) and takes it at once, also while paused: no gathering, a commit to the account's DB (the
+folders sync it at the resume), and the file id is never let back in (`gone_files`). What can
+still miss one: a crash between the notification and that commit (moments), a commit that keeps
+failing until the daemon stops (kept and retried meanwhile, 10,000 at most), and a hard delete
+made while the client wasn't connected. Each leaves the file's row stale until it is next
+written to (a file deleted for good answers not found, which forgets the row), or until the
+client reads the whole feed again after a long absence (node schema, Recently deleted).
+
+`POST /api/v2/drives/{d}/files/hard-delete-batch` (odin-core #1968) **[verified]**
+`V2DriveBatchFileWriteOperationsController.HardDeleteBatch`, `HardDeleteBatchV2.cs`,
+`FileVersionTagV2.cs` (commit 70c9d15bc):
+- Body, encrypted like the other V2 bodies: `{files: [{fileId, versionTag}]}`, 1 to 1,000
+  (`FileVersionTagBatchV2.MaxFiles`), each with both ids, none twice; else 400.
+- Each file, active or a tombstone, is deleted with its payloads and thumbnails only at its
+  `versionTag` (checked against the header read, and in the `DELETE` itself).
+- Answer `{results: [{fileId, errorCode}]}`, one per file in request order: `errorCode` null
+  when gone, `versionTagMismatch` (written since: left as it is), `fileNotFound` (missing,
+  hidden by the ACL, which the owner's app never is, or deleted meanwhile: done, on a retry
+  too), or another client error. One file's error never stops the others; only a server error
+  or a drive-level denial fails the request.
+- Nothing is left in the feed and nothing goes to peers; each deleted file is announced as
+  `fileDeleted`, with only `previousFileRef` on a minimal subscription (**[verified]** live,
+  `hard_purge` in `crates/hbsync-dev/tests/live.rs`).
+- The old single `.../{fileId}/hard-delete` takes no version tag; the client doesn't use it.
 
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,
@@ -167,6 +185,22 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
 - `queryParams.fileState` null → tombstones included.
 - Only rows with modified < now are returned; with `oldestFirst` the cursor resumes after the
   last change. Page until `hasMoreRows == false`.
+- **The feed leaves out rows the server has** **[verified]** (commit 70c9d15bc): a row
+  modified within the last second (`QueryBatch.HoldBackWindowMs`, #1923: a page read to the
+  end may lack a row written that moment, which the next read brings), a file whose TTL came
+  due (`DriveQueryServiceBase.FilterVisibleAsync`, as by id), and one the caller may not read
+  (its ACL, ibid.). The Filesync app never meets the last: an app token's caller is the owner
+  (`AppRegistrationService`, `securityLevel: Owner`), and `DriveAclAuthorizationService.
+  CallerHasPermission` admits the owner to every file. A header read for that app is 404 only
+  for a file that isn't there (deleted for good, or a TTL due; our nodes have none): an ACL
+  denial throws (`GetServerFileHeaderInternal`, `AssertCallerHasPermission`), not a 404. So
+  a re-read takes a file it had as gone only on a 404 for its header.
+- **What is in some folders**, any app's files too: `queryParams` `{groupId: [folders...],
+  fileState: ["active"]}`, minimal rows, paged while `hasMoreRows` (a page may be empty with
+  more to come) (`HomebaseRemote::holding_live`); `groupId`, `fileState` and
+  `archivalStatus` are filters of the query **[verified]** (`QueryBatch.cs:130-142, 351`,
+  `FileQueryParams.cs`). Asked before folders are deleted for good, a pass of them in one
+  question: a live file in one that this client doesn't read (not in its mirror) keeps it.
 - `sorting` must be sent: the default is creation order. `maxRecords: 0` → 500.
 - `cursorState` is a JSON string (`{paging:{time,row}}`), not base64. An empty page returns the
   input cursor. **An unparsable cursor silently restarts from the beginning**

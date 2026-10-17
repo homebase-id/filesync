@@ -267,7 +267,10 @@ impl Executor<'_> {
         // an earlier try that landed without its answer: the account's picture lacks a write
         // no announcement brings back (this device's own, or one not taken yet).
         if let JobResult::Failed(JobError::Remote(
-            RemoteError::AlreadyExists | RemoteError::VersionMismatch | RemoteError::NotFound,
+            RemoteError::AlreadyExists
+            | RemoteError::VersionMismatch
+            | RemoteError::NotFound
+            | RemoteError::StaleRange(_),
         )) = &result
         {
             self.report.drive_moved = true;
@@ -276,20 +279,38 @@ impl Executor<'_> {
             (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }, JobResult::Written(w)) => {
                 self.commit_meta(meta, hash, after, Some(w))
             }
-            // Deleted for good meanwhile: out of the tree all the same.
-            (
-                Ctx::Meta {
-                    hash,
-                    after: after @ remote::After::Removed { .. },
-                    ..
-                },
-                Job::Meta { meta, .. },
-                JobResult::Failed(JobError::Remote(RemoteError::NotFound)),
-            ) => self.commit_meta(meta, hash, after, None),
             // An earlier try landed, with whatever the file held then: the bytes count as
             // agreed only where the drive's hash is the local one (an edit since goes up).
             (_, job, JobResult::Failed(JobError::Remote(RemoteError::AlreadyExists))) => {
                 self.finish(&[Settle::node(job.node())], |_| Ok(()))
+            }
+            // Not found at a version this device knows: deleted for good meanwhile, maybe without
+            // a trace in the feed, if its header says so too. Then a removal is done (out of the
+            // tree all the same), and anything else is forgotten, so the next plan sees it gone
+            // (and creates the node anew where it is still wanted). If the header denies it, the
+            // write stays to do, a removal too: the next plan sends it again.
+            (ctx, job, JobResult::Failed(JobError::Remote(RemoteError::NotFound)))
+                if let Some(file_id) = job.file_id() =>
+            {
+                match crate::feed::gone_for_good(self.remote, file_id) {
+                    Ok(true) => match (ctx, job) {
+                        (
+                            Ctx::Meta {
+                                hash,
+                                after: after @ remote::After::Removed { .. },
+                                ..
+                            },
+                            Job::Meta { meta, .. },
+                        ) => self.commit_meta(meta, hash, after, None),
+                        _ => {
+                            self.db
+                                .write(|s| crate::feed::apply_tombstone(s, file_id))?;
+                            Ok(Outcome::stale("deleted for good remotely"))
+                        }
+                    },
+                    Ok(false) => Ok(Outcome::stale("not found, but there")),
+                    Err(e) => Ok(remote_outcome(e)),
+                }
             }
             (_, _, JobResult::Failed(e)) => Ok(match e {
                 JobError::Remote(r) => remote_outcome(r),

@@ -23,7 +23,7 @@
 //! a delete refused for its version (4160) is read once more and counts as done when the file
 //! is deleted (a retry). Faults and latency are injected per client.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -36,8 +36,8 @@ use hbsync_types::{
 };
 
 use crate::{
-    ChangeRef, ChangesPage, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody, RemoteError,
-    RemoteHeader, Result, Upload,
+    ChangeRef, ChangesPage, ForGood, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody,
+    RemoteError, RemoteHeader, Result, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -95,6 +95,9 @@ pub struct FakeServer {
     /// Feed index: (modified, row) → file.
     feed: BTreeMap<(i64, u64), RemoteFileId>,
     clock_ms: i64,
+    /// Files the feed leaves out though they exist (odin-core leaves out a row with a later
+    /// `modified` than its holdback, or one the caller may not see), for tests.
+    unlisted: std::collections::HashSet<RemoteFileId>,
     next_row: u64,
     /// Deterministic id source.
     next_id: u64,
@@ -111,6 +114,7 @@ impl FakeServer {
             feed: BTreeMap::new(),
             // A server's clock: removal times are compared with the purge's cut-off.
             clock_ms: hbsync_types::unix_now_ms(),
+            unlisted: Default::default(),
             next_row: 1,
             next_id: 1,
             subscribers: Vec::new(),
@@ -363,7 +367,7 @@ impl FakeServer {
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
         f.header.removed_at = None;
-        f.header.changed_at = None;
+        f.header.changed_at = Some(self.clock_ms);
         f.header.token = None;
         f.bytes = None;
         self.touch(file_id, writer);
@@ -385,11 +389,36 @@ impl FakeServer {
         Ok(())
     }
 
+    /// Moves the server's clock by `ms` (for tests: writes that look old to the purge).
+    pub fn advance(&mut self, ms: i64) {
+        self.clock_ms += ms;
+    }
+
+    /// Leaves `file_id` out of the feed from now on, though it stays ([`FakeServer::unlisted`]).
+    pub fn unlist(&mut self, file_id: RemoteFileId) {
+        self.unlisted.insert(file_id);
+    }
+
+    /// Puts `file_id` back in the feed ([`FakeServer::unlist`]).
+    pub fn relist(&mut self, file_id: RemoteFileId) {
+        self.unlisted.remove(&file_id);
+    }
+
     pub fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         self.files
             .get(&file_id)
             .map(|f| f.header.clone())
             .ok_or(RemoteError::NotFound)
+    }
+
+    /// Which of `folders` hold a live, not removed file (unlisted ones too).
+    pub fn holding_live(&self, folders: &[NodeId]) -> HashSet<NodeId> {
+        self.files
+            .values()
+            .filter(|f| f.header.state().is_some() && f.header.removed_at.is_none())
+            .map(|f| f.header.parent)
+            .filter(|p| folders.contains(p))
+            .collect()
     }
 
     pub fn payload(&self, file_id: RemoteFileId) -> Result<Arc<Vec<u8>>> {
@@ -419,7 +448,9 @@ impl FakeServer {
             Some(pos) => self
                 .feed
                 .range((std::ops::Bound::Excluded(pos), std::ops::Bound::Unbounded)),
-        };
+        }
+        // A file the feed leaves out (unlisted) isn't in it.
+        .filter(|(_, file_id)| !self.unlisted.contains(*file_id));
         let mut entries = Vec::new();
         let mut last = after;
         let mut has_more = false;
@@ -442,6 +473,7 @@ impl FakeServer {
             cursor,
             has_more,
             skipped: Vec::new(),
+            server_time: self.clock_ms,
         })
     }
 
@@ -545,6 +577,9 @@ pub struct Faults {
     pub refuse_writes: bool,
     /// Added to every request.
     pub latency: Duration,
+    /// Updates and payload reads answer [`RemoteError::NotFound`] though the file is there (as
+    /// a read past a payload's end might, or another reason a server has).
+    pub not_found_writes: bool,
     /// Requests seen, for assertions.
     pub requests: usize,
     /// Payload bytes handed out by `read`, for assertions about resumed downloads.
@@ -743,9 +778,18 @@ impl Remote for FakeRemote {
         })
     }
 
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        parse_cursor(cursor).ok().map(|(time, _)| time)
+    }
+
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         self.gate()?;
         self.server().header(file_id)
+    }
+
+    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>> {
+        self.gate()?;
+        Ok(self.server().holding_live(folders))
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
@@ -780,6 +824,9 @@ impl Remote for FakeRemote {
         }
         self.gate()?;
         self.gate_name(&meta.content.name)?;
+        if self.faults().not_found_writes {
+            return Err(RemoteError::NotFound);
+        }
         let received = self.receive(payload)?;
         let written = replay(received, |upload| {
             self.server()
@@ -810,6 +857,17 @@ impl Remote for FakeRemote {
             }
             result => result,
         }
+    }
+
+    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
+        self.gate()?;
+        let mut server = self.server();
+        Ok(ForGood::all(
+            files
+                .iter()
+                .map(|f| server.hard_delete(f.file_id, f.version))
+                .collect(),
+        ))
     }
 
     fn read(

@@ -484,6 +484,11 @@ fn read_feed(
 /// Bytes this process's open TCP connections have received (`ss -tip`: TLS, after gzip). The
 /// HTTP client keeps its connections open, so the counts carry on between two readings.
 fn socket_bytes() -> Result<u64, Box<dyn std::error::Error>> {
+    socket_count("bytes_received:")
+}
+
+/// [`socket_bytes`] for another of `ss`'s counters (`bytes_sent:`).
+fn socket_count(counter: &str) -> Result<u64, Box<dyn std::error::Error>> {
     let out = std::process::Command::new("ss").arg("-tinpH").output()?;
     let me = format!("pid={},", std::process::id());
     let (mut total, mut mine) = (0u64, false);
@@ -493,7 +498,7 @@ fn socket_bytes() -> Result<u64, Box<dyn std::error::Error>> {
         } else if mine
             && let Some(n) = line
                 .split_whitespace()
-                .find_map(|w| w.strip_prefix("bytes_received:"))
+                .find_map(|w| w.strip_prefix(counter))
         {
             total += n.parse::<u64>()?;
         }
@@ -715,6 +720,28 @@ impl Remote for Counted {
         file_id: hbsync_types::RemoteFileId,
     ) -> hbsync_remote::Result<hbsync_remote::RemoteHeader> {
         self.inner.header(file_id)
+    }
+
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
+    }
+
+    fn holding_live(
+        &self,
+        folders: &[hbsync_types::NodeId],
+    ) -> hbsync_remote::Result<std::collections::HashSet<hbsync_types::NodeId>> {
+        self.inner.holding_live(folders)
+    }
+
+    fn hold_back(&self) -> Duration {
+        self.inner.hold_back()
+    }
+
+    fn delete_for_good(
+        &self,
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
+        self.inner.delete_for_good(files)
     }
 
     fn create(
@@ -1086,6 +1113,107 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
         assert!(
             stale.is_empty(),
             "a kept answer hid a write (odin-core #1909)"
+        );
+        Ok(())
+    })();
+    bench.cleanup()?;
+    result
+}
+
+/// A purge on the server's hard delete (`hard-delete-batch`, odin-core #1968): `n` files
+/// (`HARD_PURGE_FILES`, 2,100 by default) created, removed, then deleted for good a batch of
+/// 1,000 at a time, as the purge sends them. Prints each batch's time and bytes (this process's
+/// connections, the notification socket included), and checks that the notifier announces
+/// every hard delete as deleted (its `previousFileRef`), and none of the feed's rows is left.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
+fn hard_purge() -> R {
+    use hbsync_homebase::drive::HARD_DELETE_BATCH;
+    use hbsync_remote::contract::{file, removed};
+    use hbsync_types::RemoteRef;
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    let remote = live_remote()?;
+    let n = std::env::var("HARD_PURGE_FILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2100usize);
+    let run_folder = run_name("hard-purge");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::from_millis(20))?;
+    let result = (|| -> R {
+        let (folder, _) = bench.folder("files")?;
+        let made = Mutex::new(Vec::with_capacity(n));
+        let done = on_threads(n, |i| {
+            let data = format!("file {i}");
+            let meta = file(&format!("f{i:05}.txt"), folder.node, data.as_bytes());
+            let at = bench.create(&meta, Some(data.as_bytes()))?;
+            let gone = remote.update(&bench.target(at), &removed(&meta), None)?;
+            made.lock().unwrap_or_else(|e| e.into_inner()).push(gone.at);
+            Ok::<_, hbsync_remote::RemoteError>(())
+        })?;
+        let made: Vec<RemoteRef> = made.into_inner().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            (done, made.len()),
+            (n, n),
+            "every create and removal went through"
+        );
+        let after = bench.cursor_now()?;
+
+        let (tx, events) = std::sync::mpsc::channel();
+        // This client's own deletes: heard (`excludeOwnWrites` would leave them out).
+        let notifier = Notifier::spawn_with(
+            remote.client().clone(),
+            remote.drive(),
+            hbsync_homebase::notify::OwnWrites::Heard,
+            tx,
+        )?;
+        // Subscribed before the deletes.
+        std::thread::sleep(Duration::from_secs(3));
+        println!("{n} removed files deleted for good, {HARD_DELETE_BATCH} a request");
+        println!(
+            "{:<8} {:>6} {:>10} {:>12} {:>12}",
+            "batch", "files", "ms", "bytes sent", "bytes recv"
+        );
+        let mut total = Duration::ZERO;
+        for (i, batch) in made.chunks(HARD_DELETE_BATCH).enumerate() {
+            let (sent, recv) = (socket_count("bytes_sent:")?, socket_bytes()?);
+            let start = std::time::Instant::now();
+            let results = remote.delete_for_good(batch)?.into_answers()?;
+            let took = start.elapsed();
+            total += took;
+            // A socket closed meanwhile takes its counts along: none then.
+            let (sent, recv) = (
+                socket_count("bytes_sent:")?.saturating_sub(sent),
+                socket_bytes()?.saturating_sub(recv),
+            );
+            assert!(results.iter().all(Result::is_ok), "{results:?}");
+            println!(
+                "{:<8} {:>6} {:>10} {sent:>12} {recv:>12}",
+                i + 1,
+                batch.len(),
+                took.as_millis()
+            );
+        }
+        println!("total    {n:>6} {:>10}", total.as_millis());
+        // The announcements trail the deletes.
+        std::thread::sleep(Duration::from_secs(15));
+        drop(notifier);
+        let gone: HashSet<_> = events
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::Changed(Some(r)) if r.deleted => Some(r.file_id),
+                _ => None,
+            })
+            .collect();
+        let missed = made.iter().filter(|r| !gone.contains(&r.file_id)).count();
+        println!("announced as deleted: {}", n - missed);
+        assert_eq!(missed, 0, "every hard delete announced, as deleted");
+        let ids: HashSet<String> = made.iter().map(|r| r.file_id.0.to_string()).collect();
+        let left = bench.changes_after(Some(&after))?.0;
+        assert!(
+            !left.iter().any(|h| ids.contains(&h.file_id.0.to_string())),
+            "nothing of them in the feed"
         );
         Ok(())
     })();

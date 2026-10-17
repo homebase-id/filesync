@@ -192,11 +192,12 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
     Ok(())
 }
 
-/// A remote whose next whole feed page, once fetched, waits for the test before it is handed
-/// back: a page on its way while the drive changes.
+/// A remote whose next whole feed page (or with `hold_header`, header read), once fetched,
+/// waits for the test before it is handed back: a page on its way while the drive changes.
 struct HeldPage {
     inner: Arc<FakeRemote>,
     hold: std::sync::atomic::AtomicBool,
+    hold_header: std::sync::atomic::AtomicBool,
     fetched: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
     go: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
 }
@@ -225,7 +226,30 @@ impl Remote for HeldPage {
         &self,
         file_id: hbsync_types::RemoteFileId,
     ) -> hbsync_remote::Result<hbsync_remote::RemoteHeader> {
-        self.inner.header(file_id)
+        let header = self.inner.header(file_id);
+        if self
+            .hold_header
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            let _ = self.fetched.lock().map(|tx| tx.send(()));
+            let _ = self.go.lock().map(|rx| rx.recv());
+        }
+        header
+    }
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
+    }
+    fn holding_live(
+        &self,
+        folders: &[hbsync_types::NodeId],
+    ) -> hbsync_remote::Result<std::collections::HashSet<hbsync_types::NodeId>> {
+        self.inner.holding_live(folders)
+    }
+    fn delete_for_good(
+        &self,
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
+        self.inner.delete_for_good(files)
     }
     fn create(
         &self,
@@ -273,6 +297,7 @@ fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
     let remote = Arc::new(HeldPage {
         inner: Arc::clone(&inner),
         hold: AtomicBool::new(false),
+        hold_header: AtomicBool::new(false),
         fetched: std::sync::Mutex::new(fetched_tx),
         go: std::sync::Mutex::new(go_rx),
     });
@@ -311,6 +336,71 @@ fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
         db.read(|s| s.mirror_by_file(v2.at.file_id))?.is_none(),
         "the page fetched before the delete brought it back"
     );
+    Ok(())
+}
+
+/// A re-read asks the server about a file the feed didn't show, and writes the answer, in the
+/// same pull: a pull meanwhile that brings the file's removal waits for it, so the header read
+/// before the removal can't write over it (the delete lost, the file brought back).
+#[test]
+fn a_reread_answer_doesnt_write_over_a_later_removal() -> R {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = tempfile::tempdir()?;
+    let inner = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+    let (fetched_tx, fetched) = std::sync::mpsc::channel();
+    let (go, go_rx) = std::sync::mpsc::channel();
+    let remote = Arc::new(HeldPage {
+        inner: Arc::clone(&inner),
+        hold: AtomicBool::new(false),
+        hold_header: AtomicBool::new(false),
+        fetched: std::sync::Mutex::new(fetched_tx),
+        go: std::sync::Mutex::new(go_rx),
+    });
+    let drive = Drive::new(
+        StateDb::open_account(&dir.path().join("state.db"))?,
+        remote.clone(),
+    );
+    let meta = folder("Docs");
+    let docs = inner.create(&meta, None)?;
+    drive.pull(None)?;
+    // Away a month: the next pull reads the whole feed again, which leaves Docs out; it asks
+    // about it, and its answer (Docs live) waits.
+    inner.server().unlist(docs.at.file_id);
+    inner
+        .server()
+        .advance(hbsync_engine::feed::TRACE_MS + 24 * 60 * 60 * 1000);
+    remote.hold_header.store(true, Ordering::SeqCst);
+    let rereading = {
+        let drive = Arc::clone(&drive);
+        std::thread::spawn(move || drive.pull(None).map(drop).map_err(|e| e.to_string()))
+    };
+    fetched.recv_timeout(Duration::from_secs(10))?;
+    // Meanwhile Docs is removed, in the feed again, and another pull asked for.
+    let removed = NodeMeta {
+        removed: true,
+        ..meta
+    };
+    inner.update(&docs, &removed, None)?;
+    inner.server().relist(docs.at.file_id);
+    let pulling = {
+        let drive = Arc::clone(&drive);
+        std::thread::spawn(move || drive.pull(None).map(drop).map_err(|e| e.to_string()))
+    };
+    let until = std::time::Instant::now() + Duration::from_millis(500);
+    while !pulling.is_finished() && std::time::Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    go.send(())?;
+    rereading.join().map_err(|_| "the re-read panicked")??;
+    pulling.join().map_err(|_| "the pull panicked")??;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    let removed: Vec<_> = db
+        .read(|s| s.list_removed(10))?
+        .into_iter()
+        .map(|r| r.row.file_id)
+        .collect();
+    assert_eq!(removed, [docs.at.file_id], "the removal stands");
     Ok(())
 }
 
@@ -375,6 +465,21 @@ impl Remote for FailsAfterAPage {
         file_id: hbsync_types::RemoteFileId,
     ) -> hbsync_remote::Result<hbsync_remote::RemoteHeader> {
         self.inner.header(file_id)
+    }
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
+    }
+    fn holding_live(
+        &self,
+        folders: &[hbsync_types::NodeId],
+    ) -> hbsync_remote::Result<std::collections::HashSet<hbsync_types::NodeId>> {
+        self.inner.holding_live(folders)
+    }
+    fn delete_for_good(
+        &self,
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
+        self.inner.delete_for_good(files)
     }
     fn create(
         &self,
@@ -703,7 +808,8 @@ fn the_purge_empties_every_folders_trash() -> R {
     };
     let (in_a, in_b) = (entry(&a, now + 1)?, entry(&b, now + 1)?);
     let young = entry(&b, now + 100)?;
-    drive.purge(((now + 10) * 1000) as i64)?;
+    // Kept less than nothing: what goes there in the next 10 s goes too.
+    drive.purge(-10_000)?;
     assert!(!in_a.exists() && !in_b.exists(), "both trashes emptied");
     assert!(young.exists(), "what is younger stays");
     Ok(())

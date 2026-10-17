@@ -657,13 +657,14 @@ mod tests {
             ),
             changed(false, Some(7), Some(7), Some(NodeId(parent)))
         );
-        // A tombstone, and a hard delete (only the file as it was): deleted either way.
+        // A tombstone (with its time: when it may go hard), and a hard delete (only the file as
+        // it was): deleted either way.
         assert_eq!(
             event(
                 "fileDeleted",
                 json!({"fileRef": row("deleted", 0), "previousFileRef": row("active", 2)})
             ),
-            changed(true, None, None, None)
+            changed(true, None, Some(7), None)
         );
         assert_eq!(
             event(

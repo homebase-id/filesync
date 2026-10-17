@@ -6,12 +6,24 @@
 //! back) changes nothing. The feed is drained completely before planning, which is what
 //! makes the mirror complete enough to call an unknown parent truly gone.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 
-use hbsync_remote::{ChangeRef, Remote, RemoteBody, RemoteError, RemoteHeader};
+use hbsync_remote::{
+    ChangeRef, ChangesPage, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader,
+};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
+use hbsync_types::activity::removal_time;
 use hbsync_types::{FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef};
+
+/// How long the feed keeps a trace of a delete for good, Unix ms: what was removed (or became
+/// a tombstone) this long ago may be deleted hard (node schema, Recently deleted), and a device
+/// away this long reads the whole feed again.
+pub const TRACE_MS: i64 = 30 * DAY_MS;
+/// A device away this long reads the whole feed again: a day before [`TRACE_MS`], for a
+/// server answer's time and its clock that differ.
+const REREAD_MS: i64 = TRACE_MS - DAY_MS;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -28,6 +40,8 @@ pub struct FeedReport {
     pub deleted: usize,
     /// Rows the client can't read (not encrypted, another key, not a sync node), with why.
     pub skipped: Vec<String>,
+    /// The server's clock at the last page read, Unix ms.
+    pub server_time: Option<i64>,
 }
 
 impl std::ops::AddAssign for FeedReport {
@@ -36,6 +50,7 @@ impl std::ops::AddAssign for FeedReport {
         self.live += other.live;
         self.deleted += other.deleted;
         self.skipped.extend(other.skipped);
+        self.server_time = self.server_time.max(other.server_time);
     }
 }
 
@@ -50,43 +65,258 @@ impl std::ops::AddAssign for FeedReport {
 /// file changed in between has moved further along the feed). Changes from elsewhere come in
 /// runs, so after a page with something new the next is read whole at once, as is a first read
 /// (no cursor: all of it is new), until a whole page holds nothing new.
+///
+/// A delete for good leaves nothing in the feed once the feed had it for [`TRACE_MS`] (node
+/// schema, Recently deleted): a device that hasn't read the feed for nearly that long (by the
+/// server's clock: the cursor's time, or [`keys::READ_AT`], against the first page's; decided
+/// before that page is applied) reads all of it again ([`Reread`]).
 pub fn pull<G: DerefMut<Target = StateDb>>(
     db: impl Fn() -> G,
     remote: &dyn Remote,
     page_size: usize,
+    reread: &mut Option<Reread>,
+) -> Result<FeedReport, FeedError> {
+    let mut report = read_pages(&db, remote, page_size, reread)?;
+    // A re-read open: what is left of it asked about (once nothing is, it ends).
+    if let Some(asking) = reread.as_ref().map(Reread::to_ask) {
+        report.deleted += settle(&db, reread, ask(remote, &asking))?;
+    }
+    Ok(report)
+}
+
+/// The pages of [`pull`], without the re-read's questions ([`Reread::to_ask`], [`ask`],
+/// [`settle`]), which come after them, in the same pull: a header read and its write in one
+/// pull, so no other pull or announcement comes between them.
+fn read_pages<G: DerefMut<Target = StateDb>>(
+    db: impl Fn() -> G,
+    remote: &dyn Remote,
+    page_size: usize,
+    reread: &mut Option<Reread>,
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
+    let (rereading, cursor, read_at) = db().read(|s| {
+        Ok((
+            s.rereading()?,
+            s.account_kv(keys::REMOTE_CURSOR)?,
+            s.account_kv(keys::READ_AT)?
+                .and_then(|v| v.parse::<i64>().ok()),
+        ))
+    })?;
+    if !rereading {
+        *reread = None;
+    } else if reread.is_none() {
+        // Asked (an upgrade), or one a new process doesn't know how far it got: from the start.
+        *reread = Some(db().write(Reread::begin)?);
+    }
+    // Read until then, by the server's clock: what the cursor and the last day's mark say, or
+    // when the re-read on its way began.
+    let mut away_from = match reread {
+        Some(r) => r.since,
+        None => cursor
+            .as_deref()
+            .and_then(|c| remote.cursor_time(c))
+            .max(read_at),
+    };
     let mut slim = None;
     loop {
         let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
         let cursor = cursor.as_deref();
-        let applied = if *slim.get_or_insert(cursor.is_some()) {
-            read_slim(&db, remote, cursor, page_size, &mut report)?
+        let page = if *slim.get_or_insert(cursor.is_some()) {
+            Page::Slim(with_retries(|| remote.change_refs(cursor, page_size))?)
         } else {
-            None
+            Page::Whole(with_retries(|| remote.changes(cursor, page_size))?)
         };
-        let (has_more, nothing_new) = match applied {
+        let now = page.server_time();
+        report.server_time = Some(now);
+        if let Some(r) = reread.as_mut() {
+            r.since.get_or_insert(now);
+        }
+        if let Some(from) = away_from.take()
+            && now.saturating_sub(from) > REREAD_MS
+        {
+            *reread = Some(Reread {
+                since: Some(now),
+                ..db().write(Reread::begin)?
+            });
+            slim = None;
+            continue;
+        }
+        // A slim page applies on its own, or else is read whole.
+        let slim_applied = match &page {
+            Page::Slim(refs) => {
+                if let Some(r) = reread.as_mut() {
+                    r.shown(refs.refs.iter().map(|r| r.file_id));
+                }
+                apply_slim(&db, refs, cursor, &mut report)?
+            }
+            Page::Whole(_) => None,
+        };
+        let (has_more, nothing_new) = match slim_applied {
             Some(has_more) => (has_more, true),
-            None => read_whole(&db, remote, cursor, page_size, &mut report)?,
+            None => {
+                let whole = match page {
+                    Page::Whole(whole) => whole,
+                    Page::Slim(_) => with_retries(|| remote.changes(cursor, page_size))?,
+                };
+                if let Some(r) = reread.as_mut() {
+                    r.shown(whole.entries.iter().map(|h| h.file_id));
+                }
+                apply_whole(&db, whole, cursor, &mut report)?
+            }
         };
         slim = Some(nothing_new);
         report.pages += 1;
         if !has_more {
-            return Ok(report);
+            break;
+        }
+    }
+    let mark = report
+        .server_time
+        .filter(|now| read_at.is_none_or(|at| now.saturating_sub(at) > DAY_MS));
+    if let Some(now) = mark {
+        db().write(|s| s.set_account_kv(keys::READ_AT, &now.to_string()))?;
+    }
+    Ok(report)
+}
+
+/// Files a re-read asks the server about per pull, at most ([`Reread`]): one pull at a time
+/// holds the drive, so it doesn't for long.
+const CONFIRM_PER_PULL: usize = 100;
+
+/// A re-read of the whole feed ([`Store::start_reread`]) on its way: the files the store had
+/// when it began that the feed hasn't shown yet, and when it began (the server's clock). The
+/// caller keeps it between pulls, so a pull an error cut short goes on where it stopped (unless
+/// the re-read is as old as an absence that starts one again); a new process starts it over.
+#[derive(Debug)]
+pub struct Reread {
+    missing: HashSet<RemoteFileId>,
+    since: Option<i64>,
+}
+
+impl Reread {
+    /// Starts one: the cursor goes, and what the store has now is what the feed must show. Its
+    /// time comes with the first page.
+    fn begin(s: &Store<'_>) -> Result<Reread, StateError> {
+        s.start_reread()?;
+        Ok(Reread {
+            missing: s.drive_file_ids()?.into_iter().collect(),
+            since: None,
+        })
+    }
+
+    fn shown(&mut self, files: impl Iterator<Item = RemoteFileId>) {
+        for f in files {
+            self.missing.remove(&f);
+        }
+    }
+
+    /// Its pages read, the files the store had that the feed didn't show: to ask the server
+    /// about ([`ask`]), [`CONFIRM_PER_PULL`] at most.
+    fn to_ask(&self) -> Vec<RemoteFileId> {
+        self.missing
+            .iter()
+            .take(CONFIRM_PER_PULL)
+            .copied()
+            .collect()
+    }
+}
+
+/// What the server said of the files a re-read asked about ([`ask`]).
+#[derive(Debug, Default)]
+struct Asked {
+    gone: Vec<RemoteFileId>,
+    found: Vec<RemoteHeader>,
+    answered: Vec<RemoteFileId>,
+}
+
+/// Asks the server about `files`, which the feed didn't show (it leaves out rows it has: one
+/// changed in its last second, homebase-api-notes): gone only if it says not found (for this
+/// app, the file isn't there); one it has is applied as it is ([`settle`]). One it can't
+/// tell about now (a broken connection) stops the asking: it and the rest are asked again
+/// later. What it found is written by [`settle`], in the same pull.
+fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
+    let mut asked = Asked::default();
+    for &file_id in files {
+        match remote.header(file_id) {
+            Err(RemoteError::NotFound) => asked.gone.push(file_id),
+            Ok(header) => asked.found.push(header),
+            Err(RemoteError::Fatal(why)) => {
+                tracing::warn!("{file_id:?} isn't in the feed and doesn't read: {why}");
+            }
+            Err(e) => {
+                tracing::info!("{file_id:?} isn't in the feed; asked again later: {e}");
+                break;
+            }
+        }
+        asked.answered.push(file_id);
+    }
+    asked
+}
+
+/// Writes what [`ask`] found: a file gone is gone here too, one there is applied as it is
+/// (one that isn't a node this client reads stays as it is; one deleted for good since stays
+/// gone, [`Store::mark_file_gone`]). Each file answered is the re-read's no more once that is
+/// written (a write that fails leaves them to ask again): once none is left, it ends. Returns
+/// how many went.
+fn settle<G: DerefMut<Target = StateDb>>(
+    db: &impl Fn() -> G,
+    reread: &mut Option<Reread>,
+    asked: Asked,
+) -> Result<usize, FeedError> {
+    let done = reread.as_ref().is_some_and(|r| {
+        let answered = asked
+            .answered
+            .iter()
+            .filter(|f| r.missing.contains(f))
+            .count();
+        answered == r.missing.len()
+    });
+    db().write(|s| {
+        for &file_id in &asked.gone {
+            apply_tombstone(s, file_id)?;
+        }
+        for header in &asked.found {
+            apply(s, header)?;
+        }
+        if done {
+            s.end_reread()?;
+        }
+        Ok(())
+    })?;
+    if let Some(r) = reread.as_mut() {
+        for file_id in &asked.answered {
+            r.missing.remove(file_id);
+        }
+    }
+    if done {
+        *reread = None;
+    }
+    Ok(asked.gone.len())
+}
+
+/// A page of the feed as read: slim, or whole.
+enum Page {
+    Slim(RefsPage),
+    Whole(ChangesPage),
+}
+
+impl Page {
+    fn server_time(&self) -> i64 {
+        match self {
+            Page::Slim(p) => p.server_time,
+            Page::Whole(p) => p.server_time,
         }
     }
 }
 
-/// One page slim, applied if it holds nothing new: whether more follow; `None` if it holds
+/// A slim page, applied if it holds nothing new: whether more follow; `None` if it holds
 /// something new (nothing applied).
-fn read_slim<G: DerefMut<Target = StateDb>>(
+fn apply_slim<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
-    remote: &dyn Remote,
+    page: &RefsPage,
     cursor: Option<&str>,
-    page_size: usize,
     report: &mut FeedReport,
 ) -> Result<Option<bool>, FeedError> {
-    let page = with_retries(|| remote.change_refs(cursor, page_size))?;
     // Checked where it is applied: a commit in between may have changed what is known.
     let applied = db().write(|s| {
         if page.unread > 0 || !known(s, &page.refs)? {
@@ -101,15 +331,13 @@ fn read_slim<G: DerefMut<Target = StateDb>>(
     Ok(applied.then_some(page.has_more))
 }
 
-/// One page whole, applied: whether more follow, and whether it held nothing new.
-fn read_whole<G: DerefMut<Target = StateDb>>(
+/// A whole page, applied: whether more follow, and whether it held nothing new.
+fn apply_whole<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
-    remote: &dyn Remote,
+    mut page: ChangesPage,
     cursor: Option<&str>,
-    page_size: usize,
     report: &mut FeedReport,
 ) -> Result<(bool, bool), FeedError> {
-    let mut page = with_retries(|| remote.changes(cursor, page_size))?;
     report.skipped.append(&mut page.skipped);
     let nothing_new = db().write(|s| {
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
@@ -157,11 +385,20 @@ fn save_cursor(s: &Store<'_>, old: Option<&str>, rows: bool, new: &str) -> Resul
 /// other version (this device's own writes coming back) they are applied as a slim page's,
 /// without reading the feed. Whether that was all; else the feed has to be read.
 pub(crate) fn announced(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
-    let refs = latest(refs);
+    let (refs, sure) = latest(refs);
     for r in refs.iter().filter(|r| r.deleted) {
-        apply_tombstone(s, r.file_id)?;
+        match r.changed_at {
+            // A tombstone on the drive (a soft delete), recorded as the feed's would be.
+            Some(at) => tombstone(s, r.at(), Some(at))?,
+            // Deleted for good, nothing left (a hard delete names only the file as it was): a
+            // tombstone this device holds at that version has nothing left to delete.
+            None => {
+                s.delete_tombstone_at(r.at())?;
+                apply_tombstone(s, r.file_id)?;
+            }
+        }
     }
-    if !known(s, &refs)? {
+    if !sure || !known(s, &refs)? {
         return Ok(false);
     }
     for r in refs.iter().filter(|r| !r.deleted) {
@@ -172,26 +409,40 @@ pub(crate) fn announced(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, State
 
 /// One ref per file: the last a file had. A tombstone ends a file (its id never comes back,
 /// `homebase-api-notes.md`); of the others the newest by the server's time, the later
-/// announced on a tie. An own write made twice, or made then deleted, needs no read.
-fn latest(refs: &[ChangeRef]) -> Vec<ChangeRef> {
-    let time = |r: &ChangeRef| r.changed_at.max(r.removed_at);
+/// announced on a tie. An own write made twice, or made then deleted, needs no read. Whether
+/// that is sure: two writes of a file, one of them without a time (a removal whose row didn't
+/// say when, `i64::MAX`), can't be told apart: in doubt, the feed tells.
+fn latest(refs: &[ChangeRef]) -> (Vec<ChangeRef>, bool) {
+    let time = |r: &ChangeRef| {
+        [r.changed_at, r.removed_at]
+            .into_iter()
+            .flatten()
+            .filter(|t| *t != i64::MAX)
+            .max()
+    };
+    let mut sure = true;
     let mut last: HashMap<RemoteFileId, ChangeRef> = HashMap::new();
     for r in refs {
         match last.get(&r.file_id) {
-            Some(had) if had.deleted || (!r.deleted && time(had) > time(r)) => {}
+            Some(had) if had.deleted => {}
+            Some(had) if !r.deleted && (time(had).is_none() || time(r).is_none()) => {
+                sure = false;
+                last.insert(r.file_id, *r);
+            }
+            Some(had) if !r.deleted && time(had) > time(r) => {}
             _ => {
                 last.insert(r.file_id, *r);
             }
         }
     }
-    last.into_values().collect()
+    (last.into_values().collect(), sure)
 }
 
 /// Applies a known ref ([`known`]) as [`apply`] would its header: only what the server says
 /// better, its times. Returns `true` for a node in the tree.
 fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
     if r.deleted {
-        apply_tombstone(s, r.file_id)?;
+        tombstone(s, r.at(), r.changed_at)?;
         return Ok(false);
     }
     apply_known(s, r, None)
@@ -212,7 +463,9 @@ fn apply_known(
         s.set_token(r.file_id, r.removed_at.is_some(), token)?;
     }
     if let Some(removed_at) = r.removed_at {
-        s.confirm_removed(r.at(), removed_at)?;
+        if let Some(at) = known_time(removed_at) {
+            s.confirm_removed(r.at(), at)?;
+        }
         return Ok(false);
     }
     if let (Some(changed_at), Some(parent)) = (r.changed_at, r.parent) {
@@ -236,11 +489,17 @@ pub fn with_retries<T>(mut f: impl FnMut() -> Result<T, RemoteError>) -> Result<
     f()
 }
 
+/// A removal's time, unless the remote didn't say ([`removal_time`]`(None)`: the newest, open
+/// in the store until a version that says).
+fn known_time(removed_at: i64) -> Option<i64> {
+    (removed_at != removal_time(None)).then_some(removed_at)
+}
+
 /// Applies one header to the mirror. Returns `true` for a node in the tree, `false` for one
 /// that left it (deleted, or removed to Recently deleted).
 pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     if header.is_deleted() {
-        apply_tombstone(s, header.file_id)?;
+        tombstone(s, header.at(), header.changed_at)?;
         return Ok(false);
     }
     // A live file without its payload changes nothing: it must never read as a delete.
@@ -257,7 +516,7 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
         gone(s, header.file_id)?;
         s.put_removed(&RemovedRow {
             row,
-            removed_at: Some(removed_at),
+            removed_at: known_time(removed_at),
         })?;
         return Ok(false);
     }
@@ -266,9 +525,31 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     Ok(true)
 }
 
+/// A tombstone in the feed, written at `at` (the server's time): the file is deleted for good,
+/// and the tombstone itself goes hard once old enough ([`crate::deleted::purge`]).
+fn tombstone(s: &Store<'_>, tombstone: RemoteRef, at: Option<i64>) -> Result<(), StateError> {
+    if let Some(at) = at {
+        s.put_tombstone(tombstone, at)?;
+    }
+    apply_tombstone(s, tombstone.file_id)
+}
+
+/// Whether the drive has file `file_id` no more (not found, or only its tombstone), by its
+/// header: a write or read answered not found may have other reasons.
+pub(crate) fn gone_for_good(
+    remote: &dyn Remote,
+    file_id: RemoteFileId,
+) -> Result<bool, RemoteError> {
+    match remote.header(file_id) {
+        Ok(header) => Ok(header.is_deleted()),
+        Err(RemoteError::NotFound) => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 /// A file deleted for good: out of Recently deleted and the mirror, and never back in them
 /// ([`Store::mark_file_gone`]).
-fn apply_tombstone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
+pub(crate) fn apply_tombstone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
     s.mark_file_gone(file_id)?;
     s.delete_removed_file(file_id)?;
     gone(s, file_id)
@@ -302,10 +583,7 @@ pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
         // `Remote`s refuse such rows.
         NodeKind::File => Some(payload.as_ref()?),
     };
-    let at = RemoteRef {
-        file_id: header.file_id,
-        version: header.version,
-    };
+    let at = header.at();
     let hash = payload.map(|p| p.hash);
     let mut row = MirrorRow {
         token: header.token.clone(),
@@ -328,6 +606,77 @@ mod tests {
     use hbsync_types::{NodeId, RemoteFileId, VersionTag};
 
     use super::*;
+
+    /// An announced soft delete records its tombstone, as the feed's row would; only a delete
+    /// for good (a ref without a time: a hard delete) of that version clears it.
+    #[test]
+    fn announced_deletes_keep_tombstones_as_the_feed_does() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut db = StateDb::open_in_memory()?;
+        let at = RemoteRef {
+            file_id: RemoteFileId(Uuid::now_v7()),
+            version: VersionTag(Uuid::now_v7()),
+        };
+        let deleted = |changed_at| ChangeRef {
+            file_id: at.file_id,
+            version: at.version,
+            deleted: true,
+            parent: None,
+            removed_at: None,
+            changed_at,
+        };
+        db.write(|s| announced(s, &[deleted(Some(7))]).map(drop))?;
+        assert_eq!(
+            db.read(|s| s.tombstones_before(8))?,
+            [at],
+            "a tombstone on the drive"
+        );
+        db.write(|s| announced(s, &[deleted(None)]).map(drop))?;
+        assert!(
+            db.read(|s| s.tombstones_before(8))?.is_empty(),
+            "deleted hard"
+        );
+        assert!(db.read(|s| s.file_gone(at.file_id))?);
+        Ok(())
+    }
+
+    /// A write of a file the store has, then its removal without a time (`i64::MAX`), announced
+    /// together: which came last can't be told, so the feed is read (the removal isn't lost to
+    /// the write the store already has).
+    #[test]
+    fn a_write_and_a_removal_without_a_time_are_doubt() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            body: RemoteBody::Live {
+                node: NodeId::new(),
+                content: NodeContent::folder("d"),
+                payload: None,
+            },
+            removed_at: None,
+            changed_at: Some(5),
+            token: None,
+        };
+        db.write(|s| apply(s, &header).map(drop))?;
+        let write = ChangeRef::of(&header);
+        let removal = ChangeRef {
+            version: VersionTag(Uuid::new_v4()),
+            removed_at: Some(i64::MAX),
+            changed_at: None,
+            ..write
+        };
+        for refs in [[write, removal], [removal, write]] {
+            assert!(!db.write(|s| announced(s, &refs))?, "the feed is read");
+        }
+        assert!(
+            db.write(|s| announced(s, &[write]))?,
+            "the write alone is known"
+        );
+        Ok(())
+    }
 
     /// A first read (no cursor) is read whole; a page of nothing new costs one slim read; a run
     /// of changes from elsewhere is read slim once, then whole page by page.
@@ -352,19 +701,19 @@ mod tests {
             let f = r.faults();
             (f.ref_pages, f.full_pages)
         };
-        pull(lock, &remote, 3)?;
+        pull(lock, &remote, 3, &mut None)?;
         assert_eq!(reads(&remote), (0, 2), "a first read: whole");
-        pull(lock, &remote, 3)?;
+        pull(lock, &remote, 3, &mut None)?;
         assert_eq!(reads(&remote), (1, 2), "nothing new: slim");
         for i in 0..7 {
             remote.create(&folder(format!("b{i}")), None)?;
         }
-        pull(lock, &remote, 3)?;
+        pull(lock, &remote, 3, &mut None)?;
         assert_eq!(reads(&remote), (2, 5), "news: slim once, then whole");
         assert_eq!(lock().read(|s| s.mirror_count())?, 11);
         // A slim row that can't be read: the page is read whole, the cursor goes on.
         remote.faults().unread_refs = true;
-        pull(lock, &remote, 3)?;
+        pull(lock, &remote, 3, &mut None)?;
         assert_eq!(reads(&remote), (3, 6), "an unread row: whole");
         Ok(())
     }

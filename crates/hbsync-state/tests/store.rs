@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 12);
+    assert_eq!(db.schema_version()?, 13);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -352,6 +352,73 @@ mod mirror {
             token: Some(FileToken(node.0.as_bytes().as_slice().into())),
             changed_at: None,
         }
+    }
+
+    /// Reading the whole feed again starts from its beginning, the files the store has listed;
+    /// tombstones are kept with their time until deleted hard.
+    #[test]
+    fn a_reread_starts_over_and_tombstones_wait() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let (shown, unshown) = (
+            row(NodeId::new(), NodeId::ROOT, "a", None),
+            row(NodeId::new(), NodeId::ROOT, "b", None),
+        );
+        db.write(|s| {
+            s.put_mirror(&shown)?;
+            s.put_mirror(&unshown)?;
+            s.set_account_kv(keys::REMOTE_CURSOR, "c")?;
+            s.start_reread()
+        })?;
+        assert!(db.read(|s| s.rereading())?);
+        assert_eq!(db.read(|s| s.account_kv(keys::REMOTE_CURSOR))?, None);
+        let mut files = db.read(|s| s.drive_file_ids())?;
+        files.sort_by_key(|f| f.0);
+        let mut both = vec![shown.file_id, unshown.file_id];
+        both.sort_by_key(|f| f.0);
+        assert_eq!(files, both);
+        db.write(|s| s.end_reread())?;
+        assert!(!db.read(|s| s.rereading())?);
+
+        let (old, young) = (shown.remote_ref(), unshown.remote_ref());
+        db.write(|s| {
+            s.put_tombstone(old, 10)?;
+            s.put_tombstone(young, 20)
+        })?;
+        assert_eq!(db.read(|s| s.tombstones_before(15))?, [old]);
+        db.write(|s| s.delete_tombstone_at(old).map(drop))?;
+        assert!(db.read(|s| s.tombstones_before(15))?.is_empty());
+        assert!(db.read(|s| s.file_gone(old.file_id))?, "still gone");
+        // Announced deleted hard elsewhere: only at the version held.
+        let other = RemoteRef {
+            file_id: RemoteFileId(Uuid::now_v7()),
+            version: VersionTag(Uuid::now_v7()),
+        };
+        db.write(|s| s.put_tombstone(other, 12))?;
+        let newer = RemoteRef {
+            version: VersionTag(Uuid::now_v7()),
+            ..other
+        };
+        assert!(!db.write(|s| s.delete_tombstone_at(newer))?);
+        assert!(db.write(|s| s.delete_tombstone_at(other))?);
+        assert!(db.read(|s| s.tombstones_before(15))?.is_empty());
+
+        // Known gone from the next prune on, forgotten once that is older than the cut-off; a
+        // tombstone still on the drive stays, however old.
+        let announced = RemoteFileId(Uuid::now_v7());
+        db.write(|s| s.mark_file_gone(announced))?;
+        assert_eq!(db.write(|s| s.prune_gone(0, 100))?, 0);
+        assert_eq!(db.write(|s| s.prune_gone(100, 200))?, 0, "not before 100");
+        assert_eq!(
+            db.write(|s| s.prune_gone(101, 200))?,
+            3,
+            "old, other and announced"
+        );
+        assert!(!db.read(|s| s.file_gone(announced))?);
+        assert!(
+            db.read(|s| s.file_gone(young.file_id))?,
+            "its tombstone is on the drive"
+        );
+        Ok(())
     }
 
     /// A version the mirror has already, again, changes nothing; the feed's refresh takes its
@@ -873,7 +940,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 12);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 13);
     Ok(())
 }
 

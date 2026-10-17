@@ -13,7 +13,7 @@ use hbsync_remote::{
     Upload,
 };
 use hbsync_state::Coords;
-use hbsync_types::{NodeId, RemoteFileId, Role, Target, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Role, Target, VersionTag};
 
 use crate::tree::Tree;
 use crate::walk::End;
@@ -159,8 +159,17 @@ impl Remote for ScopedRemote {
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
         self.inner.change_refs(cursor, limit)
     }
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
+    }
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
+    }
+    fn holding_live(&self, folders: &[NodeId]) -> RemoteResult<std::collections::HashSet<NodeId>> {
+        self.inner.holding_live(folders)
+    }
+    fn hold_back(&self) -> std::time::Duration {
+        self.inner.hold_back()
     }
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         self.inner.create(&self.on_drive(node)?, payload)
@@ -175,6 +184,9 @@ impl Remote for ScopedRemote {
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
+    }
+    fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
+        self.inner.delete_for_good(files)
     }
     fn read(
         &self,
