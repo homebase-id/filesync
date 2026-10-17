@@ -909,11 +909,13 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
         let mut cursor = bench.cursor_now()?;
         let mut late = Vec::new();
         for i in 0..rounds {
-            let primed = i % 2 == 1;
-            if primed {
+            // Other tests may write meanwhile: from the feed's end, and primed only where the
+            // read there came back empty.
+            cursor = cursor_at_end(&remote, Some(&cursor))?;
+            let primed = i % 2 == 1 && {
                 let page = remote.change_refs(Some(&cursor), 100)?;
-                assert!(page.refs.is_empty() && !page.has_more, "nothing new yet");
-            }
+                page.refs.is_empty() && !page.has_more
+            };
             let w = other.create(&folder(&format!("f{i}"), dir.node), None)?;
             bench.track(w.at.file_id);
             let (written, answered_ms) = (Instant::now(), hbsync_types::unix_now_ms());
@@ -933,6 +935,11 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
                     }
                     cursor = page.cursor;
                     break;
+                }
+                // Other rows first: on through them.
+                if !page.refs.is_empty() && page.has_more {
+                    cursor = page.cursor;
+                    continue;
                 }
                 misses.push(format!(
                     "{} rows more={} at +{}ms",
