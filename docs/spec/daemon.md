@@ -154,10 +154,11 @@ a failure (service managers restart it then).
   with the computer's own login (its client registration), so two computers using the same
   login don't hear each other's changes: each gets the other's only when its notifications
   reconnect, at its start, or with a change from a third computer it doesn't know, which can
-  be hours. The credentials are kept for this device only (the keychain entry isn't carried
-  to another computer by a migration or a backup), so this takes a credentials file copied
-  by hand. Nothing detects it: log in again on the second computer (`hbsync logout`, then
-  `hbsync setup`), which registers it as a computer of its own.
+  be hours. Windows keeps the key on the computer; macOS Migration Assistant carries the
+  login keychain to a new Mac; a Linux keyring copied to another computer carries it. So a
+  migrated Mac, a copied keyring or a credentials file copied by hand can cause it. Nothing
+  detects it: log in again on the second computer (`hbsync logout`, then `hbsync setup`),
+  which registers it as a computer of its own.
 - **When the feed is read**, and only then:
   - at a folder's start (and once more if its local catch-up, a walk, took long);
   - when the notifications connect (again): the account pulls, as changes made meanwhile
@@ -234,9 +235,10 @@ a failure (service managers restart it then).
   one listed, and the device's own removals shown "just now" (their time still open: not back
   from the server yet) by name. Once a day (the time is kept in the state DB) the account deletes for good what
   was removed more than
-  `keep_deleted_days` ago (a folder's delete as a whole), and empties `.hbsync/trash` of
+  `keep_deleted_days` ago (a folder's delete as a whole, never a live node: a removed folder
+  still holding one stays, restorable), and empties `.hbsync/trash` of
   entries that old, from those made since the purge began (older ones, from before Recently
-  deleted, may be the only copy and stay).
+  deleted, may be the only copy and stay). What goes, and how: node schema, "The purge".
 
 ### States
 

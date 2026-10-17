@@ -86,8 +86,10 @@ pub enum Action {
     Restore {
         node: usize,
     },
-    /// The purge: everything in Recently deleted is deleted for good, as the engine selects it
-    /// ([`hbsync_engine::deleted::select`]): never a live node, so a folder holding one stays.
+    /// The daily purge ([`Server::purge`]): the server's clock moves on by [`PURGE_EVERY`], and
+    /// the items of Recently deleted removed [`TRACE`] before go for good, as the engine selects
+    /// them ([`hbsync_engine::deleted::select`]): never a live node, so a folder holding one
+    /// stays.
     Purge,
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
@@ -206,6 +208,12 @@ struct Server {
     emptied_unlisted: Option<String>,
 }
 
+/// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed
+/// (30 days: `hbsync_engine::feed::TRACE_MS`), on the server's clock ([`time`]).
+pub const TRACE: i64 = 24;
+/// How far the server's clock moves on from one purge to the next.
+pub const PURGE_EVERY: i64 = TRACE / 2;
+
 /// The server's time of the write that made `version`: every write takes the next id, so ids
 /// are the server's clock (Homebase's `updated`).
 fn time(version: VersionTag) -> i64 {
@@ -247,31 +255,68 @@ impl Server {
             .collect()
     }
 
-    /// The live nodes a folder's removal took along (node schema, Recently deleted): in a
-    /// removed folder, directly or through live folders in it, written no later than its
-    /// removal. They count as removed, whether or not a device marked them so yet.
+    /// The live nodes a folder's removal took along, by the engine's one rule
+    /// ([`hbsync_engine::along::taken_along`]). They count as removed, whether or not a device
+    /// marked them so yet.
     fn taken_along(&self) -> BTreeSet<NodeId> {
-        let taken = |n: &ServerNode| {
-            let mut seen = BTreeSet::new();
-            let mut at = n.state.parent;
-            loop {
-                if self.removed.contains_key(&at) {
-                    return self
-                        .removed_at
-                        .get(&at)
-                        .is_some_and(|removed| time(n.remote.version) <= *removed);
-                }
-                match self.live.get(&at) {
-                    Some(folder) if seen.insert(at) => at = folder.state.parent,
-                    _ => return false,
-                }
-            }
-        };
-        self.live
+        hbsync_engine::along::taken_along(
+            self.live.iter().map(|(n, l)| (*n, l.state.parent)),
+            |f| {
+                self.removed
+                    .contains_key(&f)
+                    .then(|| self.removed_at.get(&f).copied())
+                    .flatten()
+            },
+            |n| self.live.get(&n).map(|l| time(l.remote.version)),
+        )
+        .into_iter()
+        .collect()
+    }
+
+    /// The engine's purge (`deleted::purge`), its clock moved on [`PURGE_EVERY`]: the items
+    /// all removed [`TRACE`] before now (each deleted on its own), with what was deleted with each,
+    /// at their versions: what [`Sim::delete_for_good`] deletes as the engine selects it (never
+    /// a live node, nor a folder holding one: the purge writes nothing live). Without a trace
+    /// or leaving a tombstone is the same here (no feed: a client finds it missing).
+    fn purge(&mut self) -> BTreeSet<(NodeId, VersionTag)> {
+        self.next += PURGE_EVERY as u128;
+        let before = self.next as i64 - TRACE;
+        let time = |s: &Server, n: &NodeId| s.removed_at.get(n).copied().unwrap_or(i64::MAX);
+        let tops: Vec<NodeId> = self
+            .removed
             .iter()
-            .filter(|(_, n)| taken(n))
-            .map(|(id, _)| *id)
-            .collect()
+            .filter(|(n, r)| {
+                time(self, n) < before
+                    && !(self.removed.contains_key(&r.state.parent)
+                        && time(self, &r.state.parent) <= time(self, n))
+            })
+            .map(|(n, _)| *n)
+            .collect();
+        let mut due = BTreeSet::new();
+        for top in tops {
+            // The item: removed nodes deleted with their folder, level by level.
+            let mut item = vec![top];
+            let mut next = 0;
+            while next < item.len() {
+                let folder = item[next];
+                let at = time(self, &folder);
+                let with: Vec<NodeId> = self
+                    .removed
+                    .iter()
+                    .filter(|(n, r)| {
+                        r.state.parent == folder && time(self, n) >= at && !item.contains(n)
+                    })
+                    .map(|(n, _)| *n)
+                    .collect();
+                item.extend(with);
+                next += 1;
+            }
+            // Due once all of it is: one removed later has its own time.
+            if item.iter().all(|n| time(self, n) < before) {
+                due.extend(item.iter().map(|n| (*n, self.removed[n].remote.version)));
+            }
+        }
+        due
     }
 
     fn tree(&self) -> Tree {
@@ -1227,8 +1272,8 @@ impl Sim {
                 }
             }
             Action::Purge => {
-                let all: BTreeSet<_> = self.server.removed.iter().map(Server::at).collect();
-                self.delete_for_good(&all);
+                let due = self.server.purge();
+                self.delete_for_good(&due);
             }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];

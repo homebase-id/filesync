@@ -3,7 +3,7 @@
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -51,6 +51,10 @@ pub struct Drive {
     /// ahead: a read clears only the doubts from before it started.
     doubts: AtomicU64,
     answered_doubts: AtomicU64,
+    /// The server's clock at the last page of the feed read, Unix ms (0: none yet).
+    server_time: AtomicI64,
+    /// A re-read of the whole feed on its way, between pulls ([`feed::Reread`]).
+    reread: Mutex<Option<feed::Reread>>,
 }
 
 /// How long uploads are held after the drive said it is full: then one is tried again.
@@ -87,6 +91,8 @@ impl Drive {
             connections: AtomicU64::new(0),
             doubts: AtomicU64::new(0),
             answered_doubts: AtomicU64::new(0),
+            server_time: AtomicI64::new(0),
+            reread: Mutex::default(),
         })
     }
 
@@ -115,6 +121,14 @@ impl Drive {
     /// The account's picture may lack something: the next sync reads the feed.
     pub fn set_behind(&self) {
         self.doubts.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Behind after deleting for good when the drive refused something for its state
+    /// (`moved`), or a request failed on the way.
+    fn behind_if<T>(&self, moved: bool, done: &Result<T, EngineError>) {
+        if moved || matches!(done, Err(EngineError::Remote(e)) if e.is_transient()) {
+            self.set_behind();
+        }
     }
 
     fn behind(&self) -> bool {
@@ -183,12 +197,18 @@ impl Drive {
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
         let doubts = self.doubts.load(Ordering::SeqCst);
-        let pulled = feed::pull(|| self.account(), self.remote(), FEED_PAGE);
-        match pulled {
+        let pulled = {
+            let mut reread = self.reread.lock().unwrap_or_else(|e| e.into_inner());
+            feed::pull(|| self.account(), self.remote(), FEED_PAGE, &mut reread)
+        };
+        match &pulled {
             // What was in doubt when it started is answered; a doubt since isn't.
-            Ok(_) => {
+            Ok(report) => {
                 self.answered_doubts.fetch_max(doubts, Ordering::SeqCst);
                 *answered = covers;
+                if let Some(now) = report.server_time {
+                    self.server_time.store(now, Ordering::SeqCst);
+                }
             }
             Err(_) => self.set_behind(),
         }
@@ -334,12 +354,10 @@ impl Drive {
         self.pull(None)?;
         let (mut restored, mut moved) = (0, false);
         let done = nodes.iter().try_for_each(|&node| {
-            restored += deleted::restore(&mut self.account(), self.remote(), node, &mut moved)?;
+            restored += deleted::restore(&self.account, self.remote(), node, &mut moved)?;
             Ok::<_, EngineError>(())
         });
-        if moved || matches!(&done, Err(EngineError::Remote(e)) if e.is_transient()) {
-            self.set_behind();
-        }
+        self.behind_if(moved, &done);
         self.wake_all();
         done.map(|()| restored)
     }
@@ -347,21 +365,32 @@ impl Drive {
     /// Deletes these items of Recently deleted for good, each with what was deleted with it.
     pub fn empty(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.catch_up(None)?;
-        deleted::empty(&mut self.account(), self.remote(), nodes)
+        let mut moved = false;
+        let gone = deleted::empty(&self.account, self.remote(), nodes, &mut moved);
+        self.behind_if(moved, &gone);
+        gone
     }
 
     /// Deletes for good what a listing of Recently deleted saw ([`deleted::empty_listed`]),
     /// nothing recorded since.
     pub fn empty_listed(&self, listed: &deleted::Listed) -> Result<usize, EngineError> {
         self.catch_up(None)?;
-        deleted::empty_listed(&mut self.account(), self.remote(), listed)
+        let mut moved = false;
+        let gone = deleted::empty_listed(&self.account, self.remote(), listed, &mut moved);
+        self.behind_if(moved, &gone);
+        gone
     }
 
-    /// Deletes for good what was deleted before `before_ms` (Unix ms): Recently deleted, and
-    /// the trash of every folder.
-    pub fn purge(&self, before_ms: i64) -> Result<usize, EngineError> {
-        self.catch_up(None)?;
-        deleted::purge(&mut self.account(), self.remote(), before_ms)
+    /// Deletes for good what was deleted `keep_ms` ago or more: Recently deleted, by the
+    /// server's clock (as read just now: a pull, whatever the announcements say, so a restore
+    /// elsewhere is in the picture), and the trash of every folder.
+    pub fn purge(&self, keep_ms: i64) -> Result<usize, EngineError> {
+        self.pull(None)?;
+        let now = self.server_time.load(Ordering::SeqCst);
+        let mut moved = false;
+        let gone = deleted::purge(&self.account, self.remote(), keep_ms, now, &mut moved);
+        self.behind_if(moved, &gone);
+        gone
     }
 
     /// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the trash
@@ -377,8 +406,7 @@ impl Drive {
         if last.is_some_and(|last| now < last + DAY) {
             return Ok(None);
         }
-        let before_ms = now.saturating_sub(u64::from(keep_days) * DAY) as i64 * 1000;
-        let gone = self.purge(before_ms)?;
+        let gone = self.purge(i64::from(keep_days) * DAY as i64 * 1000)?;
         self.account()
             .write(|s| s.set_account_kv(keys::PURGED_AT, &now.to_string()))?;
         Ok(Some(gone))

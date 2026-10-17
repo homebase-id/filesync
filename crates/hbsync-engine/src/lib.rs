@@ -3,6 +3,7 @@
 
 pub mod activity;
 pub mod adopt;
+pub mod along;
 pub mod deleted;
 pub mod drive;
 pub mod engine;

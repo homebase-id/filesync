@@ -14,6 +14,11 @@ pub struct FolderKey(pub(crate) &'static str);
 pub const IDENTITY: AccountKey = AccountKey("account.identity");
 /// The remote change feed's cursor.
 pub const REMOTE_CURSOR: AccountKey = AccountKey("remote.cursor");
+/// Until when the feed was read to its end, at the latest (Unix ms, the server's clock; kept
+/// a day at a time): with the cursor's time, how long this device was away.
+pub const READ_AT: AccountKey = AccountKey("remote.read_at");
+/// The whole feed is being read again ([`crate::Store::start_reread`]).
+pub const REREADING: AccountKey = AccountKey("remote.rereading");
 /// When Recently deleted was last purged (Unix s).
 pub const PURGED_AT: AccountKey = AccountKey("deleted.purged_at");
 /// The last removal's place in this device's order of recording them ([`crate::Recorded::seq`]).

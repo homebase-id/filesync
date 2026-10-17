@@ -16,7 +16,7 @@ WebSocket; two folders converge through a live identity. Facts and server bugs:
 (**[verified]**, odin-core #1892, #1893). Uploads need odin-core v0.1.954 or newer (PR #1936, the deferred
 payload hash, #1935): the client sends a payload's hashes after it, reading the source once. Deletes
 are guarded by their version from odin-core v0.1.960 (PR #1931, #1903; **[verified]**). The feed
-needs odin-core v0.1.962 or newer (PR #1967, minimal `query-batch`); the notification socket's
+needs odin-core v0.1.962 or newer (PRs #1967, minimal `query-batch`, and #1968, `hard-delete-batch`); the notification socket's
 minimal events need odin-core #1970 (not released yet), and leaving out this client's own writes
 (`excludeOwnWrites`, with the write's time in every write answer) odin-core #1971 (not merged yet;
 a client registration per computer, so two computers sharing one token don't hear each other).

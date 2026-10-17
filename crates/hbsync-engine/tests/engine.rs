@@ -13,7 +13,7 @@ use hbsync_remote::{
 };
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
-use hbsync_types::{NodeId, RemoteFileId, Target, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
 
 mod common;
 
@@ -238,6 +238,12 @@ impl Remote for StopAfterCreates {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
+    fn holding_live(
+        &self,
+        folders: &[hbsync_types::NodeId],
+    ) -> RemoteResult<std::collections::HashSet<hbsync_types::NodeId>> {
+        self.inner.holding_live(folders)
+    }
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         let made = self.inner.create(node, payload);
         if self.creates.fetch_add(1, Ordering::SeqCst) + 1 == self.after {
@@ -255,6 +261,12 @@ impl Remote for StopAfterCreates {
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
+    }
+    fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
+        self.inner.delete_for_good(files)
+    }
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
     }
     fn read(
         &self,
@@ -340,6 +352,12 @@ impl Remote for SlowWrites {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
+    fn holding_live(
+        &self,
+        folders: &[hbsync_types::NodeId],
+    ) -> RemoteResult<std::collections::HashSet<hbsync_types::NodeId>> {
+        self.inner.holding_live(folders)
+    }
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         self.write(|| self.unless_down(|| self.inner.create(node, payload)))
     }
@@ -353,6 +371,12 @@ impl Remote for SlowWrites {
     }
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
         self.inner.delete(file_id, expected)
+    }
+    fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
+        self.inner.delete_for_good(files)
+    }
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
     }
     fn read(
         &self,
@@ -1168,7 +1192,12 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
     };
     hbsync_local::scan(&mut db, dir.path(), &opts)?;
     let cell = std::cell::RefCell::new(db);
-    hbsync_engine::feed::pull(|| cell.borrow_mut(), &FakeRemote::new(server.clone()), 500)?;
+    hbsync_engine::feed::pull(
+        || cell.borrow_mut(),
+        &FakeRemote::new(server.clone()),
+        500,
+        &mut None,
+    )?;
     let mut db = cell.into_inner();
     let started = std::time::Instant::now();
     let adopted = hbsync_engine::adopt::adopt(
@@ -2085,7 +2114,7 @@ fn recently_deleted_restores_and_purges() -> R {
     // The purge leaves nothing restorable.
     fs::remove_file(a.root.join("z.txt"))?;
     a.sync()?;
-    assert_eq!(a.engine.drive().purge(i64::MAX)?, 1);
+    assert_eq!(a.engine.drive().purge(0)?, 1);
     b.sync()?;
     assert!(b.recently_deleted(10)?.is_empty());
     assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);

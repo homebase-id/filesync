@@ -168,6 +168,16 @@ impl Job {
         }
     }
 
+    /// The file it reads or writes at a version it knows; `None` for a create.
+    pub fn file_id(&self) -> Option<RemoteFileId> {
+        match self {
+            Job::Download(d) => Some(d.file_id),
+            Job::Upload { target, .. } | Job::Meta { target, .. } => {
+                target.as_ref().map(|t| t.at.file_id)
+            }
+        }
+    }
+
     pub fn size(&self) -> u64 {
         match self {
             Job::Download(Download { size, .. }) | Job::Upload { size, .. } => *size,
