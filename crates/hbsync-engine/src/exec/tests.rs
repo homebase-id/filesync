@@ -3254,3 +3254,40 @@ fn a_removed_folder_outside_this_part_takes_nothing_along() -> R {
     assert!(!gone);
     Ok(())
 }
+
+/// A folder the mirror has (restored), its row in Recently deleted not gone yet: it is live, so
+/// what is in it isn't taken along, as the plan reads it (it looks only at folders the mirror
+/// lacks).
+#[test]
+fn a_live_folder_with_a_leftover_removal_takes_nothing_along() -> R {
+    let mut h = Harness::new()?;
+    let (folder, node, at) = (NodeId::new(), NodeId::new(), some_version());
+    let row = MirrorRow::from_content(
+        some_version(),
+        folder,
+        NodeId::ROOT,
+        NodeKind::Folder,
+        &NodeContent::folder("d"),
+        None,
+    );
+    let hash = h.content(b"A").hash;
+    h.db.write(|s| {
+        s.put_removed(&RemovedRow {
+            row: row.clone(),
+            removed_at: Some(i64::MAX / 2),
+        })?;
+        s.put_mirror(&row)?;
+        s.put_mirror(&MirrorRow::from_content(
+            at,
+            node,
+            folder,
+            NodeKind::File,
+            &NodeContent::file("f", 0, 1, false),
+            Some(hash),
+        ))
+    })?;
+    let gone =
+        h.db.read(|s| view::gone_on_drive(s, node, &Scope::main()))?;
+    assert!(!gone);
+    Ok(())
+}

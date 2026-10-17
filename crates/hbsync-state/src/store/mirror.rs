@@ -150,9 +150,11 @@ impl Store<'_> {
         Ok(())
     }
 
-    /// The first folder in Recently deleted that the drive's folder `folder` is, or is in
-    /// through the mirror's folders, below `top` (the drive's root, or a role folder's top),
-    /// with when it went there (`None`: open, this device's own removal).
+    /// The folder in Recently deleted that the drive's folder `folder` is, or is in through the
+    /// mirror's folders, below `top` (the drive's root, or a role folder's top): the first one
+    /// missing from the mirror, if it is there, with when it went there (`None`: open, this
+    /// device's own removal). A folder the mirror has is live, whatever row Recently deleted
+    /// may still hold for it.
     pub fn removed_above(
         &self,
         folder: NodeId,
@@ -165,18 +167,17 @@ impl Store<'_> {
             if at.is_root() || at == top {
                 return Ok(None);
             }
-            if let Some(when) = removed
-                .query_row([at.0.as_bytes()], |r| r.get::<_, Option<i64>>(0))
-                .optional()?
-            {
-                return Ok(Some((at, when)));
-            }
             match parent
                 .query_row([at.0.as_bytes()], |r| r.get::<_, Vec<u8>>(0))
                 .optional()?
             {
                 Some(up) => at = codec::node(&up)?,
-                None => return Ok(None),
+                None => {
+                    return Ok(removed
+                        .query_row([at.0.as_bytes()], |r| r.get::<_, Option<i64>>(0))
+                        .optional()?
+                        .map(|when| (at, when)));
+                }
             }
         }
         Ok(None)
