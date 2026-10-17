@@ -65,7 +65,17 @@ pub(super) fn settle_placement(
     os: Os,
 ) -> Result<Option<RemoteRef>, StateError> {
     let node = record.base.node;
+    // Gone on the drive since (deleted, in Recently deleted, or taken along by a folder there):
+    // settled at the record's version whatever the plan saw, so the removal reaches the item.
+    // Against a base that moved meanwhile, the item read as an edit, which won over the delete
+    // and brought the node back. Only an item that reads as the node (its name one the drive
+    // takes): the record stays otherwise.
+    let gone = gone_on_drive(s, node)?;
+    if gone && !view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some()) {
+        return Ok(None);
+    }
     let base_at = match record.base_at {
+        _ if gone => s.get_base(node)?.map(|b| b.remote.version),
         PlannedBase::Unchecked => s.get_base(node)?.map(|b| b.remote.version),
         PlannedBase::Absent => None,
         PlannedBase::At(v) => Some(v),
@@ -88,6 +98,26 @@ pub(super) fn settle_placement(
         mark_children(s, node)?;
     }
     Ok(settled)
+}
+
+/// Whether the drive no longer has `node` as the reconciler reads it: not in the mirror, or in a
+/// folder in Recently deleted, written no later than that folder's removal (taken along).
+pub(super) fn gone_on_drive(s: &Store<'_>, node: NodeId) -> Result<bool, StateError> {
+    let Some(row) = s.get_mirror(node)? else {
+        return Ok(true);
+    };
+    let mut seen = HashSet::from([node]);
+    let mut at = row.parent;
+    while !at.is_root() && seen.insert(at) {
+        if let Some(folder) = s.removed_by_node(at)? {
+            return Ok(row.changed_at.is_none_or(|c| c <= folder.time()));
+        }
+        match s.get_mirror(at)? {
+            Some(up) => at = up.parent,
+            None => break,
+        }
+    }
+    Ok(false)
 }
 
 /// Marks what is in folder `node` on the drive dirty.
@@ -304,13 +334,6 @@ pub(crate) fn update_meta(
 ) -> Result<MirrorRow, RemoteError> {
     let written = remote.update(target, meta, None)?;
     Ok(written_row(written, meta, hash))
-}
-
-/// Gives the item at `path` these tags and returns what it holds now. Tags are no reason to
-/// fail an operation: where they can't be written (a read-only item, a full attribute block),
-/// they read as not known, and the drive's stand (§11).
-pub(super) fn write_tags(path: &Path, tags: &Tags) -> Option<Tags> {
-    tags::write(path, tags).ok().flatten()
 }
 
 /// The tags a write over a drive version sends: `ours` merged with that version's, which may

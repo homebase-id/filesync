@@ -118,6 +118,7 @@ impl Executor<'_> {
             prior_tags: prior,
             base_at: a.base_at.into(),
             held_ms: None,
+            trashed: None,
         });
         let kept = !adopt && synced_before;
         if !adopt {
@@ -136,7 +137,7 @@ impl Executor<'_> {
         if !adopt && self.crash_here(CrashPoint::AfterPlaced) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        let written = match self.write_placed_tags(&abs, tags) {
+        let written = match self.write_item_tags(&abs, tags) {
             Ok(tags::Written::Done(read)) => Some(read),
             Ok(tags::Written::Unsupported) => Some(None),
             Err(_) => None,
@@ -179,7 +180,7 @@ impl Executor<'_> {
             fingerprint: meta.fingerprint(),
             executable: None,
             hash: None,
-            tags: self.placed_tags(&abs, written),
+            tags: self.tags_after_write(&abs, written),
         };
         let os = self.cfg.os;
         let fails = self.commit_fails();
@@ -235,7 +236,14 @@ impl Executor<'_> {
         if !self.on_disk_unchanged(&row) || folder_retagged {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let read = write_tags(&abs, tags);
+        let written = match self.write_item_tags(&abs, tags) {
+            Ok(tags::Written::Done(read)) => Some(read),
+            Ok(tags::Written::Unsupported) => Some(None),
+            Err(_) => None,
+        };
+        // A failed write leaves the item what it held: read so, not as not known (which reads
+        // as the drive's tags, and a tag only the item has would never go up).
+        let read = self.tags_after_write(&abs, written);
         // Writing tags moves the change time only (a folder's mtime moves with its children).
         // If anything else moved, the item changed meanwhile: the old row stays, and the
         // rescan looks at it.
@@ -453,15 +461,63 @@ impl Executor<'_> {
         &mut self,
         path: &RelPath,
         node: NodeId,
-    ) -> Result<io::Result<PathBuf>, StateError> {
+    ) -> Result<io::Result<()>, StateError> {
+        let entry = trash_entry(path, node);
+        self.move_to_trash_as(path, &entry)
+    }
+
+    /// Moves the item at `path` into the trash as `entry` ([`trash_entry`]).
+    pub(super) fn move_to_trash_as(
+        &mut self,
+        path: &RelPath,
+        entry: &str,
+    ) -> Result<io::Result<()>, StateError> {
         let trash = layout::trash_dir(&self.cfg.root);
-        let dir = trash.join(format!("{}-{}", hbsync_types::unix_now(), node.0.simple()));
+        let to = trash.join(entry);
         // The trash folder too, made with the first item in it.
         self.db.changed(&trash);
-        if let Err(e) = put_ordered(self.db, &dir, |dir| fs::create_dir_all(dir))? {
+        if let Some(dir) = to.parent()
+            && let Err(e) = put_ordered(self.db, dir, |dir| fs::create_dir_all(dir))?
+        {
             return Ok(Err(e));
         }
-        let to = dir.join(path.name().unwrap_or("item"));
-        Ok(rename_ordered(self.db, &self.abs(path), &to)?.map(|()| to))
+        rename_ordered(self.db, &self.abs(path), &to)
+    }
+
+    /// Brings the old version a download put in the trash as `entry` back to `path`, and
+    /// removes its entry's folder, empty then.
+    pub(super) fn restore_from_trash(
+        &mut self,
+        entry: &str,
+        path: &RelPath,
+    ) -> Result<io::Result<()>, StateError> {
+        if Self::take_one(&self.cfg.fail_restores) {
+            return Ok(Err(io::Error::other("bringing it back failed (a test)")));
+        }
+        let from = layout::trash_dir(&self.cfg.root).join(entry);
+        let back = rename_ordered(self.db, &from, &self.abs(path))?;
+        if back.is_ok() {
+            remove_entry_dir(&from);
+        }
+        Ok(back)
+    }
+}
+
+/// The trash entry (relative to the trash folder) an item at `path` of `node` goes to now: a
+/// folder of its own, named by when and by the node.
+pub(super) fn trash_entry(path: &RelPath, node: NodeId) -> String {
+    format!(
+        "{}-{}/{}",
+        hbsync_types::unix_now(),
+        node.0.simple(),
+        path.name().unwrap_or("item")
+    )
+}
+
+/// Removes the folder of trash entry `item`, emptied by bringing the item back. One that can't
+/// be removed (not empty after all) stays, for the daily purge.
+pub(super) fn remove_entry_dir(item: &Path) {
+    if let Some(dir) = item.parent() {
+        drop(fs::remove_dir(dir));
     }
 }

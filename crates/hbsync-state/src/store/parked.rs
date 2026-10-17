@@ -102,8 +102,9 @@ impl Store<'_> {
         self.prep(
             "INSERT OR REPLACE INTO placing (folder, id, path, parent, name, kind, hash, size, \
              mtime_ms, executable, remote_file_id, version_tag, tags, placed_tags, prior_tags, \
-             base_at, held_ms) \
-             VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             base_at, held_ms, trashed_from, trashed_to) \
+             VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+             ?17, ?18)",
         )?
         .execute(params![
             id,
@@ -126,6 +127,8 @@ impl Store<'_> {
                 PlannedBase::At(v) => Some(v.0.as_bytes().to_vec()),
             },
             p.held_ms,
+            p.trashed.as_ref().map(|t| t.from.as_str()),
+            p.trashed.as_ref().map(|t| t.to.as_str()),
         ])?;
         Ok(())
     }
@@ -167,7 +170,7 @@ impl Store<'_> {
 /// The columns of a base row, then the target and the tags put on it.
 const PLACING_SELECT: &str = "SELECT n.uuid, p.uuid, k.name, k.kind, k.hash, k.size, k.mtime_ms, k.executable, \
              k.remote_file_id, k.version_tag, 0, NULL, NULL, k.tags, k.path, k.placed_tags, \
-             k.base_at, k.prior_tags, k.held_ms \
+             k.base_at, k.prior_tags, k.held_ms, k.trashed_from, k.trashed_to \
              FROM placing k \
              JOIN nodes n ON n.id = k.id JOIN nodes p ON p.id = k.parent WHERE k.folder = $F";
 
@@ -189,5 +192,15 @@ fn placing_row(r: &Row<'_>) -> Result<Placing> {
             Some(v) => PlannedBase::At(codec::version(v)?),
         },
         held_ms: r.get::<_, Option<i64>>(18)?,
+        trashed: match (
+            r.get::<_, Option<String>>(19)?,
+            r.get::<_, Option<String>>(20)?,
+        ) {
+            (Some(from), Some(to)) => Some(Trashed {
+                from: codec::rel_path(&from)?,
+                to,
+            }),
+            _ => None,
+        },
     })
 }

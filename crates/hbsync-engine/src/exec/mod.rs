@@ -73,9 +73,18 @@ pub struct ExecConfig {
     /// folder's stat, a file's metadata): recovery settles them in the run.
     #[doc(hidden)]
     pub fail_reads: Arc<std::sync::atomic::AtomicUsize>,
-    /// Tests only: this many placements' tag writes fail (the item keeps what it held).
+    /// Tests only: this many tag writes fail (the item keeps what it held).
     #[doc(hidden)]
     pub fail_tag_writes: Arc<std::sync::atomic::AtomicUsize>,
+    /// Tests only: this many reads of what a failed tag write left fail too.
+    #[doc(hidden)]
+    pub fail_tag_reads: Arc<std::sync::atomic::AtomicUsize>,
+    /// Tests only: this many downloads fail to put the new version in place after the old one
+    /// went to the trash, and this many bringing it back fail.
+    #[doc(hidden)]
+    pub fail_after_trash: Arc<std::sync::atomic::AtomicUsize>,
+    #[doc(hidden)]
+    pub fail_restores: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Places where a test can make the executor stop as if it crashed.
@@ -89,6 +98,9 @@ pub enum CrashPoint {
     /// After a download is moved into place, or a folder made in place (before its tags are
     /// written), before its commit.
     AfterPlaced,
+    /// After a download put the old version it replaces from another folder in the trash,
+    /// before the new one is in place.
+    AfterTrashed,
 }
 
 /// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
@@ -652,9 +664,9 @@ impl<'a> Executor<'a> {
             .is_ok()
     }
 
-    /// Writes `tags` on the placed item at `path` ([`tags::write_on`]); for a test, fails
+    /// Writes `tags` on the item at `path` ([`tags::write_on`]); for a test, fails
     /// ([`ExecConfig::fail_tag_writes`]).
-    fn write_placed_tags(&self, path: &Path, tags: &Tags) -> io::Result<tags::Written> {
+    fn write_item_tags(&self, path: &Path, tags: &Tags) -> io::Result<tags::Written> {
         let fails = self
             .cfg
             .fail_tag_writes
@@ -666,18 +678,30 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// What a placed item at `path` holds of tags after its tag write (`written`: what it left,
-    /// `None` where it failed): what the write left, or, where the volume keeps tags and the
-    /// write failed, what the item holds as read (none where that can't be read either: it was
-    /// made without). Never "not known" there: the item would read as holding the drive's tags,
-    /// and the next scan take their absence for the user removing them.
-    fn placed_tags(&self, path: &Path, written: Option<Option<Tags>>) -> Option<Tags> {
+    /// What an item at `path` holds of tags after a tag write (`written`: what it left, `None`
+    /// where it failed): what the write left, or, where the volume keeps tags and the write
+    /// failed, what the item holds as read; not known only where that can't be read either.
+    /// Taken for not known while it can be read, the item read as holding the drive's tags,
+    /// and the next scan took their absence for the user removing them.
+    fn tags_after_write(&self, path: &Path, written: Option<Option<Tags>>) -> Option<Tags> {
         let kept = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
+        let read_fails = || {
+            self.cfg
+                .fail_tag_reads
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_ok()
+        };
         match written {
             Some(left) => left,
-            None if kept => Some(tags::read(path).unwrap_or_default()),
+            None if kept && !read_fails() => tags::read(path),
             None => None,
         }
+    }
+
+    /// Takes one from test counter `n`, if it has one left.
+    fn take_one(n: &std::sync::atomic::AtomicUsize) -> bool {
+        n.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
     }
 
     /// Whether reading a placed item back fails, for a test ([`ExecConfig::fail_reads`]).
@@ -1178,6 +1202,7 @@ mod transfer_ops;
 #[cfg(test)]
 mod tests;
 
+use local::{remove_entry_dir, trash_entry};
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
@@ -1185,7 +1210,7 @@ pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub(crate) use settle::update_meta;
 pub use settle::{Settle, settle};
-use settle::{mark_children, merged_with_drive, settle_placement, write_tags, written_row};
+use settle::{gone_on_drive, mark_children, merged_with_drive, settle_placement, written_row};
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the
 // order the state DB needs with its durable commits (its docs on durability). Tags and times

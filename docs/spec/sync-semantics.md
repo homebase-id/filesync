@@ -158,8 +158,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   moves it into the sync root's internal trash (`.hbsync/trash/`), never `unlink` (one rename:
   junk and anything that appears meanwhile go along). The daily purge empties entries older
   than `keep_deleted_days`, of those made since it began. A download that moves a file to
-  another folder puts the old version there; where the new one then can't be put in place, the
-  old one comes back (gone, it would read as the user deleting it).
+  another folder puts the old version there, its record noting where before it goes; where the
+  new one then can't be put in place, the old one comes back (gone, it would read as the user
+  deleting it), and its emptied entry goes. Where bringing it back fails, or a crash came
+  between, recovery brings it back, with its row, while the new one isn't in place and its
+  place is free.
 - **Fingerprint guard.** Before deleting, overwriting or moving a local item, the executor
   checks that the local fingerprint still equals the one the plan was made from. On mismatch
   the operation is skipped and the node is re-planned.
@@ -275,10 +278,12 @@ expected fingerprint is treated as done.
   both, against the same version), its tags as the record says the write changed them, a tag
   the user changed since being their change; where it claims none, the base's tags start
   afresh, each one the item holds and the drive holds too, so a tag only the drive has is
-  written on the item and one only the item has goes up. Where the drive no longer has the node
-  (deleted, in Recently deleted, or taken along by a folder there, §6.3), the item is settled
-  at the record's version whatever the plan saw, so the removal reaches it: never read as an
-  edit, which would bring the node back. A folder's recovery, like its commit, marks what is in it on
+  written on the item and one only the item has goes up. Where the mirror no longer has the
+  node (deleted, in Recently deleted, or taken along by a folder there, §6.3), the commit and
+  recovery alike settle the item at the record's version whatever the plan saw (its recorded
+  spelling and the rest of the base as any settling keeps them), so the removal reaches it:
+  never read as an edit, which would bring the node back; one whose item isn't the drive's to
+  take (its name) is held as a file not hashed yet is, then goes. A folder's recovery, like its commit, marks what is in it on
   the drive dirty. Later changes on the drive are plain changes against it. A record goes once
   its base is written, by the commit or by recovery, or when the operation that wrote it, in
   that run, fails before its own item is in place, or its batch stops before it starts (so no
@@ -431,11 +436,14 @@ then reads the tags. Tags that couldn't be read are tried again at the next scan
 Downloads write the tags onto the temp file before it is put in place: a file without them
 would read as the user removing them. An item with more than about 2,000 bytes of tags
 isn't tag-synced: it reads as "can't tell", and keeps what the drive has; so do tags that can't
-be read or written for a moment (a failed tag write never fails the operation). A download or
-a folder made whose tag write fails holds what it holds, as read (none where that can't be read
-either), never "can't tell": read so, it looked as if holding the drive's tags, and the next
-scan took their absence for the user removing them. Its record claims nothing (not known), and
-the next plan writes them again. A node with no
+be read or written for a moment (a failed tag write never fails the operation). An item whose
+tag write fails (a tag change, a download, a folder made) holds what it holds, as read, and its
+row says so; "can't tell" only where that can't be read either: read so, it looked as if
+holding the drive's tags, the next scan took their absence for the user removing them, and a
+tag only the item had never went up. A placement's record then claims nothing (not known),
+and the next plan writes the drive's tags again. A download whose failed write would lose a
+tag the file it replaces holds and the drive doesn't (the user's, not sent up yet) isn't put in
+place: it is tried again, the plan sending the tag up meanwhile. A node with no
 base gets one when place and content agree, with the tags both sides have: the merge then
 brings each side the other's (a copy proven equal only across hash algorithms can't be proven
 again later).

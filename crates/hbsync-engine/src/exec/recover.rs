@@ -118,6 +118,44 @@ pub fn recover_placements(
             (p, judged)
         })
         .collect();
+    // An old version a download put in the trash comes back where the new one isn't in place
+    // and its place is free (on disk; in the DB, but for the node's own row).
+    let judged: Vec<(Placing, Judged)> = judged
+        .into_iter()
+        .map(|(p, judged)| {
+            let Some(t) = p
+                .trashed
+                .as_ref()
+                .filter(|_| matches!(judged, Judged::Drop))
+            else {
+                return Ok((p, judged));
+            };
+            let entry = layout::trash_dir(root).join(&t.to);
+            let in_trash = fs::symlink_metadata(&entry).is_ok();
+            let free = matches!(look(root, &t.from), OnDisk::Absent)
+                && db
+                    .read(|s| s.get_local(&t.from))?
+                    .is_none_or(|r| r.node == p.base.node);
+            if !in_trash || !free {
+                return Ok((p, judged));
+            }
+            let judged = match ops::rename_noreplace(&entry, &root.join(t.from.as_str())) {
+                Ok(()) => {
+                    remove_entry_dir(&entry);
+                    match look(root, &t.from) {
+                        OnDisk::There(meta) => {
+                            let row = read_row(root, &t.from, p.base.node, &meta, algorithm);
+                            Judged::Restored(row)
+                        }
+                        _ => Judged::Drop,
+                    }
+                }
+                // Tried again by the next recovery.
+                Err(_) => Judged::Keep,
+            };
+            Ok((p, judged))
+        })
+        .collect::<Result<_, StateError>>()?;
     db.write(|s| {
         judged
             .into_iter()
@@ -146,6 +184,9 @@ pub(super) enum Judged {
     /// It can't be told yet (its file not hashed, its folder unreadable): the record stays, for
     /// a later recovery.
     Keep,
+    /// Not put in place, the old version it put in the trash brought back (its row this one):
+    /// the record goes.
+    Restored(LocalRow),
 }
 
 /// What recovery did with a record.
@@ -207,6 +248,15 @@ pub(super) fn apply(
             s.delete_placing(node)?;
             Ok(Applied::Dropped)
         }
+        Judged::Restored(row) => {
+            if s.local_by_node(node)?.is_some_and(|r| r.path != row.path) {
+                s.delete_local(node)?;
+            }
+            s.put_local(&row)?;
+            s.delete_placing(node)?;
+            s.mark_dirty(node)?;
+            Ok(Applied::Dropped)
+        }
         Judged::Settle(row) => {
             let at_target = s.get_local(&row.path)?;
             if row.node != node {
@@ -224,31 +274,36 @@ pub(super) fn apply(
                 s.delete_parked(node)?;
                 s.put_local(&row)?;
             }
-            // Gone on the drive since (deleted, in Recently deleted, or taken along by a folder
-            // there): the base is the record's, whatever the plan saw, so the drive's removal
-            // reaches here. Settled otherwise, a base that moved meanwhile left the item the
-            // node's, read as an edit, and the next plan uploaded it again.
-            if gone_on_drive(s, node)? {
-                // Only an item that reads as a node (its name one the drive takes).
-                let reads =
-                    crate::view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some());
-                if !reads {
-                    return Ok(Applied::Kept);
-                }
-                s.put_base(&BaseRow {
-                    local_hash: row.hash,
-                    ..p.base.clone()
-                })?;
-                s.delete_placing(node)?;
-                s.mark_dirty(node)?;
-                return Ok(Applied::Settled(None));
-            }
             // What the commit does: the record goes with the base written, or stays until the
             // item can be read (its folder scanned).
             let at = settle_placement(s, p, os)?;
+            // Its node gone on the drive, its item not one the drive takes (its name): held as
+            // a file not hashed yet is, then dropped.
+            if s.is_placing(node)? && gone_on_drive(s, node)? {
+                return hold(s, p, now);
+            }
             s.mark_dirty(node)?;
             Ok(Applied::Settled(at))
         }
+    }
+}
+
+/// Holds record `p` as of `now`: from now, if it wasn't held yet; dropped once held for
+/// [`UNHASHED_HOLD`].
+fn hold(s: &Store<'_>, p: &Placing, now: i64) -> Result<Applied, StateError> {
+    match p.held_ms {
+        None => {
+            s.put_placing(&Placing {
+                held_ms: Some(now),
+                ..p.clone()
+            })?;
+            Ok(Applied::Kept)
+        }
+        Some(since) if now.saturating_sub(since) >= UNHASHED_HOLD.as_millis() as i64 => {
+            s.delete_placing(p.base.node)?;
+            Ok(Applied::Dropped)
+        }
+        Some(_) => Ok(Applied::Kept),
     }
 }
 
@@ -263,26 +318,6 @@ pub(super) enum OnDisk {
 }
 
 /// What is at `path` (under `root`), as both recoveries read it.
-/// Whether the drive no longer has `node` as the reconciler reads it: not in the mirror, or in a
-/// folder in Recently deleted, written no later than that folder's removal (taken along).
-fn gone_on_drive(s: &Store<'_>, node: NodeId) -> Result<bool, StateError> {
-    let Some(row) = s.get_mirror(node)? else {
-        return Ok(true);
-    };
-    let mut seen = HashSet::from([node]);
-    let mut at = row.parent;
-    while !at.is_root() && seen.insert(at) {
-        if let Some(folder) = s.removed_by_node(at)? {
-            return Ok(row.changed_at.is_none_or(|c| c <= folder.time()));
-        }
-        match s.get_mirror(at)? {
-            Some(up) => at = up.parent,
-            None => break,
-        }
-    }
-    Ok(false)
-}
-
 pub(super) fn look(root: &Path, path: &RelPath) -> OnDisk {
     let meta = match hbsync_platform::stat(&path.to_native(root)) {
         Ok(m) => m,

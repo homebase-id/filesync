@@ -2,6 +2,7 @@
 //! what the remote writes of `remote.rs` did).
 
 use super::*;
+use hbsync_state::Trashed;
 
 impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
@@ -155,6 +156,7 @@ impl Executor<'_> {
             },
             base_at: acted.base_at.into(),
             held_ms: None,
+            trashed: None,
         };
         let job = Job::Download(Download {
             node,
@@ -335,7 +337,7 @@ impl Executor<'_> {
             mut record,
             current,
             created_ms,
-            tags,
+            tags: to_write,
         } = placement;
         let (node, target) = (record.base.node, record.target.clone());
         let target = &target;
@@ -351,8 +353,21 @@ impl Executor<'_> {
         // file can be seen there: only that costs a commit.
         // Only a volume that keeps no tags says so for the rest: a set that fails or reads
         // back as nothing to go by doesn't.
-        let write = self.write_placed_tags(done.path(), &tags);
+        let write = self.write_item_tags(done.path(), &to_write);
         let failed = write.is_err();
+        // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
+        // not sent up yet): not put in place then, for a retry, the plan sending it up
+        // meanwhile.
+        let drive_tags = &record.base.state.tags;
+        if failed
+            && let Some(held) = current.as_ref().and_then(|r| r.tags.as_ref())
+            && held
+                .iter()
+                .any(|t| to_write.get(&t.name).is_some() && drive_tags.get(&t.name).is_none())
+        {
+            done.keep_for_retry();
+            return Ok(Outcome::Retry("its tags weren't written".into()));
+        }
         let tags = match write {
             Ok(tags::Written::Unsupported) => {
                 let _ = self.cfg.tags_kept.set(false);
@@ -369,7 +384,7 @@ impl Executor<'_> {
             self.write_durable(|s| s.put_placing(&record))?;
         }
         // The record claims only what read back; the row holds what the file holds.
-        let tags = self.placed_tags(done.path(), (!failed).then_some(tags));
+        let tags = self.tags_after_write(done.path(), (!failed).then_some(tags));
         let placed = match &current {
             Some(row) if &row.path == target => self.put(target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
@@ -379,19 +394,34 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                let trashed = match self.move_to_trash(&row.path, node)? {
-                    Ok(trashed) => trashed,
-                    Err(e) => {
-                        done.keep_for_retry();
-                        return Ok(io_outcome(e));
-                    }
+                // Where the old version goes in the trash, noted before it goes: should the new
+                // one not get in place, it comes back (in the run, or by recovery), where the
+                // next plan would take its absence for the user deleting it.
+                let entry = trash_entry(&row.path, node);
+                record.trashed = Some(Trashed {
+                    from: row.path.clone(),
+                    to: entry.clone(),
+                });
+                self.write_durable(|s| s.put_placing(&record))?;
+                if let Err(e) = self.move_to_trash_as(&row.path, &entry)? {
+                    done.keep_for_retry();
+                    return Ok(io_outcome(e));
+                }
+                if self.crash_here(CrashPoint::AfterTrashed) {
+                    return Ok(Outcome::Retry("crash point reached".into()));
+                }
+                let placed = match Self::take_one(&self.cfg.fail_after_trash) {
+                    true => Err(FileIoError::Io(io::Error::other(
+                        "not put in place (a test)",
+                    ))),
+                    false => self.put(target, |at| done.persist_new(at, created_ms))?,
                 };
-                let placed = self.put(target, |at| done.persist_new(at, created_ms))?;
-                // Not put in place: the old version comes back from the trash, where the next
-                // plan would take its absence for the user deleting it.
-                if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_))) {
-                    let back = self.abs(&row.path);
-                    let _ = rename_ordered(self.db, &trashed, &back)?;
+                if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_)))
+                    && let Err(e) = self.restore_from_trash(&entry, &row.path)?
+                {
+                    // Still in the trash: the record stays, for recovery to bring it back.
+                    self.placed(node);
+                    return Ok(io_outcome(e));
                 }
                 placed
             }

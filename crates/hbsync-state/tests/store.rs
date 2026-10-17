@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 12);
+    assert_eq!(db.schema_version()?, 13);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -260,7 +260,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
 /// kept (its column empty) reads as not checked, never as "no base".
 #[test]
 fn a_placement_record_keeps_the_base_its_plan_saw() -> R {
-    use hbsync_state::{Placing, PlannedBase};
+    use hbsync_state::{Placing, PlannedBase, Trashed};
     let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
     let db_path = dir.path().join("state.db");
     let record = |base_at| Placing {
@@ -270,10 +270,18 @@ fn a_placement_record_keeps_the_base_its_plan_saw() -> R {
         prior_tags: Some(Tags::new([Tag::new("Red", 0)])),
         base_at,
         held_ms: None,
+        trashed: None,
     };
+    // One with the old version it put in the trash.
     let (absent, at) = (
         record(PlannedBase::Absent),
-        record(PlannedBase::At(remote().version)),
+        Placing {
+            trashed: Some(Trashed {
+                from: path("old/d"),
+                to: "1-abc/d".into(),
+            }),
+            ..record(PlannedBase::At(remote().version))
+        },
     );
     let mut db = StateDb::open(&db_path)?;
     db.write(|s| {
@@ -873,7 +881,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 12);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 13);
     Ok(())
 }
 
