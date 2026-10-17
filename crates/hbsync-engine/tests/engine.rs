@@ -1114,6 +1114,56 @@ fn a_second_conflict_with_the_same_bytes_gets_its_own_copy() -> R {
     Ok(())
 }
 
+/// Two computers with the same bytes against the drive's other version each make their own
+/// conflict copy, under its own id: two copies, both named, nothing lost, and quiet after a
+/// few rounds. (They shared one id: the second made its copy under the first's, with the
+/// drive's node as its state, and could name it "".)
+#[test]
+fn two_computers_with_the_same_conflict_make_their_own_copies() -> R {
+    let server = server();
+    let mut phone = Client::new(&server, "phone")?;
+    let mut laptop = Client::new(&server, "laptop")?;
+    let mut desk = Client::new(&server, "desk")?;
+    phone.write("report.txt", "base")?;
+    phone.sync()?;
+    laptop.sync()?;
+    desk.sync()?;
+    phone.write("report.txt", "theirs")?;
+    phone.sync()?;
+    laptop.write("report.txt", "mine")?;
+    desk.write("report.txt", "mine")?;
+    laptop.sync()?;
+    desk.sync()?;
+    let mut quiet = false;
+    for _ in 0..6 {
+        let done = phone.sync()?.ops_done + laptop.sync()?.ops_done + desk.sync()?.ops_done;
+        if done == 0 {
+            quiet = true;
+            break;
+        }
+    }
+    assert!(quiet, "still syncing after 6 rounds");
+    let tree = desk.tree_text("");
+    assert_eq!(
+        tree,
+        [
+            "report (conflict desk 2026-10-08).txt = mine",
+            "report (conflict laptop 2026-10-08).txt = mine",
+            "report.txt = theirs",
+        ]
+    );
+    assert_eq!(laptop.tree_text(""), tree);
+    assert_eq!(phone.tree_text(""), tree);
+    let server = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!(server.live().count(), 3);
+    assert!(
+        server.live_names().iter().all(|n| !n.is_empty()),
+        "{:?}",
+        server.live_names()
+    );
+    Ok(())
+}
+
 #[test]
 fn adopting_a_copy_of_a_sha256_file_downloads_nothing() -> R {
     let server = server();

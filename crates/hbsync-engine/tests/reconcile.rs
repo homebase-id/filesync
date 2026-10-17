@@ -283,6 +283,70 @@ fn edit_edit_keeps_both_versions() {
     );
 }
 
+/// `f` edited here to `mine` against the drive's other version, planned on `computer`: the
+/// conflict copy's id.
+fn copy_id(f: NodeId, mine: FileContent, computer: &str) -> NodeId {
+    let mut w = World::default();
+    w.opts.computer = computer.into();
+    w.local(f, Some(NodeState::file(ROOT, "report.txt", mine)));
+    w.remote(f, Some(file(ROOT, "report.txt", "theirs")));
+    let plan = w.plan();
+    match plan.ops.first() {
+        Some(Op::LocalFork { new_node, name, .. }) if !name.is_empty() => *new_node,
+        _ => panic!("no fork: {plan:?}"),
+    }
+}
+
+/// The conflict copy's id is fixed for the conflict on a computer: planned again (after a
+/// crash, say), it is the same copy. Another computer makes its own copy of the same conflict,
+/// with the same bytes, under another id; other bytes (the executable bit too) another copy.
+#[test]
+fn a_conflict_copy_id_is_the_same_on_a_replan_and_its_computers_own() {
+    let [f] = ids(1)[..] else { unreachable!() };
+    let mine = FileContent {
+        hash: h("mine"),
+        size: 4,
+        mtime_ms: 0,
+        executable: false,
+    };
+    let laptop = copy_id(f, mine, "laptop's db id");
+    assert_eq!(copy_id(f, mine, "laptop's db id"), laptop);
+    assert_ne!(copy_id(f, mine, "desk's db id"), laptop);
+    let executable = FileContent {
+        executable: true,
+        ..mine
+    };
+    assert_ne!(copy_id(f, executable, "laptop's db id"), laptop);
+}
+
+/// A fork whose copy has no folder yet (the file's folder here waits for its own parent: the
+/// repairs take the copy out) waits: no copy, never one named "", no conflict reported yet,
+/// and nothing done to the node.
+#[test]
+fn a_fork_whose_copy_has_to_wait_waits() {
+    let [d, f] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    // The local folder of the file is nowhere in the input.
+    w.local(f, Some(file(d, "report.txt", "mine")));
+    w.remote(f, Some(file(ROOT, "report.txt", "theirs")));
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .all(|op| op.node() != f
+                && !matches!(op, Op::LocalFork { .. } | Op::RemoteCreate { .. })),
+        "{plan:?}"
+    );
+    assert!(plan.deferred.contains(&f), "{plan:?}");
+    assert!(
+        !plan
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::EditEdit { .. })),
+        "{plan:?}"
+    );
+}
+
 #[test]
 fn same_edit_on_both_sides_just_settles() {
     let [f] = ids(1)[..] else { unreachable!() };

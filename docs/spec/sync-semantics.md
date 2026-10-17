@@ -118,6 +118,12 @@ When both sides edited a file to different content:
 - The local version is renamed in place to `<stem> (conflict <device> <YYYY-MM-DD>)<ext>` and
   becomes a new node that is uploaded normally.
 - No bytes are ever dropped: the local bytes are moved by rename, never re-written.
+- The copy's node id comes from the node, the local bytes (hash and executable bit), the base
+  version and the computer (its state DB's own id for the account): planned again on that
+  computer, it is the same copy. Each computer makes its own copy: two computers with the same
+  bytes against the same version give two copies, each uploaded (rare, and accepted).
+- A copy that can't be placed yet (its folder waits for its own parent, §6.3) isn't made: the
+  node waits with it, and its conflict isn't reported yet.
 
 ## 6. Invariants on the merged tree
 

@@ -1609,6 +1609,7 @@ impl Sim {
             .count();
         let opts = Options {
             device: client.name.clone(),
+            computer: client.name.clone(),
             date: "2026-10-08".into(),
             allow_mass_delete: self.guard.is_none(),
             mass_delete_min: self.guard.unwrap_or_default(),

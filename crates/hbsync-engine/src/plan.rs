@@ -31,6 +31,9 @@ pub struct BaseExtra {
 pub struct Options {
     /// Device name used in conflict-copy names.
     pub device: String,
+    /// This computer's id for the account (its state DB's own id): a conflict copy's id
+    /// includes it, so two computers never make the same copy.
+    pub computer: String,
     /// Today's date (`YYYY-MM-DD`) for conflict-copy names. Passed in to keep this pure.
     pub date: String,
     /// Deletes above `max(mass_delete_min, mass_delete_fraction × synced files)` are held.
@@ -58,6 +61,7 @@ impl Default for Options {
     fn default() -> Self {
         Options {
             device: "device".into(),
+            computer: String::new(),
             date: "1970-01-01".into(),
             mass_delete_min: 50,
             mass_delete_fraction: 0.25,

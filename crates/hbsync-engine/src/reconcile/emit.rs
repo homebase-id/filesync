@@ -29,11 +29,15 @@ impl Reconciler<'_> {
             let depth = |tree: &Tree| tree.ancestors(node).len();
 
             if let Some(copy) = forked {
-                let name = self
-                    .merged
-                    .get(copy)
-                    .map(|s| s.name.clone())
-                    .unwrap_or_default();
+                // A copy the repairs took out (its folder waits, §6.3) isn't made, never under
+                // the name "": the node waits with it, its conflict not reported yet.
+                let Some(name) = self.merged.get(copy).map(|s| s.name.clone()) else {
+                    self.deferred.insert(node);
+                    self.plan
+                        .conflicts
+                        .retain(|c| *c != Conflict::EditEdit { node, copy });
+                    continue;
+                };
                 forks.push(Op::LocalFork {
                     node,
                     new_node: copy,
