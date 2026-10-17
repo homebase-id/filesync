@@ -158,6 +158,8 @@ impl Client {
 fn two_clients_converge_through_homebase() -> Res<()> {
     let identity = hbsync_dev::live_identity()?;
     let run = hbsync_dev::run_name("e2e");
+    // Deleted for good at the end, whatever happens; the test's own cleanup syncs a delete.
+    let _guard = hbsync_dev::RunFolder::new(&run)?;
     let mut a = Client::new(&identity, "a", &run)?;
     let mut b = Client::new(&identity, "b", &run)?;
     let result = scenarios(&run, &mut a, &mut b);
@@ -183,6 +185,8 @@ fn two_clients_converge_through_homebase() -> Res<()> {
 fn photos_restore_without_what_was_deleted_from_it_before() -> Res<()> {
     let identity = hbsync_dev::live_identity()?;
     let run = hbsync_dev::run_name("photos");
+    // Deleted for good at the end, whatever happens; the test's own cleanup syncs a delete.
+    let _guard = hbsync_dev::RunFolder::new(&run)?;
     let mut a = Client::new(&identity, "a", &run)?;
     let mut b = Client::new(&identity, "b", &run)?;
     let result = photos(&run, &mut a, &mut b);

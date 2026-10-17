@@ -857,6 +857,7 @@ fn large() -> usize {
 /// Runs `scenarios` on a harness of `computers`, checks each, cleans up; fails on any missed
 /// event or echo, after reporting all of them.
 fn run(computers: Vec<Computer>, run: &str, scenarios: &[Scenario<'_>]) -> Res {
+    let _guard = hbsync_dev::RunFolder::new(run)?;
     let h = Harness::new(computers, run)?;
     let result = (|| -> Res {
         for (name, scenario) in scenarios {

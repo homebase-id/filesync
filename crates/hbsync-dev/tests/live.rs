@@ -5,7 +5,8 @@
 use std::time::Duration;
 
 use hbsync_dev::{
-    OTHER_CLIENT, cursor_at_end, live_identity, on_threads, run_name, saved_client, saved_client_as,
+    OTHER_CLIENT, RunFolder, cursor_at_end, live_identity, on_threads, run_name, saved_client,
+    saved_client_as,
 };
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
@@ -22,7 +23,9 @@ fn live_remote() -> Result<HomebaseRemote, Box<dyn std::error::Error>> {
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn the_contract_holds_on_a_live_drive() -> R {
     let remote = live_remote()?;
-    let bench = Bench::new(&remote, &run_name("contract"), Duration::from_millis(20))?;
+    let run_folder = run_name("contract");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::from_millis(20))?;
     let failed = bench.run_all();
     let cleanup = bench.cleanup();
     assert!(failed.is_empty(), "{failed:#?}");
@@ -69,7 +72,9 @@ fn a_change_on_the_drive_is_announced() -> R {
     let identity = live_identity()?;
     let remote = live_remote()?;
     let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
-    let bench = Bench::new(&remote, &run_name("notify"), Duration::ZERO)?;
+    let run_folder = run_name("notify");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::ZERO)?;
     let listen = |own| -> Result<(Notifier, Receiver<Event>), Box<dyn std::error::Error>> {
         let (tx, rx) = std::sync::mpsc::channel();
         let n = Notifier::spawn_with(remote.client().clone(), remote.drive(), own, tx)?;
@@ -139,7 +144,9 @@ fn nodes_are_stored_encrypted() -> R {
     use hbsync_remote::contract::file;
 
     let remote = live_remote()?;
-    let bench = Bench::new(&remote, &run_name("sealed"), Duration::ZERO)?;
+    let run_folder = run_name("sealed");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::ZERO)?;
     let result = (|| -> R {
         let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
         let (dir, dir_at) = bench.folder("Private folder")?;
@@ -207,7 +214,9 @@ fn throughput() -> R {
     }
 
     let remote = live_remote()?;
-    let bench = Bench::new(&remote, &run_name("throughput"), Duration::ZERO)?;
+    let run_folder = run_name("throughput");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::ZERO)?;
     let result = (|| -> R {
         let (dir, _) = bench.folder("throughput")?;
         let alg = HashAlgorithm::Blake3;
@@ -310,7 +319,9 @@ fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
     use hbsync_types::schema::NodeContent;
     use hbsync_types::{FileToken, Target};
     let remote = live_remote()?;
-    let bench = Bench::new(&remote, &run_name("stale-token"), Duration::ZERO)?;
+    let run_folder = run_name("stale-token");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::ZERO)?;
     let result = (|| -> R {
         let (folder, _) = bench.folder("d")?;
         let meta = file("f.txt", folder.node, b"one");
@@ -349,7 +360,9 @@ fn feed_sizes() -> R {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2000usize);
-    let bench = Bench::new(&remote, &run_name("feed-sizes"), Duration::from_millis(20))?;
+    let run_folder = run_name("feed-sizes");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::from_millis(20))?;
     let result = (|| -> R {
         let before = bench.cursor_now()?;
         let (folder, _) = bench.folder("files")?;
@@ -534,6 +547,7 @@ fn echo_run(
 
     let remote = Counted::new(live_remote()?);
     let run = run_name("echoes");
+    let _guard = RunFolder::new(&run)?;
     let mut a = TestClient::new(remote.clone(), "a", |cfg: &mut EngineConfig| {
         cfg.allow_mass_delete = true;
         cfg.exec.filter = Arc::new(Filter::load(&cfg.exec.root, cfg.exec.case_insensitive)?);
@@ -751,7 +765,9 @@ fn write_answers_carry_the_feeds_time() -> R {
     use std::collections::HashMap;
 
     let remote = live_remote()?;
-    let bench = Bench::new(&remote, &run_name("answer-times"), Duration::ZERO)?;
+    let run_folder = run_name("answer-times");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::ZERO)?;
     let result = (|| -> R {
         let cursor = bench.cursor_now()?;
         let (dir, _) = bench.folder("d")?;
@@ -903,7 +919,9 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
     let identity = live_identity()?;
     let remote = live_remote()?;
     let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
-    let bench = Bench::new(&remote, &run_name("feed-at-once"), Duration::ZERO)?;
+    let run_folder = run_name("feed-at-once");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::ZERO)?;
     let result = (|| -> R {
         let (dir, _) = bench.folder("d")?;
         let mut cursor = bench.cursor_now()?;
@@ -986,7 +1004,9 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
     let identity = live_identity()?;
     let remote = live_remote()?;
     let other = HomebaseRemote::connect(saved_client_as(&identity, Some(OTHER_CLIENT))?)?;
-    let bench = Bench::new(&remote, &run_name("cache-race"), Duration::ZERO)?;
+    let run_folder = run_name("cache-race");
+    let _guard = RunFolder::new(&run_folder)?;
+    let bench = Bench::new(&remote, &run_folder, Duration::ZERO)?;
     let result = (|| -> R {
         let (dir, _) = bench.folder("d")?;
         let mut stale = Vec::new();
