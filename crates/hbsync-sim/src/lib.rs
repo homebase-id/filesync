@@ -771,7 +771,50 @@ impl Sim {
     fn crash(&mut self, c: usize) {
         self.crashes += 1;
         let front = self.clients[c].plan.front().map(|(op, _)| op.clone());
+        // A download replacing a file from another folder puts the old version in the trash
+        // first: every third crash comes between that and the new one being in place (the
+        // record notes where the old one went).
+        let trash_crash = match &front {
+            Some(Op::LocalDownload {
+                node,
+                parent,
+                name,
+                replace: true,
+                ..
+            }) => {
+                self.crashes.is_multiple_of(3)
+                    && self.clients[c]
+                        .local
+                        .get(*node)
+                        .is_some_and(|l| (l.parent, &l.name) != (*parent, name))
+            }
+            _ => false,
+        };
         match front {
+            Some(op @ Op::LocalDownload { node, .. }) if trash_crash => {
+                let client = &self.clients[c];
+                let old = client.local.get(node).cloned();
+                let prior = (client.os != Os::Windows)
+                    .then(|| client.local.get(node).map(|l| l.tags.clone()))
+                    .map(Option::unwrap_or_default);
+                if self.execute(c, &op) == Outcome::Done
+                    && let Some(record) = self.placed_from.take()
+                {
+                    self.lose_commit(c, &op, record, prior);
+                    // Not in place: the new version never got there, the old one is in the
+                    // trash.
+                    let client = &mut self.clients[c];
+                    client.local.remove(node);
+                    if let Some(p) = client.placing.get_mut(&node) {
+                        p.trashed = old;
+                        p.unhashed = false;
+                    }
+                    if self.verbose {
+                        self.trace
+                            .push(format!("crash c{c}: {node:?} old version in the trash"));
+                    }
+                }
+            }
             Some(op @ Op::LocalDownload { node, .. })
                 if self.clients[c].fetched.contains_key(&node) =>
             {
@@ -864,6 +907,7 @@ impl Sim {
             prior,
             unhashed,
             held: false,
+            trashed: None,
         };
         client.placing.insert(*node, placement);
         if self.verbose {
@@ -903,6 +947,7 @@ impl Sim {
             prior,
             unhashed: false,
             held: false,
+            trashed: None,
         };
         client.placing.insert(*node, placement);
         if self.verbose {
@@ -936,6 +981,21 @@ impl Sim {
                 let local = self.clients[c].local.get(node);
                 self.trace
                     .push(format!("recover c{c} {node:?} there={there} {local:?}"));
+            }
+            // Not in place, the old version in the trash: it comes back where its place is free
+            // (as the engine's recovery brings it back); its folder gone, it stays there.
+            if let Some(old) = p.trashed.as_ref().filter(|_| !there) {
+                let client = &mut self.clients[c];
+                let free = !client.local.contains(node)
+                    && client.local.exists(old.parent)
+                    && client
+                        .local
+                        .children(old.parent)
+                        .all(|n| client.local.get(n).is_none_or(|s| s.name != old.name));
+                if free {
+                    client.local.insert(node, old.clone());
+                }
+                continue;
             }
             if there {
                 if !self.settle_record(c, node, &p) {
@@ -3236,6 +3296,9 @@ struct Placement {
     unhashed: bool,
     /// Held once already (its node gone, its item not the drive's to take): it goes next.
     held: bool,
+    /// The old version a download put in the trash (as it was here), until the new one is in
+    /// place.
+    trashed: Option<NodeState>,
 }
 
 /// What happened to one operation.
@@ -3603,6 +3666,75 @@ mod tests {
         assert!(!sim.gone_for(0, file));
         sim.clients[0].planned_removed.insert(folder, i64::MAX);
         assert!(sim.gone_for(0, file));
+    }
+
+    /// A file moved to another folder and edited on another device: the download bringing it
+    /// here puts the old version in the trash, and a crash comes before the new one is in
+    /// place. Recovery brings the old one back, so nothing reads as the user deleting it (left
+    /// in the trash, the next plan took it for a delete against the drive's edit: a conflict),
+    /// and every device converges on the new version.
+    #[test]
+    fn an_old_version_a_crash_left_in_the_trash_comes_back() {
+        let mut sim = Sim::new(2);
+        let index = |sim: &Sim, c: usize, f: NodeId| {
+            sim.folders_of(c)
+                .iter()
+                .position(|n| *n == f)
+                .expect("a folder")
+        };
+        for name in [0, 1] {
+            let parent = index(&sim, 0, NodeId::ROOT);
+            sim.run(&[act(0, Action::CreateFolder { parent, name })]);
+        }
+        let (a, b) = (sim.item(0, "a").expect("a"), sim.item(0, "b").expect("b"));
+        let parent = index(&sim, 0, a);
+        sim.run(&[act(0, Action::CreateFile { parent, name: 3 })]);
+        assert!(sim.quiesce(10));
+        let file = sim.item(0, "a/c.txt").expect("the file");
+        let item = sim
+            .items_of(1)
+            .iter()
+            .position(|n| *n == file)
+            .expect("there");
+        let to = index(&sim, 1, b);
+        sim.run(&[
+            act(
+                1,
+                Action::Move {
+                    node: item,
+                    parent: to,
+                    name: 3,
+                },
+            ),
+            act(1, Action::Edit { file: 0 }),
+        ]);
+        sim.plan(1);
+        while sim.step(1) {}
+        sim.plan(0);
+        while sim.clients[0]
+            .plan
+            .front()
+            .is_some_and(|(op, _)| !matches!(op, Op::LocalDownload { node, .. } if *node == file))
+        {
+            sim.step(0);
+        }
+        assert!(!sim.clients[0].plan.is_empty(), "no download");
+        // The next crash comes between the trash and the new version.
+        sim.crashes = 2;
+        sim.crash(0);
+        assert!(!sim.clients[0].local.contains(file), "not in the trash");
+        sim.plan(0);
+        assert_eq!(sim.item(0, "a/c.txt"), Some(file), "not brought back");
+        let ops: Vec<&'static str> = sim.clients[0]
+            .plan
+            .iter()
+            .map(|(op, _)| op.kind())
+            .collect();
+        assert_eq!(ops, ["LocalDownload"]);
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+        assert!(sim.server.live.contains_key(&file), "deleted on the drive");
+        assert_eq!(sim.item(0, "b/c.txt"), Some(file));
     }
 
     /// The tag check still catches a tag dropped from a node nobody deleted.

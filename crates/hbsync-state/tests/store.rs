@@ -278,7 +278,7 @@ fn a_placement_record_keeps_the_base_its_plan_saw() -> R {
         Placing {
             trashed: Some(Trashed {
                 from: path("old/d"),
-                to: "1-abc/d".into(),
+                to: path("1-abc/d"),
             }),
             ..record(PlannedBase::At(remote().version))
         },

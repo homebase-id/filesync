@@ -137,11 +137,7 @@ impl Executor<'_> {
         if !adopt && self.crash_here(CrashPoint::AfterPlaced) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        let written = match self.write_item_tags(&abs, tags) {
-            Ok(tags::Written::Done(read)) => Some(read),
-            Ok(tags::Written::Unsupported) => Some(None),
-            Err(_) => None,
-        };
+        let written = self.write_tags_left(&abs, tags);
         let tags = written.clone().flatten();
         // Tags written: the record claims what the folder holds now, before its commit. A
         // folder taken over held its own: a failed write left those, not known (none claimed).
@@ -190,7 +186,7 @@ impl Executor<'_> {
             }
             s.put_local(&row)?;
             match &record {
-                Some(r) => settle_placement(s, r, os),
+                Some(r) => settle_placement(s, r, os).map(|p| p.at),
                 None => {
                     let at = settle(s, Settle::placed(node, None, TagWrite::Agreed), os)?;
                     // Made from Recently deleted (its folder restored, its RemoteCreate to
@@ -236,11 +232,7 @@ impl Executor<'_> {
         if !self.on_disk_unchanged(&row) || folder_retagged {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        let written = match self.write_item_tags(&abs, tags) {
-            Ok(tags::Written::Done(read)) => Some(read),
-            Ok(tags::Written::Unsupported) => Some(None),
-            Err(_) => None,
-        };
+        let written = self.write_tags_left(&abs, tags);
         // A failed write leaves the item what it held: read so, not as not known (which reads
         // as the drive's tags, and a tag only the item has would never go up).
         let read = self.tags_after_write(&abs, written);
@@ -462,7 +454,9 @@ impl Executor<'_> {
         path: &RelPath,
         node: NodeId,
     ) -> Result<io::Result<()>, StateError> {
-        let entry = trash_entry(path, node);
+        let Some(entry) = trash_entry(path, node) else {
+            return Ok(Err(io::Error::other("no name in the trash")));
+        };
         self.move_to_trash_as(path, &entry)
     }
 
@@ -470,10 +464,10 @@ impl Executor<'_> {
     pub(super) fn move_to_trash_as(
         &mut self,
         path: &RelPath,
-        entry: &str,
+        entry: &RelPath,
     ) -> Result<io::Result<()>, StateError> {
         let trash = layout::trash_dir(&self.cfg.root);
-        let to = trash.join(entry);
+        let to = entry.to_native(&trash);
         // The trash folder too, made with the first item in it.
         self.db.changed(&trash);
         if let Some(dir) = to.parent()
@@ -488,36 +482,40 @@ impl Executor<'_> {
     /// removes its entry's folder, empty then.
     pub(super) fn restore_from_trash(
         &mut self,
-        entry: &str,
+        entry: &RelPath,
         path: &RelPath,
     ) -> Result<io::Result<()>, StateError> {
         if Self::take_one(&self.cfg.fail_restores) {
             return Ok(Err(io::Error::other("bringing it back failed (a test)")));
         }
-        let from = layout::trash_dir(&self.cfg.root).join(entry);
-        let back = rename_ordered(self.db, &from, &self.abs(path))?;
-        if back.is_ok() {
-            remove_entry_dir(&from);
-        }
+        let back = restore_entry(self.db, &self.cfg.root, entry, path)?;
         Ok(back)
     }
 }
 
 /// The trash entry (relative to the trash folder) an item at `path` of `node` goes to now: a
 /// folder of its own, named by when and by the node.
-pub(super) fn trash_entry(path: &RelPath, node: NodeId) -> String {
-    format!(
-        "{}-{}/{}",
-        hbsync_types::unix_now(),
-        node.0.simple(),
-        path.name().unwrap_or("item")
-    )
+pub(super) fn trash_entry(path: &RelPath, node: NodeId) -> Option<RelPath> {
+    RelPath::new(&format!("{}-{}", hbsync_types::unix_now(), node.0.simple()))
+        .and_then(|dir| dir.join(path.name().unwrap_or("item")))
+        .ok()
 }
 
-/// Removes the folder of trash entry `item`, emptied by bringing the item back. One that can't
-/// be removed (not empty after all) stays, for the daily purge.
-pub(super) fn remove_entry_dir(item: &Path) {
-    if let Some(dir) = item.parent() {
+/// Brings the item in trash entry `entry` back to `path` (under `root`), ordered as any rename
+/// ([`rename_ordered`]: no row about it is durable before it), and removes the entry's folder,
+/// empty then (one that can't be removed, not empty after all, stays for the daily purge).
+pub(super) fn restore_entry(
+    db: &mut StateDb,
+    root: &Path,
+    entry: &RelPath,
+    path: &RelPath,
+) -> Result<io::Result<()>, StateError> {
+    let from = entry.to_native(&layout::trash_dir(root));
+    let back = rename_ordered(db, &from, &path.to_native(root))?;
+    if back.is_ok()
+        && let Some(dir) = from.parent()
+    {
         drop(fs::remove_dir(dir));
     }
+    Ok(back)
 }

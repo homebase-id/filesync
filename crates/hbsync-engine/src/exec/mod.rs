@@ -80,9 +80,12 @@ pub struct ExecConfig {
     #[doc(hidden)]
     pub fail_tag_reads: Arc<std::sync::atomic::AtomicUsize>,
     /// Tests only: this many downloads fail to put the new version in place after the old one
-    /// went to the trash, and this many bringing it back fail.
+    /// went to the trash (`fail_after_trash`; with a DB error: `fail_db_after_trash`), and this
+    /// many bringing it back fail.
     #[doc(hidden)]
     pub fail_after_trash: Arc<std::sync::atomic::AtomicUsize>,
+    #[doc(hidden)]
+    pub fail_db_after_trash: Arc<std::sync::atomic::AtomicUsize>,
     #[doc(hidden)]
     pub fail_restores: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -658,23 +661,27 @@ impl<'a> Executor<'a> {
 
     /// Whether a placement's commit write fails, for a test ([`ExecConfig::fail_commits`]).
     fn commit_fails(&self) -> bool {
-        self.cfg
-            .fail_commits
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok()
+        Self::take_one(&self.cfg.fail_commits)
     }
 
-    /// Writes `tags` on the item at `path` ([`tags::write_on`]); for a test, fails
-    /// ([`ExecConfig::fail_tag_writes`]).
-    fn write_item_tags(&self, path: &Path, tags: &Tags) -> io::Result<tags::Written> {
-        let fails = self
-            .cfg
-            .fail_tag_writes
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok();
-        match fails {
+    /// Writes `tags` on the item at `path` ([`tags::write_on`]; for a test, fails:
+    /// [`ExecConfig::fail_tag_writes`]): what it left (`None` in it: nothing to go by, or a
+    /// volume that keeps none, which it notes), `None` where it failed.
+    fn write_tags_left(&self, path: &Path, tags: &Tags) -> Option<Option<Tags>> {
+        let written = match Self::take_one(&self.cfg.fail_tag_writes) {
             true => Err(io::Error::other("its tag write failed (a test)")),
             false => tags::write_on(path, tags),
+        };
+        match written {
+            Ok(tags::Written::Unsupported) => {
+                let _ = self.cfg.tags_kept.set(false);
+                Some(None)
+            }
+            Ok(tags::Written::Done(read)) => {
+                let _ = self.cfg.tags_kept.set(true);
+                Some(read)
+            }
+            Err(_) => None,
         }
     }
 
@@ -685,15 +692,9 @@ impl<'a> Executor<'a> {
     /// and the next scan took their absence for the user removing them.
     fn tags_after_write(&self, path: &Path, written: Option<Option<Tags>>) -> Option<Tags> {
         let kept = tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false);
-        let read_fails = || {
-            self.cfg
-                .fail_tag_reads
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-                .is_ok()
-        };
         match written {
             Some(left) => left,
-            None if kept && !read_fails() => tags::read(path),
+            None if kept && !Self::take_one(&self.cfg.fail_tag_reads) => tags::read(path),
             None => None,
         }
     }
@@ -706,10 +707,7 @@ impl<'a> Executor<'a> {
 
     /// Whether reading a placed item back fails, for a test ([`ExecConfig::fail_reads`]).
     fn read_fails(&self) -> bool {
-        self.cfg
-            .fail_reads
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok()
+        Self::take_one(&self.cfg.fail_reads)
     }
 
     /// Whether the test crash point `at` is reached; the run then stops.
@@ -1202,7 +1200,7 @@ mod transfer_ops;
 #[cfg(test)]
 mod tests;
 
-use local::{remove_entry_dir, trash_entry};
+use local::{restore_entry, trash_entry};
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
@@ -1210,7 +1208,7 @@ pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub(crate) use settle::update_meta;
 pub use settle::{Settle, settle};
-use settle::{gone_on_drive, mark_children, merged_with_drive, settle_placement, written_row};
+use settle::{mark_children, merged_with_drive, settle_placement, written_row};
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the
 // order the state DB needs with its durable commits (its docs on durability). Tags and times

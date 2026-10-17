@@ -289,6 +289,11 @@ impl Store<'_> {
         )
     }
 
+    /// Whether Recently deleted holds anything at all.
+    pub fn has_removed(&self) -> Result<bool> {
+        Ok(self.prep("SELECT 1 FROM removed LIMIT 1")?.exists([])?)
+    }
+
     pub fn mirror_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM remote")
     }

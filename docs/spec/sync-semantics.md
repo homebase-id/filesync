@@ -160,9 +160,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   than `keep_deleted_days`, of those made since it began. A download that moves a file to
   another folder puts the old version there, its record noting where before it goes; where the
   new one then can't be put in place, the old one comes back (gone, it would read as the user
-  deleting it), and its emptied entry goes. Where bringing it back fails, or a crash came
-  between, recovery brings it back, with its row, while the new one isn't in place and its
-  place is free.
+  deleting it, against the drive's edit: a conflict), and its emptied entry goes. From the move
+  on, the record is recovery's whatever fails (a DB error too): where bringing it back fails,
+  or a crash came between, recovery brings it back, with its row, ordered as any rename, where
+  the new one verifiably isn't in place (nothing there, or another node's item: never a file
+  there with other bytes or held too long unhashed) and its place is free; its folder deleted
+  meanwhile, it stays in the trash.
 - **Fingerprint guard.** Before deleting, overwriting or moving a local item, the executor
   checks that the local fingerprint still equals the one the plan was made from. On mismatch
   the operation is skipped and the node is re-planned.

@@ -63,7 +63,7 @@ pub(super) fn settle_placement(
     s: &Store<'_>,
     record: &Placing,
     os: Os,
-) -> Result<Option<RemoteRef>, StateError> {
+) -> Result<Placed, StateError> {
     let node = record.base.node;
     // Gone on the drive since (deleted, in Recently deleted, or taken along by a folder there):
     // settled at the record's version whatever the plan saw, so the removal reaches the item.
@@ -72,7 +72,7 @@ pub(super) fn settle_placement(
     // takes): the record stays otherwise.
     let gone = gone_on_drive(s, node)?;
     if gone && !view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some()) {
-        return Ok(None);
+        return Ok(Placed { at: None, gone });
     }
     let base_at = match record.base_at {
         _ if gone => s.get_base(node)?.map(|b| b.remote.version),
@@ -93,19 +93,30 @@ pub(super) fn settle_placement(
         same_bytes: true,
         ..Settle::placed(node, Some(&acted), tags)
     };
-    let settled = settle(s, how, os)?;
+    let at = settle(s, how, os)?;
     if record.base.state.kind == NodeKind::Folder {
         mark_children(s, node)?;
     }
-    Ok(settled)
+    Ok(Placed { at, gone })
+}
+
+/// What [`settle_placement`] did: where it put the base, if it did, and whether the node was
+/// gone on the drive.
+pub(super) struct Placed {
+    pub(super) at: Option<RemoteRef>,
+    pub(super) gone: bool,
 }
 
 /// Whether the drive no longer has `node` as the reconciler reads it: not in the mirror, or in a
 /// folder in Recently deleted, written no later than that folder's removal (taken along).
-pub(super) fn gone_on_drive(s: &Store<'_>, node: NodeId) -> Result<bool, StateError> {
+fn gone_on_drive(s: &Store<'_>, node: NodeId) -> Result<bool, StateError> {
     let Some(row) = s.get_mirror(node)? else {
         return Ok(true);
     };
+    // Nothing in Recently deleted: nothing taken along (the walk up costs a query a level).
+    if !s.has_removed()? {
+        return Ok(false);
+    }
     let mut seen = HashSet::from([node]);
     let mut at = row.parent;
     while !at.is_root() && seen.insert(at) {

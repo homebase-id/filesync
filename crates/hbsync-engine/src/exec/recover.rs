@@ -101,10 +101,15 @@ pub fn recover_placements(
     }
     // Outside the write: a file of another client's hash algorithm is hashed.
     let now = hbsync_types::unix_now_ms();
-    let judged: Vec<(Placing, Judged)> = found
+    // Each judged, and whether its item verifiably isn't in place (nothing there, or another
+    // node's): only then may an old version it put in the trash come back.
+    let judged: Vec<(Placing, Judged, bool)> = found
         .into_iter()
         .map(|(p, scanned)| {
-            let judged = match (look(root, &p.target), scanned) {
+            let at_target = look(root, &p.target);
+            let not_placed =
+                matches!(at_target, OnDisk::Absent) || matches!(scanned, Scanned::Other);
+            let judged = match (at_target, scanned) {
                 (OnDisk::Absent, _) => Judged::Drop,
                 (OnDisk::Unreadable, _) => Judged::Keep,
                 (OnDisk::There(_), Scanned::Other) => Judged::Drop,
@@ -115,47 +120,43 @@ pub fn recover_placements(
                     judge(root, &p, Some(row), now)
                 }
             };
-            (p, judged)
+            (p, judged, not_placed)
         })
         .collect();
-    // An old version a download put in the trash comes back where the new one isn't in place
-    // and its place is free (on disk; in the DB, but for the node's own row).
-    let judged: Vec<(Placing, Judged)> = judged
-        .into_iter()
-        .map(|(p, judged)| {
-            let Some(t) = p
-                .trashed
-                .as_ref()
-                .filter(|_| matches!(judged, Judged::Drop))
-            else {
-                return Ok((p, judged));
-            };
-            let entry = layout::trash_dir(root).join(&t.to);
-            let in_trash = fs::symlink_metadata(&entry).is_ok();
-            let free = matches!(look(root, &t.from), OnDisk::Absent)
-                && db
-                    .read(|s| s.get_local(&t.from))?
-                    .is_none_or(|r| r.node == p.base.node);
-            if !in_trash || !free {
-                return Ok((p, judged));
-            }
-            let judged = match ops::rename_noreplace(&entry, &root.join(t.from.as_str())) {
-                Ok(()) => {
-                    remove_entry_dir(&entry);
-                    match look(root, &t.from) {
-                        OnDisk::There(meta) => {
-                            let row = read_row(root, &t.from, p.base.node, &meta, algorithm);
-                            Judged::Restored(row)
-                        }
-                        _ => Judged::Drop,
-                    }
+    // An old version a download put in the trash comes back where the new one verifiably isn't
+    // in place (never where a file is there, with other bytes or not hashed in time) and its
+    // place is free (on disk; in the DB, but for the node's own row).
+    let mut restored = Vec::with_capacity(judged.len());
+    for (p, judged, not_placed) in judged {
+        let Some(t) = p.trashed.as_ref().filter(|_| not_placed) else {
+            restored.push((p, judged));
+            continue;
+        };
+        let in_trash = fs::symlink_metadata(t.to.to_native(&layout::trash_dir(root))).is_ok();
+        let free = matches!(look(root, &t.from), OnDisk::Absent)
+            && db
+                .read(|s| s.get_local(&t.from))?
+                .is_none_or(|r| r.node == p.base.node);
+        if !in_trash || !free {
+            restored.push((p, judged));
+            continue;
+        }
+        let judged = match restore_entry(db, root, &t.to, &t.from)? {
+            Ok(()) => match look(root, &t.from) {
+                OnDisk::There(meta) => {
+                    Judged::Restored(read_row(root, &t.from, p.base.node, &meta, algorithm))
                 }
-                // Tried again by the next recovery.
-                Err(_) => Judged::Keep,
-            };
-            Ok((p, judged))
-        })
-        .collect::<Result<_, StateError>>()?;
+                _ => Judged::Drop,
+            },
+            // Its folder gone since (the user deleted it): it stays in the trash, as what was
+            // in that folder would have gone there.
+            Err(e) if hbsync_platform::nothing_there(&e) => judged,
+            // Tried again by the next recovery.
+            Err(_) => Judged::Keep,
+        };
+        restored.push((p, judged));
+    }
+    let judged = restored;
     db.write(|s| {
         judged
             .into_iter()
@@ -276,14 +277,14 @@ pub(super) fn apply(
             }
             // What the commit does: the record goes with the base written, or stays until the
             // item can be read (its folder scanned).
-            let at = settle_placement(s, p, os)?;
+            let placed = settle_placement(s, p, os)?;
             // Its node gone on the drive, its item not one the drive takes (its name): held as
             // a file not hashed yet is, then dropped.
-            if s.is_placing(node)? && gone_on_drive(s, node)? {
+            if placed.gone && s.is_placing(node)? {
                 return hold(s, p, now);
             }
             s.mark_dirty(node)?;
-            Ok(Applied::Settled(at))
+            Ok(Applied::Settled(placed.at))
         }
     }
 }

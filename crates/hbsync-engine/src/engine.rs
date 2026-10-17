@@ -59,6 +59,7 @@ impl EngineConfig {
                 fail_tag_writes: Arc::default(),
                 fail_tag_reads: Arc::default(),
                 fail_after_trash: Arc::default(),
+                fail_db_after_trash: Arc::default(),
                 fail_restores: Arc::default(),
             },
             device: device.to_owned(),

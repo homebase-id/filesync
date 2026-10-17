@@ -198,7 +198,7 @@ fn placing_row(r: &Row<'_>) -> Result<Placing> {
         ) {
             (Some(from), Some(to)) => Some(Trashed {
                 from: codec::rel_path(&from)?,
-                to,
+                to: codec::rel_path(&to)?,
             }),
             _ => None,
         },

@@ -353,34 +353,39 @@ impl Executor<'_> {
         // file can be seen there: only that costs a commit.
         // Only a volume that keeps no tags says so for the rest: a set that fails or reads
         // back as nothing to go by doesn't.
-        let write = self.write_item_tags(done.path(), &to_write);
-        let failed = write.is_err();
+        let left = self.write_tags_left(done.path(), &to_write);
+        let failed = left.is_none();
         // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
         // not sent up yet): not put in place then, for a retry, the plan sending it up
         // meanwhile.
-        let drive_tags = &record.base.state.tags;
         if failed
             && let Some(held) = current.as_ref().and_then(|r| r.tags.as_ref())
-            && held
-                .iter()
-                .any(|t| to_write.get(&t.name).is_some() && drive_tags.get(&t.name).is_none())
+            && tags_lost(held, &to_write, &record.base.state.tags)
         {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }
-        let tags = match write {
-            Ok(tags::Written::Unsupported) => {
-                let _ = self.cfg.tags_kept.set(false);
-                None
+        let tags = left.flatten();
+        // Replacing a file from another folder, the old version goes in the trash: where, noted
+        // before it goes (with the tags, one write): should the new one not get in place, it
+        // comes back (in the run, or by recovery), where the next plan would take its absence
+        // for the user deleting it.
+        let trashed = match &current {
+            Some(row) if &row.path != target => {
+                let Some(entry) = trash_entry(&row.path, node) else {
+                    done.keep_for_retry();
+                    return Ok(Outcome::Retry("no name in the trash".into()));
+                };
+                Some(Trashed {
+                    from: row.path.clone(),
+                    to: entry,
+                })
             }
-            Ok(tags::Written::Done(read)) => {
-                let _ = self.cfg.tags_kept.set(true);
-                read
-            }
-            Err(_) => None,
+            _ => None,
         };
-        if tags != record.placed_tags {
+        if tags != record.placed_tags || trashed.is_some() {
             record.placed_tags = tags.clone();
+            record.trashed = trashed;
             self.write_durable(|s| s.put_placing(&record))?;
         }
         // The record claims only what read back; the row holds what the file holds.
@@ -394,21 +399,22 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                // Where the old version goes in the trash, noted before it goes: should the new
-                // one not get in place, it comes back (in the run, or by recovery), where the
-                // next plan would take its absence for the user deleting it.
-                let entry = trash_entry(&row.path, node);
-                record.trashed = Some(Trashed {
-                    from: row.path.clone(),
-                    to: entry.clone(),
-                });
-                self.write_durable(|s| s.put_placing(&record))?;
+                let entry = match &record.trashed {
+                    Some(t) => t.to.clone(),
+                    None => return Err(Outcome::stale("no trash noted")),
+                };
                 if let Err(e) = self.move_to_trash_as(&row.path, &entry)? {
                     done.keep_for_retry();
                     return Ok(io_outcome(e));
                 }
+                // In the trash: the record is recovery's from here, whatever leaves this (a DB
+                // error too), unless the old version comes back in the run.
+                self.placed(node);
                 if self.crash_here(CrashPoint::AfterTrashed) {
                     return Ok(Outcome::Retry("crash point reached".into()));
+                }
+                if Self::take_one(&self.cfg.fail_db_after_trash) {
+                    return Err(StateError::Conflict("the DB failed (a test)".into()).into());
                 }
                 let placed = match Self::take_one(&self.cfg.fail_after_trash) {
                     true => Err(FileIoError::Io(io::Error::other(
@@ -416,12 +422,13 @@ impl Executor<'_> {
                     ))),
                     false => self.put(target, |at| done.persist_new(at, created_ms))?,
                 };
-                if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_)))
-                    && let Err(e) = self.restore_from_trash(&entry, &row.path)?
-                {
-                    // Still in the trash: the record stays, for recovery to bring it back.
-                    self.placed(node);
-                    return Ok(io_outcome(e));
+                if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_))) {
+                    if let Err(e) = self.restore_from_trash(&entry, &row.path)? {
+                        // Still in the trash: the record stays, for recovery to bring it back.
+                        return Ok(io_outcome(e));
+                    }
+                    // Back: nothing of it is anywhere else, and the record goes.
+                    self.db.write(|s| s.delete_placing(node))?;
                 }
                 placed
             }
@@ -475,7 +482,7 @@ impl Executor<'_> {
                 tags,
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
-            settle_placement(s, &record, os)
+            settle_placement(s, &record, os).map(|p| p.at)
         });
         // The DB failing stops the run; the record is the next sync's recovery's.
         let at = match committed {
@@ -485,4 +492,11 @@ impl Executor<'_> {
         self.note([(node, at)]);
         Ok(Outcome::Settled)
     }
+}
+
+/// Whether a download whose tag write failed loses a tag: one the item there holds (`held`) as
+/// the download was to write it, that the drive doesn't hold so (a colour changed here too).
+pub(super) fn tags_lost(held: &Tags, to_write: &Tags, drive: &Tags) -> bool {
+    held.iter()
+        .any(|t| to_write.get(&t.name) == Some(t) && drive.get(&t.name) != Some(t))
 }

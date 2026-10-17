@@ -50,7 +50,7 @@ pub struct BaseRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trashed {
     pub from: RelPath,
-    pub to: String,
+    pub to: RelPath,
 }
 
 /// A download (or folder) about to be put in place (written before its batch runs): the base
