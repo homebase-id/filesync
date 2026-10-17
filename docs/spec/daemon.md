@@ -62,7 +62,10 @@ daemon runs.
 In the OS keychain, service `Homebase Filesync`, account = identity, value = the credentials
 JSON (identity, client auth token, shared secret):
 
-- macOS: Keychain Services, the login keychain;
+- macOS: Keychain Services, the login keychain, which Migration Assistant carries to a new Mac
+  (keeping the item on this Mac, `AfterFirstUnlockThisDeviceOnly`, needs the data protection
+  keychain, and that a provisioning profile and keychain-access-groups entitlement the app
+  doesn't have);
 - Windows: Credential Manager, with `CRED_PERSIST_LOCAL_MACHINE` persistence: a roaming
   profile doesn't carry it to another computer (an entry written before, roaming, is written
   again so when read);
