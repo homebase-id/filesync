@@ -1415,10 +1415,15 @@ impl Sim {
             .retain(|(_, n, name)| *n != node || held.contains(name));
     }
 
-    /// A client put `node` in place: where a user's delete of it lost, it is no longer
-    /// deleted. A lost delete settles nothing: what other clients did to its tags still counts.
+    /// A client put `node` in place: where a user's delete of it lost (the drive has it), it is
+    /// no longer deleted. A lost delete settles nothing: what other clients did to its tags
+    /// still counts. One the drive doesn't have (a folder made here to restore it, its
+    /// RemoteCreate to follow) is back once the drive has it again ([`Sim::restored_on_drive`]):
+    /// a delete that won settles the tags then.
     fn placed_back(&mut self, node: NodeId) {
-        self.deleted.remove(&node);
+        if self.server.live.contains_key(&node) {
+            self.deleted.remove(&node);
+        }
     }
 
     /// [`Action::EmptyListed`].
@@ -3381,12 +3386,14 @@ mod tests {
         sim.check().unwrap_or_else(|e| panic!("{e}"));
     }
 
-    /// A folder never synced, made again where a user's delete of it lost, and the client dies
-    /// before its commit: it is back all the same (no longer deleted), as a step that commits.
+    /// A folder never synced, made again where a user's delete of it lost (the drive has it),
+    /// and the client dies before its commit: it is back all the same (no longer deleted), as a
+    /// step that commits.
     #[test]
     fn a_folder_made_back_without_a_record_is_no_longer_deleted() {
         let mut sim = Sim::new(1);
         let node = NodeId::new();
+        sim.server.put(node, NodeState::folder(NodeId::ROOT, "d"));
         sim.deleted.insert(node);
         sim.clients[0].plan.push_back((
             Op::LocalMkdir {
