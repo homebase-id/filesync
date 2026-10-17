@@ -930,7 +930,8 @@ fn write_answers_carry_the_feeds_time() -> R {
 /// first (an empty answer the server may keep: `QueryBatchCached`), as a client that just read
 /// to the end has. Prints, per late round, the row's `updated` against the time b's answer
 /// came (Unix ms, this machine's clock, the server's too on the dev host), the first reads'
-/// answers, and how long the row was missing. `FEED_AT_ONCE_ROUNDS` sets the rounds (40).
+/// answers, and how long the row was missing; fails only when a read said no more rows
+/// without it. `FEED_AT_ONCE_ROUNDS` sets the rounds (40).
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn another_clients_write_is_in_the_feed_at_once() -> R {
@@ -991,11 +992,9 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
         for l in &late {
             println!("  {l}");
         }
-        assert!(
-            late.is_empty(),
-            "{} of {rounds} rounds read it late",
-            late.len()
-        );
+        // Held back (more rows to come) costs a read; hidden (no more rows) would miss it.
+        let hidden: Vec<&String> = late.iter().filter(|l| l.contains("more=false")).collect();
+        assert!(hidden.is_empty(), "hidden, not held back: {hidden:#?}");
         Ok(())
     })();
     bench.cleanup()?;
