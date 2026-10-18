@@ -84,7 +84,7 @@ pub enum FailPoint {
     PlacedRead,
     /// A tag write: the item keeps what it held.
     TagWrite,
-    /// Reading what a failed tag write left: not known then.
+    /// Reading what a failed tag write left: the item is taken to hold what it held before.
     TagRead,
     /// Putting a download's new version in place, once the old one it replaces from another
     /// folder is in the trash.
@@ -126,10 +126,11 @@ struct TagsLeft {
     /// What read back, for a placement's record to claim (`None`: not known: the write failed,
     /// read back as nothing to go by, or the volume keeps none).
     claimed: Option<Tags>,
-    /// What the item holds, for its row: what read back, or where the write failed, what it
-    /// holds as read (not known only where that can't be read either). Taken for not known
-    /// while it can be read, the item read as holding the drive's tags, and the next scan took
-    /// their absence for the user removing them.
+    /// What the item holds: what read back, or where the write failed, what it holds as read
+    /// (`None` where that can't be read either: its row takes what it held before then,
+    /// [`Executor::held_after`]). Taken for not known while it can be read, the item read as
+    /// holding the drive's tags, and the next scan took their absence for the user removing
+    /// them.
     held: Option<Tags>,
     failed: bool,
 }
@@ -753,6 +754,24 @@ impl<'a> Executor<'a> {
                     .flatten(),
                 failed: true,
             },
+        }
+    }
+
+    /// Whether a tag write failed and what it left couldn't be read back, on a volume that
+    /// keeps tags.
+    fn unread(&self, left: &TagsLeft) -> bool {
+        left.failed && left.held.is_none() && self.tags_kept()
+    }
+
+    /// What a tag write left on an item that held `before`, for its row: what read back, or
+    /// where the write failed and that read failed too, `before`, as a failed write changes
+    /// nothing. Not known read as the drive's tags: a commit settled its base on them, and the
+    /// scan that then read the item without them sent their removal up.
+    fn held_after(&self, left: TagsLeft, before: Tags) -> Option<Tags> {
+        if self.unread(&left) {
+            Some(before)
+        } else {
+            left.held
         }
     }
 
