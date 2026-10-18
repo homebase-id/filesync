@@ -103,6 +103,9 @@ impl Executor<'_> {
         } else {
             Some(Tags::default())
         };
+        // What it holds before the write, for a write that fails unread: none where that can't
+        // be read either (claiming less than it holds only sends what it holds up).
+        let held_before = prior.clone().unwrap_or_default();
         // Where the volume keeps no tags (this OS none), what it holds of them is never known:
         // it claims none, as a download does.
         let kept_tags = self.tags_kept();
@@ -171,7 +174,7 @@ impl Executor<'_> {
             fingerprint: meta.fingerprint(),
             executable: None,
             hash: None,
-            tags: left.held,
+            tags: self.held_after(left, held_before),
         };
         let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
         let fails = self.fails(FailPoint::Commit);
@@ -234,7 +237,8 @@ impl Executor<'_> {
         }
         // A failed write leaves the item what it held: read so, not as not known (which reads
         // as the drive's tags, and a tag only the item has would never go up).
-        let read = self.write_tags(&abs, tags).held;
+        let left = self.write_tags(&abs, tags);
+        let unread = self.unread(&left);
         // Writing tags moves the change time only (a folder's mtime moves with its children).
         // If anything else moved, the item changed meanwhile: the old row stays, and the
         // rescan looks at it.
@@ -248,10 +252,15 @@ impl Executor<'_> {
         if !same {
             return Ok(rescan(&mut self.report, &row.path));
         }
+        // Not read back either: the row stays as the scan read it, its change time too, so the
+        // scan reads whatever changed since (a tag the user added meanwhile).
+        if unread {
+            return self.finish(&[Settle::acted(node, drive, TagWrite::Nothing)], |_| Ok(()));
+        }
         let before = row.tags.clone();
         let row = LocalRow {
             fingerprint: meta.fingerprint(),
-            tags: read,
+            tags: left.held,
             ..row
         };
         // What it changed, where both are known; nothing claimed otherwise.

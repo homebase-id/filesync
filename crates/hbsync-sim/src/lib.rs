@@ -1905,7 +1905,8 @@ impl Sim {
                 recorded && (std::mem::take(&mut self.fail_commit_next) || self.writes % 11 == 5);
         }
         // A tag write that fails leaves the item as it was (a tag write: nothing recorded), or a
-        // placed item with none (what it holds, as read, is what settles: the executor's).
+        // placed item with none (what it holds, as read, is what settles: the executor's; where
+        // that read fails too, it takes what the item held before, which is the same).
         if tag_failed {
             // A download whose failed write would lose a tag the item there holds and the drive
             // doesn't (the user's, not sent up yet) isn't put in place: the item stays as it

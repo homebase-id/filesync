@@ -453,10 +453,16 @@ would read as the user removing them. An item with more than about 2,000 bytes o
 isn't tag-synced: it reads as "can't tell", and keeps what the drive has; so do tags that can't
 be read or written for a moment (a failed tag write never fails the operation). An item whose
 tag write fails (a tag change, a download, a folder made) holds what it holds, as read, and its
-row says so; "can't tell" only where that can't be read either: read so, it looked as if
-holding the drive's tags, the next scan took their absence for the user removing them, and a
-tag only the item had never went up. A placement's record then claims nothing (not known),
-and the next plan writes the drive's tags again. A download whose failed write would lose a
+row says so: never "can't tell", which reads as the drive's tags, so the next scan took their
+absence for the user removing them, and a tag only the item had never went up. Where it can't
+be read back either, it is taken to hold what it held before the write (a failed write
+changes nothing): a file or folder made here none, a folder taken over what was read of it
+(none where that couldn't be read either: claiming less than an item holds only sends the
+rest up); a tag change's row stays as the scan read it, its change time too, so the scan reads
+whatever changed since. Recovery still reads an item whose tags it can't read as not known: it
+can't tell that from tags too big to sync, which keep the drive's. A placement whose tag write
+failed claims nothing in its record (not known), and the next plan writes the drive's tags
+again. A download whose failed write would lose a
 tag the file it replaces holds and the drive doesn't (the user's, not sent up yet) isn't put in
 place: it is tried again, the plan sending the tag up meanwhile, unless the drive refused that
 for good in the run (access, read-only): then it is placed. A node with no

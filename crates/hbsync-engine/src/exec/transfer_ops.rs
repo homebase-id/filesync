@@ -387,11 +387,13 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }
         if left.claimed != record.placed_tags {
-            record.placed_tags = left.claimed;
+            record.placed_tags = left.claimed.clone();
             self.write_durable(|s| s.put_placing(&record))?;
         }
-        // The record claims only what read back; the row holds what the file holds.
-        let tags = left.held;
+        // The record claims only what read back; the row holds what the file holds: where the
+        // write failed and that can't be read, none, as a temp file made here holds (one an
+        // earlier try left holds what it wrote then: claiming less only sends that up).
+        let tags = self.held_after(left, Tags::default());
         let placed = match &current {
             Some(row) if &row.path == target => self.put(target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)

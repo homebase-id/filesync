@@ -2338,7 +2338,10 @@ fn a_folder_taken_over_holds_its_tags_before_the_write() -> R {
 /// holds none. Its row and the base hold what it holds, so the next plan writes work again,
 /// and never takes it off the drive. Read as not known, the item looked as if holding the
 /// drive's tags, the base took work, and the next scan's none read as the user removing it.
-fn a_failed_tag_write_removes_nothing(folder: bool) -> R {
+/// `unread`: what it holds can't be read back either: made here, it holds none all the same,
+/// and its row says so (not known, it read as the drive's, the base took work, through a later
+/// write in the run on the node too: a file's tags sent up).
+fn a_failed_tag_write_removes_nothing(folder: bool, unread: bool) -> R {
     let mut h = Harness::new()?;
     if !tags_kept(&h.cfg.root) {
         return Ok(()); // nothing to tag with here
@@ -2415,9 +2418,24 @@ fn a_failed_tag_write_removes_nothing(folder: bool) -> R {
             drive,
         },
     };
+    let mut ops = vec![op];
+    if unread && !folder {
+        ops.push(Op::RemoteTags {
+            node,
+            file_id: at.file_id,
+            expected: at.version,
+            tags: work.clone(),
+        });
+    }
+    let count = ops.len();
     h.cfg.faults.fail(FailPoint::TagWrite, 1);
-    let report = h.run(vec![op])?;
-    assert_eq!(report.done, 1, "{report:?}");
+    if unread {
+        h.cfg.faults.fail(FailPoint::TagRead, 1);
+    }
+    let report = h.run(ops)?;
+    assert_eq!(report.done, count, "{report:?}");
+    let row = h.db.read(|s| s.local_by_node(node))?.ok_or("no row")?;
+    assert_eq!(row.tags, Some(Tags::default()), "{row:?}");
     // The next scan reads what the item holds.
     let path = h.cfg.root.join("x");
     assert_eq!(tags::read(&path), Some(Tags::default()));
@@ -2444,12 +2462,22 @@ fn a_failed_tag_write_removes_nothing(folder: bool) -> R {
 
 #[test]
 fn a_failed_tag_write_on_a_download_removes_nothing() -> R {
-    a_failed_tag_write_removes_nothing(false)
+    a_failed_tag_write_removes_nothing(false, false)
 }
 
 #[test]
 fn a_failed_tag_write_on_a_folder_made_removes_nothing() -> R {
-    a_failed_tag_write_removes_nothing(true)
+    a_failed_tag_write_removes_nothing(true, false)
+}
+
+#[test]
+fn a_failed_tag_write_left_unread_on_a_download_removes_nothing() -> R {
+    a_failed_tag_write_removes_nothing(false, true)
+}
+
+#[test]
+fn a_failed_tag_write_left_unread_on_a_folder_made_removes_nothing() -> R {
+    a_failed_tag_write_removes_nothing(true, true)
 }
 
 /// A file at `p1/f` this device synced, moved to `p2` and edited on the drive: the download
@@ -3031,8 +3059,8 @@ fn recovery_of_a_deleted_folder_marks_what_is_in_it() -> R {
 /// A file tagged blue here, work on the drive: the plan writes work here, and the write fails.
 /// The file keeps blue, and its row says so, so the next plan still sends blue up. Read as not
 /// known, the file looked as if holding the drive's tags (work), and blue never went up.
-#[test]
-fn a_failed_tag_write_keeps_what_the_item_holds() -> R {
+/// `unread`: what it holds can't be read back either: its row keeps what the scan read.
+fn a_failed_tag_write_keeps_what_the_item_holds(unread: bool) -> R {
     let mut h = Harness::new()?;
     if !tags_kept(&h.cfg.root) {
         return Ok(()); // nothing to tag with here
@@ -3065,7 +3093,11 @@ fn a_failed_tag_write_keeps_what_the_item_holds() -> R {
         ))
     })?;
     let both = Tags::new(vec![Tag::new("Blue", 0), Tag::new("Work", 0)]);
+    let scanned = h.db.read(|s| s.local_by_node(node))?.ok_or("no row")?;
     h.cfg.faults.fail(FailPoint::TagWrite, 1);
+    if unread {
+        h.cfg.faults.fail(FailPoint::TagRead, 1);
+    }
     h.run(vec![Op::LocalTags {
         node,
         tags: both,
@@ -3080,6 +3112,11 @@ fn a_failed_tag_write_keeps_what_the_item_holds() -> R {
     }])?;
     let row = h.db.read(|s| s.local_by_node(node))?.expect("its row");
     assert_eq!(row.tags, Some(blue));
+    // Unread, the row stays as the scan read it, its change time too: the scan reads whatever
+    // changed since.
+    if unread {
+        assert_eq!(row, scanned);
+    }
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         plan.ops.iter().any(|op| match op {
@@ -3093,10 +3130,21 @@ fn a_failed_tag_write_keeps_what_the_item_holds() -> R {
     Ok(())
 }
 
-/// A folder made whose tag write fails, and what it holds can't be read either: not known (the
-/// drive's stand until the scan reads it), never taken for none.
 #[test]
-fn a_failed_tag_write_left_unread_is_not_known() -> R {
+fn a_failed_tag_write_keeps_what_the_item_holds_as_read() -> R {
+    a_failed_tag_write_keeps_what_the_item_holds(false)
+}
+
+#[test]
+fn a_failed_tag_write_left_unread_keeps_what_the_scan_read() -> R {
+    a_failed_tag_write_keeps_what_the_item_holds(true)
+}
+
+/// A folder made whose tag write fails, and what it holds can't be read either: made here, it
+/// holds none (a failed write changes nothing), and its row says so: never not known, which
+/// reads as the drive's tags.
+#[test]
+fn a_folder_made_whose_tags_cant_be_read_back_holds_none() -> R {
     let mut h = Harness::new()?;
     if !tags_kept(&h.cfg.root) {
         return Ok(()); // nothing to tag with here
@@ -3113,7 +3161,7 @@ fn a_failed_tag_write_left_unread_is_not_known() -> R {
     }])?;
     assert_eq!(report.done, 1, "{report:?}");
     let row = h.db.read(|s| s.local_by_node(node))?.expect("its row");
-    assert_eq!(row.tags, None);
+    assert_eq!(row.tags, Some(Tags::default()));
     Ok(())
 }
 
