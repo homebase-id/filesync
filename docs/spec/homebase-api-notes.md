@@ -25,7 +25,10 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
 - **Drives**: an app cannot create a drive. The owner app creates a requested drive at
   registration when the request entry carries a name and drive type slug **[verified]**
   `odin-js/packages/apps/owner-app/src/hooks/apps/useApp.ts:55-88`. Drive request entry keys:
-  `a`, `t`, `n`, `d`, `p` (Read=1, Write=2), `ds`, `ts`, `r`, `s`.
+  `a`, `t`, `n`, `d`, `p` (Read=1, Write=2), `ds`, `ts`, `r`, `s`. The server requires both
+  slugs (`ds`, `ts`) and derives none: a missing, empty or malformed one is refused
+  (odin-core #1901, PR #1941; `DriveManager.CreateDriveAsync`, `OdinSlug.AssertRequired`)
+  **[verified]**.
 
 ## The Filesync app on an identity (`crates/hbsync-homebase`, tried on frodo.dotyou.cloud 2026-10-09)
 - **Ids and slugs** **[verified]**: YouAuth still requires an app id (`client_id`, and
@@ -357,9 +360,6 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   can't read the flag either (`ClientDriveData` lacks it). To do in odin-core / odin-js.
 - **Circle permission keys lost** **[verified]**: odin-js sends `cp`, but the server's
   `YouAuthAppParameters` has no `cp`, so they vanish on the redirect to `/owner/appreg`.
-- `docs/mandatory-slugs-and-app-ids-plan.md` calls `DriveSlug`/`DriveTypeSlug` required; the
-  server derives a missing one instead (only the owner app insists on `ts`). odin-core #1901
-  makes them mandatory with no derivation; tracked in filesync #7.
 - Delete takes an optional `versionTag` since odin-core PR #1931 (#1903, v0.1.960; see the
   Delete row): one request per delete. A 4160 is an edit since (the node is re-planned) or a
   retry (the tombstone has a version of its own): the client reads the header once and takes
@@ -391,9 +391,3 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   outlived the write's cache clearing (odin-core #1909, filesync #90; the change feed,
   above). The client's workaround (page sizes varied per read, announced changes read for
   again) is gone.
-- **A content update of a deleted file is a 500** **[verified, tried]**: a PATCH with an
-  `appendOrOverwrite` payload on a tombstone throws a NullReferenceException in
-  `DriveStorageServiceBase.UpdateBatchCopyFilesAsync` / `ProcessAppendOrOverwrite` (the
-  tombstone's payload list is null) before the 4002 check. Workaround in the client: after a
-  failed update, read the header; a tombstone means `NotFound`. Filed as odin-core #1904
-  (a header-only update of a tombstone correctly answers 4002); tracked in filesync #6.

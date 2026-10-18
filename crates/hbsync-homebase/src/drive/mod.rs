@@ -232,33 +232,22 @@ impl HomebaseRemote {
             Some(at) => (UploadMethod::Patch, self.file(at.file_id)),
         };
         let boundary = Uuid::new_v4().simple().to_string();
-        match self
+        let WriteResult {
+            file_id,
+            new_version_tag,
+            updated,
+        } = self
             .client
             .upload(method, &path, Multipart::new(boundary, parts))
-        {
-            Ok(WriteResult {
-                file_id,
-                new_version_tag,
-                updated,
-            }) => Ok(Target {
-                at: RemoteRef {
-                    file_id: RemoteFileId(file_id),
-                    version: VersionTag(new_version_tag),
-                },
-                token: Some(key.token(self.client.key())),
-                changed_at: updated,
-            }),
-            // odin-core answers a content update of a file deleted meanwhile with 500 (a null
-            // payload list in `ProcessAppendOrOverwrite`, odin-core #1904) instead of 4002: look
-            // before retrying.
-            Err(HomebaseError::Api { ref error, .. }) if error.status == 500 => {
-                if let Some(at) = at {
-                    self.current(at)?;
-                }
-                Err(RemoteError::Transient(format!("{path}: {error}")))
-            }
-            Err(e) => Err(remote_error(e)),
-        }
+            .map_err(remote_error)?;
+        Ok(Target {
+            at: RemoteRef {
+                file_id: RemoteFileId(file_id),
+                version: VersionTag(new_version_tag),
+            },
+            token: Some(key.token(self.client.key())),
+            changed_at: updated,
+        })
     }
 
     /// One page of the change feed in `shape`,
