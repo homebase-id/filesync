@@ -1428,6 +1428,8 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
         .into_iter()
         .find(|i| i.path == "Photos")
         .ok_or("Photos not listed")?;
+    // Listed as staying: emptying it leaves it.
+    assert!(photos.stays);
     // Another device, which never synced, empties it.
     let mut b = Client::new(&server, "b")?;
     assert_eq!(b.engine.drive().empty(&[photos.node])?, 1, "x.txt");
@@ -1440,6 +1442,55 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     assert_eq!(left, ["Photos"]);
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
+/// A folder emptied from Recently deleted takes with it what was deleted from it before, listed
+/// on its own (a sub-folder deleted first): all removed, so it may go. The listing counts that
+/// as in it, and nothing of it stays.
+#[test]
+fn emptying_a_folder_takes_what_was_deleted_from_it_before() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("other.txt", "o")?;
+    a.write("run/keep.txt", "k")?;
+    a.write("run/data/x.txt", "x")?;
+    a.write("run/data/sub/y.txt", "y")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("run/data"))?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("run"))?;
+    a.sync()?;
+    let mut reader =
+        hbsync_engine::root::AccountReader::open(&a.db_path(), "test.example")?.ok_or("no DB")?;
+    let (items, summary) = reader.deletes(10)?;
+    let listed: Vec<(String, usize, bool)> = items
+        .iter()
+        .map(|(d, along)| (d.path.clone(), *along, d.stays))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("run".to_owned(), 5, false),
+            ("run/data".to_owned(), 3, false)
+        ],
+        "run holds keep.txt, data and data's three"
+    );
+    assert_eq!(summary.items, 6);
+    let run = items[0].0.node;
+    assert_eq!(a.engine.drive().empty(&[run])?, 6);
+    assert!(a.recently_deleted(10)?.is_empty());
+    let s = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!(
+        (s.removed().count(), s.live_names()),
+        (0, vec!["other.txt".to_owned()])
+    );
+    drop(s);
+    b.sync()?;
+    assert!(b.recently_deleted(10)?.is_empty());
+    assert_eq!(b.tree_text(""), ["other.txt = o"]);
     Ok(())
 }
 

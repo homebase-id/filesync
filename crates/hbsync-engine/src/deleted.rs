@@ -103,8 +103,13 @@ struct Listing<'a, 's> {
     roots: Vec<NodeId>,
     /// Of the listed rows, how many emptying all of them deletes for good ([`select`]).
     going: usize,
-    /// How many rows each delete took along: its members, which its restore restores.
+    /// How many rows each item holds: all of Recently deleted below it, through removed
+    /// folders ([`inside`]), what emptying it deletes with it.
     along: HashMap<NodeId, usize>,
+    /// The items emptying them leaves in Recently deleted: they hold a live node.
+    stays: HashSet<NodeId>,
+    /// What the folders of Recently deleted hold, read once when asked.
+    holdings: Option<Holdings>,
     folders: HashMap<NodeId, String>,
     /// Where a walk up stops: a folder's top (here or not), the role folders whether synced
     /// here or not; above them all, the main folder's top (the drive's root).
@@ -127,6 +132,8 @@ impl<'a, 's> Listing<'a, 's> {
             roots: Vec::new(),
             going: 0,
             along: HashMap::new(),
+            stays: HashSet::new(),
+            holdings: None,
             folders,
             tops,
             places: HashMap::new(),
@@ -147,30 +154,59 @@ impl<'a, 's> Listing<'a, 's> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let rows = &listing.rows.rows[..count];
+        let holdings = holdings(s)?;
+        // What each item holds, and whether emptying it leaves it.
+        let mut children: HashMap<NodeId, Vec<Chosen>> = HashMap::new();
+        for r in rows {
+            children
+                .entry(r.row.parent)
+                .or_default()
+                .push(Chosen::of(r));
+        }
         for (r, root) in rows.iter().zip(&listing.roots) {
             if *root != r.row.node {
-                *listing.along.entry(*root).or_default() += 1;
+                continue;
+            }
+            let held = inside(
+                Chosen::of(r),
+                |c| (c.node, c.folder),
+                |n| Ok::<_, StateError>(children.get(&n).cloned().unwrap_or_default()),
+            )?;
+            listing.along.insert(r.row.node, held.len() - 1);
+            if !select(&held, &holdings).contains(&r.row.node) {
+                listing.stays.insert(r.row.node);
             }
         }
         // What emptying all of it deletes.
         let chosen: Vec<Chosen> = rows.iter().map(Chosen::of).collect();
-        listing.going = select(&chosen, &holdings(s)?).len();
+        listing.going = select(&chosen, &holdings).len();
+        listing.holdings = Some(holdings);
         Ok(listing)
     }
 
-    /// `node`'s row, if it is in Recently deleted, with how many items its delete took along
-    /// (its members, as the listing counts them; 0 for an item a delete took along itself).
+    /// `node`'s row, if it is in Recently deleted, with how many items it holds (as the
+    /// listing counts them; 0 for an item a delete took along itself).
     fn describe_node(&mut self, node: NodeId) -> Result<Option<(Deleted, usize)>, StateError> {
         let Some(top) = self.rows.get(node)?.cloned() else {
             return Ok(None);
         };
         let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
-        let along = match root == node {
-            true => group(self.rows.s, top)?.len() - 1,
-            false => 0,
-        };
         let i = self.rows.index[&node].unwrap_or_default();
-        Ok(Some((self.describe_as(i, root)?, along)))
+        let mut d = self.describe_as(i, root)?;
+        if root != node {
+            return Ok(Some((d, 0)));
+        }
+        let s = self.rows.s;
+        let held: Vec<Chosen> = inside_of(s, top)?.iter().map(Chosen::of).collect();
+        if self.holdings.is_none() {
+            self.holdings = Some(holdings(s)?);
+        }
+        let holdings = self
+            .holdings
+            .as_ref()
+            .ok_or(StateError::Corrupt("no holdings".into()))?;
+        d.stays = !select(&held, holdings).contains(&node);
+        Ok(Some((d, held.len() - 1)))
     }
 
     /// The rows of the items deleted on their own, newest first (the items' own rows give
@@ -184,7 +220,8 @@ impl<'a, 's> Listing<'a, 's> {
         picked
             .into_iter()
             .map(|i| {
-                let d = self.describe(i)?;
+                let mut d = self.describe(i)?;
+                d.stays = self.stays.contains(&d.node);
                 let n = match d.root == d.node {
                     true => self.along.get(&d.node).copied().unwrap_or(0),
                     false => 0,
@@ -215,6 +252,7 @@ impl<'a, 's> Listing<'a, 's> {
             removed_at_ms,
             root,
             folder: self.folders.get(&top).cloned(),
+            stays: false,
         })
     }
 }
@@ -582,6 +620,42 @@ fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> 
     Ok(rows)
 }
 
+/// `top` and every removed node below it, through the removed folders, whenever each was
+/// removed (one deleted from a folder before the folder is in it too): what emptying `top`
+/// deletes for good with it, as far as it may (node schema, The purge). Each node once: removed
+/// rows may form a cycle. `at` gives a row's node and whether it is a folder, `children` a
+/// folder's removed children.
+pub fn inside<T, E>(
+    top: T,
+    at: impl Fn(&T) -> (NodeId, bool),
+    mut children: impl FnMut(NodeId) -> Result<Vec<T>, E>,
+) -> Result<Vec<T>, E> {
+    let mut seen = HashSet::from([at(&top).0]);
+    let mut rows = vec![top];
+    let mut next = 0;
+    while next < rows.len() {
+        let (node, folder) = at(&rows[next]);
+        if folder {
+            let below: Vec<T> = children(node)?
+                .into_iter()
+                .filter(|r| seen.insert(at(r).0))
+                .collect();
+            rows.extend(below);
+        }
+        next += 1;
+    }
+    Ok(rows)
+}
+
+/// [`inside`] `top`, from the store.
+fn inside_of(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
+    inside(
+        top,
+        |r| (r.row.node, r.row.kind == NodeKind::Folder),
+        |n| s.removed_children(n),
+    )
+}
+
 fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, StateError> {
     let Some(top) = s.removed_by_node(node)? else {
         return Ok(None);
@@ -706,8 +780,9 @@ fn empty_trashes(account: &Mutex<StateDb>, keep_ms: i64) -> Result<(), EngineErr
     Ok(())
 }
 
-/// Deletes for good the items `nodes` name, each with what was deleted with it ([`select`]),
-/// leaving tombstones. Returns how many items went.
+/// Deletes for good the items `nodes` name, each with all of Recently deleted that is in it
+/// ([`inside`]: what was deleted with it, and what was deleted from it before), as [`select`]s
+/// it, leaving tombstones. Returns how many items went.
 pub fn empty(
     account: &Mutex<StateDb>,
     remote: &dyn Remote,
@@ -715,11 +790,13 @@ pub fn empty(
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
     let passes = locked(account).read(|s| {
-        let mut tops = Vec::new();
+        let mut chosen = Vec::new();
         for &node in nodes {
-            tops.extend(s.removed_by_node(node)?);
+            if let Some(top) = s.removed_by_node(node)? {
+                chosen.extend(inside_of(s, top)?);
+            }
         }
-        passes_of(s, tops, None)
+        going(s, chosen)
     })?;
     delete_for_good(account, remote, &passes, None, moved)
 }
@@ -893,19 +970,19 @@ fn due(account: &Mutex<StateDb>, before_ms: i64) -> Result<Vec<RemovedRow>, Stat
 }
 
 /// The passes ([`passes`]) that delete the items `tops` for good, each with what was deleted
-/// with it. With `before`, only an item whose every member was removed before then (Unix ms,
-/// the server's), by its own removal: one removed later in a folder removed long ago (that a
-/// live node kept, say) has its own time in Recently deleted, and so does the item. One whose
-/// time isn't known yet waits for a purge that knows it.
+/// with it, if every member was removed before `before` (Unix ms, the server's), by its own
+/// removal: one removed later in a folder removed long ago (that a live node kept, say) has its
+/// own time in Recently deleted, and so does the item. One whose time isn't known yet waits for
+/// a purge that knows it.
 fn passes_of(
     s: &Store<'_>,
     tops: Vec<RemovedRow>,
-    before: Option<i64>,
+    before: i64,
 ) -> Result<Vec<Vec<RemovedRow>>, StateError> {
     let mut chosen = Vec::new();
     for top in tops {
         let item = group(s, top)?;
-        let due = |r: &RemovedRow| before.is_none_or(|b| r.removed_at.is_some_and(|at| at < b));
+        let due = |r: &RemovedRow| r.removed_at.is_some_and(|at| at < before);
         if item.iter().all(due) {
             chosen.extend(item);
         }
@@ -924,7 +1001,7 @@ fn expire(
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
     let tops = due(account, before)?;
-    let passes = locked(account).read(|s| passes_of(s, tops, Some(before)))?;
+    let passes = locked(account).read(|s| passes_of(s, tops, before))?;
     delete_for_good(account, remote, &passes, hard_before, moved)
 }
 

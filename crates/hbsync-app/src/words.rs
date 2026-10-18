@@ -238,6 +238,7 @@ mod tests {
             removed_at_ms: Some(0),
             root: hbsync_types::NodeId::ROOT,
             folder: folder.map(Into::into),
+            stays: false,
         };
         let main = Some(Path::new("/home/a/Homebase"));
         assert_eq!(

@@ -16,6 +16,7 @@ fn action() -> impl Strategy<Value = Action> {
         1 => Just(Action::Purge),
         1 => Just(Action::ListDeleted),
         1 => Just(Action::EmptyListed),
+        1 => i().prop_map(|pick| Action::EmptyItem { pick }),
         1 => i().prop_map(|pick| Action::EditTaken { pick }),
         2 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
         1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),

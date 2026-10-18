@@ -241,6 +241,7 @@ mod tests {
                 removed_at_ms: Some(at),
                 root: NodeId(Uuid::from_u128(n)),
                 folder: Some("/home/a/Homebase".into()),
+                stays: false,
             },
             along,
         }

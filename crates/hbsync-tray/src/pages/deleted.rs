@@ -66,8 +66,8 @@ impl Server {
             .ok()
             .flatten()
             .map(|r| r.folder);
-        // Shown: the items deleted on their own, each with how many items its delete took
-        // along: its restore brings them back.
+        // Shown: the items deleted on their own, each with how many items are in it, and whether
+        // emptying leaves it.
         let rows: String = list
             .items
             .iter()
@@ -76,6 +76,10 @@ impl Server {
                 let along = match item.along {
                     0 => String::new(),
                     n => format!(" <span class=small>with {n} items in it</span>"),
+                };
+                let along = match d.stays {
+                    true => format!("{along} <span class=small>({STAYS})</span>"),
+                    false => along,
                 };
                 format!(
                     "<li><form method=post action=\"{url}\">\
@@ -100,10 +104,17 @@ impl Server {
 
     pub(super) fn empty_page(&self, form: &HashMap<String, String>) -> String {
         let field = |name| escape(form.get(name).map_or("", String::as_str));
+        let stays = match form.get("stays").and_then(|n| n.parse::<usize>().ok()) {
+            Some(1) => "<p>One folder stays: it holds items that aren't deleted.</p>".to_owned(),
+            Some(n) if n > 1 => {
+                format!("<p>{n} folders stay: they hold items that aren't deleted.</p>")
+            }
+            _ => String::new(),
+        };
         format!(
             "<h1>Empty Recently deleted?</h1>\
-             <p>The {count} items in it are deleted for good, from your Homebase and every \
-             device. This can't be undone.</p>\
+             <p>The {count} items in it that can go are deleted for good, from your Homebase \
+             and every device. This can't be undone.</p>{stays}\
              <form method=post action=\"{url}\">\
              <input type=hidden name=listed value=\"{listed}\">\
              <button>Delete them for good</button></form>\
@@ -201,6 +212,9 @@ impl Server {
     }
 }
 
+/// Why an item of Recently deleted stays when emptied.
+const STAYS: &str = "stays when emptied: it holds items that aren't deleted";
+
 /// The button that empties Recently deleted as listed (`url`): all it held now, nothing deleted
 /// after this look. When emptying would take nothing (every folder in it still holds a live
 /// item), it says so instead.
@@ -213,9 +227,11 @@ fn empty_offer(list: &hbsync_app::protocol::DeletedList, url: &str) -> String {
     format!(
         "<form method=post action=\"{url}\">\
          <input type=hidden name=count value=\"{count}\">\
+         <input type=hidden name=stays value=\"{stays}\">\
          <input type=hidden name=listed value=\"{listed}\">\
          <button class=secondary>Empty now…</button></form>",
         count = list.total(),
+        stays = list.items.iter().filter(|i| i.deleted.stays).count(),
         listed = escape(&control::listed_field(&list.accounts)),
     )
 }

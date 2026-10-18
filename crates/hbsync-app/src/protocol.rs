@@ -195,15 +195,16 @@ pub struct DeletedItem {
     pub identity: String,
     #[serde(flatten)]
     pub deleted: Deleted,
-    /// How many items its delete took along: the removed ones deleted with it, which restoring
-    /// it restores (a deleted folder of thousands of files is one item with its count), whatever
-    /// emptying can take now; 0 for an item a delete took along itself.
+    /// How many items are in it: all of Recently deleted below it (through removed folders),
+    /// what was deleted with it, which restoring it restores, and what was deleted from it before
+    /// (listed on its own too), which emptying it takes along. A deleted folder of thousands of
+    /// files is one item with its count; 0 for an item a delete took along itself.
     #[serde(default)]
     pub along: usize,
 }
 
 impl DeletedItem {
-    /// This item and what its delete took along.
+    /// This item and what is in it.
     pub fn count(&self) -> usize {
         1 + self.along
     }

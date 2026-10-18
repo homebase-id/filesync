@@ -160,7 +160,9 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      before `queryTime` − 30 days), each node by its own removal: one removed later (in a
      folder a live node held, say) has its own 30 days, and the item waits with it. Files go before their folders, each at the version the client knows: one written
      since stays. An item holding a removal whose time the client doesn't know yet waits for a
-     purge that knows it.
+     purge that knows it. A user emptying an item takes everything removed below it, through
+     removed folders: what was deleted from it before too (a sub-folder deleted first, listed
+     on its own), else the folder would stay holding it.
   2. **Never a live node:** the purge and emptying delete removed nodes only, and write nothing
      live. A folder holding a live node, or a removed node that isn't going, stays with the
      folders it is in, emptied of the rest. So a removed folder still holding a live node (a
@@ -255,6 +257,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-18: emptying an item of Recently deleted by hand takes everything removed below it,
+  what was deleted from it before too (it stayed, holding that); the node is the same.
 - 2026-10-18: removals and restores that change nothing else go through
   `update-archival-status-batch` (odin-core #1964), many files a request; the node is the same.
 - 2026-10-16: emptying and the purge delete for good only removed nodes, never a live node: a

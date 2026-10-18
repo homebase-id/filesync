@@ -311,9 +311,12 @@ Replies:
   that tell a client what is new.
 - `{"recent":[…]}` (each entry with its `folder`), newest first.
 - `{"deleted":{"items":[…],"accounts":[…]}}`: the newest `limit` deletes, newest first, each an
-  item deleted on its own with its account's `identity` and `along`, how many items its delete
-  took along: the removed ones deleted with it, which restoring it restores, whatever emptying
-  can take now (not those items: a deleted folder of thousands of files is one entry); and, for
+  item deleted on its own with its account's `identity`, `along`, how many items are in it:
+  all of Recently deleted below it, through removed folders, what was deleted with it (which
+  restoring it restores) and what was deleted from it before (listed on its own too), which
+  emptying it takes along (not those items: a deleted folder of thousands of files is one
+  entry), and `stays` (left out when false) when emptying leaves it: it holds a live node, and
+  only what else is in it goes (clients say so, never "deleting" alone); and, for
   each account holding anything, its `deletes`, its `items` (what emptying all of it deletes
   for good: removed nodes only, the deletes and what they took along, but a folder holding a
   live node or a removal that stays: 0 when nothing can be emptied yet, which clients say
