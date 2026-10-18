@@ -190,7 +190,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      taken up after as long starts over.
   5. **Gone for good:** a hard delete is announced on the notification socket, and a device
      takes it at once. A write at a version the client knows that finds the file not there,
-     and its header not found either (or a tombstone), forgets it: the next sync puts what the
+     and its header not found either (or a tombstone; an answer per file that says it is one
+     needs no header read), forgets it: the next sync puts what the
      device has up anew. A delete, soft or hard, answered not found for that file (not a failed
      request) is checked the same way. A request that fails leaves the files it didn't answer
      for the next purge, whatever its error. A client keeps the ids of files

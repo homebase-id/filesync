@@ -283,6 +283,11 @@ pub enum RemoteError {
     VersionMismatch,
     #[error("not found")]
     NotFound,
+    /// The file is a tombstone: deleted for good, leaving a trace (Homebase 4002,
+    /// `cannotUpdateNonActiveFile`, in an answer per file). Gone, as a read of its header would
+    /// say: no need to read it.
+    #[error("deleted for good")]
+    Deleted,
     /// A payload range past its end (HTTP 416): the file changed since its header was read.
     /// Read the header again, then retry; it says nothing about the file being gone.
     #[error("range not satisfiable: {0}")]
@@ -317,7 +322,8 @@ pub enum RemoteError {
 pub struct Answers<T> {
     /// The drive's answer for each of the first files asked, in order (all of them unless
     /// `stopped`): [`RemoteError::VersionMismatch`] for one written since (left as it is),
-    /// [`RemoteError::NotFound`] for one not there.
+    /// [`RemoteError::NotFound`] for one not there, [`RemoteError::Deleted`] for a tombstone
+    /// (where the remote tells them apart).
     pub answers: Vec<Result<T>>,
     /// The error of the request that stopped it after those: the files left weren't answered,
     /// and weren't written.
@@ -375,6 +381,7 @@ impl RemoteError {
             RemoteError::Denied(why) => RemoteError::Denied(why.clone()),
             RemoteError::VersionMismatch => RemoteError::VersionMismatch,
             RemoteError::NotFound => RemoteError::NotFound,
+            RemoteError::Deleted => RemoteError::Deleted,
             RemoteError::StaleRange(why) => RemoteError::StaleRange(why.clone()),
             RemoteError::HashMismatch => RemoteError::HashMismatch,
             RemoteError::InvalidHash => RemoteError::InvalidHash,

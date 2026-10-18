@@ -3273,3 +3273,36 @@ fn another_device_finishes_a_folders_delete_left_half_done() -> R {
     assert_eq!((items, deleted.len()), (1, 6), "{deleted:?}");
     Ok(())
 }
+
+/// A file removed here that another device deleted for good meanwhile (a tombstone, not in the
+/// picture yet): the removal's answer says so, and its header isn't read to make sure. It is
+/// gone here too, out of Recently deleted.
+#[test]
+fn a_removal_answered_as_a_tombstone_reads_no_header() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    a.announced();
+    // Deleted for good elsewhere, leaving a tombstone a hasn't heard of.
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        let h = s
+            .live()
+            .find(|h| h.state().is_some_and(|st| st.name == "x.txt"))
+            .ok_or("no x")?
+            .clone();
+        s.delete(h.file_id, h.version)?;
+    }
+    fs::remove_file(a.root.join("x.txt"))?;
+    a.sync_unasked()?;
+    assert_eq!(a.remote.faults().headers, 0);
+    assert!(a.recently_deleted(10)?.is_empty());
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["keep.txt"]
+    );
+    Ok(())
+}

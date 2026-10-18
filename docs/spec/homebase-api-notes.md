@@ -151,6 +151,9 @@ client reads the whole feed again after a long absence (node schema, Recently de
   file's error never stops the others.
 - The client removes and restores through it (`HomebaseRemote::set_removed`): a request per
   level of a folder's tree and per 1,000 files, a folder's level before what is in it. A
+  `cannotUpdateNonActiveFile` answer is a tombstone (a file is active or deleted:
+  `AssertActiveForUpdate`, **[verified]**): the file is taken as deleted for good without
+  reading its header; a `fileNotFound` one is still checked by a header read. A
   restore under a new name (` (restored)`) or at the top is a PATCH, as it rewrites content
   or `groupId`.
 

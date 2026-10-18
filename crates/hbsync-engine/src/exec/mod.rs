@@ -1441,6 +1441,7 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         RemoteError::AlreadyExists
         | RemoteError::VersionMismatch
         | RemoteError::NotFound
+        | RemoteError::Deleted
         | RemoteError::StaleRange(_)
         | RemoteError::HashMismatch => Outcome::stale(e.to_string()),
     }

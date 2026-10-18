@@ -386,8 +386,9 @@ impl FakeServer {
         removed: bool,
     ) -> Result<Target> {
         let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
+        // As Homebase's archival-status batch: a tombstone, whatever the version asked.
         if f.header.body == RemoteBody::Deleted {
-            return Err(RemoteError::NotFound);
+            return Err(RemoteError::Deleted);
         }
         if f.header.version != expected {
             return Err(RemoteError::VersionMismatch);
@@ -620,6 +621,8 @@ pub struct Faults {
     pub not_found_writes: bool,
     /// Requests seen, for assertions.
     pub requests: usize,
+    /// Headers read ([`Remote::header`]), for assertions.
+    pub headers: usize,
     /// Payload bytes handed out by `read`, for assertions about resumed downloads.
     pub served: u64,
     /// Updates that came without a token (on Homebase: a header read first), for assertions.
@@ -822,6 +825,7 @@ impl Remote for FakeRemote {
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         self.gate()?;
+        self.faults().headers += 1;
         self.server().header(file_id)
     }
 

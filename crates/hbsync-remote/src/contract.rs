@@ -658,7 +658,7 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
 
 /// Removals and restores in one request ([`Remote::set_removed`]): each file at its version,
 /// its header kept but for the removal, an answer per file in order. A file changed since stays
-/// as it is; a tombstone or an unknown file is not found; one already at the status asked for
+/// as it is; a tombstone is deleted for good; one already at the status asked for
 /// is left alone (its version and removal time stay).
 fn removals_in_one_request(b: &Bench) -> Outcome {
     let (f, w) = b.file("f", b"kept")?;
@@ -681,7 +681,7 @@ fn removals_in_one_request(b: &Bench) -> Outcome {
     let answers = b.remote.set_removed(&asked, true)?.into_answers()?;
     ensure!(answers.len() == 4, "{} answers for 4 files", answers.len());
     ensure_err!(&answers[1], RemoteError::VersionMismatch);
-    ensure_err!(&answers[3], RemoteError::NotFound);
+    ensure_err!(&answers[3], RemoteError::Deleted);
     let (Ok(gone_f), Ok(gone_x)) = (&answers[0], &answers[2]) else {
         return Err(format!("not removed: {answers:?}").into());
     };

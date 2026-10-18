@@ -523,6 +523,11 @@ impl Restoring<'_> {
         match e {
             // Deleted for good meanwhile (its header says so too), maybe without a trace in the
             // feed: gone here too, and what was to come back into it, the top takes.
+            // A tombstone, by its answer, or one whose header says so.
+            RemoteError::Deleted => {
+                self.gone.push(row.file_id);
+                self.in_plan.remove(&row.node);
+            }
             RemoteError::NotFound => match gone_for_good(self.remote, row.file_id) {
                 Ok(true) => {
                     self.gone.push(row.file_id);

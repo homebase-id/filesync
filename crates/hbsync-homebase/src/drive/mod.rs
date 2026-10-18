@@ -141,8 +141,13 @@ fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Target> {
 }
 
 /// Why `update-archival-status-batch` left a file as it was (`OdinClientErrorCode`'s camelCase
-/// name): written since, not there (or deleted), or anything else.
+/// name): written since, not there, a tombstone (`cannotUpdateNonActiveFile`: odin-core's
+/// `AssertActiveForUpdate` answers it for a file that isn't active, and a file is active or
+/// deleted), or anything else.
 fn refused(code: &str) -> RemoteError {
+    if code.eq_ignore_ascii_case("cannotUpdateNonActiveFile") {
+        return RemoteError::Deleted;
+    }
     code_error(code)
         .unwrap_or_else(|| RemoteError::Fatal(format!("archival status refused: {code}")))
 }
@@ -854,7 +859,7 @@ mod tests {
         assert_eq!(first.changed_at, Some(1_760_000_000_123));
         assert_eq!(first.token, asked[0].token, "the key stays");
         assert!(matches!(got[1], Err(RemoteError::VersionMismatch)));
-        assert!(matches!(got[2], Err(RemoteError::NotFound)));
+        assert!(matches!(got[2], Err(RemoteError::Deleted)));
         assert!(matches!(got[3], Err(RemoteError::Fatal(_))));
         Ok(())
     }
