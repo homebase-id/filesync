@@ -1,8 +1,9 @@
 //! The daemon's control socket: how the CLI asks for the status and sends requests.
 //!
-//! One JSON request per line, one JSON reply per line, then the connection closes. Each request
-//! carries the protocol version; a daemon refuses one it doesn't speak (after an update, until
-//! it restarts).
+//! One JSON request per line, one JSON reply per line, then the connection closes; but a
+//! [`Ask::Watch`], whose connection is handed over and stays open for replies to come. Each
+//! request carries the protocol version; a daemon refuses one it doesn't speak (after an update,
+//! until it restarts).
 //!
 //! Only this user can connect:
 //! - Unix: a socket file in a folder only this user can open (`0700`).
@@ -42,14 +43,35 @@ pub enum IpcError {
 
 /// Asks the daemon `request` and waits for its reply.
 pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
-    let line = serde_json::to_string(request).map_err(|e| IpcError::Protocol(e.to_string()))?;
+    let mut stream = open(paths, request)?;
+    read_reply(&mut stream)?.ok_or(IpcError::Protocol("no answer".into()))
+}
+
+/// Connects to the daemon and sends `request`.
+fn open(paths: &Paths, request: &Request) -> Result<BufReader<Stream>, IpcError> {
     let name = endpoint(paths, false).map_err(not_running)?;
-    let stream = Stream::connect(name).map_err(not_running)?;
+    let mut stream = Stream::connect(name).map_err(not_running)?;
     patience(&stream)?;
-    let mut stream = BufReader::new(stream);
-    stream.get_mut().write_all(format!("{line}\n").as_bytes())?;
-    let reply = read_line(&mut stream)?.ok_or(IpcError::Protocol("no answer".into()))?;
-    serde_json::from_str(&reply).map_err(|e| IpcError::Protocol(e.to_string()))
+    write_line(&mut stream, request)?;
+    Ok(BufReader::new(stream))
+}
+
+/// The other side's next reply; `None` at the end of the stream.
+fn read_reply(stream: &mut BufReader<Stream>) -> Result<Option<Reply>, IpcError> {
+    let Some(line) = read_line(stream)? else {
+        return Ok(None);
+    };
+    serde_json::from_str(&line)
+        .map(Some)
+        .map_err(|e| IpcError::Protocol(e.to_string()))
+}
+
+/// Writes `value` as a JSON line.
+fn write_line(stream: &mut Stream, value: &impl serde::Serialize) -> Result<(), IpcError> {
+    let mut out = serde_json::to_string(value).map_err(|e| IpcError::Protocol(e.to_string()))?;
+    out.push('\n');
+    stream.write_all(out.as_bytes())?;
+    Ok(())
 }
 
 fn not_running(e: io::Error) -> IpcError {
@@ -79,26 +101,34 @@ pub fn listen(paths: &Paths) -> io::Result<Listener> {
     options.create_sync()
 }
 
-/// Answers requests on `listener` with `answer`, each connection on its own thread. Returns
-/// only if the listener fails.
-pub fn serve(listener: Listener, answer: impl Fn(Request) -> Reply + Send + Sync + 'static) {
-    let answer = Arc::new(answer);
+/// Answers requests on `listener` with `answer`, each connection on its own thread; hands a
+/// [`Ask::Watch`]'s connection to `watch`. Returns only if the listener fails.
+pub fn serve(
+    listener: Listener,
+    answer: impl Fn(Request) -> Reply + Send + Sync + 'static,
+    watch: impl Fn(Stream) + Send + Sync + 'static,
+) {
+    let both = Arc::new((answer, watch));
     for conn in listener.incoming() {
         let Ok(conn) = conn else {
             continue;
         };
-        let answer = Arc::clone(&answer);
+        let both = Arc::clone(&both);
         let _ = std::thread::Builder::new()
             .name("hbsync-ipc".into())
             .spawn(move || {
-                if let Err(e) = handle(conn, answer.as_ref()) {
+                if let Err(e) = handle(conn, &both.0, &both.1) {
                     tracing::debug!("a control connection failed: {e}");
                 }
             });
     }
 }
 
-fn handle(conn: Stream, answer: &(dyn Fn(Request) -> Reply + Sync)) -> Result<(), IpcError> {
+fn handle(
+    conn: Stream,
+    answer: &(dyn Fn(Request) -> Reply + Sync),
+    watch: &(dyn Fn(Stream) + Sync),
+) -> Result<(), IpcError> {
     patience(&conn)?;
     let mut conn = BufReader::new(conn);
     let Some(line) = read_line(&mut conn)? else {
@@ -118,22 +148,71 @@ fn handle(conn: Stream, answer: &(dyn Fn(Request) -> Reply + Sync)) -> Result<()
             "{OTHER_PROTOCOL}{PROTOCOL}, the request {}: restart the daemon",
             e.protocol
         )),
-        Ok(_) => serde_json::from_str::<Request>(&line).map_or_else(not_a_request, answer),
+        Ok(_) => match serde_json::from_str::<Request>(&line) {
+            Ok(Request {
+                ask: Ask::Watch, ..
+            }) => {
+                watch(conn.into_inner());
+                return Ok(());
+            }
+            Ok(request) => answer(request),
+            Err(e) => not_a_request(e),
+        },
         Err(e) => not_a_request(e),
     };
-    let mut out = serde_json::to_string(&reply).map_err(|e| IpcError::Protocol(e.to_string()))?;
+    write_line(conn.get_mut(), &reply)
+}
+
+/// Watches the daemon's status ([`Ask::Watch`]).
+pub fn watch(paths: &Paths) -> Result<Watching, IpcError> {
+    let stream = open(paths, &Request::new(Ask::Watch))?;
+    // Replies come when the status changes: blocks until then.
+    unless_unsupported(stream.get_ref().set_recv_timeout(None))?;
+    Ok(Watching(stream))
+}
+
+/// The daemon's replies to an [`Ask::Watch`], as they come.
+#[derive(Debug)]
+pub struct Watching(BufReader<Stream>);
+
+impl Watching {
+    /// The next reply, waiting for it; `None` once the daemon closed the connection (it
+    /// stopped).
+    pub fn reply(&mut self) -> Result<Option<Reply>, IpcError> {
+        read_reply(&mut self.0)
+    }
+}
+
+/// Readies a watching client's connection ([`Ask::Watch`]): writes wait at most [`PATIENCE`]
+/// where the OS can time them out (named pipes can't).
+pub fn watched(stream: &Stream) -> io::Result<()> {
+    unless_unsupported(stream.set_send_timeout(Some(PATIENCE)))
+}
+
+/// A reply as a line, to send to watching clients ([`send`]).
+pub fn line(reply: &Reply) -> Result<String, IpcError> {
+    let mut out = serde_json::to_string(reply).map_err(|e| IpcError::Protocol(e.to_string()))?;
     out.push('\n');
-    conn.get_mut().write_all(out.as_bytes())?;
-    Ok(())
+    Ok(out)
+}
+
+/// Writes a [`line`] to a watching client.
+pub fn send(stream: &mut Stream, line: &str) -> io::Result<()> {
+    stream.write_all(line.as_bytes())
+}
+
+/// Ok where the OS can't time out (named pipes).
+fn unless_unsupported(set: io::Result<()>) -> io::Result<()> {
+    match set {
+        Err(e) if e.kind() == io::ErrorKind::Unsupported => Ok(()),
+        other => other,
+    }
 }
 
 /// Waits at most [`PATIENCE`] for the other side, where the OS can time out reads (named pipes
 /// can't).
 fn patience(stream: &Stream) -> io::Result<()> {
-    match stream.set_recv_timeout(Some(PATIENCE)) {
-        Err(e) if e.kind() == io::ErrorKind::Unsupported => Ok(()),
-        other => other,
-    }
+    unless_unsupported(stream.set_recv_timeout(Some(PATIENCE)))
 }
 
 /// One line of at most [`MAX_LINE`] bytes, without its end; `None` at the end of the stream.
@@ -295,43 +374,64 @@ mod tests {
             call(&paths, &Request::new(Ask::Status)),
             Err(IpcError::NotRunning)
         ));
+        assert!(matches!(watch(&paths), Err(IpcError::NotRunning)));
 
         let listener = listen(&paths)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = std::sync::Mutex::new(tx);
         std::thread::spawn(move || {
-            serve(listener, move |r| match r.ask {
-                Ask::Status => Reply::Status(Box::new(status())),
-                Ask::Control(c) => {
-                    let _ = tx.lock().map(|tx| tx.send(c));
-                    Reply::Done
-                }
-                // A large reply: megabytes in one line.
-                Ask::Deleted { limit } => Reply::Deleted(crate::protocol::DeletedList {
-                    items: (0..limit).map(deleted).collect(),
-                    accounts: Vec::new(),
-                }),
-                Ask::FindDeleted { .. } => Reply::Refused("not here".into()),
-                Ask::AddFolder { .. }
-                | Ask::RemoveFolder { .. }
-                | Ask::StartOver { .. }
-                | Ask::Stop => Reply::Refused("not here".into()),
-                Ask::Recent { limit } => Reply::Recent(
-                    (0..limit as u64)
-                        .map(|i| RecentItem {
-                            folder: PathBuf::from("/home/a/Homebase"),
-                            synced: Synced {
-                                at: 1_800_000_000 - i,
-                                kind: SyncedKind::Downloaded,
-                                path: format!("Photos/p{i}.jpg"),
-                                files: 1,
-                                bytes: 1000,
-                            },
-                        })
-                        .collect(),
-                ),
-            })
+            serve(
+                listener,
+                move |r| match r.ask {
+                    Ask::Status => Reply::Status(Box::new(status())),
+                    Ask::Control(c) => {
+                        let _ = tx.lock().map(|tx| tx.send(c));
+                        Reply::Done
+                    }
+                    // A large reply: megabytes in one line.
+                    Ask::Deleted { limit } => Reply::Deleted(crate::protocol::DeletedList {
+                        items: (0..limit).map(deleted).collect(),
+                        accounts: Vec::new(),
+                    }),
+                    Ask::FindDeleted { .. } => Reply::Refused("not here".into()),
+                    Ask::AddFolder { .. }
+                    | Ask::RemoveFolder { .. }
+                    | Ask::StartOver { .. }
+                    | Ask::Watch
+                    | Ask::Stop => Reply::Refused("not here".into()),
+                    Ask::Recent { limit } => Reply::Recent(
+                        (0..limit as u64)
+                            .map(|i| RecentItem {
+                                folder: PathBuf::from("/home/a/Homebase"),
+                                synced: Synced {
+                                    at: 1_800_000_000 - i,
+                                    kind: SyncedKind::Downloaded,
+                                    path: format!("Photos/p{i}.jpg"),
+                                    files: 1,
+                                    bytes: 1000,
+                                },
+                            })
+                            .collect(),
+                    ),
+                },
+                |mut stream| {
+                    // The status now, then as it changes; the connection ends with the daemon.
+                    let mut changed = status();
+                    changed.folders[0].pending = 4;
+                    for s in [status(), changed] {
+                        let _ = line(&Reply::Status(Box::new(s))).map(|l| send(&mut stream, &l));
+                    }
+                },
+            )
         });
+
+        let mut watching = watch(&paths)?;
+        assert_eq!(watching.reply()?, Some(Reply::Status(Box::new(status()))));
+        match watching.reply()? {
+            Some(Reply::Status(s)) => assert_eq!(s.folders[0].pending, 4),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(watching.reply()?, None, "the daemon closed it");
 
         match call(&paths, &Request::new(Ask::Status))? {
             Reply::Status(s) => assert_eq!(*s, status()),
@@ -373,28 +473,29 @@ mod tests {
         Ok(())
     }
 
-    /// The wire format docs/spec/daemon.md documents for protocol 5.
+    /// The wire format docs/spec/daemon.md documents for protocol 6.
     #[test]
     fn requests_look_as_documented() -> Result<(), serde_json::Error> {
         let json = |ask| serde_json::to_string(&Request::new(ask));
-        assert_eq!(json(Ask::Status)?, r#"{"protocol":5,"ask":"status"}"#);
-        assert_eq!(json(Ask::Stop)?, r#"{"protocol":5,"ask":"stop"}"#);
+        assert_eq!(json(Ask::Status)?, r#"{"protocol":6,"ask":"status"}"#);
+        assert_eq!(json(Ask::Watch)?, r#"{"protocol":6,"ask":"watch"}"#);
+        assert_eq!(json(Ask::Stop)?, r#"{"protocol":6,"ask":"stop"}"#);
         assert_eq!(
             json(Ask::Control(Control::Daemon(DaemonControl::SyncNow)))?,
-            r#"{"protocol":5,"ask":{"control":{"daemon":"sync_now"}}}"#
+            r#"{"protocol":6,"ask":{"control":{"daemon":"sync_now"}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Daemon(DaemonControl::Pause {
                 until: Some(1_800_000_000)
             })))?,
-            r#"{"protocol":5,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#
+            r#"{"protocol":6,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Folder {
                 path: PathBuf::from("/h"),
                 control: FolderControl::ConfirmDeletes { token: "t".into() }
             }))?,
-            r#"{"protocol":5,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
+            r#"{"protocol":6,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
         );
         let node = hbsync_types::NodeId(hbsync_types::Uuid::from_u128(1));
         assert_eq!(
@@ -402,7 +503,7 @@ mod tests {
                 identity: "a.example".into(),
                 control: AccountControl::Restore { nodes: vec![node] }
             }))?,
-            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}}}"#
+            r#"{"protocol":6,"ask":{"control":{"account":{"identity":"a.example","control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Account {
@@ -412,21 +513,21 @@ mod tests {
                     seq: 7
                 }
             }))?,
-            r#"{"protocol":5,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"db":"d1","seq":7}}}}}}"#
+            r#"{"protocol":6,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"db":"d1","seq":7}}}}}}"#
         );
         assert_eq!(
             json(Ask::Recent { limit: 10 })?,
-            r#"{"protocol":5,"ask":{"recent":{"limit":10}}}"#
+            r#"{"protocol":6,"ask":{"recent":{"limit":10}}}"#
         );
         assert_eq!(
             json(Ask::Deleted { limit: 100 })?,
-            r#"{"protocol":5,"ask":{"deleted":{"limit":100}}}"#
+            r#"{"protocol":6,"ask":{"deleted":{"limit":100}}}"#
         );
         assert_eq!(
             json(Ask::FindDeleted {
                 items: vec!["Photos/2024".into()]
             })?,
-            r#"{"protocol":5,"ask":{"find_deleted":{"items":["Photos/2024"]}}}"#
+            r#"{"protocol":6,"ask":{"find_deleted":{"items":["Photos/2024"]}}}"#
         );
         assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);
         Ok(())
@@ -449,7 +550,7 @@ mod tests {
         ));
 
         let listener = listen(&paths)?;
-        std::thread::spawn(move || serve(listener, |_| Reply::Done));
+        std::thread::spawn(move || serve(listener, |_| Reply::Done, |_| {}));
         let folder = path.parent().ok_or("folder")?;
         let mode = std::fs::metadata(folder)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
@@ -482,7 +583,7 @@ mod tests {
         std::fs::create_dir_all(&paths.runtime)?;
         std::fs::write(socket_path(&paths), "stale")?;
         let listener = listen(&paths)?;
-        std::thread::spawn(move || serve(listener, |_| Reply::Done));
+        std::thread::spawn(move || serve(listener, |_| Reply::Done, |_| {}));
         let mode = std::fs::metadata(&paths.runtime)?.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
         assert_eq!(

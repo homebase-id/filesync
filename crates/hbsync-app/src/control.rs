@@ -40,11 +40,39 @@ fn older_protocol(why: &str) -> Option<u32> {
 /// The daemon's status; `None` when it isn't running.
 pub fn status(paths: &Paths) -> Result<Option<DaemonStatus>> {
     match ask(paths, Ask::Status) {
-        Ok(Reply::Status(s)) => Ok(Some(*s)),
-        Ok(Reply::Refused(why)) if older_protocol(&why).is_some() => Err(OlderDaemon.into()),
-        Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
+        Ok(reply) => status_of(reply).map(Some),
         Err(IpcError::NotRunning) => Ok(None),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// The status a reply carries; an older daemon's refusal is [`OlderDaemon`].
+fn status_of(reply: Reply) -> Result<DaemonStatus> {
+    match reply {
+        Reply::Status(s) => Ok(*s),
+        Reply::Refused(why) if older_protocol(&why).is_some() => Err(OlderDaemon.into()),
+        other => Err(format!("unexpected answer: {other:?}").into()),
+    }
+}
+
+/// Watches the daemon's status: `None` when it isn't running. [`Watch::status`] waits for each.
+pub fn watch(paths: &Paths) -> Result<Option<Watch>> {
+    match ipc::watch(paths) {
+        Ok(watching) => Ok(Some(Watch(watching))),
+        Err(IpcError::NotRunning) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The daemon's status as it changes ([`watch`]).
+#[derive(Debug)]
+pub struct Watch(ipc::Watching);
+
+impl Watch {
+    /// The status now (at first), then each time it changed: waits until then. `None` once the
+    /// daemon stopped.
+    pub fn status(&mut self) -> Result<Option<DaemonStatus>> {
+        self.0.reply()?.map(status_of).transpose()
     }
 }
 
