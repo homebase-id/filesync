@@ -200,8 +200,11 @@ a failure (service managers restart it then).
   batch, not on a timer. An account's loop waits on one channel (requests, its
   notifications, its folders' ends) until the announcements quiet down, the read while not
   connected, a restart or the purge's look (10 min). The daemon's own loop waits for an
-  account to end or a stop. Left on a timer: the notification socket's ping (every 30 s),
-  the sleep poll below off Linux, and the 10 min bounds on a lost wake-up.
+  account to end or a stop. The notification socket's thread blocks until a frame comes or the
+  keep-alive is due (a stop or reconnect shuts the socket down). The tray is sent the status
+  when it changes (`watch`, below). Left on a timer: the notification socket's ping (every
+  30 s), the sleep poll below off Linux, the 10 min bounds on a lost wake-up, and the tray's
+  minute (relative times).
 - **Pause** stops a running sync between operations and before the next transfer (transfers
   in flight finish); nothing syncs until resume. The watcher keeps recording changes. A pause
   survives a restart (`paused` in the config).
@@ -260,26 +263,30 @@ refused this device: `hbsync setup` again), `stopped`.
 
 ## Control socket
 
-One request line, one reply line (JSON), then the connection closes. Requests carry the protocol
-version (now 5); a daemon refuses another one with the reason (after an update: restart it). The
+One request line, one reply line (JSON), then the connection closes; but `watch`, answered with
+the status now and again each time it changes (at most once a second while a folder syncs: its
+progress changes without telling), on the open connection until either side closes it (what
+the tray shows). Requests carry the protocol version (now 6); a daemon refuses another one
+with the reason (after an update: restart it). The
 wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":5,"ask":"status"}
-{"protocol":5,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":5,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":5,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":5,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
-{"protocol":5,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
-{"protocol":5,"ask":{"recent":{"limit":10}}}
-{"protocol":5,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
-{"protocol":5,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":5,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
-{"protocol":5,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":5,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":6,"ask":"status"}
+{"protocol":6,"ask":"watch"}                                        // a status line now, then one per change
+{"protocol":6,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":6,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":6,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":6,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":6,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":6,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
+{"protocol":6,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
+{"protocol":6,"ask":{"recent":{"limit":10}}}
+{"protocol":6,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":6,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":6,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
+{"protocol":6,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":6,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
@@ -337,6 +344,10 @@ Only the user can connect:
 command line. It keeps the daemon running while a folder is set up (starting it when it
 doesn't answer, at most every 30 s after a failed start, and once more when the daemon runs
 another version), and **Quit stops the daemon too**. One tray per user (`homebase-filesync.lock`).
+It watches the daemon's status (`watch` on the control socket: sent when it changes, read on a
+thread of its own), asks once more after an action, shows the status again once a minute (the
+menu's relative times; and looks whether its program was replaced on disk), and while the daemon
+isn't running looks every second (every ten while nothing is set up).
 
 - **Linux:** a StatusNotifierItem over D-Bus (pure Rust, no GTK), as KDE, Xfce, Cinnamon and
   most panels show them; GNOME needs the AppIndicator extension. Windows and macOS: tao's event

@@ -127,7 +127,7 @@ fn main() -> ExitCode {
 struct App {
     paths: Paths,
     send: Sender,
-    wake: mpsc::Sender<()>,
+    wake: mpsc::Sender<poll::Poke>,
     pages: Pages,
     tray: Option<TrayIcon>,
     daemon: Daemon,
@@ -252,7 +252,7 @@ impl App {
                 let _ = reply.send(picked);
             }
             Event::Wake => {
-                let _ = self.wake.send(());
+                let _ = self.wake.send(poll::Poke::Look);
             }
             Event::StartAtLogin(on) => self.start_at_login = on,
             Event::Exit => return false,

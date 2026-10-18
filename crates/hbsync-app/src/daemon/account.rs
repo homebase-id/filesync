@@ -30,7 +30,9 @@ use crate::protocol::{
     State, Until,
 };
 use crate::runner::schedule::{Announced, pause_end};
-use crate::runner::{Backoff, Command, Handle, Runner, RunnerConfig, RunnerError, lock, wait_for};
+use crate::runner::{
+    Backoff, Command, Handle, Runner, RunnerConfig, RunnerError, Wakeup, lock, wait_for,
+};
 use crate::{Config, CredentialError, CredentialStore, Location, Paths};
 
 /// How often the purge of Recently deleted is looked at (it runs once a day).
@@ -57,6 +59,8 @@ pub(crate) struct Account {
     /// A connection to its DB for the control socket's answers (recent, deleted), opened on
     /// first use.
     reader: Mutex<Option<AccountReader>>,
+    /// Raised when its status (or its folders') may have changed.
+    changed: Arc<Wakeup>,
 }
 
 /// What the account's thread waits for, on one channel.
@@ -98,6 +102,7 @@ impl Account {
         identity: &str,
         folder: &Path,
         paused: Option<Until>,
+        changed: Arc<Wakeup>,
     ) -> (Arc<Account>, Receiver<Msg>) {
         let (requests, rx) = channel();
         let account = Account {
@@ -114,6 +119,7 @@ impl Account {
             ended: AtomicBool::new(false),
             done: AtomicBool::new(false),
             reader: Mutex::new(None),
+            changed,
         };
         (Arc::new(account), rx)
     }
@@ -132,6 +138,7 @@ impl Account {
             Phase::Waiting { folders, .. } => {
                 if !folders.iter().any(|f| f == path) {
                     folders.push(path.to_path_buf());
+                    self.changed.raise();
                 }
             }
             Phase::Running(_) => self.tell(Msg::Request(Request::AddFolder(path.to_path_buf()))),
@@ -141,7 +148,10 @@ impl Account {
     /// Stops syncing the folder at `path`.
     pub fn remove_folder(&self, path: &Path) {
         match &mut *lock(&self.phase) {
-            Phase::Waiting { folders, .. } => folders.retain(|f| f != path),
+            Phase::Waiting { folders, .. } => {
+                folders.retain(|f| f != path);
+                self.changed.raise();
+            }
             Phase::Running(_) => self.tell(Msg::Request(Request::RemoveFolder(path.to_path_buf()))),
         }
     }
@@ -203,6 +213,7 @@ impl Account {
     pub fn pause(&self, pause: Option<Until>) {
         *lock(&self.paused) = pause;
         self.wake();
+        self.changed.raise();
         self.send_all(&match pause {
             Some(until) => Command::Pause { until },
             None => Command::Resume,
@@ -379,6 +390,13 @@ impl Account {
             *state = to;
             *error = Some(why);
         }
+        self.changed.raise();
+    }
+
+    /// Changes its status.
+    fn set_status(&self, f: impl FnOnce(&mut AccountStatus)) {
+        f(&mut lock(&self.status));
+        self.changed.raise();
     }
 
     /// Whether it should stop: the daemon stops, or the account ends.
@@ -441,7 +459,7 @@ impl Account {
             .map_err(DaemonError::Ipc)?;
         let notifier = match Notifier::spawn(client, remote.drive(), tx) {
             Ok(n) => {
-                lock(&self.status).hints = Hints::Connecting;
+                self.set_status(|s| s.hints = Hints::Connecting);
                 Some(n)
             }
             // Not connected, for good: the drive is read on a timer (Notifications).
@@ -449,7 +467,7 @@ impl Account {
                 tracing::error!(
                     "can't start the notifications ({e}); reading the drive now and then"
                 );
-                lock(&self.status).hints = Hints::Lost(format!("can't start: {e}"));
+                self.set_status(|s| s.hints = Hints::Lost(format!("can't start: {e}")));
                 None
             }
         };
@@ -490,6 +508,7 @@ impl Account {
                 }
             }
             *phase = Phase::Running(shown(&runners));
+            self.changed.raise();
         }
 
         // Folders to start once no runner of theirs is left.
@@ -504,6 +523,7 @@ impl Account {
             }
             if pause_ran_out(&mut lock(&self.paused), unix_now()) {
                 tracing::info!("the pause is over");
+                self.changed.raise();
             }
             let paused = lock(&self.paused).is_some();
             let mut changed = false;
@@ -519,7 +539,7 @@ impl Account {
                                 r.handle.send(Command::Online);
                             }
                         }
-                        lock(&self.status).hints = hints;
+                        self.set_status(|s| s.hints = hints);
                     }
                     Msg::Woke => {
                         if let Some(n) = &notifier {
@@ -609,6 +629,7 @@ impl Account {
             }
             if changed || runners.len() != before {
                 *lock(&self.phase) = Phase::Running(shown(&runners));
+                self.changed.raise();
             }
             if runners.is_empty() {
                 notifications.finish();
@@ -663,6 +684,7 @@ impl Account {
             .find(|r| r.folder == folder)
             .and_then(|r| r.role);
         cfg.paused = *lock(&self.paused);
+        cfg.changed = Arc::clone(&self.changed);
         let done = Arc::new(AtomicBool::new(false));
         let (ending, tell) = (Arc::clone(&done), self.requests.clone());
         let (handle, thread) = Runner::spawn_with(cfg, Arc::clone(drive), move || {
@@ -711,8 +733,8 @@ impl Account {
         };
         if let Location::File { path, why } = location {
             tracing::warn!("credentials in {} (no keychain: {why})", path.display());
-            lock(&self.status).credentials_warning =
-                Some(format!("kept in {} (no keychain: {why})", path.display()));
+            let warning = format!("kept in {} (no keychain: {why})", path.display());
+            self.set_status(|s| s.credentials_warning = Some(warning));
         }
         Ok(Some(creds))
     }
@@ -1362,7 +1384,7 @@ mod tests {
         let home = tempfile::tempdir()?;
         let paths = Paths::under(home.path());
         let folder = home.path().join("Homebase");
-        let (account, _requests) = Account::new(&paths, "a.example", &folder, None);
+        let (account, _requests) = Account::new(&paths, "a.example", &folder, None, Arc::default());
         // Its DB, from the drive; its runners running (none needed here).
         let db = paths.account_db("a.example");
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
@@ -1394,8 +1416,13 @@ mod tests {
         use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
         let home = tempfile::tempdir()?;
         let paths = Paths::under(home.path());
-        let (account, _requests) =
-            Account::new(&paths, "a.example", &home.path().join("Homebase"), None);
+        let (account, _requests) = Account::new(
+            &paths,
+            "a.example",
+            &home.path().join("Homebase"),
+            None,
+            Arc::default(),
+        );
         let db = paths.account_db("a.example");
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         Drive::open(

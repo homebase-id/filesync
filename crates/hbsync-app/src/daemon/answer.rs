@@ -24,7 +24,8 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
         Err(why) => Reply::Refused(why.to_string()),
     };
     match request.ask {
-        Ask::Status => Reply::Status(Box::new(status(accounts))),
+        // A watch is taken by the control socket; asked here, it is answered once.
+        Ask::Status | Ask::Watch => Reply::Status(Box::new(status(accounts))),
         Ask::Recent { limit } => {
             let mut items: Vec<_> = accounts.iter().flat_map(|a| a.recent(limit)).collect();
             items.sort_by_key(|i| std::cmp::Reverse(i.synced.at));
@@ -148,7 +149,7 @@ fn find_deleted(
         .collect()
 }
 
-fn status(accounts: &[Arc<Account>]) -> DaemonStatus {
+pub(super) fn status(accounts: &[Arc<Account>]) -> DaemonStatus {
     let mut status = DaemonStatus {
         version: crate::VERSION.into(),
         accounts: Vec::new(),

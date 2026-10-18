@@ -16,10 +16,10 @@
 
 use std::borrow::Cow;
 use std::io;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
@@ -50,8 +50,14 @@ pub enum Event {
     Refused(String),
 }
 
-/// How often the socket is checked for a stop request and the keep-alive.
-const TICK: Duration = Duration::from_secs(1);
+/// The shortest read timeout (a zero one would mean none).
+const MIN_WAIT: Duration = Duration::from_millis(10);
+/// The longest read timeout. Windows doesn't say whether shutting a socket down ends a read
+/// blocked on it: there a stop or reconnect is also seen at this slow poll.
+#[cfg(windows)]
+const MAX_WAIT: Duration = Duration::from_secs(5);
+#[cfg(not(windows))]
+const MAX_WAIT: Duration = Duration::MAX;
 const PING_EVERY: Duration = Duration::from_secs(30);
 /// No frame at all (not even a pong) for this long: the connection is dead.
 const SILENCE: Duration = Duration::from_secs(75);
@@ -83,12 +89,12 @@ pub struct Received {
     pub bytes: AtomicU64,
 }
 
-/// The notification connection, on its own thread. Stops when dropped: the thread ends at
-/// its next check (it isn't waited for, as it may be in the middle of connecting).
+/// The notification connection, on its own thread. Stops when dropped: its socket is shut
+/// down, so the thread ends at once (it isn't waited for: resolving a name can take a while).
+/// The thread blocks until a frame comes or the keep-alive is due: no wake-up in between.
 #[derive(Debug)]
 pub struct Notifier {
-    stop: Arc<AtomicBool>,
-    reconnect: Arc<AtomicBool>,
+    control: Arc<Control>,
     /// Counted by the connection's thread, read with the `dev` feature.
     #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     received: Arc<Received>,
@@ -120,18 +126,13 @@ impl Notifier {
         subscription: Subscription,
         events: Sender<Event>,
     ) -> io::Result<Self> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let reconnect = Arc::new(AtomicBool::new(false));
+        let control = Arc::new(Control::default());
         let received = Arc::new(Received::default());
-        let (flag, kick, counts) = (stop.clone(), reconnect.clone(), received.clone());
+        let (told, counts) = (control.clone(), received.clone());
         std::thread::Builder::new()
             .name("hbsync-notify".into())
-            .spawn(move || run(&client, subscription, &events, &flag, &kick, &counts))?;
-        Ok(Notifier {
-            stop,
-            reconnect,
-            received,
-        })
+            .spawn(move || run(&client, subscription, &events, &told, &counts))?;
+        Ok(Notifier { control, received })
     }
 
     /// What it received so far (measurements).
@@ -144,13 +145,74 @@ impl Notifier {
     /// the machine woke up or the network changed, the old connection is most likely dead
     /// but would take a while to look it.
     pub fn reconnect(&self) {
-        self.reconnect.store(true, Ordering::Relaxed);
+        self.control.tell(&self.control.reconnect);
     }
 }
 
 impl Drop for Notifier {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.control.tell(&self.control.stop);
+    }
+}
+
+/// What the notifier tells its thread, and how it reaches it at once: the open connection's
+/// socket is shut down (a read or a TLS handshake blocked on it ends), a backoff's wait is
+/// woken.
+#[derive(Debug, Default)]
+struct Control {
+    stop: AtomicBool,
+    reconnect: AtomicBool,
+    /// The open connection's socket (a clone of it), while there is one.
+    socket: Mutex<Option<TcpStream>>,
+    /// Wakes a backoff's wait.
+    told: Condvar,
+}
+
+impl Control {
+    /// Sets `flag` (one of its own) and makes the thread see it at once.
+    fn tell(&self, flag: &AtomicBool) {
+        flag.store(true, Ordering::SeqCst);
+        // Its reading side only: the thread can still say goodbye (a Close frame).
+        if let Some(socket) = &*self.socket() {
+            let _ = socket.shutdown(Shutdown::Read);
+        }
+        self.told.notify_all();
+    }
+
+    fn stopping(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Stopping, or to reconnect.
+    fn told(&self) -> bool {
+        self.stopping() || self.reconnect.load(Ordering::SeqCst)
+    }
+
+    /// Keeps a clone of `tcp`, the new connection's socket, to shut it down when told. False
+    /// when told already: the connection isn't to be used. Without a clone (the OS refused
+    /// one), a stop is seen when the next read times out, at the keep-alive at the latest.
+    fn hold(&self, tcp: &TcpStream) -> bool {
+        let mut socket = self.socket();
+        if self.told() {
+            return false;
+        }
+        *socket = tcp.try_clone().ok();
+        true
+    }
+
+    /// The connection is closed.
+    fn release(&self) {
+        *self.socket() = None;
+    }
+
+    /// Waits `time`, or until told.
+    fn wait(&self, time: Duration) {
+        let socket = self.socket();
+        let _ = self.told.wait_timeout_while(socket, time, |_| !self.told());
+    }
+
+    fn socket(&self) -> MutexGuard<'_, Option<TcpStream>> {
+        self.socket.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -180,30 +242,33 @@ fn run(
     client: &Client,
     subscription: Subscription,
     events: &Sender<Event>,
-    stop: &AtomicBool,
-    reconnect: &AtomicBool,
+    control: &Control,
     received: &Received,
 ) {
     const FIRST: Duration = Duration::from_secs(1);
     let mut backoff = FIRST;
-    while !stop.load(Ordering::Relaxed) {
+    while !control.stopping() {
         let (mut connected, mut refused) = (false, false);
         let result = session(
             client,
             subscription,
             events,
-            (stop, reconnect),
+            control,
             received,
             &mut connected,
             &mut refused,
         );
+        control.release();
         if connected {
             backoff = FIRST;
         }
         let Err(why) = result else {
             return; // stopped, or nobody listens any more
         };
-        if reconnect.swap(false, Ordering::Relaxed) {
+        if control.stopping() {
+            return;
+        }
+        if control.reconnect.swap(false, Ordering::Relaxed) {
             backoff = FIRST;
             continue;
         }
@@ -218,14 +283,8 @@ fn run(
         } else {
             backoff.mul_f64(0.8 + 0.4 * jitter)
         };
-        let until = Instant::now() + wait;
-        while Instant::now() < until
-            && !stop.load(Ordering::Relaxed)
-            && !reconnect.load(Ordering::Relaxed)
-        {
-            std::thread::sleep(TICK.min(until.saturating_duration_since(Instant::now())));
-        }
-        backoff = if reconnect.swap(false, Ordering::Relaxed) {
+        control.wait(wait);
+        backoff = if control.reconnect.swap(false, Ordering::Relaxed) {
             FIRST
         } else {
             (backoff * 2).min(MAX_BACKOFF)
@@ -240,12 +299,12 @@ fn session(
     client: &Client,
     subscription: Subscription,
     events: &Sender<Event>,
-    (stop, reconnect): (&AtomicBool, &AtomicBool),
+    control: &Control,
     received: &Received,
     connected: &mut bool,
     refused: &mut bool,
 ) -> Result<(), String> {
-    let mut socket = connect(client)?;
+    let mut socket = connect(client, control)?;
     send(
         &mut socket,
         client,
@@ -254,15 +313,24 @@ fn session(
     )?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
+    // Told to stop or reconnect: the socket is shut down, or about to be.
+    let told = || match control.stopping() {
+        true => Ok(()),
+        false => Err("reconnecting on request".to_owned()),
+    };
     loop {
-        if stop.load(Ordering::Relaxed) {
+        if control.told() {
             let _ = socket.close(None);
-            return Ok(());
+            return told();
         }
-        if reconnect.load(Ordering::Relaxed) {
-            let _ = socket.close(None);
-            return Err("reconnecting on request".into());
-        }
+        // Blocks until a frame comes or the next check is due (the socket is shut down when
+        // told).
+        let wait = next_check(Instant::now(), opened, *connected, last_frame, last_ping);
+        socket
+            .get_ref()
+            .get_ref()
+            .set_read_timeout(Some(wait))
+            .map_err(|e| e.to_string())?;
         match socket.read() {
             Ok(Message::Text(text)) => {
                 last_frame = Instant::now();
@@ -297,6 +365,7 @@ fn session(
                     e.kind(),
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) => {}
+            Err(_) if control.told() => return told(),
             Err(e) => return Err(e.to_string()),
         }
         if !*connected && opened.elapsed() > HANDSHAKE {
@@ -312,7 +381,23 @@ fn session(
     }
 }
 
-fn connect(client: &Client) -> Result<Socket, String> {
+/// How long the session may block on a read before it has something to check: the
+/// handshake's deadline, the silence's, the next ping.
+fn next_check(
+    now: Instant,
+    opened: Instant,
+    connected: bool,
+    last_frame: Instant,
+    last_ping: Instant,
+) -> Duration {
+    let mut at = (last_frame + SILENCE).min(last_ping + PING_EVERY);
+    if !connected {
+        at = at.min(opened + HANDSHAKE);
+    }
+    at.saturating_duration_since(now).clamp(MIN_WAIT, MAX_WAIT)
+}
+
+fn connect(client: &Client, control: &Control) -> Result<Socket, String> {
     let host = client.identity();
     // Every address in turn, as the HTTP client does (an IPv6 address may be unreachable).
     let mut failure = format!("{host} has no address");
@@ -330,6 +415,9 @@ fn connect(client: &Client) -> Result<Socket, String> {
         }
     }
     let tcp = connected.ok_or(failure)?;
+    if !control.hold(&tcp) {
+        return Err("told before connecting".into());
+    }
     tcp.set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| e.to_string())?;
     let name = rustls::pki_types::ServerName::try_from(host.to_owned())
@@ -356,12 +444,6 @@ fn connect(client: &Client) -> Result<Socket, String> {
         tungstenite::HandshakeError::Failure(e) => e.to_string(),
         tungstenite::HandshakeError::Interrupted(_) => "handshake timed out".to_owned(),
     })?;
-    // From now on, reads wake up every tick for the stop flag and the keep-alive.
-    socket
-        .get_ref()
-        .get_ref()
-        .set_read_timeout(Some(TICK))
-        .map_err(|e| e.to_string())?;
     Ok(socket)
 }
 
@@ -533,6 +615,93 @@ mod tests {
 
     fn n(body: serde_json::Value) -> Notification {
         classify(body.to_string().as_bytes())
+    }
+
+    /// Connected and quiet, a read blocks until the ping is due, never on a short tick;
+    /// before the handshake, until its deadline.
+    #[test]
+    fn a_read_blocks_until_the_next_check() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let check = |now, connected, last_frame, last_ping| {
+            next_check(now, t0, connected, last_frame, last_ping)
+        };
+        assert_eq!(check(t0, true, t0, t0), PING_EVERY.min(MAX_WAIT));
+        assert_eq!(
+            check(t0 + s(10), true, t0, t0),
+            (PING_EVERY - s(10)).min(MAX_WAIT)
+        );
+        assert_eq!(check(t0, false, t0, t0), HANDSHAKE.min(MAX_WAIT));
+        // Pinged, but nothing heard for long: the silence's deadline.
+        let late = t0 + SILENCE - s(5);
+        assert_eq!(check(late, true, t0, late), s(5));
+        // Overdue: a short wait, never a zero one (no timeout at all).
+        assert_eq!(next_check(t0 + s(100), t0, true, t0, t0), MIN_WAIT);
+    }
+
+    /// A local socket pair: what the notifier holds, and the server's end.
+    fn pair() -> io::Result<(TcpStream, TcpStream)> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let client = TcpStream::connect(listener.local_addr()?)?;
+        Ok((client, listener.accept()?.0))
+    }
+
+    /// A stop or a reconnect ends a read blocked on the connection at once. (Not on Windows,
+    /// whose blocked reads end by their timeout: `MAX_WAIT`.)
+    #[cfg(not(windows))]
+    #[test]
+    fn a_stop_or_reconnect_ends_a_blocked_read() -> io::Result<()> {
+        use std::io::Read;
+        for stop in [true, false] {
+            let control = Arc::new(Control::default());
+            let (mut tcp, _server) = pair()?;
+            assert!(control.hold(&tcp));
+            // As the session reads: far longer than the test waits.
+            tcp.set_read_timeout(Some(Duration::from_secs(60)))?;
+            let reading = std::thread::spawn(move || tcp.read(&mut [0u8; 16]).map(drop));
+            std::thread::sleep(Duration::from_millis(50));
+            let told = Instant::now();
+            control.tell(if stop {
+                &control.stop
+            } else {
+                &control.reconnect
+            });
+            let _ = reading.join();
+            assert!(
+                told.elapsed() < Duration::from_secs(5),
+                "{:?}",
+                told.elapsed()
+            );
+            assert_eq!(control.stopping(), stop);
+        }
+        Ok(())
+    }
+
+    /// Told to stop or reconnect, a backoff isn't waited out, and a connection made since
+    /// isn't used; not told, a backoff is waited out.
+    #[test]
+    fn a_stop_or_reconnect_ends_a_backoff() -> io::Result<()> {
+        for stop in [true, false] {
+            let control = Control::default();
+            control.tell(if stop {
+                &control.stop
+            } else {
+                &control.reconnect
+            });
+            let waited = Instant::now();
+            control.wait(Duration::from_secs(60));
+            assert!(
+                waited.elapsed() < Duration::from_secs(5),
+                "a backoff isn't waited out"
+            );
+            assert!(!control.hold(&pair()?.0), "told: not used");
+        }
+        let control = Control::default();
+        let waited = Instant::now();
+        control.wait(Duration::from_millis(100));
+        assert!(waited.elapsed() >= Duration::from_millis(100));
+        assert!(control.hold(&pair()?.0));
+        Ok(())
     }
 
     /// The subscription asks for minimal events, without this client's own writes unless it
