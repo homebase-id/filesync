@@ -1101,18 +1101,12 @@ impl<'a> Executor<'a> {
         ran: Vec<(Job, JobResult)>,
         pending: &mut BTreeMap<NodeId, Prepared>,
     ) -> Result<(), StateError> {
-        let (mut ops, mut landed) = (Vec::new(), Vec::new());
+        let (mut ops, mut landed, mut rest) = (Vec::new(), Vec::new(), Vec::new());
         for (job, result) in ran {
-            let Some(Prepared {
-                op,
-                attempts,
-                ctx,
-                gone,
-            }) = pending.remove(&job.node())
-            else {
+            let Some(p) = pending.remove(&job.node()) else {
                 continue;
             };
-            match (ctx, job, result) {
+            match (p.ctx, job, result) {
                 (
                     Ctx::Meta {
                         hash,
@@ -1122,7 +1116,7 @@ impl<'a> Executor<'a> {
                     Job::Meta { meta, .. },
                     JobResult::Written(written),
                 ) => {
-                    ops.push((op, attempts, gone));
+                    ops.push((p.op, p.attempts, p.gone));
                     landed.push(remote::Landed {
                         meta,
                         hash,
@@ -1130,22 +1124,24 @@ impl<'a> Executor<'a> {
                         written,
                     });
                 }
-                (ctx, job, result) => {
-                    let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
-                    self.handle(op, attempts, outcome, gone)?;
-                }
+                (ctx, job, result) => rest.push((p.op, p.attempts, p.gone, ctx, job, result)),
             }
         }
-        if landed.is_empty() {
-            return Ok(());
+        // What landed first: it is recorded whatever becomes of the rest.
+        if !landed.is_empty() {
+            // Not recorded: planned again, as one that failed on its own.
+            let failed = match self.commit_removed(landed) {
+                Ok(_) => None,
+                Err(Outcome::Retry(why)) => Some(why),
+                Err(_) => Some("removals answered, not recorded".to_owned()),
+            };
+            for (op, attempts, gone) in ops {
+                let outcome = failed.clone().map_or(Outcome::Settled, Outcome::Retry);
+                self.handle(op, attempts, outcome, gone)?;
+            }
         }
-        // One that failed is planned again, as one that failed on its own.
-        let failed = match self.commit_removed(landed) {
-            Err(Outcome::Retry(why)) => Some(why),
-            _ => None,
-        };
-        for (op, attempts, gone) in ops {
-            let outcome = failed.clone().map_or(Outcome::Settled, Outcome::Retry);
+        for (op, attempts, gone, ctx, job, result) in rest {
+            let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
             self.handle(op, attempts, outcome, gone)?;
         }
         Ok(())

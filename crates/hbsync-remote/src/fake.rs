@@ -294,17 +294,19 @@ impl FakeServer {
         upload: Option<Upload<'_>>,
     ) -> Result<Target> {
         let current = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
-        if current.header.version != expected {
-            return Err(RemoteError::VersionMismatch);
-        }
+        // As Homebase (`AssertActiveForUpdate`): a tombstone answers so before the version is
+        // looked at.
         let RemoteBody::Live {
             node,
             payload: old_payload,
             ..
         } = &current.header.body
         else {
-            return Err(RemoteError::NotFound);
+            return Err(RemoteError::Deleted);
         };
+        if current.header.version != expected {
+            return Err(RemoteError::VersionMismatch);
+        }
         let (node, old_payload, kind) = (*node, *old_payload, current.header.kind);
         // Homebase replaces the whole header: a client that sent another node id or kind
         // would change (or clear) them. Ours never may.
@@ -375,7 +377,7 @@ impl FakeServer {
     }
 
     /// Sets only a file's removal, if it is still at `expected`, as Homebase's
-    /// `update-archival-status-batch` does for each file: a deleted file is not found (4002,
+    /// `update-archival-status-batch` does for each file: a deleted file answers so (4002,
     /// before the version is looked at), one already so is left as it is (its version and time
     /// too), anything else gets a new version at the server's time.
     fn set_removed_by(

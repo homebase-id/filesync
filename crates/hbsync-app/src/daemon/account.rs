@@ -313,7 +313,7 @@ impl Account {
     }
 
     /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
-    /// items it took along; and, when it holds anything, all of it as listed now.
+    /// items are in it; and, when it holds anything, all of it as listed now.
     pub fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
         let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
             return (Vec::new(), None);
@@ -573,6 +573,7 @@ impl Account {
                 }
             }
             notifications.tick(Instant::now(), paused);
+            keeper.paused(paused);
             // Not while paused: no deletes for good, no pulls. On the keeper's thread: this one
             // never waits for it.
             if Instant::now() >= next_purge && !paused {

@@ -249,7 +249,7 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Deleted { limit } => match daemon::deleted(&paths, limit)?.map(|l| l.items) {
             Some(list) if list.is_empty() => println!("Recently deleted is empty."),
             Some(list) => {
-                // Each item deleted on its own, with how many its delete took along.
+                // Each item deleted on its own, with how many items are in it.
                 for (item, what) in list.iter().zip(described(&paths, &list)?) {
                     println!("{}  {what}", item.deleted.node.0);
                 }

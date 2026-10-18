@@ -206,7 +206,7 @@ pub struct DeletedItem {
     /// How many items are in it: all of Recently deleted below it (through removed folders),
     /// what was deleted with it, which restoring it restores, and what was deleted from it before
     /// (listed on its own too), which emptying it takes along. A deleted folder of thousands of
-    /// files is one item with its count; 0 for an item a delete took along itself.
+    /// files is one item with its count.
     #[serde(default)]
     pub along: usize,
 }

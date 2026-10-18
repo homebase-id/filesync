@@ -49,7 +49,7 @@ pub struct Listed {
 }
 
 /// The drive's newest `limit` deletes of Recently deleted, newest first, each with how many
-/// items it took along, and the summary of all of it.
+/// items are in it ([`inside`]), and the summary of all of it.
 pub fn deletes(
     s: &Store<'_>,
     limit: usize,
@@ -77,7 +77,7 @@ pub fn deletes(
 }
 
 /// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, each
-/// with how many items it took along: only those rows are read, and walked up from.
+/// with how many items are in it: only those rows are read, and walked up and down from.
 pub fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::lazy(s)?;
     let mut found = Vec::new();
@@ -90,7 +90,7 @@ pub fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, St
 }
 
 /// The items of Recently deleted named `names` (deletes, or items a delete took along), each
-/// with how many items it took along: to pick by their places, which end in those names. Only
+/// with how many items are in it: to pick by their places, which end in those names. Only
 /// those rows are read whole, and walked up from.
 pub fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
     let names: HashSet<&str> = names.iter().map(String::as_str).collect();
@@ -98,7 +98,7 @@ pub fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, S
     find(s, &s.removed_named(&names)?)
 }
 
-/// Every item of Recently deleted, newest first, each with how many items it took along: listed
+/// Every item of Recently deleted, newest first, each with how many items are in it: listed
 /// whole (tests).
 #[cfg(any(test, feature = "testkit"))]
 pub fn all(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
@@ -166,27 +166,21 @@ impl<'a, 's> Listing<'a, 's> {
         Ok(listing)
     }
 
-    /// `node`'s row, if it is in Recently deleted, with how many items it holds (as the
-    /// listing counts them; 0 for an item a delete took along itself).
+    /// `node`'s row, if it is in Recently deleted, with how many items are in it (as the listing
+    /// counts them).
     fn describe_node(&mut self, node: NodeId) -> Result<Option<(Deleted, usize)>, StateError> {
         let Some(top) = self.rows.get(node)?.cloned() else {
             return Ok(None);
         };
         let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
         let i = self.rows.index[&node].unwrap_or_default();
-        if root != node {
-            return Ok(Some((self.describe_as(i, root, false)?, 0)));
-        }
         // All of Recently deleted in it goes with it: it stays only for a live node in it.
         let s = self.rows.s;
         let below = inside_of(s, top)?;
-        let mut stays = false;
-        for r in below.iter().filter(|r| r.row.kind == NodeKind::Folder) {
-            if !s.mirror_children(r.row.node)?.is_empty() {
-                stays = true;
-                break;
-            }
-        }
+        let stays = below.iter().any(|r| r.row.kind == NodeKind::Folder) && {
+            let live = s.removed_holding_live()?;
+            below.iter().any(|r| live.contains(&r.row.node))
+        };
         Ok(Some((self.describe_as(i, root, stays)?, below.len() - 1)))
     }
 
@@ -196,16 +190,13 @@ impl<'a, 's> Listing<'a, 's> {
         (0..self.roots.len()).filter(|&i| self.roots[i] == self.rows.rows[i].row.node)
     }
 
-    /// Rows `picked`, described, each with how many items it took along.
+    /// Rows `picked`, described, each with how many items are in it.
     fn with_along(&mut self, picked: Vec<usize>) -> Result<Vec<(Deleted, usize)>, StateError> {
         picked
             .into_iter()
             .map(|i| {
                 let d = self.describe(i)?;
-                let held = match d.root == d.node {
-                    true => self.held.get(&d.node).copied().unwrap_or_default(),
-                    false => Held::default(),
-                };
+                let held = self.held.get(&d.node).copied().unwrap_or_default();
                 Ok((
                     Deleted {
                         stays: held.stays,
@@ -581,8 +572,7 @@ struct RestorePlan {
 
 /// `top` and what was deleted with it below it, level by level: the removed items in it
 /// deleted with their folder ([`deleted_with`]). What was deleted from it before stays out, and
-/// so do the live nodes its delete took along ([`crate::along`]): what Recently deleted lists
-/// with it.
+/// so do the live nodes its delete took along ([`crate::along`]): what restoring it restores.
 fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
     // Each node once: removed rows may form a cycle (left by a remote one).
     let mut seen = HashSet::from([top.row.node]);
@@ -640,7 +630,8 @@ struct Held {
 
 /// What each of `rows` (all of Recently deleted) holds, in one pass, given the removed folders
 /// holding a live node (`live`). With every row chosen, only a live node keeps one ([`select`]).
-/// A row in a cycle counts what is below it up to the cycle.
+/// Rows in a cycle (only a remote one leaves one) are each walked down on their own instead, as
+/// a lookup of one does.
 fn held_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<NodeId, Held> {
     let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for r in rows.iter().filter(|r| r.node != r.parent) {
@@ -650,6 +641,7 @@ fn held_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<NodeId, Held> 
     let below = |n: &NodeId| children.get(n).unwrap_or(&none);
     let mut held: HashMap<NodeId, Held> = HashMap::new();
     let mut on_path = HashSet::new();
+    let mut cycle = false;
     for r in rows {
         let mut stack = vec![(r.node, false)];
         while let Some((n, done)) = stack.pop() {
@@ -666,10 +658,31 @@ fn held_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<NodeId, Held> 
                 }
                 held.insert(n, h);
                 on_path.remove(&n);
-            } else if !held.contains_key(&n) && on_path.insert(n) {
-                stack.push((n, true));
-                stack.extend(below(&n).iter().map(|c| (*c, false)));
+            } else if !held.contains_key(&n) {
+                if on_path.insert(n) {
+                    stack.push((n, true));
+                    stack.extend(below(&n).iter().map(|c| (*c, false)));
+                } else {
+                    cycle = true;
+                }
             }
+        }
+    }
+    if cycle {
+        for r in rows {
+            let Ok(reach) = inside(
+                r.node,
+                |n| (*n, true),
+                |n| Ok::<_, std::convert::Infallible>(below(&n).clone()),
+            );
+            let stays = reach.iter().any(|n| live.contains(n));
+            held.insert(
+                r.node,
+                Held {
+                    count: reach.len() - 1,
+                    stays,
+                },
+            );
         }
     }
     held
@@ -1636,7 +1649,7 @@ mod tests {
         ];
         expected.sort();
         assert_eq!(found, expected);
-        assert_eq!(listed[&data], (run, 0), "taken along");
+        assert_eq!(listed[&data], (run, 1), "taken along, holding f.bin");
         assert_eq!(
             listed[&other_data],
             (other_data, 0),

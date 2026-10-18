@@ -26,7 +26,11 @@ enum Job {
 pub(crate) struct Keeper {
     drive: Arc<Drive>,
     worker: Option<(Sender<Job>, JoinHandle<()>)>,
-    /// The account ends: a purge not started yet doesn't start.
+    /// A purge is asked for and hasn't started: asked again meanwhile, it is that one.
+    purging: Arc<AtomicBool>,
+    /// The account is paused, or ends: a purge not started yet doesn't start (it is asked
+    /// again after the pause).
+    paused: Arc<AtomicBool>,
     ending: Arc<AtomicBool>,
     /// Jobs done, for tests.
     done: Arc<AtomicUsize>,
@@ -37,6 +41,8 @@ impl Keeper {
         let mut keeper = Keeper {
             drive,
             worker: None,
+            purging: Arc::default(),
+            paused: Arc::default(),
             ending: Arc::default(),
             done: Arc::default(),
         };
@@ -46,8 +52,10 @@ impl Keeper {
 
     fn start(&mut self) {
         let (tx, rx) = channel::<Job>();
-        let (drive, ending, done) = (
-            Arc::clone(&self.drive),
+        let drive = Arc::clone(&self.drive);
+        let (purging, paused, ending, done) = (
+            Arc::clone(&self.purging),
+            Arc::clone(&self.paused),
             Arc::clone(&self.ending),
             Arc::clone(&self.done),
         );
@@ -56,8 +64,14 @@ impl Keeper {
             .spawn(move || {
                 for job in rx {
                     match job {
-                        Job::Purge(_) if ending.load(Ordering::SeqCst) => {}
-                        Job::Purge(keep_days) => purge_now(&drive, keep_days),
+                        Job::Purge(keep_days) => {
+                            purging.store(false, Ordering::SeqCst);
+                            let held =
+                                paused.load(Ordering::SeqCst) || ending.load(Ordering::SeqCst);
+                            if !held {
+                                purge_now(&drive, keep_days);
+                            }
+                        }
                         Job::Control(control) => run_request(&drive, control),
                     }
                     done.fetch_add(1, Ordering::SeqCst);
@@ -72,9 +86,17 @@ impl Keeper {
         };
     }
 
-    /// The purge, once a day: what Recently deleted has kept `keep_days` goes.
+    /// The purge, once a day: what Recently deleted has kept `keep_days` goes. Asked while one
+    /// waits to start, it is that one.
     pub fn purge(&mut self, keep_days: u32) {
-        self.send(Job::Purge(keep_days));
+        if !self.purging.swap(true, Ordering::SeqCst) {
+            self.send(Job::Purge(keep_days));
+        }
+    }
+
+    /// The account is paused (or resumed): no purge starts while it is.
+    pub fn paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::SeqCst);
     }
 
     /// Restores or empties as `control` asks.
@@ -98,6 +120,7 @@ impl Keeper {
         {
             return;
         }
+        self.purging.store(false, Ordering::SeqCst);
         tracing::warn!("Recently deleted's thread isn't running: a request was dropped");
     }
 
@@ -171,8 +194,8 @@ mod tests {
 
     /// A purge that waits (here on the drive, as the first one waits on the state DB while the
     /// folders' first syncs hold it) keeps no one who asks waiting: asking returns at once, and
-    /// a request asked meanwhile runs once the purge is done. Asked again, it purges only once a
-    /// day.
+    /// a request asked meanwhile runs once the purge is done. Asked again meanwhile, it is the
+    /// same purge.
     #[test]
     fn asking_never_waits_for_a_purge() -> R {
         let home = tempfile::tempdir()?;
@@ -195,7 +218,7 @@ mod tests {
         assert_eq!(keeper.done(), 0, "nothing was done while the purge waited");
         assert!(!purged()?);
         drop(server);
-        wait_for("the purges and the request", || keeper.done() == 3)?;
+        wait_for("the purge and the request", || keeper.done() == 2)?;
         assert!(purged()?);
         keeper.finish();
         Ok(())
@@ -219,6 +242,30 @@ mod tests {
         assert_eq!(done.load(Ordering::SeqCst), 2);
         let mut account = StateDb::open_account(&db)?;
         assert!(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_none());
+        Ok(())
+    }
+
+    /// A purge asked for before a pause doesn't start during it.
+    #[test]
+    fn no_purge_starts_while_paused() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let mut keeper = Keeper::spawn(drive);
+        let server = remote.server();
+        keeper.request(AccountControl::Restore { nodes: Vec::new() });
+        keeper.purge(30);
+        keeper.paused(true);
+        drop(server);
+        wait_for("the request and the purge", || keeper.done() == 2)?;
+        let mut account = StateDb::open_account(&db)?;
+        assert!(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_none());
+        keeper.paused(false);
+        keeper.purge(30);
+        wait_for("the purge", || keeper.done() == 3)?;
+        assert!(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_some());
+        keeper.finish();
         Ok(())
     }
 }

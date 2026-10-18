@@ -320,7 +320,7 @@ impl HomebaseRemote {
     fn current(&self, at: RemoteRef) -> Result<wire::FileHeader> {
         let header = self.raw_header(at.file_id)?;
         if header.file_state == "deleted" {
-            return Err(RemoteError::NotFound);
+            return Err(RemoteError::Deleted);
         }
         if header.file_metadata.version_tag != at.version.0 {
             return Err(RemoteError::VersionMismatch);
