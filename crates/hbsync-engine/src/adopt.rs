@@ -22,6 +22,7 @@ use hbsync_platform::name::name_key;
 use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError, Store};
 use hbsync_types::{ContentHash, NodeId, NodeKind};
 
+use crate::exec::spells;
 use crate::scope::Scope;
 
 /// Adopts what it can among the dirty nodes, never as a folder the scope leaves out (§12: a
@@ -67,19 +68,20 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usi
         let mut claimed: HashSet<NodeId> = HashSet::new();
         let mut matches: Vec<(&LocalRow, NodeId, bool)> = Vec::new();
         for row in group {
-            if let Some((remote_node, proven_equal)) =
-                find_match(db, root, os, row, &siblings, &claimed)?
+            if let Some((remote_node, agreed)) = find_match(db, root, os, row, &siblings, &claimed)?
             {
                 claimed.insert(remote_node);
-                matches.push((row, remote_node, proven_equal));
+                matches.push((row, remote_node, agreed));
             }
         }
         db.write(|s| {
-            for (row, remote_node, proven_equal) in &matches {
+            for (row, remote_node, agreed) in &matches {
                 take_over(s, row.node, *remote_node)?;
-                // A match proven by hashing with the remote's algorithm is recorded right away:
-                // the reconciler can't compare hashes of different algorithms by itself.
-                if *proven_equal {
+                // Recorded right away where the reconciler couldn't tell they agree: a match
+                // proven by hashing with the remote's algorithm (it can't compare hashes of
+                // different algorithms), or at this device's spelling of a drive name the name
+                // map doesn't give back (it reads that as another name).
+                if *agreed {
                     let how = crate::exec::Settle {
                         same_bytes: true,
                         ..crate::exec::Settle::node(*remote_node)
@@ -117,9 +119,9 @@ pub(crate) fn same_bytes(root: &Path, row: &LocalRow, hash: &ContentHash, size: 
     }
 }
 
-/// The remote node `row` is a copy of, if any, and whether equality was proven across hash
-/// algorithms (which only this function can know). `siblings` are the remote children of the
-/// row's parent by [`name_key`].
+/// The remote node `row` is a copy of, if any, and whether it's to be recorded as agreed at
+/// once (see [`adopt`]). `siblings` are the remote children of the row's parent by
+/// [`name_key`].
 fn find_match(
     db: &mut StateDb,
     root: &Path,
@@ -155,12 +157,13 @@ fn find_match(
             continue;
         };
         let cross = row.hash.is_some_and(|h| h.algorithm != file.hash.algorithm);
+        let spelled = remote.name != name && spells(&row.path, &remote.name, os);
         // Recorded as agreed at once (see `adopt`), so the place must match exactly.
-        if cross && remote.name != name {
+        if cross && remote.name != name && !spelled {
             continue;
         }
         if same_bytes(root, row, &file.hash, file.size) {
-            return Ok(Some((remote.node, cross)));
+            return Ok(Some((remote.node, cross || spelled)));
         }
     }
     Ok(None)

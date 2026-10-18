@@ -787,6 +787,58 @@ fn a_download_commits_as_it_is_recovered() -> R {
     Ok(())
 }
 
+/// A first download of a name the name map wouldn't give back from this device's spelling
+/// (decomposed; on Windows, an escape's own code point) records the spelling, committed or
+/// recovered: the item reads as the drive's name, not as renamed.
+#[test]
+fn a_first_download_records_the_local_spelling() -> R {
+    for (os, name) in [
+        (Os::Linux, "e\u{301}"),
+        (Os::MacOs, "e\u{301}"),
+        (Os::Windows, "a\u{F022}b"),
+    ] {
+        for crash in [false, true] {
+            let mut h = Harness::new()?;
+            h.cfg.os = os;
+            let (node, at) = h.seed(name, b"A")?;
+            if crash {
+                h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+            }
+            let ran = h.run(vec![Op::LocalDownload {
+                node,
+                parent: NodeId::ROOT,
+                name: name.into(),
+                replace: false,
+                tags: Tags::default(),
+                drive: Some(Box::new(DriveVersion {
+                    state: NodeState::file(NodeId::ROOT, name, h.content(b"A")),
+                    at,
+                    base_at: None,
+                })),
+            }]);
+            assert_eq!(ran.is_err(), crash, "{ran:?}");
+            if crash {
+                h.local_file(name, node, b"A")?;
+                recover_placements(&mut h.db, &h.cfg)?;
+                assert_eq!(h.records()?, []);
+            }
+            let base = h.base(node)?.ok_or("a base")?;
+            assert_eq!(
+                base.local_name.as_deref(),
+                Some(name),
+                "{os:?}, crash {crash}"
+            );
+            let read = h.db.read(|s| view::local_node(s, node, os, None))?;
+            assert_eq!(
+                read.and_then(|l| l.state).map(|l| l.name).as_deref(),
+                Some(name),
+                "{os:?}, crash {crash}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// A download's record claims the tags it writes, the empty set too, as they read back: an
 /// untagged file is known to hold none. (Claiming none for it read as not known, and a tag the
 /// user had removed came back.) Where the volume keeps no tags, it claims none.

@@ -1275,6 +1275,7 @@ use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
+pub(crate) use settle::spells;
 use settle::{Placed, mark_children, merged_with_drive, settle_placement};
 pub use settle::{Settle, settle};
 pub(crate) use settle::{meta, meta_at, record_removed, update_meta};
