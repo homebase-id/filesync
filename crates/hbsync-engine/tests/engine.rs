@@ -1430,6 +1430,11 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
         .ok_or("Photos not listed")?;
     // Listed as staying: emptying it leaves it.
     assert!(photos.stays);
+    let mut reader = hbsync_engine::root::AccountReader::open(&a.db_path(), "test.example")?
+        .ok_or("no DB")?;
+    let (items, summary) = reader.deletes(10)?;
+    assert!(items[0].0.stays);
+    assert_eq!((summary.stays, summary.items), (1, 1), "x.txt goes, Photos stays");
     // Another device, which never synced, empties it.
     let mut b = Client::new(&server, "b")?;
     assert_eq!(b.engine.drive().empty(&[photos.node])?, 1, "x.txt");

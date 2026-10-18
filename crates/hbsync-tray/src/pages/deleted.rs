@@ -78,7 +78,7 @@ impl Server {
                     n => format!(" <span class=small>with {n} items in it</span>"),
                 };
                 let along = match d.stays {
-                    true => format!("{along} <span class=small>({STAYS})</span>"),
+                    true => format!("{along} <span class=small>({})</span>", words::STAYS),
                     false => along,
                 };
                 format!(
@@ -104,13 +104,13 @@ impl Server {
 
     pub(super) fn empty_page(&self, form: &HashMap<String, String>) -> String {
         let field = |name| escape(form.get(name).map_or("", String::as_str));
-        let stays = match form.get("stays").and_then(|n| n.parse::<usize>().ok()) {
-            Some(1) => "<p>One folder stays: it holds items that aren't deleted.</p>".to_owned(),
-            Some(n) if n > 1 => {
-                format!("<p>{n} folders stay: they hold items that aren't deleted.</p>")
-            }
-            _ => String::new(),
-        };
+        let stays = form
+            .get("stays")
+            .and_then(|n| n.parse().ok())
+            .map(words::staying)
+            .filter(|said| !said.is_empty())
+            .map(|said| format!("<p>{said}</p>"))
+            .unwrap_or_default();
         format!(
             "<h1>Empty Recently deleted?</h1>\
              <p>The {count} items in it that can go are deleted for good, from your Homebase \
@@ -212,9 +212,6 @@ impl Server {
     }
 }
 
-/// Why an item of Recently deleted stays when emptied.
-const STAYS: &str = "stays when emptied: it holds items that aren't deleted";
-
 /// The button that empties Recently deleted as listed (`url`): all it held now, nothing deleted
 /// after this look. When emptying would take nothing (every folder in it still holds a live
 /// item), it says so instead.
@@ -231,7 +228,7 @@ fn empty_offer(list: &hbsync_app::protocol::DeletedList, url: &str) -> String {
          <input type=hidden name=listed value=\"{listed}\">\
          <button class=secondary>Empty now…</button></form>",
         count = list.total(),
-        stays = list.items.iter().filter(|i| i.deleted.stays).count(),
+        stays = list.staying(),
         listed = escape(&control::listed_field(&list.accounts)),
     )
 }
@@ -250,11 +247,13 @@ mod tests {
                 identity: "a.example".into(),
                 deletes: 1,
                 items,
+                stays: 1,
                 db: "d1".into(),
                 seq: 3,
             }],
         };
-        assert!(empty_offer(&list(2), "/e").contains("Empty now"));
+        let offer = empty_offer(&list(2), "/e");
+        assert!(offer.contains("Empty now") && offer.contains("name=stays value=\"1\""));
         let none = empty_offer(&list(0), "/e");
         assert!(
             !none.contains("<form") && none.contains("can be emptied yet"),

@@ -278,7 +278,12 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             daemon::empty(&paths, &found)?;
-            println!("{}", emptying(&paths, &found)?);
+            let staying: Vec<DeletedItem> =
+                found.iter().filter(|i| i.deleted.stays).cloned().collect();
+            println!("{}", emptied(staying.len()));
+            for what in described(&paths, &staying)? {
+                println!("  {what}");
+            }
         }
         Command::EmptyDeleted { yes, .. } => {
             // Everything it holds now, nothing deleted after this look: the counts only.
@@ -312,10 +317,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             daemon::empty_listed(&paths, &list.accounts)?;
-            let shown = daemon::deleted(&paths, usize::MAX)?
-                .map(|l| l.items)
-                .unwrap_or_default();
-            println!("{}", emptying(&paths, &shown)?);
+            println!("{}", emptied(list.staying()));
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
         Command::Start => {
@@ -441,7 +443,7 @@ fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
                 n => format!(" (with {n} items in it)"),
             };
             let stays = match item.deleted.stays {
-                true => format!("; {STAYS}"),
+                true => format!("; {}", words::STAYS),
                 false => String::new(),
             };
             format!(
@@ -452,21 +454,12 @@ fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
         .collect())
 }
 
-/// Why an item of Recently deleted stays when emptied.
-const STAYS: &str = "stays when emptied: it holds items that aren't deleted";
-
-/// What emptying `items` (or all of Recently deleted, `items` its listing) does, in words: never
-/// "deleting" alone where something stays.
-fn emptying(paths: &Paths, items: &[DeletedItem]) -> Res<String> {
-    let staying: Vec<DeletedItem> = items.iter().filter(|i| i.deleted.stays).cloned().collect();
-    if staying.is_empty() {
-        return Ok("Deleting for good.".to_owned());
-    }
-    Ok(format!(
-        "Deleting for good. These stay, as they hold items that aren't deleted (what else is \
-         in them goes; restoring one shows what it holds):\n  {}",
-        described(paths, &staying)?.join("\n  ")
-    ))
+/// What emptying does, `staying` items left (they hold a live node): never "deleting" alone
+/// where something stays.
+fn emptied(staying: usize) -> String {
+    format!("Deleting for good. {}", words::staying(staying))
+        .trim_end()
+        .to_owned()
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.

@@ -284,8 +284,8 @@ pub enum RemoteError {
     #[error("not found")]
     NotFound,
     /// The file is a tombstone: deleted for good, leaving a trace (Homebase 4002,
-    /// `cannotUpdateNonActiveFile`, in an answer per file). Gone, as a read of its header would
-    /// say: no need to read it.
+    /// `cannotUpdateNonActiveFile`, to a write). Gone, as a read of its header would say: no need
+    /// to read it.
     #[error("deleted for good")]
     Deleted,
     /// A payload range past its end (HTTP 416): the file changed since its header was read.

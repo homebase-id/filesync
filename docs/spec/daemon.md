@@ -320,7 +320,8 @@ Replies:
   each account holding anything, its `deletes`, its `items` (what emptying all of it deletes
   for good: removed nodes only, the deletes and what they took along, but a folder holding a
   live node or a removal that stays: 0 when nothing can be emptied yet, which clients say
-  instead of offering to empty), and what the listing saw:
+  instead of offering to empty), its `stays` (the items deleted on their own that emptying
+  leaves: they hold a live node), and what the listing saw:
   `db`, the account's state DB (a random id made with it, so one made again is another), and
   `seq`, the counter of this device's order of recording removals (each version of a node
   removed gets the next when first recorded; recorded again, its server time confirmed, it keeps

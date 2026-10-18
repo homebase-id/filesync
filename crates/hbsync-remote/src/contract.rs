@@ -503,11 +503,11 @@ fn deletes(b: &Bench) -> Outcome {
     // deleted it meanwhile).
     ensure_err!(
         b.update(w2, &f, None),
-        RemoteError::NotFound | RemoteError::VersionMismatch
+        RemoteError::NotFound | RemoteError::Deleted | RemoteError::VersionMismatch
     );
     ensure_err!(
         b.update(w2, &f, Some(b"edited")),
-        RemoteError::NotFound | RemoteError::VersionMismatch
+        RemoteError::NotFound | RemoteError::Deleted | RemoteError::VersionMismatch
     );
     ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
     Ok(())

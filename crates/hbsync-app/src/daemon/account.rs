@@ -323,6 +323,7 @@ impl Account {
             identity: self.identity.clone(),
             deletes: summary.deletes,
             items: summary.items,
+            stays: summary.stays,
             db: summary.listed.db,
             seq: summary.listed.seq,
         });
@@ -487,7 +488,7 @@ impl Account {
         }
         let mut notifications =
             Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now());
-        let keeper = Keeper::spawn(Arc::clone(&drive));
+        let mut keeper = Keeper::spawn(Arc::clone(&drive));
         let mut runners: Vec<Running> = Vec::new();
         // A runner that couldn't start: the account stops its runners and ends with it, the
         // daemon with it (restarted whole). One that ended with an error is started again after a

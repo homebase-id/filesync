@@ -1101,52 +1101,51 @@ impl<'a> Executor<'a> {
         ran: Vec<(Job, JobResult)>,
         pending: &mut BTreeMap<NodeId, Prepared>,
     ) -> Result<(), StateError> {
-        let mut landed = Vec::new();
+        let (mut ops, mut landed) = (Vec::new(), Vec::new());
         for (job, result) in ran {
-            let Some(p) = pending.remove(&job.node()) else {
+            let Some(Prepared {
+                op,
+                attempts,
+                ctx,
+                gone,
+            }) = pending.remove(&job.node())
+            else {
                 continue;
             };
-            match (p, job, result) {
+            match (ctx, job, result) {
                 (
-                    Prepared {
-                        op,
-                        attempts,
-                        ctx:
-                            Ctx::Meta {
-                                hash,
-                                after: remote::After::Removed { file_id },
-                                ..
-                            },
-                        gone,
+                    Ctx::Meta {
+                        hash,
+                        after: remote::After::Removed { file_id },
+                        ..
                     },
                     Job::Meta { meta, .. },
                     JobResult::Written(written),
-                ) => landed.push((
-                    (op, attempts, gone),
-                    remote::Landed {
+                ) => {
+                    ops.push((op, attempts, gone));
+                    landed.push(remote::Landed {
                         meta,
                         hash,
                         file_id,
                         written,
-                    },
-                )),
-                (p, job, result) => {
-                    let outcome = self.commit(p.ctx, job, result).unwrap_or_else(|o| o);
-                    self.handle(p.op, p.attempts, outcome, p.gone)?;
+                    });
+                }
+                (ctx, job, result) => {
+                    let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
+                    self.handle(op, attempts, outcome, gone)?;
                 }
             }
         }
         if landed.is_empty() {
             return Ok(());
         }
-        let (ops, landed): (Vec<_>, Vec<_>) = landed.into_iter().unzip();
-        let committed = self.commit_removed(landed);
+        // One that failed is planned again, as one that failed on its own.
+        let failed = match self.commit_removed(landed) {
+            Err(Outcome::Retry(why)) => Some(why),
+            _ => None,
+        };
         for (op, attempts, gone) in ops {
-            // As one that failed on its own: planned again.
-            let outcome = match &committed {
-                Ok(()) => Outcome::Settled,
-                Err(e) => Outcome::Retry(e.to_string()),
-            };
+            let outcome = failed.clone().map_or(Outcome::Settled, Outcome::Retry);
             self.handle(op, attempts, outcome, gone)?;
         }
         Ok(())

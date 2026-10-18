@@ -171,6 +171,11 @@ impl DeletedList {
     pub fn total(&self) -> usize {
         self.accounts.iter().map(|a| a.items).sum()
     }
+
+    /// The items emptying all of it leaves ([`DeletedAccount::stays`]).
+    pub fn staying(&self) -> usize {
+        self.accounts.iter().map(|a| a.stays).sum()
+    }
 }
 
 /// An account's Recently deleted as a whole, when listed: what emptying all of it takes.
@@ -182,6 +187,9 @@ pub struct DeletedAccount {
     /// What emptying all of it deletes for good: removed nodes only, every item and the ones its
     /// deletes took along, but a folder holding a live node or a removal that stays.
     pub items: usize,
+    /// The items deleted on their own that emptying leaves: they hold a live node.
+    #[serde(default)]
+    pub stays: usize,
     /// What the listing saw, which emptying all of it as listed takes
     /// ([`AccountControl::EmptyListed`]): the account's DB (its own id: one made again is
     /// another), and the counter of its order of recording removals.

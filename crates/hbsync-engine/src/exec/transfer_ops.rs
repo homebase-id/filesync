@@ -298,11 +298,7 @@ impl Executor<'_> {
                     e @ (RemoteError::NotFound | RemoteError::Deleted),
                 )),
             ) if let Some(file_id) = job.file_id() => {
-                let gone = match e {
-                    RemoteError::Deleted => Ok(true),
-                    _ => crate::feed::gone_for_good(self.remote, file_id),
-                };
-                match gone {
+                match crate::feed::gone_after(self.remote, &e, file_id) {
                     Ok(true) => match (ctx, job) {
                         (
                             Ctx::Meta {

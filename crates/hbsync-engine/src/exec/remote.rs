@@ -135,8 +135,7 @@ impl Executor<'_> {
         written: Option<Target>,
     ) -> Step {
         let node = meta.node;
-        let row = written
-            .map(|w| MirrorRow::written(w, meta.node, meta.parent, meta.kind, &meta.content, hash));
+        let row = written.map(|w| written_row(&meta, hash, w));
         self.finish(&[Settle::node(node)], |s| match after {
             After::Created => {
                 s.delete_removed(node)?;
@@ -152,32 +151,25 @@ impl Executor<'_> {
     /// not one per file. They change nothing on disk: a crash before it loses only their
     /// answers, as one before the first commit did (the nodes stay dirty, planned again from
     /// the feed).
-    pub(super) fn commit_removed(&mut self, landed: Vec<Landed>) -> Result<(), StateError> {
-        let os = self.cfg.os;
-        let landed: Vec<(Settle<'_>, Landed)> = landed
+    pub(super) fn commit_removed(&mut self, landed: Vec<Landed>) -> Step {
+        let nodes: Vec<Settle<'_>> = landed.iter().map(|l| Settle::node(l.meta.node)).collect();
+        let rows: Vec<(NodeId, hbsync_types::RemoteFileId, MirrorRow)> = landed
             .into_iter()
-            .map(|l| (self.ours(Settle::node(l.meta.node)), l))
+            .map(|l| {
+                let row = written_row(&l.meta, l.hash, l.written);
+                (l.meta.node, l.file_id, row)
+            })
             .collect();
-        let settled = self.db.write(|s| {
-            landed
-                .iter()
-                .map(|(how, l)| {
-                    let row = MirrorRow::written(
-                        l.written.clone(),
-                        l.meta.node,
-                        l.meta.parent,
-                        l.meta.kind,
-                        &l.meta.content,
-                        l.hash,
-                    );
-                    removed(s, l.meta.node, l.file_id, Some(row))?;
-                    Ok((how.node, settle(s, *how, os)?))
-                })
-                .collect::<Result<Vec<_>, StateError>>()
-        })?;
-        self.note(settled);
-        Ok(())
+        self.finish(&nodes, |s| {
+            rows.into_iter()
+                .try_for_each(|(node, file_id, row)| removed(s, node, file_id, Some(row)))
+        })
     }
+}
+
+/// The mirror's row of `meta` as written (`w`, the drive's answer).
+fn written_row(meta: &NodeMeta, hash: Option<hbsync_types::ContentHash>, w: Target) -> MirrorRow {
+    MirrorRow::written(w, meta.node, meta.parent, meta.kind, &meta.content, hash)
 }
 
 /// A removal the drive answered, as written.

@@ -141,13 +141,8 @@ fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Target> {
 }
 
 /// Why `update-archival-status-batch` left a file as it was (`OdinClientErrorCode`'s camelCase
-/// name): written since, not there, a tombstone (`cannotUpdateNonActiveFile`: odin-core's
-/// `AssertActiveForUpdate` answers it for a file that isn't active, and a file is active or
-/// deleted), or anything else.
+/// name): written since, not there, a tombstone, or anything else.
 fn refused(code: &str) -> RemoteError {
-    if code.eq_ignore_ascii_case("cannotUpdateNonActiveFile") {
-        return RemoteError::Deleted;
-    }
     code_error(code)
         .unwrap_or_else(|| RemoteError::Fatal(format!("archival status refused: {code}")))
 }
@@ -731,8 +726,10 @@ fn code_error(code: &str) -> Option<RemoteError> {
     let mapped = match code.to_ascii_lowercase().as_str() {
         "existingfilewithuniqueid" => RemoteError::AlreadyExists,
         "versiontagmismatch" => RemoteError::VersionMismatch,
-        // Missing, or deleted (a tombstone).
-        "filenotfound" | "cannotupdatenonactivefile" => RemoteError::NotFound,
+        "filenotfound" => RemoteError::NotFound,
+        // Not active: a file is active or deleted (odin-core's `AssertActiveForUpdate`), so a
+        // tombstone.
+        "cannotupdatenonactivefile" => RemoteError::Deleted,
         // An upload whose hash part didn't arrive: sent again like one refused.
         "payloadhashmismatch" | "payloadhashmissing" => RemoteError::HashMismatch,
         "invalidpayloadhash" => RemoteError::InvalidHash,
@@ -870,7 +867,7 @@ mod tests {
             (api(400, Some("existingFileWithUniqueId")), "AlreadyExists"),
             (api(400, Some("versionTagMismatch")), "VersionMismatch"),
             (api(400, Some("fileNotFound")), "NotFound"),
-            (api(400, Some("cannotUpdateNonActiveFile")), "NotFound"),
+            (api(400, Some("cannotUpdateNonActiveFile")), "Deleted"),
             (api(400, Some("payloadHashMismatch")), "HashMismatch"),
             (api(400, Some("payloadHashMissing")), "HashMismatch"),
             (api(400, Some("payloadHashRequired")), "HashRequired"),

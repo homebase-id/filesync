@@ -20,7 +20,7 @@ use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::engine::EngineError;
 use crate::exec::{meta_at, remove_all, trashed_at};
-use crate::feed::{TRACE_MS, apply_tombstone, gone_for_good};
+use crate::feed::{TRACE_MS, apply_tombstone, gone_after, gone_for_good};
 use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
@@ -34,6 +34,8 @@ pub struct DeletedSummary {
     /// What emptying all of it now deletes for good ([`select`]): every item, those its deletes
     /// took along too, but a folder holding a live node or a removal that stays.
     pub items: usize,
+    /// The items deleted on their own that emptying leaves: they hold a live node.
+    pub stays: usize,
     /// What the listing saw: [`empty_listed`] with it empties exactly that.
     pub listed: Listed,
 }
@@ -56,6 +58,15 @@ pub fn deletes(
     let summary = DeletedSummary {
         deletes: listing.deletes().count(),
         items: listing.going,
+        stays: listing
+            .deletes()
+            .filter(|&i| {
+                listing
+                    .held
+                    .get(&listing.rows.rows[i].row.node)
+                    .is_some_and(|h| h.stays)
+            })
+            .count(),
         listed: Listed {
             db: s.db_id()?,
             seq: s.removed_seq()?,
@@ -103,13 +114,8 @@ struct Listing<'a, 's> {
     roots: Vec<NodeId>,
     /// Of the listed rows, how many emptying all of them deletes for good ([`select`]).
     going: usize,
-    /// How many rows each item holds: all of Recently deleted below it, through removed
-    /// folders ([`inside`]), what emptying it deletes with it.
-    along: HashMap<NodeId, usize>,
-    /// The items emptying them leaves in Recently deleted: they hold a live node.
-    stays: HashSet<NodeId>,
-    /// What the folders of Recently deleted hold, read once when asked.
-    holdings: Option<Holdings>,
+    /// What each row holds ([`held_below`]).
+    held: HashMap<NodeId, Held>,
     folders: HashMap<NodeId, String>,
     /// Where a walk up stops: a folder's top (here or not), the role folders whether synced
     /// here or not; above them all, the main folder's top (the drive's root).
@@ -131,9 +137,7 @@ impl<'a, 's> Listing<'a, 's> {
             rows: RemovedRows::new(s, Vec::new()),
             roots: Vec::new(),
             going: 0,
-            along: HashMap::new(),
-            stays: HashSet::new(),
-            holdings: None,
+            held: HashMap::new(),
             folders,
             tops,
             places: HashMap::new(),
@@ -155,32 +159,10 @@ impl<'a, 's> Listing<'a, 's> {
             .collect::<Result<Vec<_>, _>>()?;
         let rows = &listing.rows.rows[..count];
         let holdings = holdings(s)?;
-        // What each item holds, and whether emptying it leaves it.
-        let mut children: HashMap<NodeId, Vec<Chosen>> = HashMap::new();
-        for r in rows {
-            children
-                .entry(r.row.parent)
-                .or_default()
-                .push(Chosen::of(r));
-        }
-        for (r, root) in rows.iter().zip(&listing.roots) {
-            if *root != r.row.node {
-                continue;
-            }
-            let held = inside(
-                Chosen::of(r),
-                |c| (c.node, c.folder),
-                |n| Ok::<_, StateError>(children.get(&n).cloned().unwrap_or_default()),
-            )?;
-            listing.along.insert(r.row.node, held.len() - 1);
-            if !select(&held, &holdings).contains(&r.row.node) {
-                listing.stays.insert(r.row.node);
-            }
-        }
-        // What emptying all of it deletes.
         let chosen: Vec<Chosen> = rows.iter().map(Chosen::of).collect();
+        listing.held = held_below(&chosen, &holdings.live);
+        // What emptying all of it deletes.
         listing.going = select(&chosen, &holdings).len();
-        listing.holdings = Some(holdings);
         Ok(listing)
     }
 
@@ -192,21 +174,20 @@ impl<'a, 's> Listing<'a, 's> {
         };
         let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
         let i = self.rows.index[&node].unwrap_or_default();
-        let mut d = self.describe_as(i, root)?;
         if root != node {
-            return Ok(Some((d, 0)));
+            return Ok(Some((self.describe_as(i, root, false)?, 0)));
         }
+        // All of Recently deleted in it goes with it: it stays only for a live node in it.
         let s = self.rows.s;
-        let held: Vec<Chosen> = inside_of(s, top)?.iter().map(Chosen::of).collect();
-        if self.holdings.is_none() {
-            self.holdings = Some(holdings(s)?);
+        let below = inside_of(s, top)?;
+        let mut stays = false;
+        for r in below.iter().filter(|r| r.row.kind == NodeKind::Folder) {
+            if !s.mirror_children(r.row.node)?.is_empty() {
+                stays = true;
+                break;
+            }
         }
-        let holdings = self
-            .holdings
-            .as_ref()
-            .ok_or(StateError::Corrupt("no holdings".into()))?;
-        d.stays = !select(&held, holdings).contains(&node);
-        Ok(Some((d, held.len() - 1)))
+        Ok(Some((self.describe_as(i, root, stays)?, below.len() - 1)))
     }
 
     /// The rows of the items deleted on their own, newest first (the items' own rows give
@@ -220,13 +201,18 @@ impl<'a, 's> Listing<'a, 's> {
         picked
             .into_iter()
             .map(|i| {
-                let mut d = self.describe(i)?;
-                d.stays = self.stays.contains(&d.node);
-                let n = match d.root == d.node {
-                    true => self.along.get(&d.node).copied().unwrap_or(0),
-                    false => 0,
+                let d = self.describe(i)?;
+                let held = match d.root == d.node {
+                    true => self.held.get(&d.node).copied().unwrap_or_default(),
+                    false => Held::default(),
                 };
-                Ok((d, n))
+                Ok((
+                    Deleted {
+                        stays: held.stays,
+                        ..d
+                    },
+                    held.count,
+                ))
             })
             .collect()
     }
@@ -234,11 +220,11 @@ impl<'a, 's> Listing<'a, 's> {
     /// Row `i` as listed: where it comes back to and its path there.
     fn describe(&mut self, i: usize) -> Result<Deleted, StateError> {
         let root = self.roots[i];
-        self.describe_as(i, root)
+        self.describe_as(i, root, false)
     }
 
-    /// Row `i`, deleted with `root`'s delete.
-    fn describe_as(&mut self, i: usize, root: NodeId) -> Result<Deleted, StateError> {
+    /// Row `i`, deleted with `root`'s delete; `stays` when emptying it leaves it.
+    fn describe_as(&mut self, i: usize, root: NodeId, stays: bool) -> Result<Deleted, StateError> {
         let r = &self.rows.rows[i];
         let (node, parent, name) = (r.row.node, r.row.parent, r.row.name.clone());
         let (kind, size, removed_at_ms) = (r.row.kind, r.row.file.map(|f| f.size), r.removed_at);
@@ -252,7 +238,7 @@ impl<'a, 's> Listing<'a, 's> {
             removed_at_ms,
             root,
             folder: self.folders.get(&top).cloned(),
-            stays: false,
+            stays,
         })
     }
 }
@@ -559,23 +545,20 @@ impl Restoring<'_> {
         }
         *self.moved = true;
         match e {
-            // Deleted for good meanwhile (its header says so too), maybe without a trace in the
-            // feed: gone here too, and what was to come back into it, the top takes.
-            // A tombstone, by its answer, or one whose header says so.
-            RemoteError::Deleted => {
-                self.gone.push(row.file_id);
-                self.in_plan.remove(&row.node);
+            // Deleted for good meanwhile (its answer or its header says so), maybe without a
+            // trace in the feed: gone here too, and what was to come back into it, the top takes.
+            RemoteError::NotFound | RemoteError::Deleted => {
+                match gone_after(self.remote, &e, row.file_id) {
+                    Ok(true) => {
+                        self.gone.push(row.file_id);
+                        self.in_plan.remove(&row.node);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        self.failed.get_or_insert(e);
+                    }
+                }
             }
-            RemoteError::NotFound => match gone_for_good(self.remote, row.file_id) {
-                Ok(true) => {
-                    self.gone.push(row.file_id);
-                    self.in_plan.remove(&row.node);
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    self.failed.get_or_insert(e);
-                }
-            },
             // Changed meanwhile: the feed tells what it is now.
             RemoteError::VersionMismatch => {}
             e => {
@@ -645,6 +628,51 @@ pub fn inside<T, E>(
         next += 1;
     }
     Ok(rows)
+}
+
+/// What a row of Recently deleted holds: how many rows are below it, through removed folders
+/// ([`inside`]), and whether emptying it leaves it (a folder in it holds a live node).
+#[derive(Debug, Clone, Copy, Default)]
+struct Held {
+    count: usize,
+    stays: bool,
+}
+
+/// What each of `rows` (all of Recently deleted) holds, in one pass, given the removed folders
+/// holding a live node (`live`). With every row chosen, only a live node keeps one ([`select`]).
+/// A row in a cycle counts what is below it up to the cycle.
+fn held_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<NodeId, Held> {
+    let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for r in rows.iter().filter(|r| r.node != r.parent) {
+        children.entry(r.parent).or_default().push(r.node);
+    }
+    let none = Vec::new();
+    let below = |n: &NodeId| children.get(n).unwrap_or(&none);
+    let mut held: HashMap<NodeId, Held> = HashMap::new();
+    let mut on_path = HashSet::new();
+    for r in rows {
+        let mut stack = vec![(r.node, false)];
+        while let Some((n, done)) = stack.pop() {
+            if done {
+                let mut h = Held {
+                    count: 0,
+                    stays: live.contains(&n),
+                };
+                for c in below(&n) {
+                    if let Some(ch) = held.get(c) {
+                        h.count += 1 + ch.count;
+                        h.stays |= ch.stays;
+                    }
+                }
+                held.insert(n, h);
+                on_path.remove(&n);
+            } else if !held.contains_key(&n) && on_path.insert(n) {
+                stack.push((n, true));
+                stack.extend(below(&n).iter().map(|c| (*c, false)));
+            }
+        }
+    }
+    held
 }
 
 /// [`inside`] `top`, from the store.
