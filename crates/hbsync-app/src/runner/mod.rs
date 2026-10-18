@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -87,6 +87,8 @@ pub struct RunnerConfig {
     pub once: bool,
     /// Tests: adjusts the engine's config.
     pub tweak: Option<fn(&mut EngineConfig)>,
+    /// Raised when its status may have changed (the daemon pushes it to the tray).
+    pub(crate) changed: Arc<Wakeup>,
 }
 
 impl RunnerConfig {
@@ -102,6 +104,7 @@ impl RunnerConfig {
             look: Duration::from_secs(60),
             once: false,
             tweak: None,
+            changed: Arc::default(),
         }
     }
 }
@@ -160,6 +163,8 @@ pub struct Handle {
     status: Arc<Mutex<FolderStatus>>,
     progress: Arc<Counters>,
     woken: Arc<AtomicU64>,
+    /// Raised when its status may have changed.
+    changed: Arc<Wakeup>,
 }
 
 impl Handle {
@@ -168,6 +173,8 @@ impl Handle {
     pub fn send(&self, control: Command) -> bool {
         if matches!(control, Command::Pause { .. } | Command::Stop) {
             self.stop.store(true, Ordering::Relaxed);
+            // Shown as paused at once.
+            self.changed.raise();
         }
         self.control.0.send(Msg::Command(control)).is_ok()
     }
@@ -208,6 +215,31 @@ impl<F: FnOnce()> Drop for OnDrop<F> {
         if let Some(f) = self.0.take() {
             f();
         }
+    }
+}
+
+/// Raised when there is something to look at: whoever waits on it wakes.
+#[derive(Debug, Default)]
+pub(crate) struct Wakeup {
+    rung: Mutex<u64>,
+    rings: Condvar,
+}
+
+impl Wakeup {
+    pub fn raise(&self) {
+        *lock(&self.rung) += 1;
+        self.rings.notify_all();
+    }
+
+    /// Waits until it was raised after `seen` (what this returned last; 0 at first), or
+    /// `timeout` passed. Returns how often it has been raised.
+    pub fn wait(&self, seen: u64, timeout: Duration) -> u64 {
+        let rung = lock(&self.rung);
+        let (rung, _) = self
+            .rings
+            .wait_timeout_while(rung, timeout, |rung| *rung == seen)
+            .unwrap_or_else(|e| e.into_inner());
+        *rung
     }
 }
 
@@ -293,6 +325,7 @@ impl Runner {
             status: Arc::clone(&status),
             progress: Arc::clone(&progress),
             woken: Arc::clone(&woken),
+            changed: cfg.changed.clone(),
         };
         let runner = Runner {
             cfg,
@@ -312,7 +345,7 @@ impl Runner {
             .spawn(move || {
                 // Told also when it panics.
                 let _ended = OnDrop(Some(ended));
-                let status = Arc::clone(&runner.status);
+                let (status, changed) = (Arc::clone(&runner.status), runner.cfg.changed.clone());
                 let result = runner.run();
                 // Its account starts a failed runner again after a pause.
                 let mut status = lock(&status);
@@ -323,6 +356,7 @@ impl Runner {
                     tracing::error!("the sync of {} stopped: {e}", status.path.display());
                 }
                 drop(status);
+                changed.raise();
                 result
             })?;
         Ok((handle, thread))
@@ -330,6 +364,7 @@ impl Runner {
 
     fn set(&self, f: impl FnOnce(&mut FolderStatus)) {
         f(&mut lock(&self.status));
+        self.cfg.changed.raise();
     }
 
     /// The end of a pause: syncing goes on.

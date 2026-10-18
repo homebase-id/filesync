@@ -8,21 +8,21 @@
 mod account;
 mod answer;
 mod sleep;
+mod watch;
 
 pub use account::{Notifications, Puller, UNANNOUNCED_READ};
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use hbsync_homebase::HomebaseError;
 use hbsync_types::unix_now;
 
 use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
-use crate::runner::{Command, OnDrop, RunnerError, WAIT_AT_MOST, lock};
+use crate::runner::{Command, OnDrop, RunnerError, WAIT_AT_MOST, Wakeup, lock};
 use crate::{Config, ConfigError, CredentialError, Paths};
 use account::Account;
 
@@ -43,31 +43,6 @@ pub enum DaemonError {
     Runner(#[from] RunnerError),
     #[error("the control socket: {0}")]
     Ipc(std::io::Error),
-}
-
-/// Raised when there is something to look at: whoever waits on it wakes.
-#[derive(Debug, Default)]
-pub(crate) struct Wakeup {
-    rung: Mutex<u64>,
-    rings: Condvar,
-}
-
-impl Wakeup {
-    pub fn raise(&self) {
-        *lock(&self.rung) += 1;
-        self.rings.notify_all();
-    }
-
-    /// Waits until it was raised after `seen` (what this returned last; 0 at first), or
-    /// `timeout` passed. Returns how often it has been raised.
-    pub fn wait(&self, seen: u64, timeout: Duration) -> u64 {
-        let rung = lock(&self.rung);
-        let (rung, _) = self
-            .rings
-            .wait_timeout_while(rung, timeout, |rung| *rung == seen)
-            .unwrap_or_else(|e| e.into_inner());
-        *rung
-    }
 }
 
 /// Stops the daemon from another thread (a signal handler's).
@@ -102,6 +77,7 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
         stop,
         accounts: Mutex::default(),
         starting_over: AtomicUsize::new(0),
+        changed: Arc::default(),
     });
     {
         let daemon = Arc::downgrade(&daemon);
@@ -129,11 +105,20 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
         );
     }
     let listener = ipc::listen(paths).map_err(DaemonError::Ipc)?;
+    let watchers = Arc::new(watch::Watchers::new(Arc::clone(&daemon.changed)));
+    {
+        let (weak, watchers) = (Arc::downgrade(&daemon), Arc::clone(&watchers));
+        std::thread::Builder::new()
+            .name("hbsync-status".into())
+            .spawn(move || watch::push(weak, watchers))
+            .map_err(DaemonError::Ipc)?;
+    }
     {
         let daemon = Arc::clone(&daemon);
+        let watch = move |stream| watchers.add(stream);
         std::thread::Builder::new()
             .name("hbsync-control".into())
-            .spawn(move || ipc::serve(listener, move |r| answer::answer(r, &daemon)))
+            .spawn(move || ipc::serve(listener, move |r| answer::answer(r, &daemon), watch))
             .map_err(DaemonError::Ipc)?;
     }
     let mut result = Ok(());
@@ -168,6 +153,8 @@ pub(crate) struct Daemon {
     accounts: Mutex<Vec<(Arc<Account>, AccountThread)>>,
     /// Accounts starting over ([`Daemon::start_over`]): the daemon doesn't end meanwhile.
     starting_over: AtomicUsize,
+    /// Raised when the status may have changed ([`watch`]).
+    changed: Arc<Wakeup>,
 }
 
 type AccountThread = JoinHandle<Result<(), DaemonError>>;
@@ -195,8 +182,13 @@ impl Daemon {
         }
         // A pause that ended while the daemon wasn't running is over.
         let config = Config::load(&self.paths.config_file())?.unwrap_or_default();
-        let (account, requests) =
-            Account::new(&self.paths, identity, path, config.pause(unix_now()));
+        let (account, requests) = Account::new(
+            &self.paths,
+            identity,
+            path,
+            config.pause(unix_now()),
+            Arc::clone(&self.changed),
+        );
         let thread = {
             let (account, paths, stop) =
                 (Arc::clone(&account), self.paths.clone(), self.stop.clone());
@@ -213,6 +205,7 @@ impl Daemon {
                 .map_err(DaemonError::Ipc)?
         };
         accounts.push((account, thread));
+        self.changed.raise();
         Ok(())
     }
 
@@ -257,7 +250,11 @@ impl Daemon {
         let ended = |(a, t): &(Arc<Account>, AccountThread)| {
             t.is_finished() || a.done.load(Ordering::SeqCst)
         };
+        let before = accounts.len();
         let result = join_finished(&mut accounts, ended, |(_, t)| t);
+        if accounts.len() != before {
+            self.changed.raise();
+        }
         (result, accounts.len())
     }
 }

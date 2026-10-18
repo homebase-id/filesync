@@ -1,5 +1,6 @@
 //! What the daemon and its clients (the CLI, the tray) say to each other on the control socket
-//! ([`crate::ipc`]): one [`Request`] per connection, one [`Reply`].
+//! ([`crate::ipc`]): one [`Request`] per connection, one [`Reply`]; but [`Ask::Watch`], answered
+//! with a [`Reply::Status`] now and another each time it changes.
 //!
 //! The daemon syncs folders, each with an account (an identity): its status lists both, and a
 //! [`Control`] goes to the daemon (every folder), to an account (its Recently deleted), or to
@@ -16,7 +17,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -37,6 +38,9 @@ impl Request {
 #[serde(rename_all = "snake_case")]
 pub enum Ask {
     Status,
+    /// The status now, and again each time it changes (at most once a second while a folder
+    /// syncs), on this connection until either side closes it: what the tray shows.
+    Watch,
     /// Stop the daemon (between operations). The one request a daemon of any version takes,
     /// whatever protocol it speaks: an update stops the daemon of the build before it.
     Stop,
