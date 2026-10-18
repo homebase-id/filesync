@@ -188,6 +188,13 @@ impl Remote for ScopedRemote {
     fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.inner.set_removed(files, removed)
+    }
     fn read(
         &self,
         file_id: RemoteFileId,

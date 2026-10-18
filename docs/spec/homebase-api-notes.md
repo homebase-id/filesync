@@ -125,6 +125,30 @@ client reads the whole feed again after a long absence (node schema, Recently de
   `hard_purge` in `crates/hbsync-dev/tests/live.rs`).
 - The old single `.../{fileId}/hard-delete` takes no version tag; the client doesn't use it.
 
+`POST /api/v2/drives/{d}/files/update-archival-status-batch` (odin-core #1964, v0.1.962)
+**[verified]** `V2DriveBatchFileWriteOperationsController.UpdateArchivalStatusBatch`,
+`UpdateArchivalStatusBatchRequestV2.cs`, `UpdateArchivalStatusBatchResultV2.cs`,
+`DriveStorageServiceBase.UpdateArchivalStatus` (odin-core main 4eb50e5db):
+- Body, encrypted like the other V2 bodies: `{archivalStatus, files: [{fileId, versionTag}]}`,
+  the files as for `hard-delete-batch` (1 to 1,000, none twice); `archivalStatus` required
+  (missing is a 400, never a silent 0).
+- Each file in request order, one after another (`PerFileAsync`): only `appData.archivalStatus`
+  is set, the rest of the header (content, key header, payloads, `groupId`) stays, so neither
+  the key nor the content is needed. A deleted file answers `cannotUpdateNonActiveFile`
+  before the version is looked at, a stale tag `versionTagMismatch`, a missing one (or hidden
+  by the ACL) `fileNotFound`. A file already at that status is left alone: its version tag and
+  `updated` stay (a removal keeps its time). Otherwise the write moves its version and
+  `updated` (`modified` = max(old + 1, now)) and raises the usual drive event. The client
+  doesn't put a folder and what is in it in one request: a folder whose removal (or restore)
+  is refused must hold back what is in it, and a request goes on past a refused file.
+- Answer `{results: [{fileId, newVersionTag, updated, errorCode}]}`, one per file in request
+  order; `updated` as Unix ms (**[tried]** live, `write_answers_carry_the_feeds_time`). One
+  file's error never stops the others.
+- The client removes and restores through it (`HomebaseRemote::set_removed`): a request per
+  level of a folder's tree and per 1,000 files, a folder's level before what is in it. A
+  restore under a new name (` (restored)`) or at the top is a PATCH, as it rewrites content
+  or `groupId`.
+
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,
 contentType, iv, hash?}]}}`. `transferIv` is required and must not be all zero. Omit

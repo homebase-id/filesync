@@ -743,6 +743,13 @@ impl Remote for Counted {
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.inner.set_removed(files, removed)
+    }
 
     fn create(
         &self,
@@ -1128,7 +1135,7 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
 fn hard_purge() -> R {
-    use hbsync_homebase::drive::HARD_DELETE_BATCH;
+    use hbsync_homebase::drive::BATCH_FILES;
     use hbsync_remote::contract::{file, removed};
     use hbsync_types::RemoteRef;
     use std::collections::HashSet;
@@ -1170,13 +1177,13 @@ fn hard_purge() -> R {
         )?;
         // Subscribed before the deletes.
         std::thread::sleep(Duration::from_secs(3));
-        println!("{n} removed files deleted for good, {HARD_DELETE_BATCH} a request");
+        println!("{n} removed files deleted for good, {BATCH_FILES} a request");
         println!(
             "{:<8} {:>6} {:>10} {:>12} {:>12}",
             "batch", "files", "ms", "bytes sent", "bytes recv"
         );
         let mut total = Duration::ZERO;
-        for (i, batch) in made.chunks(HARD_DELETE_BATCH).enumerate() {
+        for (i, batch) in made.chunks(BATCH_FILES).enumerate() {
             let (sent, recv) = (socket_count("bytes_sent:")?, socket_bytes()?);
             let start = std::time::Instant::now();
             let results = remote.delete_for_good(batch)?.into_answers()?;

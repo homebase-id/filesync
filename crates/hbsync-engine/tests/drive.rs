@@ -251,6 +251,13 @@ impl Remote for HeldPage {
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.inner.set_removed(files, removed)
+    }
     fn create(
         &self,
         node: &NodeMeta,
@@ -480,6 +487,13 @@ impl Remote for FailsAfterAPage {
         files: &[hbsync_types::RemoteRef],
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
+    }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.inner.set_removed(files, removed)
     }
     fn create(
         &self,

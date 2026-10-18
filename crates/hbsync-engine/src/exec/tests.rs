@@ -1117,6 +1117,13 @@ impl Remote for ReadHook {
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.inner.set_removed(files, removed)
+    }
 
     fn create(
         &self,
@@ -3427,5 +3434,45 @@ fn a_live_folder_with_a_leftover_removal_takes_nothing_along() -> R {
     let gone =
         h.db.read(|s| view::gone_on_drive(s, node, &Scope::main()))?;
     assert!(!gone);
+    Ok(())
+}
+
+/// Removals go to the drive together, in one request, each file at the version its plan saw:
+/// one written since stays as it is (never forced) and is planned again, the others go.
+#[test]
+fn removals_go_in_one_request_and_a_changed_file_stays() -> R {
+    let mut h = Harness::new()?;
+    let (a, at_a) = h.seed("a", b"A")?;
+    let (b, at_b) = h.seed("b", b"B")?;
+    let (c, at_c) = h.seed("c", b"C")?;
+    // Another device renames b after this plan was made.
+    let renamed = hbsync_remote::NodeMeta {
+        node: b,
+        parent: NodeId::ROOT,
+        kind: NodeKind::File,
+        content: NodeContent::file("b2", 0, 1, false),
+        removed: false,
+    };
+    h.remote
+        .server()
+        .update(at_b.file_id, at_b.version, &renamed, None)?;
+    let delete = |node, at: RemoteRef| Op::RemoteDelete {
+        node,
+        parent: NodeId::ROOT,
+        file_id: at.file_id,
+        expected: at.version,
+    };
+    let before = h.remote.faults().requests;
+    let report = h.run(vec![delete(a, at_a), delete(b, at_b), delete(c, at_c)])?;
+    assert_eq!(h.remote.faults().requests - before, 1, "one request");
+    assert!(report.drive_moved, "{report:?}");
+    let server = h.remote.server();
+    let removed: Vec<_> = server.removed().map(|r| r.file_id).collect();
+    assert_eq!(removed.len(), 2, "{removed:?}");
+    assert!(removed.contains(&at_a.file_id) && removed.contains(&at_c.file_id));
+    assert_eq!(server.live_names(), ["b2"]);
+    drop(server);
+    assert!(h.db.read(|s| s.removed_by_node(b))?.is_none());
+    assert!(h.db.read(|s| s.removed_by_node(a))?.is_some());
     Ok(())
 }

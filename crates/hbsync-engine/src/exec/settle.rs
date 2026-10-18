@@ -320,25 +320,6 @@ pub(super) fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String
         .map(str::to_owned)
 }
 
-/// A metadata-only update of a node to `meta` if it's still at `target` (its payload, of
-/// content `hash`, stays); its mirror row after.
-pub(crate) fn update_meta(
-    remote: &dyn Remote,
-    target: &Target,
-    meta: &NodeMeta,
-    hash: Option<hbsync_types::ContentHash>,
-) -> Result<MirrorRow, RemoteError> {
-    let written = remote.update(target, meta, None)?;
-    Ok(MirrorRow::written(
-        written,
-        meta.node,
-        meta.parent,
-        meta.kind,
-        &meta.content,
-        hash,
-    ))
-}
-
 /// A mirror row's node as written back: at `parent` under `name`, removed or not.
 pub(crate) fn meta_at(row: &MirrorRow, parent: NodeId, name: &str, removed: bool) -> NodeMeta {
     NodeMeta {

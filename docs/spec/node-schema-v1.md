@@ -81,7 +81,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 | `mtime` | int | files | local modification time, Unix ms |
 | `size` | int | files | plaintext size in bytes |
 | `x` | bool | no | executable bit; omitted when false |
-| `rm` | object | no longer written | from before 2026-10-15: `{"at": <Unix ms>, "root": "<node id>"}` on a removed node. Readers ignore it (the header says what is removed and when, see Recently deleted); the next write drops it |
+| `rm` | object | no longer written | from before 2026-10-15: `{"at": <Unix ms>, "root": "<node id>"}` on a removed node. Readers ignore it (the header says what is removed and when, see Recently deleted); the next write of the content drops it (a removal or restore through the archival-status batch keeps the content, and so it) |
 | `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime`. Readers round a fractional value and take anything else as none (and keep it) |
 | `tags` | array | no | Finder tags (files and folders): `[{"n": <name>, "c": <colour>}, …]`. `n` is the tag's name (NFC, not empty, one entry per name); `c` is Finder's colour, `1` grey, `2` green, `3` purple, `4` blue, `5` yellow, `6` red, `7` orange, left out when none. Order doesn't matter (this client sorts by name). No key means no tags. Synced: adding or removing a tag, or changing its colour, reaches every device (sync-semantics §11). Readers skip an entry without a string `n` and read any other `c` as none |
 
@@ -132,8 +132,9 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 
 ## Recently deleted
 - A delete removes: one metadata-only update that sets `archivalStatus` to `2`, keeping the
-  content, payload, `groupId` and name. Every removed node is marked so itself: a removed node
-  is out of the folder tree for every client, and restorable.
+  content, payload, `groupId` and name (`update-archival-status-batch`, many files in one
+  request, each at its `versionTag`: homebase-api-notes). Every removed node is marked so
+  itself: a removed node is out of the folder tree for every client, and restorable.
 - **When:** a node's removal time is its header's `updated`, the server's time of the write
   that removed it (odin-core's `record.modified`, **[verified]** `FileMetadata.cs`). Nothing
   writes to a removed node, so it stays that time (see the rules below).
@@ -146,7 +147,7 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   it. (Writers from before 2026-10-15 removed what was in a folder first: their folder deletes
   list as separate items until they expire.)
 - Restore is the update back: `archivalStatus` `0` (and new bytes, when an edit
-  restores it). Restoring a folder also restores the removed nodes below it that were deleted
+  restores it; the same batch when nothing else changes). Restoring a folder also restores the removed nodes below it that were deleted
   with it (not what was deleted from it before); a node whose parent is removed brings the
   parent back first, and one whose parent is gone for good comes back at the top. If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
@@ -232,7 +233,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
 - **Read:** ignore keys you don't use. Showing `ct` and `tags` is optional. Leave nodes with
   `archivalStatus` `2` out of the folder tree (a "Recently deleted" view may show them).
 - **Delete:** remove (set `archivalStatus` `2`), never delete a live node outright; a folder
-  first (Recently deleted).
+  first (Recently deleted). `update-archival-status-batch` does it for up to 1,000 files in a
+  request, each at its `versionTag`, without reading or rewriting content: send a folder's
+  removal before (not in the same request as) what is in it, and leave a file it answers
+  `versionTagMismatch` for as it is.
 - **A removed node** is never written to except to restore it: its `updated` is its removal
   time. That also rules out what odin-core counts as a change of it **[verified]**
   `TableDriveMainIndex.cs` (`UpdateReactionSummaryAsync`, `UpdateTransferSummaryAsync`,
@@ -250,6 +254,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-18: removals and restores that change nothing else go through
+  `update-archival-status-batch` (odin-core #1964), many files a request; the node is the same.
 - 2026-10-16: emptying and the purge delete for good only removed nodes, never a live node: a
   folder holding a live node stays until the purge has marked those nodes removed (next).
 - 2026-10-17: the purge (above, the one rule for deleting for good): each node goes without a

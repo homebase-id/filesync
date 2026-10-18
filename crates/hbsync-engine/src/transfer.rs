@@ -4,8 +4,9 @@
 //! places files in the sync root happens on the caller's thread, before ([`Job`] preparation)
 //! and after (the `commit` callback), so the DB keeps a single writer.
 //!
-//! Order: jobs marked urgent (a file the user is waiting for) first, then smallest first, so
-//! many small files aren't stuck behind one large one.
+//! Order: removals first (they move no bytes; a request takes a thousand), then jobs marked
+//! urgent (a file the user is waiting for), then smallest first, so many small files aren't
+//! stuck behind one large one.
 //!
 //! Small files wait on round trips, so many run at once. Large ones wait on bandwidth, so only
 //! a few do: more wouldn't move bytes faster, each would just finish later (and an upload cut
@@ -20,7 +21,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
-use hbsync_remote::{NodeMeta, Pace, Remote, RemoteError, Upload};
+use hbsync_remote::{Answers, NodeMeta, Pace, Remote, RemoteError, Upload};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target};
 
 #[derive(Debug, Clone, Copy)]
@@ -184,6 +185,33 @@ impl Job {
             Job::Meta { .. } => 0,
         }
     }
+
+    /// The file a removal (to Recently deleted) removes, at the version it knows: a write of the
+    /// removal alone (`prepare_remove` writes the node as the mirror has it), which goes with
+    /// others in one request ([`Remote::set_removed`]).
+    /// A node of the part of the drive a role folder's engine leaves out isn't one: its write
+    /// goes to the remote's guard as an update ([`NodeId::OUTSIDE`]).
+    fn removal(&self) -> Option<&Target> {
+        match self {
+            Job::Meta {
+                meta,
+                target: Some(target),
+            } if meta.removed && ![meta.node, meta.parent].contains(&NodeId::OUTSIDE) => {
+                Some(target)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Removals sent in one request: as many as Homebase takes in one. A level of more goes in
+/// requests that run at once, on the workers.
+const REMOVALS_AT_ONCE: usize = 1000;
+
+/// What a worker takes on: a job, or removals sent together.
+enum Task {
+    One(Box<Job>),
+    Removals(Vec<Job>),
 }
 
 /// What a job produced.
@@ -220,7 +248,7 @@ impl JobError {
     }
 }
 
-/// Runs `jobs` on a worker pool. `urgent` jobs go first, then smaller ones. `commit` is called
+/// Runs `jobs` on a worker pool: removals together, then `urgent` jobs, then smaller ones. `commit` is called
 /// on this thread for every finished job, in completion order.
 pub fn run_jobs(
     remote: &dyn Remote,
@@ -247,9 +275,20 @@ pub fn run_jobs_while(
     mut commit: impl FnMut(Job, JobResult) -> bool,
 ) {
     jobs.sort_by_key(|(urgent, job)| (!*urgent, job.size()));
-    let workers = cfg.workers.min(jobs.len()).max(1);
+    let (mut removals, jobs): (Vec<Job>, Vec<Job>) = jobs
+        .into_iter()
+        .map(|(_, j)| j)
+        .partition(|j| j.removal().is_some());
+    // Removals first, a request for each thousand: they move no bytes.
+    let mut tasks = VecDeque::new();
+    while !removals.is_empty() {
+        let rest = removals.split_off(removals.len().min(REMOVALS_AT_ONCE));
+        tasks.push_back(Task::Removals(std::mem::replace(&mut removals, rest)));
+    }
+    tasks.extend(jobs.into_iter().map(|j| Task::One(Box::new(j))));
+    let workers = cfg.workers.min(tasks.len()).max(1);
     let queue = Mutex::new(Queue {
-        jobs: jobs.into_iter().map(|(_, j)| j).collect(),
+        jobs: tasks,
         large: 0,
         large_from: cfg.large_from,
         large_at_once: cfg.large_at_once.max(1),
@@ -271,17 +310,27 @@ pub fn run_jobs_while(
                 // outage is seen here, or fast jobs would all have started before it counted.
                 while !out.load(Ordering::Relaxed)
                     && !halt.is_some_and(|h| h.load(Ordering::Relaxed))
-                    && let Some(job) = queue.lock().ok().and_then(|mut q| q.take())
+                    && let Some(task) = queue.lock().ok().and_then(|mut q| q.take())
                 {
-                    let result = run_job(remote, &job, meter);
-                    if let JobResult::Failed(JobError::Remote(RemoteError::Transient(_))) = &result
-                    {
+                    let results = match task {
+                        Task::One(job) => {
+                            let result = run_job(remote, &job, meter);
+                            if let Ok(mut q) = queue.lock() {
+                                q.finished(&job);
+                            }
+                            vec![(*job, result)]
+                        }
+                        Task::Removals(jobs) => remove(remote, jobs),
+                    };
+                    if results.iter().any(|(_, result)| {
+                        matches!(
+                            result,
+                            JobResult::Failed(JobError::Remote(RemoteError::Transient(_)))
+                        )
+                    }) {
                         out.store(true, Ordering::Relaxed);
                     }
-                    if let Ok(mut q) = queue.lock() {
-                        q.finished(&job);
-                    }
-                    if tx.send((job, result)).is_err() {
+                    if results.into_iter().any(|r| tx.send(r).is_err()) {
                         break;
                     }
                 }
@@ -300,7 +349,7 @@ pub fn run_jobs_while(
 
 /// Jobs not started yet, and how many large ones are running.
 struct Queue {
-    jobs: VecDeque<Job>,
+    jobs: VecDeque<Task>,
     large: usize,
     large_from: u64,
     large_at_once: usize,
@@ -314,12 +363,17 @@ impl Queue {
     /// The first job that may start: a small one, or a large one while a slot is free. `None`
     /// when only large ones are left and their slots are all taken: the workers holding the
     /// slots take them on, so the one asking can end.
-    fn take(&mut self) -> Option<Job> {
+    fn take(&mut self) -> Option<Task> {
         let free = self.large < self.large_at_once;
-        let i = self.jobs.iter().position(|j| free || !self.is_large(j))?;
-        let job = self.jobs.remove(i)?;
-        self.large += usize::from(self.is_large(&job));
-        Some(job)
+        let i = self.jobs.iter().position(|t| match t {
+            Task::One(j) => free || !self.is_large(j),
+            Task::Removals(_) => true,
+        })?;
+        let task = self.jobs.remove(i)?;
+        if let Task::One(job) = &task {
+            self.large += usize::from(self.is_large(job));
+        }
+        Some(task)
     }
 
     fn finished(&mut self, job: &Job) {
@@ -373,6 +427,26 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             .map_err(JobError::Remote),
     };
     result.unwrap_or_else(JobResult::Failed)
+}
+
+/// Removes the files of `jobs` (removals, [`Job::removal`]) in one call: each job with its file's
+/// answer. Those a stopped call left unanswered fail as it did: such a call may have written
+/// them (an answer lost), so they are planned again, never sent again blind.
+fn remove(remote: &dyn Remote, jobs: Vec<Job>) -> Vec<(Job, JobResult)> {
+    let files: Vec<Target> = jobs.iter().filter_map(Job::removal).cloned().collect();
+    let Answers { answers, stopped } = remote
+        .set_removed(&files, true)
+        .unwrap_or_else(Answers::stopped);
+    let stopped =
+        stopped.unwrap_or_else(|| RemoteError::Fatal("removals the drive didn't answer".into()));
+    let mut answers = answers.into_iter();
+    jobs.into_iter()
+        .map(|job| {
+            let answer = answers.next().unwrap_or_else(|| Err(stopped.again()));
+            let result = answer.map_or_else(|e| JobResult::Failed(e.into()), JobResult::Written);
+            (job, result)
+        })
+        .collect()
 }
 
 fn download(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<JobResult, JobError> {
