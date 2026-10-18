@@ -477,6 +477,143 @@ fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
     Ok(())
 }
 
+/// Drive names the name map wouldn't give back from their local spelling (decomposed, which
+/// every OS's map composes; on Windows, an escape's own code point), each with how this OS
+/// spells it.
+const UNMAPPED: [(hbsync_platform::Os, &str); 3] = [
+    (hbsync_platform::Os::Linux, "Re\u{301}sume\u{301}.txt"),
+    (hbsync_platform::Os::MacOs, "e\u{301}"),
+    (hbsync_platform::Os::Windows, "a\u{F022}b"),
+];
+
+/// Names the name map wouldn't give back ([`UNMAPPED`]): from the first download on, the item
+/// reads as the drive's name, not as renamed. Otherwise an edit renamed the node on the drive.
+#[test]
+fn a_downloaded_name_the_map_wont_give_back_reads_as_the_drives() -> R {
+    use hbsync_fileio::HashAlgorithm::Blake3;
+    use hbsync_types::NodeId;
+
+    for (os, name) in UNMAPPED {
+        let server = server();
+        let (edited, gone) = (format!("1{name}"), format!("2{name}"));
+        let (edited_node, gone_node) = {
+            let mut srv = server.lock().map_err(|_| "poisoned")?;
+            (
+                srv.seed_file(NodeId::ROOT, &edited, b"v1", Blake3)?.0,
+                srv.seed_file(NodeId::ROOT, &gone, b"v1", Blake3)?.0,
+            )
+        };
+        let mut c = Client::with_config(&server, "c", move |cfg| cfg.exec.os = os)?;
+        assert_clean(&c.sync()?);
+        // An edit here goes up to the same node, under the drive's name.
+        c.write(&edited, b"v2")?;
+        assert_clean(&c.sync()?);
+        // The drive deletes the other: it goes here too, and doesn't come back.
+        {
+            let mut srv = server.lock().map_err(|_| "poisoned")?;
+            let file = srv.file_id_of(gone_node).ok_or("live")?;
+            let version = srv.header(file)?.version;
+            srv.delete(file, version)?;
+        }
+        assert_clean(&c.sync()?);
+        let names: Vec<String> = c.entries("").into_iter().map(|(p, _)| p).collect();
+        assert_eq!(names, std::slice::from_ref(&edited), "{os:?}");
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        assert_eq!(srv.live_names(), [edited], "{os:?}");
+        let file = srv.file_id_of(edited_node).ok_or("the same node")?;
+        assert_eq!(srv.payload(file)?.as_slice(), b"v2", "{os:?}");
+    }
+    Ok(())
+}
+
+/// A rename on the drive to a name the name map wouldn't give back ([`UNMAPPED`]; on Windows,
+/// from the name this device spells the same): it settles. Otherwise the item never read as at
+/// the new name, and every sync moved it again, up to the round limit.
+#[test]
+fn a_rename_on_the_drive_to_a_name_the_map_wont_give_back_settles() -> R {
+    use hbsync_fileio::HashAlgorithm::Blake3;
+    use hbsync_remote::{NodeMeta, RemoteBody};
+    use hbsync_types::NodeId;
+
+    for (os, to) in UNMAPPED {
+        let server = server();
+        let from = hbsync_platform::nfc(&to.replace('\u{F022}', ":"));
+        let node = (server.lock().map_err(|_| "poisoned")?)
+            .seed_file(NodeId::ROOT, &from, b"v1", Blake3)?
+            .0;
+        let mut c = Client::with_config(&server, "c", move |cfg| cfg.exec.os = os)?;
+        assert_clean(&c.sync()?);
+        {
+            let mut srv = server.lock().map_err(|_| "poisoned")?;
+            let file = srv.file_id_of(node).ok_or("live")?;
+            let h = srv.header(file)?;
+            let RemoteBody::Live { mut content, .. } = h.body else {
+                return Err("live".into());
+            };
+            content.name = to.to_owned();
+            let meta = NodeMeta {
+                node,
+                parent: h.parent,
+                kind: h.kind,
+                content,
+                removed: false,
+            };
+            srv.update(file, h.version, &meta, None)?;
+        }
+        let report = c.sync()?;
+        assert_clean(&report);
+        assert_eq!(report.pending, 0, "{os:?}: {report:?}");
+        assert!(c.sync()?.is_idle(), "{os:?}");
+        let names: Vec<String> = c.entries("").into_iter().map(|(p, _)| p).collect();
+        assert_eq!(names, [to], "{os:?}");
+        assert_eq!(
+            server.lock().map_err(|_| "poisoned")?.live_names(),
+            [to],
+            "{os:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A first run over a copy of a node whose drive name is decomposed ([`UNMAPPED`]), hashed
+/// with this device's algorithm or another: the copy is adopted, no conflict and nothing
+/// uploaded. Otherwise it read as both sides moved, or, across hash algorithms, wasn't adopted
+/// at all and went up as a conflict copy. (Not a drive name holding an escape's own code point
+/// on Windows: adoption looks for the drive's node under the name the copy maps to, which
+/// differs.)
+#[test]
+fn a_copy_at_a_decomposed_drive_name_is_adopted() -> R {
+    use hbsync_fileio::HashAlgorithm::{Blake3, Sha256};
+    use hbsync_platform::Os;
+    use hbsync_types::NodeId;
+
+    for (os, name) in UNMAPPED.into_iter().filter(|(os, _)| *os != Os::Windows) {
+        for algorithm in [Blake3, Sha256] {
+            let server = server();
+            server.lock().map_err(|_| "poisoned")?.seed_file(
+                NodeId::ROOT,
+                name,
+                b"same",
+                algorithm,
+            )?;
+            let mut c = Client::with_config(&server, "c", move |cfg| cfg.exec.os = os)?;
+            c.write(name, b"same")?;
+            let report = c.sync()?;
+            assert_clean(&report);
+            assert_eq!(report.adopted, 1, "{os:?}, {algorithm:?}: {report:?}");
+            assert!(c.sync()?.is_idle(), "{os:?}, {algorithm:?}");
+            let names: Vec<String> = c.entries("").into_iter().map(|(p, _)| p).collect();
+            assert_eq!(names, [name], "{os:?}, {algorithm:?}");
+            assert_eq!(
+                server.lock().map_err(|_| "poisoned")?.live_names(),
+                [name],
+                "{os:?}, {algorithm:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn large_file_streams_and_resumes() -> R {
     let server = server();

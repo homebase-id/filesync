@@ -276,7 +276,13 @@ fn settled(
     os: Os,
 ) -> Option<BaseRow> {
     let l = local.state.as_ref()?;
-    let agreed = Agreement::of(l, remote, how.same_bytes);
+    let mut agreed = Agreement::of(l, remote, how.same_bytes);
+    // An item at this device's spelling of the drive's name is at that name, though the name
+    // map wouldn't give it back (decomposed, an escape's own code point): the spelling is
+    // recorded below. Else it reads as renamed from the first placement on.
+    agreed.place |= l.parent == remote.parent
+        && l.name != remote.name
+        && spells(&local.row.path, &remote.name, os);
     let prior = base
         .as_ref()
         .map(|b| b.state.tags.clone())
@@ -298,6 +304,12 @@ fn settled(
         row.local_hash = l.content.map(|c| c.hash);
     }
     Some(row)
+}
+
+/// Whether `path` is where this device spells the drive's `name` in its folder (where the
+/// executor puts it), whether or not the name map gives `name` back from it.
+pub(crate) fn spells(path: &RelPath, name: &str, os: Os) -> bool {
+    spell(&path.parent().unwrap_or_default(), name, os).is_ok_and(|p| p == *path)
 }
 
 /// The local spelling of `path`'s name, recorded in the base when the name map wouldn't give it
