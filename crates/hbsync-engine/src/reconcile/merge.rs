@@ -260,7 +260,7 @@ impl Reconciler<'_> {
             if l_edited && r_edited && !same_edit {
                 // Keep both: the remote version keeps the node, the local bytes become a copy.
                 let base_version = self.input.base_extra.get(&node).and_then(|e| e.version);
-                let copy = fork_id(node, l.content.map(|c| c.hash), base_version);
+                let copy = fork_id(node, l.content, base_version, &self.opts.computer);
                 self.forks.insert(node, copy);
                 self.plan.conflicts.push(Conflict::EditEdit { node, copy });
                 let copy_state = NodeState {

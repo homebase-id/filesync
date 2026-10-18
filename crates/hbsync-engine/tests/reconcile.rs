@@ -283,6 +283,64 @@ fn edit_edit_keeps_both_versions() {
     );
 }
 
+/// `f` edited here to `mine` against the drive's other version, planned on `computer`: the
+/// conflict copy's id.
+fn copy_id(f: NodeId, mine: FileContent, computer: &str) -> NodeId {
+    let mut w = World::default();
+    w.opts.computer = computer.into();
+    w.local(f, Some(NodeState::file(ROOT, "report.txt", mine)));
+    w.remote(f, Some(file(ROOT, "report.txt", "theirs")));
+    let plan = w.plan();
+    match plan.ops.first() {
+        Some(Op::LocalFork { new_node, name, .. }) if !name.is_empty() => *new_node,
+        _ => panic!("no fork: {plan:?}"),
+    }
+}
+
+/// The conflict copy's id is fixed for the conflict on a computer: planned again (after a
+/// crash, say), it is the same copy. Another computer makes its own copy of the same conflict,
+/// with the same bytes, under another id; other bytes (the executable bit too) another copy.
+#[test]
+fn a_conflict_copy_id_is_the_same_on_a_replan_and_its_computers_own() {
+    let [f] = ids(1)[..] else { unreachable!() };
+    let mine = FileContent {
+        hash: h("mine"),
+        size: 4,
+        mtime_ms: 0,
+        executable: false,
+    };
+    let laptop = copy_id(f, mine, "laptop's db id");
+    assert_eq!(copy_id(f, mine, "laptop's db id"), laptop);
+    assert_ne!(copy_id(f, mine, "desk's db id"), laptop);
+    let executable = FileContent {
+        executable: true,
+        ..mine
+    };
+    assert_ne!(copy_id(f, executable, "laptop's db id"), laptop);
+}
+
+/// A fork whose copy has no folder yet (the file's folder here waits for its own parent: the
+/// repairs take the copy out) waits: no copy, never one named "", and nothing done to the
+/// node. Its conflicts (the edits, the moves) aren't reported yet: that it waits is.
+#[test]
+fn a_fork_whose_copy_has_to_wait_waits() {
+    let [d, f] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    // The local folder of the file is nowhere in the input.
+    w.local(f, Some(file(d, "report.txt", "mine")));
+    w.remote(f, Some(file(ROOT, "report.txt", "theirs")));
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .all(|op| op.node() != f
+                && !matches!(op, Op::LocalFork { .. } | Op::RemoteCreate { .. })),
+        "{plan:?}"
+    );
+    assert!(plan.deferred.contains(&f), "{plan:?}");
+    assert_eq!(plan.conflicts, [Conflict::CopyWaits { node: f }]);
+}
+
 #[test]
 fn same_edit_on_both_sides_just_settles() {
     let [f] = ids(1)[..] else { unreachable!() };
@@ -773,6 +831,33 @@ fn a_local_edit_of_a_file_moved_into_an_ignored_folder_stays_as_a_new_file() {
     }));
 }
 
+/// A detached item's new id is its computer's: the same on a replan, another on another
+/// computer, even one with the same device name.
+#[test]
+fn a_detached_items_id_is_its_computers() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let detached = |computer: &str| {
+        let mut w = World {
+            opts: ignoring("build/\n"),
+            ..World::default()
+        };
+        w.opts.device = "laptop".into();
+        w.opts.computer = computer.into();
+        w.synced(f, file(ROOT, "a.txt", "v1"));
+        w.local(f, Some(file(ROOT, "a.txt", "local v2")));
+        w.remote(b, Some(folder(ROOT, "build")))
+            .remote(f, Some(file(b, "a.txt", "v1")));
+        let plan = w.plan();
+        match plan.ops.first() {
+            Some(&Op::LocalDetach { new_node, .. }) => new_node,
+            _ => panic!("{plan:?}"),
+        }
+    };
+    let one = detached("one computer's db id");
+    assert_eq!(detached("one computer's db id"), one);
+    assert_ne!(detached("another computer's db id"), one);
+}
+
 #[test]
 fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
     let [b, d, f, n] = ids(4)[..] else {
@@ -966,4 +1051,49 @@ fn local_writes_carry_the_drive_version_the_plan_saw() {
         assert_eq!(drive(node), Some(&seen), "{op} carries what the plan saw");
     }
     assert_eq!(drive(tagged).map(|d| &d.state), Some(&red));
+}
+
+/// A fork whose copy has to wait makes its node wait before the names are judged: the node
+/// keeps the name it holds on the drive, and a new file wanting that name yields to it, the
+/// same whichever id is lower. (Judged as if the node went ahead, it lost to a lower id: the
+/// plan renamed it, but it waited, and the other file went up under the name it still held.)
+#[test]
+fn a_waiting_fork_keeps_its_name_and_a_new_file_yields() {
+    let [d, a, b] = ids(3)[..] else {
+        unreachable!()
+    };
+    for (f, x) in [(a, b), (b, a)] {
+        for x_on_drive in [false, true] {
+            let mut w = World::default();
+            w.synced(f, file(ROOT, "a.txt", "v1"));
+            // Here: edited, in a folder that waits for its own; on the drive: edited, moved.
+            w.local(f, Some(file(d, "a.txt", "mine")));
+            w.remote(f, Some(file(ROOT, "x.txt", "theirs")));
+            let other = Some(file(ROOT, "x.txt", "other"));
+            if x_on_drive {
+                w.remote(x, other);
+            } else {
+                w.local(x, other);
+            }
+            let plan = w.plan();
+            assert!(plan.ops.iter().all(|op| op.node() != f), "{plan:?}");
+            assert!(plan.deferred.contains(&f), "{plan:?}");
+            let mut conflicts = plan.conflicts.clone();
+            conflicts.sort_by_key(|c| c.node() == x);
+            assert_eq!(
+                conflicts,
+                [
+                    Conflict::CopyWaits { node: f },
+                    Conflict::NameClash { node: x }
+                ]
+            );
+            let renamed = |op: &Op| match op {
+                Op::RemoteCreate { node, name, .. } | Op::RemoteUpdate { node, name, .. } => {
+                    *node == x && name == "x (conflict 1).txt"
+                }
+                _ => false,
+            };
+            assert!(plan.ops.iter().any(renamed), "{plan:?}");
+        }
+    }
 }

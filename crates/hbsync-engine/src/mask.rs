@@ -30,7 +30,6 @@
 //! the same way, but is never leaving or brought back: it is synced elsewhere, by another
 //! engine or another device. A role folder's name stays free for the scope's own items.
 
-use hbsync_fileio::{FNV1A64_OFFSET, fnv1a64_from};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 
@@ -38,6 +37,7 @@ use hbsync_local::Filter;
 use hbsync_platform::name::name_key;
 use hbsync_types::{NodeId, NodeKind};
 
+use crate::id::derived_id;
 use crate::reconcile::Input;
 use crate::scope::Scope;
 use crate::tree::Tree;
@@ -68,7 +68,7 @@ impl Masks {
         input: &Input,
         filter: &Filter,
         scope: &Scope,
-        device: &str,
+        computer: &str,
         taken: &HashSet<NodeId>,
     ) -> Masks {
         // Where a node is: through the folders in Recently deleted too (a node in one is where
@@ -187,7 +187,7 @@ impl Masks {
         }
         let detached: BTreeMap<NodeId, NodeId> = detach
             .into_iter()
-            .map(|n| (n, detach_id(n, device, taken)))
+            .map(|n| (n, detach_id(n, computer, taken)))
             .collect();
 
         let mut local = Tree::new();
@@ -324,30 +324,19 @@ fn folder_path(
     known
 }
 
-/// The new id of a detached item: fixed for the node and the device, so a replan before the
-/// detach ran picks the same one, and two devices detaching the same node don't collide. A
-/// hash, never a mix that undoes itself: an item detached twice must not get its first id back
-/// (that id is still live remotely, maybe where this device doesn't sync). Nor one in `taken`:
-/// the node detached here before, whose first copy holds that id still.
-fn detach_id(node: NodeId, device: &str, taken: &HashSet<NodeId>) -> NodeId {
-    let candidate = |round: u32| {
-        let mut bytes = [0u8; 16];
-        for (half, out) in bytes.chunks_mut(8).enumerate() {
-            let mut h = FNV1A64_OFFSET ^ half as u64;
-            for part in [node.0.as_bytes().as_slice(), device.as_bytes(), b"detach"] {
-                h = fnv1a64_from(h, part);
-            }
-            if round > 0 {
-                h = fnv1a64_from(h, &round.to_le_bytes());
-            }
-            out.copy_from_slice(&h.to_le_bytes());
-        }
-        bytes[6] = (bytes[6] & 0x0F) | 0x40; // a well-formed v4 UUID
-        bytes[8] = (bytes[8] & 0x3F) | 0x80;
-        NodeId(hbsync_types::Uuid::from_bytes(bytes))
-    };
-    (0..)
-        .map(candidate)
+/// The new id of a detached item: fixed for the node and the computer ([`Options::computer`]),
+/// so a replan before the detach ran picks the same one, and two computers detaching the same
+/// node don't collide. Never a mix that undoes itself: an item detached twice must not get its
+/// first id back (that id is still live remotely, maybe where this device doesn't sync). Nor
+/// one in `taken`: the node detached here before, whose first copy holds that id still.
+///
+/// [`Options::computer`]: crate::plan::Options::computer
+fn detach_id(node: NodeId, computer: &str, taken: &HashSet<NodeId>) -> NodeId {
+    (0u32..)
+        .map(|round| {
+            let round = round.to_le_bytes();
+            derived_id(&[node.0.as_bytes(), computer.as_bytes(), &round], b"detach")
+        })
         .find(|id| !taken.contains(id))
         .unwrap_or_else(NodeId::new)
 }
@@ -366,8 +355,8 @@ mod tests {
         );
         let once = detach_id(node, "laptop", &HashSet::new());
         let again = detach_id(node, "laptop", &HashSet::from([once]));
-        assert_eq!(once.0.to_string(), "3e8e761e-85ca-4e8a-9333-e7ec35797e2e");
-        assert_eq!(again.0.to_string(), "afd5a7ee-1160-42a3-b291-7c3f5baf8433");
+        assert_eq!(once.0.to_string(), "c6aa197b-18be-48cc-9349-15f8054da6c4");
+        assert_eq!(again.0.to_string(), "f72689c1-6928-45fe-825e-bb8930f210bf");
     }
 
     #[test]

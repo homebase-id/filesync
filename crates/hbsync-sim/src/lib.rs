@@ -359,6 +359,9 @@ impl Server {
 #[derive(Debug)]
 struct Client {
     name: String,
+    /// Its computer's id for the account (`Options::computer`): the folders of one computer
+    /// share it, as they share one state DB.
+    computer: String,
     local: Tree,
     base: Tree,
     extra: HashMap<NodeId, BaseExtra>,
@@ -412,6 +415,7 @@ struct Client {
 impl Client {
     fn new(name: String, os: Os, filter: Filter, coords: Coords) -> Self {
         Client {
+            computer: name.clone(),
             name,
             local: Tree::new(),
             base: Tree::new(),
@@ -576,7 +580,7 @@ impl Sim {
     /// Client `main`'s computer syncs Documents too: one more client, last, in its coordinates.
     fn with_documents_on(mut self, main: usize) -> Self {
         let first = &self.clients[main];
-        let docs = Client::new(
+        let mut docs = Client::new(
             format!("{}-docs", first.name),
             first.os,
             Filter::default(),
@@ -584,6 +588,7 @@ impl Sim {
                 top: Role::Documents.node(),
             },
         );
+        docs.computer = first.computer.clone();
         self.clients.push(docs);
         self.computers.push((main, self.clients.len() - 1));
         self
@@ -1654,6 +1659,7 @@ impl Sim {
             .count();
         let opts = Options {
             device: client.name.clone(),
+            computer: client.computer.clone(),
             date: "2026-10-08".into(),
             allow_mass_delete: self.guard.is_none(),
             mass_delete_min: self.guard.unwrap_or_default(),

@@ -16,13 +16,14 @@ impl Executor<'_> {
         let target = spell(&parent, name, self.cfg.os).map_err(|e| {
             Outcome::unsyncable(format!("the conflict copy's name can't be used here: {e}"))
         })?;
-        // Its id is fixed by the node and the bytes: the next plan picks it again.
+        // Its id is fixed by the node, the bytes, the base version and this computer: the next
+        // plan picks it again.
         if self.db.read(|s| s.local_by_node(new_node))?.is_some() {
             return Ok(Outcome::unsyncable("its conflict copy's id is in use here"));
         }
-        // The name may be held by something that stays: the copy can exist remotely already,
-        // made by another device with the same bytes, named to fit its folder there. Then a
-        // numbered name here; a later plan moves it where it belongs.
+        // The name may be held by something that stays (a file the user named so, or another
+        // computer's copy of the same conflict made the same day under a device name like
+        // this one's). Then a numbered name here; a later plan moves it where it belongs.
         let target = if self.free_target(&target, None)? {
             target
         } else {
