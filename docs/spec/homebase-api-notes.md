@@ -38,6 +38,11 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   on every requested drive and refuses a request without `cd` (`RegisterApp.tsx:74`). Slugs:
   `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`, at most 14 characters (`OdinSlug.cs`). Filesync uses app
   slug `filesync` and one drive `filesync`/`filesync`; its ids are fixed in `app.rs`.
+- **Signing in by slug** **[verified]** (odin-core #1902, PR #1933): a YouAuth `client_id` is
+  the app id or the app's slug, any case (`YouAuthUnifiedService` looks a non-GUID up with
+  `GetAppRegistrationBySlugAsync`), and `appId` in `permission_request` is needed only while the
+  app still has to register. So a device that knows only the slug can sign in. Filesync still
+  sends its fixed app id: registration needs one, and the same id on every device is harmless.
 - **Addressing by slug** **[verified, tried]**: once registered, the client finds its drive
   with `GET /api/v2/apps/filesync/drives/filesync` (`V2AppDriveController.cs`); the answer
   carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`.
@@ -373,11 +378,6 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
 - Payload hashes: `../odin-core/docs/payload-hashes.md` (errors 4175–4178).
 
 ## Known gaps
-- **Apps can't sign in by slug** **[verified]**: YouAuth needs the app id GUID
-  (`AppNeedsRegistration`: "App id must be a uuid"), so an app with a per-identity id can't
-  authorize a second device; own-identity file routes exist only by drive GUID (slug routes only
-  under `/peer/`). Filed as odin-core #1902 (bug, high priority). Until it's fixed Filesync keeps
-  fixed ids for registration and resolves its drive by slug.
 - **No file-sync drive kind** **[verified]**: the drive flag `RequirePayloadHashes` (#1899)
   can't be requested at registration (no field in `d`), the owner app drops a requested
   drive's attributes when it creates it, and no owner UI sets the flag or a kind. App clients
