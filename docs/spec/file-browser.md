@@ -112,7 +112,8 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   each counts the items deleted with it, below it: what restoring it restores (filesync's `along`).
 - **Deleting for good** (emptying, or the 30-day purge) takes removed nodes only, never a live node: a folder
   holding a live node, or a removed node that isn't going, stays with the folders it is in, emptied of the
-  rest; until the purge marks what a folder's delete took along removed (to come), such a folder stays.
+  rest. So a removed folder still holding a live node (its delete stopped half way) stays in Recently deleted,
+  restorable, until the delete finishes or it is restored, possibly indefinitely; it never goes for good on its own.
   Files go first, then each folder after what is in it.
 - **Never write to a removed node** except to restore it: no rename, no sharing or sending to another
   identity, no reactions or comments, no local app data (local tags, local content, read time). odin-core
@@ -134,7 +135,16 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
     before anything is deleted (4160; the message names the tag, not the file: **[verified]**
     odin-core `V2DriveControllerBase.DeleteFileIdBatchInternal`): re-read the items, leave the
     changed ones, send the rest again.
-  - Delete files before folders (`delete-batch/by-file-id`), which leaves tombstones.
-  - The 30-day purge is the desktops' job; the phone never purges on its own.
+  - Delete files before folders (`delete-batch/by-file-id`): soft, leaving tombstones (node
+    schema, "The purge", 3.).
+- **The purge:** the mini-app purges too (when it opens, say), as every client does, by the
+  one rule in node schema, "The purge": all of it (what goes, never a live node, without a
+  trace or with one per node, asking the server 1.1 s into a pass before its folders go). On
+  the wire: `hard-delete-batch` (odin-core #1968), each file with its `versionTag`; read the
+  answer per file: `versionTagMismatch` was written since and stays (with the folders above
+  it), `fileNotFound` is done once the file's header is not found too (or a tombstone), any
+  other code stays and makes the purge fail (it runs again later). A request that fails
+  leaves all its files for the next purge. A
+  folder's contents on the server: a `groupId` query (homebase-api-notes, Change feed).
 - **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.
 - **Every write sends `archivalStatus`:** the server replaces the whole header and takes a missing one for 0.

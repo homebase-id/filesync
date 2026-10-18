@@ -7,6 +7,7 @@
 //! Implementations: [`fake::FakeServer`] / [`fake::FakeRemote`] (in memory, Homebase
 //! semantics) and, later, the Homebase adapter.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 
 use hbsync_types::schema::NodeContent;
@@ -32,8 +33,8 @@ pub struct RemoteHeader {
     /// Unix ms, the server's time of the write that removed it (Homebase's `updated`).
     pub removed_at: Option<i64>,
     /// When this version was written, Unix ms, the server's time (Homebase's `updated`): what
-    /// decides whether a node in a removed folder went with it (node schema, Recently deleted).
-    /// `None` where the remote doesn't say (a tombstone).
+    /// decides whether a node in a removed folder went with it (node schema, Recently deleted),
+    /// and, for a tombstone, when it may be deleted hard. `None` where the remote doesn't say.
     pub changed_at: Option<i64>,
     /// The file's [`FileToken`], where the remote has one (a tombstone has none).
     pub token: Option<FileToken>,
@@ -64,6 +65,14 @@ pub struct PayloadInfo {
 }
 
 impl RemoteHeader {
+    /// This file at this version.
+    pub fn at(&self) -> RemoteRef {
+        RemoteRef {
+            file_id: self.file_id,
+            version: self.version,
+        }
+    }
+
     pub fn node(&self) -> Option<NodeId> {
         match &self.body {
             RemoteBody::Live { node, .. } => Some(*node),
@@ -119,6 +128,9 @@ pub struct ChangesPage {
     /// Rows left out because they can't be read as nodes (another app's file, one that doesn't
     /// decrypt), each with why.
     pub skipped: Vec<String>,
+    /// The remote's clock when it answered, Unix ms (Homebase's `queryTime`): the times of
+    /// [`RemoteHeader`] are this clock's.
+    pub server_time: i64,
 }
 
 /// One row of the change feed as a slim page carries it: which version of which file changed,
@@ -127,7 +139,8 @@ pub struct ChangesPage {
 pub struct ChangeRef {
     pub file_id: RemoteFileId,
     pub version: VersionTag,
-    /// A tombstone.
+    /// A tombstone; without [`ChangeRef::changed_at`], a delete for good that left none (a
+    /// hard delete, as a notification names it).
     pub deleted: bool,
     /// As in [`RemoteHeader`]; `None` for a tombstone.
     pub parent: Option<NodeId>,
@@ -175,6 +188,8 @@ pub struct RefsPage {
     pub refs: Vec<ChangeRef>,
     pub cursor: String,
     pub has_more: bool,
+    /// As in [`ChangesPage`].
+    pub server_time: i64,
     /// Rows that couldn't be read slim: the page is read whole, which says what they are.
     pub unread: usize,
 }
@@ -186,6 +201,7 @@ impl RefsPage {
             refs: page.entries.iter().map(ChangeRef::of).collect(),
             cursor: page.cursor.clone(),
             has_more: page.has_more,
+            server_time: page.server_time,
             unread: 0,
         }
     }
@@ -267,6 +283,10 @@ pub enum RemoteError {
     VersionMismatch,
     #[error("not found")]
     NotFound,
+    /// A payload range past its end (HTTP 416): the file changed since its header was read.
+    /// Read the header again, then retry; it says nothing about the file being gone.
+    #[error("range not satisfiable: {0}")]
+    StaleRange(String),
     /// The bytes don't match the declared hash: the source changed since it was hashed, or
     /// the server received other bytes (Homebase 4175, 4178).
     #[error("payload hash mismatch")]
@@ -291,6 +311,36 @@ pub enum RemoteError {
     Fatal(String),
 }
 
+/// What a delete for good answered ([`Remote::delete_for_good`]).
+#[derive(Debug, Default)]
+pub struct ForGood {
+    /// The drive's answer for each of the first files asked, in order (all of them unless
+    /// `stopped`): [`RemoteError::VersionMismatch`] for one written since (left as it is),
+    /// [`RemoteError::NotFound`] for one not there.
+    pub answers: Vec<Result<()>>,
+    /// The error of the request that stopped it after those: the files left weren't answered,
+    /// and weren't deleted.
+    pub stopped: Option<RemoteError>,
+}
+
+impl ForGood {
+    /// Every file answered.
+    pub fn all(answers: Vec<Result<()>>) -> ForGood {
+        ForGood {
+            answers,
+            stopped: None,
+        }
+    }
+
+    /// The answers, if every file was answered; else what stopped it.
+    pub fn into_answers(self) -> Result<Vec<Result<()>>> {
+        match self.stopped {
+            Some(e) => Err(e),
+            None => Ok(self.answers),
+        }
+    }
+}
+
 impl RemoteError {
     pub fn is_transient(&self) -> bool {
         matches!(self, RemoteError::Transient(_))
@@ -311,8 +361,24 @@ pub trait Remote: Send + Sync {
     /// skips it).
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage>;
 
+    /// The time of the last change a cursor of [`Remote::changes`] stands after, Unix ms by the
+    /// remote's clock, if the cursor says: how long ago the feed was last read to its end.
+    fn cursor_time(&self, cursor: &str) -> Option<i64>;
+
     /// The current header of a file, live or deleted.
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader>;
+
+    /// Which of `folders` hold a live file (not deleted, not removed), whatever it is: also one
+    /// this client can't read as a node, which isn't in its mirror. Asked before folders are
+    /// deleted for good; a file written in the last [`Remote::hold_back`] may be missing.
+    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>>;
+
+    /// How long after a write the remote's queries may still leave it out (Homebase's feed
+    /// holds back its last second): a delete that relies on a query asks it that long after
+    /// the moment it must see up to.
+    fn hold_back(&self) -> std::time::Duration {
+        std::time::Duration::ZERO
+    }
 
     /// Creates a node. Fails with [`RemoteError::AlreadyExists`] if a live file already has
     /// this node id (a retry of a create that landed). Returns the file as written, with the
@@ -330,8 +396,14 @@ pub trait Remote: Send + Sync {
         payload: Option<Upload<'_>>,
     ) -> Result<Target>;
 
-    /// Deletes (tombstones) a file if it is still at `expected`.
+    /// Deletes (tombstones) a file if it is still at `expected`: it stays in the feed as a
+    /// tombstone, which is how a device learns of the delete.
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()>;
+
+    /// Deletes files for good, leaving nothing in the feed (Homebase's hard delete), live ones
+    /// and tombstones, each only if still at its version: what the drive answered for each
+    /// ([`ForGood`]). An outer error stopped it before any file was answered.
+    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood>;
 
     /// Streams the payload (or `start..end` of it) into `sink`. Returns the bytes written: fewer
     /// than asked when the range runs past the payload's end.
@@ -354,8 +426,20 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         (**self).change_refs(cursor, limit)
     }
 
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        (**self).cursor_time(cursor)
+    }
+
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         (**self).header(file_id)
+    }
+
+    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>> {
+        (**self).holding_live(folders)
+    }
+
+    fn hold_back(&self) -> std::time::Duration {
+        (**self).hold_back()
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
@@ -373,6 +457,10 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
 
     fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
         (**self).delete(file_id, expected)
+    }
+
+    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
+        (**self).delete_for_good(files)
     }
 
     fn read(

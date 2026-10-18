@@ -1050,6 +1050,21 @@ impl Remote for ReadHook {
     ) -> hbsync_remote::Result<hbsync_remote::RemoteHeader> {
         self.inner.header(file_id)
     }
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
+    }
+    fn holding_live(
+        &self,
+        folders: &[hbsync_types::NodeId],
+    ) -> hbsync_remote::Result<std::collections::HashSet<hbsync_types::NodeId>> {
+        self.inner.holding_live(folders)
+    }
+    fn delete_for_good(
+        &self,
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
+        self.inner.delete_for_good(files)
+    }
 
     fn create(
         &self,

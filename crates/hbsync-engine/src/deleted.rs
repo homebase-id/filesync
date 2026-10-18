@@ -9,15 +9,18 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use hbsync_platform::name::name_key;
-use hbsync_remote::{NodeMeta, Remote, RemoteError};
+use hbsync_remote::{ForGood, Remote, RemoteError};
 use hbsync_state::{RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::activity::Deleted;
-use hbsync_types::{NodeId, NodeKind, Role};
+use hbsync_types::{NodeId, NodeKind, RemoteRef, Role};
 
 use crate::engine::EngineError;
-use crate::exec::{remove_all, trashed_at, update_meta};
+use crate::exec::{meta_at, remove_all, trashed_at, update_meta};
+use crate::feed::{TRACE_MS, apply_tombstone, gone_for_good};
 use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
@@ -163,7 +166,7 @@ impl<'a, 's> Listing<'a, 's> {
         };
         let root = deleted_by_item(&mut self.rows, node, &mut HashMap::new())?;
         let along = match root == node {
-            true => group(self.rows.s, top, false)?.len() - 1,
+            true => group(self.rows.s, top)?.len() - 1,
             false => 0,
         };
         let i = self.rows.index[&node].unwrap_or_default();
@@ -355,18 +358,23 @@ fn join(folder: &str, name: &str) -> String {
     }
 }
 
+/// The account's DB, held only while it is read or written: never while the server answers.
+fn locked(account: &Mutex<StateDb>) -> MutexGuard<'_, StateDb> {
+    account.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Restores `node` with what was deleted with it, and the folders it was in that are in
 /// Recently deleted too (just those, not their other contents). Returns how many items came
 /// back; 0 when `node` isn't in Recently deleted (any more).
 /// `moved` is set when the drive refused a write for its state (changed or deleted for good
 /// meanwhile): the account's picture lacks that.
 pub fn restore(
-    db: &mut StateDb,
+    account: &Mutex<StateDb>,
     remote: &dyn Remote,
     node: NodeId,
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
-    let Some(plan) = db.read(|s| plan_restore(s, node))? else {
+    let Some(plan) = locked(account).read(|s| plan_restore(s, node))? else {
         return Ok(0);
     };
     let RestorePlan {
@@ -374,7 +382,7 @@ pub fn restore(
         mut live,
         mut taken,
     } = plan;
-    let in_plan: HashSet<NodeId> = rows.iter().map(|r| r.row.node).collect();
+    let mut in_plan: HashSet<NodeId> = rows.iter().map(|r| r.row.node).collect();
     let mut restored = 0;
     for r in &rows {
         let row = &r.row;
@@ -391,17 +399,23 @@ pub fn restore(
         let Some(name) = restored_names(&row.name).find(|n| !names.contains(&name_key(n))) else {
             continue; // no free name: it stays in Recently deleted
         };
-        let meta = NodeMeta {
-            node: row.node,
-            parent,
-            kind: row.kind,
-            content: row.content(&name),
-            removed: false,
-        };
+        let meta = meta_at(row, parent, &name, false);
         let back = match update_meta(remote, &row.target(), &meta, row.file.map(|f| f.hash)) {
             Ok(back) => back,
-            // Changed or deleted for good meanwhile: the feed tells what it is now.
-            Err(RemoteError::VersionMismatch | RemoteError::NotFound) => {
+            // Changed meanwhile: the feed tells what it is now.
+            Err(RemoteError::VersionMismatch) => {
+                *moved = true;
+                continue;
+            }
+            // Deleted for good meanwhile (its header says so too), maybe without a trace in the
+            // feed: gone here too, and what was to come back into it, the top takes.
+            Err(RemoteError::NotFound) if gone_for_good(remote, row.file_id)? => {
+                *moved = true;
+                locked(account).write(|s| apply_tombstone(s, row.file_id))?;
+                in_plan.remove(&row.node);
+                continue;
+            }
+            Err(RemoteError::NotFound) => {
                 *moved = true;
                 continue;
             }
@@ -410,7 +424,7 @@ pub fn restore(
         names.insert(name_key(&name));
         live.insert(row.node);
         // The mirror's write marks it dirty in the folders it comes back to.
-        db.write(|s| {
+        locked(account).write(|s| {
             s.delete_removed(row.node)?;
             s.put_mirror(&back)
         })?;
@@ -430,13 +444,11 @@ struct RestorePlan {
     taken: HashMap<NodeId, HashSet<String>>,
 }
 
-/// `top` and what its delete took along below it, level by level: the removed items in it
-/// deleted with their folder ([`deleted_with`]), and the live ones written no later than its
-/// removal (node schema: their own removal was still on its way), which count as removed then.
-/// What was deleted from it before stays out.
-///
-/// Without `live`, only the removed items: what Recently deleted lists with it.
-fn group(s: &Store<'_>, top: RemovedRow, live: bool) -> Result<Vec<RemovedRow>, StateError> {
+/// `top` and what was deleted with it below it, level by level: the removed items in it
+/// deleted with their folder ([`deleted_with`]). What was deleted from it before stays out, and
+/// so do the live nodes its delete took along ([`crate::along`]): what Recently deleted lists
+/// with it.
+fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
     // Each node once: removed rows may form a cycle (left by a remote one).
     let mut seen = HashSet::from([top.row.node]);
     let mut rows = vec![top];
@@ -444,24 +456,10 @@ fn group(s: &Store<'_>, top: RemovedRow, live: bool) -> Result<Vec<RemovedRow>, 
     while next < rows.len() {
         if rows[next].row.kind == NodeKind::Folder {
             let folder = &rows[next];
-            let removed = s
+            let with: Vec<RemovedRow> = s
                 .removed_children(folder.row.node)?
                 .into_iter()
-                .filter(|r| deleted_with(r.time(), folder));
-            let along = match live {
-                true => s.mirror_children(folder.row.node)?,
-                false => Vec::new(),
-            };
-            let along = along
-                .into_iter()
-                .filter(|m| m.changed_at.is_none_or(|at| at <= folder.time()))
-                .map(|row| RemovedRow {
-                    row,
-                    removed_at: folder.removed_at,
-                });
-            let with: Vec<RemovedRow> = removed
-                .chain(along)
-                .filter(|r| seen.insert(r.row.node))
+                .filter(|r| deleted_with(r.time(), folder) && seen.insert(r.row.node))
                 .collect();
             rows.extend(with);
         }
@@ -488,7 +486,7 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     // is live still comes back with its folder by itself.
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for r in chain.into_iter().chain(group(s, top, true)?) {
+    for r in chain.into_iter().chain(group(s, top)?) {
         if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
             rows.push(r);
         }
@@ -513,65 +511,117 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
     Ok(Some(RestorePlan { rows, live, taken }))
 }
 
-/// Deletes for good the items of Recently deleted removed before `before_ms` (Unix ms), each
-/// with what was deleted with it ([`select`]: removed nodes only, never a live one), files
-/// before their folders, and empties every folder's trash (`.hbsync/trash`) of the same age.
-/// Returns how many items went.
-pub fn purge(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize, EngineError> {
-    let gone = expire(db, remote, before_ms)?;
-    for folder in db.read(|s| s.folders())? {
+/// The purge: deletes for good the items of Recently deleted kept `keep_ms` by `now_ms` (the
+/// server's clock), each with what was deleted with it, as emptying them would ([`select`]:
+/// removed nodes only, never a live one, and never a folder holding one), files before their
+/// folders; the tombstones as old as [`TRACE_MS`]; and every folder's trash (`.hbsync/trash`)
+/// of the same age (by this device's clock, which named its entries). Node schema, "The
+/// purge":
+/// - It never writes a live node. A removed folder still holding one (a delete that stopped
+///   half way, or a file written into it since) stays in Recently deleted, restorable, until
+///   its delete finishes or someone restores it: possibly indefinitely.
+/// - An item holding a removal whose time isn't known yet waits for a purge that knows it.
+/// - Each node goes without a trace (a hard delete) once its own removal is [`TRACE_MS`] old,
+///   else leaving a tombstone, which goes hard [`TRACE_MS`] after its own time.
+/// - What is known gone longer than that is forgotten ([`Store::prune_gone`]).
+///
+/// Each part runs whatever became of the others (the trash only once the items went); the
+/// first error is returned at the end.
+/// Returns how many items went. `moved` is set when the drive refused a delete for its state
+/// (written since, restored, gone already): the account's picture lacks that.
+pub fn purge(
+    account: &Mutex<StateDb>,
+    remote: &dyn Remote,
+    keep_ms: i64,
+    now_ms: i64,
+    moved: &mut bool,
+) -> Result<usize, EngineError> {
+    let traced = now_ms.saturating_sub(TRACE_MS);
+    // Each part on its own: one that fails doesn't keep the others from their work, but for the
+    // trash: while Recently deleted's items didn't go, the local copies of deletes stay too.
+    let expired = expire(
+        account,
+        remote,
+        now_ms.saturating_sub(keep_ms),
+        Some(traced),
+        moved,
+    );
+    let tombstones = delete_tombstones(account, remote, traced);
+    let pruned = locked(account)
+        .write(|s| s.prune_gone(traced, now_ms))
+        .map(drop)
+        .map_err(EngineError::from);
+    let trash = match &expired {
+        Ok(_) => empty_trashes(account, keep_ms),
+        Err(_) => Ok(()),
+    };
+    let gone = expired?;
+    tombstones?;
+    pruned?;
+    trash?;
+    Ok(gone)
+}
+
+/// Empties every folder's trash (`.hbsync/trash`) of what went there `keep_ms` ago or more
+/// (by this device's clock, which named its entries).
+fn empty_trashes(account: &Mutex<StateDb>, keep_ms: i64) -> Result<(), EngineError> {
+    let trashed_before = hbsync_types::unix_now_ms().saturating_sub(keep_ms);
+    let folders = locked(account).read(|s| s.folders())?;
+    for folder in folders {
         if folder.path.is_empty() {
             continue;
         }
         // Only what went there since the purge has been emptying it: older entries (from
         // before Recently deleted) may be the only copy left, and stay.
-        let since = db.write(
-            |s| match s.folder_kv_of(folder.id, keys::TRASH_PURGED_SINCE)? {
+        let since = locked(account).write(|s| {
+            match s.folder_kv_of(folder.id, keys::TRASH_PURGED_SINCE)? {
                 Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
                 None => {
                     let now = hbsync_types::unix_now();
                     s.set_folder_kv_of(folder.id, keys::TRASH_PURGED_SINCE, &now.to_string())?;
                     Ok(now)
                 }
-            },
-        )?;
+            }
+        })?;
         empty_trash(
             &layout::trash_dir(Path::new(&folder.path)),
             since,
-            before_ms,
+            trashed_before,
         );
     }
-    Ok(gone)
+    Ok(())
 }
 
-/// Deletes for good the items `nodes` name, each with what was deleted with it ([`select`]).
-/// Returns how many items went.
+/// Deletes for good the items `nodes` name, each with what was deleted with it ([`select`]),
+/// leaving tombstones. Returns how many items went.
 pub fn empty(
-    db: &mut StateDb,
+    account: &Mutex<StateDb>,
     remote: &dyn Remote,
     nodes: &[NodeId],
+    moved: &mut bool,
 ) -> Result<usize, EngineError> {
-    let tops = db.read(|s| {
+    let passes = locked(account).read(|s| {
         let mut tops = Vec::new();
         for &node in nodes {
             tops.extend(s.removed_by_node(node)?);
         }
-        Ok(tops)
+        passes_of(s, tops, None)
     })?;
-    delete_groups(db, remote, tops)
+    delete_for_good(account, remote, &passes, None, moved)
 }
 
 /// Deletes for good what a listing saw ([`DeletedSummary::listed`]): the rows recorded up to
 /// its counter, an open removal too; nothing recorded since (a removal that arrives later,
 /// whatever its server time, or a node deleted again after a restore), and never a live node
-/// ([`select`]). Refused for a listing of another DB (the account's, made again) or one this DB
-/// never gave. Returns how many items went.
+/// ([`select`]). Leaves tombstones. Refused for a listing of another DB (the account's, made
+/// again) or one this DB never gave. Returns how many items went.
 pub fn empty_listed(
-    db: &mut StateDb,
+    account: &Mutex<StateDb>,
     remote: &dyn Remote,
     listed: &Listed,
+    moved: &mut bool,
 ) -> Result<usize, EngineError> {
-    let rows = db.read(|s| {
+    let passes = locked(account).read(|s| {
         if !listed_here(s, listed)? {
             return Err(StateError::Conflict(
                 "Recently deleted was never listed so here: look at it again".to_owned(),
@@ -580,7 +630,7 @@ pub fn empty_listed(
         let chosen = s.recorded_upto(listed.seq)?;
         going(s, chosen.into_iter().map(|r| r.removed).collect())
     })?;
-    delete_for_good(db, remote, &rows)
+    delete_for_good(account, remote, &passes, None, moved)
 }
 
 /// Whether this DB gave `listed`: its own, up to a counter it reached.
@@ -588,15 +638,15 @@ pub fn listed_here(s: &Store<'_>, listed: &Listed) -> Result<bool, StateError> {
     Ok(!listed.db.is_empty() && listed.db == s.db_id()? && listed.seq <= s.removed_seq()?)
 }
 
-/// What emptying `chosen` (rows of Recently deleted) deletes for good ([`select`]), in that
-/// order.
-fn going(s: &Store<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<RemovedRow>, StateError> {
+/// What emptying `chosen` (rows of Recently deleted) deletes for good, in the passes
+/// [`passes`] gives.
+fn going(s: &Store<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<Vec<RemovedRow>>, StateError> {
     let picked: Vec<Chosen> = chosen.iter().map(Chosen::of).collect();
     let mut rows: HashMap<NodeId, RemovedRow> =
         chosen.into_iter().map(|r| (r.row.node, r)).collect();
-    Ok(select(&picked, &holdings(s)?)
+    Ok(passes(&picked, &holdings(s)?)
         .into_iter()
-        .filter_map(|n| rows.remove(&n))
+        .map(|pass| pass.into_iter().filter_map(|n| rows.remove(&n)).collect())
         .collect())
 }
 
@@ -641,6 +691,13 @@ pub struct Holdings {
 /// so do the folders it is in. Files first, then each folder after the folders in it (a cycle
 /// of them in some order), by the links among the chosen alone, however deep.
 pub fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
+    passes(chosen, holdings).into_iter().flatten().collect()
+}
+
+/// [`select`]'s order in passes, each deleted at once (a hard delete takes a pass in batches):
+/// the files, then the folders a level at a time, the deepest first. Nothing in a pass is in
+/// another node of it.
+pub fn passes(chosen: &[Chosen], holdings: &Holdings) -> Vec<Vec<NodeId>> {
     let mut links: HashMap<NodeId, (NodeId, bool)> = HashMap::new();
     let mut chosen_in: HashMap<NodeId, u64> = HashMap::new();
     for c in chosen {
@@ -684,82 +741,266 @@ pub fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
             d += 1;
         }
     }
+    let level = |n: &NodeId| (links[n].1, std::cmp::Reverse(depth[n]));
     let mut going: Vec<NodeId> = links
         .keys()
         .filter(|n| !stays.contains(*n))
         .copied()
         .collect();
-    going.sort_by_key(|n| (links[n].1, std::cmp::Reverse(depth[n]), *n));
+    going.sort_by_key(|n| (level(n), *n));
+    // Files are one pass, whatever their depth.
+    let pass = |n: &NodeId| match links[n].1 {
+        false => (false, std::cmp::Reverse(0)),
+        true => level(n),
+    };
     going
+        .chunk_by(|a, b| pass(a) == pass(b))
+        .map(<[NodeId]>::to_vec)
+        .collect()
 }
 
-/// Deletes for good the items of Recently deleted removed before `before_ms`, each with what
-/// was deleted with it.
-fn expire(db: &mut StateDb, remote: &dyn Remote, before_ms: i64) -> Result<usize, EngineError> {
-    let tops = db.read(|s| {
+/// The items of Recently deleted removed before `before_ms` (Unix ms, the server's): those
+/// deleted on their own, as listed.
+fn due(account: &Mutex<StateDb>, before_ms: i64) -> Result<Vec<RemovedRow>, StateError> {
+    locked(account).read(|s| {
         let before = s.removed_before(before_ms)?;
         let count = before.len();
         let mut rows = RemovedRows::new(s, before);
         let (mut tops, mut known) = (Vec::new(), HashMap::new());
         for i in 0..count {
-            // The items deleted on their own, as listed: in a cycle of rows, one of them.
+            // In a cycle of rows, one of them.
             let node = rows.rows[i].row.node;
             if deleted_by_item(&mut rows, node, &mut known)? == node {
                 tops.push(rows.rows[i].clone());
             }
         }
         Ok(tops)
-    })?;
-    delete_groups(db, remote, tops)
+    })
 }
 
-/// Deletes for good `tops`, each with what was deleted with it ([`select`]).
-fn delete_groups(
-    db: &mut StateDb,
-    remote: &dyn Remote,
+/// The passes ([`passes`]) that delete the items `tops` for good, each with what was deleted
+/// with it. With `before`, only an item whose every member was removed before then (Unix ms,
+/// the server's), by its own removal: one removed later in a folder removed long ago (that a
+/// live node kept, say) has its own time in Recently deleted, and so does the item. One whose
+/// time isn't known yet waits for a purge that knows it.
+fn passes_of(
+    s: &Store<'_>,
     tops: Vec<RemovedRow>,
-) -> Result<usize, EngineError> {
-    let rows = db.read(|s| {
-        let mut chosen = Vec::new();
-        for top in tops {
-            chosen.extend(group(s, top, false)?);
+    before: Option<i64>,
+) -> Result<Vec<Vec<RemovedRow>>, StateError> {
+    let mut chosen = Vec::new();
+    for top in tops {
+        let item = group(s, top)?;
+        let due = |r: &RemovedRow| before.is_none_or(|b| r.removed_at.is_some_and(|at| at < b));
+        if item.iter().all(due) {
+            chosen.extend(item);
         }
-        going(s, chosen)
-    })?;
-    delete_for_good(db, remote, &rows)
+    }
+    going(s, chosen)
 }
 
-fn delete_for_good(
-    db: &mut StateDb,
+/// Deletes for good the items removed before `before` (Unix ms, the server's), each with what
+/// was deleted with it, as [`delete_for_good`] does with `hard_before`: an item goes once all
+/// of it was removed before then ([`passes_of`]).
+fn expire(
+    account: &Mutex<StateDb>,
     remote: &dyn Remote,
-    rows: &[RemovedRow],
+    before: i64,
+    hard_before: Option<i64>,
+    moved: &mut bool,
+) -> Result<usize, EngineError> {
+    let tops = due(account, before)?;
+    let passes = locked(account).read(|s| passes_of(s, tops, Some(before)))?;
+    delete_for_good(account, remote, &passes, hard_before, moved)
+}
+
+/// Deletes `passes` for good ([`going`]), one pass at a time, each node at the version this
+/// device knows: one written since stays, and so do the folders above it. A folder goes only
+/// while nothing else is in it, on this device or on the drive (a live node this device doesn't
+/// read, not in its mirror: one question for the pass's folders that may go, asked once the
+/// drive's queries show what was written up to the pass's start, [`Remote::hold_back`]; a pass
+/// with none asks nothing, and doesn't wait). A node removed before `hard_before` (Unix ms, the
+/// server's) goes without a trace, in batches; any other leaves a tombstone (`None`: every one
+/// does). Returns how many went. One written since, or not found, sets `moved`; one not found
+/// is recorded gone once its header says so too. A request that fails stops it with its error:
+/// what it didn't answer stays, for the next purge.
+fn delete_for_good(
+    account: &Mutex<StateDb>,
+    remote: &dyn Remote,
+    passes: &[Vec<RemovedRow>],
+    hard_before: Option<i64>,
+    moved: &mut bool,
 ) -> Result<usize, EngineError> {
     // What each folder holds of the rows still to go: what is in a folder goes before it (but
     // round a cycle).
     let mut to_go: HashMap<NodeId, u64> = HashMap::new();
-    for r in rows {
+    for r in passes.iter().flatten() {
         *to_go.entry(r.row.parent).or_default() += 1;
     }
+    let hard = |r: &RemovedRow| {
+        hard_before.is_some_and(|before| r.removed_at.is_some_and(|at| at > 0 && at < before))
+    };
     let mut gone = 0;
-    for r in rows {
-        let held = to_go.get(&r.row.node).copied().unwrap_or(0);
-        if let Some(n) = to_go.get_mut(&r.row.parent) {
-            *n -= 1;
+    for pass in passes {
+        let began = Instant::now();
+        let mut going: Vec<&RemovedRow> = Vec::new();
+        for r in pass {
+            let held = to_go.get(&r.row.node).copied().unwrap_or(0);
+            if let Some(n) = to_go.get_mut(&r.row.parent) {
+                *n -= 1;
+            }
+            // A folder holding anything else here (what failed to go, or came meanwhile) stays.
+            if r.row.kind == NodeKind::Folder
+                && locked(account).read(|s| s.child_count(r.row.node))? > held
+            {
+                continue;
+            }
+            going.push(r);
         }
-        // A folder holding anything else now (what failed to go, or came meanwhile) stays.
-        if r.row.kind == NodeKind::Folder && db.read(|s| s.child_count(r.row.node))? > held {
-            continue;
+        let folders: Vec<NodeId> = going
+            .iter()
+            .filter(|r| r.row.kind == NodeKind::Folder)
+            .map(|r| r.row.node)
+            .collect();
+        if !folders.is_empty() {
+            // The drive's queries leave out what changed in their last moments: what was
+            // written up to the pass's start shows once that has passed.
+            std::thread::sleep(remote.hold_back().saturating_sub(began.elapsed()));
+            let holding = remote.holding_live(&folders)?;
+            going.retain(|r| !holding.contains(&r.row.node));
         }
-        match remote.delete(r.row.file_id, r.row.version) {
-            Ok(()) | Err(RemoteError::NotFound) => {}
-            // Restored or changed meanwhile: not ours to delete.
-            Err(RemoteError::VersionMismatch) => continue,
-            Err(e) => return Err(EngineError::Remote(e)),
+        let (hard, soft): (Vec<&RemovedRow>, Vec<&RemovedRow>) =
+            going.into_iter().partition(|r| hard(r));
+        let refs: Vec<RemoteRef> = hard.iter().map(|r| r.row.remote_ref()).collect();
+        let (answers, mut failed) = hard_delete(remote, &refs);
+        let mut gone_now: Vec<&RemovedRow> = Vec::new();
+        let mut not_found: Vec<&RemovedRow> = Vec::new();
+        for (r, answer) in hard.iter().zip(answers) {
+            match answer {
+                Answer::Deleted => gone_now.push(r),
+                Answer::Missing => not_found.push(r),
+                Answer::Written => *moved = true,
+                Answer::Kept => {}
+            }
         }
-        db.write(|s| s.delete_removed(r.row.node).map(drop))?;
-        gone += 1;
+        if failed.is_none() {
+            for r in soft {
+                match remote.delete(r.row.file_id, r.row.version) {
+                    Ok(()) => gone_now.push(r),
+                    Err(RemoteError::NotFound) => not_found.push(r),
+                    // Restored or changed meanwhile: not ours to delete.
+                    Err(RemoteError::VersionMismatch) => *moved = true,
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+        // Not found: deleted for good meanwhile (another device's purge), if its header says
+        // so too; else it stays. Either way the picture lacked it. A request that fails stops
+        // the asking: the rest stay, for the next purge.
+        if !not_found.is_empty() {
+            *moved = true;
+        }
+        if failed.is_none() {
+            for r in not_found {
+                match gone_for_good(remote, r.row.file_id) {
+                    Ok(true) => gone_now.push(r),
+                    Ok(false) => {}
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+        locked(account).write(|s| {
+            for r in &gone_now {
+                s.delete_removed(r.row.node)?;
+                // Its id never comes back, nor its row from a page read before (a tombstone's
+                // version and time come with the feed's row).
+                s.mark_file_gone(r.row.file_id)?;
+            }
+            Ok(())
+        })?;
+        gone += gone_now.len();
+        if let Some(e) = failed {
+            return Err(EngineError::Remote(e));
+        }
     }
     Ok(gone)
+}
+
+/// What the drive answered for a file a delete for good asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Deleted,
+    /// Not there: gone already, by another device's purge, maybe (the picture lacked that).
+    Missing,
+    /// Written since: it stays, and the picture lacked that.
+    Written,
+    /// Refused for another reason (logged, and an error of the call): it stays.
+    Kept,
+}
+
+/// Deletes `files` without a trace, each only at its version: the drive's answer for each of
+/// the first files, and the error of the request that stopped it there, if one did (the files
+/// not answered stay), or else the first answer that isn't one of [`Answer`]'s.
+fn hard_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option<RemoteError>) {
+    if files.is_empty() {
+        return (Vec::new(), None);
+    }
+    let ForGood { answers, stopped } = match remote.delete_for_good(files) {
+        Ok(done) => done,
+        Err(e) => return (Vec::new(), Some(e)),
+    };
+    // Any other answer for a file: it stays, and fails the purge (retried later).
+    let mut refused: Option<(usize, RemoteError)> = None;
+    let answers = answers
+        .into_iter()
+        .map(|answer| match answer {
+            Ok(()) => Answer::Deleted,
+            Err(RemoteError::NotFound) => Answer::Missing,
+            Err(RemoteError::VersionMismatch) => Answer::Written,
+            Err(e) => {
+                match &mut refused {
+                    Some((n, _)) => *n += 1,
+                    None => refused = Some((1, e)),
+                }
+                Answer::Kept
+            }
+        })
+        .collect();
+    let refused = refused.map(|(n, e)| {
+        tracing::warn!("{n} of {} files weren't deleted for good: {e}", files.len());
+        e
+    });
+    (answers, stopped.or(refused))
+}
+
+/// Deletes hard the tombstones the feed brought that were written before `before_ms` (Unix ms,
+/// the server's clock): a delete for good that left one leaves nothing in the feed once every
+/// device has had time to see it. Each at its version: one written since stays, and so does
+/// one a failed request didn't answer.
+fn delete_tombstones(
+    account: &Mutex<StateDb>,
+    remote: &dyn Remote,
+    before_ms: i64,
+) -> Result<(), EngineError> {
+    let tombstones = locked(account).read(|s| s.tombstones_before(before_ms))?;
+    let (answers, failed) = hard_delete(remote, &tombstones);
+    locked(account).write(|s| {
+        tombstones
+            .iter()
+            .zip(answers)
+            .filter(|(_, answer)| matches!(answer, Answer::Deleted | Answer::Missing))
+            .try_for_each(|(t, _)| s.delete_tombstone_at(*t).map(drop))
+    })?;
+    match failed {
+        Some(e) => Err(EngineError::Remote(e)),
+        None => Ok(()),
+    }
 }
 
 /// Deletes the trash entries (`<Unix s>-<node>`) that went there from `since` (Unix s) until
@@ -778,10 +1019,42 @@ fn empty_trash(trash: &Path, since: u64, before_ms: i64) {
 
 #[cfg(test)]
 mod tests {
+    use hbsync_remote::NodeMeta;
     use hbsync_state::MirrorRow;
     use hbsync_types::{RemoteFileId, Uuid, VersionTag};
 
     use super::*;
+
+    /// The account's DB as the drive holds it, read and written by a test as by the drive.
+    struct Db(Mutex<StateDb>);
+
+    impl Db {
+        fn new() -> Result<Db, StateError> {
+            Ok(Db(Mutex::new(StateDb::open_in_memory()?)))
+        }
+
+        fn read<T>(
+            &self,
+            f: impl FnOnce(&Store<'_>) -> Result<T, StateError>,
+        ) -> Result<T, StateError> {
+            locked(&self.0).read(f)
+        }
+
+        fn write<T>(
+            &self,
+            f: impl FnOnce(&Store<'_>) -> Result<T, StateError>,
+        ) -> Result<T, StateError> {
+            locked(&self.0).write(f)
+        }
+    }
+
+    impl std::ops::Deref for Db {
+        type Target = Mutex<StateDb>;
+
+        fn deref(&self) -> &Mutex<StateDb> {
+            &self.0
+        }
+    }
 
     fn removed(node: NodeId, parent: NodeId, removed_at: i64) -> RemovedRow {
         RemovedRow {
@@ -805,7 +1078,7 @@ mod tests {
     /// plan ends; so does the walk to the item that took them along.
     #[test]
     fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
+        let db = Db::new()?;
         let (a, b) = (NodeId::new(), NodeId::new());
         db.write(|s| {
             s.put_removed(&removed(a, b, 1))?;
@@ -843,11 +1116,11 @@ mod tests {
         FakeRemote::new(FakeServer::new(ServerConfig::default()))
     }
 
-    fn listed(db: &mut StateDb) -> Result<Listed, StateError> {
+    fn listed(db: &Db) -> Result<Listed, StateError> {
         Ok(db.read(|s| deletes(s, 0))?.1.listed)
     }
 
-    fn left(db: &mut StateDb) -> Result<Vec<NodeId>, StateError> {
+    fn left(db: &Db) -> Result<Vec<NodeId>, StateError> {
         let mut left: Vec<NodeId> = db.read(all)?.into_iter().map(|(d, _)| d.node).collect();
         left.sort();
         Ok(left)
@@ -866,7 +1139,7 @@ mod tests {
     fn emptying_takes_what_was_listed_and_nothing_since() -> Result<(), Box<dyn std::error::Error>>
     {
         let remote = fake();
-        let mut db = StateDb::open_in_memory()?;
+        let db = Db::new()?;
         let [f, with, own, lone, late, later_with] = [(); 6].map(|_| NodeId::new());
         db.write(|s| {
             s.put_removed(&removed(f, NodeId::ROOT, 10))?;
@@ -893,8 +1166,8 @@ mod tests {
                 None => Err(StateError::Conflict("own isn't listed".into())),
             }
         })?;
-        assert_eq!(empty_listed(&mut db, &remote, &summary.listed)?, 2);
-        assert_eq!(left(&mut db)?, sorted(vec![f, late, later_with, lone]));
+        assert_eq!(empty_listed(&db, &remote, &summary.listed, &mut false)?, 2);
+        assert_eq!(left(&db)?, sorted(vec![f, late, later_with, lone]));
         Ok(())
     }
 
@@ -912,7 +1185,7 @@ mod tests {
         };
         for how in ["listed", "deletes", "purge"] {
             let remote = fake();
-            let mut db = StateDb::open_in_memory()?;
+            let db = Db::new()?;
             db.write(|s| {
                 for (node, parent) in [
                     (outer, NodeId::ROOT),
@@ -945,13 +1218,13 @@ mod tests {
                     // The count it shows is what emptying takes.
                     let (_, summary) = db.read(|s| deletes(s, 0))?;
                     assert_eq!((summary.deletes, summary.items), (4, 2));
-                    empty_listed(&mut db, &remote, &summary.listed)?
+                    empty_listed(&db, &remote, &summary.listed, &mut false)?
                 }
-                "deletes" => empty(&mut db, &remote, &[outer, other, g, h])?,
-                _ => expire(&mut db, &remote, 11)?,
+                "deletes" => empty(&db, &remote, &[outer, other, g, h], &mut false)?,
+                _ => expire(&db, &remote, 11, None, &mut false)?,
             };
             assert_eq!(went, 2, "{how}");
-            assert_eq!(left(&mut db)?, sorted(vec![outer, f, g, h]), "{how}");
+            assert_eq!(left(&db)?, sorted(vec![outer, f, g, h]), "{how}");
             for n in [taken, taken_deep, later, unknown, h_child] {
                 assert!(db.read(|s| s.get_mirror(n))?.is_some(), "{how}: {n:?}");
             }
@@ -964,7 +1237,7 @@ mod tests {
     #[test]
     fn a_folder_stays_when_a_delete_in_it_fails() -> Result<(), Box<dyn std::error::Error>> {
         let remote = fake();
-        let mut db = StateDb::open_in_memory()?;
+        let db = Db::new()?;
         let (f, child) = (NodeId::new(), NodeId::new());
         let mut row = removed(child, f, 10);
         // On the drive at a version other than the one recorded: its delete is refused.
@@ -984,9 +1257,9 @@ mod tests {
             s.put_removed(&removed(f, NodeId::ROOT, 10))?;
             s.put_removed(&row)
         })?;
-        let listing = listed(&mut db)?;
-        assert_eq!(empty_listed(&mut db, &remote, &listing)?, 0);
-        assert_eq!(left(&mut db)?, sorted(vec![f, child]));
+        let listing = listed(&db)?;
+        assert_eq!(empty_listed(&db, &remote, &listing, &mut false)?, 0);
+        assert_eq!(left(&db)?, sorted(vec![f, child]));
         Ok(())
     }
 
@@ -995,31 +1268,31 @@ mod tests {
     #[test]
     fn emptying_an_unknown_listing_is_refused() -> Result<(), Box<dyn std::error::Error>> {
         let remote = fake();
-        let mut db = StateDb::open_in_memory()?;
+        let db = Db::new()?;
         let x = NodeId::new();
         db.write(|s| s.put_removed(&removed(x, NodeId::ROOT, 1)))?;
-        let listing = listed(&mut db)?;
+        let listing = listed(&db)?;
         let ahead = Listed {
             seq: listing.seq + 1,
             ..listing.clone()
         };
-        assert!(empty_listed(&mut db, &remote, &ahead).is_err());
+        assert!(empty_listed(&db, &remote, &ahead, &mut false).is_err());
         // Another DB, its counter as far.
-        let mut again = StateDb::open_in_memory()?;
-        let elsewhere = listed(&mut again)?;
+        let again = Db::new()?;
+        let elsewhere = listed(&again)?;
         assert_ne!(elsewhere.db, listing.db);
         let other = Listed {
             db: elsewhere.db,
             ..listing.clone()
         };
-        assert!(empty_listed(&mut db, &remote, &other).is_err());
+        assert!(empty_listed(&db, &remote, &other, &mut false).is_err());
         let nothing = Listed {
             seq: 0,
             ..listing.clone()
         };
-        assert_eq!(empty_listed(&mut db, &remote, &nothing)?, 0);
-        assert_eq!(left(&mut db)?, [x], "nothing went");
-        assert_eq!(empty_listed(&mut db, &remote, &listing)?, 1);
+        assert_eq!(empty_listed(&db, &remote, &nothing, &mut false)?, 0);
+        assert_eq!(left(&db)?, [x], "nothing went");
+        assert_eq!(empty_listed(&db, &remote, &listing, &mut false)?, 1);
         Ok(())
     }
 
@@ -1029,7 +1302,7 @@ mod tests {
     fn a_cycle_in_recently_deleted_is_emptied() -> Result<(), Box<dyn std::error::Error>> {
         let remote = fake();
         for purge in [false, true] {
-            let mut db = StateDb::open_in_memory()?;
+            let db = Db::new()?;
             let (a, b) = (NodeId::new(), NodeId::new());
             db.write(|s| {
                 s.put_removed(&removed(a, b, 1))?;
@@ -1037,13 +1310,13 @@ mod tests {
             })?;
             let gone = match purge {
                 false => {
-                    let listing = listed(&mut db)?;
-                    empty_listed(&mut db, &remote, &listing)?
+                    let listing = listed(&db)?;
+                    empty_listed(&db, &remote, &listing, &mut false)?
                 }
-                true => expire(&mut db, &remote, 2)?,
+                true => expire(&db, &remote, 2, None, &mut false)?,
             };
             assert_eq!(gone, 2, "purge: {purge}");
-            assert_eq!(left(&mut db)?, [], "purge: {purge}");
+            assert_eq!(left(&db)?, [], "purge: {purge}");
         }
         Ok(())
     }
@@ -1053,7 +1326,7 @@ mod tests {
     /// listing lists it as a delete.
     #[test]
     fn a_chain_too_deep_ends_at_the_last_row_walked() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
+        let db = Db::new()?;
         let chain: Vec<NodeId> = (0..hbsync_state::MAX_DEPTH + 2)
             .map(|_| NodeId::new())
             .collect();
@@ -1162,7 +1435,7 @@ mod tests {
     /// from it before; each such item is one of its own in Recently deleted.
     #[test]
     fn what_went_before_its_folder_stays() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
+        let db = Db::new()?;
         let (f, early, with, deeper) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
         db.write(|s| {
             s.put_removed(&removed(early, f, 5))?;

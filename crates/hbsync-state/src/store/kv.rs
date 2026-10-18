@@ -51,6 +51,11 @@ impl Store<'_> {
         Ok(())
     }
 
+    pub fn delete_account_kv(&self, key: AccountKey) -> Result<()> {
+        self.change("DELETE FROM kv WHERE key = ?1", key.0)?;
+        Ok(())
+    }
+
     /// Counts a [`crate::StateDb::flush`]: the write its commit syncs.
     pub(crate) fn count_flush(&self) -> Result<()> {
         self.prep(

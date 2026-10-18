@@ -23,45 +23,21 @@ fn remote_change(i: &Input, node: NodeId) -> Change {
     }
 }
 
-/// The remote nodes a folder's removal took along (node schema, Recently deleted): those in a
-/// folder in Recently deleted, directly or through folders in it, written no later than that
-/// folder's removal (the server's times; one this device wrote, whose time it doesn't know,
-/// was). A folder's delete removes the folder first, then what is in it: until it has, they
-/// count as gone. One written after the removal is a change of its own, and keeps the folder
-/// alive (§6.3).
+/// The remote nodes a folder's removal took along ([`crate::along::taken_along`]): one this
+/// device wrote, whose time it doesn't know, was. A folder's delete removes the folder first,
+/// then what is in it: until it has, they count as gone. One written after the removal is a
+/// change of its own, and keeps the folder alive (§6.3).
 pub(super) fn taken_along(i: &Input) -> HashSet<NodeId> {
-    // The removal time of the removed folder each node is in (`None`: none), found once.
-    let mut folder_at: HashMap<NodeId, Option<i64>> = HashMap::new();
-    let mut taken = HashSet::new();
     if i.removed.is_empty() {
-        return taken;
+        return HashSet::new();
     }
-    for node in i.remote.ids() {
-        let mut chain = Vec::new();
-        let mut at = node;
-        let found = loop {
-            if let Some(&known) = folder_at.get(&at) {
-                break known;
-            }
-            let Some(parent) = i.remote.get(at).map(|s| s.parent) else {
-                break None;
-            };
-            chain.push(at);
-            match i.removed.get(&parent) {
-                Some(r) => break Some(r.at),
-                // A cycle ends it.
-                None if chain.contains(&parent) => break None,
-                None => at = parent,
-            }
-        };
-        for n in chain {
-            folder_at.insert(n, found);
-        }
-        if found.is_some_and(|removed| i.changed_at.get(&node).is_none_or(|c| *c <= removed)) {
-            taken.insert(node);
-        }
-    }
-    taken
+    crate::along::taken_along(
+        i.remote
+            .ids()
+            .filter_map(|n| Some((n, i.remote.get(n)?.parent))),
+        |folder| i.removed.get(&folder).map(|r| r.at),
+        |node| i.changed_at.get(&node).copied(),
+    )
 }
 
 impl Reconciler<'_> {

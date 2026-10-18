@@ -30,6 +30,7 @@ mod local;
 mod mirror;
 mod parked;
 mod removed;
+mod tombstones;
 
 /// The agreed state of one node.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1275,9 +1275,9 @@ use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
-pub(crate) use settle::update_meta;
 use settle::{Placed, mark_children, merged_with_drive, settle_placement};
 pub use settle::{Settle, settle};
+pub(crate) use settle::{meta, meta_at, record_removed, update_meta};
 pub use transfer_ops::tags_lost;
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the
@@ -1359,10 +1359,13 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         RemoteError::Fatal(_) | RemoteError::InvalidHash | RemoteError::HashRequired => {
             Outcome::unsyncable(e.to_string())
         }
-        // The remote moved on, or rejected the bytes (changed mid-upload): plan again.
+        // The remote moved on, or rejected the bytes (changed mid-upload), or the file grew
+        // shorter than its header said (a read past its end): plan again, from what the feed
+        // says it is now.
         RemoteError::AlreadyExists
         | RemoteError::VersionMismatch
         | RemoteError::NotFound
+        | RemoteError::StaleRange(_)
         | RemoteError::HashMismatch => Outcome::stale(e.to_string()),
     }
 }

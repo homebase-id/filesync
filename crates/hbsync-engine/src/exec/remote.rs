@@ -114,13 +114,7 @@ impl Executor<'_> {
         else {
             return Err(Outcome::Done); // already out of the tree
         };
-        let meta = NodeMeta {
-            node,
-            parent: mirror.parent,
-            kind: mirror.kind,
-            content: mirror.content(&mirror.name),
-            removed: true,
-        };
+        let meta = meta(&mirror, true);
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
@@ -152,13 +146,7 @@ impl Executor<'_> {
             // Out of the tree, into Recently deleted at the server's time of the write, which
             // its answer has (`updated`, odin-core #1971). Never this device's clock.
             After::Removed { file_id } => {
-                s.delete_mirror(file_id)?;
-                if let Some(row) = row {
-                    s.put_removed(&RemovedRow {
-                        removed_at: row.changed_at,
-                        row,
-                    })?;
-                }
+                record_removed(s, file_id, row)?;
                 s.mark_dirty(node)
             }
         })

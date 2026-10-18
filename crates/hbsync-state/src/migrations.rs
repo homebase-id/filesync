@@ -280,6 +280,18 @@ const MIGRATIONS: &[&str] = &[
     // commit, a sixth of what deleting a folder of files writes), and only emptying as listed
     // reads by it, a scan of Recently deleted then.
     "DROP INDEX removed_seq;",
+    // 13: of a file deleted for good, the tombstone it left, while that is still on the drive
+    // (its version and time, the server's: deleted hard once that is old enough, so none stays
+    // in the feed for long), and since when it is known gone (the server's time; NULL: not
+    // known yet, the next purge's). No index: the daily purge reads them all once. The whole
+    // feed is read again once, so the tombstones from before are known too, and the removal
+    // times an earlier build stored as 0 (a header without one) become open: the re-read
+    // brings the real ones.
+    "ALTER TABLE gone_files ADD COLUMN version_tag BLOB;
+    ALTER TABLE gone_files ADD COLUMN at INTEGER;
+    ALTER TABLE gone_files ADD COLUMN gone_at INTEGER;
+    INSERT OR REPLACE INTO kv (key, value) VALUES ('remote.rereading', '1');
+    UPDATE removed SET removed_at = NULL WHERE removed_at = 0;",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.
@@ -386,6 +398,7 @@ fn repair_early_8(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
 
     #[test]
     fn applying_twice_changes_nothing() -> Result<()> {
@@ -574,6 +587,55 @@ mod tests {
             |r| r.get(0),
         )?;
         assert!(!indexed);
+        Ok(())
+    }
+
+    /// A DB at version 12 keeps what it knows gone, and reads the whole feed again once, for
+    /// the tombstones on the drive.
+    #[test]
+    fn version_12_reads_the_feed_again_for_tombstones() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        for sql in &MIGRATIONS[..(12 - BASE) as usize] {
+            conn.execute_batch(sql)?;
+        }
+        conn.pragma_update(None, "user_version", 12)?;
+        conn.execute("INSERT INTO gone_files (file_id) VALUES (x'01')", [])?;
+        // An earlier build stored a header without a time as 0.
+        for (node, at) in [("05", 0), ("06", 7)] {
+            conn.execute(
+                &format!(
+                    "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, \
+                     removed_at) VALUES (x'{node}', x'11{node}', x'22{node}', x'00', 1, 'n', ?1)"
+                ),
+                [at],
+            )?;
+        }
+        apply(&mut conn)?;
+        let times: Vec<Option<i64>> = conn
+            .prepare("SELECT removed_at FROM removed ORDER BY node")?
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        assert_eq!(times, [None, Some(7)], "0 is a time not known");
+        assert_eq!(user_version(&conn)?, VERSION);
+        let row: (Option<Vec<u8>>, Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT version_tag, at, gone_at FROM gone_files WHERE file_id = x'01'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        assert_eq!(
+            row,
+            (None, None, None),
+            "gone, no tombstone, since a time not known"
+        );
+        let reread: Option<String> = conn
+            .query_row(
+                "SELECT value FROM kv WHERE key = 'remote.rereading'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        assert_eq!(reread.as_deref(), Some("1"), "the feed is read again once");
         Ok(())
     }
 
