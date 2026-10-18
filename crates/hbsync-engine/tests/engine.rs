@@ -3030,3 +3030,69 @@ fn a_write_whose_answer_was_lost_isnt_sent_again() -> R {
     assert!(a.sync_unasked()?.ops_done == 0, "settled");
     Ok(())
 }
+
+/// A file renamed, moved or tagged here and edited on the drive: the plan writes the rename,
+/// move or tags to the drive, then downloads the edit. The download acts on the version that
+/// write made (the bytes the same), so it is fetched once, in the same round: acting only on
+/// the version the plan saw, it went stale behind the run's own write and came again a round
+/// later.
+#[test]
+fn a_download_after_the_runs_own_write_is_fetched_once() -> R {
+    use hbsync_platform::tags::{self, Tag, Tags};
+    type Change = fn(&Client) -> std::io::Result<()>;
+    let rename: Change = |c| fs::rename(c.root.join("d/f.txt"), c.root.join("d/g.txt"));
+    let mv: Change = |c| fs::rename(c.root.join("d/f.txt"), c.root.join("e/f.txt"));
+    let tag: Change = |c| {
+        let at = ["d/f.txt", "d/g.txt"].map(|p| c.root.join(p));
+        let file = at
+            .iter()
+            .find(|p| p.exists())
+            .ok_or(std::io::ErrorKind::NotFound)?;
+        tags::write(file, &Tags::new([Tag::new("Red", 6)])).map(|_| ())
+    };
+    const EDITED: &str = "edited on the drive";
+    let edit: Change = |c| c.write("d/f.txt", EDITED);
+    let blue: Change =
+        |c| tags::write(&c.root.join("d/f.txt"), &Tags::new([Tag::new("Blue", 4)])).map(|_| ());
+    // (case, changed here, changed on the drive)
+    let cases: [(&str, &[Change], &[Change]); 6] = [
+        ("rename / edit", &[rename], &[edit]),
+        ("move / edit", &[mv], &[edit]),
+        ("tag / edit", &[tag], &[edit]),
+        ("rename / edit+tag", &[rename], &[edit, blue]),
+        ("tag / edit+tag", &[tag], &[edit, blue]),
+        ("rename+tag / edit", &[rename, tag], &[edit]),
+    ];
+    for (case, here, there) in cases {
+        let server = server();
+        let mut a = Client::new(&server, "a")?;
+        let mut b = Client::new(&server, "b")?;
+        a.write("d/f.txt", "base")?;
+        a.write("e/other.txt", "other")?;
+        let tagless =
+            !tags::CAN_TAG || tags::write(&a.root.join("d/f.txt"), &Tags::default())?.is_none();
+        if tagless && case.contains("tag") {
+            eprintln!("{case}: no tags here; skipped");
+            continue;
+        }
+        a.sync()?;
+        b.sync()?;
+        there.iter().try_for_each(|change| change(&b))?;
+        b.sync()?;
+        here.iter().try_for_each(|change| change(&a))?;
+        a.remote.faults().served = 0;
+        let report = a.sync()?;
+        let stale: Vec<_> = report
+            .skipped
+            .iter()
+            .filter(|(_, why)| matches!(why, hbsync_engine::exec::Skip::Stale(_)))
+            .collect();
+        assert!(stale.is_empty(), "{case}: {stale:?}");
+        assert!(report.failed.is_empty(), "{case}: {:?}", report.failed);
+        let served = a.remote.faults().served;
+        assert_eq!(served, EDITED.len() as u64, "{case}: downloaded once");
+        b.sync()?;
+        assert_eq!(a.tree_text(""), b.tree_text(""), "{case}");
+    }
+    Ok(())
+}
