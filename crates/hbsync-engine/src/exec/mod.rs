@@ -1052,15 +1052,12 @@ impl<'a> Executor<'a> {
             Some(&progress.bytes_done),
             halt.as_deref(),
             jobs,
-            |job, result| {
+            |ran| {
                 if first_error.is_some() {
                     return false;
                 }
-                if let Some(p) = pending.remove(&job.node()) {
-                    let outcome = self.commit(p.ctx, job, result).unwrap_or_else(|o| o);
-                    if let Err(e) = self.handle(p.op, p.attempts, outcome, p.gone) {
-                        first_error = Some(e);
-                    }
+                if let Err(e) = self.commit_ran(ran, &mut pending) {
+                    first_error = Some(e);
                 }
                 first_error.is_none() && !self.should_stop() && self.resume_at.is_none()
             },
@@ -1092,6 +1089,65 @@ impl<'a> Executor<'a> {
         }
         if self.crashed {
             return Err(StateError::Conflict("crash point reached".into()));
+        }
+        Ok(())
+    }
+
+    /// Records what jobs that ran together did (taking them out of `pending`): the removals
+    /// that landed in one go, in one transaction ([`Executor::commit_removed`]: one commit for
+    /// a request's thousand answers, not one each); every other result on its own.
+    fn commit_ran(
+        &mut self,
+        ran: Vec<(Job, JobResult)>,
+        pending: &mut BTreeMap<NodeId, Prepared>,
+    ) -> Result<(), StateError> {
+        let mut landed = Vec::new();
+        for (job, result) in ran {
+            let Some(p) = pending.remove(&job.node()) else {
+                continue;
+            };
+            match (p, job, result) {
+                (
+                    Prepared {
+                        op,
+                        attempts,
+                        ctx:
+                            Ctx::Meta {
+                                hash,
+                                after: remote::After::Removed { file_id },
+                                ..
+                            },
+                        gone,
+                    },
+                    Job::Meta { meta, .. },
+                    JobResult::Written(written),
+                ) => landed.push((
+                    (op, attempts, gone),
+                    remote::Landed {
+                        meta,
+                        hash,
+                        file_id,
+                        written,
+                    },
+                )),
+                (p, job, result) => {
+                    let outcome = self.commit(p.ctx, job, result).unwrap_or_else(|o| o);
+                    self.handle(p.op, p.attempts, outcome, p.gone)?;
+                }
+            }
+        }
+        if landed.is_empty() {
+            return Ok(());
+        }
+        let (ops, landed): (Vec<_>, Vec<_>) = landed.into_iter().unzip();
+        let committed = self.commit_removed(landed);
+        for (op, attempts, gone) in ops {
+            // As one that failed on its own: planned again.
+            let outcome = match &committed {
+                Ok(()) => Outcome::Settled,
+                Err(e) => Outcome::Retry(e.to_string()),
+            };
+            self.handle(op, attempts, outcome, gone)?;
         }
         Ok(())
     }

@@ -3186,3 +3186,90 @@ fn a_download_after_the_runs_own_write_is_fetched_once() -> R {
     }
     Ok(())
 }
+
+/// A folder's delete, its removals answered a request at a time and recorded a request at a
+/// time: a crash or a power cut at any of its commits loses nothing, and the next sync finishes
+/// the delete. Every node of the folder ends removed on the drive (restorable, as one item),
+/// none live, and the other device has the folder gone.
+#[test]
+fn a_crash_at_any_commit_of_a_folders_delete_finishes_it() -> R {
+    for at in 0..8 {
+        for before in [true, false] {
+            for kept in [common::Kept::All, common::Kept::Durable(None)] {
+                let server = server();
+                let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+                a.write("keep.txt", "k")?;
+                for i in 0..5 {
+                    a.write(&format!("F/f{i}.txt"), format!("{i}"))?;
+                }
+                a.write("F/G/g.txt", "g")?;
+                a.sync()?;
+                let mut b = Client::new(&server, "b")?;
+                b.sync()?;
+                fs::remove_dir_all(a.root.join("F"))?;
+                let case = format!("at {at}, before {before}, {kept:?}");
+                common::crash(&mut a, kept, move |now, n| {
+                    n == at && (now == Commit::Before) == before
+                })?;
+                a.sync()?;
+                b.sync()?;
+                let s = server.lock().map_err(|_| "poisoned")?;
+                let live: Vec<String> = s.live_names();
+                assert_eq!(live, ["keep.txt"], "{case}");
+                assert_eq!(s.removed().count(), 8, "{case}");
+                drop(s);
+                assert_eq!(b.tree_text(""), ["keep.txt = k"], "{case}");
+                // One item, with all of the folder in it.
+                let deleted = a.recently_deleted(10)?;
+                let items = deleted.iter().filter(|d| d.root == d.node).count();
+                assert_eq!((items, deleted.len()), (1, 8), "{case}: {deleted:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A folder's delete that its device never finished (the folder removed on the drive, what is
+/// in it still live, and the device never back) is finished by another device that syncs it:
+/// what the removal took along goes to Recently deleted with the folder, and off its disk.
+#[test]
+fn another_device_finishes_a_folders_delete_left_half_done() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    for i in 0..5 {
+        a.write(&format!("F/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+    b.sync()?;
+    // a removes the folder alone, and is never seen again.
+    let f = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        let h = s
+            .live()
+            .find(|h| h.state().is_some_and(|st| st.name == "F"))
+            .ok_or("no F")?
+            .clone();
+        Target {
+            at: RemoteRef {
+                file_id: h.file_id,
+                version: h.version,
+            },
+            token: Some(hbsync_remote::fake::token_of(h.file_id)),
+            changed_at: None,
+        }
+    };
+    a.remote.set_removed(&[f], true)?.into_answers()?;
+    drop(a);
+    b.sync()?;
+    let s = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!(s.live_names(), ["keep.txt"]);
+    assert_eq!(s.removed().count(), 6);
+    drop(s);
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
+    let deleted = b.recently_deleted(10)?;
+    let items = deleted.iter().filter(|d| d.root == d.node).count();
+    assert_eq!((items, deleted.len()), (1, 6), "{deleted:?}");
+    Ok(())
+}
