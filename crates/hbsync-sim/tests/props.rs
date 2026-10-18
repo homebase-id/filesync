@@ -2722,3 +2722,50 @@ fn regression_a_tag_removed_while_a_restored_folder_has_no_base() {
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// Client 0 deletes a tagged folder whose drive copy holds a file it never had: the delete loses,
+/// and the folder is made again, but the crash comes before its tags are written and its commit.
+/// The user then renames it: away from the record's place, the scan finds it as a new folder
+/// (the engine's write-ahead record pairs only what is at its place), not the node with no tags.
+/// The simulator kept it as the node, its missing tag read as a removal (`cc 03016076…`).
+#[test]
+fn regression_a_folder_made_again_and_moved_before_recovery_is_a_new_folder() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 0, name: 0 },
+        },
+        Act {
+            client: 1,
+            action: Tag { node: 0, tag: 8 },
+        },
+        Act {
+            client: 1,
+            action: CreateFile { parent: 6, name: 0 },
+        },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Plan { client: 0 },
+        Step { client: 0 },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: Delete { node: 0 },
+        },
+        Plan { client: 0 },
+        Crash { client: 0 },
+        Act {
+            client: 0,
+            action: Move {
+                node: 0,
+                parent: 7,
+                name: 1,
+            },
+        },
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
