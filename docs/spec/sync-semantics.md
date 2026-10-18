@@ -309,7 +309,12 @@ expected fingerprint is treated as done.
   recovery in the run read the disk at a record's target alike: the item there with the
   record's bytes is settled, a record whose target verifiably holds nothing (not found, a file
   where a folder would be, a loop of links) goes, and one whose target holds another node is
-  left to adoption. A record never goes only because no scan has seen its item yet. No operation writes over a
+  left to adoption. A record never goes only because no scan has seen its item yet. An item
+  at its target whose bytes are neither the record's nor the base's (the user edited it before
+  the next sync) can't be told from the file that was there before (the crash may have come
+  during the transfer, before the move): the record goes, and the item reads against the old
+  base, a conflict copy where the drive changed too; the tags the download wrote read as this
+  device adding them (a known limit, §11). No operation writes over a
   record it didn't write: it is left for the next plan, the node dirty, until recovery settles
   the record. A verified download that couldn't be
   placed stays in the temp folder for the retry; temp files no pending download wants are
@@ -464,7 +469,10 @@ elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go 
 the item changes again. A tag change makes the scan read the file again (the change time is
 part of the fingerprint, to catch writes that keep the modification time). An item that becomes
 a new node on a device that can't hold all its tags (detached on Windows, §10) goes up with
-the tags that device has.
+the tags that device has. A download put in place whose commit a crash lost, its file edited
+before the next sync, is read against the old base (§8a, crash recovery): a tag the download
+wrote reads as this device adding it, so a tag another device removed meanwhile can come back.
+No tag is lost, only the removal; the simulator allows exactly this.
 
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where

@@ -494,6 +494,11 @@ pub struct Sim {
     tags_forked: BTreeSet<(usize, NodeId, String)>,
     /// Tag adds a client's remote write sent up: they stand once the item goes from it.
     tags_sent: BTreeSet<(usize, NodeId, String)>,
+    /// Tags a download wrote on a client's item whose record recovery dropped (the item
+    /// changed since: it can't be told from the file there before), that the item still
+    /// holds: read against the old base, they are that client's adds, and a removal made
+    /// elsewhere meanwhile may come back (sync semantics §8, §11: the known limit).
+    tags_unproven: BTreeSet<(usize, NodeId, String)>,
     deleted: BTreeSet<NodeId>,
     /// What the phone deleted with the role folder, brought back with it.
     role_folder_deleted_with: Vec<NodeId>,
@@ -544,6 +549,7 @@ impl Sim {
             tags_forked: BTreeSet::new(),
             tags_sent: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
+            tags_unproven: BTreeSet::new(),
             tags_cleared: BTreeSet::new(),
             deleted: BTreeSet::new(),
             role_folder_deleted_with: Vec::new(),
@@ -815,10 +821,11 @@ impl Sim {
                 let prior = (client.os != Os::Windows)
                     .then(|| client.local.get(node).map(|l| l.tags.clone()))
                     .map(Option::unwrap_or_default);
+                let fresh = !client.local.contains(node);
                 if self.execute(c, &op) == Outcome::Done
                     && let Some(record) = self.placed_from.take()
                 {
-                    self.lose_commit(c, &op, record, prior);
+                    self.lose_commit(c, &op, record, prior, fresh);
                 }
             }
             // A folder is made in place, then the crash, before its tags are written. Only one
@@ -835,6 +842,7 @@ impl Sim {
                     })
                 });
                 let synced_before = client.base.contains(node);
+                let fresh = !client.local.contains(node);
                 if self.execute(c, &op) == Outcome::Done {
                     let client = &mut self.clients[c];
                     if let Some(mut state) = client.local.get(node).cloned() {
@@ -843,7 +851,7 @@ impl Sim {
                     }
                     if synced_before && let Some(record) = record {
                         // Nothing was there.
-                        self.lose_commit(c, &op, record, Some(Tags::default()));
+                        self.lose_commit(c, &op, record, Some(Tags::default()), fresh);
                     } else {
                         self.placed_back(node);
                     }
@@ -861,8 +869,16 @@ impl Sim {
     /// write-ahead record stays, claiming tags as the engine's does: a download those it wrote
     /// as the OS holds them, the empty set too (not known where the OS keeps none); a folder,
     /// made without tags and lost before they are written, holds none only if it is to hold
-    /// none (not known otherwise). `prior`: what the item there held before.
-    fn lose_commit(&mut self, c: usize, op: &Op, record: DriveVersion, prior: Option<Tags>) {
+    /// none (not known otherwise). `prior`: what the item there held before; `fresh`: the node
+    /// had no item here before (the scan finds the one put in place as new).
+    fn lose_commit(
+        &mut self,
+        c: usize,
+        op: &Op,
+        record: DriveVersion,
+        prior: Option<Tags>,
+        fresh: bool,
+    ) {
         let (Op::LocalDownload {
             node,
             parent,
@@ -897,6 +913,7 @@ impl Sim {
             name: name.clone(),
             tags,
             prior,
+            fresh,
             unhashed,
             held: false,
         };
@@ -917,6 +934,7 @@ impl Sim {
         record: DriveVersion,
         tags: Option<Tags>,
         prior: Option<Tags>,
+        fresh: bool,
     ) {
         let (Op::LocalDownload {
             node, parent, name, ..
@@ -936,6 +954,7 @@ impl Sim {
             name: name.clone(),
             tags,
             prior,
+            fresh,
             unhashed: false,
             held: false,
         };
@@ -981,12 +1000,32 @@ impl Sim {
                         self.clients[c].placing.insert(node, p);
                     }
                 }
-            } else if !self.clients[c].base.contains(node) && self.clients[c].local.contains(node) {
-                // A first download changed since it was put in place: the scan found it as a
-                // new item, and recovery doesn't take it for the node.
+            } else if !p.fresh {
+                self.unproven_tags(c, node, &p);
+            } else if self.clients[c].local.contains(node) {
+                // An item new to this client (a first download, a folder made again after a
+                // local delete) moved or changed since it was put in place: the scan found it
+                // as a new item, and recovery doesn't take it for the node.
                 let new = self.release_id();
                 rekey_client(&mut self.clients[c], node, new);
                 self.retrack(c, node, new);
+            }
+        }
+    }
+
+    /// The record `p` of the node's own item on client `c` dropped (the item changed since): the
+    /// tags its download wrote, changing what the item held before, that the item still holds
+    /// are [`Sim::tags_unproven`].
+    fn unproven_tags(&mut self, c: usize, node: NodeId, p: &Placement) {
+        let (Some(written), Some(before)) = (&p.tags, &p.prior) else {
+            return;
+        };
+        let Some(item) = self.clients[c].local.get(node) else {
+            return;
+        };
+        for tag in written.iter() {
+            if before.get(&tag.name) != Some(tag) && item.tags.get(&tag.name) == Some(tag) {
+                self.tags_unproven.insert((c, node, tag.name.clone()));
             }
         }
     }
@@ -1826,6 +1865,7 @@ impl Sim {
         // What the item held of tags before the operation (nothing where there was none).
         let held_before = self.clients[c].local.get(node).cloned();
         let before_tags = held_before.as_ref().map(|l| l.tags.clone());
+        let fresh = held_before.is_none();
         let outcome = self.execute(c, &op);
         let landed = outcome == Outcome::Landed;
         let outcome = if landed { Outcome::Done } else { outcome };
@@ -1933,7 +1973,7 @@ impl Sim {
                 };
                 // The operation ends, and recovery settles what it put in place right away, by
                 // that item alone (no other is read again, as the executor's).
-                self.keep_record(c, &op, record, tags, prior);
+                self.keep_record(c, &op, record, tags, prior, fresh);
                 if let Some(p) = self.clients[c].placing.get(&node).cloned()
                     && self.record_there(c, node, &p)
                 {
@@ -3052,13 +3092,16 @@ impl Sim {
                 return Err(format!("lost tag {name:?} of {node:?}: {:?}", s.tags));
             }
         }
-        // A synced tag a client removed stays removed (§11), unless another client added it.
-        // One removed before a delete was settled by it (`deleted_now`, `restored_on_drive`).
+        // A synced tag a client removed stays removed (§11), unless another client added it,
+        // or holds it from a download whose record recovery dropped (`tags_unproven`, the known
+        // limit). One removed before a delete was settled by it (`deleted_now`,
+        // `restored_on_drive`).
         for (by, node, name) in &self.tags_cleared {
             let added_elsewhere = self
                 .tags_added
                 .iter()
                 .chain(&self.tags_forked)
+                .chain(&self.tags_unproven)
                 .any(|(c, n, t)| c != by && n == node && t == name);
             if let Some(s) = server.get(*node)
                 && !added_elsewhere
@@ -3277,6 +3320,10 @@ struct Placement {
     tags: Option<Tags>,
     /// What the item there held before (`None`: not known; none where there was none).
     prior: Option<Tags>,
+    /// The node had no item on this client before it was put in place: with the commit lost,
+    /// the scan finds the item as a new one, the node's only where recovery takes it over (at
+    /// its place with the record's bytes).
+    fresh: bool,
     unhashed: bool,
     /// Held once already (its node gone, its item not the drive's to take): it goes next.
     held: bool,
