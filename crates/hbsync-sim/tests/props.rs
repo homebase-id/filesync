@@ -2769,3 +2769,50 @@ fn regression_a_folder_made_again_and_moved_before_recovery_is_a_new_folder() {
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// Client 1 downloads a version client 0 tagged Work; the crash comes once it is in place,
+/// before its commit, and the user edits it. Client 0 removes Work meanwhile. Recovery can't
+/// tell the edited item from the file there before (its bytes are neither), so it drops the
+/// record and the old base stands: the Work the download wrote reads as client 1 adding it,
+/// and comes back (the known limit, sync semantics §8, §11; `cc 86011d5e…`). Nothing is lost:
+/// the edit goes to a conflict copy.
+#[test]
+fn regression_a_tag_a_crashed_download_wrote_may_come_back_after_an_edit() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 2 },
+        },
+        Plan { client: 0 },
+        Step { client: 0 },
+        Act {
+            client: 0,
+            action: Tag { node: 0, tag: 1 },
+        },
+        Act {
+            client: 0,
+            action: Edit { file: 0 },
+        },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Plan { client: 0 },
+        Step { client: 0 },
+        Act {
+            client: 0,
+            action: Tag { node: 0, tag: 9 },
+        },
+        Step { client: 1 },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Crash { client: 1 },
+        Act {
+            client: 1,
+            action: Edit { file: 0 },
+        },
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}

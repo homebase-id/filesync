@@ -494,6 +494,11 @@ pub struct Sim {
     tags_forked: BTreeSet<(usize, NodeId, String)>,
     /// Tag adds a client's remote write sent up: they stand once the item goes from it.
     tags_sent: BTreeSet<(usize, NodeId, String)>,
+    /// Tags a download wrote on a client's item whose record recovery dropped (the item
+    /// changed since: it can't be told from the file there before), that the item still
+    /// holds: read against the old base, they are that client's adds, and a removal made
+    /// elsewhere meanwhile may come back (sync semantics §8, §11: the known limit).
+    tags_unproven: BTreeSet<(usize, NodeId, String)>,
     deleted: BTreeSet<NodeId>,
     /// What the phone deleted with the role folder, brought back with it.
     role_folder_deleted_with: Vec<NodeId>,
@@ -544,6 +549,7 @@ impl Sim {
             tags_forked: BTreeSet::new(),
             tags_sent: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
+            tags_unproven: BTreeSet::new(),
             tags_cleared: BTreeSet::new(),
             deleted: BTreeSet::new(),
             role_folder_deleted_with: Vec::new(),
@@ -994,13 +1000,32 @@ impl Sim {
                         self.clients[c].placing.insert(node, p);
                     }
                 }
-            } else if p.fresh && self.clients[c].local.contains(node) {
+            } else if !p.fresh {
+                self.unproven_tags(c, node, &p);
+            } else if self.clients[c].local.contains(node) {
                 // An item new to this client (a first download, a folder made again after a
                 // local delete) moved or changed since it was put in place: the scan found it
                 // as a new item, and recovery doesn't take it for the node.
                 let new = self.release_id();
                 rekey_client(&mut self.clients[c], node, new);
                 self.retrack(c, node, new);
+            }
+        }
+    }
+
+    /// The record `p` of the node's own item on client `c` dropped (the item changed since): the
+    /// tags its download wrote, changing what the item held before, that the item still holds
+    /// are [`Sim::tags_unproven`].
+    fn unproven_tags(&mut self, c: usize, node: NodeId, p: &Placement) {
+        let (Some(written), Some(before)) = (&p.tags, &p.prior) else {
+            return;
+        };
+        let Some(item) = self.clients[c].local.get(node) else {
+            return;
+        };
+        for tag in written.iter() {
+            if before.get(&tag.name) != Some(tag) && item.tags.get(&tag.name) == Some(tag) {
+                self.tags_unproven.insert((c, node, tag.name.clone()));
             }
         }
     }
@@ -3067,13 +3092,16 @@ impl Sim {
                 return Err(format!("lost tag {name:?} of {node:?}: {:?}", s.tags));
             }
         }
-        // A synced tag a client removed stays removed (§11), unless another client added it.
-        // One removed before a delete was settled by it (`deleted_now`, `restored_on_drive`).
+        // A synced tag a client removed stays removed (§11), unless another client added it,
+        // or holds it from a download whose record recovery dropped (`tags_unproven`, the known
+        // limit). One removed before a delete was settled by it (`deleted_now`,
+        // `restored_on_drive`).
         for (by, node, name) in &self.tags_cleared {
             let added_elsewhere = self
                 .tags_added
                 .iter()
                 .chain(&self.tags_forked)
+                .chain(&self.tags_unproven)
                 .any(|(c, n, t)| c != by && n == node && t == name);
             if let Some(s) = server.get(*node)
                 && !added_elsewhere
