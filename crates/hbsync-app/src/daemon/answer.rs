@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use hbsync_types::NodeId;
 
@@ -69,10 +68,7 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             }
         }
         Ask::Stop => {
-            daemon.stop.store(true, Ordering::Relaxed);
-            for a in accounts {
-                a.send_all(&Command::Stop);
-            }
+            daemon.stop.stop();
             Reply::Done
         }
         Ask::Control(control) => self::control(control, accounts, daemon),

@@ -5,17 +5,14 @@
 // No console window at logon.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use std::io::IsTerminal;
-use std::process::ExitCode;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-
 use hbsync_app::Paths;
-use hbsync_app::daemon::DaemonError;
+use hbsync_app::daemon::{DaemonError, Stop};
 use hbsync_app::lock::LockError;
 use hbsync_app::runner::RunnerError;
 use hbsync_engine::root::RootError;
 use hbsync_state::StateError;
+use std::io::IsTerminal;
+use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let paths = match Paths::resolve() {
@@ -32,11 +29,18 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Stop::default();
     #[cfg(unix)]
-    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-        if let Err(e) = signal_hook::flag::register(signal, Arc::clone(&stop)) {
-            tracing::warn!("can't handle signal {signal}: {e}");
+    {
+        use signal_hook::consts::{SIGINT, SIGTERM};
+        let stopper = stop.clone();
+        let handled = signal_hook::iterator::Signals::new([SIGTERM, SIGINT]).and_then(|mut s| {
+            std::thread::Builder::new()
+                .name("hbsync-signals".into())
+                .spawn(move || s.forever().for_each(|_| stopper.stop()))
+        });
+        if let Err(e) = handled {
+            tracing::warn!("can't handle signals: {e}");
         }
     }
     let Err(e) = hbsync_app::daemon::run(&paths, stop) else {

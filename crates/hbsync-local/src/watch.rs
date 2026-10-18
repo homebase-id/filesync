@@ -5,11 +5,13 @@
 //! a full rescan, since events were lost.
 //!
 //! [`LocalObserver`] starts the watcher *before* catch-up, so a change made while catch-up runs
-//! is seen by the watcher (and at worst handled twice, which is harmless).
+//! is seen by the watcher (and at worst handled twice, which is harmless). It rings a bell when
+//! there is something to record, so its owner can block until then instead of polling.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
@@ -52,26 +54,70 @@ impl Default for Debounce {
     }
 }
 
+/// Called from the watcher's thread when there is something to record (or the ignore rules
+/// were touched): at most once until the next [`LocalObserver::poll`], however many events
+/// come meanwhile.
+pub type Bell = Arc<dyn Fn() + Send + Sync>;
+
 /// OS change notifications for one sync root.
-#[derive(Debug)]
 pub struct LiveWatcher {
     _watcher: RecommendedWatcher,
     rx: Receiver<notify::Result<Event>>,
     root: PathBuf,
+    /// The bell rang since the queue was last drained: it won't ring again until then.
+    rung: Arc<AtomicBool>,
+    /// The ignore rules' file was touched.
+    rules: Arc<AtomicBool>,
+    /// The OS watcher stopped sending (its channel closed).
+    gone: AtomicBool,
+}
+
+impl std::fmt::Debug for LiveWatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveWatcher")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LiveWatcher {
-    pub fn start(root: &Path, filter: Arc<Filter>) -> notify::Result<Self> {
+    /// Starts watching; `bell` rings when an event is queued or the ignore rules' file was
+    /// changed.
+    pub fn start(root: &Path, filter: Arc<Filter>, bell: Option<Bell>) -> notify::Result<Self> {
         let root = root.canonicalize().map_err(notify::Error::io)?;
         let (tx, rx) = channel();
-        let filter_root = root.clone();
-        let mut watcher = notify::recommended_watcher(move |res| {
+        let (rung, rules): (Arc<AtomicBool>, Arc<AtomicBool>) = Default::default();
+        let (filter_root, rang, touched) = (root.clone(), Arc::clone(&rung), Arc::clone(&rules));
+        let rules_file = crate::layout::ignore_file(&root);
+        let rules_dir = rules_file.parent().unwrap_or(&root).to_path_buf();
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+            // The rules' file is the client's own (filtered below), but a change to it counts
+            // (or may hide in an event that lost its paths); reading it (as the runner does to
+            // compare them) doesn't.
+            let rules_touched = res.as_ref().map_or(true, |e| {
+                e.need_rescan()
+                    || !reads_only(&e.kind)
+                        && e.paths.iter().any(|p| *p == rules_file || *p == rules_dir)
+            });
+            if rules_touched {
+                touched.store(true, Ordering::SeqCst);
+            }
             // Only changes are queued, and only their paths that sync: reads (a viewer, a
             // backup tool, the rescan itself) and filtered items (the client's own state,
             // junk, ignored folders) would otherwise flood the channel.
-            if let Some(res) = keep(&filter_root, &filter, res) {
+            let kept = keep(&filter_root, &filter, res);
+            let queued = kept.is_some();
+            if let Some(res) = kept {
                 // The receiver is gone only when the watcher is being dropped.
                 let _ = tx.send(res);
+            }
+            // After queueing: whoever the bell wakes finds the event.
+            if (queued || rules_touched)
+                && !rang.load(Ordering::Relaxed)
+                && !rang.swap(true, Ordering::SeqCst)
+                && let Some(bell) = &bell
+            {
+                bell();
             }
         })?;
         watcher.watch(&root, RecursiveMode::Recursive)?;
@@ -79,13 +125,22 @@ impl LiveWatcher {
             _watcher: watcher,
             rx,
             root,
+            rung,
+            rules,
+            gone: AtomicBool::new(false),
         })
     }
 
     /// Waits up to `timeout` for a first change, then collects until no change came for
     /// `debounce.quiet` (the queue is then drained) or `debounce.max_delay` has passed.
     /// `None` if nothing changed. Events that change nothing neither start nor extend a batch.
-    pub fn next_batch(&self, timeout: Duration, debounce: Debounce) -> Option<WatchBatch> {
+    /// `first` is called once the first change came, before the rest is collected.
+    pub fn next_batch(
+        &self,
+        timeout: Duration,
+        debounce: Debounce,
+        first: impl FnOnce(),
+    ) -> Option<WatchBatch> {
         let mut batch = WatchBatch::default();
         let deadline = Instant::now() + timeout;
         loop {
@@ -95,11 +150,13 @@ impl LiveWatcher {
             {
                 Ok(event) => {
                     if self.add(&mut batch, event) {
+                        first();
                         break;
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => return None,
                 Err(RecvTimeoutError::Disconnected) => {
+                    self.gone.store(true, Ordering::Relaxed);
                     batch.rescan_all = true;
                     return Some(batch);
                 }
@@ -129,6 +186,7 @@ impl LiveWatcher {
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
+                    self.gone.store(true, Ordering::Relaxed);
                     batch.rescan_all = true;
                     break;
                 }
@@ -157,10 +215,7 @@ fn keep(
         return Some(event);
     };
     let rescan = event.need_rescan();
-    if let EventKind::Access(kind) = event.kind
-        && kind != AccessKind::Close(AccessMode::Write)
-        && !rescan
-    {
+    if reads_only(&event.kind) && !rescan {
         return None;
     }
     event.paths.retain(|path| {
@@ -168,6 +223,11 @@ fn keep(
             .is_ok_and(|rel| !excluded(rel, filter))
     });
     (rescan || !event.paths.is_empty()).then_some(Ok(event))
+}
+
+/// Whether an event of `kind` only says something was opened or read.
+fn reads_only(kind: &EventKind) -> bool {
+    matches!(kind, EventKind::Access(a) if *a != AccessKind::Close(AccessMode::Write))
 }
 
 /// Whether `rel` is filtered or lies in a filtered folder. Whether it is a folder itself is
@@ -228,6 +288,10 @@ pub struct LocalObserver {
     pub watcher_error: Option<String>,
     /// A batch was recorded without storing the journal position (see [`LocalObserver::poll`]).
     unsaved: bool,
+    /// While `unsaved`: a position taken, stored if no change came until the instant.
+    settling: Option<(String, Instant)>,
+    /// The last batch was cut off by `max_delay`: events may still be queued.
+    more: bool,
     /// When to look into new folders once more, and which (see [`RECHECK`]).
     recheck: Option<(Instant, Vec<RelPath>)>,
 }
@@ -242,7 +306,15 @@ const RECHECK: Duration = Duration::from_secs(1);
 impl LocalObserver {
     /// Starts watching. Call [`LocalObserver::catch_up`] next.
     pub fn start(root: &Path, opts: ScanOptions) -> Self {
-        let (watcher, watcher_error) = match LiveWatcher::start(root, Arc::clone(&opts.filter)) {
+        Self::ringing(root, opts, None)
+    }
+
+    /// [`LocalObserver::start`], ringing `bell` when there is something to record
+    /// ([`LocalObserver::poll`]) or the ignore rules' file was touched
+    /// ([`LocalObserver::rules_touched`]). Poll at [`LocalObserver::deadline`] too.
+    pub fn ringing(root: &Path, opts: ScanOptions, bell: Option<Bell>) -> Self {
+        let filter = Arc::clone(&opts.filter);
+        let (watcher, watcher_error) = match LiveWatcher::start(root, filter, bell) {
             Ok(w) => (Some(w), None),
             // Typically inotify's watch limit on very large trees.
             Err(e) => (None, Some(e.to_string())),
@@ -254,6 +326,8 @@ impl LocalObserver {
             watcher,
             watcher_error,
             unsaved: false,
+            settling: None,
+            more: false,
             recheck: None,
         }
     }
@@ -264,12 +338,18 @@ impl LocalObserver {
 
     /// Waits up to `timeout` for live changes and records them. `None` if nothing happened
     /// (or there is no watcher; then [`LocalObserver::catch_up`] should run periodically).
+    /// With a zero `timeout` it only takes what is queued, and costs nothing when nothing is.
     pub fn poll(
         &mut self,
         db: &mut StateDb,
         timeout: Duration,
         debounce: Debounce,
     ) -> Result<Option<ScanReport>, StateError> {
+        // Before draining: an event queued from now on rings again.
+        if let Some(w) = &self.watcher {
+            w.rung.store(false, Ordering::SeqCst);
+        }
+        self.more = false;
         // Without a watcher nothing is ever due for a recheck.
         if self
             .recheck
@@ -280,6 +360,8 @@ impl LocalObserver {
             let report = rescan_dirs(db, &self.root, &dirs, &self.opts)?;
             self.note_new_folders(&report);
             if report.added + report.removed + report.modified + report.moved > 0 {
+                // The queue wasn't looked at: poll again at once.
+                self.more = true;
                 return Ok(Some(report));
             }
         }
@@ -287,22 +369,47 @@ impl LocalObserver {
             std::thread::sleep(timeout);
             return Ok(None);
         };
-        // The journal position is taken before waiting. Once the queue has been drained (a
-        // quiet period, or no event at all, for longer than the OS takes to deliver one),
-        // every change made before that position has been delivered and recorded, in this
-        // batch or an earlier one, so the position can be stored; anything later is replayed
-        // after a crash. A batch cut off by `max_delay` may leave events queued: it stores
-        // nothing, and the next drained poll catches up.
-        let position = self.journal.as_mut().and_then(|j| j.now().ok());
-        let Some(batch) = watcher.next_batch(timeout, debounce) else {
-            if self.unsaved
-                && let Some(position) = position
+        // A batch's journal position is taken when its first change came, before the rest is
+        // collected. Once the queue has been drained (a quiet period longer than the OS takes
+        // to deliver an event), every change made before that position has been delivered and
+        // recorded, in this batch or an earlier one, so the position can be stored; anything
+        // later is replayed after a crash. A batch cut off by `max_delay` may leave events
+        // queued: it stores nothing. Then a position taken while nothing is recorded is stored
+        // once no change came for a quiet period after it (`settling`), as the OS has
+        // delivered everything before it by then. Nothing is taken while nothing changes.
+        if self.unsaved
+            && self.settling.is_none()
+            && let Some(journal) = self.journal.as_mut()
+        {
+            match journal.now() {
+                Ok(position) => self.settling = Some((position, Instant::now() + debounce.quiet)),
+                // An older position is always safe: it only replays more.
+                Err(_) => self.unsaved = false,
+            }
+        }
+        let mut position = None;
+        let journal = &mut self.journal;
+        let first = || position = journal.as_mut().and_then(|j| j.now().ok());
+        let Some(batch) = watcher.next_batch(timeout, debounce, first) else {
+            if let Some((_, at)) = &self.settling
+                && Instant::now() >= *at
+                && let Some((position, _)) = self.settling.take()
             {
                 db.write(|s| s.set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
             }
             return Ok(None);
         };
+        self.settling = None;
+        self.more = !batch.drained;
+        if watcher.gone.load(Ordering::Relaxed) {
+            // Left to the look's rescans from now on, as without a watcher.
+            self.watcher_error = Some("the live watcher stopped".to_owned());
+            self.watcher = None;
+            self.more = false;
+            // No position is stored without a watcher; the one stored is older, which is safe.
+            self.unsaved = false;
+        }
         let dirs: Vec<RelPath> = batch.dirs.into_iter().collect();
         let report = if batch.rescan_all {
             scan(db, &self.root, &self.opts)?
@@ -332,6 +439,31 @@ impl LocalObserver {
 
     pub fn has_watcher(&self) -> bool {
         self.watcher.is_some()
+    }
+
+    /// When to [`LocalObserver::poll`] even if the bell didn't ring: a recheck of new
+    /// folders, a journal position to store, or events a cut-off batch left queued.
+    pub fn deadline(&self) -> Option<Instant> {
+        let journal_due = self.unsaved
+            && self.journal.is_some()
+            && self.watcher.is_some()
+            && self.settling.is_none();
+        [
+            self.recheck.as_ref().map(|(at, _)| *at),
+            self.settling.as_ref().map(|(_, at)| *at),
+            (self.more || journal_due).then(Instant::now),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Whether the ignore rules' file was touched since the last call (only seen with a
+    /// watcher).
+    pub fn rules_touched(&self) -> bool {
+        self.watcher
+            .as_ref()
+            .is_some_and(|w| w.rules.swap(false, Ordering::SeqCst))
     }
 }
 
@@ -447,7 +579,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
-        let mut watcher = LiveWatcher::start(&root, Arc::default())?;
+        let mut watcher = LiveWatcher::start(&root, Arc::default(), None)?;
         let (tx, rx) = channel();
         watcher.rx = rx;
         let reading = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -478,7 +610,7 @@ mod tests {
         };
         let started = Instant::now();
         assert_eq!(
-            watcher.next_batch(Duration::from_millis(200), debounce),
+            watcher.next_batch(Duration::from_millis(200), debounce, || {}),
             None
         );
         assert!(
@@ -492,7 +624,7 @@ mod tests {
         tx.send(Ok(created))?;
         let started = Instant::now();
         let batch = watcher
-            .next_batch(Duration::from_millis(200), debounce)
+            .next_batch(Duration::from_millis(200), debounce, || {})
             .ok_or("no batch")?;
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -515,7 +647,7 @@ mod tests {
     {
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
-        let mut watcher = LiveWatcher::start(&root, Arc::default())?;
+        let mut watcher = LiveWatcher::start(&root, Arc::default(), None)?;
         let (tx, rx) = channel();
         watcher.rx = rx;
         // As the OS callback queues them.
@@ -541,7 +673,7 @@ mod tests {
             max_delay: Duration::from_secs(30),
         };
         let batch = watcher
-            .next_batch(Duration::from_secs(1), debounce)
+            .next_batch(Duration::from_secs(1), debounce, || {})
             .ok_or("no batch")?;
         assert_eq!(batch.dirs, [rp("a"), rp("b")].into());
         assert!(batch.drained);
@@ -674,6 +806,144 @@ mod tests {
             read.map(|t| t.iter().map(|t| t.name.clone()).collect::<Vec<_>>()),
             Some(vec!["Red".to_owned()])
         );
+        Ok(())
+    }
+
+    /// Idle, the observer neither rings nor asks to be polled; a change rings once however
+    /// many follow before the poll, and so does a touch of the ignore rules.
+    #[test]
+    fn the_bell_rings_once_per_poll_and_never_while_idle() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::sync::atomic::AtomicUsize;
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        fs::create_dir_all(root.join(".hbsync"))?;
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        let mut db = StateDb::open_in_memory()?;
+        let rang = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&rang);
+        let bell: Bell = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let mut observer = LocalObserver::ringing(&root, opts, Some(bell));
+        observer.journal = None;
+        observer.catch_up(&mut db)?;
+        let quick = Debounce {
+            quiet: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+        };
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| -> Result<(), String> {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                if Instant::now() > until {
+                    return Err(format!("timed out waiting until {what}"));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        };
+        // Whatever starting the watch delivered.
+        std::thread::sleep(Duration::from_millis(300));
+        while observer.poll(&mut db, Duration::ZERO, quick)?.is_some() {}
+        rang.store(0, Ordering::SeqCst);
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(rang.load(Ordering::SeqCst), 0, "idle: no ring");
+        assert_eq!(observer.deadline(), None, "idle: nothing to poll for");
+        assert!(observer.poll(&mut db, Duration::ZERO, quick)?.is_none());
+
+        fs::write(root.join("a.txt"), "a")?;
+        wait_for("a change rings", &|| rang.load(Ordering::SeqCst) == 1)?;
+        fs::write(root.join("b.txt"), "b")?;
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(rang.load(Ordering::SeqCst), 1, "once until the poll");
+        assert!(observer.poll(&mut db, Duration::ZERO, quick)?.is_some());
+        for name in ["a.txt", "b.txt"] {
+            assert!(db.read(|s| s.get_local(&rp(name)))?.is_some(), "{name}");
+        }
+        assert!(!observer.rules_touched());
+
+        fs::write(root.join(".hbsync").join("ignore"), "*.tmp\n")?;
+        wait_for("the rules ring", &|| rang.load(Ordering::SeqCst) == 2)?;
+        assert!(observer.rules_touched());
+        assert!(!observer.rules_touched(), "taken");
+
+        // Reading them (as the runner does to compare them) is no change. The write's last
+        // events may still come first.
+        std::thread::sleep(Duration::from_millis(300));
+        while observer.poll(&mut db, Duration::ZERO, quick)?.is_some() {}
+        observer.rules_touched();
+        let before = rang.load(Ordering::SeqCst);
+        fs::read_to_string(root.join(".hbsync").join("ignore"))?;
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(rang.load(Ordering::SeqCst), before, "a read rang");
+        assert!(!observer.rules_touched());
+        Ok(())
+    }
+
+    /// A watcher whose OS side stopped is dropped after one full rescan: the folder is left
+    /// to the look, not rescanned in a loop.
+    #[test]
+    fn a_watcher_that_stopped_is_dropped() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        let mut db = StateDb::open_in_memory()?;
+        let mut observer = LocalObserver::start(&root, opts);
+        // As on macOS and Windows: a journal.
+        observer.journal = Some(Box::new(ClockJournal(Instant::now())));
+        observer.watcher.as_mut().ok_or("no watcher")?.rx = channel().1;
+        assert!(
+            observer
+                .poll(&mut db, Duration::ZERO, Debounce::default())?
+                .is_some()
+        );
+        assert!(!observer.has_watcher());
+        assert!(observer.watcher_error.is_some());
+        assert_eq!(observer.deadline(), None);
+        Ok(())
+    }
+
+    /// A batch whose journal position wasn't stored asks to be polled: a position is taken
+    /// then, and stored once a quiet period has passed with no change. Polled as the runner
+    /// does, at the deadline the observer gives; only the events the test sends arrive (an OS
+    /// may still deliver some of its own, FSEvents a moment late).
+    #[test]
+    fn an_unsaved_position_is_stored_after_a_quiet_period() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        let mut db = StateDb::open_in_memory()?;
+        let mut observer = LocalObserver::start(&root, opts);
+        observer.journal = Some(Box::new(ClockJournal(Instant::now())));
+        let (_tx, rx) = channel();
+        observer.watcher.as_mut().ok_or("no watcher")?.rx = rx;
+        let quiet = Debounce {
+            quiet: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+        };
+        let stored = |db: &mut StateDb| db.read(|s| s.get_kv(keys::JOURNAL_CURSOR));
+        observer.unsaved = true;
+        assert!(observer.deadline().is_some_and(|at| at <= Instant::now()));
+        let taken = Instant::now();
+        assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+        let at = observer.deadline().ok_or("no deadline")?;
+        assert!(at >= taken + quiet.quiet, "a quiet period later");
+        // Until it is stored, as the runner polls: never before the quiet period.
+        let until = Instant::now() + Duration::from_secs(10);
+        while stored(&mut db)?.is_none() {
+            assert!(Instant::now() < until, "never stored");
+            let polled = Instant::now();
+            assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+            if stored(&mut db)?.is_some() {
+                assert!(polled >= at, "stored before the quiet period");
+                break;
+            }
+            let next = observer.deadline().ok_or("no deadline while unsaved")?;
+            std::thread::sleep(next.saturating_duration_since(Instant::now()));
+        }
+        assert_eq!(observer.deadline(), None, "nothing more to do");
         Ok(())
     }
 

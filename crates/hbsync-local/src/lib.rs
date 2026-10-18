@@ -17,7 +17,7 @@ pub use layout::IGNORE_FILE;
 pub use marker::Marker;
 pub use scan::{ScanOptions, ScanReport, rescan_dirs, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
-pub use watch::{Debounce, LiveWatcher, LocalObserver, WatchBatch};
+pub use watch::{Bell, Debounce, LiveWatcher, LocalObserver, WatchBatch};
 
 /// The client's own folder at the top of the sync root (its marker, ignore rules, temp files,
 /// trash). Never synced. The state DB is the account's, elsewhere.
