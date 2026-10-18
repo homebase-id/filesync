@@ -102,3 +102,4 @@ cc 69f777f936b37f6f187f193884ed55176f94e8aefc8e560d24605de9c407851c # a folder d
 cc b65a8b9c348752d09cd71a86e433975ebe89fd07693acf6acc2c31811de621e1 # a tag add sent up before its item went to the trash (c2 moved the file it downloaded; #94)
 cc 0301607604a993a951d88ae914f571cb4c6febdb9d6208834cc2a3f8dc62cee4 # a folder made again after a local delete, renamed before recovery: a new folder to the scan
 cc 86011d5eb95ee202529f9a60d8896203aea0fdd9227ee44207aa93529110313c # a tag a download wrote before a crash, its item edited before recovery: it may come back (the known limit)
+cc 6b8411dc78679ffd8d3265a255bcb0f449e1850c2d71b326945f5ece1a711a11 # a folder deleted and made again by another client: a tag add not sent up yet stands

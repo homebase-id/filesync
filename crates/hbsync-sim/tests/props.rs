@@ -2816,3 +2816,82 @@ fn regression_a_tag_a_crashed_download_wrote_may_come_back_after_an_edit() {
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// Client 2 deletes a folder (an ignore rule takes it off the drive) while clients 0 and 1 tag
+/// it red, neither synced yet. Client 0 brings it back (a create of the removed node, with its
+/// red) and then removes red. Client 1 never saw the delete: its red goes up against the
+/// version back, as any add, and red is back by right. The checker took the restore for
+/// settling every add the removed version didn't hold, client 1's unsent one too, and read
+/// red as client 0's removal coming back (`cc 6b8411dc…`).
+#[test]
+fn regression_an_add_not_sent_up_outlives_a_restore() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 2,
+            action: CreateFolder { parent: 0, name: 0 },
+        },
+        Act {
+            client: 2,
+            action: Move {
+                node: 0,
+                parent: 13,
+                name: 13,
+            },
+        },
+        Act {
+            client: 1,
+            action: ToggleIgnore,
+        },
+        Plan { client: 2 },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 6 },
+        },
+        Plan { client: 0 },
+        Step { client: 0 },
+        Step { client: 2 },
+        Plan { client: 1 },
+        Plan { client: 0 },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 0, name: 0 },
+        },
+        Act {
+            client: 2,
+            action: ToggleIgnore,
+        },
+        Step { client: 1 },
+        Plan { client: 2 },
+        Step { client: 0 },
+        Act {
+            client: 0,
+            action: Tag { node: 0, tag: 4 },
+        },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Act {
+            client: 1,
+            action: Tag { node: 3, tag: 12 },
+        },
+        Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Step { client: 2 },
+        Step { client: 2 },
+        Plan { client: 0 },
+        Step { client: 0 },
+        Act {
+            client: 0,
+            action: Tag { node: 3, tag: 4 },
+        },
+    ];
+    run(3, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
