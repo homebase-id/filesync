@@ -193,15 +193,27 @@ a failure (service managers restart it then).
   noticed within 75 s (no frame, not even a pong to the ping every 30 s) and reconnected
   (backoff 1 s, doubling to 30 s); a refused subscription the same way, but not sooner than
   every 5 min.
+- **No wake-up while idle:** the daemon's threads block until something happens or the next
+  thing is due. A folder's loop waits on one channel (requests, the watcher, the drive's
+  wakes) until a backoff, a retry, a pause's end or the look of a folder without a watcher
+  (and 10 min at most); the watcher rings it, and the journal position is taken once per
+  batch, not on a timer. An account's loop waits on one channel (requests, its
+  notifications, its folders' ends) until the announcements quiet down, the read while not
+  connected, a restart or the purge's look (10 min). The daemon's own loop waits for an
+  account to end or a stop. Left on a timer: the notification socket's ping (every 30 s),
+  the sleep poll below off Linux, and the 10 min bounds on a lost wake-up.
 - **Pause** stops a running sync between operations and before the next transfer (transfers
   in flight finish); nothing syncs until resume. The watcher keeps recording changes. A pause
   survives a restart (`paused` in the config).
-- **Sleep:** a wall-clock jump of more than 30 s across a 250 ms wait means the machine slept.
-  The loop syncs at once and forgets its backoff; the account reconnects the notification
-  socket.
+- **Sleep:** the daemon notices it on a thread of its own: on Linux the kernel tells it (a
+  timer cancelled when the wall clock is set, as a resume does); elsewhere a 30 s wait that
+  took over a minute by the wall clock means the machine slept (the OS's power notifications
+  are a follow-up). Every account then reconnects its notification socket, and every folder
+  syncs at once and forgets its backoff.
 - **Network changes:** the reconnect backoff (at most 30 s); no OS hooks yet.
-- **Ignore rules:** `.hbsync/ignore` is checked for an edit once a minute and on a sync
-  request; an edit restarts the engine with the new rules (sync semantics §10).
+- **Ignore rules:** `.hbsync/ignore` is read again a second after the watcher saw it change
+  (once a minute in a folder without a watcher) and on a sync request; an edit restarts the
+  engine with the new rules (sync semantics §10).
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.

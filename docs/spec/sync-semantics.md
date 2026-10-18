@@ -415,8 +415,8 @@ An item inside a filtered folder is filtered too.
    kept in the state DB. When it changed, start-up walks the whole tree (a journal doesn't
    report items that just became visible) and re-plans every synced node; the new fingerprint
    is stored in the same transaction. Items that come into view are new items. The sync loop
-   checks the ignore file for an edit once a minute and on a sync request, and
-   starts over with the new rules when it changed.
+   checks the ignore file for an edit when the watcher sees it change (once a minute without
+   a watcher) and on a sync request, and starts over with the new rules when it changed.
 
 ## 11. Tags
 

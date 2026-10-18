@@ -2,16 +2,18 @@
 //!
 //! It takes the one-daemon lock, reads the config, answers on the control socket
 //! ([`answer`]), and runs each account ([`account`]: its credentials, connection, drive and
-//! folders) until a stop request or signal.
+//! folders) until a stop request or signal. Its threads block until there is something to do:
+//! nothing wakes it on a timer while nothing happens (but [`sleep`]'s poll off Linux).
 
 mod account;
 mod answer;
+mod sleep;
 
 pub use account::{Notifications, Puller, UNANNOUNCED_READ};
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -20,7 +22,7 @@ use hbsync_types::unix_now;
 
 use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
-use crate::runner::{RunnerError, lock};
+use crate::runner::{Command, OnDrop, RunnerError, WAIT_AT_MOST, lock};
 use crate::{Config, ConfigError, CredentialError, Paths};
 use account::Account;
 
@@ -43,9 +45,52 @@ pub enum DaemonError {
     Ipc(std::io::Error),
 }
 
-/// Runs the daemon until a stop request, or until `stop` is set (a signal). It ends when its
-/// last account has (one failing stops them all: the daemon is restarted whole).
-pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
+/// Raised when there is something to look at: whoever waits on it wakes.
+#[derive(Debug, Default)]
+pub(crate) struct Wakeup {
+    rung: Mutex<u64>,
+    rings: Condvar,
+}
+
+impl Wakeup {
+    pub fn raise(&self) {
+        *lock(&self.rung) += 1;
+        self.rings.notify_all();
+    }
+
+    /// Waits until it was raised after `seen` (what this returned last; 0 at first), or
+    /// `timeout` passed. Returns how often it has been raised.
+    pub fn wait(&self, seen: u64, timeout: Duration) -> u64 {
+        let rung = lock(&self.rung);
+        let (rung, _) = self
+            .rings
+            .wait_timeout_while(rung, timeout, |rung| *rung == seen)
+            .unwrap_or_else(|e| e.into_inner());
+        *rung
+    }
+}
+
+/// Stops the daemon from another thread (a signal handler's).
+#[derive(Debug, Clone, Default)]
+pub struct Stop {
+    flag: Arc<AtomicBool>,
+    wakeup: Arc<Wakeup>,
+}
+
+impl Stop {
+    pub fn stop(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+        self.wakeup.raise();
+    }
+
+    fn stopped(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+}
+
+/// Runs the daemon until a stop request, or until `stop` (a signal). It ends when its last
+/// account has (one failing stops them all: the daemon is restarted whole).
+pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
     let _lock = InstanceLock::acquire(paths)?;
     let config = Config::load(&paths.config_file())?
         .ok_or_else(|| DaemonError::NotSetUp("no config".into()))?;
@@ -58,6 +103,22 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
         accounts: Mutex::default(),
         starting_over: AtomicUsize::new(0),
     });
+    {
+        let daemon = Arc::downgrade(&daemon);
+        std::thread::Builder::new()
+            .name("hbsync-sleep".into())
+            .spawn(move || {
+                sleep::watch(|| {
+                    let Some(daemon) = daemon.upgrade() else {
+                        return false;
+                    };
+                    tracing::info!("the machine woke up");
+                    daemon.accounts().iter().for_each(|a| a.woke());
+                    true
+                })
+            })
+            .map_err(DaemonError::Ipc)?;
+    }
     for root in &config.roots {
         daemon.add_folder(&root.identity, &root.folder)?;
         tracing::info!(
@@ -76,18 +137,23 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
             .map_err(DaemonError::Ipc)?;
     }
     let mut result = Ok(());
+    let (mut rung, mut stopping) = (0, false);
     loop {
-        std::thread::sleep(Duration::from_millis(200));
         let (ended, left) = daemon.reap();
         if let Err(e) = ended {
-            daemon.stop.store(true, Ordering::Relaxed);
+            daemon.stop.stop();
             if result.is_ok() {
                 result = Err(e);
             }
         }
+        if daemon.stop.stopped() && !stopping {
+            stopping = true;
+            daemon.stop_all();
+        }
         if left == 0 && daemon.starting_over.load(Ordering::SeqCst) == 0 {
             break;
         }
+        rung = daemon.stop.wakeup.wait(rung, WAIT_AT_MOST);
     }
     tracing::info!("daemon stopped");
     result
@@ -97,7 +163,8 @@ pub fn run(paths: &Paths, stop: Arc<AtomicBool>) -> Result<(), DaemonError> {
 /// it runs.
 pub(crate) struct Daemon {
     paths: Paths,
-    stop: Arc<AtomicBool>,
+    /// Set to stop; its wakeup is raised when an account ends too.
+    stop: Stop,
     accounts: Mutex<Vec<(Arc<Account>, AccountThread)>>,
     /// Accounts starting over ([`Daemon::start_over`]): the daemon doesn't end meanwhile.
     starting_over: AtomicUsize,
@@ -131,14 +198,18 @@ impl Daemon {
         let (account, requests) =
             Account::new(&self.paths, identity, path, config.pause(unix_now()));
         let thread = {
-            let (account, paths, stop) = (
-                Arc::clone(&account),
-                self.paths.clone(),
-                Arc::clone(&self.stop),
-            );
+            let (account, paths, stop) =
+                (Arc::clone(&account), self.paths.clone(), self.stop.clone());
             std::thread::Builder::new()
                 .name(format!("hbsync-account-{identity}"))
-                .spawn(move || account.run(&paths, &config, &requests, &stop))
+                .spawn(move || {
+                    // Told also when it panics.
+                    let _ended = OnDrop(Some(|| {
+                        account.done.store(true, Ordering::SeqCst);
+                        stop.wakeup.raise();
+                    }));
+                    account.run(&paths, &config, &requests, &stop.flag)
+                })
                 .map_err(DaemonError::Ipc)?
         };
         accounts.push((account, thread));
@@ -167,13 +238,26 @@ impl Daemon {
             .iter()
             .try_for_each(|folder| self.add_folder(identity, folder));
         self.starting_over.fetch_sub(1, Ordering::SeqCst);
+        self.stop.wakeup.raise();
         ended.and(again)
     }
 
-    /// Joins the accounts that ended: the first error among them, and how many still run.
+    /// Stops every account (the stop flag set): their runners stop between operations.
+    fn stop_all(&self) {
+        for a in self.accounts() {
+            a.send_all(&Command::Stop);
+            a.wake();
+        }
+    }
+
+    /// Joins the accounts that ended (or are ending: their thread is about to): the first error
+    /// among them, and how many still run.
     fn reap(&self) -> (Result<(), DaemonError>, usize) {
         let mut accounts = lock(&self.accounts);
-        let result = join_finished(&mut accounts, |(_, t)| t.is_finished(), |(_, t)| t);
+        let ended = |(a, t): &(Arc<Account>, AccountThread)| {
+            t.is_finished() || a.done.load(Ordering::SeqCst)
+        };
+        let result = join_finished(&mut accounts, ended, |(_, t)| t);
         (result, accounts.len())
     }
 }

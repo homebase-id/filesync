@@ -193,6 +193,28 @@ fn on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
     live_names(server).iter().any(|n| n == name)
 }
 
+/// No poll: an idle runner with a watcher doesn't wake up at all, and a change wakes it at
+/// once.
+#[test]
+fn an_idle_runner_never_wakes_up() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    // Ignore rules, read when they change: reading them is no change.
+    a.write(".hbsync/ignore", "*.log\n")?;
+    wait_until("the rule is counted", || a.status().rules == 1)?;
+    a.wait_idle()?;
+    // Whatever its first sync left (a recheck of new folders, events of its own writes).
+    std::thread::sleep(Duration::from_secs(2));
+    let woken = a.handle.woken();
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(a.handle.woken(), woken, "woke up while idle");
+
+    a.write("new.txt", "new")?;
+    wait_until("the change is uploaded", || on_server(&server, "new.txt"))?;
+    assert!(a.handle.woken() > woken);
+    Ok(())
+}
+
 #[test]
 fn syncs_by_itself_and_pauses_and_resumes() -> R {
     let server = server();
@@ -521,6 +543,12 @@ fn an_edited_ignore_file_applies_without_a_restart() -> R {
     assert!(a.has("debug.log"), "an ignored file stays on its device");
     assert!(on_server(&server, "notes.txt"));
     wait_until("the rule is counted", || a.status().rules == 1)?;
+
+    // Seen by the watcher: no sync now needed, nor a minute's look.
+    a.write("x.tmp", "scratch")?;
+    a.write(".hbsync/ignore", "*.log\n*.tmp\n")?;
+    wait_until("the second rule is counted", || a.status().rules == 2)?;
+    wait_until("x.tmp left the drive", || !on_server(&server, "x.tmp"))?;
     Ok(())
 }
 

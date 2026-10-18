@@ -8,24 +8,29 @@
 //!
 //! - **Pause** stops a running sync between operations (and before the next transfer) and
 //!   syncs nothing until **resume**; the watcher keeps recording changes meanwhile.
-//! - **Sleep**: a wall-clock gap across a short wait means the machine slept. The runner then
-//!   syncs at once and forgets its backoff (the account has the notifier reconnect).
-//! - **Ignore rules** (`.hbsync/ignore`) are checked for changes once a minute and on request;
-//!   a change restarts the engine, which re-plans everything (sync semantics §10).
+//! - **Sleep**: told by its account ([`Command::Woke`]), the runner syncs at once and forgets
+//!   its backoff.
+//! - **Ignore rules** (`.hbsync/ignore`) are checked for changes when the watcher sees the file
+//!   change (once a minute without a watcher) and on request; a change restarts the engine,
+//!   which re-plans everything (sync semantics §10).
+//!
+//! No poll: the runner blocks on one channel (its commands, the watcher's bell, the drive's
+//! wakes) until the next thing time alone changes ([`Schedule::next_wake`]), so an idle folder
+//! with a watcher wakes only every [`WAIT_AT_MOST`].
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use hbsync_engine::activity::Counters;
 use hbsync_engine::exec::Stopped;
 use hbsync_engine::feed::FeedError;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
-use hbsync_local::{Filter, FilterError, LocalObserver};
+use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
 use hbsync_remote::RemoteError;
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
@@ -40,10 +45,11 @@ pub(crate) mod schedule;
 pub(crate) use schedule::Backoff;
 use schedule::{Schedule, Synced};
 
-/// How long the loop waits for local changes before looking at everything else.
-const TICK: Duration = Duration::from_millis(250);
-/// A wall-clock gap this much longer than a tick means the machine slept.
-const SLEPT: Duration = Duration::from_secs(30);
+/// The longest any of the daemon's loops waits for an event: a bound on what a lost wake-up
+/// could hold back.
+pub(crate) const WAIT_AT_MOST: Duration = Duration::from_secs(600);
+/// The ignore rules are read this long after their file was last touched: not half written.
+const RULES_QUIET: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -118,17 +124,42 @@ pub enum Command {
     ConfirmDeletes {
         token: String,
     },
+    /// The machine woke up: sync now, the backoff forgotten.
+    Woke,
     /// Stop the runner (between operations).
     Stop,
+}
+
+/// What the runner's thread waits for, on one channel.
+#[derive(Debug)]
+enum Msg {
+    Command(Command),
+    /// Its part of the drive changed (announced, or another folder's sync).
+    Drive,
+    /// The watcher has changes to record, or the ignore rules' file was touched.
+    Local,
+    /// Every [`Handle`] is gone: it stops.
+    Orphaned,
+}
+
+/// The sending end the handles share: when the last one goes, the runner is told.
+#[derive(Debug)]
+struct Owner(Sender<Msg>);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let _ = self.0.send(Msg::Orphaned);
+    }
 }
 
 /// Controls a running [`Runner`] from other threads.
 #[derive(Debug, Clone)]
 pub struct Handle {
-    control: Sender<Command>,
+    control: Arc<Owner>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
     progress: Arc<Counters>,
+    woken: Arc<AtomicU64>,
 }
 
 impl Handle {
@@ -138,7 +169,13 @@ impl Handle {
         if matches!(control, Command::Pause { .. } | Command::Stop) {
             self.stop.store(true, Ordering::Relaxed);
         }
-        self.control.send(control).is_ok()
+        self.control.0.send(Msg::Command(control)).is_ok()
+    }
+
+    /// How often the runner's loop has woken up (tests: none while idle).
+    #[doc(hidden)]
+    pub fn woken(&self) -> u64 {
+        self.woken.load(Ordering::Relaxed)
     }
 
     /// Paused while the pause flag is set: seen at once, not only once the runner gets to it.
@@ -155,6 +192,25 @@ impl Handle {
     }
 }
 
+/// How long to wait from `now` for the earliest of `deadlines`, [`WAIT_AT_MOST`] at most.
+pub(crate) fn wait_for(now: Instant, deadlines: impl IntoIterator<Item = Instant>) -> Duration {
+    deadlines
+        .into_iter()
+        .fold(now + WAIT_AT_MOST, Instant::min)
+        .saturating_duration_since(now)
+}
+
+/// Calls its function when dropped, also in a panic's unwinding: a thread's end told for sure.
+pub(crate) struct OnDrop<F: FnOnce()>(pub Option<F>);
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
 /// The lock, also after a panic elsewhere (the data is plain values).
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -163,10 +219,14 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub struct Runner {
     cfg: RunnerConfig,
     drive: Arc<Drive>,
-    control: Receiver<Command>,
+    control: Receiver<Msg>,
+    /// Its own channel, for the watcher's bell and the drive's wakes.
+    wakes: Sender<Msg>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
     progress: Arc<Counters>,
+    /// How often its loop woke up ([`Handle::woken`]).
+    woken: Arc<AtomicU64>,
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
     /// The conflicts and failures of the last sync, to tell each one only once.
@@ -187,8 +247,9 @@ impl std::fmt::Debug for Runner {
 struct Parts {
     engine: Engine,
     observer: LocalObserver,
-    /// Woken when another folder's sync changed this one's part of the drive.
-    wake: Receiver<()>,
+    /// Set when the drive changed for the folder ([`Drive::subscribe_with`], which wakes the
+    /// runner while this lives).
+    drive_changed: Arc<AtomicBool>,
 }
 
 impl Parts {
@@ -208,6 +269,16 @@ impl Runner {
         cfg: RunnerConfig,
         drive: Arc<Drive>,
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
+        Self::spawn_with(cfg, drive, || {})
+    }
+
+    /// [`Runner::spawn`], calling `ended` as its thread ends (after its status says so, unless
+    /// it panicked).
+    pub fn spawn_with(
+        cfg: RunnerConfig,
+        drive: Arc<Drive>,
+        ended: impl FnOnce() + Send + 'static,
+    ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
@@ -215,19 +286,23 @@ impl Runner {
         status.paused_until = cfg.paused.flatten();
         let status = Arc::new(Mutex::new(status));
         let progress = Arc::new(Counters::default());
+        let woken = Arc::new(AtomicU64::new(0));
         let handle = Handle {
-            control: tx,
+            control: Arc::new(Owner(tx.clone())),
             stop: Arc::clone(&stop),
             status: Arc::clone(&status),
             progress: Arc::clone(&progress),
+            woken: Arc::clone(&woken),
         };
         let runner = Runner {
             cfg,
             drive,
             control: rx,
+            wakes: tx,
             stop,
             status,
             progress,
+            woken,
             held: Vec::new(),
             told: Default::default(),
             stalled: Default::default(),
@@ -235,6 +310,8 @@ impl Runner {
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
             .spawn(move || {
+                // Told also when it panics.
+                let _ended = OnDrop(Some(ended));
                 let status = Arc::clone(&runner.status);
                 let result = runner.run();
                 // Its account starts a failed runner again after a pause.
@@ -282,7 +359,11 @@ impl Runner {
         let mut engine = Engine::open(&sync_root, Arc::clone(&self.drive), cfg)?;
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
-        let observer = LocalObserver::start(root, engine.scan_options().clone());
+        let wakes = self.wakes.clone();
+        let bell: Bell = Arc::new(move || {
+            let _ = wakes.send(Msg::Local);
+        });
+        let observer = LocalObserver::ringing(root, engine.scan_options().clone(), Some(bell));
         if let Some(why) = &observer.watcher_error {
             tracing::warn!("no live watcher ({why}); the folder is rescanned once a minute");
         }
@@ -290,11 +371,18 @@ impl Runner {
             s.rules = rules;
             s.watcher_error = observer.watcher_error.clone();
         });
-        let wake = self.drive.subscribe(sync_root.folder());
+        let drive_changed = Arc::new(AtomicBool::new(false));
+        let (alive, wakes) = (Arc::downgrade(&drive_changed), self.wakes.clone());
+        // One message until the runner takes the change, however many wakes come.
+        self.drive.subscribe_with(sync_root.folder(), move || {
+            alive.upgrade().is_some_and(|changed| {
+                changed.swap(true, Ordering::SeqCst) || wakes.send(Msg::Drive).is_ok()
+            })
+        });
         Ok(Parts {
             engine,
             observer,
-            wake,
+            drive_changed,
         })
     }
 
@@ -306,6 +394,8 @@ impl Runner {
         let mut schedule = Schedule::new(Instant::now(), self.cfg.look, self.cfg.paused);
         let mut started = false;
         let mut check_rules = false;
+        // When to read the ignore rules, touched a moment ago.
+        let mut rules_at: Option<Instant> = None;
         tracing::info!(
             "syncing {} with {}{}",
             self.cfg.folder.display(),
@@ -317,81 +407,68 @@ impl Runner {
             }
         );
         loop {
-            // Local changes: the watcher's batches are recorded in the DB as they come. Only a
-            // change syncs: a sync's own writes come back as batches that change nothing.
-            let (wall, mono) = (SystemTime::now(), Instant::now());
-            let mut worked = false;
-            match &mut parts {
-                Some(p) => {
-                    if let Some(scan) = p.engine.observe(&mut p.observer, TICK)? {
-                        if scan.dirty > 0 {
-                            schedule.want();
-                        }
-                        worked = true;
-                    }
-                }
-                None => std::thread::sleep(TICK),
-            }
-            if slept(
-                SystemTime::now().duration_since(wall).ok(),
-                mono.elapsed(),
-                worked,
-            ) {
-                tracing::info!("the machine woke up: syncing now");
-                schedule.woke(Instant::now());
-            }
-
-            loop {
-                match self.control.try_recv() {
-                    Ok(Command::SyncNow) => {
-                        schedule.asked(Instant::now());
-                        check_rules = true;
-                        // The user may have made room on the drive.
-                        self.drive.clear_full();
-                    }
-                    Ok(Command::Online) => schedule.online(Instant::now()),
-                    Ok(Command::Pause { until }) => {
-                        schedule.pause(until);
-                        self.set(|s| s.paused_until = until);
-                        match until {
-                            Some(t) => tracing::info!(
-                                "paused for {} min",
-                                t.saturating_sub(unix_now()) / 60
-                            ),
-                            None => tracing::info!("paused"),
-                        }
-                    }
-                    Ok(Command::Resume) => {
-                        if schedule.resume(Instant::now()) {
-                            tracing::info!("resumed");
-                        }
-                        self.resume();
-                    }
-                    Ok(Command::ConfirmDeletes { token }) => {
-                        if token != report::held_token(&self.held) {
-                            tracing::warn!("a confirmation of deletes that changed since: ignored");
-                            continue;
-                        }
-                        tracing::info!("{} held deletes confirmed", self.held.len());
-                        confirmed = Some(self.held.clone());
-                        schedule.asked(Instant::now());
-                    }
-                    Ok(Command::Stop) | Err(TryRecvError::Disconnected) => {
+            // Until something happens, or time alone changes something.
+            let now = Instant::now();
+            let looking = parts.as_ref().is_none_or(|p| !p.observer.has_watcher());
+            let observer = parts.as_ref().and_then(|p| p.observer.deadline());
+            let wait = wait_for(
+                now,
+                [
+                    schedule.next_wake(now, unix_now(), looking),
+                    observer,
+                    rules_at,
+                ]
+                .into_iter()
+                .flatten(),
+            );
+            let mut first = self.control.recv_timeout(wait).ok();
+            self.woken.fetch_add(1, Ordering::Relaxed);
+            while let Some(msg) = first.take().or_else(|| self.control.try_recv().ok()) {
+                match msg {
+                    Msg::Command(Command::Stop) | Msg::Orphaned => {
                         tracing::info!("stopped");
                         return Ok(());
                     }
-                    Err(TryRecvError::Empty) => break,
+                    Msg::Command(command) => {
+                        self.command(command, &mut schedule, &mut confirmed, &mut check_rules)
+                    }
+                    // Taken below.
+                    Msg::Drive | Msg::Local => {}
                 }
             }
 
-            // A change in this folder's part of the drive (announced, or another folder's sync).
-            if let Some(p) = &parts
-                && p.wake.try_iter().count() > 0
-            {
-                schedule.want();
+            // Local changes: the watcher's batches are recorded in the DB as they come. Only a
+            // change syncs: a sync's own writes come back as batches that change nothing. Taken
+            // whether the bell rang or not: with nothing queued, that costs nothing.
+            if let Some(p) = &mut parts {
+                // A change in this folder's part of the drive.
+                if p.drive_changed.swap(false, Ordering::SeqCst) {
+                    schedule.want();
+                }
+                if let Some(scan) = p.engine.observe(&mut p.observer, Duration::ZERO)?
+                    && scan.dirty > 0
+                {
+                    schedule.want();
+                }
+                // After the poll, which has the watcher ring again for a touch from now on.
+                if p.observer.rules_touched() {
+                    rules_at = Some(Instant::now() + RULES_QUIET);
+                }
+                if let Some(why) = &p.observer.watcher_error
+                    && lock(&self.status).watcher_error.is_none()
+                {
+                    tracing::warn!(
+                        "no live watcher ({why}); the folder is rescanned once a minute"
+                    );
+                    self.set(|s| s.watcher_error = Some(why.clone()));
+                }
             }
 
             let now = Instant::now();
+            if rules_at.is_some_and(|at| now >= at) {
+                rules_at = None;
+                check_rules = true;
+            }
             if schedule.pause_over(now, unix_now()) {
                 tracing::info!("the pause is over: resuming");
                 self.resume();
@@ -461,7 +538,7 @@ impl Runner {
                 p.engine.confirm_deletes(seen);
             }
             // This sync pulls what woke it so far.
-            p.wake.try_iter().for_each(drop);
+            p.drive_changed.store(false, Ordering::SeqCst);
             let began = Instant::now();
             // Before showing it syncs: the last sync's numbers aren't this one's.
             self.progress.reset();
@@ -513,6 +590,55 @@ impl Runner {
         }
     }
 
+    /// Takes `command` (but a stop).
+    fn command(
+        &mut self,
+        command: Command,
+        schedule: &mut Schedule,
+        confirmed: &mut Option<Vec<NodeId>>,
+        check_rules: &mut bool,
+    ) {
+        match command {
+            Command::SyncNow => {
+                schedule.asked(Instant::now());
+                *check_rules = true;
+                // The user may have made room on the drive.
+                self.drive.clear_full();
+            }
+            Command::Online => schedule.online(Instant::now()),
+            Command::Woke => {
+                tracing::info!("the machine woke up: syncing now");
+                schedule.woke(Instant::now());
+            }
+            Command::Pause { until } => {
+                schedule.pause(until);
+                self.set(|s| s.paused_until = until);
+                match until {
+                    Some(t) => {
+                        tracing::info!("paused for {} min", t.saturating_sub(unix_now()) / 60)
+                    }
+                    None => tracing::info!("paused"),
+                }
+            }
+            Command::Resume => {
+                if schedule.resume(Instant::now()) {
+                    tracing::info!("resumed");
+                }
+                self.resume();
+            }
+            Command::ConfirmDeletes { token } => {
+                if token != report::held_token(&self.held) {
+                    tracing::warn!("a confirmation of deletes that changed since: ignored");
+                    return;
+                }
+                tracing::info!("{} held deletes confirmed", self.held.len());
+                *confirmed = Some(self.held.clone());
+                schedule.asked(Instant::now());
+            }
+            Command::Stop => {}
+        }
+    }
+
     /// Shows `why` nothing syncs (in `state`), until another try after `wait`.
     fn failing(&self, state: State, why: String, wait: Duration) {
         self.set(|s| {
@@ -560,18 +686,6 @@ impl Runner {
     }
 }
 
-/// Whether the machine slept during a wait that took `wall` by the wall clock (`None`: it was
-/// set back) and `mono` by the monotonic clock, `worked` telling whether the wait also did
-/// work (recorded a batch, rescanned). The monotonic clock stops in sleep on Linux and macOS:
-/// a wall clock far ahead of it is a sleep. On Windows it runs on, so a long wait that did no
-/// work counts too. A clock set forward only costs a sync.
-pub(crate) fn slept(wall: Option<Duration>, mono: Duration, worked: bool) -> bool {
-    let Some(wall) = wall else {
-        return false;
-    };
-    wall > mono + SLEPT || (!worked && wall > TICK + SLEPT)
-}
-
 fn is_offline(e: &EngineError) -> bool {
     match e {
         EngineError::Stopped(Stopped::Unreachable(_)) => true,
@@ -579,26 +693,5 @@ fn is_offline(e: &EngineError) -> bool {
             r.is_transient() || matches!(r, RemoteError::Io(_))
         }
         _ => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_long_wall_clock_gap_means_the_machine_slept() {
-        let s = Duration::from_secs;
-        // A tick.
-        assert!(!slept(Some(TICK), TICK, false));
-        // Linux, macOS: the monotonic clock stood still.
-        assert!(slept(Some(s(3600)), TICK, false));
-        assert!(slept(Some(s(3600)), TICK, true));
-        // Windows: both ran on, and the wait did nothing else.
-        assert!(slept(Some(s(3600)), s(3600), false));
-        // A long scan in the wait is no sleep.
-        assert!(!slept(Some(s(45)), s(45), true));
-        // The clock set back.
-        assert!(!slept(None, TICK, false));
     }
 }

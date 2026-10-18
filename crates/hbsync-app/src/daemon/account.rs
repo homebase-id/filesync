@@ -3,14 +3,14 @@
 //! and owns what is the account's: the [`Drive`], the notifications (a change announced is
 //! pulled once, which wakes the folders it concerns), Recently deleted and its daily purge.
 //! Its folders' runners sync until the daemon stops, or until it starts over with new
-//! credentials.
+//! credentials. Its thread blocks on one channel ([`Msg`]) until the next thing that is due.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SendError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_engine::deleted::Listed;
@@ -29,14 +29,14 @@ use crate::protocol::{
     AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Hints, RecentItem,
     State, Until,
 };
-use crate::runner::schedule::Announced;
-use crate::runner::{Backoff, Command, Handle, Runner, RunnerConfig, RunnerError, lock, slept};
+use crate::runner::schedule::{Announced, pause_end};
+use crate::runner::{Backoff, Command, Handle, Runner, RunnerConfig, RunnerError, lock, wait_for};
 use crate::{Config, CredentialError, CredentialStore, Location, Paths};
 
-/// How often the account looks at its notifier, its requests and its runners.
-const TICK: Duration = Duration::from_millis(200);
 /// How often the purge of Recently deleted is looked at (it runs once a day).
 const PURGE_LOOK: Duration = Duration::from_secs(600);
+/// While the config can't be read, folders to start wait this long before it is read again.
+const CONFIG_AGAIN: Duration = Duration::from_secs(1);
 
 /// An account of the daemon, shared with the control socket's thread.
 pub(crate) struct Account {
@@ -48,13 +48,26 @@ pub(crate) struct Account {
     phase: Mutex<Phase>,
     /// Paused (kept in the config too): a runner starts paused.
     paused: Mutex<Option<Until>>,
-    /// Requests run on its thread.
-    requests: Sender<Request>,
+    /// What its thread is told.
+    requests: Sender<Msg>,
     /// Told to end (to start over with new credentials).
     ended: AtomicBool,
+    /// Its thread is ending: joining it waits for no more than that.
+    pub done: AtomicBool,
     /// A connection to its DB for the control socket's answers (recent, deleted), opened on
     /// first use.
     reader: Mutex<Option<AccountReader>>,
+}
+
+/// What the account's thread waits for, on one channel.
+pub(crate) enum Msg {
+    Request(Request),
+    /// From its notifications.
+    Hint(Event),
+    /// The machine woke up.
+    Woke,
+    /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
+    Wake,
 }
 
 /// What the account's thread is asked to do.
@@ -85,7 +98,7 @@ impl Account {
         identity: &str,
         folder: &Path,
         paused: Option<Until>,
-    ) -> (Arc<Account>, Receiver<Request>) {
+    ) -> (Arc<Account>, Receiver<Msg>) {
         let (requests, rx) = channel();
         let account = Account {
             identity: identity.to_owned(),
@@ -99,6 +112,7 @@ impl Account {
             paused: Mutex::new(paused),
             requests,
             ended: AtomicBool::new(false),
+            done: AtomicBool::new(false),
             reader: Mutex::new(None),
         };
         (Arc::new(account), rx)
@@ -120,9 +134,7 @@ impl Account {
                     folders.push(path.to_path_buf());
                 }
             }
-            Phase::Running(_) => {
-                let _ = self.requests.send(Request::AddFolder(path.to_path_buf()));
-            }
+            Phase::Running(_) => self.tell(Msg::Request(Request::AddFolder(path.to_path_buf()))),
         }
     }
 
@@ -130,11 +142,7 @@ impl Account {
     pub fn remove_folder(&self, path: &Path) {
         match &mut *lock(&self.phase) {
             Phase::Waiting { folders, .. } => folders.retain(|f| f != path),
-            Phase::Running(_) => {
-                let _ = self
-                    .requests
-                    .send(Request::RemoveFolder(path.to_path_buf()));
-            }
+            Phase::Running(_) => self.tell(Msg::Request(Request::RemoveFolder(path.to_path_buf()))),
         }
     }
 
@@ -194,6 +202,7 @@ impl Account {
     /// Pauses (`Some`) or resumes its folders, also before they run.
     pub fn pause(&self, pause: Option<Until>) {
         *lock(&self.paused) = pause;
+        self.wake();
         self.send_all(&match pause {
             Some(until) => Command::Pause { until },
             None => Command::Resume,
@@ -240,7 +249,7 @@ impl Account {
                 }
             }
         }
-        let request = Request::Deleted(control);
+        let request = Msg::Request(Request::Deleted(control));
         self.requests
             .send(request)
             .map_err(|_| "the account has stopped".to_owned())
@@ -249,6 +258,22 @@ impl Account {
     /// Ends the account: its runners stop between operations and [`Account::run`] returns.
     pub fn end(&self) {
         self.ended.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+
+    /// Has its thread look again (whether to stop, its pause).
+    pub fn wake(&self) {
+        self.tell(Msg::Wake);
+    }
+
+    /// The machine woke up: its notifications reconnect, its folders sync.
+    pub fn woke(&self) {
+        self.tell(Msg::Woke);
+    }
+
+    /// Tells its thread `msg`; lost only once the thread has ended.
+    fn tell(&self, msg: Msg) {
+        let _ = self.requests.send(msg);
     }
 
     /// The newest `limit` entries of its folders' recently synced lists.
@@ -361,11 +386,23 @@ impl Account {
         stop.load(Ordering::Relaxed) || self.ended.load(Ordering::Relaxed)
     }
 
-    /// Waits `time`, or less if it should stop meanwhile. Returns whether it should.
-    fn wait(&self, time: Duration, stop: &AtomicBool) -> bool {
+    /// Waits `time` on `rx`, or less if it should stop or the machine woke up meanwhile (a
+    /// try then goes at once). Returns whether it should stop. Requests and the like that come
+    /// meanwhile are kept in `early`.
+    fn wait(
+        &self,
+        time: Duration,
+        stop: &AtomicBool,
+        rx: &Receiver<Msg>,
+        early: &mut Vec<Msg>,
+    ) -> bool {
         let until = Instant::now() + time;
-        while Instant::now() < until && !self.stopping(stop) {
-            std::thread::sleep(TICK);
+        while !self.stopping(stop) {
+            match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+                Ok(Msg::Woke) | Err(_) => break,
+                Ok(Msg::Wake) => {}
+                Ok(msg) => early.push(msg),
+            }
         }
         self.stopping(stop)
     }
@@ -376,17 +413,32 @@ impl Account {
         &self,
         paths: &Paths,
         config: &Config,
-        requests: &Receiver<Request>,
+        requests: &Receiver<Msg>,
         stop: &AtomicBool,
     ) -> Result<(), DaemonError> {
-        let Some(creds) = self.credentials(paths, stop)? else {
+        // What came while waiting for the credentials and the identity.
+        let mut msgs = Vec::new();
+        let Some(creds) = self.credentials(paths, stop, requests, &mut msgs)? else {
             return Ok(());
         };
         let client = Client::new(&creds)?;
-        let Some(remote) = self.connect(&client, stop) else {
+        let Some(remote) = self.connect(&client, stop, requests, &mut msgs) else {
             return Ok(());
         };
+        // The notifications' events reach this thread's channel through a thread of their own,
+        // which ends with them.
         let (tx, events) = channel();
+        let hints = self.requests.clone();
+        std::thread::Builder::new()
+            .name("hbsync-hints".into())
+            .spawn(move || {
+                for event in events {
+                    if hints.send(Msg::Hint(event)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(DaemonError::Ipc)?;
         let notifier = match Notifier::spawn(client, remote.drive(), tx) {
             Ok(n) => {
                 lock(&self.status).hints = Hints::Connecting;
@@ -445,60 +497,61 @@ impl Account {
         let keep_days = config.keep_deleted_days.0;
         let mut next_purge = Instant::now();
         loop {
-            let (wall, mono) = (SystemTime::now(), Instant::now());
-            std::thread::sleep(TICK);
             if self.stopping(stop) || result.is_err() {
                 for r in &runners {
                     r.handle.send(Command::Stop);
                 }
             }
-            if slept(
-                SystemTime::now().duration_since(wall).ok(),
-                mono.elapsed(),
-                false,
-            ) && let Some(n) = &notifier
-            {
-                n.reconnect();
-            }
             if pause_ran_out(&mut lock(&self.paused), unix_now()) {
                 tracing::info!("the pause is over");
             }
             let paused = lock(&self.paused).is_some();
-            while let Ok(event) = events.try_recv() {
-                if let Some(hints) = notifications.event(event, Instant::now(), paused) {
-                    // Connected again: what waits for the drive goes now.
-                    if hints == Hints::Connected {
+            let mut changed = false;
+            for msg in msgs.drain(..) {
+                match msg {
+                    Msg::Hint(event) => {
+                        let Some(hints) = notifications.event(event, Instant::now(), paused) else {
+                            continue;
+                        };
+                        // Connected again: what waits for the drive goes now.
+                        if hints == Hints::Connected {
+                            for r in &runners {
+                                r.handle.send(Command::Online);
+                            }
+                        }
+                        lock(&self.status).hints = hints;
+                    }
+                    Msg::Woke => {
+                        if let Some(n) = &notifier {
+                            n.reconnect();
+                        }
                         for r in &runners {
-                            r.handle.send(Command::Online);
+                            r.handle.send(Command::Woke);
                         }
                     }
-                    lock(&self.status).hints = hints;
-                }
-            }
-            notifications.tick(Instant::now(), paused);
-            let mut changed = false;
-            while let Ok(request) = requests.try_recv() {
-                match request {
-                    Request::Deleted(control) => run_request(&drive, control),
+                    Msg::Request(Request::Deleted(control)) => run_request(&drive, control),
                     // Started below, once no runner of the folder is left (one removed a moment
                     // ago may still be finishing an operation).
-                    Request::AddFolder(folder) => {
+                    Msg::Request(Request::AddFolder(folder)) => {
                         let synced = runners.iter().any(|r| r.path == folder && r.shows());
                         if !synced && !adding.contains(&folder) {
                             adding.push(folder);
                         }
                     }
-                    Request::RemoveFolder(folder) => {
+                    Msg::Request(Request::RemoveFolder(folder)) => {
                         adding.retain(|f| *f != folder);
                         for r in runners.iter_mut().filter(|r| r.path == folder) {
                             r.stop_for_good();
                         }
                         changed = true;
                     }
+                    // Looked at below.
+                    Msg::Wake => {}
                 }
             }
+            notifications.tick(Instant::now(), paused);
             // Not while paused: no deletes for good, no pulls.
-            if Instant::now() >= next_purge && lock(&self.paused).is_none() {
+            if Instant::now() >= next_purge && !paused {
                 next_purge = Instant::now() + PURGE_LOOK;
                 match drive.purge_when_due(keep_days) {
                     Ok(Some(n)) if n > 0 => {
@@ -523,10 +576,12 @@ impl Account {
                 .extract_if(.., |f| !runners.iter().any(|r| r.path == *f))
                 .collect();
             // The config as it is now (its settings may have changed meanwhile); while it can't
-            // be read, restarts wait a while and new folders wait for the next tick.
+            // be read, restarts wait a while and new folders wait a moment.
             let config = (due || !ready.is_empty())
                 .then(|| Self::config(paths))
                 .flatten();
+            // While the config can't be read: when to read it again for folders to start.
+            let mut config_again = None;
             for r in runners.iter_mut().filter(|r| r.due(now)) {
                 match config.as_ref().map(|c| self.start(&drive, c, &r.path)) {
                     Some(Ok(new)) => {
@@ -543,6 +598,7 @@ impl Account {
             for folder in ready {
                 let Some(config) = &config else {
                     adding.push(folder);
+                    config_again = Some(now + CONFIG_AGAIN);
                     continue;
                 };
                 match self.start(&drive, config, &folder) {
@@ -558,6 +614,25 @@ impl Account {
                 notifications.finish();
                 return result;
             }
+
+            // Until a message, or the next thing that is due.
+            let now = Instant::now();
+            let pause = *lock(&self.paused);
+            let paused = pause.is_some();
+            let pause_end = pause.and_then(|until| pause_end(until, now, unix_now()));
+            let restarts = runners.iter().filter_map(|r| match r.life {
+                Life::Waiting(at) => Some(at),
+                _ => None,
+            });
+            let deadlines = [
+                notifications.deadline(now, paused),
+                (!paused).then_some(next_purge),
+                pause_end,
+                config_again,
+            ];
+            let wait = wait_for(now, deadlines.into_iter().flatten().chain(restarts));
+            msgs.extend(requests.recv_timeout(wait).ok());
+            msgs.extend(requests.try_iter());
         }
     }
 
@@ -588,11 +663,17 @@ impl Account {
             .find(|r| r.folder == folder)
             .and_then(|r| r.role);
         cfg.paused = *lock(&self.paused);
-        let (handle, thread) = Runner::spawn(cfg, Arc::clone(drive))?;
+        let done = Arc::new(AtomicBool::new(false));
+        let (ending, tell) = (Arc::clone(&done), self.requests.clone());
+        let (handle, thread) = Runner::spawn_with(cfg, Arc::clone(drive), move || {
+            ending.store(true, Ordering::SeqCst);
+            let _ = tell.send(Msg::Wake);
+        })?;
         Ok(Running {
             path: folder.to_path_buf(),
             handle,
             life: Life::Syncing(thread),
+            done,
             started: Instant::now(),
             backoff: Backoff::new(),
         })
@@ -603,6 +684,8 @@ impl Account {
         &self,
         paths: &Paths,
         stop: &AtomicBool,
+        rx: &Receiver<Msg>,
+        early: &mut Vec<Msg>,
     ) -> Result<Option<hbsync_homebase::Credentials>, DaemonError> {
         let store = CredentialStore::open(paths);
         let mut backoff = Backoff::new();
@@ -619,7 +702,7 @@ impl Account {
                     let wait_for = backoff.after(State::Failing);
                     tracing::warn!("can't read the keychain ({why}); trying again in {wait_for:?}");
                     self.waiting(State::Failing, format!("can't read the keychain: {why}"));
-                    if self.wait(wait_for, stop) {
+                    if self.wait(wait_for, stop, rx, early) {
                         return Ok(None);
                     }
                 }
@@ -636,7 +719,13 @@ impl Account {
 
     /// The drive, once the identity answers (finding it takes a request); `None` when stopped
     /// first.
-    fn connect(&self, client: &Client, stop: &AtomicBool) -> Option<Arc<HomebaseRemote>> {
+    fn connect(
+        &self,
+        client: &Client,
+        stop: &AtomicBool,
+        rx: &Receiver<Msg>,
+        early: &mut Vec<Msg>,
+    ) -> Option<Arc<HomebaseRemote>> {
         let mut backoff = Backoff::new();
         loop {
             match HomebaseRemote::connect(client.clone()) {
@@ -653,7 +742,7 @@ impl Account {
                         self.identity
                     );
                     self.waiting(state, e.to_string());
-                    if self.wait(wait_for, stop) {
+                    if self.wait(wait_for, stop, rx, early) {
                         return None;
                     }
                 }
@@ -810,6 +899,22 @@ impl Notifications {
             self.next_read = now + UNANNOUNCED_READ;
             self.puller.ask();
         }
+    }
+
+    /// When [`Notifications::tick`] has something to do (`paused`: never), `now` being now.
+    pub fn deadline(&self, now: Instant, paused: bool) -> Option<Instant> {
+        if paused {
+            return None;
+        }
+        let unannounced = self.connected.is_none().then_some(self.next_read);
+        [
+            self.connect_read.then_some(now),
+            self.announced.deadline(),
+            unannounced,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// What waits to be taken: the changes kept, and whether the feed is to be read too.
@@ -1098,6 +1203,8 @@ struct Running {
     path: PathBuf,
     handle: Handle,
     life: Life,
+    /// Its thread is ending: joining it waits for no more than that.
+    done: Arc<AtomicBool>,
     started: Instant,
     backoff: Backoff,
 }
@@ -1139,8 +1246,9 @@ impl Running {
     /// its folder was removed or the account is `ending`; one waiting for that goes when the
     /// account ends.
     fn ended(&mut self, ending: bool) {
+        let ending_now = self.done.load(Ordering::SeqCst);
         match &self.life {
-            Life::Syncing(t) | Life::Stopping(t) if !t.is_finished() => return,
+            Life::Syncing(t) | Life::Stopping(t) if !t.is_finished() && !ending_now => return,
             Life::Waiting(_) if !ending => return,
             _ => {}
         }
@@ -1223,6 +1331,7 @@ mod tests {
                 path: folder.clone(),
                 handle,
                 life: Life::Syncing(thread),
+                done: Arc::default(),
                 started: Instant::now(),
                 backoff: Backoff::new(),
             };

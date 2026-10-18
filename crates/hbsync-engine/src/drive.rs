@@ -4,7 +4,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -33,8 +33,8 @@ pub struct Drive {
     asked: AtomicU64,
     /// Held while pulling: how many of the asks the last finished pull answered.
     answered: Mutex<u64>,
-    /// Folders to wake when the drive changed.
-    wakes: Mutex<Vec<(i64, Sender<()>)>>,
+    /// Folders to wake when the drive changed: each one's call, false once it is gone.
+    wakes: Mutex<Vec<(i64, Wake)>>,
     /// Feed rows the client can't read, whoever pulled them, until taken.
     skipped: Mutex<Vec<String>>,
     /// The drive refused an upload, out of storage: until when uploads are held.
@@ -56,6 +56,9 @@ pub struct Drive {
     /// A re-read of the whole feed on its way, between pulls ([`feed::Reread`]).
     reread: Mutex<Option<feed::Reread>>,
 }
+
+/// Wakes a folder's engine ([`Drive::subscribe_with`]).
+type Wake = Box<dyn Fn() -> bool + Send>;
 
 /// How long uploads are held after the drive said it is full: then one is tried again.
 const FULL_HOLD: Duration = Duration::from_secs(600);
@@ -249,11 +252,17 @@ impl Drive {
     /// its writes).
     pub fn subscribe(&self, folder: i64) -> Receiver<()> {
         let (tx, rx) = channel();
+        self.subscribe_with(folder, move || tx.send(()).is_ok());
+        rx
+    }
+
+    /// Calls `wake` when the drive changed for `folder`'s engine, as [`Drive::subscribe`]
+    /// does, until it returns false (its folder is gone).
+    pub fn subscribe_with(&self, folder: i64, wake: impl Fn() -> bool + Send + 'static) {
         self.wakes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push((folder, tx));
-        rx
+            .push((folder, Box::new(wake)));
     }
 
     /// Wakes every folder's engine: the drive changed. Folders gone are forgotten.
@@ -272,7 +281,7 @@ impl Drive {
         self.wakes
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(folder, tx)| !wanted(*folder) || tx.send(()).is_ok());
+            .retain(|(folder, wake)| !wanted(*folder) || wake());
     }
 
     /// Makes sure the drive has `role`'s folder, just pulled: kept if it is there, back from

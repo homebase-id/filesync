@@ -15,6 +15,13 @@ const REMOTE_QUIET: Duration = Duration::from_millis(1000);
 /// ...but no longer than this after the first.
 const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
 
+/// When a pause `until` then (Unix seconds; `None`: until resumed) ends, `unix` being the Unix
+/// time at `now`.
+pub(crate) fn pause_end(until: Until, now: Instant, unix: u64) -> Option<Instant> {
+    // Too far ahead for an instant: none, as for a pause until resumed.
+    until.and_then(|t| now.checked_add(Duration::from_secs(t.saturating_sub(unix))))
+}
+
 /// How long to wait after each failure in a row.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Backoff(Duration);
@@ -49,15 +56,19 @@ impl Announced {
         self.0 = Some((first, now + REMOTE_QUIET));
     }
 
+    /// When announced changes are due to be pulled ([`Announced::due`]); `None`: none were.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.0
+            .map(|(first, quiet)| quiet.min(first + REMOTE_MAX_WAIT))
+    }
+
     /// Whether announced changes are due to be pulled now: they are taken then.
     pub fn due(&mut self, now: Instant) -> bool {
-        match self.0 {
-            Some((first, quiet)) if now >= quiet || now >= first + REMOTE_MAX_WAIT => {
-                self.0 = None;
-                true
-            }
-            _ => false,
+        let due = self.deadline().is_some_and(|at| now >= at);
+        if due {
+            self.0 = None;
         }
+        due
     }
 }
 
@@ -211,6 +222,22 @@ impl Schedule {
         }
     }
 
+    /// When time alone next changes what [`Schedule::due`], [`Schedule::look_due`] (when
+    /// `looking`) or [`Schedule::pause_over`] say, `unix` being the Unix time at `now`: the
+    /// runner waits for an event until then. `None`: only an event can.
+    pub fn next_wake(&self, now: Instant, unix: u64, looking: bool) -> Option<Instant> {
+        let look = looking.then_some(self.next_look);
+        let (pause_end, sync) = match self.pause {
+            Some(until) => (pause_end(until, now, unix), None),
+            None => {
+                let wanted = self.wanted.then_some(now);
+                let earliest = wanted.into_iter().chain(self.retry).min();
+                (None, earliest.map(|at| at.max(self.not_before)))
+            }
+        };
+        [look, pause_end, sync].into_iter().flatten().min()
+    }
+
     /// A sync failed, leaving `state`: tried again after a backoff. Returns the wait.
     pub fn failed(&mut self, now: Instant, state: State) -> Duration {
         let wait = self.backoff.after(state);
@@ -315,7 +342,9 @@ mod tests {
         let t0 = Instant::now();
         let mut a = Announced::default();
         assert!(!a.due(t0), "nothing announced");
+        assert_eq!(a.deadline(), None);
         a.note(t0);
+        assert_eq!(a.deadline(), Some(t0 + ms(1000)));
         assert!(!a.due(t0 + ms(500)));
         a.note(t0 + ms(800));
         assert!(!a.due(t0 + ms(1500)), "still coming");
@@ -326,6 +355,11 @@ mod tests {
         for i in 0..20 {
             a.note(t1 + ms(i * 500));
         }
+        assert_eq!(
+            a.deadline(),
+            Some(t1 + ms(10_000)),
+            "no later than ten seconds"
+        );
         assert!(!a.due(t1 + ms(9_999)));
         assert!(a.due(t1 + ms(10_000)));
     }
@@ -367,6 +401,56 @@ mod tests {
         assert!(s.pause_over(t0, 1_000));
         assert_eq!(s.paused(), None);
         assert!(s.due(t0));
+    }
+
+    /// Idle, nothing wakes the runner but the look, and that only while it looks; whatever
+    /// time alone would change is woken for, and nothing earlier.
+    #[test]
+    fn the_next_wake_is_the_first_thing_time_changes() {
+        let t0 = Instant::now();
+        let s5 = Duration::from_secs(5);
+        let mut s = Schedule::new(t0, LOOK, None);
+        assert_eq!(s.next_wake(t0, 0, true), Some(t0), "starting: at once");
+        s.synced(t0, Synced::Done);
+        assert_eq!(s.next_wake(t0, 0, true), Some(t0 + LOOK));
+        assert_eq!(
+            s.next_wake(t0, 0, false),
+            None,
+            "idle with a watcher: never"
+        );
+        for at in [t0 + ms(1), t0 + LOOK - ms(1)] {
+            assert!(!s.due(at));
+        }
+
+        // A failure's backoff: a change waits for its end.
+        let wait = s.failed(t0, State::Offline);
+        assert_eq!(s.next_wake(t0, 0, false), None, "nothing wanted");
+        s.want();
+        assert_eq!(s.next_wake(t0, 0, false), Some(t0 + wait));
+        assert!(!s.due(t0 + wait - ms(1)));
+        assert!(s.due(t0 + wait));
+
+        // Unfinished work: its retry.
+        s.synced(t0, Synced::Unfinished { progressed: false });
+        assert_eq!(s.next_wake(t0, 0, false), Some(t0 + s5));
+        assert!(s.due(t0 + s5));
+
+        // A timed pause: its end, and no sync before.
+        s.pause(Some(1_000));
+        assert_eq!(
+            s.next_wake(t0, 990, false),
+            Some(t0 + Duration::from_secs(10))
+        );
+        assert!(!s.pause_over(t0 + Duration::from_secs(9), 999));
+        assert!(s.pause_over(t0 + Duration::from_secs(10), 1_000));
+        // So far ahead it has no instant: as if until resumed.
+        s.pause(Some(u64::MAX));
+        assert_eq!(s.next_wake(t0, 0, false), None);
+        // Paused until resumed: only the look.
+        s.pause(None);
+        s.want();
+        assert_eq!(s.next_wake(t0, 0, false), None);
+        assert_eq!(s.next_wake(t0, 0, true), Some(t0 + LOOK));
     }
 
     #[test]

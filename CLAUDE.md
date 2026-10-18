@@ -23,7 +23,8 @@ a client registration per computer, so two computers sharing one token don't hea
 The feed needs odin-core with PR #1973 (merged as 4eb50e5db, after v0.1.962; #1909): a server
 without it can keep an answer from before a write and hide that write for up to 2 h. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
-syntax, picked up within a minute of an edit); an ignored item is kept on its device only.
+syntax, picked up a second after an edit, within a minute without a watcher); an ignored item
+is kept on its device only.
 Finder tags and colours sync too (sync semantics §11: macOS, KDE on Linux; Windows keeps them). The
 product runs as a per-user daemon (`hbsyncd`) shown and controlled by the tray app
 (`hbsync-tray`, program `homebase-filesync`: status, recently synced, Recently deleted, pause, logging in through the browser) and by `hbsync`
