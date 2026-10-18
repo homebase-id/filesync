@@ -19,11 +19,14 @@ use crate::autostart::LABEL;
 const ANSWER: Duration = Duration::from_secs(2);
 
 /// Moves process `pid` into a new scope of the app's, unless it shouldn't: away from a desktop
-/// (over SSH a scope would end with the user's service manager, at logout), when this process
-/// runs in a unit of the app's already (from the menu, at login: what it starts is in it too),
-/// or for a private instance (`HBSYNC_HOME`). A failure is logged, and the process stays.
+/// (over SSH a scope would end with the user's service manager, at logout), when it runs in a
+/// unit of the app's already (started from the menu or at login, or by the tray in its scope),
+/// or for a private instance (`HBSYNC_HOME`). Judged by where `pid` is, not the caller: the
+/// tray's own move is a job the service manager runs after answering, so a daemon it starts at
+/// once may have been forked where the tray was before. A failure is logged, and the process
+/// stays.
 pub fn move_to_scope(pid: u32) {
-    if crate::control::dev_home() || !desktop() || in_own_unit() {
+    if crate::control::dev_home() || !desktop() || in_own_unit(pid) {
         return;
     }
     if let Err(e) = start_scope(pid) {
@@ -63,9 +66,9 @@ fn desktop() -> bool {
     std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland" || t == "x11")
 }
 
-/// Whether this process runs in a unit of the app's. Yes when that can't be read.
-fn in_own_unit() -> bool {
-    std::fs::read_to_string("/proc/self/cgroup").map_or(true, |c| ours(&c))
+/// Whether process `pid` runs in a unit of the app's. Yes when that can't be read.
+fn in_own_unit(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/cgroup")).map_or(true, |c| ours(&c))
 }
 
 /// Whether the unit of a `/proc/<pid>/cgroup` (the last part of its path) is the app's:
