@@ -96,28 +96,44 @@ impl<'a> Bench<'a> {
     }
 
     /// Deletes for good everything the scenarios (and the scratch folder) left, tombstones
-    /// too: nothing of them stays in the feed.
+    /// too: nothing of them stays in the feed. Each file at the version its header has: one
+    /// answered as written since (a header read that raced a write still landing, as under a
+    /// whole live suite's load) is read and deleted again, a few times.
     pub fn cleanup(&self) -> Result<(), RemoteError> {
-        let created = std::mem::take(&mut *self.created.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut left = Vec::new();
-        for file_id in created {
-            match self.remote.header(file_id) {
-                Ok(h) => left.push(RemoteRef {
-                    file_id,
-                    version: h.version,
-                }),
-                Err(RemoteError::NotFound) => {}
-                Err(e) => return Err(e),
+        let mut files =
+            std::mem::take(&mut *self.created.lock().unwrap_or_else(|e| e.into_inner()));
+        for round in 0..4 {
+            let mut left = Vec::new();
+            for file_id in files {
+                match self.remote.header(file_id) {
+                    Ok(h) => left.push(RemoteRef {
+                        file_id,
+                        version: h.version,
+                    }),
+                    Err(RemoteError::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
             }
-        }
-        if left.is_empty() {
-            return Ok(());
-        }
-        for result in self.remote.delete_for_good(&left)?.into_answers()? {
-            match result {
-                Ok(()) | Err(RemoteError::NotFound) => {}
-                Err(e) => return Err(e),
+            if left.is_empty() {
+                return Ok(());
             }
+            let answers = self.remote.delete_for_good(&left)?.into_answers()?;
+            files = Vec::new();
+            for (at, result) in left.iter().zip(answers) {
+                match result {
+                    Ok(()) | Err(RemoteError::NotFound) => {}
+                    Err(RemoteError::VersionMismatch) if round < 3 => files.push(at.file_id),
+                    Err(e) => return Err(e),
+                }
+            }
+            if files.is_empty() {
+                return Ok(());
+            }
+            eprintln!(
+                "cleanup: {} files written since their header was read; reading them again",
+                files.len()
+            );
+            std::thread::sleep(Duration::from_secs(1));
         }
         Ok(())
     }
