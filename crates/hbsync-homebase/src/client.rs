@@ -260,43 +260,7 @@ impl Client {
             .header("Authorization", &self.bearer())
             .header("Range", &format!("bytes={start}-{last}"))
             .call();
-        let response = checked(response, path)?;
-        // Anything but the range asked for (a proxy that ignored `Range`) must not reach the
-        // sink: it would be written at the wrong offset.
-        if response.status().as_u16() != 206 {
-            return Err(HomebaseError::Protocol(format!(
-                "{path}: asked for bytes {start}-{last}, got HTTP {}",
-                response.status().as_u16()
-            )));
-        }
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        };
-        let range = header("Content-Range");
-        let size = range
-            .as_deref()
-            .and_then(|r| content_range(r).filter(|(first, _)| *first == start))
-            .map(|(_, size)| size)
-            .ok_or_else(|| {
-                HomebaseError::Protocol(format!(
-                    "{path}: asked for bytes {start}-{last}, got Content-Range {range:?}"
-                ))
-            })?;
-        Ok(Fetched {
-            encrypted: header("PayloadEncrypted").is_some_and(|v| v.eq_ignore_ascii_case("true")),
-            key_header: header("SharedSecretEncryptedHeader64"),
-            size,
-            what: path.to_owned(),
-            body: response
-                .into_body()
-                .into_with_config()
-                .limit(u64::MAX)
-                .reader(),
-        })
+        Fetched::new(response, path, start, last)
     }
 
     fn decode<T: DeserializeOwned>(
@@ -337,11 +301,15 @@ pub struct Fetched {
     body: ureq::BodyReader<'static>,
 }
 
-/// The first byte and the whole size of a `Content-Range: bytes first-last/size`.
-fn content_range(value: &str) -> Option<(u64, u64)> {
+/// The first and last byte and the whole size of a `Content-Range: bytes first-last/size`.
+fn content_range(value: &str) -> Option<(u64, u64, u64)> {
     let (range, size) = value.strip_prefix("bytes ")?.split_once('/')?;
-    let (first, _) = range.split_once('-')?;
-    Some((first.trim().parse().ok()?, size.trim().parse().ok()?))
+    let (first, last) = range.split_once('-')?;
+    Some((
+        first.trim().parse().ok()?,
+        last.trim().parse().ok()?,
+        size.trim().parse().ok()?,
+    ))
 }
 
 impl std::fmt::Debug for Fetched {
@@ -354,23 +322,90 @@ impl std::fmt::Debug for Fetched {
 }
 
 impl Fetched {
-    /// Copies up to `limit` bytes into `sink`; returns how many came.
+    /// A ranged GET's response for `start..=last` of the payload at `path`.
+    fn new(
+        response: Result<Response<ureq::Body>, ureq::Error>,
+        path: &str,
+        start: u64,
+        last: u64,
+    ) -> Result<Fetched, HomebaseError> {
+        let response = checked(response, path)?;
+
+        // Anything but the range asked for (a proxy that ignored `Range`) must not reach the
+        // sink: it would be written at the wrong offset.
+        if response.status().as_u16() != 206 {
+            return Err(HomebaseError::Protocol(format!(
+                "{path}: asked for bytes {start}-{last}, got HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let range = header("Content-Range");
+        let size = range
+            .as_deref()
+            // The range asked for, cut short only at the payload's end.
+            .and_then(content_range)
+            .filter(|&(first, end, size)| first == start && end == last.min(size.saturating_sub(1)))
+            .map(|(_, _, size)| size)
+            .ok_or_else(|| {
+                HomebaseError::Protocol(format!(
+                    "{path}: asked for bytes {start}-{last}, got Content-Range {range:?}"
+                ))
+            })?;
+        Ok(Fetched {
+            encrypted: header("PayloadEncrypted").is_some_and(|v| v.eq_ignore_ascii_case("true")),
+            key_header: header("SharedSecretEncryptedHeader64"),
+            size,
+            what: path.to_owned(),
+            body: response
+                .into_body()
+                .into_with_config()
+                .limit(u64::MAX)
+                .reader(),
+        })
+    }
+
+    /// Copies the body into `sink`, at most `limit` bytes, and returns how many came. The body
+    /// must end there: bytes past `limit` are an error. Reading it to its end gives the
+    /// connection back to the pool (ureq keeps one only once a read has found the body's end).
     pub fn copy_to(&mut self, sink: &mut dyn Write, limit: u64) -> Result<u64, HomebaseError> {
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut buf = vec![0u8; limit.clamp(1, 64 * 1024) as usize];
         let mut written = 0u64;
         while written < limit {
             let want = (limit - written).min(buf.len() as u64) as usize;
-            let n = self
-                .body
-                .read(&mut buf[..want])
-                .map_err(|e| HomebaseError::Network(format!("{}: {e}", self.what)))?;
+            let n = self.read(&mut buf[..want])?;
             if n == 0 {
-                break;
+                return Ok(written);
             }
             sink.write_all(&buf[..n])?;
             written += n as u64;
         }
+        // Everything asked for came: a failure to read the end only costs the connection.
+        if self.read(&mut [0u8; 1]).is_ok_and(|n| n != 0) {
+            return Err(HomebaseError::Protocol(format!(
+                "{}: more than the {limit} bytes asked for",
+                self.what
+            )));
+        }
         Ok(written)
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, HomebaseError> {
+        loop {
+            match self.body.read(buf) {
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                result => {
+                    return result
+                        .map_err(|e| HomebaseError::Network(format!("{}: {e}", self.what)));
+                }
+            }
+        }
     }
 }
 
@@ -386,8 +421,7 @@ pub(crate) fn http_json<T: DeserializeOwned>(
         .map_err(|e| HomebaseError::Network(format!("{what}: {e}")))
 }
 
-/// The response if it is a success; otherwise the error it carries.
-/// `inner`, keeping its first error (ureq gets a copy and reports only its own).
+/// A reader passing on `inner`, keeping its first error (ureq gets a copy and reports only its own).
 struct Recording<R> {
     inner: R,
     failed: Option<std::io::Error>,
@@ -405,6 +439,7 @@ impl<R: Read> Read for Recording<R> {
     }
 }
 
+/// The response if it is a success; otherwise the error it carries.
 fn checked(
     response: Result<Response<ureq::Body>, ureq::Error>,
     what: &str,
@@ -436,7 +471,99 @@ mod tests {
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
-    use super::{agent_with, content_range};
+    use super::{Fetched, IDLE, agent_with, content_range};
+    use crate::HomebaseError;
+
+    /// A keep-alive server answering every request with `body` as bytes `0..len` of a payload
+    /// (its `Content-Length` is the body's): the connections it accepted, once the client is done.
+    fn ranges_server(
+        body: &'static [u8],
+        len: usize,
+    ) -> std::io::Result<(String, std::thread::JoinHandle<usize>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/", listener.local_addr()?);
+        let server = std::thread::spawn(move || {
+            let mut accepted = 0;
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { break };
+                accepted += 1;
+                // A connection the client keeps without using it ends the test, not hangs it.
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                while let Ok(n) = socket.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    // A request is answered once its head is in.
+                    if !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        continue;
+                    }
+                    if request.starts_with(b"GET /stop") {
+                        return accepted;
+                    }
+                    request.clear();
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\ncontent-range: bytes 0-{}/{}\r\n\
+                         content-length: {}\r\n\r\n",
+                        len - 1,
+                        body.len().max(len),
+                        body.len()
+                    );
+                    if socket.write_all(head.as_bytes()).is_err() || socket.write_all(body).is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+            accepted
+        });
+        Ok((url, server))
+    }
+
+    fn fetch(agent: &ureq::Agent, url: &str, len: u64) -> Result<Fetched, HomebaseError> {
+        let response = agent
+            .get(url)
+            .header("Range", &format!("bytes=0-{}", len - 1))
+            .call();
+        Fetched::new(response, "payload", 0, len - 1)
+    }
+
+    /// Reading a payload to its end gives its connection back to the pool: many downloads, one
+    /// connection.
+    #[test]
+    fn downloads_reuse_their_connection() -> Result<(), Box<dyn std::error::Error>> {
+        const BODY: &[u8] = b"0123456789";
+        const LEN: u64 = BODY.len() as u64;
+        let (url, server) = ranges_server(BODY, BODY.len())?;
+        let agent = agent_with(IDLE);
+        for _ in 0..5 {
+            let mut got = Vec::new();
+            let n = fetch(&agent, &url, LEN)?.copy_to(&mut got, LEN)?;
+            assert_eq!((n, got.as_slice()), (LEN, BODY));
+        }
+        let _ = agent.get(format!("{url}stop")).call();
+        assert_eq!(server.join().map_err(|_| "server panicked")?, 1);
+        Ok(())
+    }
+
+    /// A body longer than the range asked for is refused, not cut short.
+    #[test]
+    fn bytes_past_the_range_are_an_error() -> Result<(), Box<dyn std::error::Error>> {
+        let (url, server) = ranges_server(b"0123456789abc", 10)?;
+        let agent = agent_with(IDLE);
+        let mut got = Vec::new();
+        let err = fetch(&agent, &url, 10)?.copy_to(&mut got, 10);
+        assert!(
+            matches!(&err, Err(HomebaseError::Protocol(why)) if why.contains("more than")),
+            "{err:?}"
+        );
+        assert_eq!(got, b"0123456789");
+        let _ = agent.get(format!("{url}stop")).call();
+        server.join().map_err(|_| "server panicked")?;
+        Ok(())
+    }
 
     /// A body that stops coming ends the read after the idle time, though the call has no
     /// overall timeout.
@@ -470,8 +597,8 @@ mod tests {
 
     #[test]
     fn content_ranges_parse() {
-        assert_eq!(content_range("bytes 16-47/112"), Some((16, 112)));
-        assert_eq!(content_range("bytes 0-0/1"), Some((0, 1)));
+        assert_eq!(content_range("bytes 16-47/112"), Some((16, 47, 112)));
+        assert_eq!(content_range("bytes 0-0/1"), Some((0, 0, 1)));
         for bad in [
             "bytes */112",
             "bytes 16-47/*",
