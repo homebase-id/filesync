@@ -7,6 +7,7 @@
 
 mod account;
 mod answer;
+mod keeper;
 mod sleep;
 mod watch;
 

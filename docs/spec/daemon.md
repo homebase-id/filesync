@@ -98,8 +98,10 @@ says so when it couldn't reach the keychain to remove the credentials there.
       refused;
    3. opens the account's `Drive` and the notification socket, and runs a sync loop
       (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the
-      notifications on to every folder's loop, reconnects the socket after a sleep, runs
-      Recently deleted's requests and its daily purge (not while paused).
+      notifications on to every folder's loop, reconnects the socket after a sleep, and has
+      Recently deleted's requests and its daily purge (not while paused) run on a thread of
+      their own, one at a time: the account's loop never waits for them (a purge waits on the
+      state DB while the folders' first syncs hold it).
 
    One folder's loop failing is started again after a pause (from 5 s, doubling up to 5 min,
    reset after an hour without failing), the folder showing `failing` with its error
@@ -245,7 +247,8 @@ a failure (service managers restart it then).
 
 - **Recently deleted:** the account's removed nodes (node schema, "Recently deleted"), kept in
   its state DB (table `removed`), listed newest first with their path and the folder each comes
-  back to. Restore and Empty are the account's: run on its thread when asked (once connected).
+  back to. Restore and Empty are the account's: run on its Recently deleted thread when asked
+  (once connected), in turn with the purge.
   Empty takes what the user was shown: the items named, or everything removed until the newest
   one listed, and the device's own removals shown "just now" (their time still open: not back
   from the server yet) by name. Once a day (the time is kept in the state DB) the account deletes for good what
