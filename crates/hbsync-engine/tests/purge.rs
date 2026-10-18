@@ -735,6 +735,14 @@ impl hbsync_remote::Remote for Watched {
             _ => self.inner.delete_for_good(files),
         }
     }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.request();
+        self.inner.set_removed(files, removed)
+    }
     fn read(
         &self,
         file_id: RemoteFileId,

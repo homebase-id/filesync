@@ -265,6 +265,13 @@ impl Remote for StopAfterCreates {
     fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.inner.set_removed(files, removed)
+    }
     fn cursor_time(&self, cursor: &str) -> Option<i64> {
         self.inner.cursor_time(cursor)
     }
@@ -279,12 +286,14 @@ impl Remote for StopAfterCreates {
 }
 
 /// A remote whose writes take a while, counting how many run at once, and the writes after
-/// which the drive held a cycle. Writes ending before `down_until` fail (an outage).
+/// which the drive held a cycle, and the requests that removed files. Writes ending before
+/// `down_until` fail (an outage).
 struct SlowWrites {
     inner: FakeRemote,
     running: AtomicUsize,
     most: AtomicUsize,
     cycles: AtomicUsize,
+    removals: AtomicUsize,
     down_until: Mutex<Option<std::time::Instant>>,
 }
 
@@ -295,6 +304,7 @@ impl SlowWrites {
             running: AtomicUsize::new(0),
             most: AtomicUsize::new(0),
             cycles: AtomicUsize::new(0),
+            removals: AtomicUsize::new(0),
             down_until: Mutex::new(None),
         })
     }
@@ -375,6 +385,14 @@ impl Remote for SlowWrites {
     fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
+    fn set_removed(
+        &self,
+        files: &[hbsync_types::Target],
+        removed: bool,
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+        self.removals.fetch_add(1, Ordering::SeqCst);
+        self.write(|| self.unless_down(|| self.inner.set_removed(files, removed)))
+    }
     fn cursor_time(&self, cursor: &str) -> Option<i64> {
         self.inner.cursor_time(cursor)
     }
@@ -388,8 +406,9 @@ impl Remote for SlowWrites {
     }
 }
 
-/// Folder creates, renames and deletes run on the worker pool, several at once, each still
-/// after what it depends on: a folder before what goes into it, contents before their folder.
+/// Folder creates and renames run on the worker pool, several at once, and deletes together in
+/// one request, each still after what it depends on: a folder before what goes into it, and
+/// before what is in it when it goes.
 #[test]
 fn remote_writes_run_together_in_dependency_order() -> R {
     let server = server();
@@ -408,7 +427,7 @@ fn remote_writes_run_together_in_dependency_order() -> R {
         let again = a.engine.sync_once("2026-10-08")?;
         assert!(again.is_idle(), "{what}: all done: {again:?}");
         let most = slow.most.swap(0, Ordering::SeqCst);
-        assert!(most > 1, "{what}: one write at a time");
+        assert!(most > 1 || what == "deletes", "{what}: one write at a time");
         assert_eq!(slow.cycles.load(Ordering::SeqCst), 0, "{what}");
         b.sync()?;
         assert_eq!(b.tree_text(""), a.tree_text(""), "{what}");
@@ -423,6 +442,8 @@ fn remote_writes_run_together_in_dependency_order() -> R {
         fs::remove_dir_all(a.root.join(format!("e{i}")))?;
     }
     check(&mut a, "deletes")?;
+    // 48 removals, a request for each level: the folders, then `sub`, then what is in that.
+    assert_eq!(slow.removals.load(Ordering::SeqCst), 3);
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
     Ok(())
 }
@@ -1492,6 +1513,75 @@ fn a_folder_goes_first_and_a_child_that_failed_follows() -> R {
     b.sync()?;
     assert_eq!(a.read_text("d/keep.txt")?, "k");
     assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// A folder's delete and restore go to the drive a level at a time, each level in one request
+/// (`update-archival-status-batch`), the folder before what is in it. A name a live sibling took
+/// meanwhile is a rewrite of its own.
+#[test]
+fn deletes_and_restores_go_a_level_at_a_time() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    for i in 0..20 {
+        a.write(&format!("d/f{i:02}.txt"), format!("{i}"))?;
+    }
+    a.write("d/sub/g.txt", "g")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    let before = a.remote.faults().requests;
+    a.sync()?;
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 23);
+    let delete = a.remote.faults().requests - before;
+    // The sync reads the feed too; one request per removal would be 23.
+    assert!(delete <= 6, "{delete} requests");
+    // Restore it all: d, then its 21 children, then g.txt in sub: three levels.
+    let d = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "d")
+        .ok_or("d")?;
+    let before = a.remote.faults().requests;
+    assert_eq!(a.engine.drive().restore(&[d.node])?, 23);
+    // The feed read first, then a request per level.
+    assert_eq!(a.remote.faults().requests - before, 1 + 3);
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
+    a.sync()?;
+    assert_eq!(a.read_text("d/sub/g.txt")?, "g");
+    assert_eq!(a.tree_text("").len(), 23);
+    Ok(())
+}
+
+/// A removal request whose answer is lost (after the drive wrote it) is never sent again blind:
+/// every file in it waits for the feed, which shows them removed.
+#[test]
+fn a_removal_request_whose_answer_is_lost_is_not_sent_again() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..5 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("stay.txt", "s")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.remote.faults().lose_answer_named = Some("f2.txt".into());
+    a.sync()?;
+    a.remote.faults().lose_answer_named = None;
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 6);
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["stay.txt"]
+    );
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = s"]);
+    // Deleted with d: its item.
+    let items = a.recently_deleted(10)?;
+    let d = items.iter().find(|i| i.path == "d").ok_or("d")?;
+    assert!(items.iter().all(|i| i.root == d.node), "{items:?}");
     Ok(())
 }
 

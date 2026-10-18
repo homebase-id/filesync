@@ -94,7 +94,10 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   keys and writes the rest back, unknown keys included: rebuilding it from `FilesyncNodeContent`
   would drop `ct`, `x` and later keys for every device.
 - Delete: remove (`archivalStatus` 2, content as read), a folder first (node schema, "Recently
-  deleted").
+  deleted"). `update-archival-status-batch` with `archivalStatus` 2 does it without reading or
+  rewriting the content: up to 1,000 files a request, each with its `versionTag`, answered per
+  file (`versionTagMismatch`: changed since, leave it). The folder in one request, then what is
+  in it.
   Desktop clients move local copies they lose to `.hbsync/trash/`, so a deletion from the phone
   can be recovered there.
 - A retry keeps the node id, including one the user asks for after a failure, so a retry that gets 4105
@@ -119,9 +122,12 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   identity, no reactions or comments, no local app data (local tags, local content, read time). odin-core
   counts each as a change, which moves its `updated`, its removal time.
 - **Restore** is a metadata-only update by fileId:
-  - It uses the node's own key with a new IV, its `versionTag`, an empty manifest (the payload stays) and
-    `archivalStatus` 0.
-  - The content is written back as read, unknown keys included, without an `rm`.
+  - Back under its own name in its own folder: `update-archival-status-batch` with `archivalStatus` 0,
+    each item at its `versionTag`, a level at a time (each folder's request before what is in it).
+  - Under a new name, or at the top: an update with the node's own key with a new IV, its `versionTag`, an
+    empty manifest (the payload stays) and `archivalStatus` 0.
+  - The content is written back as read, unknown keys included, without an `rm` (the batch leaves the
+    content, an old `rm` too: it means nothing).
   - Order: the removed folders above the item first, outermost first, then the item, then what was deleted
     with it (not what was deleted from it before).
   - An item whose folder is gone for good goes to the top level; one whose folder didn't come back stays

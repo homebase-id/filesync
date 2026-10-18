@@ -58,6 +58,7 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
         "removal_keeps_the_bytes_and_restores",
         removal_keeps_the_bytes_and_restores,
     ),
+    ("removals_in_one_request", removals_in_one_request),
     (
         "a_removed_node_deleted_for_good",
         a_removed_node_deleted_for_good,
@@ -652,6 +653,94 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
         "not restored: {back:?}"
     );
     ensure!(b.read(w.file_id, None)? == b"edited", "the restore's bytes");
+    Ok(())
+}
+
+/// Removals and restores in one request ([`Remote::set_removed`]): each file at its version,
+/// its header kept but for the removal, an answer per file in order. A file changed since stays
+/// as it is; a tombstone or an unknown file is not found; one already at the status asked for
+/// is left alone (its version and removal time stay).
+fn removals_in_one_request(b: &Bench) -> Outcome {
+    let (f, w) = b.file("f", b"kept")?;
+    let (g, v) = b.file("g", b"stale")?;
+    let (_, x) = b.file("x", b"later")?;
+    let v2 = b.update(v, &with(&g, NodeContent::file("g", 2, 5, false)), None)?;
+    let (_, t) = b.file("t", b"tomb")?;
+    b.remote.delete(t.file_id, t.version)?;
+    let tomb = b.remote.header(t.file_id)?.version;
+    let cursor = b.cursor_now()?;
+    let asked = [
+        b.target(w),
+        b.target(v),
+        b.target(x),
+        b.target(RemoteRef {
+            file_id: t.file_id,
+            version: tomb,
+        }),
+    ];
+    let answers = b.remote.set_removed(&asked, true)?.into_answers()?;
+    ensure!(answers.len() == 4, "{} answers for 4 files", answers.len());
+    ensure_err!(&answers[1], RemoteError::VersionMismatch);
+    ensure_err!(&answers[3], RemoteError::NotFound);
+    let (Ok(gone_f), Ok(gone_x)) = (&answers[0], &answers[2]) else {
+        return Err(format!("not removed: {answers:?}").into());
+    };
+    for (gone, at) in [(gone_f, w), (gone_x, x)] {
+        let header = b.remote.header(at.file_id)?;
+        ensure!(
+            gone.at.file_id == at.file_id && gone.at.version != at.version,
+            "{gone:?} for {at:?}"
+        );
+        ensure!(
+            header.version == gone.at.version
+                && header.removed_at.is_some()
+                && header.removed_at == gone.changed_at,
+            "the answer isn't the header: {gone:?}, {header:?}"
+        );
+    }
+    // Only the removal changed: the name, the place and the bytes stay.
+    let header = b.remote.header(w.file_id)?;
+    ensure!(
+        header.parent == f.parent && header.state().is_none(),
+        "{header:?}"
+    );
+    ensure!(
+        matches!(&header.body, RemoteBody::Live { node, content, payload: Some(_) }
+            if *node == f.node && content.name == "f"),
+        "the header changed: {header:?}"
+    );
+    ensure!(b.read(w.file_id, None)? == b"kept", "the bytes went");
+    let header = b.remote.header(v.file_id)?;
+    ensure!(
+        header.version == v2.version && header.removed_at.is_none(),
+        "the file written since was removed: {header:?}"
+    );
+    let feed = b.changes_to(&cursor, &[w.file_id, x.file_id])?;
+    ensure!(
+        feed.iter().filter(|h| h.removed_at.is_some()).count() == 2,
+        "the feed shows no removals: {feed:?}"
+    );
+    // Again at its new version: already removed, left alone.
+    let again = b
+        .remote
+        .set_removed(std::slice::from_ref(gone_f), true)?
+        .into_answers()?;
+    ensure!(
+        matches!(&again[0], Ok(t) if t.at == gone_f.at && t.changed_at == gone_f.changed_at),
+        "an unchanged removal moved: {again:?}"
+    );
+    // Restored: live again, as it was.
+    let back = b
+        .remote
+        .set_removed(&[gone_f.clone(), gone_x.clone()], false)?
+        .into_answers()?;
+    ensure!(back.iter().all(Result::is_ok), "{back:?}");
+    let header = b.remote.header(w.file_id)?;
+    ensure!(
+        header.removed_at.is_none() && header.state().is_some(),
+        "not restored: {header:?}"
+    );
+    ensure!(b.read(w.file_id, None)? == b"kept", "the restore's bytes");
     Ok(())
 }
 

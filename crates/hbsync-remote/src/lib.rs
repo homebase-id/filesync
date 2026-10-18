@@ -311,29 +311,51 @@ pub enum RemoteError {
     Fatal(String),
 }
 
-/// What a delete for good answered ([`Remote::delete_for_good`]).
-#[derive(Debug, Default)]
-pub struct ForGood {
+/// What a write of many files answered, file by file ([`Remote::delete_for_good`],
+/// [`Remote::set_removed`]).
+#[derive(Debug)]
+pub struct Answers<T> {
     /// The drive's answer for each of the first files asked, in order (all of them unless
     /// `stopped`): [`RemoteError::VersionMismatch`] for one written since (left as it is),
     /// [`RemoteError::NotFound`] for one not there.
-    pub answers: Vec<Result<()>>,
+    pub answers: Vec<Result<T>>,
     /// The error of the request that stopped it after those: the files left weren't answered,
-    /// and weren't deleted.
+    /// and weren't written.
     pub stopped: Option<RemoteError>,
 }
 
-impl ForGood {
+/// What a delete for good answered.
+pub type ForGood = Answers<()>;
+
+impl<T> Default for Answers<T> {
+    fn default() -> Self {
+        Answers {
+            answers: Vec::new(),
+            stopped: None,
+        }
+    }
+}
+
+impl<T> Answers<T> {
     /// Every file answered.
-    pub fn all(answers: Vec<Result<()>>) -> ForGood {
-        ForGood {
+    pub fn all(answers: Vec<Result<T>>) -> Self {
+        Answers {
             answers,
             stopped: None,
         }
     }
 
+    /// Stopped by `e` before any file was answered (the call's own error, as callers that take
+    /// what was answered before it see it).
+    pub fn stopped(e: RemoteError) -> Self {
+        Answers {
+            answers: Vec::new(),
+            stopped: Some(e),
+        }
+    }
+
     /// The answers, if every file was answered; else what stopped it.
-    pub fn into_answers(self) -> Result<Vec<Result<()>>> {
+    pub fn into_answers(self) -> Result<Vec<Result<T>>> {
         match self.stopped {
             Some(e) => Err(e),
             None => Ok(self.answers),
@@ -344,6 +366,24 @@ impl ForGood {
 impl RemoteError {
     pub fn is_transient(&self) -> bool {
         matches!(self, RemoteError::Transient(_))
+    }
+
+    /// The same error once more, for another file of a request it ended.
+    pub fn again(&self) -> RemoteError {
+        match self {
+            RemoteError::AlreadyExists => RemoteError::AlreadyExists,
+            RemoteError::Denied(why) => RemoteError::Denied(why.clone()),
+            RemoteError::VersionMismatch => RemoteError::VersionMismatch,
+            RemoteError::NotFound => RemoteError::NotFound,
+            RemoteError::StaleRange(why) => RemoteError::StaleRange(why.clone()),
+            RemoteError::HashMismatch => RemoteError::HashMismatch,
+            RemoteError::InvalidHash => RemoteError::InvalidHash,
+            RemoteError::HashRequired => RemoteError::HashRequired,
+            RemoteError::Transient(why) => RemoteError::Transient(why.clone()),
+            RemoteError::Io(e) => RemoteError::Io(std::io::Error::new(e.kind(), e.to_string())),
+            RemoteError::Full(why) => RemoteError::Full(why.clone()),
+            RemoteError::Fatal(why) => RemoteError::Fatal(why.clone()),
+        }
     }
 }
 
@@ -405,6 +445,13 @@ pub trait Remote: Send + Sync {
     /// ([`ForGood`]). An outer error stopped it before any file was answered.
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood>;
 
+    /// Moves files to Recently deleted (`removed`), or back, each only if still at its version,
+    /// leaving the rest of its header as it is: what the drive answered for each, in order, the
+    /// file as written (its token kept) with the server's time of the write. A file already so
+    /// is left as it is, its version and time too. An outer error stopped it before any file
+    /// was answered.
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>>;
+
     /// Streams the payload (or `start..end` of it) into `sink`. Returns the bytes written: fewer
     /// than asked when the range runs past the payload's end.
     fn read(
@@ -461,6 +508,10 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
 
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
         (**self).delete_for_good(files)
+    }
+
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
+        (**self).set_removed(files, removed)
     }
 
     fn read(

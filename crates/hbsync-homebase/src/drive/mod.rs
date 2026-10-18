@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    ChangesPage, ForGood, NodeMeta, Paced, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader,
-    Result, Upload,
+    Answers, ChangesPage, ForGood, NodeMeta, Paced, RefsPage, Remote, RemoteBody, RemoteError,
+    RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
@@ -77,12 +77,15 @@ struct DeleteResult {
     local_file_not_found: bool,
 }
 
-/// Files a hard delete takes per request (odin-core `FileVersionTagBatchV2.MaxFiles`).
-pub const HARD_DELETE_BATCH: usize = 1000;
+/// Files a batch of per-file writes takes per request (`hard-delete-batch`,
+/// `update-archival-status-batch`: odin-core `FileVersionTagBatchV2.MaxFiles`).
+pub const BATCH_FILES: usize = 1000;
 
+/// The answer of a batch write with an answer per file, in request order (`hard-delete-batch`,
+/// `update-archival-status-batch`).
 #[derive(Deserialize)]
-struct HardDeleteAnswer {
-    results: Vec<HardDeleted>,
+struct BatchAnswer<T> {
+    results: Vec<T>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +106,45 @@ fn hard_deleted(answer: &HardDeleted) -> Result<()> {
         Some(code) if code.eq_ignore_ascii_case("fileNotFound") => Err(RemoteError::NotFound),
         Some(code) => Err(RemoteError::Fatal(format!("hard delete refused: {code}"))),
     }
+}
+
+/// `UpdateArchivalStatusResultV2` (verified in odin-core).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchivalSet {
+    file_id: Uuid,
+    /// The version after it; the one asked for when the file was already so. `None` with an
+    /// error.
+    new_version_tag: Option<Uuid>,
+    /// Its time after it (Unix ms), as the feed shows it.
+    updated: Option<i64>,
+    error_code: Option<String>,
+}
+
+/// One file's answer to a removal or restore of `asked`: the file as written, its token kept
+/// (its key didn't change).
+fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Target> {
+    if let Some(code) = &answer.error_code {
+        return Err(refused(code));
+    }
+    let version = answer.new_version_tag.ok_or_else(|| {
+        RemoteError::Fatal("update-archival-status-batch answered no version".into())
+    })?;
+    Ok(Target {
+        at: RemoteRef {
+            file_id: asked.at.file_id,
+            version: VersionTag(version),
+        },
+        token: asked.token.clone(),
+        changed_at: answer.updated,
+    })
+}
+
+/// Why `update-archival-status-batch` left a file as it was (`OdinClientErrorCode`'s camelCase
+/// name): written since, not there (or deleted), or anything else.
+fn refused(code: &str) -> RemoteError {
+    code_error(code)
+        .unwrap_or_else(|| RemoteError::Fatal(format!("archival status refused: {code}")))
 }
 
 impl HomebaseRemote {
@@ -536,30 +578,56 @@ impl Remote for HomebaseRemote {
         Ok(())
     }
 
-    /// One request per [`HARD_DELETE_BATCH`] files (`hard-delete-batch`, odin-core #1968): each
+    /// One request per [`BATCH_FILES`] files (`hard-delete-batch`, odin-core #1968): each
     /// file goes only at its version, and one file's answer never stops the others.
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
-        in_batches(files, HARD_DELETE_BATCH, |batch| {
+        in_batches(files, BATCH_FILES, |batch| {
             let body = json!({ "files": batch.iter().map(|f| json!({
                 "fileId": f.file_id.0,
                 "versionTag": f.version.0,
             })).collect::<Vec<_>>() });
-            let answer: HardDeleteAnswer = self
+            let answer: BatchAnswer<HardDeleted> = self
                 .client
                 .post(&format!("{}/hard-delete-batch", self.files()), &body)
                 .map_err(remote_error)?;
-            if answer.results.len() != batch.len()
-                || answer
-                    .results
-                    .iter()
-                    .zip(batch)
-                    .any(|(a, f)| a.file_id != f.file_id.0)
-            {
-                return Err(RemoteError::Fatal(
-                    "hard-delete-batch answered other files than asked".into(),
-                ));
-            }
+            let asked = batch.iter().map(|f| f.file_id);
+            same_files("hard-delete-batch", &answer.results, |a| a.file_id, asked)?;
             Ok(answer.results.iter().map(hard_deleted).collect())
+        })
+    }
+
+    /// One request per [`BATCH_FILES`] files (`update-archival-status-batch`, odin-core
+    /// #1964): only `archivalStatus` changes (2 removed, 0 back), each file only at its version,
+    /// one after another in the order asked; one file's answer never stops the others.
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
+        in_batches(files, BATCH_FILES, |batch| {
+            let body = json!({
+                "archivalStatus": if removed { ARCHIVAL_REMOVED } else { 0 },
+                "files": batch.iter().map(|t| json!({
+                    "fileId": t.at.file_id.0,
+                    "versionTag": t.at.version.0,
+                })).collect::<Vec<_>>(),
+            });
+            let answer: BatchAnswer<ArchivalSet> = self
+                .client
+                .post(
+                    &format!("{}/update-archival-status-batch", self.files()),
+                    &body,
+                )
+                .map_err(remote_error)?;
+            let asked = batch.iter().map(|t| t.at.file_id);
+            same_files(
+                "update-archival-status-batch",
+                &answer.results,
+                |a| a.file_id,
+                asked,
+            )?;
+            Ok(answer
+                .results
+                .iter()
+                .zip(batch)
+                .map(|(a, t)| archival_set(a, t))
+                .collect())
         })
     }
 
@@ -613,15 +681,30 @@ impl Remote for HomebaseRemote {
     }
 }
 
+/// Whether a batch answered the files asked (`asked`, their ids), in order.
+fn same_files<A>(
+    what: &str,
+    answers: &[A],
+    answered: impl Fn(&A) -> Uuid,
+    asked: impl Iterator<Item = RemoteFileId>,
+) -> Result<()> {
+    if !answers.iter().map(answered).eq(asked.map(|f| f.0)) {
+        return Err(RemoteError::Fatal(format!(
+            "{what} answered other files than asked"
+        )));
+    }
+    Ok(())
+}
+
 /// `files` sent `size` at a time: each one's answer. A request that fails after earlier ones
-/// went keeps their answers and stops there: the files left weren't answered (nor deleted).
+/// went keeps their answers and stops there: the files left weren't answered (nor written).
 /// One that fails first is the whole call's error.
-fn in_batches(
-    files: &[RemoteRef],
+fn in_batches<F, T>(
+    files: &[F],
     size: usize,
-    mut send: impl FnMut(&[RemoteRef]) -> Result<Vec<Result<()>>>,
-) -> Result<ForGood> {
-    let mut done = ForGood::default();
+    mut send: impl FnMut(&[F]) -> Result<Vec<Result<T>>>,
+) -> Result<Answers<T>> {
+    let mut done = Answers::default();
     for batch in files.chunks(size) {
         match send(batch) {
             Ok(answers) => done.answers.extend(answers),
@@ -638,6 +721,22 @@ fn in_batches(
 /// Folders asked about in one query ([`HomebaseRemote::holding_live`]).
 const CHILDREN_QUERY_FOLDERS: usize = 100;
 
+/// The trait's error for an `OdinClientErrorCode` (its camelCase name), if it has one of its own.
+fn code_error(code: &str) -> Option<RemoteError> {
+    let mapped = match code.to_ascii_lowercase().as_str() {
+        "existingfilewithuniqueid" => RemoteError::AlreadyExists,
+        "versiontagmismatch" => RemoteError::VersionMismatch,
+        // Missing, or deleted (a tombstone).
+        "filenotfound" | "cannotupdatenonactivefile" => RemoteError::NotFound,
+        // An upload whose hash part didn't arrive: sent again like one refused.
+        "payloadhashmismatch" | "payloadhashmissing" => RemoteError::HashMismatch,
+        "invalidpayloadhash" => RemoteError::InvalidHash,
+        "payloadhashrequired" => RemoteError::HashRequired,
+        _ => return None,
+    };
+    Some(mapped)
+}
+
 /// How a Homebase answer maps onto the trait's errors (`homebase-api-notes.md`, Errors).
 fn remote_error(e: HomebaseError) -> RemoteError {
     match e {
@@ -649,20 +748,7 @@ fn remote_error(e: HomebaseError) -> RemoteError {
         }
         HomebaseError::Io(e) => RemoteError::Io(e),
         HomebaseError::Api { what, error } => {
-            let by_code = [
-                ("existingFileWithUniqueId", RemoteError::AlreadyExists),
-                ("versionTagMismatch", RemoteError::VersionMismatch),
-                ("fileNotFound", RemoteError::NotFound),
-                ("cannotUpdateNonActiveFile", RemoteError::NotFound),
-                ("payloadHashMismatch", RemoteError::HashMismatch),
-                // An upload whose hash part didn't arrive: sent again like one refused.
-                ("payloadHashMissing", RemoteError::HashMismatch),
-                ("invalidPayloadHash", RemoteError::InvalidHash),
-                ("payloadHashRequired", RemoteError::HashRequired),
-            ]
-            .into_iter()
-            .find(|(code, _)| error.is(code));
-            if let Some((_, mapped)) = by_code {
+            if let Some(mapped) = error.code.as_deref().and_then(code_error) {
                 return mapped;
             }
             let why = format!("{what}: {error}");
@@ -719,9 +805,57 @@ mod tests {
         assert!(done.answers.iter().all(Result::is_ok));
         assert!(matches!(done.stopped, Some(RemoteError::NotFound)));
         assert!(
-            in_batches(&files, 2, |_| Err(RemoteError::Transient("cut".into()))).is_err(),
+            in_batches::<_, ()>(&files, 2, |_| Err(RemoteError::Transient("cut".into()))).is_err(),
             "the first fails: the call's error"
         );
+        Ok(())
+    }
+
+    /// `update-archival-status-batch`'s answer as odin-core writes it
+    /// (`UpdateArchivalStatusBatchResultV2`), read per file.
+    #[test]
+    fn archival_answers_read_per_file() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let asked: Vec<Target> = (0..4)
+            .map(|_| Target {
+                at: RemoteRef {
+                    file_id: RemoteFileId(Uuid::new_v4()),
+                    version: VersionTag(Uuid::new_v4()),
+                },
+                token: Some(hbsync_types::FileToken(Box::new([7]))),
+                changed_at: None,
+            })
+            .collect();
+        let new = Uuid::new_v4();
+        let answer: BatchAnswer<ArchivalSet> = serde_json::from_value(json!({"results": [
+            {"fileId": asked[0].at.file_id.0, "newVersionTag": new, "updated": 1_760_000_000_123i64,
+             "errorCode": null},
+            {"fileId": asked[1].at.file_id.0, "newVersionTag": null, "updated": null,
+             "errorCode": "versionTagMismatch"},
+            {"fileId": asked[2].at.file_id.0, "errorCode": "cannotUpdateNonActiveFile"},
+            {"fileId": asked[3].at.file_id.0, "errorCode": "invalidFile"},
+        ]}))?;
+        let ids = |asked: &[Target]| asked.iter().map(|t| t.at.file_id).collect::<Vec<_>>();
+        same_files(
+            "batch",
+            &answer.results,
+            |a| a.file_id,
+            ids(&asked).into_iter(),
+        )?;
+        let shifted = ids(&asked[..3]).into_iter();
+        assert!(same_files("batch", &answer.results[1..], |a| a.file_id, shifted).is_err());
+        let got: Vec<Result<Target>> = answer
+            .results
+            .iter()
+            .zip(&asked)
+            .map(|(a, t)| archival_set(a, t))
+            .collect();
+        let first = got[0].as_ref().map_err(|e| e.to_string())?;
+        assert_eq!(first.at.version, VersionTag(new));
+        assert_eq!(first.changed_at, Some(1_760_000_000_123));
+        assert_eq!(first.token, asked[0].token, "the key stays");
+        assert!(matches!(got[1], Err(RemoteError::VersionMismatch)));
+        assert!(matches!(got[2], Err(RemoteError::NotFound)));
+        assert!(matches!(got[3], Err(RemoteError::Fatal(_))));
         Ok(())
     }
 

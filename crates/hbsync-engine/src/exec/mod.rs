@@ -1277,7 +1277,7 @@ pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 use settle::{Placed, mark_children, merged_with_drive, settle_placement};
 pub use settle::{Settle, settle};
-pub(crate) use settle::{meta, meta_at, record_removed, update_meta};
+pub(crate) use settle::{meta, meta_at, record_removed};
 pub use transfer_ops::tags_lost;
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the

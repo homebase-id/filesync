@@ -36,7 +36,7 @@ use hbsync_types::{
 };
 
 use crate::{
-    ChangeRef, ChangesPage, ForGood, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody,
+    Answers, ChangeRef, ChangesPage, ForGood, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody,
     RemoteError, RemoteHeader, Result, Upload,
 };
 
@@ -372,6 +372,44 @@ impl FakeServer {
         f.bytes = None;
         self.touch(file_id, writer);
         Ok(())
+    }
+
+    /// Sets only a file's removal, if it is still at `expected`, as Homebase's
+    /// `update-archival-status-batch` does for each file: a deleted file is not found (4002,
+    /// before the version is looked at), one already so is left as it is (its version and time
+    /// too), anything else gets a new version at the server's time.
+    fn set_removed_by(
+        &mut self,
+        writer: Option<ClientId>,
+        file_id: RemoteFileId,
+        expected: VersionTag,
+        removed: bool,
+    ) -> Result<Target> {
+        let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
+        if f.header.body == RemoteBody::Deleted {
+            return Err(RemoteError::NotFound);
+        }
+        if f.header.version != expected {
+            return Err(RemoteError::VersionMismatch);
+        }
+        if f.header.removed_at.is_some() == removed {
+            return Ok(Target {
+                at: RemoteRef {
+                    file_id,
+                    version: expected,
+                },
+                token: Some(token_of(file_id)),
+                changed_at: f.header.changed_at,
+            });
+        }
+        let version = VersionTag(self.fresh_uuid());
+        let now = self.clock_ms;
+        let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
+        f.header.version = version;
+        f.header.removed_at = removed.then_some(now);
+        f.header.changed_at = Some(now);
+        self.touch(file_id, writer);
+        Ok(written(RemoteRef { file_id, version }, now))
     }
 
     /// Deletes a file for good if it is still at `expected`, as Homebase's hard delete: gone,
@@ -868,6 +906,58 @@ impl Remote for FakeRemote {
                 .map(|f| server.hard_delete(f.file_id, f.version))
                 .collect(),
         ))
+    }
+
+    /// One request: a refusal of all writes, or an answer lost (after the server wrote the
+    /// rest), is the request's. A write failure injected for a name
+    /// ([`Faults::fail_writes_named`]) fails that file alone, unwritten: a lever of the fake's
+    /// (Homebase answers a file only with a client error) to hold one file back.
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
+        self.gate()?;
+        // As odin-core's `FileVersionTagBatchV2.AssertValid`: else a 400 for all of it.
+        let ids: HashSet<RemoteFileId> = files.iter().map(|t| t.at.file_id).collect();
+        if files.is_empty() || files.len() > 1000 || ids.len() != files.len() {
+            return Err(RemoteError::Fatal(format!(
+                "1 to 1,000 files, none twice: {} asked, {} different",
+                files.len(),
+                ids.len()
+            )));
+        }
+        let names: Vec<Option<String>> = files
+            .iter()
+            .map(|t| match self.server().header(t.at.file_id).ok()?.body {
+                RemoteBody::Live { content, .. } => Some(content.name),
+                RemoteBody::Deleted => None,
+            })
+            .collect();
+        // The faults on every write (no file is named so).
+        self.gate_name("")?;
+        if self.faults().not_found_writes {
+            return Ok(Answers::all(
+                files.iter().map(|_| Err(RemoteError::NotFound)).collect(),
+            ));
+        }
+        let failing = self.faults().fail_writes_named.clone();
+        let answers = {
+            let mut server = self.server();
+            files
+                .iter()
+                .zip(&names)
+                .map(|(t, name)| match failing.is_some() && *name == failing {
+                    true => Err(RemoteError::Transient("injected write failure".into())),
+                    false => server.set_removed_by(
+                        Some(self.client),
+                        t.at.file_id,
+                        t.at.version,
+                        removed,
+                    ),
+                })
+                .collect()
+        };
+        for name in names.iter().flatten() {
+            self.answered(name)?;
+        }
+        Ok(Answers::all(answers))
     }
 
     fn read(

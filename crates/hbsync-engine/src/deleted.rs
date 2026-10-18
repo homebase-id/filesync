@@ -13,13 +13,13 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use hbsync_platform::name::name_key;
-use hbsync_remote::{ForGood, Remote, RemoteError};
-use hbsync_state::{RemovedRow, StateDb, StateError, Store, keys};
+use hbsync_remote::{Answers, ForGood, NodeMeta, Remote, RemoteError};
+use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::activity::Deleted;
-use hbsync_types::{NodeId, NodeKind, RemoteRef, Role};
+use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::engine::EngineError;
-use crate::exec::{meta_at, remove_all, trashed_at, update_meta};
+use crate::exec::{meta_at, remove_all, trashed_at};
 use crate::feed::{TRACE_MS, apply_tombstone, gone_for_good};
 use crate::tree::restored_names;
 use crate::walk::End;
@@ -367,7 +367,7 @@ fn locked(account: &Mutex<StateDb>) -> MutexGuard<'_, StateDb> {
 /// Recently deleted too (just those, not their other contents). Returns how many items came
 /// back; 0 when `node` isn't in Recently deleted (any more).
 /// `moved` is set when the drive refused a write for its state (changed or deleted for good
-/// meanwhile): the account's picture lacks that.
+/// meanwhile), or a write may have landed unanswered: the account's picture lacks that.
 pub fn restore(
     account: &Mutex<StateDb>,
     remote: &dyn Remote,
@@ -377,60 +377,169 @@ pub fn restore(
     let Some(plan) = locked(account).read(|s| plan_restore(s, node))? else {
         return Ok(0);
     };
-    let RestorePlan {
-        rows,
-        mut live,
-        mut taken,
-    } = plan;
-    let mut in_plan: HashSet<NodeId> = rows.iter().map(|r| r.row.node).collect();
+    let RestorePlan { rows, live, taken } = plan;
+    let mut r = Restoring {
+        remote,
+        in_plan: rows.iter().map(|r| r.row.node).collect(),
+        live,
+        taken,
+        moved,
+        back: Vec::new(),
+        gone: Vec::new(),
+        failed: None,
+    };
     let mut restored = 0;
-    for r in &rows {
-        let row = &r.row;
-        // Its folder is back (or never left). One that was to come back and didn't keeps it in
-        // Recently deleted; one deleted for good, the top takes it.
-        let parent = if live.contains(&row.parent) {
-            row.parent
-        } else if in_plan.contains(&row.parent) {
-            continue;
-        } else {
-            NodeId::ROOT
-        };
-        let names = taken.entry(parent).or_default();
-        let Some(name) = restored_names(&row.name).find(|n| !names.contains(&name_key(n))) else {
-            continue; // no free name: it stays in Recently deleted
-        };
-        let meta = meta_at(row, parent, &name, false);
-        let back = match update_meta(remote, &row.target(), &meta, row.file.map(|f| f.hash)) {
-            Ok(back) => back,
-            // Changed meanwhile: the feed tells what it is now.
-            Err(RemoteError::VersionMismatch) => {
-                *moved = true;
-                continue;
+    let mut left: Vec<&MirrorRow> = rows.iter().map(|r| &r.row).collect();
+    // In waves, each after the folders it comes back into: the rows whose folder is back (or
+    // never left; one deleted for good, the top takes), then those in them. One that was to
+    // come back into a folder that didn't stays in Recently deleted.
+    while r.failed.is_none() {
+        let (wave, later): (Vec<&MirrorRow>, _) = left
+            .into_iter()
+            .partition(|row| r.live.contains(&row.parent) || !r.in_plan.contains(&row.parent));
+        if wave.is_empty() {
+            break;
+        }
+        left = later;
+        // Back in its own folder under its own name: only its removal undone, with the others
+        // in one request. The rest, once those answered (a name one didn't take is free again),
+        // under a free name or at the top: a rewrite each.
+        let mut asked = Vec::new();
+        let mut rest = Vec::new();
+        for row in wave {
+            let free = r.live.contains(&row.parent)
+                && r.taken
+                    .entry(row.parent)
+                    .or_default()
+                    .insert(name_key(&row.name));
+            if free {
+                asked.push(row)
+            } else {
+                rest.push(row)
             }
+        }
+        let targets: Vec<Target> = asked.iter().map(|row| row.target()).collect();
+        let Answers { answers, stopped } = if targets.is_empty() {
+            Answers::default()
+        } else {
+            remote
+                .set_removed(&targets, false)
+                .unwrap_or_else(Answers::stopped)
+        };
+        let stopped = stopped.or_else(|| {
+            (answers.len() < targets.len())
+                .then(|| RemoteError::Fatal("restores the drive didn't answer".into()))
+        });
+        let mut answers = answers.into_iter();
+        for row in asked {
+            // One the call left unanswered fails as it did.
+            let answer = match (answers.next(), &stopped) {
+                (Some(answer), _) => answer,
+                (None, Some(e)) => Err(e.again()),
+                (None, None) => continue,
+            };
+            let meta = meta_at(row, row.parent, &row.name, false);
+            r.settle(row, &meta, answer);
+        }
+        if let Some(e) = stopped {
+            *r.moved = true; // it may have landed
+            r.failed.get_or_insert(e);
+        }
+        for row in rest {
+            if r.failed.is_some() {
+                break;
+            }
+            let parent = match r.live.contains(&row.parent) {
+                true => row.parent,
+                false => NodeId::ROOT,
+            };
+            let names = r.taken.entry(parent).or_default();
+            let Some(name) = restored_names(&row.name).find(|n| !names.contains(&name_key(n)))
+            else {
+                continue; // no free name: it stays in Recently deleted
+            };
+            names.insert(name_key(&name));
+            let meta = meta_at(row, parent, &name, false);
+            let answer = remote.update(&row.target(), &meta, None);
+            r.settle(row, &meta, answer);
+        }
+        // What came back, and what was deleted for good meanwhile, in one write. The mirror's
+        // write marks each dirty in the folders it comes back to.
+        let (back, gone) = (std::mem::take(&mut r.back), std::mem::take(&mut r.gone));
+        locked(account).write(|s| {
+            gone.iter().try_for_each(|f| apply_tombstone(s, *f))?;
+            back.iter().try_for_each(|m| {
+                s.delete_removed(m.node)?;
+                s.put_mirror(m)
+            })
+        })?;
+        restored += back.len();
+    }
+    match r.failed {
+        Some(e) => Err(EngineError::Remote(e)),
+        None => Ok(restored),
+    }
+}
+
+/// A restore under way: what is back or going, and the names taken.
+struct Restoring<'a> {
+    remote: &'a dyn Remote,
+    in_plan: HashSet<NodeId>,
+    live: HashSet<NodeId>,
+    taken: HashMap<NodeId, HashSet<String>>,
+    moved: &'a mut bool,
+    /// Written back, to record.
+    back: Vec<MirrorRow>,
+    /// Deleted for good meanwhile, to forget.
+    gone: Vec<hbsync_types::RemoteFileId>,
+    /// What stops the restore.
+    failed: Option<RemoteError>,
+}
+
+impl Restoring<'_> {
+    /// Takes the drive's answer to `row`'s restore as `meta`.
+    fn settle(&mut self, row: &MirrorRow, meta: &NodeMeta, answer: Result<Target, RemoteError>) {
+        let e = match answer {
+            Ok(w) => {
+                let hash = row.file.map(|f| f.hash);
+                self.live.insert(row.node);
+                self.back.push(MirrorRow::written(
+                    w,
+                    meta.node,
+                    meta.parent,
+                    meta.kind,
+                    &meta.content,
+                    hash,
+                ));
+                return;
+            }
+            Err(e) => e,
+        };
+        // The name it didn't take is free again.
+        if let Some(names) = self.taken.get_mut(&meta.parent) {
+            names.remove(&name_key(&meta.content.name));
+        }
+        *self.moved = true;
+        match e {
             // Deleted for good meanwhile (its header says so too), maybe without a trace in the
             // feed: gone here too, and what was to come back into it, the top takes.
-            Err(RemoteError::NotFound) if gone_for_good(remote, row.file_id)? => {
-                *moved = true;
-                locked(account).write(|s| apply_tombstone(s, row.file_id))?;
-                in_plan.remove(&row.node);
-                continue;
+            RemoteError::NotFound => match gone_for_good(self.remote, row.file_id) {
+                Ok(true) => {
+                    self.gone.push(row.file_id);
+                    self.in_plan.remove(&row.node);
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    self.failed.get_or_insert(e);
+                }
+            },
+            // Changed meanwhile: the feed tells what it is now.
+            RemoteError::VersionMismatch => {}
+            e => {
+                self.failed.get_or_insert(e);
             }
-            Err(RemoteError::NotFound) => {
-                *moved = true;
-                continue;
-            }
-            Err(e) => return Err(EngineError::Remote(e)),
-        };
-        names.insert(name_key(&name));
-        live.insert(row.node);
-        // The mirror's write marks it dirty in the folders it comes back to.
-        locked(account).write(|s| {
-            s.delete_removed(row.node)?;
-            s.put_mirror(&back)
-        })?;
-        restored += 1;
+        }
     }
-    Ok(restored)
 }
 
 /// What a restore of a node does, worked out in one read.
@@ -951,10 +1060,9 @@ fn hard_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option
     if files.is_empty() {
         return (Vec::new(), None);
     }
-    let ForGood { answers, stopped } = match remote.delete_for_good(files) {
-        Ok(done) => done,
-        Err(e) => return (Vec::new(), Some(e)),
-    };
+    let ForGood { answers, stopped } = remote
+        .delete_for_good(files)
+        .unwrap_or_else(ForGood::stopped);
     // Any other answer for a file: it stays, and fails the purge (retried later).
     let mut refused: Option<(usize, RemoteError)> = None;
     let answers = answers
