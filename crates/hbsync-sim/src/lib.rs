@@ -492,7 +492,9 @@ pub struct Sim {
     /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
     /// them to the original too, as that client's add.
     tags_forked: BTreeSet<(usize, NodeId, String)>,
-    /// Tag adds a client's remote write sent up: they stand once the item goes from it.
+    /// Tag adds a client's remote write sent up (until the client adds the tag again): they
+    /// stand once the item goes from it; a restore keeps an add only if it holds it, or the add
+    /// is still to go up ([`Sim::restored`]).
     tags_sent: BTreeSet<(usize, NodeId, String)>,
     /// Tags a download wrote on a client's item whose record recovery dropped (the item
     /// changed since: it can't be told from the file there before), that the item still
@@ -1241,6 +1243,8 @@ impl Sim {
                         tags.push(tag);
                         self.tags_added.insert((c, node, name.to_owned()));
                         self.tags_cleared.remove(&(c, node, name.to_owned()));
+                        // Added again: not sent up yet.
+                        self.tags_sent.remove(&(c, node, name.to_owned()));
                     }
                     _ => return,
                 }
@@ -1476,14 +1480,31 @@ impl Sim {
     /// `node` is back where a user deleted it (on the drive, or here where the delete lost)
     /// with the tags named `held`: no longer deleted, so what users do to its tags from now on
     /// counts. What they did before is settled by the delete: tag removals (the version back
-    /// has what it had), and tags added are there only if it holds them.
+    /// has what it had), and tags added are there only if it holds them; but for an add a
+    /// client hasn't sent up and its item, synced there, still holds: that client never saw
+    /// the delete (one that did lost the item, and the add with it), and sends the add up
+    /// against the version back, as any add.
     fn restored(&mut self, node: NodeId, held: &BTreeSet<String>) {
         if !self.deleted.remove(&node) {
             return;
         }
         self.tags_cleared.retain(|(_, n, _)| *n != node);
-        self.tags_added
-            .retain(|(_, n, name)| *n != node || held.contains(name));
+        let (sent, clients) = (&self.tags_sent, &self.clients);
+        self.tags_added.retain(|add| {
+            let (c, n, name) = add;
+            let pending = || {
+                *c != DETACHED
+                    && !sent.contains(add)
+                    && clients.get(*c).is_some_and(|client| {
+                        client
+                            .local
+                            .get(node)
+                            .is_some_and(|item| item.tags.get(name).is_some())
+                            && !masked(&client.local, &client.filter).contains(&node)
+                    })
+            };
+            *n != node || held.contains(name) || pending()
+        });
     }
 
     /// A client put `node` in place: where a user's delete of it lost (the drive has it), it is
