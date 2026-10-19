@@ -44,7 +44,6 @@ use hbsync_local::{Filter, Verdict};
 use hbsync_platform::Os;
 use hbsync_platform::name::check_remote_name;
 use hbsync_platform::tags::express;
-use hbsync_remote::Holds;
 use hbsync_state::Coords;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -1421,7 +1420,16 @@ impl Sim {
                 let taken = self.server.purge();
                 self.remove_live(taken);
                 let due = self.server.due();
-                self.delete_for_good(&due, None);
+                // What was removed since the cut-off may not have reached the purging device.
+                let before = self.server.purge_before();
+                let known: BTreeSet<(NodeId, VersionTag)> = self
+                    .server
+                    .removed
+                    .iter()
+                    .filter(|(n, _)| self.server.removed_at.get(n).is_some_and(|at| *at < before))
+                    .map(Server::at)
+                    .collect();
+                self.delete_for_good(&due, &known);
             }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];
@@ -1621,7 +1629,7 @@ impl Sim {
     /// [`Action::EmptyListed`].
     fn empty_listed(&mut self) {
         if let Some(listed) = self.server.listed.clone() {
-            self.delete_for_good(&listed, Some(&listed));
+            self.delete_for_good(&listed, &listed);
         }
     }
 
@@ -1669,7 +1677,7 @@ impl Sim {
                 .live
                 .values()
                 .any(|n| inside.contains(&n.state.parent));
-        self.delete_for_good(&chosen, Some(&listed));
+        self.delete_for_good(&chosen, &listed);
         if !kept && self.server.removed.contains_key(&item) && self.server.emptied_kept.is_none() {
             self.server.emptied_kept = Some(format!("{item:?}"));
         }
@@ -1677,15 +1685,13 @@ impl Sim {
 
     /// Deletes for good the rows of Recently deleted still at a version in `chosen`, as the
     /// engine does ([`deleted::passes`], with what the folders hold as the emptying device
-    /// knows it: of Recently deleted, the rows in `known` at their versions, `None` all of
-    /// it), in its order: before a pass's folders go, the drive is asked which of them hold a
-    /// file that isn't deleted, but the later passes' rows ([`Holds::AnyBut`]), and those
-    /// stay. Records the first it deletes that it mustn't: one not chosen at that version (a
+    /// knows it: of Recently deleted, the rows in `known` at their versions), in its order: before a pass's folders go, the drive is asked which of them hold a
+    /// file as the engine asks ([`deleted::before_folders_go`]), and those stay. Records the first it deletes that it mustn't: one not chosen at that version (a
     /// live node, say), or a folder holding anything not going after it.
     fn delete_for_good(
         &mut self,
         chosen: &BTreeSet<(NodeId, VersionTag)>,
-        known: Option<&BTreeSet<(NodeId, VersionTag)>>,
+        known: &BTreeSet<(NodeId, VersionTag)>,
     ) {
         let server = &self.server;
         let rows: Vec<deleted::Chosen> = server
@@ -1700,7 +1706,7 @@ impl Sim {
             .collect();
         let mut holdings = deleted::Holdings::default();
         for row in &server.removed {
-            if known.is_none_or(|k| k.contains(&Server::at(row))) {
+            if known.contains(&Server::at(row)) {
                 *holdings.removed.entry(row.1.state.parent).or_default() += 1;
             }
         }
@@ -1719,7 +1725,7 @@ impl Sim {
             let server = &self.server;
             let later: HashSet<RemoteRef> =
                 pending.iter().map(|n| server.removed[n].remote).collect();
-            let holds = Holds::AnyBut(&later);
+            let holds = deleted::before_folders_go(&later);
             let holding: HashSet<NodeId> = server
                 .live
                 .values()

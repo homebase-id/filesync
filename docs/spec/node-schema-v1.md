@@ -196,8 +196,10 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      leaving out the rows of the later passes at the versions the client knows (round a cycle
      of removed folders, a folder holds one still to go). The earlier passes' files are gone by
      then and nothing in a pass is in another node of it, so such a file isn't going: its
-     folder stays, with the folders it is in, for a later purge, and a folder goes for good
-     only with everything removed below it. As that query leaves out what changed in its last
+     folder stays, with the folders it is in, until that file goes too (a purge that knows it;
+     one no client reads keeps it indefinitely, as a live one does). So a folder goes for good
+     only with everything removed below it, but round a cycle of removed folders, where one
+     goes first. As that query leaves out what changed in its last
      second, the client asks 1.1 s after the pass begins, when it shows all written before (a
      pass deleting no folder asks nothing, and doesn't wait).
      What a client still misses (a live file written into a folder in the moment between the
@@ -288,7 +290,7 @@ write nodes this client syncs. The file browser's own guide, built on these rule
 - 2026-10-19: before a pass of folders goes for good, the server's answer counts any file in
   them that isn't deleted, a removed one too, but the later passes' rows at their versions
   (The purge, 2.): a removed node the client didn't know of (removed since its last read, or
-  one it doesn't read) keeps its folder, which stays in Recently deleted until a later purge.
+  one it doesn't read) keeps its folder, which stays in Recently deleted until that node goes.
   Before, only a live file did, and the folder could go for good while that node stayed. The
   node is the same.
 - 2026-10-19: deleting for good softly (emptying by hand, and the purge's younger nodes) goes

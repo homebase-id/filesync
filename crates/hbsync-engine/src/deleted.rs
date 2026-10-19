@@ -1287,7 +1287,8 @@ fn stuck_below(s: &Store<'_>, before: i64) -> Result<Stuck, StateError> {
 /// doesn't wait). Any file there that isn't deleted, live or removed, keeps its folder, one
 /// this device doesn't know or doesn't read too: the earlier passes' files went, and nothing
 /// in a pass is in another node of it, so it isn't going; but the later passes' rows at their
-/// versions (round a cycle, a folder holds one). A node removed before `hard_before` (Unix ms, the
+/// versions ([`before_folders_go`]): round a cycle of removed folders, one holds another
+/// still to go, and goes first. A node removed before `hard_before` (Unix ms, the
 /// server's) goes without a trace; any other leaves a tombstone (`None`: every one does),
 /// recorded with its time; both in batches, many files a request. Returns how many went. One written since, or not found, sets `moved`; one not found
 /// is recorded gone once its header says so too. A request that fails stops it with its error:
@@ -1311,17 +1312,14 @@ fn delete_for_good(
     // The rows of the passes not yet begun, at their versions.
     let mut later: HashSet<RemoteRef> = passes
         .iter()
-        .skip(1)
         .flatten()
         .map(|r| r.row.remote_ref())
         .collect();
     let mut gone = 0;
-    for (i, pass) in passes.iter().enumerate() {
+    for pass in passes {
         let began = Instant::now();
-        if i > 0 {
-            for r in pass {
-                later.remove(&r.row.remote_ref());
-            }
+        for r in pass {
+            later.remove(&r.row.remote_ref());
         }
         let mut going: Vec<&RemovedRow> = Vec::new();
         for r in pass {
@@ -1347,7 +1345,7 @@ fn delete_for_good(
             // The drive's queries leave out what changed in their last moments: what was
             // written up to the pass's start shows once that has passed.
             std::thread::sleep(remote.hold_back().saturating_sub(began.elapsed()));
-            let holding = remote.holding(&folders, Holds::AnyBut(&later))?;
+            let holding = remote.holding(&folders, before_folders_go(&later))?;
             going.retain(|r| !holding.contains(&r.row.node));
         }
         let (hard, soft): (Vec<&RemovedRow>, Vec<&RemovedRow>) =
@@ -1411,6 +1409,13 @@ fn delete_for_good(
         }
     }
     Ok(gone)
+}
+
+/// What the drive is asked about a pass's folders just before they go for good, `later` the
+/// rows of the passes after it, at their versions: whether a file that isn't deleted is in one,
+/// live or removed, but those ([`delete_for_good`]). One that is keeps its folder.
+pub fn before_folders_go(later: &HashSet<RemoteRef>) -> Holds<'_> {
+    Holds::AnyBut(later)
 }
 
 /// What the drive answered for a file a delete for good asked about.

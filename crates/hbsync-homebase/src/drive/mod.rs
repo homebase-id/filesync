@@ -502,7 +502,8 @@ impl Remote for HomebaseRemote {
     }
 
     /// One `groupId` query a page at a time (any type, active files only): a removed file is
-    /// told by its `archivalStatus`, a file's version by its `versionTag`.
+    /// told by its `archivalStatus`, a file's version by its `versionTag` (minimal rows carry
+    /// both, **[verified]** odin-core #1967 `QueryBatchFileRef`: [`wire::FileRef`]).
     fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
         let mut holding = HashSet::new();
         for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {

@@ -160,9 +160,10 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   other code stays and makes the purge fail (it runs again later). A request that fails
   leaves all its files for the next purge. A
   folder's contents on the server: a `groupId` query (homebase-api-notes, Change feed). Before a
-  pass of folders goes, any active row in one (live or `archivalStatus` 2, of any type) keeps it,
-  but the rows of your later passes at their `versionTag` (a cycle of removed folders): a removed
-  file you didn't know of keeps its folder too.
+  pass of folders goes, any active row in one (live or `archivalStatus` 2, of any type; minimal
+  rows carry `archivalStatus` and `versionTag`, **[verified]** homebase-api-notes) keeps it, but
+  the rows of your later passes at their `versionTag` (a cycle of removed folders): a removed file
+  you didn't know of keeps its folder too.
   - **First, what a delete left** (node schema, "The purge", 2.): for each item the purge would delete
     (removed more than 30 days ago), the live nodes below its removed folders (directly or through live
     folders) that the delete took along: written no later than the removal of the nearest removed folder
