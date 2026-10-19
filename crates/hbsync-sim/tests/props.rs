@@ -2,7 +2,7 @@ use hbsync_sim::{Action, Event, Sim};
 use hbsync_types::NodeId;
 use proptest::prelude::*;
 
-fn action() -> impl Strategy<Value = Action> {
+fn action() -> impl Strategy<Value = Action> + Clone {
     let i = || 0usize..16;
     prop_oneof![
         3 => (i(), i()).prop_map(|(parent, name)| Action::CreateFile { parent, name }),
@@ -26,10 +26,33 @@ fn action() -> impl Strategy<Value = Action> {
     ]
 }
 
+/// The users' actions without tags (an edit instead: a tag change around a delete stopped half
+/// way has simulator findings of its own, on main too), with deletes another device stops half
+/// way and purges, more often.
+fn stopped_delete_action() -> impl Strategy<Value = Action> + Clone {
+    let i = || 0usize..16;
+    prop_oneof![
+        6 => action().prop_map(|a| match a {
+            Action::Tag { node, .. } | Action::Colour { node, .. } => Action::Edit { file: node },
+            a => a,
+        }),
+        1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
+        1 => Just(Action::Purge),
+    ]
+}
+
 fn event(clients: usize) -> impl Strategy<Value = Event> {
+    events_of(clients, action())
+}
+
+/// Events with the users' `actions`.
+fn events_of(
+    clients: usize,
+    actions: impl Strategy<Value = Action> + Clone,
+) -> impl Strategy<Value = Event> {
     let c = move || 0..clients;
     prop_oneof![
-        4 => (c(), action()).prop_map(|(client, action)| Event::Act { client, action }),
+        4 => (c(), actions).prop_map(|(client, action)| Event::Act { client, action }),
         1 => c().prop_map(|client| Event::Plan { client }),
         3 => c().prop_map(|client| Event::Step { client }),
     ]
@@ -166,6 +189,17 @@ proptest! {
     #[test]
     fn new_role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(5), 0..120)) {
         run_with(3, None, Sim::with_new_role_devices, &events)?;
+    }
+
+    /// Another device deletes a folder and stops half way, never to come back, while the users
+    /// work and the daily purge runs: the purge removes what the delete took along, once the
+    /// folder is kept long enough, and deletes it for good 30 days on, never a live node, never
+    /// what was written after the delete. The clients converge without loss.
+    #[test]
+    fn stopped_deletes_and_the_purge_converge_without_loss(
+        events in proptest::collection::vec(events_of(3, stopped_delete_action()), 0..120)
+    ) {
+        run(3, &events)?;
     }
 
     /// A download fetches, then puts in place and commits a step later: meanwhile the drive
@@ -1477,9 +1511,9 @@ fn regression_a_folder_moved_into_a_removed_one_keeps_what_is_in_it() {
 }
 
 /// Purges after a folder's delete stopped half way (the folder removed, the file in it not
-/// marked yet): the purge touches neither (the file is live, and the folder holding it stays);
-/// the delete carried on is what removes the file, and the client that saw it and the one away
-/// since before it converge, nothing lost or back.
+/// marked yet): the purge, once the folder is kept long enough, removes the file (taken along)
+/// and never deletes it for good at once; the delete carried on finds it removed already, and
+/// the client that saw it and the one away since before it converge, nothing lost or back.
 #[test]
 fn regression_a_purge_mid_delete_leaves_what_the_folder_took_along() {
     use Action::*;
@@ -1525,6 +1559,95 @@ fn regression_a_purge_mid_delete_leaves_what_the_folder_took_along() {
         Vec::<String>::new(),
         "nothing came back"
     );
+}
+
+/// Client 0 and the other devices, with folder "b" holding "b/c.txt" and "b/a/c.txt", all
+/// synced; and the ids of b, b/a, b/c.txt and b/a/c.txt.
+fn stopped_delete_setup() -> (Sim, [NodeId; 4]) {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let folder = |sim: &Sim, path: &str| -> usize {
+        let node = if path.is_empty() {
+            NodeId::ROOT
+        } else {
+            sim.item(0, path).expect(path)
+        };
+        sim.pick(0, node, true).expect(path)
+    };
+    let act = |client, action| Event::Act { client, action };
+    let (a, b, c) = (0, 1, 3); // NAMES: "a", "b", "c.txt"
+    let parent = folder(&sim, "");
+    sim.run(&[act(0, CreateFolder { parent, name: b })]);
+    let parent = folder(&sim, "b");
+    sim.run(&[
+        act(0, CreateFolder { parent, name: a }),
+        act(0, CreateFile { parent, name: c }),
+    ]);
+    let parent = folder(&sim, "b/a");
+    sim.run(&[act(0, CreateFile { parent, name: c })]);
+    assert!(sim.quiesce(30), "no convergence");
+    let ids = ["b", "b/a", "b/c.txt", "b/a/c.txt"].map(|p| sim.item(0, p).expect(p));
+    (sim, ids)
+}
+
+/// Another device deletes folder b and stops right after the folder, never to come back; no
+/// device syncs meanwhile. Once b is kept long enough, the purge removes what it took along, a
+/// folder before what is in it, to Recently deleted; once their own removal is kept as long,
+/// all of it goes for good. The devices converge, nothing lost.
+#[test]
+fn regression_the_purge_finishes_a_delete_stopped_half_way() {
+    use Action::*;
+    let (mut sim, [b, a, c, ac]) = stopped_delete_setup();
+    let pick = sim.stopped_pick(b).expect("b");
+    let act = |action| Event::Act { client: 0, action };
+    sim.run(&[act(DeleteStopped { pick, done: 0 })]);
+    assert!(sim.is_removed(b));
+    assert!(
+        ![a, c, ac].iter().any(|n| sim.is_removed(*n)),
+        "taken along, live"
+    );
+    // Daily purges, until b's removal is old enough.
+    sim.run(&[act(Purge), act(Purge), act(Purge)]);
+    assert!(
+        [b, a, c, ac].iter().all(|n| sim.is_removed(*n)),
+        "removed now"
+    );
+    sim.run(&[act(Purge), act(Purge), act(Purge)]);
+    assert!(!sim.is_removed(b), "gone for good");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(sim.server_paths(), Vec::<String>::new());
+}
+
+/// As [`regression_the_purge_finishes_a_delete_stopped_half_way`], but the phone edits b/a/c.txt
+/// after the delete: written after the removal, it isn't taken along. The purge leaves it live,
+/// and b/a above it, and b holding them; it removes b/c.txt only. The devices bring b back
+/// with them, nothing lost.
+#[test]
+fn regression_the_purge_leaves_what_was_written_after_a_stopped_delete() {
+    use Action::*;
+    let (mut sim, [b, a, c, ac]) = stopped_delete_setup();
+    let pick = sim.stopped_pick(b).expect("b");
+    let act = |action| Event::Act { client: 0, action };
+    sim.run(&[act(DeleteStopped { pick, done: 0 })]);
+    // EditTaken picks among the files taken along, in id order.
+    let pick = usize::from(ac > c);
+    sim.run(&[act(EditTaken { pick })]);
+    sim.run(&[act(Purge), act(Purge), act(Purge)]);
+    assert!(sim.is_removed(c), "taken along: removed");
+    assert!(
+        !sim.is_removed(a) && !sim.is_removed(ac),
+        "written after: live"
+    );
+    sim.run(&[act(Purge), act(Purge), act(Purge)]);
+    assert!(sim.is_removed(b), "b holds them");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(sim.server_paths(), ["b", "b/a", "b/a/c.txt"]);
 }
 
 /// A file put into a folder after another device removed it (with what was in it) isn't in

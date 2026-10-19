@@ -1400,11 +1400,55 @@ fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
     Ok(())
 }
 
+/// A device deleting a folder stops half way and never comes back: what is in it is still live,
+/// taken along by the folder's removal. Another device's purge, once the folder is kept long
+/// enough, removes them first (to Recently deleted, still restorable), and they go for good
+/// with the folder once their own removal is kept as long. Nothing else goes.
+#[test]
+fn the_purge_finishes_a_delete_that_stopped_half_way() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("Photos/x.txt", "x")?;
+    a.write("Photos/2024/y.txt", "y")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    a.remote.faults().fail_writes_named = Some("2024".into());
+    a.sync()?;
+    let count = || {
+        server
+            .lock()
+            .map(|s| (s.live().count(), s.removed().count()))
+            .unwrap_or_default()
+    };
+    assert_eq!(count(), (3, 2), "2024, y.txt and keep.txt are live");
+    // a is gone for good. b, which doesn't sync (a phone, say, or a computer syncing another
+    // part: one syncing it finishes the delete), purges, the folder kept long enough: 2024 and
+    // y.txt are removed, a folder first, and are restorable; nothing goes for good yet.
+    drop(a);
+    let mut b = Client::new(&server, "b")?;
+    assert_eq!(b.engine.drive().purge(0)?, 0);
+    assert_eq!(count(), (1, 4));
+    let photos = b
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    assert!(!photos.stays, "nothing live holds it any more");
+    // Their own removal kept long enough: all of it goes.
+    assert_eq!(b.engine.drive().purge(0)?, 4);
+    assert_eq!(count(), (1, 0));
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
+    Ok(())
+}
+
 /// The device deleting a folder stops after the folder's removal: what is in it is still live,
 /// unmarked, taken along by the folder's removal (node schema, Recently deleted). Emptying the
 /// folder from Recently deleted, on another device, deletes for good only what is removed: the
-/// folder stays while it holds live nodes, which emptying never deletes for good (marking them
-/// removed first is the purge's, still to come). Taken along, they show nowhere.
+/// folder stays while it holds live nodes, which emptying never deletes for good (the purge
+/// removes them first: [`the_purge_finishes_a_delete_that_stopped_half_way`]). Taken along,
+/// they show nowhere.
 #[test]
 fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     let server = server();

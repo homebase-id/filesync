@@ -19,7 +19,7 @@ use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::engine::EngineError;
-use crate::exec::{meta_at, remove_all, trashed_at};
+use crate::exec::{meta_at, record_removed, remove_all, trashed_at};
 use crate::feed::{TRACE_MS, apply_tombstone, gone_after, gone_for_good};
 use crate::tree::restored_names;
 use crate::walk::End;
@@ -433,32 +433,23 @@ pub fn restore(
                 rest.push(row)
             }
         }
-        let targets: Vec<Target> = asked.iter().map(|row| row.target()).collect();
-        let Answers { answers, stopped } = if targets.is_empty() {
-            Answers::default()
-        } else {
-            remote
+        // As many a request as the drive takes.
+        for part in asked.chunks(crate::transfer::REMOVALS_AT_ONCE) {
+            let targets: Vec<Target> = part.iter().map(|row| row.target()).collect();
+            let (answers, stopped) = remote
                 .set_removed(&targets, false)
                 .unwrap_or_else(Answers::stopped)
-        };
-        let stopped = stopped.or_else(|| {
-            (answers.len() < targets.len())
-                .then(|| RemoteError::Fatal("restores the drive didn't answer".into()))
-        });
-        let mut answers = answers.into_iter();
-        for row in asked {
+                .padded(targets.len());
             // One the call left unanswered fails as it did.
-            let answer = match (answers.next(), &stopped) {
-                (Some(answer), _) => answer,
-                (None, Some(e)) => Err(e.again()),
-                (None, None) => continue,
-            };
-            let meta = meta_at(row, row.parent, &row.name, false);
-            r.settle(row, &meta, answer);
-        }
-        if let Some(e) = stopped {
-            *r.moved = true; // it may have landed
-            r.failed.get_or_insert(e);
+            for (row, answer) in part.iter().zip(answers) {
+                let meta = meta_at(row, row.parent, &row.name, false);
+                r.settle(row, &meta, answer);
+            }
+            if let Some(e) = stopped {
+                *r.moved = true; // it may have landed
+                r.failed.get_or_insert(e);
+                break;
+            }
         }
         for row in rest {
             if r.failed.is_some() {
@@ -746,9 +737,12 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
 /// folders; the tombstones as old as [`TRACE_MS`]; and every folder's trash (`.hbsync/trash`)
 /// of the same age (by this device's clock, which named its entries). Node schema, "The
 /// purge":
-/// - It never writes a live node. A removed folder still holding one (a delete that stopped
-///   half way, or a file written into it since) stays in Recently deleted, restorable, until
-///   its delete finishes or someone restores it: possibly indefinitely.
+/// - It never deletes a live node for good. What the delete of an item kept that long took
+///   along and left live (a delete that stopped half way) it first removes, a folder before
+///   what is in it ([`remove_taken_along`]): each goes 30 days after its own removal. A
+///   removed folder still holding a live node it doesn't take (a file written into it since,
+///   one whose time isn't known, one this device doesn't read) stays in Recently deleted,
+///   restorable, until someone restores it or the node is removed: possibly indefinitely.
 /// - An item holding a removal whose time isn't known yet waits for a purge that knows it.
 /// - Each node goes without a trace (a hard delete) once its own removal is [`TRACE_MS`] old,
 ///   else leaving a tombstone, which goes hard [`TRACE_MS`] after its own time.
@@ -766,15 +760,11 @@ pub fn purge(
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
     let traced = now_ms.saturating_sub(TRACE_MS);
+    let before = now_ms.saturating_sub(keep_ms);
     // Each part on its own: one that fails doesn't keep the others from their work, but for the
     // trash: while Recently deleted's items didn't go, the local copies of deletes stay too.
-    let expired = expire(
-        account,
-        remote,
-        now_ms.saturating_sub(keep_ms),
-        Some(traced),
-        moved,
-    );
+    let taken = remove_taken_along(account, remote, before, moved);
+    let expired = expire(account, remote, before, Some(traced), moved);
     let tombstones = delete_tombstones(account, remote, traced);
     let pruned = locked(account)
         .write(|s| s.prune_gone(traced, now_ms))
@@ -784,6 +774,7 @@ pub fn purge(
         Ok(_) => empty_trashes(account, keep_ms),
         Err(_) => Ok(()),
     };
+    taken?;
     let gone = expired?;
     tombstones?;
     pruned?;
@@ -1044,6 +1035,248 @@ fn expire(
     let tops = due(account, before)?;
     let passes = locked(account).read(|s| passes_of(s, tops, before))?;
     delete_for_good(account, remote, &passes, hard_before, moved)
+}
+
+/// Removes what the deletes of the items removed before `before` (Unix ms, the server's) took
+/// along and left live, a delete that stopped half way (node schema, The purge, 2.), so the
+/// items can go: [`crate::along::taken_levels`] picks them, by the reconciler's rule, from the
+/// removed folders of those items that hold a live node, and that the drive confirms still
+/// removed at the version this device has (a header read each). Top-down, a level at a time,
+/// each node at the version this device knows (`update-archival-status-batch`, many a
+/// request): one written since stays, and so does what is in it. They go to Recently deleted
+/// with their folder's item, at the server's time of this write: 30 days on, they go for good
+/// with it.
+///
+/// A live folder it removes is the nearest removed folder of what is in it from then on: a
+/// node in it this device didn't know of (written since its last read, or one it doesn't
+/// read) would count as taken along by it. So once the drive's queries show what was written
+/// up to the last removal ([`Remote::hold_back`]), the drive is asked whether any of them still
+/// holds a live node, and those are put back, with the ones above them it removed
+/// ([`put_back`]).
+///
+/// Returns how many it removed (and didn't put back). A refused or unanswered one sets `moved`;
+/// a request that fails stops it with its error, after putting back what needs it; another
+/// error is returned once the rest is done.
+fn remove_taken_along(
+    account: &Mutex<StateDb>,
+    remote: &dyn Remote,
+    before: i64,
+    moved: &mut bool,
+) -> Result<usize, EngineError> {
+    let Stuck { folders, live } = locked(account).read(|s| stuck_below(s, before))?;
+    let removed_at: HashMap<NodeId, i64> = folders
+        .iter()
+        .filter_map(|f| Some((f.row.node, f.removed_at?)))
+        .collect();
+    let levels = crate::along::taken_levels(
+        live.values().map(|m| (m.node, m.parent)),
+        |f| removed_at.get(&f).copied(),
+        |n| live[&n].changed_at,
+        |n| Role::of(n).is_some(),
+    );
+    // The folders it takes from, as the drive has them now: one restored or written since
+    // takes nothing.
+    let first: HashSet<NodeId> = levels
+        .first()
+        .into_iter()
+        .flatten()
+        .map(|n| live[n].parent)
+        .collect();
+    let mut removed: HashSet<NodeId> = HashSet::new();
+    let mut failed = None;
+    for f in folders.iter().filter(|f| first.contains(&f.row.node)) {
+        match remote.header(f.row.file_id) {
+            Ok(h) if h.version == f.row.version && h.removed_at.is_some() => {
+                removed.insert(f.row.node);
+            }
+            Ok(_) | Err(RemoteError::NotFound | RemoteError::Deleted) => *moved = true,
+            Err(e) if e.is_transient() => return Err(EngineError::Remote(e)),
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
+        }
+    }
+    // The live folders it removed, as written, with their depth.
+    let mut made: Vec<(MirrorRow, usize)> = Vec::new();
+    let mut last = Instant::now();
+    let mut count = 0;
+    let mut stopped = None;
+    'levels: for (depth, level) in levels.iter().enumerate() {
+        // What is in a node that stays, stays.
+        let going: Vec<&MirrorRow> = level
+            .iter()
+            .map(|n| &live[n])
+            .filter(|m| removed.contains(&m.parent))
+            .collect();
+        for part in going.chunks(crate::transfer::REMOVALS_AT_ONCE) {
+            let targets: Vec<Target> = part.iter().map(|m| m.target()).collect();
+            let (answers, stop) = remote
+                .set_removed(&targets, true)
+                .unwrap_or_else(Answers::stopped)
+                .padded(part.len());
+            last = Instant::now();
+            let mut done = Vec::new();
+            for (m, answer) in part.iter().zip(answers) {
+                match answer {
+                    Ok(w) => done.push(MirrorRow {
+                        version: w.at.version,
+                        token: w.token,
+                        changed_at: w.changed_at,
+                        ..(*m).clone()
+                    }),
+                    // Written since, or gone; or unanswered, so it may have landed: the feed
+                    // tells what it is now.
+                    Err(_) if stop.is_some() => *moved = true,
+                    Err(
+                        RemoteError::VersionMismatch | RemoteError::NotFound | RemoteError::Deleted,
+                    ) => *moved = true,
+                    Err(e) => {
+                        failed.get_or_insert(e);
+                    }
+                }
+            }
+            count += done.len();
+            removed.extend(done.iter().map(|m| m.node));
+            made.extend(
+                done.iter()
+                    .filter(|m| m.kind == NodeKind::Folder)
+                    .map(|m| (m.clone(), depth)),
+            );
+            locked(account).write(|s| {
+                done.into_iter()
+                    .try_for_each(|m| record_removed(s, m.file_id, Some(m)))
+            })?;
+            if stop.is_some() {
+                stopped = stop;
+                break 'levels;
+            }
+        }
+    }
+    count -= put_back(account, remote, made, last, moved)?;
+    if count > 0 {
+        tracing::info!("the purge removed {count} items a delete took along and left");
+    }
+    match stopped.or(failed) {
+        Some(e) => Err(EngineError::Remote(e)),
+        None => Ok(count),
+    }
+}
+
+/// Puts back the live folders [`remove_taken_along`] removed (`made`, each as written, with its
+/// depth) that the drive says hold a live node, asked once its queries show what was written
+/// up to `last` (the last removal), and the folders above them among `made`: top-down, each at
+/// the version written, as a restore does. One that doesn't come back (written since) sets
+/// `moved`. Returns how many came back.
+fn put_back(
+    account: &Mutex<StateDb>,
+    remote: &dyn Remote,
+    made: Vec<(MirrorRow, usize)>,
+    last: Instant,
+    moved: &mut bool,
+) -> Result<usize, EngineError> {
+    if made.is_empty() {
+        return Ok(0);
+    }
+    std::thread::sleep(remote.hold_back().saturating_sub(last.elapsed()));
+    let nodes: Vec<NodeId> = made.iter().map(|(m, _)| m.node).collect();
+    let holding = remote.holding_live(&nodes)?;
+    if holding.is_empty() {
+        return Ok(0);
+    }
+    let made: HashMap<NodeId, (MirrorRow, usize)> =
+        made.into_iter().map(|(m, d)| (m.node, (m, d))).collect();
+    let mut back: Vec<&(MirrorRow, usize)> = Vec::new();
+    let mut seen = HashSet::new();
+    for &folder in &holding {
+        let mut at = folder;
+        while let Some(row) = made.get(&at)
+            && seen.insert(at)
+        {
+            back.push(row);
+            at = row.0.parent;
+        }
+    }
+    back.sort_by_key(|(m, depth)| (*depth, m.node));
+    let mut came = 0;
+    for level in back.chunk_by(|a, b| a.1 == b.1) {
+        let targets: Vec<Target> = level.iter().map(|(m, _)| m.target()).collect();
+        let (answers, stopped) = remote
+            .set_removed(&targets, false)
+            .unwrap_or_else(Answers::stopped)
+            .padded(targets.len());
+        let rows: Vec<MirrorRow> = level
+            .iter()
+            .zip(answers)
+            .filter_map(|((m, _), answer)| match answer {
+                Ok(w) => Some(MirrorRow {
+                    version: w.at.version,
+                    token: w.token,
+                    changed_at: w.changed_at,
+                    ..m.clone()
+                }),
+                Err(_) => {
+                    *moved = true;
+                    None
+                }
+            })
+            .collect();
+        came += rows.len();
+        locked(account).write(|s| {
+            rows.iter().try_for_each(|m| {
+                s.delete_removed(m.node)?;
+                s.put_mirror(m)
+            })
+        })?;
+        if let Some(e) = stopped {
+            return Err(EngineError::Remote(e));
+        }
+    }
+    Ok(came)
+}
+
+/// The removed folders whose delete may have left live what it took along, and what is live
+/// below them.
+#[derive(Default)]
+struct Stuck {
+    folders: Vec<RemovedRow>,
+    /// By node.
+    live: HashMap<NodeId, MirrorRow>,
+}
+
+/// The removed folders of the items removed before `before` (Unix ms, the server's) that hold
+/// a live node written no later than their removal ([`Store::removed_holding_taken`]: none,
+/// mostly, at the cost of one query), and the live nodes below them, directly or through live
+/// folders written by then too (one written after takes nothing in it along).
+fn stuck_below(s: &Store<'_>, before: i64) -> Result<Stuck, StateError> {
+    let mut stuck = Stuck::default();
+    let mut rows = RemovedRows::new(s, Vec::new());
+    let mut known = HashMap::new();
+    for folder in s.removed_holding_taken()? {
+        let item = deleted_by_item(&mut rows, folder, &mut known)?;
+        let due = rows
+            .get(item)?
+            .is_some_and(|r| r.removed_at.is_some_and(|at| at < before));
+        if due && let Some(row) = rows.get(folder)? {
+            stuck.folders.push(row.clone());
+        }
+    }
+    let mut next: Vec<(NodeId, i64)> = stuck
+        .folders
+        .iter()
+        .filter_map(|f| Some((f.row.node, f.removed_at?)))
+        .collect();
+    while let Some((folder, removed_at)) = next.pop() {
+        for m in s.mirror_children(folder)? {
+            if m.kind == NodeKind::Folder
+                && m.changed_at.is_some_and(|at| at <= removed_at)
+                && !stuck.live.contains_key(&m.node)
+            {
+                next.push((m.node, removed_at));
+            }
+            stuck.live.insert(m.node, m);
+        }
+    }
+    Ok(stuck)
 }
 
 /// Deletes `passes` for good ([`going`]), one pass at a time, each node at the version this
@@ -1689,6 +1922,201 @@ mod tests {
             (f, f),
             "deleted with the folder"
         );
+        Ok(())
+    }
+
+    /// The purge removes what a delete that stopped half way left live, a folder before what is
+    /// in it, at the versions this device knows: one written since (its version here an old
+    /// one) stays, and so does what is in it; so does one written after the removal, one whose
+    /// time isn't known, what a folder restored on the drive since holds, and what the delete
+    /// of an item not kept long enough left.
+    #[test]
+    fn the_purge_removes_only_what_a_delete_took_along() -> Result<(), Box<dyn std::error::Error>> {
+        let remote = fake();
+        let db = Db::new()?;
+        let meta = |node: NodeId, parent: NodeId| NodeMeta {
+            node,
+            parent,
+            kind: NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder(node.0.to_string()),
+            removed: false,
+        };
+        let [f, a, b, stale, in_stale, late, unknown] = [(); 7].map(|_| NodeId::new());
+        let [back, in_back, young, in_young] = [(); 4].map(|_| NodeId::new());
+        let mut rows: HashMap<NodeId, MirrorRow> = HashMap::new();
+        let row = |node, parent, w: Target| {
+            let m = meta(node, parent);
+            MirrorRow::written(w, node, parent, m.kind, &m.content, None)
+        };
+        for (node, parent) in [
+            (f, NodeId::ROOT),
+            (a, f),
+            (b, a),
+            (stale, f),
+            (in_stale, stale),
+            (late, f),
+            (unknown, f),
+            (back, NodeId::ROOT),
+            (in_back, back),
+            (young, NodeId::ROOT),
+            (in_young, young),
+        ] {
+            rows.insert(
+                node,
+                row(node, parent, remote.create(&meta(node, parent), None)?),
+            );
+        }
+        let set_removed =
+            |row: &MirrorRow, removed: bool| -> Result<Target, Box<dyn std::error::Error>> {
+                let answers = remote
+                    .set_removed(&[row.target()], removed)?
+                    .into_answers()?;
+                Ok(answers.into_iter().next().ok_or("no answer")??)
+            };
+        // The deletes: the folders alone (each stopped there); young's not kept long enough.
+        for node in [f, back] {
+            rows.insert(
+                node,
+                row(node, NodeId::ROOT, set_removed(&rows[&node], true)?),
+            );
+        }
+        remote.server().advance(1000);
+        let before = rows[&f].changed_at.ok_or("no time")? + 500;
+        rows.insert(
+            young,
+            row(young, NodeId::ROOT, set_removed(&rows[&young], true)?),
+        );
+        // Written since, on another device: this one has the old version.
+        remote.update(&rows[&stale].target(), &meta(stale, f), None)?;
+        // Written after the removal, as this device knows.
+        let w = remote.update(&rows[&late].target(), &meta(late, f), None)?;
+        rows.insert(late, row(late, f, w));
+        // Restored on the drive since: this device still has it removed.
+        set_removed(&rows[&back], false)?;
+        db.write(|s| {
+            for (node, r) in &rows {
+                match *node {
+                    n if [f, back, young].contains(&n) => s.put_removed(&RemovedRow {
+                        removed_at: r.changed_at,
+                        row: r.clone(),
+                    })?,
+                    n if n == unknown => s.put_mirror(&MirrorRow {
+                        changed_at: None,
+                        ..r.clone()
+                    })?,
+                    _ => s.put_mirror(r)?,
+                }
+            }
+            Ok(())
+        })?;
+        let mut moved = false;
+        assert_eq!(remove_taken_along(&db, &remote, before, &mut moved)?, 2);
+        assert!(moved, "the drive had what this device didn't");
+        for n in [a, b] {
+            assert!(db.read(|s| s.removed_by_node(n))?.is_some(), "{n:?}");
+            assert!(db.read(|s| s.get_mirror(n))?.is_none(), "{n:?}");
+        }
+        let removed_on_drive: HashSet<NodeId> =
+            remote.server().removed().filter_map(|h| h.node()).collect();
+        assert_eq!(removed_on_drive, HashSet::from([f, a, b, young]));
+        for n in [stale, in_stale, late, unknown, in_back, in_young] {
+            assert!(db.read(|s| s.get_mirror(n))?.is_some(), "{n:?}");
+        }
+        // Its folder kept that long, its own removal not: it waits for its own 30 days.
+        assert_eq!(expire(&db, &remote, before, None, &mut false)?, 0);
+        Ok(())
+    }
+
+    /// A live folder the purge removes becomes the nearest removed folder of what is in it: a
+    /// node in it this device didn't know of (written since its last read, or one it doesn't
+    /// read) would count as taken along by it. The drive is asked after, and the folder put
+    /// back, with the ones above it the purge removed; what went with them stays removed.
+    #[test]
+    fn a_folder_holding_what_this_device_didnt_know_is_put_back()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let remote = fake();
+        let db = Db::new()?;
+        let folder = |node: NodeId, parent: NodeId| NodeMeta {
+            node,
+            parent,
+            kind: NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder(node.0.to_string()),
+            removed: false,
+        };
+        let [f, outer, a, z, y, b] = [(); 6].map(|_| NodeId::new());
+        let mut rows: HashMap<NodeId, MirrorRow> = HashMap::new();
+        for (node, parent) in [
+            (f, NodeId::ROOT),
+            (outer, f),
+            (a, outer),
+            (z, a),
+            (y, outer),
+            (b, f),
+        ] {
+            let m = folder(node, parent);
+            let w = remote.create(&m, None)?;
+            rows.insert(
+                node,
+                MirrorRow::written(w, node, parent, m.kind, &m.content, None),
+            );
+        }
+        let w = remote
+            .set_removed(&[rows[&f].target()], true)?
+            .into_answers()?;
+        let w = w.into_iter().next().ok_or("no answer")??;
+        let removal = w.changed_at.ok_or("no time")?;
+        rows.insert(
+            f,
+            MirrorRow {
+                version: w.at.version,
+                changed_at: w.changed_at,
+                ..rows[&f].clone()
+            },
+        );
+        // Written since this device's last read: z in a, and in b a node it doesn't read.
+        remote.update(&rows[&z].target(), &folder(z, a), None)?;
+        let (_, unread_at) = remote.server().seed_file(
+            b,
+            "unread.bin",
+            b"u",
+            hbsync_fileio::HashAlgorithm::Blake3,
+        )?;
+        remote.server().unlist(unread_at.file_id);
+        db.write(|s| {
+            for (node, r) in &rows {
+                if *node == f {
+                    s.put_removed(&RemovedRow {
+                        removed_at: Some(removal),
+                        row: r.clone(),
+                    })?;
+                } else {
+                    s.put_mirror(r)?;
+                }
+            }
+            Ok(())
+        })?;
+        remote.server().advance(1000);
+        let mut moved = false;
+        // a, outer above it, and b came back; y stays removed.
+        assert_eq!(
+            remove_taken_along(&db, &remote, removal + 500, &mut moved)?,
+            1
+        );
+        assert!(moved);
+        let live: HashSet<NodeId> = remote.server().live().filter_map(|h| h.node()).collect();
+        assert_eq!(live.len(), 5, "{live:?}");
+        assert!(
+            [outer, a, z, b].iter().all(|n| live.contains(n)),
+            "{live:?}"
+        );
+        assert!(db.read(|s| s.removed_by_node(y))?.is_some());
+        for n in [outer, a, b] {
+            assert!(
+                db.read(|s| s.get_mirror(n))?.is_some(),
+                "{n:?} back here too"
+            );
+            assert!(db.read(|s| s.removed_by_node(n))?.is_none(), "{n:?}");
+        }
         Ok(())
     }
 }

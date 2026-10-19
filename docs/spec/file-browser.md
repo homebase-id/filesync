@@ -119,9 +119,10 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   folder holding the earlier delete, so it stays.
 - **Deleting for good** (emptying, or the 30-day purge) takes removed nodes only, never a live node: a folder
   holding a live node, or a removed node that isn't going, stays with the folders it is in, emptied of the
-  rest. So a removed folder still holding a live node (its delete stopped half way) stays in Recently deleted,
-  restorable, until the delete finishes or it is restored, possibly indefinitely; it never goes for good on its own.
-  Files go first, then each folder after what is in it.
+  rest. So a removed folder still holding a live node stays in Recently deleted, restorable; it never goes for
+  good while it holds one. What a delete that stopped half way left live, the purge removes first (below), so
+  the folder goes later; a node written after the removal, or one no client reads, keeps it there until it is
+  restored. Files go first, then each folder after what is in it.
 - **Never write to a removed node** except to restore it: no rename, no sharing or sending to another
   identity, no reactions or comments, no local app data (local tags, local content, read time). odin-core
   counts each as a change, which moves its `updated`, its removal time.
@@ -156,5 +157,19 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   other code stays and makes the purge fail (it runs again later). A request that fails
   leaves all its files for the next purge. A
   folder's contents on the server: a `groupId` query (homebase-api-notes, Change feed).
+  - **First, what a delete left** (node schema, "The purge", 2.): for each item the purge would delete
+    (removed more than 30 days ago), the live nodes below its removed folders (directly or through live
+    folders) that the delete took along: written no later than the removal of the nearest removed folder
+    above (`updated` of the version you have, against the folder's). Skip a node whose `updated` you don't
+    know, one written after, and a role folder, and the live folders above them. Read the header of each
+    removed folder that directly holds one first: go on only if it is still removed at the version you
+    have. Then remove them top-down, a level at a time, with `update-archival-status-batch`
+    (`archivalStatus` 2, each at its `versionTag`): one answered `versionTagMismatch` or not found stays
+    live, and so does everything in it. Then, 1.1 s after the last of those requests, ask the server (a
+    `groupId` query) whether any live folder you removed still holds a live node (one you didn't know of
+    would count as taken along by your removal), and put those back (`archivalStatus` 0, at the version you
+    wrote), with the folders above them you removed, top-down. Don't delete them for good in the same
+    purge: each has its own 30 days from this removal. A mini-app that doesn't do this leaves it to the desktop clients' purge; it
+    must never delete a live node for good instead.
 - **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.
 - **Every write sends `archivalStatus`:** the server replaces the whole header and takes a missing one for 0.

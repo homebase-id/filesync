@@ -360,6 +360,24 @@ impl<T> Answers<T> {
         }
     }
 
+    /// An answer for each of `asked` files, in order, and what stopped the call, if anything
+    /// did: a file it left unanswered fails as it did (it may have been written: an answer
+    /// lost). A call that answered fewer without saying why counts as stopped.
+    pub fn padded(self, asked: usize) -> (Vec<Result<T>>, Option<RemoteError>) {
+        let Answers {
+            mut answers,
+            stopped,
+        } = self;
+        let stopped = stopped.or_else(|| {
+            (answers.len() < asked)
+                .then(|| RemoteError::Fatal("the drive didn't answer every file".into()))
+        });
+        if let Some(e) = &stopped {
+            answers.resize_with(asked.max(answers.len()), || Err(e.again()));
+        }
+        (answers, stopped)
+    }
+
     /// The answers, if every file was answered; else what stopped it.
     pub fn into_answers(self) -> Result<Vec<Result<T>>> {
         match self.stopped {

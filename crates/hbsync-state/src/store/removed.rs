@@ -104,6 +104,21 @@ impl Store<'_> {
         Ok(nodes.into_iter().map(|n| c.from_drive(n)).collect())
     }
 
+    /// The nodes of Recently deleted holding a live node written no later than their removal,
+    /// both times known (the server's): those whose delete may have left live what it took
+    /// along (node schema, The purge, 2.). One query.
+    pub fn removed_holding_taken(&self) -> Result<std::collections::HashSet<NodeId>> {
+        let c = self.coords()?;
+        let nodes = self.many(
+            "SELECT r.node FROM removed r JOIN nodes n ON n.uuid = r.node \
+             WHERE r.removed_at IS NOT NULL AND EXISTS (SELECT 1 FROM remote m \
+                 WHERE m.parent = n.id AND m.changed_at <= r.removed_at)",
+            [],
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )?;
+        Ok(nodes.into_iter().map(|n| c.from_drive(n)).collect())
+    }
+
     /// How many nodes of Recently deleted each folder holds: one grouped query.
     pub fn removed_per_folder(&self) -> Result<HashMap<NodeId, u64>> {
         let c = self.coords()?;

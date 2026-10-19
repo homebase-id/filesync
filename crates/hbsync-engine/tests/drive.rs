@@ -937,3 +937,28 @@ fn a_restore_reads_first_and_a_lost_answer_is_behind() -> R {
     assert!(!drive.current(), "its answer didn't come: behind");
     Ok(())
 }
+
+/// A folder of more nodes than the drive takes in a request comes back whole: its restore goes
+/// in requests of as many as it takes.
+#[test]
+fn a_restore_of_more_than_a_request_takes() -> R {
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let top = folder("Big");
+    let mut made = vec![remote.create(&top, None)?];
+    for i in 0..1001 {
+        let child = NodeMeta {
+            parent: top.node,
+            ..folder(&format!("f{i}"))
+        };
+        made.push(remote.create(&child, None)?);
+    }
+    // Removed, the folder first.
+    for part in made.chunks(1000) {
+        remote.set_removed(part, true)?.into_answers()?;
+    }
+    drive.pull(None)?;
+    assert_eq!(drive.restore(&[top.node])?, 1002);
+    assert_eq!(remote.server().removed().count(), 0);
+    Ok(())
+}
