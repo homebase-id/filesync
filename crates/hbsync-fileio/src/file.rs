@@ -197,7 +197,8 @@ impl CompletedFile {
         if hash_file(src, expected.algorithm)?.hash != expected {
             return Ok(None);
         }
-        File::open(src)?.sync_data()?;
+        // Windows flushes a file only through a handle that may write it.
+        OpenOptions::new().write(true).open(src)?.sync_data()?;
         Ok(Some(CompletedFile {
             path: src.to_owned(),
             hash: expected,
