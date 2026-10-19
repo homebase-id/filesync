@@ -31,7 +31,8 @@ mod merge;
 mod repair;
 
 pub use crate::plan::{
-    Agreement, BaseExtra, Conflict, DriveVersion, Input, Op, Options, Plan, Removed, Requirement,
+    Agreement, BaseExtra, Conflict, DriveVersion, Input, Listed, Op, Options, Plan, Removed,
+    Requirement,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,8 +70,21 @@ pub fn reconcile(input: &Input, opts: &Options) -> Plan {
         &opts.computer,
         &opts.taken,
     );
-    let input = masks.input.as_ref().unwrap_or(input);
-    Reconciler::new(input, opts, &masks).run()
+    let view = masks.input.as_ref().unwrap_or(input);
+    let mut plan = Reconciler::new(view, opts, &masks).run();
+    // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
+    // judged with all of the folder's children.
+    if let Some(listed) = &input.listed {
+        plan.unlisted.extend(
+            masks
+                .masked
+                .iter()
+                .filter_map(|m| input.remote.get(*m).or(input.base.get(*m)))
+                .map(|s| s.parent)
+                .filter(|p| !listed.full.contains(p)),
+        );
+    }
+    plan
 }
 
 /// Rounds of orphan and cycle repair at most (each round ends at least one cycle; a real tree

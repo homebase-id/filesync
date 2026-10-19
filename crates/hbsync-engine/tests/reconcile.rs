@@ -1,6 +1,6 @@
 //! One test per rule of `docs/spec/sync-semantics.md`.
 
-use hbsync_engine::{BaseExtra, Conflict, DriveVersion, Input, Op, Options, reconcile};
+use hbsync_engine::{BaseExtra, Conflict, DriveVersion, Input, Listed, Op, Options, reconcile};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -532,6 +532,53 @@ fn name_clash_lower_id_keeps_the_name() {
             }));
         }
     }
+}
+
+/// A plan from part of a folder's children ([`Input::listed`]) names the folders it judged
+/// without all it needs: a clash (a numbered name must be free among all of them), a name
+/// whose clashes weren't read (an orphan moved to the root).
+#[test]
+fn names_judged_in_part_of_a_folder_ask_for_all_of_it() {
+    let [low, high, orphan, gone] = ids(4)[..] else {
+        unreachable!()
+    };
+    let docs = NodeId::new();
+    let named = |names: &[&str]| Listed {
+        named: [(
+            docs,
+            names
+                .iter()
+                .map(|n| hbsync_namemap::sibling_hash(n))
+                .collect(),
+        )]
+        .into(),
+        ..Listed::default()
+    };
+    // No clash among the names read: nothing more needed.
+    let mut w = World::default();
+    w.synced(docs, folder(ROOT, "Docs"));
+    w.local(low, Some(file(docs, "x.txt", "local")));
+    w.input.listed = Some(named(&["x.txt"]));
+    assert!(w.plan().unlisted.is_empty());
+    // A clash: the loser's numbered name is judged against the whole folder.
+    w.remote(high, Some(file(docs, "X.TXT", "remote")));
+    let plan = w.plan();
+    assert_eq!(plan.conflicts, [Conflict::NameClash { node: high }]);
+    assert_eq!(plan.unlisted, [docs].into());
+    // Listed whole: the plan stands.
+    w.input.listed = Some(Listed {
+        full: [docs].into(),
+        ..Listed::default()
+    });
+    assert!(w.plan().unlisted.is_empty());
+    // An orphan the server kept goes to the root, which wasn't read.
+    let mut w = World::default();
+    w.remote(orphan, Some(file(gone, "kept.txt", "data")));
+    w.input.remote_complete = true;
+    w.input.listed = Some(Listed::default());
+    let plan = w.plan();
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: orphan }]);
+    assert_eq!(plan.unlisted, [ROOT].into());
 }
 
 #[test]

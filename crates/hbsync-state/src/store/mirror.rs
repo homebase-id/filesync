@@ -45,18 +45,40 @@ impl Store<'_> {
     }
 
     pub fn mirror_children(&self, parent: NodeId) -> Result<Vec<MirrorRow>> {
+        self.mirror_in(parent, None)
+    }
+
+    /// The children of `parent` whose name has sibling hash `key`, as
+    /// [`Store::base_named`].
+    pub fn mirror_named(&self, parent: NodeId, key: i32) -> Result<Vec<MirrorRow>> {
+        self.mirror_in(parent, Some(key))
+    }
+
+    /// The children of `parent`: all, or those whose name has sibling hash `key`.
+    fn mirror_in(&self, parent: NodeId, key: Option<i32>) -> Result<Vec<MirrorRow>> {
         let c = self.coords()?;
-        let rows = self.many(
-            &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF}"),
-            [c.to_drive(parent).0.as_bytes()],
-            mirror_row,
-        )?;
+        let drive = c.to_drive(parent);
+        let rows = match key {
+            None => self.many(
+                &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF}"),
+                [drive.0.as_bytes()],
+                mirror_row,
+            )?,
+            Some(key) => self.many(
+                &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF} AND m.name_key = ?2"),
+                params![drive.0.as_bytes(), key],
+                mirror_row,
+            )?,
+        };
         let mut seen = Vec::with_capacity(rows.len() + 1);
         for row in rows {
             seen.extend(self.seen(row)?);
         }
         // The rest of the drive is a folder at the top.
-        if parent.is_root() && c.is_outside(NodeId::OUTSIDE) {
+        if parent.is_root()
+            && c.is_outside(NodeId::OUTSIDE)
+            && key.is_none_or(|k| k == sibling_hash(Coords::OUTSIDE_NAME))
+        {
             seen.push(outside_row());
         }
         Ok(seen)
@@ -83,11 +105,11 @@ impl Store<'_> {
         let f = row.file.as_ref();
         self.prep(
             "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, token, changed_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                 hash, size, mtime_ms, executable, content_extra, token, changed_at, name_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                  ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
                  kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
-                 content_extra = ?11, token = ?12, changed_at = ?13",
+                 content_extra = ?11, token = ?12, changed_at = ?13, name_key = ?14",
         )?
         .execute(params![
             id,
@@ -103,6 +125,7 @@ impl Store<'_> {
             row.content_extra,
             row.token.as_ref().map(|t| &t.0[..]),
             row.changed_at,
+            sibling_hash(&row.name),
         ])?;
         self.fan_out(row.node, row.parent)
     }

@@ -4,6 +4,7 @@
 //! the UUIDs appear once. The local side is a tree like the other two: each row holds its
 //! parent and its name, and paths are derived. Moving a folder rewrites one row.
 
+use hbsync_namemap::sibling_hash;
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::{

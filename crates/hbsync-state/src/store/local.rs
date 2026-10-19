@@ -243,8 +243,8 @@ impl Store<'_> {
         let (lo, hi) = codec::file_id_parts(&fp.file_id);
         self.prep(
             "INSERT INTO local (folder, id, parent, name, kind, size, mtime_ns, ctime_ns, \
-                 volume, file_id, file_id_hi, executable, hash, tags) \
-                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+                 volume, file_id, file_id_hi, executable, hash, tags, name_key) \
+                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
                  ON CONFLICT (id, folder) DO UPDATE SET kind = ?4, size = ?5, \
                  mtime_ns = ?6, ctime_ns = ?7, volume = ?8, file_id = ?9, file_id_hi = ?10, \
                  executable = ?11, hash = ?12, tags = ?13",
@@ -263,6 +263,7 @@ impl Store<'_> {
             row.executable,
             row.hash.as_ref().map(codec::hash_to),
             row.tags.as_ref().map(tags_to_string),
+            sibling_hash(name),
         ])?;
         // The row didn't move (checked above): what was found stays right, unless a folder
         // became a file. A new folder is known from now on.
@@ -384,22 +385,25 @@ impl Store<'_> {
         }
     }
 
+    /// The children of the folder at `parent` whose name has sibling hash `key`, as
+    /// [`Store::base_named`]: the local spelling's (the same as its remote name's).
+    pub fn local_named(&self, parent: &RelPath, key: i32) -> Result<Vec<LocalRow>> {
+        let Some(id) = self.local_id_at(parent)? else {
+            return Ok(Vec::new());
+        };
+        let raw = self.raw_local(
+            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1 AND l.name_key = ?2"),
+            params![id, key],
+        )?;
+        rows_below(parent, raw)
+    }
+
     pub(super) fn children_of(&self, id: i64, path: &RelPath) -> Result<Vec<LocalRow>> {
         let raw = self.raw_local(
             &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1"),
             [id],
         )?;
-        let mut rows = raw
-            .into_iter()
-            .map(|r| {
-                let child = path
-                    .join(&r.name)
-                    .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
-                r.into_row(child)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        rows.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(rows)
+        rows_below(path, raw)
     }
 
     /// Moves the row at `from`, and with it everything below, to `to` (a folder was moved or
@@ -417,8 +421,10 @@ impl Store<'_> {
         if self.local_id_at(to)?.is_some() {
             return Err(conflict());
         }
-        self.prep("UPDATE local SET parent = ?2, name = ?3 WHERE folder = $F AND id = ?1")?
-            .execute(params![id, parent, name])?;
+        self.prep(
+            "UPDATE local SET parent = ?2, name = ?3, name_key = ?4 WHERE folder = $F AND id = ?1",
+        )?
+        .execute(params![id, parent, name, sibling_hash(name)])?;
         self.forget_local_ids();
         Ok(())
     }
@@ -447,6 +453,21 @@ impl Store<'_> {
     pub fn local_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM local WHERE folder = $F")
     }
+}
+
+/// Rows of the folder at `path`, in walk order.
+fn rows_below(path: &RelPath, raw: Vec<RawLocal>) -> Result<Vec<LocalRow>> {
+    let mut rows = raw
+        .into_iter()
+        .map(|r| {
+            let child = path
+                .join(&r.name)
+                .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
+            r.into_row(child)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(rows)
 }
 
 /// A local row as stored, before its path is known.

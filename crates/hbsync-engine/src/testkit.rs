@@ -72,6 +72,7 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         tweak: impl FnOnce(&mut EngineConfig),
     ) -> Res<Engine> {
         let mut cfg = EngineConfig::new(root, name);
+        cfg.check_narrow = true;
         configure(&mut cfg)?;
         tweak(&mut cfg);
         let db = db_path(root);

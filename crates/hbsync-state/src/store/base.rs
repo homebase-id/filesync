@@ -41,6 +41,16 @@ impl Store<'_> {
         )
     }
 
+    /// The children of `parent` whose name has sibling hash `key`
+    /// ([`hbsync_namemap::sibling_hash`]): every one that may clash with a name of that hash.
+    pub fn base_named(&self, parent: NodeId, key: i32) -> Result<Vec<BaseRow>> {
+        self.many(
+            &format!("{BASE_SELECT} WHERE b.parent = {ID_OF} AND b.name_key = ?2"),
+            params![parent.0.as_bytes(), key],
+            base_row,
+        )
+    }
+
     /// Inserts or replaces the base row of `row.node`.
     pub fn put_base(&self, row: &BaseRow) -> Result<()> {
         let c = row.state.content.as_ref();
@@ -51,12 +61,12 @@ impl Store<'_> {
         self.prep(
                 "INSERT INTO base (folder, id, parent, name, kind, hash, size, mtime_ms, \
                  executable, remote_file_id, version_tag, content_state, local_name, local_hash, \
-                 tags) \
-                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 tags, name_key) \
+                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                  ON CONFLICT (id, folder) DO UPDATE SET parent = ?2, name = ?3, kind = ?4, hash = ?5, \
                  size = ?6, mtime_ms = ?7, executable = ?8, remote_file_id = ?9, \
                  version_tag = ?10, content_state = ?11, local_name = ?12, local_hash = ?13, \
-                 tags = ?14",
+                 tags = ?14, name_key = ?15",
             )?
             .execute(params![
                 id,
@@ -73,6 +83,7 @@ impl Store<'_> {
                 row.local_name,
                 row.local_hash.as_ref().map(codec::hash_to),
                 (!row.state.tags.is_empty()).then(|| tags_to_string(&row.state.tags)),
+                sibling_hash(&row.state.name),
             ])?;
         Ok(())
     }

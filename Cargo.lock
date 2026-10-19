@@ -1677,6 +1677,7 @@ dependencies = [
 name = "hbsync-namemap"
 version = "0.7.1"
 dependencies = [
+ "hbsync-fileio",
  "hbsync-platform",
  "proptest",
 ]
@@ -1724,6 +1725,7 @@ name = "hbsync-state"
 version = "0.7.1"
 dependencies = [
  "hbsync-fileio",
+ "hbsync-namemap",
  "hbsync-platform",
  "hbsync-types",
  "rusqlite",

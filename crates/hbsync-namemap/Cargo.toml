@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+hbsync-fileio.workspace = true
 hbsync-platform.workspace = true
 
 [dev-dependencies]

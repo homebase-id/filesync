@@ -226,6 +226,7 @@ impl Masks {
             remote_complete: input.remote_complete,
             removed: input.removed.clone(),
             changed_at: input.changed_at.clone(),
+            listed: input.listed.clone(),
         };
         Masks {
             masked,

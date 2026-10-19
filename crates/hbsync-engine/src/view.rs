@@ -2,7 +2,10 @@
 //!
 //! For each dirty node the three sides are loaded, plus the context the rules need:
 //! - every ancestor on every side (paths, cycles, orphans);
-//! - the children of every folder involved (name clashes, live children of deleted folders);
+//! - in each folder it is in on any side, the children whose names may clash with its names
+//!   there (name clashes): [`build_narrow`] reads those by their sibling hash, [`build_input`]
+//!   all children;
+//! - the children of a dirty folder that may go (live children keep it);
 //! - the full local subtree of a folder that is gone remotely (what a trash would take).
 //!
 //! The local side is translated from paths to the node model here: the parent is the node at
@@ -18,6 +21,7 @@ use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
 
 use crate::exec::parked_name;
+use crate::plan::Listed;
 use crate::reconcile::{BaseExtra, Input, Removed};
 use crate::scope::Scope;
 
@@ -116,14 +120,42 @@ pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, St
     Ok(row.path.parent().unwrap_or_default().join(&name).ok())
 }
 
-/// Loads everything the reconciler needs for `dirty`; `filter` is this device's (§10), `scope`
-/// the engine's (§12).
+/// Loads everything the reconciler needs for `dirty`, with every child of each folder involved;
+/// `filter` is this device's (§10), `scope` the engine's (§12).
 pub fn build_input(
     s: &Store<'_>,
     dirty: &[NodeId],
     os: Os,
     filter: &Filter,
     scope: &Scope,
+) -> Result<Input, StateError> {
+    build(s, dirty, os, filter, scope, None)
+}
+
+/// [`build_input`] with only the children the rules may need, except in the folders in `full`
+/// ([`Input::listed`]): planning a change in a large folder reads a few rows, not the folder.
+/// A plan that needs more says so ([`crate::plan::Plan::unlisted`]).
+pub fn build_narrow(
+    s: &Store<'_>,
+    dirty: &[NodeId],
+    os: Os,
+    filter: &Filter,
+    scope: &Scope,
+    full: &HashSet<NodeId>,
+) -> Result<Input, StateError> {
+    build(s, dirty, os, filter, scope, Some(full))
+}
+
+/// Past this many names to look up in one folder, it is listed whole: one query instead.
+const NAMED_MAX: usize = 32;
+
+fn build(
+    s: &Store<'_>,
+    dirty: &[NodeId],
+    os: Os,
+    filter: &Filter,
+    scope: &Scope,
+    full: Option<&HashSet<NodeId>>,
 ) -> Result<Input, StateError> {
     let mut b = Builder {
         s,
@@ -137,20 +169,87 @@ pub fn build_input(
     // The feed is drained before every plan, and every loaded node brings its ancestors.
     b.input.remote_complete = true;
 
-    let mut folders: HashSet<NodeId> = HashSet::from([NodeId::ROOT]);
     for &node in dirty {
         b.load(node)?;
-        for tree in [&b.input.base, &b.input.remote, &b.input.local] {
-            if let Some(state) = tree.get(node) {
-                folders.insert(state.parent);
-                if state.kind == NodeKind::Folder {
-                    folders.insert(node);
+    }
+    let mut listed = Listed::default();
+    match full {
+        None => {
+            // Every child of every folder involved, and of the root.
+            listed.full.insert(NodeId::ROOT);
+            for &node in dirty {
+                for tree in [&b.input.base, &b.input.remote, &b.input.local] {
+                    if let Some(state) = tree.get(node) {
+                        listed.full.insert(state.parent);
+                        if state.kind == NodeKind::Folder {
+                            listed.full.insert(node);
+                        }
+                    }
+                }
+            }
+        }
+        Some(full) => {
+            // In each folder a dirty node is in, what may clash with its names; all of a dirty
+            // folder that may go (gone on a side, hidden, or in a folder gone remotely).
+            listed.full.extend(full);
+            let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
+            for &node in dirty {
+                let mut folder = false;
+                for tree in [&b.input.base, &b.input.remote, &b.input.local] {
+                    if let Some(state) = tree.get(node) {
+                        listed
+                            .named
+                            .entry(state.parent)
+                            .or_default()
+                            .insert(hbsync_namemap::sibling_hash(&state.name));
+                        folder |= state.kind == NodeKind::Folder;
+                    }
+                }
+                let is_folder =
+                    |t: &crate::tree::Tree| t.get(node).is_some_and(|s| s.kind == NodeKind::Folder);
+                let stays = is_folder(&b.input.local)
+                    && is_folder(&b.input.remote)
+                    && b.input.remote.path(node).is_some()
+                    && !hidden.contains(&node);
+                if folder && !stays {
+                    listed.full.insert(node);
+                }
+            }
+            let Listed { full, named } = &mut listed;
+            named.retain(|folder, keys| {
+                if keys.len() > NAMED_MAX {
+                    full.insert(*folder);
+                }
+                !full.contains(folder)
+            });
+            // A parked item is at its original name (`parked_place`), which its row's hash
+            // isn't: those in the folders read by name come along (there are hardly ever any).
+            for node in s.all_parked()? {
+                if s.local_parent(node)?
+                    .is_some_and(|p| listed.named.contains_key(&p))
+                {
+                    b.load(node)?;
                 }
             }
         }
     }
+    let mut folders: Vec<NodeId> = listed.full.iter().copied().collect();
+    folders.sort();
     for folder in folders {
         b.load_children(folder)?;
+    }
+    let mut named: Vec<(NodeId, Vec<i32>)> = listed
+        .named
+        .iter()
+        .map(|(folder, keys)| {
+            let mut keys: Vec<i32> = keys.iter().copied().collect();
+            keys.sort();
+            (*folder, keys)
+        })
+        .collect();
+    named.sort();
+    for (folder, keys) in named {
+        b.load_named(folder, &keys)?;
     }
     // A folder that is gone remotely (or masked) but present locally may be trashed or
     // detached: load all of it.
@@ -185,6 +284,9 @@ pub fn build_input(
                 || !expanded.insert(folder)
             {
                 continue;
+            }
+            if listed.full.insert(folder) {
+                listed.named.remove(&folder);
             }
             b.load_children(folder)?;
             folders.extend(b.input.remote.children(folder));
@@ -226,6 +328,9 @@ pub fn build_input(
             );
             folder = r.row.parent;
         }
+    }
+    if full.is_some() {
+        b.input.listed = Some(listed);
     }
     Ok(b.input)
 }
@@ -297,30 +402,59 @@ impl Builder<'_, '_> {
     /// Loads the children of `folder` (which is loaded) on every side. The rows the listings
     /// return are used directly; `load` then only reads the sides they didn't cover.
     fn load_children(&mut self, folder: NodeId) -> Result<(), StateError> {
+        self.load_kids(folder, None)
+    }
+
+    /// Loads the children of `folder` (which is loaded) whose names have one of the sibling
+    /// hashes `keys`, on every side.
+    fn load_named(&mut self, folder: NodeId, keys: &[i32]) -> Result<(), StateError> {
+        self.load_kids(folder, Some(keys))
+    }
+
+    /// The children of `folder` on every side: all, or those with one of `keys`.
+    fn load_kids(&mut self, folder: NodeId, keys: Option<&[i32]>) -> Result<(), StateError> {
+        let s = self.s;
+        let path = if folder.is_root() {
+            Some(RelPath::root())
+        } else {
+            s.local_by_node(folder)?.map(|r| r.path)
+        };
+        let (mut base, mut mirror, mut local) = (Vec::new(), Vec::new(), Vec::new());
+        match keys {
+            None => {
+                base = s.base_children(folder)?;
+                mirror = s.mirror_children(folder)?;
+                if let Some(path) = &path {
+                    local = s.local_children(path)?;
+                }
+            }
+            Some(keys) => {
+                for &key in keys {
+                    base.extend(s.base_named(folder, key)?);
+                    mirror.extend(s.mirror_named(folder, key)?);
+                    if let Some(path) = &path {
+                        local.extend(s.local_named(path, key)?);
+                    }
+                }
+            }
+        }
         let mut kids: Vec<NodeId> = Vec::new();
-        for row in self.s.base_children(folder)? {
+        for row in base {
             kids.push(row.node);
             if self.base_done.insert(row.node) {
                 self.add_base(row);
             }
         }
-        for row in self.s.mirror_children(folder)? {
+        for row in mirror {
             kids.push(row.node);
             if self.mirror_done.insert(row.node) {
                 self.add_mirror(row);
             }
         }
-        let local_path = if folder.is_root() {
-            Some(RelPath::root())
-        } else {
-            self.s.local_by_node(folder)?.map(|r| r.path)
-        };
-        if let Some(path) = local_path {
-            for row in self.s.local_children(&path)? {
-                kids.push(row.node);
-                if self.local_done.insert(row.node) {
-                    self.add_local(row)?;
-                }
+        for row in local {
+            kids.push(row.node);
+            if self.local_done.insert(row.node) {
+                self.add_local(row)?;
             }
         }
         for kid in kids {

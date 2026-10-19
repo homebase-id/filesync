@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 13);
+    assert_eq!(db.schema_version()?, 14);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -333,6 +333,64 @@ mod mirror {
         );
         assert_eq!((row.file, row.content_extra.clone()), (None, None));
         assert_eq!(row.content("d"), folder);
+    }
+
+    /// A folder's children are found by their sibling hash on every side: every spelling of a
+    /// name, the local escapes included, and after a rename on every side.
+    #[test]
+    fn children_are_found_by_sibling_hash() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let docs = base(NodeState::folder(NodeId::ROOT, "Docs"));
+        let named = |n: &str| hbsync_namemap::sibling_hash(n);
+        let (upper, lower, other) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut escaped = local("Docs/a\u{F022}b", NodeKind::File, 7);
+        db.write(|s| {
+            s.put_base(&docs)?;
+            s.put_local(&local("Docs", NodeKind::Folder, 1))?;
+            s.put_base(&BaseRow {
+                node: upper,
+                ..base(NodeState::file(docs.node, "Report.TXT", content(b"r")))
+            })?;
+            s.put_mirror(&row(lower, docs.node, "report.txt", None))?;
+            s.put_mirror(&row(other, docs.node, "other.txt", None))?;
+            s.put_local(&local("Docs/REPORT.txt", NodeKind::File, 5))?;
+            s.put_local(&escaped)
+        })?;
+        db.read(|s| {
+            let key = named("report.txt");
+            let base: Vec<NodeId> = s
+                .base_named(docs.node, key)?
+                .iter()
+                .map(|r| r.node)
+                .collect();
+            assert_eq!(base, [upper]);
+            let remote: Vec<NodeId> = s
+                .mirror_named(docs.node, key)?
+                .iter()
+                .map(|r| r.node)
+                .collect();
+            assert_eq!(remote, [lower]);
+            let local: Vec<String> = s
+                .local_named(&path("Docs"), key)?
+                .iter()
+                .map(|r| r.path.to_string())
+                .collect();
+            assert_eq!(local, ["Docs/REPORT.txt"]);
+            let escapes = s.local_named(&path("Docs"), named("a:b"))?;
+            assert_eq!(escapes.len(), 1);
+            Ok(())
+        })?;
+        // Renamed: found by the new name only.
+        db.write(|s| s.move_local_subtree(&escaped.path, &path("Docs/c.txt")))?;
+        escaped.path = path("Docs/c.txt");
+        db.read(|s| {
+            assert!(s.local_named(&path("Docs"), named("a:b"))?.is_empty());
+            assert_eq!(
+                s.local_named(&path("Docs"), named("C.TXT"))?,
+                [escaped.clone()]
+            );
+            Ok(())
+        })
     }
 
     fn row(node: NodeId, parent: NodeId, name: &str, file: Option<MirrorFile>) -> MirrorRow {
@@ -961,7 +1019,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 13);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 14);
     Ok(())
 }
 
