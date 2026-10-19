@@ -801,7 +801,10 @@ impl Sim {
     /// [`Action::DeleteOutright`].
     fn delete_outright(&mut self, pick: usize) {
         if let Some(folder) = self.pick_folder(pick) {
+            // Gone for good, as the purge's deletes: what an earlier removal kept goes too.
             self.server.live.remove(&folder);
+            self.server.removed_at.remove(&folder);
+            self.server.tags_at_removal.remove(&folder);
             self.deleted_now(folder);
         }
     }
