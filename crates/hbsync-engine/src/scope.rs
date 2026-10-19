@@ -165,8 +165,12 @@ impl Remote for ScopedRemote {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
-    fn holding_live(&self, folders: &[NodeId]) -> RemoteResult<std::collections::HashSet<NodeId>> {
-        self.inner.holding_live(folders)
+    fn holding(
+        &self,
+        folders: &[NodeId],
+        holds: hbsync_remote::Holds<'_>,
+    ) -> RemoteResult<std::collections::HashSet<NodeId>> {
+        self.inner.holding(folders, holds)
     }
     fn hold_back(&self) -> std::time::Duration {
         self.inner.hold_back()

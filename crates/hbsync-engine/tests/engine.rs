@@ -238,11 +238,12 @@ impl Remote for StopAfterCreates {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
-    fn holding_live(
+    fn holding(
         &self,
         folders: &[hbsync_types::NodeId],
+        holds: hbsync_remote::Holds<'_>,
     ) -> RemoteResult<std::collections::HashSet<hbsync_types::NodeId>> {
-        self.inner.holding_live(folders)
+        self.inner.holding(folders, holds)
     }
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         let made = self.inner.create(node, payload);
@@ -362,11 +363,12 @@ impl Remote for SlowWrites {
     fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
         self.inner.header(file_id)
     }
-    fn holding_live(
+    fn holding(
         &self,
         folders: &[hbsync_types::NodeId],
+        holds: hbsync_remote::Holds<'_>,
     ) -> RemoteResult<std::collections::HashSet<hbsync_types::NodeId>> {
-        self.inner.holding_live(folders)
+        self.inner.holding(folders, holds)
     }
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
         self.write(|| self.unless_down(|| self.inner.create(node, payload)))

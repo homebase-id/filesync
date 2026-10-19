@@ -36,7 +36,7 @@ use hbsync_types::{
 };
 
 use crate::{
-    Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, NodeMeta, PayloadInfo,
+    Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, Holds, NodeMeta, PayloadInfo,
     RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 
@@ -465,11 +465,18 @@ impl FakeServer {
         }
     }
 
-    /// Which of `folders` hold a live, not removed file (unlisted ones too).
-    pub fn holding_live(&self, folders: &[NodeId]) -> HashSet<NodeId> {
+    /// Which of `folders` hold a file not deleted that `holds` counts (unlisted ones too).
+    pub fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> HashSet<NodeId> {
         self.files
             .values()
-            .filter(|f| f.header.state().is_some() && f.header.removed_at.is_none())
+            .filter(|f| {
+                let at = RemoteRef {
+                    file_id: f.header.file_id,
+                    version: f.header.version,
+                };
+                matches!(f.header.body, RemoteBody::Live { .. })
+                    && holds.counts(at, f.header.removed_at.is_some())
+            })
             .map(|f| f.header.parent)
             .filter(|p| folders.contains(p))
             .collect()
@@ -863,9 +870,9 @@ impl Remote for FakeRemote {
         self.server().header(file_id)
     }
 
-    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>> {
+    fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
         self.gate()?;
-        Ok(self.server().holding_live(folders))
+        Ok(self.server().holding(folders, holds))
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {

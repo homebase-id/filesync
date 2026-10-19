@@ -1714,6 +1714,7 @@ dependencies = [
  "hbsync-fileio",
  "hbsync-local",
  "hbsync-platform",
+ "hbsync-remote",
  "hbsync-state",
  "hbsync-types",
  "proptest",

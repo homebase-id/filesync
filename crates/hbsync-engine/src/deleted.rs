@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use hbsync_platform::name::name_key;
-use hbsync_remote::{Answers, NodeMeta, Remote, RemoteError};
+use hbsync_remote::{Answers, Holds, NodeMeta, Remote, RemoteError};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
@@ -1179,7 +1179,7 @@ fn put_back(
     }
     std::thread::sleep(remote.hold_back().saturating_sub(last.elapsed()));
     let nodes: Vec<NodeId> = made.iter().map(|(m, _)| m.node).collect();
-    let holding = remote.holding_live(&nodes)?;
+    let holding = remote.holding(&nodes, Holds::Live)?;
     if holding.is_empty() {
         return Ok(0);
     }
@@ -1281,10 +1281,13 @@ fn stuck_below(s: &Store<'_>, before: i64) -> Result<Stuck, StateError> {
 
 /// Deletes `passes` for good ([`going`]), one pass at a time, each node at the version this
 /// device knows: one written since stays, and so do the folders above it. A folder goes only
-/// while nothing else is in it, on this device or on the drive (a live node this device doesn't
-/// read, not in its mirror: one question for the pass's folders that may go, asked once the
-/// drive's queries show what was written up to the pass's start, [`Remote::hold_back`]; a pass
-/// with none asks nothing, and doesn't wait). A node removed before `hard_before` (Unix ms, the
+/// while nothing else is in it, on this device or on the drive: one question for the pass's
+/// folders that may go ([`Holds::AnyBut`]), asked once the drive's queries show what was
+/// written up to the pass's start ([`Remote::hold_back`]; a pass with none asks nothing, and
+/// doesn't wait). Any file there that isn't deleted, live or removed, keeps its folder, one
+/// this device doesn't know or doesn't read too: the earlier passes' files went, and nothing
+/// in a pass is in another node of it, so it isn't going; but the later passes' rows at their
+/// versions (round a cycle, a folder holds one). A node removed before `hard_before` (Unix ms, the
 /// server's) goes without a trace; any other leaves a tombstone (`None`: every one does),
 /// recorded with its time; both in batches, many files a request. Returns how many went. One written since, or not found, sets `moved`; one not found
 /// is recorded gone once its header says so too. A request that fails stops it with its error:
@@ -1305,9 +1308,18 @@ fn delete_for_good(
     let hard = |r: &RemovedRow| {
         hard_before.is_some_and(|before| r.removed_at.is_some_and(|at| at > 0 && at < before))
     };
+    // The rows of the passes not yet begun, at their versions.
+    let mut later: HashSet<RemoteRef> = passes
+        .iter()
+        .flatten()
+        .map(|r| r.row.remote_ref())
+        .collect();
     let mut gone = 0;
     for pass in passes {
         let began = Instant::now();
+        for r in pass {
+            later.remove(&r.row.remote_ref());
+        }
         let mut going: Vec<&RemovedRow> = Vec::new();
         for r in pass {
             let held = to_go.get(&r.row.node).copied().unwrap_or(0);
@@ -1331,7 +1343,7 @@ fn delete_for_good(
             // The drive's queries leave out what changed in their last moments: what was
             // written up to the pass's start shows once that has passed.
             std::thread::sleep(remote.hold_back().saturating_sub(began.elapsed()));
-            let holding = remote.holding_live(&folders)?;
+            let holding = remote.holding(&folders, Holds::AnyBut(&later))?;
             going.retain(|r| !holding.contains(&r.row.node));
         }
         let (hard, soft): (Vec<&RemovedRow>, Vec<&RemovedRow>) =
@@ -2033,6 +2045,62 @@ mod tests {
         }
         // Its folder kept that long, its own removal not: it waits for its own 30 days.
         assert_eq!(expire(&db, &remote, before, None, &mut false)?, 0);
+        Ok(())
+    }
+
+    /// A folder goes for good only with everything removed below it: a removed node on the
+    /// drive this device doesn't know (removed since its last read, or one it doesn't read)
+    /// keeps its folder, which stays in Recently deleted. The rest goes, a cycle of removed
+    /// folders too (each holds the other, still to go). Emptying as listed, emptying the
+    /// deletes and the purge agree.
+    #[test]
+    fn a_folder_holding_a_removal_this_device_doesnt_know_stays()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for how in ["listed", "deletes", "purge"] {
+            let remote = fake();
+            let db = Db::new()?;
+            let [f, unknown, other, in_other, a, b] = [(); 6].map(|_| NodeId::new());
+            for (node, parent) in [
+                (f, NodeId::ROOT),
+                (unknown, f),
+                (other, NodeId::ROOT),
+                (in_other, other),
+                (a, b),
+                (b, a),
+            ] {
+                let name = node.0.to_string();
+                let meta = NodeMeta {
+                    node,
+                    parent,
+                    kind: NodeKind::Folder,
+                    content: hbsync_types::schema::NodeContent::folder(name),
+                    removed: true,
+                };
+                let w = remote.create(&meta, None)?;
+                if node != unknown {
+                    let row = MirrorRow::written(w, node, parent, meta.kind, &meta.content, None);
+                    db.write(|s| {
+                        s.put_removed(&RemovedRow {
+                            row,
+                            removed_at: Some(10),
+                        })
+                    })?;
+                }
+            }
+            let went = match how {
+                "listed" => {
+                    let listing = listed(&db)?;
+                    empty_listed(&db, &remote, &listing, &mut false)?
+                }
+                "deletes" => empty(&db, &remote, &[f, other, a], &mut false)?,
+                _ => expire(&db, &remote, 11, None, &mut false)?,
+            };
+            assert_eq!(went, 4, "{how}");
+            assert_eq!(left(&db)?, [f], "{how}");
+            let on_drive: HashSet<NodeId> =
+                remote.server().removed().filter_map(|h| h.node()).collect();
+            assert_eq!(on_drive, HashSet::from([f, unknown]), "{how}");
+        }
         Ok(())
     }
 

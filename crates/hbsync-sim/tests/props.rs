@@ -1269,6 +1269,76 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
     }
 }
 
+/// Emptying as listed by a device that doesn't know a removal made since the listing: client 0
+/// deletes `a` and stops after the folder (the file in it still live, taken along), lists
+/// Recently deleted, and client 1's sync then marks the file removed; client 0 empties (as
+/// listed, or the item) knowing only what it listed. `a` holds that removed file, which isn't
+/// going: the drive, asked before `a` goes, says so, and `a` stays with it (a folder goes for
+/// good only with everything removed below it). The file stays restorable, and nothing is lost.
+#[test]
+fn regression_emptying_spares_a_folder_holding_a_removal_it_didnt_know() {
+    use Action::*;
+    let (a, c_txt) = (0, 3); // NAMES: "a", "c.txt"
+    let act = |client, action| Event::Act { client, action };
+    let sync = |client| {
+        let mut events = vec![Event::Plan { client }];
+        events.extend([Event::Step { client }; 12]);
+        events
+    };
+    for item in [false, true] {
+        let mut sim = Sim::new(2);
+        let root = sim.pick(0, hbsync_types::NodeId::ROOT, true).expect("root");
+        sim.run(&[act(
+            0,
+            CreateFolder {
+                parent: root,
+                name: a,
+            },
+        )]);
+        let node_a = sim.item(0, "a").expect("a");
+        let parent = sim.pick(0, node_a, true).expect("a");
+        sim.run(&[act(
+            0,
+            CreateFile {
+                parent,
+                name: c_txt,
+            },
+        )]);
+        assert!(sim.quiesce(30), "no convergence");
+        let node_c = sim.item(0, "a/c.txt").expect("a/c.txt");
+        let node = sim.pick(0, node_a, false).expect("a");
+        sim.run(&[act(0, Delete { node })]);
+        sim.run(&[Event::Plan { client: 0 }, Event::Step { client: 0 }]);
+        assert!(
+            sim.is_removed(node_a) && !sim.is_removed(node_c),
+            "the folder went first"
+        );
+        sim.run(&[act(0, ListDeleted)]);
+        sim.run(&sync(1));
+        assert!(sim.is_removed(node_c), "client 1 marked the file removed");
+        sim.run(&[act(
+            0,
+            if item {
+                EmptyItem { pick: 0 }
+            } else {
+                EmptyListed
+            },
+        )]);
+        assert!(
+            sim.is_removed(node_a),
+            "item {item}: `a` holds the file: it stays"
+        );
+        assert!(
+            sim.is_removed(node_c),
+            "item {item}: the file wasn't listed"
+        );
+        assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            panic!("item {item}: {e}");
+        }
+    }
+}
+
 /// Found by a 150,000-case run (2026-10-16): two devices hold the same file without a base,
 /// both edited against the drive, and fork it. The copy id was the same for both (`fork_id`:
 /// same node, same bytes, no base version), and the first device's copy was on the drive

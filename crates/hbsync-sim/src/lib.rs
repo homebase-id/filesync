@@ -44,6 +44,7 @@ use hbsync_local::{Filter, Verdict};
 use hbsync_platform::Os;
 use hbsync_platform::name::check_remote_name;
 use hbsync_platform::tags::express;
+use hbsync_remote::Holds;
 use hbsync_state::Coords;
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -1420,7 +1421,7 @@ impl Sim {
                 let taken = self.server.purge();
                 self.remove_live(taken);
                 let due = self.server.due();
-                self.delete_for_good(&due);
+                self.delete_for_good(&due, None);
             }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];
@@ -1620,7 +1621,7 @@ impl Sim {
     /// [`Action::EmptyListed`].
     fn empty_listed(&mut self) {
         if let Some(listed) = self.server.listed.clone() {
-            self.delete_for_good(&listed);
+            self.delete_for_good(&listed, Some(&listed));
         }
     }
 
@@ -1668,17 +1669,24 @@ impl Sim {
                 .live
                 .values()
                 .any(|n| inside.contains(&n.state.parent));
-        self.delete_for_good(&chosen);
+        self.delete_for_good(&chosen, Some(&listed));
         if !kept && self.server.removed.contains_key(&item) && self.server.emptied_kept.is_none() {
             self.server.emptied_kept = Some(format!("{item:?}"));
         }
     }
 
     /// Deletes for good the rows of Recently deleted still at a version in `chosen`, as the
-    /// engine selects them ([`deleted::select`], with what the folders hold on the server), in
-    /// its order. Records the first it deletes that it mustn't: one not chosen at that version
-    /// (a live node, say), or a folder holding anything not going after it.
-    fn delete_for_good(&mut self, chosen: &BTreeSet<(NodeId, VersionTag)>) {
+    /// engine does ([`deleted::passes`], with what the folders hold as the emptying device
+    /// knows it: of Recently deleted, the rows in `known` at their versions, `None` all of
+    /// it), in its order: before a pass's folders go, the drive is asked which of them hold a
+    /// file that isn't deleted, but the later passes' rows ([`Holds::AnyBut`]), and those
+    /// stay. Records the first it deletes that it mustn't: one not chosen at that version (a
+    /// live node, say), or a folder holding anything not going after it.
+    fn delete_for_good(
+        &mut self,
+        chosen: &BTreeSet<(NodeId, VersionTag)>,
+        known: Option<&BTreeSet<(NodeId, VersionTag)>>,
+    ) {
         let server = &self.server;
         let rows: Vec<deleted::Chosen> = server
             .removed
@@ -1691,8 +1699,10 @@ impl Sim {
             })
             .collect();
         let mut holdings = deleted::Holdings::default();
-        for r in server.removed.values() {
-            *holdings.removed.entry(r.state.parent).or_default() += 1;
+        for row in &server.removed {
+            if known.is_none_or(|k| k.contains(&Server::at(row))) {
+                *holdings.removed.entry(row.1.state.parent).or_default() += 1;
+            }
         }
         holdings.live = server
             .live
@@ -1700,30 +1710,49 @@ impl Sim {
             .map(|n| n.state.parent)
             .filter(|p| server.removed.contains_key(p))
             .collect();
-        let order = deleted::select(&rows, &holdings);
-        let mut pending: BTreeSet<NodeId> = order.iter().copied().collect();
-        for n in order {
-            pending.remove(&n);
-            let was_chosen = self
-                .server
-                .removed
-                .get_key_value(&n)
-                .is_some_and(|row| chosen.contains(&Server::at(row)));
-            let held = self
-                .server
-                .live
-                .iter()
-                .chain(&self.server.removed)
-                .find(|(c, s)| s.state.parent == n && !pending.contains(*c))
-                .map(|(c, _)| *c);
-            if (!was_chosen || held.is_some()) && self.server.emptied_unlisted.is_none() {
-                self.server.emptied_unlisted = Some(format!("{n:?} (holding {held:?})"));
+        let passes = deleted::passes(&rows, &holdings);
+        let mut pending: BTreeSet<NodeId> = passes.iter().flatten().copied().collect();
+        for pass in passes {
+            for n in &pass {
+                pending.remove(n);
             }
-            self.server.removed_at.remove(&n);
-            self.server.tags_at_removal.remove(&n);
-            if let Some(gone) = self.server.removed.remove(&n) {
-                self.deleted_now(n);
-                self.supersede(gone.state.content);
+            let server = &self.server;
+            let later: HashSet<RemoteRef> =
+                pending.iter().map(|n| server.removed[n].remote).collect();
+            let holds = Holds::AnyBut(&later);
+            let holding: HashSet<NodeId> = server
+                .live
+                .values()
+                .map(|n| (n, false))
+                .chain(server.removed.values().map(|n| (n, true)))
+                .filter(|(n, removed)| holds.counts(n.remote, *removed))
+                .map(|(n, _)| n.state.parent)
+                .collect();
+            for n in pass {
+                if holding.contains(&n) {
+                    continue;
+                }
+                let was_chosen = self
+                    .server
+                    .removed
+                    .get_key_value(&n)
+                    .is_some_and(|row| chosen.contains(&Server::at(row)));
+                let held = self
+                    .server
+                    .live
+                    .iter()
+                    .chain(&self.server.removed)
+                    .find(|(c, s)| s.state.parent == n && !pending.contains(*c))
+                    .map(|(c, _)| *c);
+                if (!was_chosen || held.is_some()) && self.server.emptied_unlisted.is_none() {
+                    self.server.emptied_unlisted = Some(format!("{n:?} (holding {held:?})"));
+                }
+                self.server.removed_at.remove(&n);
+                self.server.tags_at_removal.remove(&n);
+                if let Some(gone) = self.server.removed.remove(&n) {
+                    self.deleted_now(n);
+                    self.supersede(gone.state.content);
+                }
             }
         }
     }

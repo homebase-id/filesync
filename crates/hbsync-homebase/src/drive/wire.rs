@@ -222,7 +222,7 @@ pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
 }
 
 /// The `query-batch` body for a page of the active files in `folders` (their `groupId`), of
-/// any type, minimal rows: what [`HomebaseRemote::holding_live`](super::HomebaseRemote) asks.
+/// any type, minimal rows: what [`HomebaseRemote::holding`](super::HomebaseRemote) asks.
 /// odin-core filters on `groupId`, `fileState` and `archivalStatus` (**[verified]**
 /// `QueryBatch.cs:130-142, 351`); live is any status but removed, so that is read per row.
 pub fn children_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) -> Value {
