@@ -15,7 +15,7 @@ pub use filter::{Filter, FilterError, Verdict, is_junk};
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
 pub use layout::IGNORE_FILE;
 pub use marker::Marker;
-pub use scan::{ScanOptions, ScanReport, rescan_dirs, scan};
+pub use scan::{ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
 pub use watch::{Bell, Debounce, LiveWatcher, LocalObserver, WatchBatch};
 

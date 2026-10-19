@@ -1664,11 +1664,13 @@ name = "hbsync-local"
 version = "0.7.1"
 dependencies = [
  "hbsync-fileio",
+ "hbsync-namemap",
  "hbsync-platform",
  "hbsync-state",
  "hbsync-types",
  "ignore",
  "notify",
+ "proptest",
  "tempfile",
  "thiserror 2.0.21",
 ]
