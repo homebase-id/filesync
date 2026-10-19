@@ -87,7 +87,7 @@ and all used by `drive::HomebaseRemote` against frodo **[tried]** (the contract 
 |---|---|---|
 | Create | `POST /api/v2/drives/{d}/files` | multipart, plaintext request and response (`V2DriveCreateFileController.cs`). Parts: `instructions` first, `metadata` second, then `payload`* (filename = payload key, case-sensitive) and `thumbnail`* (`V1DriveUploadControllerBase.cs:205-270`). Duplicate UniqueId → 400 4105, also when the node holding it is only removed (`archivalStatus` 2, in Recently deleted: **[verified]** live), so a role folder in Recently deleted is restored, never created again. Response `{fileId, driveId, globalTransitId, recipientStatus, newVersionTag, payloads[{key, uid, lastModified}]}` |
 | Update | `PATCH /api/v2/drives/{d}/files/{fileId}` (or `/by-uid/{uid}`) | multipart, plaintext; `metadata` required. `fileMetadata.versionTag` required (4159), stale → 4160. Instructions need `locale: "local"` (missing → 500) and a `manifest`; `payloadDescriptors: []` is a header-only update that keeps the payloads. The key header sent is the file's own key with a new IV; the client has the key from its last write of the file or the file's last header or feed row (its token, `encryption.md`), so an update is one request. Ops `appendOrOverwrite` / `deletePayload`; unlisted payloads kept. Unknown fileId → 4106, deleted file → 4002 |
-| Delete (soft) | `POST /api/v2/drives/{d}/files/{fileId}/delete` | encrypted body `{recipients: [], versionTag}` (send it; an empty body likely fails binding **[inferred]**). `versionTag` is optional (odin-core #1903, PR #1931, from v0.1.960; **[verified]** in `V2DriveControllerBase.PerformFileDelete`): the file is deleted only at that version, else 400 4160 and nothing is deleted or sent to recipients. Unknown file → 200 `localFileNotFound: true` (before the tag check). Deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted`; with the tag the client had, it's refused instead (the tombstone has a version of its own, **[verified]** `UpsertAllButReactionsAndTransferAsync`) |
+| Delete (soft) | `POST /api/v2/drives/{d}/files/soft-delete-batch` | up to 1,000 files a request, each at its `versionTag`, an answer per file: see below. The single `.../{fileId}/delete` (encrypted body `{recipients: [], versionTag}`; unknown file → 200 `localFileNotFound: true`; deleting a tombstone rewrites it: new versionTag, new feed row, another `fileDeleted`, **[verified]** `UpsertAllButReactionsAndTransferAsync`) the client no longer uses |
 | Query | `POST /api/v2/drives/{d}/files/query-batch` | encrypted body `{queryParams, resultOptionsRequest}`; see below |
 | Header | `GET .../files/{f}/header`, `GET .../files/by-uid/{uid}/header` | encrypted response with `content`. A deleted file → 200 `fileState: "deleted"`; unknown → 404 |
 | Payload | `GET .../files/{f}/payload/{key}` | raw bytes; this route **ignores Range** |
@@ -129,6 +129,32 @@ client reads the whole feed again after a long absence (node schema, Recently de
   `fileDeleted`, with only `previousFileRef` on a minimal subscription (**[verified]** live,
   `hard_purge` in `crates/hbsync-dev/tests/live.rs`).
 - The old single `.../{fileId}/hard-delete` takes no version tag; the client doesn't use it.
+
+`POST /api/v2/drives/{d}/files/soft-delete-batch` (odin-core #1977) **[verified]** on odin-core
+main e0d52f336 (frodo runs it): `V2DriveBatchFileWriteOperationsController.SoftDeleteBatch`,
+`SoftDeleteBatchV2.cs`, `V2DriveControllerBase.SoftDeleteFileAsync`, `FileVersionTagV2.cs`:
+- The sibling of `hard-delete-batch` in the same controller, sharing its limits
+  (`FileVersionTagBatchV2.AssertValidBatch`). Not the older `delete-batch/by-file-id` there,
+  which refuses its whole batch for one stale tag.
+- Body, encrypted like the other V2 bodies: `{files: [{fileId, versionTag?, recipients?}]}`, 1
+  to 1,000 files, none twice, no empty `fileId` or `versionTag`; else 400 and nothing is
+  touched. The client sends every file's `versionTag` and no recipients: with none, the
+  transit permission isn't asked (`ResolveRecipientTokensAsync` checks it only for a
+  recipient) and nothing goes to peers.
+- Each file in request order, one after another (`PerFileAsync`): a tombstone already is
+  answered as deleted, its tag not checked and the file not rewritten (a retry, another
+  device's delete); a live file (removed too) goes only at its `versionTag`
+  (`SoftDeleteLongTermFile`, checked against the header read), leaving a tombstone with a new
+  version (`SaveFileHeader` makes one) and its row in the feed.
+- Answer `{results: [{fileId, errorCode, updated, recipientStatus}]}`, one per file in request
+  order: `errorCode` null when deleted, `versionTagMismatch` (written since: left as it is),
+  `fileNotFound` (missing, or hidden by the ACL), or another client error; one file's error
+  never stops the others, a server error fails the request. `updated` is the tombstone's time
+  as the feed shows it (Unix ms; a tombstone already answers its own), null when it stayed.
+  The answer carries no `versionTag`: the tombstone's comes with its row in the feed.
+- The client deletes softly through it (`HomebaseRemote::delete`: emptying Recently deleted,
+  and the purge's younger nodes), a request per 1,000 files. It records each tombstone's time
+  from `updated` at once, and its version from the feed (node schema, The purge, 3.).
 
 `POST /api/v2/drives/{d}/files/update-archival-status-batch` (odin-core #1964, v0.1.962)
 **[verified]** `V2DriveBatchFileWriteOperationsController.UpdateArchivalStatusBatch`,
@@ -366,13 +392,15 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   (At fcfc3b422 the answer read the header after the whole write instead.) Create and update
   answer `updated` next to `fileId` and `newVersionTag` (null only for a peer-only update);
   a delete (single, batch, by group) the tombstone's time, null when `localFileNotFound`; the
-  archival-status batch per result, null with an `errorCode`. Hard-delete-batch answers none.
+  archival-status batch and `soft-delete-batch` (#1977) per result, null with an `errorCode`.
+  Hard-delete-batch answers none.
   It is the time the feed shows for that write (odin-core `WriteResponseUpdatedTests`;
   **[tried]** on frodo at fe067124b for a create, a new version, a removal and a restore by
   PATCH, the archival-status batch and a delete: `write_answers_carry_the_feeds_time`). The
   client records a version's and a removal's time from it (`drive::HomebaseRemote`'s
-  `Target::changed_at`) and reads no feed after its writes. It doesn't read a delete's: a
-  tombstone isn't kept. Before #1971 the answers had no time (`payloads[].lastModified` is
+  `Target::changed_at`) and reads no feed after its writes. A soft delete's gives the
+  tombstone's time, which the client records (`gone_files.at`); the tombstone's version still
+  comes with the feed's row (`soft-delete-batch`, above). Before #1971 the answers had no time (`payloads[].lastModified` is
   the payload's, not the header's `updated`).
 
 ## Conventions
@@ -387,15 +415,11 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   can't read the flag either (`ClientDriveData` lacks it). To do in odin-core / odin-js.
 - **Circle permission keys lost** **[verified]**: odin-js sends `cp`, but the server's
   `YouAuthAppParameters` has no `cp`, so they vanish on the redirect to `/owner/appreg`.
-- Delete takes an optional `versionTag` since odin-core PR #1931 (#1903, v0.1.960; see the
-  Delete row): one request per delete. A 4160 is an edit since (the node is re-planned) or a
-  retry (the tombstone has a version of its own): the client reads the header once and takes
-  `deleted` as done. `delete-batch/by-file-id` takes a `versionTag` per request and checks them
-  all before deleting any (**[verified]** `DeleteFileIdBatchInternal`); not used yet. A retried
-  batch whose files were partly deleted fails whole (their tombstones have new tags, **[inferred]**
-  from the single delete), and its 4160 names the stale tag in its message, not the file
-  (**[verified]**, `AssertVersionTagMatches`): re-read the headers. Deleting a tombstone at its own tag rewrites it (new
-  version, feed row and `fileDeleted`, **[verified]** `UpsertAllButReactionsAndTransferAsync`).
+- Delete takes an optional `versionTag` since odin-core PR #1931 (#1903, v0.1.960).
+  `delete-batch/by-file-id` takes a `versionTag` per request and checks them all before
+  deleting any (**[verified]** `DeleteFileIdBatchInternal`): one stale tag fails its whole batch,
+  and its 4160 names the tag, not the file (**[verified]**, `AssertVersionTagMatches`). The client
+  uses neither: `soft-delete-batch` (#1977, above) answers per file.
 - Payload reads were buffered whole in server memory (#1892) and ranges were `int` (#1893)
   until odin-core PR #1921 (merged 2026-10-11). The client is written for #1921: a read is one streamed
   request, whatever its size. Uploads over 4 GiB still fail (the `uint` byte count, the half of

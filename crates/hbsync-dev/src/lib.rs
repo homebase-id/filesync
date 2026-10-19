@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hbsync_homebase::{Client, Credentials};
 use hbsync_remote::{Remote, RemoteError};
+use hbsync_types::RemoteRef;
 
 /// Where the development tools keep the credentials of `identity`:
 /// `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json` (default `~/.config`). The product keeps them
@@ -209,20 +210,31 @@ pub fn delete_top_folders(
         doomed.push(found);
     }
     if !dry {
-        for found in doomed {
-            match remote.delete(found.file_id, found.version) {
-                Ok(()) | Err(RemoteError::NotFound) => {}
-                // Written since it was read: once more at its version now.
-                Err(RemoteError::VersionMismatch) => {
-                    let h = remote.header(found.file_id)?;
-                    if !h.is_deleted() {
-                        match remote.delete(found.file_id, h.version) {
-                            Ok(()) | Err(RemoteError::NotFound) => {}
-                            Err(e) => return Err(e),
-                        }
-                    }
-                }
+        let asked: Vec<RemoteRef> = doomed
+            .iter()
+            .map(|f| RemoteRef {
+                file_id: f.file_id,
+                version: f.version,
+            })
+            .collect();
+        // Written since it was read: once more at its version now.
+        let mut again = Vec::new();
+        for (at, answer) in asked.iter().zip(remote.delete(&asked)?.into_answers()?) {
+            match answer {
+                Ok(_) | Err(RemoteError::NotFound) => {}
+                Err(RemoteError::VersionMismatch) => again.push(RemoteRef {
+                    file_id: at.file_id,
+                    version: remote.header(at.file_id)?.version,
+                }),
                 Err(e) => return Err(e),
+            }
+        }
+        if !again.is_empty() {
+            for answer in remote.delete(&again)?.into_answers()? {
+                match answer {
+                    Ok(_) | Err(RemoteError::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
             }
         }
     }

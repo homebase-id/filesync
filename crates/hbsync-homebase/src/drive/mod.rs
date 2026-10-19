@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    Answers, ChangesPage, ForGood, NodeMeta, Paced, RefsPage, Remote, RemoteBody, RemoteError,
-    RemoteHeader, Result, Upload,
+    Answers, ChangesPage, Deletes, ForGood, NodeMeta, Paced, RefsPage, Remote, RemoteBody,
+    RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
@@ -70,22 +70,37 @@ struct WriteResult {
     updated: Option<i64>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeleteResult {
-    #[serde(default)]
-    local_file_not_found: bool,
-}
-
-/// Files a batch of per-file writes takes per request (`hard-delete-batch`,
+/// Files a batch of per-file writes takes per request (`soft-delete-batch`, `hard-delete-batch`,
 /// `update-archival-status-batch`: odin-core `FileVersionTagBatchV2.MaxFiles`).
 pub const BATCH_FILES: usize = 1000;
 
-/// The answer of a batch write with an answer per file, in request order (`hard-delete-batch`,
-/// `update-archival-status-batch`).
+/// The answer of a batch write with an answer per file, in request order (`soft-delete-batch`,
+/// `hard-delete-batch`, `update-archival-status-batch`).
 #[derive(Deserialize)]
 struct BatchAnswer<T> {
     results: Vec<T>,
+}
+
+/// `SoftDeleteResultV2` (verified in odin-core); its `recipientStatus` is left out (this client
+/// names no recipients).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SoftDeleted {
+    file_id: Uuid,
+    /// `None`: deleted, a tombstone already too. Else why it stayed, as `OdinClientErrorCode`'s
+    /// camelCase name.
+    error_code: Option<String>,
+    /// The tombstone's time (Unix ms) as the feed shows it; `None` when it stayed.
+    updated: Option<i64>,
+}
+
+/// One file's answer to a soft delete: its tombstone's time.
+fn soft_deleted(answer: &SoftDeleted) -> Result<Option<i64>> {
+    match &answer.error_code {
+        None => Ok(answer.updated),
+        Some(code) => Err(code_error(code)
+            .unwrap_or_else(|| RemoteError::Fatal(format!("soft delete refused: {code}")))),
+    }
 }
 
 #[derive(Deserialize)]
@@ -549,46 +564,35 @@ impl Remote for HomebaseRemote {
         self.write(Some(target), meta, payload)
     }
 
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
-        // The server deletes only at `expected` (odin-core #1903), else 4160.
-        let result: DeleteResult = match self
-            .client
-            .post(
-                &format!("{}/delete", self.file(file_id)),
-                &json!({ "recipients": [], "versionTag": expected.0 }),
-            )
-            .map_err(remote_error)
-        {
-            Ok(result) => result,
-            // A retry: deleting gave the tombstone a version of its own. The raw header is
-            // enough: a row that doesn't decrypt is still a tombstone. A header that can't be
-            // read keeps the server's answer.
-            Err(RemoteError::VersionMismatch)
-                if self
-                    .raw_header(file_id)
-                    .is_ok_and(|h| h.file_state == "deleted") =>
-            {
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
-        if result.local_file_not_found {
-            return Err(RemoteError::NotFound);
-        }
-        Ok(())
+    /// One request per [`BATCH_FILES`] files (`soft-delete-batch`, odin-core #1977): each file
+    /// goes only at its version (a tombstone isn't checked: it answers as deleted, with its own
+    /// time), one after another in the order asked; one file's answer never stops the others.
+    /// No recipients: nothing goes to peers.
+    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
+        in_batches(files, BATCH_FILES, |batch| {
+            let answer: BatchAnswer<SoftDeleted> = self
+                .client
+                .post(
+                    &format!("{}/soft-delete-batch", self.files()),
+                    &versioned(batch.iter()),
+                )
+                .map_err(remote_error)?;
+            let asked = batch.iter().map(|f| f.file_id);
+            same_files("soft-delete-batch", &answer.results, |a| a.file_id, asked)?;
+            Ok(answer.results.iter().map(soft_deleted).collect())
+        })
     }
 
     /// One request per [`BATCH_FILES`] files (`hard-delete-batch`, odin-core #1968): each
     /// file goes only at its version, and one file's answer never stops the others.
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
         in_batches(files, BATCH_FILES, |batch| {
-            let body = json!({ "files": batch.iter().map(|f| json!({
-                "fileId": f.file_id.0,
-                "versionTag": f.version.0,
-            })).collect::<Vec<_>>() });
             let answer: BatchAnswer<HardDeleted> = self
                 .client
-                .post(&format!("{}/hard-delete-batch", self.files()), &body)
+                .post(
+                    &format!("{}/hard-delete-batch", self.files()),
+                    &versioned(batch.iter()),
+                )
                 .map_err(remote_error)?;
             let asked = batch.iter().map(|f| f.file_id);
             same_files("hard-delete-batch", &answer.results, |a| a.file_id, asked)?;
@@ -601,13 +605,8 @@ impl Remote for HomebaseRemote {
     /// one after another in the order asked; one file's answer never stops the others.
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
         in_batches(files, BATCH_FILES, |batch| {
-            let body = json!({
-                "archivalStatus": if removed { ARCHIVAL_REMOVED } else { 0 },
-                "files": batch.iter().map(|t| json!({
-                    "fileId": t.at.file_id.0,
-                    "versionTag": t.at.version.0,
-                })).collect::<Vec<_>>(),
-            });
+            let mut body = versioned(batch.iter().map(|t| &t.at));
+            body["archivalStatus"] = json!(if removed { ARCHIVAL_REMOVED } else { 0 });
             let answer: BatchAnswer<ArchivalSet> = self
                 .client
                 .post(
@@ -679,6 +678,14 @@ impl Remote for HomebaseRemote {
         plain.finish(end == response.size)?;
         Ok(len - plain.left())
     }
+}
+
+/// The body of a batch of files each at its version: `{files: [{fileId, versionTag}]}`.
+fn versioned<'a>(files: impl Iterator<Item = &'a RemoteRef>) -> serde_json::Value {
+    json!({ "files": files.map(|f| json!({
+        "fileId": f.file_id.0,
+        "versionTag": f.version.0,
+    })).collect::<Vec<_>>() })
 }
 
 /// Whether a batch answered the files asked (`asked`, their ids), in order.
@@ -857,6 +864,33 @@ mod tests {
         assert_eq!(first.token, asked[0].token, "the key stays");
         assert!(matches!(got[1], Err(RemoteError::VersionMismatch)));
         assert!(matches!(got[2], Err(RemoteError::Deleted)));
+        assert!(matches!(got[3], Err(RemoteError::Fatal(_))));
+        Ok(())
+    }
+
+    /// `soft-delete-batch`'s answer as odin-core writes it (`SoftDeleteBatchResultV2`), read per
+    /// file: deleted with the tombstone's time (a tombstone already, too), or why it stayed.
+    #[test]
+    fn soft_delete_answers_read_per_file() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
+        let answer: BatchAnswer<SoftDeleted> = serde_json::from_value(json!({"results": [
+            {"fileId": ids[0], "errorCode": null, "updated": 1_760_000_000_123i64,
+             "recipientStatus": {}},
+            {"fileId": ids[1], "errorCode": "versionTagMismatch", "updated": null,
+             "recipientStatus": {}},
+            {"fileId": ids[2], "errorCode": "fileNotFound", "updated": null,
+             "recipientStatus": {}},
+            {"fileId": ids[3], "errorCode": "invalidFile", "updated": null,
+             "recipientStatus": {}},
+        ]}))?;
+        let got: Vec<Result<Option<i64>>> = answer.results.iter().map(soft_deleted).collect();
+        assert!(
+            matches!(got[0], Ok(Some(1_760_000_000_123))),
+            "{:?}",
+            got[0]
+        );
+        assert!(matches!(got[1], Err(RemoteError::VersionMismatch)));
+        assert!(matches!(got[2], Err(RemoteError::NotFound)));
         assert!(matches!(got[3], Err(RemoteError::Fatal(_))));
         Ok(())
     }

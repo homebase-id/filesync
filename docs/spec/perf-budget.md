@@ -39,5 +39,6 @@ network latency.
 | Edit in one folder until it is in the other (both running) | ≈ 0.55 s, mostly the 300 ms local debounce |
 | Deleting the 10,130 nodes | 33.6 s: a header check and a delete per node, one at a time |
 
-Follow-ups: batch deletes (`delete-batch/by-file-id`, with the header checks batched too);
+Follow-ups: batch deletes (done: removals through `update-archival-status-batch` since
+2026-10-18, emptying through `soft-delete-batch` since 2026-10-19, 1,000 files a request);
 find what drives peak memory during a large first download.

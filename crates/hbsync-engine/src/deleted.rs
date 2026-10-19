@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
 use hbsync_platform::name::name_key;
-use hbsync_remote::{Answers, ForGood, NodeMeta, Remote, RemoteError};
+use hbsync_remote::{Answers, NodeMeta, Remote, RemoteError};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
@@ -1285,8 +1285,8 @@ fn stuck_below(s: &Store<'_>, before: i64) -> Result<Stuck, StateError> {
 /// read, not in its mirror: one question for the pass's folders that may go, asked once the
 /// drive's queries show what was written up to the pass's start, [`Remote::hold_back`]; a pass
 /// with none asks nothing, and doesn't wait). A node removed before `hard_before` (Unix ms, the
-/// server's) goes without a trace, in batches; any other leaves a tombstone (`None`: every one
-/// does). Returns how many went. One written since, or not found, sets `moved`; one not found
+/// server's) goes without a trace; any other leaves a tombstone (`None`: every one does),
+/// recorded with its time; both in batches, many files a request. Returns how many went. One written since, or not found, sets `moved`; one not found
 /// is recorded gone once its header says so too. A request that fails stops it with its error:
 /// what it didn't answer stays, for the next purge.
 fn delete_for_good(
@@ -1338,28 +1338,23 @@ fn delete_for_good(
             going.into_iter().partition(|r| hard(r));
         let refs: Vec<RemoteRef> = hard.iter().map(|r| r.row.remote_ref()).collect();
         let (answers, mut failed) = hard_delete(remote, &refs);
-        let mut gone_now: Vec<&RemovedRow> = Vec::new();
+        let mut answered: Vec<(&RemovedRow, Answer)> = hard.into_iter().zip(answers).collect();
+        if failed.is_none() {
+            let refs: Vec<RemoteRef> = soft.iter().map(|r| r.row.remote_ref()).collect();
+            let (answers, stopped) = soft_delete(remote, &refs);
+            failed = stopped;
+            answered.extend(soft.into_iter().zip(answers));
+        }
+        // Each gone with its tombstone's time, if it left one.
+        let mut gone_now: Vec<(&RemovedRow, Option<i64>)> = Vec::new();
         let mut not_found: Vec<&RemovedRow> = Vec::new();
-        for (r, answer) in hard.iter().zip(answers) {
+        for (r, answer) in answered {
             match answer {
-                Answer::Deleted => gone_now.push(r),
+                Answer::Deleted(tombstone) => gone_now.push((r, tombstone)),
                 Answer::Missing => not_found.push(r),
+                // Restored or changed meanwhile: not ours to delete.
                 Answer::Written => *moved = true,
                 Answer::Kept => {}
-            }
-        }
-        if failed.is_none() {
-            for r in soft {
-                match remote.delete(r.row.file_id, r.row.version) {
-                    Ok(()) => gone_now.push(r),
-                    Err(RemoteError::NotFound) => not_found.push(r),
-                    // Restored or changed meanwhile: not ours to delete.
-                    Err(RemoteError::VersionMismatch) => *moved = true,
-                    Err(e) => {
-                        failed = Some(e);
-                        break;
-                    }
-                }
             }
         }
         // Not found: deleted for good meanwhile (another device's purge), if its header says
@@ -1371,7 +1366,7 @@ fn delete_for_good(
         if failed.is_none() {
             for r in not_found {
                 match gone_for_good(remote, r.row.file_id) {
-                    Ok(true) => gone_now.push(r),
+                    Ok(true) => gone_now.push((r, None)),
                     Ok(false) => {}
                     Err(e) => {
                         failed = Some(e);
@@ -1381,11 +1376,14 @@ fn delete_for_good(
             }
         }
         locked(account).write(|s| {
-            for r in &gone_now {
+            for (r, tombstone) in &gone_now {
                 s.delete_removed(r.row.node)?;
-                // Its id never comes back, nor its row from a page read before (a tombstone's
-                // version and time come with the feed's row).
-                s.mark_file_gone(r.row.file_id)?;
+                // Its id never comes back, nor its row from a page read before. A tombstone's
+                // time comes with the answer, its version with the feed's row.
+                match tombstone {
+                    Some(at) => s.put_own_tombstone(r.row.file_id, *at)?,
+                    None => s.mark_file_gone(r.row.file_id)?,
+                }
             }
             Ok(())
         })?;
@@ -1400,7 +1398,8 @@ fn delete_for_good(
 /// What the drive answered for a file a delete for good asked about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answer {
-    Deleted,
+    /// Gone, leaving a tombstone written at this time (Unix ms, the server's), if it said.
+    Deleted(Option<i64>),
     /// Not there: gone already, by another device's purge, maybe (the picture lacked that).
     Missing,
     /// Written since: it stays, and the picture lacked that.
@@ -1409,22 +1408,38 @@ enum Answer {
     Kept,
 }
 
-/// Deletes `files` without a trace, each only at its version: the drive's answer for each of
-/// the first files, and the error of the request that stopped it there, if one did (the files
-/// not answered stay), or else the first answer that isn't one of [`Answer`]'s.
+/// Deletes `files` without a trace, each only at its version: [`answers`].
 fn hard_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option<RemoteError>) {
     if files.is_empty() {
         return (Vec::new(), None);
     }
-    let ForGood { answers, stopped } = remote
-        .delete_for_good(files)
-        .unwrap_or_else(ForGood::stopped);
+    answers(files.len(), remote.delete_for_good(files), |()| None)
+}
+
+/// Deletes `files`, each only at its version, leaving tombstones (many a request): [`answers`],
+/// each with its tombstone's time.
+fn soft_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option<RemoteError>) {
+    if files.is_empty() {
+        return (Vec::new(), None);
+    }
+    answers(files.len(), remote.delete(files), |at| at)
+}
+
+/// What the drive answered for each of the first of `asked` files (each deleted with
+/// `tombstone` of its answer), and the error of the request that stopped it there, if one did
+/// (the files not answered stay), or else the first answer that isn't one of [`Answer`]'s.
+fn answers<T>(
+    asked: usize,
+    answered: Result<Answers<T>, RemoteError>,
+    tombstone: impl Fn(T) -> Option<i64>,
+) -> (Vec<Answer>, Option<RemoteError>) {
+    let Answers { answers, stopped } = answered.unwrap_or_else(Answers::stopped);
     // Any other answer for a file: it stays, and fails the purge (retried later).
     let mut refused: Option<(usize, RemoteError)> = None;
     let answers = answers
         .into_iter()
         .map(|answer| match answer {
-            Ok(()) => Answer::Deleted,
+            Ok(t) => Answer::Deleted(tombstone(t)),
             Err(RemoteError::NotFound) => Answer::Missing,
             Err(RemoteError::VersionMismatch) => Answer::Written,
             Err(e) => {
@@ -1437,7 +1452,7 @@ fn hard_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option
         })
         .collect();
     let refused = refused.map(|(n, e)| {
-        tracing::warn!("{n} of {} files weren't deleted for good: {e}", files.len());
+        tracing::warn!("{n} of {asked} files weren't deleted: {e}");
         e
     });
     (answers, stopped.or(refused))
@@ -1458,7 +1473,7 @@ fn delete_tombstones(
         tombstones
             .iter()
             .zip(answers)
-            .filter(|(_, answer)| matches!(answer, Answer::Deleted | Answer::Missing))
+            .filter(|(_, answer)| matches!(answer, Answer::Deleted(_) | Answer::Missing))
             .try_for_each(|(t, _)| s.delete_tombstone_at(*t).map(drop))
     })?;
     match failed {

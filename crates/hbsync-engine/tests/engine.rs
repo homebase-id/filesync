@@ -13,7 +13,7 @@ use hbsync_remote::{
 };
 use hbsync_state::StateDb;
 use hbsync_state::testkit::Commit;
-use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Target};
 
 mod common;
 
@@ -259,8 +259,8 @@ impl Remote for StopAfterCreates {
     ) -> RemoteResult<Target> {
         self.inner.update(target, meta, payload)
     }
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
-        self.inner.delete(file_id, expected)
+    fn delete(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::Deletes> {
+        self.inner.delete(files)
     }
     fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
@@ -379,8 +379,8 @@ impl Remote for SlowWrites {
     ) -> RemoteResult<Target> {
         self.write(|| self.unless_down(|| self.inner.update(target, meta, payload)))
     }
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
-        self.inner.delete(file_id, expected)
+    fn delete(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::Deletes> {
+        self.inner.delete(files)
     }
     fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)

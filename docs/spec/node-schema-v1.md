@@ -202,8 +202,10 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      removed more than 30 days ago goes without a trace (a hard delete: `hard-delete-batch`,
      odin-core #1968), nothing of the file left, in the feed either. Anything else (a younger
      node, and anything a user empties by hand) is deleted softly, leaving a tombstone, the
-     trace; any client deletes a tombstone hard more than 30 days after its own `updated`. A node whose
-     time isn't known never goes without a trace.
+     trace (`soft-delete-batch`, odin-core #1977, many files a request, each at its version);
+     any client deletes a tombstone hard more than 30 days after its own `updated` (the soft
+     delete's answer gives it; the tombstone's version, which the hard delete needs, comes
+     with its row in the feed). A node whose time isn't known never goes without a trace.
   4. **Why 30 days:** the feed keeps a trace of a delete that long and no longer, so every
      device that reads the feed at least every 30 days learns of every delete. One that hasn't
      read it for 29 days (a day's margin) reads all of it again: what it has that the feed no
@@ -278,6 +280,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-19: deleting for good softly (emptying by hand, and the purge's younger nodes) goes
+  through `soft-delete-batch` (odin-core #1977), up to 1,000 files a request, each at its
+  version; a client records the tombstone's time from the answer (The purge, 3.). The node is
+  the same.
 - 2026-10-19: the purge removes what a delete that stopped half way left live (The purge, 2.):
   the live nodes the delete of an item it would delete took along (written no later than the
   removal, by the server's time, at the version the client knows; the folder confirmed still

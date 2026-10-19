@@ -13,7 +13,7 @@ use hbsync_remote::{
     Upload,
 };
 use hbsync_state::Coords;
-use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Role, Target, VersionTag};
+use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Role, Target};
 
 use crate::tree::Tree;
 use crate::walk::End;
@@ -182,8 +182,8 @@ impl Remote for ScopedRemote {
     ) -> RemoteResult<Target> {
         self.inner.update(target, &self.on_drive(meta)?, payload)
     }
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> RemoteResult<()> {
-        self.inner.delete(file_id, expected)
+    fn delete(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::Deletes> {
+        self.inner.delete(files)
     }
     fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)

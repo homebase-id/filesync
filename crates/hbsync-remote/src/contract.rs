@@ -56,6 +56,7 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
     ("guarded_updates", guarded_updates),
     ("content_round_trips", content_round_trips),
     ("deletes", deletes),
+    ("deletes_in_one_request", deletes_in_one_request),
     ("deletes_for_good", deletes_for_good),
     ("live_children", live_children),
     ("tombstone_in_the_feed", tombstone_in_the_feed),
@@ -217,6 +218,18 @@ impl<'a> Bench<'a> {
         let target = self.target(at);
         let written = with_upload(data, |upload| self.remote.update(&target, meta, upload))?;
         Ok(self.keep(written))
+    }
+
+    /// Deletes one file at `at` ([`Remote::delete`]): its answer, the tombstone's time.
+    pub fn delete(&self, at: RemoteRef) -> Result<Option<i64>, RemoteError> {
+        let answers = self.remote.delete(&[at])?.into_answers()?;
+        match <[_; 1]>::try_from(answers) {
+            Ok([answer]) => answer,
+            Err(answers) => Err(RemoteError::Fatal(format!(
+                "{} answers for one file",
+                answers.len()
+            ))),
+        }
     }
 
     fn read(
@@ -427,7 +440,7 @@ fn empty_file(b: &Bench) -> Outcome {
 fn retried_create_and_recreate_after_delete(b: &Bench) -> Outcome {
     let (f, first) = b.file("x", b"1")?;
     ensure_err!(b.create(&f, Some(b"1")), RemoteError::AlreadyExists);
-    b.remote.delete(first.file_id, first.version)?;
+    b.delete(first)?;
     // A tombstone frees the node id; the new file gets a new file id.
     let again = b.create(&f, Some(b"1"))?;
     ensure!(
@@ -525,15 +538,12 @@ fn deletes(b: &Bench) -> Outcome {
     let (f, w) = b.file("f", b"1")?;
     let w2 = b.update(w, &with(&f, NodeContent::file("f", 2, 1, false)), None)?;
     // A delete at a version that is no longer current is refused (another client changed it).
-    ensure_err!(
-        b.remote.delete(w.file_id, w.version),
-        RemoteError::VersionMismatch
-    );
+    ensure_err!(b.delete(w), RemoteError::VersionMismatch);
     ensure!(!b.remote.header(w.file_id)?.is_deleted(), "deleted anyway");
-    b.remote.delete(w2.file_id, w2.version)?;
+    b.delete(w2)?;
     ensure!(b.remote.header(w.file_id)?.is_deleted(), "not deleted");
     // A retried delete succeeds.
-    b.remote.delete(w2.file_id, w2.version)?;
+    b.delete(w2)?;
     // An update of a deleted file fails, header only or with new bytes (another client
     // deleted it meanwhile).
     ensure_err!(
@@ -545,6 +555,63 @@ fn deletes(b: &Bench) -> Outcome {
         RemoteError::NotFound | RemoteError::Deleted | RemoteError::VersionMismatch
     );
     ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
+    Ok(())
+}
+
+/// Deletes in one request ([`Remote::delete`]): each file at its version, an answer per file
+/// in order, one file's answer never stopping the others. A live file goes, answering its
+/// tombstone's time as the feed shows it; one written since stays; a tombstone answers as
+/// deleted whatever the version asked, with its own time, left as it is; a file the drive
+/// doesn't have answers not found. A batch naming a file twice is refused whole, nothing
+/// deleted.
+fn deletes_in_one_request(b: &Bench) -> Outcome {
+    let (_, w) = b.file("f", b"1")?;
+    let (g, v) = b.file("g", b"2")?;
+    let v2 = b.update(v, &with(&g, NodeContent::file("g", 2, 1, false)), None)?;
+    let (_, t) = b.file("t", b"3")?;
+    let tomb_at = b.delete(t)?;
+    let tomb = b.remote.header(t.file_id)?;
+    let (_, x) = b.file("x", b"4")?;
+    ensure!(
+        b.remote.delete(&[x, x]).is_err() && !b.remote.header(x.file_id)?.is_deleted(),
+        "a batch naming a file twice went through"
+    );
+    let missing = RemoteRef {
+        file_id: RemoteFileId(NodeId::new().0),
+        version: w.version,
+    };
+    let cursor = b.cursor_now()?;
+    let answers = b.remote.delete(&[w, v, t, missing, x])?.into_answers()?;
+    ensure!(answers.len() == 5, "{} answers for 5 files", answers.len());
+    ensure_err!(&answers[1], RemoteError::VersionMismatch);
+    ensure_err!(&answers[3], RemoteError::NotFound);
+    let (Ok(gone_w), Ok(again_t), Ok(gone_x)) = (&answers[0], &answers[2], &answers[4]) else {
+        return Err(format!("not deleted: {answers:?}").into());
+    };
+    let header = b.remote.header(v.file_id)?;
+    ensure!(
+        !header.is_deleted() && header.version == v2.version,
+        "the file written since was deleted: {header:?}"
+    );
+    let header = b.remote.header(t.file_id)?;
+    ensure!(
+        header.version == tomb.version && *again_t == tomb_at && tomb_at == tomb.changed_at,
+        "the tombstone moved, or answered another time: {again_t:?} for {tomb:?}, now {header:?}"
+    );
+    let feed = b.changes_to(&cursor, &[w.file_id, x.file_id])?;
+    ensure!(feed.len() == 2, "{} feed rows for 2 deletes", feed.len());
+    for (at, answered) in [(w, gone_w), (x, gone_x)] {
+        let header = b.remote.header(at.file_id)?;
+        ensure!(header.is_deleted(), "not deleted: {header:?}");
+        let row = feed.iter().find(|h| h.file_id == at.file_id);
+        ensure!(
+            row.is_some_and(|row| row.is_deleted()
+                && row.version == header.version
+                && answered.is_some()
+                && row.changed_at == *answered),
+            "the answer isn't the feed's: {answered:?}, {row:?}"
+        );
+    }
     Ok(())
 }
 
@@ -574,7 +641,7 @@ fn live_children(b: &Bench) -> Outcome {
     holding(&[other.node], "only a removed one in dir")?;
     let w = b.update(gone, &f, None)?;
     holding(&[dir.node, other.node], "restored")?;
-    b.remote.delete(w.file_id, w.version)?;
+    b.delete(w)?;
     holding(&[other.node], "only a tombstone in dir")?;
     Ok(())
 }
@@ -585,7 +652,7 @@ fn deletes_for_good(b: &Bench) -> Outcome {
     let (f, w) = b.file("f", b"1")?;
     let w2 = b.update(w, &with(&f, NodeContent::file("f", 2, 1, false)), None)?;
     let (_, t) = b.file("t", b"2")?;
-    b.remote.delete(t.file_id, t.version)?;
+    b.delete(t)?;
     let tomb = RemoteRef {
         file_id: t.file_id,
         version: b.remote.header(t.file_id)?.version,
@@ -621,7 +688,7 @@ fn tombstone_in_the_feed(b: &Bench) -> Outcome {
     let f = file("f", dir.node, b"data");
     let w = b.create(&f, Some(b"data"))?;
     let cursor = b.cursor_now()?;
-    b.remote.delete(w.file_id, w.version)?;
+    b.delete(w)?;
 
     let feed = b.changes_to(&cursor, &[w.file_id])?;
     ensure!(feed.len() == 1, "{} feed entries", feed.len());
@@ -701,7 +768,7 @@ fn removals_in_one_request(b: &Bench) -> Outcome {
     let (_, x) = b.file("x", b"later")?;
     let v2 = b.update(v, &with(&g, NodeContent::file("g", 2, 5, false)), None)?;
     let (_, t) = b.file("t", b"tomb")?;
-    b.remote.delete(t.file_id, t.version)?;
+    b.delete(t)?;
     let tomb = b.remote.header(t.file_id)?.version;
     let cursor = b.cursor_now()?;
     let asked = [
@@ -789,7 +856,7 @@ fn slim_pages_match_whole_ones(b: &Bench) -> Outcome {
     let (_, hw) = b.file("h", b"three")?;
     b.update(fw, &with(&f, NodeContent::file("f2", 1, 3, false)), None)?;
     b.update(gw, &removed(&g), None)?;
-    b.remote.delete(hw.file_id, hw.version)?;
+    b.delete(hw)?;
     b.update(dw, &removed(&d), None)?;
     std::thread::sleep(b.settle);
     let mut at = Some(cursor);
@@ -820,7 +887,7 @@ fn a_removed_node_deleted_for_good(b: &Bench) -> Outcome {
     let (f, w) = b.file("f", b"1")?;
     let gone = b.update(w, &removed(&f), None)?;
     let cursor = b.cursor_now()?;
-    b.remote.delete(gone.file_id, gone.version)?;
+    b.delete(gone)?;
     let feed = b.changes_to(&cursor, &[w.file_id])?;
     ensure!(
         feed.last().is_some_and(RemoteHeader::is_deleted),

@@ -1144,10 +1144,9 @@ impl Remote for ReadHook {
 
     fn delete(
         &self,
-        file_id: hbsync_types::RemoteFileId,
-        expected: hbsync_types::VersionTag,
-    ) -> hbsync_remote::Result<()> {
-        self.inner.delete(file_id, expected)
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
+        self.inner.delete(files)
     }
 
     fn read(
