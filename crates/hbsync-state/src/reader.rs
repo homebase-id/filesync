@@ -38,6 +38,10 @@ impl Reader {
         // What it reads is answered and let go: a small cache, not the default 2 MB a listing
         // of Recently deleted would fill and keep.
         conn.pragma_update(None, "cache_size", READER_CACHE_KIB)?;
+        // A sort larger than that cache (a listing of Recently deleted: every row, ordered by
+        // time) stays in memory: on disk it wrote ~3 MB of temporary files per listing of 10k
+        // rows. The writer does the same.
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         match migrations::user_version(&conn)? {
             0 => Ok(None),
             migrations::VERSION => Ok(Some(Reader { conn })),
@@ -71,7 +75,8 @@ mod tests {
     use super::*;
     use crate::{StateDb, keys};
 
-    /// What a reader reads is answered and let go: its page cache is small.
+    /// What a reader reads is answered and let go: its page cache is small. What it sorts stays
+    /// in memory, as the writer's does: no temporary file.
     #[test]
     fn a_reader_keeps_a_small_cache() -> Result<()> {
         let dir = tempfile::tempdir().map_err(|e| StateError::Conflict(e.to_string()))?;
@@ -82,6 +87,15 @@ mod tests {
             .conn
             .pragma_query_value(None, "cache_size", |r| r.get(0))?;
         assert_eq!(size, READER_CACHE_KIB);
+        // 2: MEMORY.
+        let temp: i64 = reader
+            .conn
+            .pragma_query_value(None, "temp_store", |r| r.get(0))?;
+        let db = StateDb::open_account(&path)?;
+        let writer: i64 = db
+            .conn
+            .pragma_query_value(None, "temp_store", |r| r.get(0))?;
+        assert_eq!((temp, writer), (2, 2));
         Ok(())
     }
 
