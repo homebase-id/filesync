@@ -459,6 +459,146 @@ fn seed(server: &Arc<Mutex<FakeServer>>, name: &str) -> common::Res<RemoteFileId
     Ok(at.file_id)
 }
 
+/// Slim pages longer than whole ones read the drive as pages of one size do: a slim page with
+/// something new is read again whole as far as a whole page goes, the feed going on from there.
+#[test]
+fn slim_pages_longer_than_whole_ones_read_the_same() -> common::Res<()> {
+    let server = server();
+    let mut files = Vec::new();
+    for i in 0..4 {
+        files.push(seed(&server, &format!("a{i}.txt"))?);
+    }
+    let remote = FakeRemote::new(server.clone());
+    let (db, other) = (pulled(&remote)?, pulled(&remote)?);
+    // Runs of deletes (tombstones: known) between new files, as a feed read later sees them.
+    for round in 0..4 {
+        for i in 0..7 {
+            files.push(seed(&server, &format!("b{round}-{i}.txt"))?);
+        }
+        let mut server = server.lock().map_err(|_| "poisoned")?;
+        for &file in files.iter().rev().skip(round).take(5) {
+            let version = server.header(file)?.version;
+            server.delete(file, version)?;
+        }
+    }
+    let longer = feed::Pages { whole: 2, slim: 5 };
+    let report = feed::pull(|| db.borrow_mut(), &remote, longer, &mut None)?;
+    feed::pull(|| other.borrow_mut(), &remote, 3, &mut None)?;
+    let ours = drive_state(&db)?;
+    assert_eq!((ours.0.len(), ours.1.len()), (12, 20), "{report:?}");
+    assert_eq!(ours, drive_state(&other)?);
+    Ok(())
+}
+
+/// A run of known rows (tombstones) longer than a whole page, then something new: the rows
+/// before it are applied slim, not read whole; a re-read counts them as shown.
+#[test]
+fn known_rows_before_a_new_one_are_read_slim() -> common::Res<()> {
+    let server = server();
+    let mut files = Vec::new();
+    for i in 0..40 {
+        files.push(seed(&server, &format!("a{i}.txt"))?);
+    }
+    let remote = FakeRemote::new(server.clone());
+    let db = pulled(&remote)?;
+    {
+        let mut server = server.lock().map_err(|_| "poisoned")?;
+        for &file in &files[..35] {
+            let version = server.header(file)?.version;
+            server.delete(file, version)?;
+        }
+    }
+    let new = seed(&server, "new.txt")?;
+    db.borrow_mut().write(|s| s.start_reread())?;
+    let (whole_before, headers_before) = {
+        let faults = remote.faults();
+        (faults.full_pages, faults.headers)
+    };
+    let pages = feed::Pages { whole: 2, slim: 16 };
+    let mut reread = None;
+    feed::pull(|| db.borrow_mut(), &remote, pages, &mut reread)?;
+    assert!(db.borrow_mut().read(|s| s.mirror_by_file(new))?.is_some());
+    assert_eq!(db.borrow_mut().read(|s| s.drive_file_ids())?.len(), 6);
+    let faults = remote.faults();
+    // The whole drive read slim, but the first page (a re-read starts over) and the new
+    // file's.
+    assert_eq!(faults.full_pages - whole_before, 2);
+    // Every file the store had was shown: none asked about.
+    assert_eq!(faults.headers - headers_before, 0);
+    assert!(reread.is_none());
+    Ok(())
+}
+
+/// Slim and whole pages of any lengths read a drive alike, whatever runs of new and known
+/// rows (tombstones, versions the store has) it holds.
+#[test]
+fn any_page_lengths_read_the_same() -> common::Res<()> {
+    use proptest::test_runner::{Config, TestCaseError, TestRunner};
+    let mut runner = TestRunner::new(Config {
+        cases: 64,
+        ..Config::default()
+    });
+    // Rounds of (new files, deletes of the newest); page lengths.
+    let strategy = (
+        proptest::collection::vec((0usize..9, 0usize..9), 1..8),
+        1usize..5,
+        1usize..12,
+    );
+    runner
+        .run(&strategy, |(rounds, whole, slim)| {
+            read_alike(&rounds, feed::Pages { whole, slim })
+                .map_err(|e| TestCaseError::fail(e.to_string()))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// A drive made in `rounds` read with `pages` as with pages of one length.
+fn read_alike(rounds: &[(usize, usize)], pages: feed::Pages) -> common::Res<()> {
+    let server = server();
+    let mut files = Vec::new();
+    let mut made = 0;
+    let mut seed_one = |files: &mut Vec<RemoteFileId>| -> common::Res<()> {
+        made += 1;
+        files.push(seed(&server, &format!("f{made}.txt"))?);
+        Ok(())
+    };
+    for _ in 0..3 {
+        seed_one(&mut files)?;
+    }
+    let remote = FakeRemote::new(server.clone());
+    let (db, other) = (pulled(&remote)?, pulled(&remote)?);
+    for &(new, deletes) in rounds {
+        for _ in 0..new {
+            seed_one(&mut files)?;
+        }
+        let mut server = server.lock().map_err(|_| "poisoned")?;
+        for file in files.drain(files.len().saturating_sub(deletes)..) {
+            let version = server.header(file)?.version;
+            server.delete(file, version)?;
+        }
+    }
+    feed::pull(|| db.borrow_mut(), &remote, pages, &mut None)?;
+    feed::pull(|| other.borrow_mut(), &remote, 1000, &mut None)?;
+    let ours = drive_state(&db)?;
+    assert_eq!(ours.0.len(), files.len(), "{rounds:?} {pages:?}");
+    assert_eq!(ours, drive_state(&other)?, "{rounds:?} {pages:?}");
+    Ok(())
+}
+
+/// The live files a store has, and its tombstones, sorted.
+type DriveState = (Vec<RemoteFileId>, Vec<hbsync_types::RemoteRef>);
+
+fn drive_state(db: &std::cell::RefCell<StateDb>) -> common::Res<DriveState> {
+    Ok(db.borrow_mut().read(|s| {
+        let mut live = s.drive_file_ids()?;
+        live.sort();
+        let mut gone = s.tombstones_before(i64::MAX)?;
+        gone.sort_by_key(|t| t.file_id);
+        Ok((live, gone))
+    })?)
+}
+
 /// A re-read asks the server about what the feed didn't show; one it can't tell about now (a
 /// broken connection) is kept and asked again at the next pull, the re-read open until then.
 #[test]

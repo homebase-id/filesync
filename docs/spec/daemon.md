@@ -183,7 +183,9 @@ a failure (service managers restart it then).
   - before Recently deleted's restore, emptying and the daily purge, while not current;
   - when this device makes a role folder that another device made meanwhile.
   A sync woken by a local change or by the account's drive reads nothing while current,
-  and none reads after its own writes. Every read asks for pages of 500 rows.
+  and none reads after its own writes. A read starts with a page of 500 rows; slim pages grow
+  to 2,000 in a run of them (a slim page with something new is read again whole, as far as 500
+  rows go, after its rows before the new one, read slim, when 500 wouldn't reach it).
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start

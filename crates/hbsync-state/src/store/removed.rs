@@ -2,9 +2,23 @@
 
 use super::*;
 
-/// Versions [`Store::known`] asks in one query: three variables each, well under SQLite's
-/// limit (32,766 in the bundled SQLite, 999 in old ones).
-const KNOWN_CHUNK: usize = 300;
+/// Whether the version `q.(f, v)` (removed: `q.r`) isn't in the store.
+const UNKNOWN: &str = "CASE WHEN q.r THEN NOT EXISTS (SELECT 1 FROM removed \
+     WHERE file_id = q.f AND version_tag = q.v) \
+     ELSE NOT EXISTS (SELECT 1 FROM remote WHERE file_id = q.f AND version_tag = q.v) END";
+
+/// A version's query variables: file id, version tag, removed.
+fn version_params(at: &RemoteRef, removed: bool) -> [rusqlite::types::Value; 3] {
+    [
+        rusqlite::types::Value::Blob(at.file_id.0.as_bytes().to_vec()),
+        rusqlite::types::Value::Blob(at.version.0.as_bytes().to_vec()),
+        rusqlite::types::Value::Integer(i64::from(removed)),
+    ]
+}
+
+/// Versions [`Store::known`] and [`Store::first_unknown`] ask in one query: three or four
+/// variables each, under SQLite's limit (32,766 in the bundled SQLite, 999 in old ones).
+const KNOWN_CHUNK: usize = 240;
 
 impl Store<'_> {
     // ---- Recently deleted ----
@@ -192,7 +206,8 @@ impl Store<'_> {
 
     /// Whether the store has every one of `versions`, each `(version, removed)` in Recently
     /// deleted or else the mirror: a query per [`KNOWN_CHUNK`] (SQLite allows only so many
-    /// variables in one; its text differs by length: not cached).
+    /// variables in one; its text differs by length: not cached), each ending at the first one
+    /// missing.
     pub fn known(&self, versions: &[(RemoteRef, bool)]) -> Result<bool> {
         for chunk in versions.chunks(KNOWN_CHUNK) {
             if !self.known_chunk(chunk)? {
@@ -205,23 +220,40 @@ impl Store<'_> {
     fn known_chunk(&self, versions: &[(RemoteRef, bool)]) -> Result<bool> {
         let rows = vec!["(?, ?, ?)"; versions.len()].join(", ");
         let sql = format!(
-            "WITH q(f, v, r) AS (VALUES {rows}) SELECT NOT EXISTS (SELECT 1 FROM q WHERE \
-             CASE WHEN q.r THEN NOT EXISTS (SELECT 1 FROM removed \
-                 WHERE file_id = q.f AND version_tag = q.v) \
-             ELSE NOT EXISTS (SELECT 1 FROM remote \
-                 WHERE file_id = q.f AND version_tag = q.v) END)"
+            "WITH q(f, v, r) AS (VALUES {rows}) SELECT NOT EXISTS (SELECT 1 FROM q WHERE {UNKNOWN})"
         );
-        let params = versions.iter().flat_map(|(at, removed)| {
-            [
-                rusqlite::types::Value::Blob(at.file_id.0.as_bytes().to_vec()),
-                rusqlite::types::Value::Blob(at.version.0.as_bytes().to_vec()),
-                rusqlite::types::Value::Integer(i64::from(*removed)),
-            ]
-        });
+        let params = versions
+            .iter()
+            .flat_map(|(at, removed)| version_params(at, *removed));
         Ok(self
             .conn
             .prepare(&sql)?
             .query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
+    }
+
+    /// The first of `versions` the store doesn't have ([`Store::known`]), by its index.
+    pub fn first_unknown(&self, versions: &[(RemoteRef, bool)]) -> Result<Option<usize>> {
+        for (n, chunk) in versions.chunks(KNOWN_CHUNK).enumerate() {
+            if let Some(i) = self.first_unknown_in(chunk)? {
+                return Ok(Some(n * KNOWN_CHUNK + i));
+            }
+        }
+        Ok(None)
+    }
+
+    fn first_unknown_in(&self, versions: &[(RemoteRef, bool)]) -> Result<Option<usize>> {
+        let rows = vec!["(?, ?, ?, ?)"; versions.len()].join(", ");
+        let sql =
+            format!("WITH q(i, f, v, r) AS (VALUES {rows}) SELECT MIN(q.i) FROM q WHERE {UNKNOWN}");
+        let params = versions.iter().enumerate().flat_map(|(i, (at, removed))| {
+            std::iter::once(rusqlite::types::Value::Integer(i as i64))
+                .chain(version_params(at, *removed))
+        });
+        let first: Option<i64> = self
+            .conn
+            .prepare(&sql)?
+            .query_row(rusqlite::params_from_iter(params), |r| r.get(0))?;
+        Ok(first.map(|i| i as usize))
     }
 
     pub fn removed_by_node(&self, node: NodeId) -> Result<Option<RemovedRow>> {

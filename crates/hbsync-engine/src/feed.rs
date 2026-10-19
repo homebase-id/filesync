@@ -70,18 +70,41 @@ impl std::ops::AddAssign for FeedReport {
 /// schema, Recently deleted): a device that hasn't read the feed for nearly that long (by the
 /// server's clock: the cursor's time, or [`keys::READ_AT`], against the first page's; decided
 /// before that page is applied) reads all of it again ([`Reread`]).
+///
+/// Slim pages may be longer than whole ones ([`Pages`]): after a whole page they are as long,
+/// and each slim page applied doubles them. A slim page read again whole is read as far as a
+/// whole page goes, and the feed continues from there; its rows before the first new one, when
+/// a whole page wouldn't reach it, are read again slim first.
 pub fn pull<G: DerefMut<Target = StateDb>>(
     db: impl Fn() -> G,
     remote: &dyn Remote,
-    page_size: usize,
+    pages: impl Into<Pages>,
     reread: &mut Option<Reread>,
 ) -> Result<FeedReport, FeedError> {
-    let mut report = read_pages(&db, remote, page_size, reread)?;
+    let mut report = read_pages(&db, remote, pages.into(), reread)?;
     // A re-read open: what is left of it asked about (once nothing is, it ends).
     if let Some(asking) = reread.as_ref().map(Reread::to_ask) {
         report.deleted += settle(&db, reread, ask(remote, &asking))?;
     }
     Ok(report)
+}
+
+/// Rows of the feed read per request, at most: a slim page's rows are a fraction of a whole
+/// one's, in bytes and in the work they take.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pages {
+    pub whole: usize,
+    pub slim: usize,
+}
+
+impl From<usize> for Pages {
+    /// Slim and whole pages alike.
+    fn from(rows: usize) -> Pages {
+        Pages {
+            whole: rows,
+            slim: rows,
+        }
+    }
 }
 
 /// The pages of [`pull`], without the re-read's questions ([`Reread::to_ask`], [`ask`],
@@ -90,7 +113,7 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
 fn read_pages<G: DerefMut<Target = StateDb>>(
     db: impl Fn() -> G,
     remote: &dyn Remote,
-    page_size: usize,
+    pages: Pages,
     reread: &mut Option<Reread>,
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
@@ -118,13 +141,22 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
             .max(read_at),
     };
     let mut slim = None;
+    // Slim pages start as long as whole ones after a whole page, and grow in a run of them.
+    let whole_rows = pages.whole.max(1);
+    let most_slim = pages.slim.max(whole_rows);
+    let mut slim_rows = whole_rows;
+    // The rows before the first new one of a slim page, read again to apply them slim. Counted
+    // as the server returned them (a row filtered out for this client may make the read stop
+    // short of the new one: the whole page that follows then starts on known rows).
+    let mut known_rows: Option<usize> = None;
     loop {
         let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
         let cursor = cursor.as_deref();
         let page = if *slim.get_or_insert(cursor.is_some()) {
-            Page::Slim(with_retries(|| remote.change_refs(cursor, page_size))?)
+            let rows = known_rows.unwrap_or(slim_rows);
+            Page::Slim(with_retries(|| remote.change_refs(cursor, rows))?)
         } else {
-            Page::Whole(with_retries(|| remote.changes(cursor, page_size))?)
+            Page::Whole(with_retries(|| remote.changes(cursor, whole_rows))?)
         };
         let now = page.server_time();
         report.server_time = Some(now);
@@ -141,22 +173,39 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
             slim = None;
             continue;
         }
-        // A slim page applies on its own, or else is read whole.
+        // A slim page applies on its own, or else is read whole. Its rows before the first new
+        // one, if a whole page wouldn't reach it, are read again slim first.
         let slim_applied = match &page {
-            Page::Slim(refs) => {
-                if let Some(r) = reread.as_mut() {
-                    r.shown(refs.refs.iter().map(|r| r.file_id));
+            Page::Slim(refs) => match apply_slim(&db, refs, cursor, &mut report)? {
+                Slim::Applied(has_more) => {
+                    // Shown only once applied: read again, it may go less far.
+                    if let Some(r) = reread.as_mut() {
+                        r.shown(refs.refs.iter().map(|r| r.file_id));
+                    }
+                    Some(has_more)
                 }
-                apply_slim(&db, refs, cursor, &mut report)?
-            }
+                // Each such read asks for fewer rows: it ends.
+                Slim::NewAt(i) if i >= whole_rows && known_rows.is_none_or(|k| i < k) => {
+                    known_rows = Some(i);
+                    continue;
+                }
+                Slim::NewAt(_) => None,
+            },
             Page::Whole(_) => None,
         };
+        let before_new = known_rows.take().is_some();
         let (has_more, nothing_new) = match slim_applied {
-            Some(has_more) => (has_more, true),
+            // The rows before a new one: it comes next.
+            Some(has_more) if before_new => (has_more, false),
+            Some(has_more) => {
+                slim_rows = slim_rows.saturating_mul(2).min(most_slim);
+                (has_more, true)
+            }
             None => {
+                slim_rows = whole_rows;
                 let whole = match page {
                     Page::Whole(whole) => whole,
-                    Page::Slim(_) => with_retries(|| remote.changes(cursor, page_size))?,
+                    Page::Slim(_) => with_retries(|| remote.changes(cursor, whole_rows))?,
                 };
                 if let Some(r) = reread.as_mut() {
                     r.shown(whole.entries.iter().map(|h| h.file_id));
@@ -309,26 +358,35 @@ impl Page {
     }
 }
 
-/// A slim page, applied if it holds nothing new: whether more follow; `None` if it holds
-/// something new (nothing applied).
+/// What became of a slim page ([`apply_slim`]).
+enum Slim {
+    /// It held nothing new, and was applied: whether more follow.
+    Applied(bool),
+    /// Its first new row (0 when one didn't read): nothing applied.
+    NewAt(usize),
+}
+
+/// A slim page, applied if it holds nothing new.
 fn apply_slim<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     page: &RefsPage,
     cursor: Option<&str>,
     report: &mut FeedReport,
-) -> Result<Option<bool>, FeedError> {
+) -> Result<Slim, FeedError> {
     // Checked where it is applied: a commit in between may have changed what is known.
-    let applied = db().write(|s| {
-        if page.unread > 0 || !known(s, &page.refs)? {
-            return Ok(false);
+    Ok(db().write(|s| {
+        if page.unread > 0 {
+            return Ok(Slim::NewAt(0));
+        }
+        if let Some(i) = first_unknown(s, &page.refs)? {
+            return Ok(Slim::NewAt(i));
         }
         for r in &page.refs {
             report.count(apply_ref(s, r)?);
         }
         save_cursor(s, cursor, !page.refs.is_empty(), &page.cursor)?;
-        Ok(true)
-    })?;
-    Ok(applied.then_some(page.has_more))
+        Ok(Slim::Applied(page.has_more))
+    })?)
 }
 
 /// A whole page, applied: whether more follow, and whether it held nothing new.
@@ -361,15 +419,21 @@ impl FeedReport {
     }
 }
 
-/// Whether the store knows every one of `refs`: a tombstone needs nothing, the rest are
-/// versions it has, in Recently deleted or else in the mirror.
+/// Whether the store knows every one of `refs` ([`first_unknown`]).
 fn known(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
-    let versions: Vec<(RemoteRef, bool)> = refs
+    Ok(first_unknown(s, refs)?.is_none())
+}
+
+/// The first of `refs` the store doesn't know: a tombstone needs nothing, the rest are
+/// versions it has, in Recently deleted or else in the mirror.
+fn first_unknown(s: &Store<'_>, refs: &[ChangeRef]) -> Result<Option<usize>, StateError> {
+    let (at, versions): (Vec<usize>, Vec<(RemoteRef, bool)>) = refs
         .iter()
-        .filter(|r| !r.deleted)
-        .map(|r| (r.at(), r.removed_at.is_some()))
-        .collect();
-    s.known(&versions)
+        .enumerate()
+        .filter(|(_, r)| !r.deleted)
+        .map(|(i, r)| (i, (r.at(), r.removed_at.is_some())))
+        .unzip();
+    Ok(s.first_unknown(&versions)?.map(|i| at[i]))
 }
 
 /// Stores the cursor after a page; unchanged on an idle pull: no write, so nothing to sync.
