@@ -3410,3 +3410,98 @@ fn a_removal_answered_as_a_tombstone_reads_no_header() -> R {
     );
     Ok(())
 }
+
+/// A delete taken back: the files the other device set aside in its trash when the delete
+/// came are taken from there, not over the network, each only once its bytes read as the
+/// drive's. A trash file with other bytes (changed there) stays, and its file is downloaded.
+#[test]
+fn a_restore_takes_the_bytes_from_the_trash() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let (x, y, z) = ("x".repeat(1000), "y".repeat(2000), "z".repeat(3000));
+    a.write("run/x.txt", &x)?;
+    a.write("run/sub/y.txt", &y)?;
+    a.write("run/z.txt", &z)?;
+    a.sync()?;
+    let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("run"))?;
+    a.sync()?;
+    b.sync()?;
+    assert!(b.read_text("run/x.txt").is_err(), "deleted on b");
+    let entry = fs::read_dir(b.root.join(".hbsync/trash"))?
+        .next()
+        .ok_or("no trash entry")??
+        .path();
+    // Changed in the trash, its size kept: not the drive's bytes.
+    let changed = "Z".repeat(3000);
+    fs::write(entry.join("run/z.txt"), &changed)?;
+    let run = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "run")
+        .ok_or("run not listed")?;
+    assert_eq!(a.engine.drive().restore(&[run.node])?, 5);
+    let served = b.remote.faults().served;
+    b.sync()?;
+    assert_eq!(
+        b.remote.faults().served - served,
+        3000,
+        "only z.txt over the network"
+    );
+    assert_eq!(b.read_text("run/x.txt")?, x);
+    assert_eq!(b.read_text("run/sub/y.txt")?, y);
+    assert_eq!(b.read_text("run/z.txt")?, z);
+    assert!(!entry.join("run/x.txt").exists(), "taken from the trash");
+    assert_eq!(fs::read_to_string(entry.join("run/z.txt"))?, changed);
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// A restore taken from the trash, with a crash or a power cut at any of the sync's commits:
+/// the next sync finishes it, every file whole and in place, from the trash or the drive.
+#[test]
+fn a_crash_while_taking_from_the_trash_loses_nothing() -> R {
+    for at in 0..8 {
+        for before in [true, false] {
+            for kept in [common::Kept::All, common::Kept::Durable(None)] {
+                let case = format!("at {at}, before {before}, {kept:?}");
+                let server = server();
+                let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+                for i in 0..4 {
+                    a.write(&format!("F/f{i}.txt"), format!("{i}").repeat(100))?;
+                }
+                a.write("F/G/g.txt", "g".repeat(100))?;
+                a.sync()?;
+                let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+                b.sync()?;
+                fs::remove_dir_all(a.root.join("F"))?;
+                a.sync()?;
+                b.sync()?;
+                let f = a
+                    .recently_deleted(10)?
+                    .into_iter()
+                    .find(|i| i.path == "F")
+                    .ok_or("F not listed")?;
+                a.engine.drive().restore(&[f.node])?;
+                common::crash(&mut b, kept, move |now, n| {
+                    n == at && (now == Commit::Before) == before
+                })?;
+                b.sync()?;
+                for i in 0..4 {
+                    assert_eq!(
+                        b.read_text(&format!("F/f{i}.txt"))?,
+                        format!("{i}").repeat(100),
+                        "{case}"
+                    );
+                }
+                assert_eq!(b.read_text("F/G/g.txt")?, "g".repeat(100), "{case}");
+                a.sync()?;
+                assert_eq!(a.tree_text(""), b.tree_text(""), "{case}");
+            }
+        }
+    }
+    Ok(())
+}

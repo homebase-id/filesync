@@ -80,7 +80,7 @@ impl PartialFile {
     /// final hash covers every byte.
     pub fn open(dir: &Path, key: &str, algorithm: HashAlgorithm) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
-        let path = dir.join(format!("{key}.partial"));
+        let path = partial_path(dir, key);
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -141,6 +141,11 @@ impl PartialFile {
     }
 }
 
+/// Where [`PartialFile::open`] keeps the download `key`.
+pub fn partial_path(dir: &Path, key: &str) -> PathBuf {
+    dir.join(format!("{key}.partial"))
+}
+
 /// Appends to the partial file, hashing as it goes.
 impl Write for PartialFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
@@ -167,6 +172,46 @@ pub struct CompletedFile {
 impl CompletedFile {
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Takes the file at `src` (on the volume of `dir`) for the download `key` into `dir`
+    /// ([`PartialFile::open`]'s place), if it holds exactly the bytes `expected` (`size` of
+    /// them): it is hashed now, then moved there in one rename and its bytes synced, as a
+    /// download's are. It holds other bytes: nothing moves (`None`). Changed between its hash
+    /// and the move (its identity, size or mtime other): it goes back, and `None`. Fails where a
+    /// partial file of `key` is there already.
+    pub fn adopt(
+        src: &Path,
+        dir: &Path,
+        key: &str,
+        expected: ContentHash,
+        size: u64,
+    ) -> Result<Option<CompletedFile>, FileIoError> {
+        let meta = hbsync_platform::stat(src)?;
+        if meta.kind != hbsync_platform::EntryKind::File || meta.size != size {
+            return Ok(None);
+        }
+        let hashed = hash_file(src, expected.algorithm)?;
+        if hashed.hash != expected || hashed.size != size {
+            return Ok(None);
+        }
+        fs::create_dir_all(dir)?;
+        let path = partial_path(dir, key);
+        ops::rename_noreplace(src, &path)?;
+        let moved = hbsync_platform::stat(&path)?;
+        if moved.file_id != hashed.meta.file_id
+            || !hashed.meta.fingerprint().same_after_rename(&moved)
+        {
+            // Not the bytes hashed: back where it was.
+            ops::rename_noreplace(&path, src)?;
+            return Ok(None);
+        }
+        File::open(&path)?.sync_all()?;
+        Ok(Some(CompletedFile {
+            path,
+            hash: expected,
+            size,
+        }))
     }
 
     /// Sets mtime and executable bit before the file becomes visible.
@@ -279,6 +324,34 @@ mod tests {
             0,
             "temp dir is empty after persist"
         );
+        Ok(())
+    }
+
+    /// A file with the bytes wanted is taken as the download, in one rename; one with other
+    /// bytes, or of another size, stays where it is, untouched.
+    #[test]
+    fn adopt_takes_only_the_bytes_wanted() -> Result<(), FileIoError> {
+        let dir = tempfile::tempdir()?;
+        let tmp = dir.path().join("tmp");
+        let (same, other) = (dir.path().join("same"), dir.path().join("other"));
+        fs::write(&same, b"wanted")?;
+        fs::write(&other, b"wanteD")?;
+        let expected = hash_bytes(b"wanted", ALG);
+        assert!(CompletedFile::adopt(&other, &tmp, "k", expected, 6)?.is_none());
+        assert!(CompletedFile::adopt(&same, &tmp, "k", expected, 5)?.is_none());
+        assert_eq!(fs::read(&other)?, b"wanteD");
+        assert!(same.exists());
+        let done = CompletedFile::adopt(&same, &tmp, "k", expected, 6)?.expect("taken");
+        assert!(!same.exists());
+        assert_eq!(done.hash, expected);
+        let target = dir.path().join("placed");
+        done.persist_new(&target, None)?;
+        assert_eq!(fs::read(&target)?, b"wanted");
+        // A partial file there already: refused, the source stays.
+        fs::write(&same, b"wanted")?;
+        PartialFile::open(&tmp, "k2", ALG)?;
+        assert!(CompletedFile::adopt(&same, &tmp, "k2", expected, 6).is_err());
+        assert_eq!(fs::read(&same)?, b"wanted");
         Ok(())
     }
 

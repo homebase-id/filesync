@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
+use hbsync_fileio::{
+    CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file, partial_path,
+};
 use hbsync_remote::{Answers, NodeMeta, Pace, Remote, RemoteError, Upload};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target};
 
@@ -138,6 +140,10 @@ pub struct Download {
     pub key: String,
     /// The hash the `local` rows keep (computed too if the remote uses another algorithm).
     pub local_algorithm: HashAlgorithm,
+    /// Files on this volume that may hold the bytes already (in the folder's trash: a delete
+    /// taken back), in the order to try them: one that holds exactly `expected` is taken
+    /// instead of a transfer ([`CompletedFile::adopt`]).
+    pub from_trash: Vec<PathBuf>,
 }
 
 /// The byte-moving half of a transfer.
@@ -451,19 +457,24 @@ fn remove(remote: &dyn Remote, jobs: Vec<Job>) -> Vec<(Job, JobResult)> {
 }
 
 fn download(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<JobResult, JobError> {
-    let mut partial = PartialFile::open(&d.tmp_dir, &d.key, d.expected.algorithm)?;
-    let offset = partial.offset();
-    // Resume where an earlier attempt stopped. The size is known, so always name the range:
-    // a remote needn't look it up first.
-    if offset < d.size {
-        let range = Some(offset..d.size);
-        let mut sink = MeteredWrite {
-            inner: &mut partial,
-            meter,
-        };
-        remote.read(d.file_id, range, &mut sink)?;
-    }
-    let file = partial.finish(Some(d.expected), Some(d.size))?;
+    let file = match from_trash(d) {
+        Some(file) => file,
+        None => {
+            let mut partial = PartialFile::open(&d.tmp_dir, &d.key, d.expected.algorithm)?;
+            let offset = partial.offset();
+            // Resume where an earlier attempt stopped. The size is known, so always name the
+            // range: a remote needn't look it up first.
+            if offset < d.size {
+                let range = Some(offset..d.size);
+                let mut sink = MeteredWrite {
+                    inner: &mut partial,
+                    meter,
+                };
+                remote.read(d.file_id, range, &mut sink)?;
+            }
+            partial.finish(Some(d.expected), Some(d.size))?
+        }
+    };
     file.set_attributes(Some(d.mtime_ms.saturating_mul(1_000_000)), d.executable)?;
     let local_hash = if d.expected.algorithm == d.local_algorithm {
         d.expected
@@ -471,6 +482,21 @@ fn download(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<JobR
         hash_file(file.path(), d.local_algorithm)?.hash
     };
     Ok(JobResult::Downloaded { file, local_hash })
+}
+
+/// The first of `d`'s trash files that holds exactly the bytes it wants, taken for it
+/// ([`CompletedFile::adopt`]); none where a download of them is under way already (its partial
+/// file goes on), or none holds them.
+fn from_trash(d: &Download) -> Option<CompletedFile> {
+    if d.from_trash.is_empty() || partial_path(&d.tmp_dir, &d.key).exists() {
+        return None;
+    }
+    d.from_trash.iter().find_map(|src| {
+        CompletedFile::adopt(src, &d.tmp_dir, &d.key, d.expected, d.size)
+            .inspect_err(|e| tracing::debug!("{} not taken from the trash: {e}", src.display()))
+            .ok()
+            .flatten()
+    })
 }
 
 #[cfg(test)]
