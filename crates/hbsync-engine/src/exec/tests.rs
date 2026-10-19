@@ -3476,3 +3476,56 @@ fn removals_go_in_one_request_and_a_changed_file_stays() -> R {
     assert!(h.db.read(|s| s.removed_by_node(a))?.is_some());
     Ok(())
 }
+
+/// A download whose bytes the trash holds (its node's entry, under its name) takes them from
+/// there. Where its tags can't be written over the ones the file had there, the file stays in
+/// the trash, untouched, and the download fetches the bytes instead.
+#[test]
+fn a_download_takes_the_bytes_from_the_trash_unless_its_tags_fail() -> R {
+    for tags_fail in [false, true] {
+        let mut h = Harness::new()?;
+        let (node, at) =
+            h.remote
+                .server()
+                .seed_file(NodeId::ROOT, "f", b"data", h.cfg.algorithm)?;
+        let content = h.content(b"data");
+        let mtime_ms = 1_700_000_000_000;
+        h.db.write(|s| {
+            s.put_mirror(&MirrorRow::from_content(
+                at,
+                node,
+                NodeId::ROOT,
+                NodeKind::File,
+                &NodeContent::file("f", mtime_ms, 4, false),
+                Some(content.hash),
+            ))
+        })?;
+        let entry = hbsync_local::layout::trash_dir(&h.cfg.root).join(format!(
+            "{}-{}",
+            hbsync_types::unix_now(),
+            node.0.simple()
+        ));
+        fs::create_dir_all(&entry)?;
+        let trashed = entry.join("f");
+        fs::write(&trashed, b"data")?;
+        ops::set_mtime(&trashed, mtime_ms * 1_000_000)?;
+        if tags_fail {
+            h.cfg.faults.fail(FailPoint::TagWrite, 1);
+        }
+        let served = h.remote.faults().served;
+        h.run(vec![Op::LocalDownload {
+            node,
+            parent: NodeId::ROOT,
+            name: "f".into(),
+            replace: false,
+            tags: Tags::default(),
+            drive: None,
+        }])?;
+        assert_eq!(fs::read(h.at("f")?)?, b"data", "{tags_fail}");
+        let fetched = h.remote.faults().served - served;
+        assert_eq!(fetched, if tags_fail { 4 } else { 0 }, "{tags_fail}");
+        assert_eq!(trashed.exists(), tags_fail, "{tags_fail}");
+        assert_eq!(h.records()?, []);
+    }
+    Ok(())
+}

@@ -394,6 +394,14 @@ impl Executor<'_> {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }
+        // A file taken from the trash holds the tags it had there: written over, or not used.
+        if left.failed && done.adopted() {
+            if let Some(trash) = &mut self.trash {
+                trash.refused.insert(node);
+            }
+            done.keep_for_retry();
+            return Ok(Outcome::Retry("its tags weren't written".into()));
+        }
         if left.claimed != record.placed_tags {
             record.placed_tags = left.claimed.clone();
             self.write_durable(|s| s.put_placing(&record))?;

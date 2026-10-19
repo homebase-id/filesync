@@ -484,12 +484,11 @@ fn fetch(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<Complet
     Ok(partial.finish(Some(d.expected), Some(d.size))?)
 }
 
-/// The first of `d`'s trash files that holds exactly the bytes it wants, taken for it
-/// ([`CompletedFile::adopt`]); none where none holds them (or a download of them is under way
-/// already: its partial file goes on).
+/// The first of `d`'s trash files that holds exactly the bytes it wants, taken for it where it
+/// is ([`CompletedFile::adopt`]); none where none holds them.
 fn from_trash(d: &Download) -> Option<CompletedFile> {
     d.from_trash.iter().find_map(|src| {
-        CompletedFile::adopt(src, &d.tmp_dir, &d.key, d.expected, d.size, d.mtime_ms)
+        CompletedFile::adopt(src, d.expected, d.size, d.mtime_ms)
             .inspect_err(|e| tracing::debug!("{} not taken from the trash: {e}", src.display()))
             .ok()
             .flatten()
