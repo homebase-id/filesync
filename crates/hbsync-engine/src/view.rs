@@ -313,10 +313,9 @@ fn build(
     // A remote node whose folder isn't in the mirror may be an orphan, which the main folder
     // puts into Recovered files: where that is (live, removed or synced here before), and what
     // in it may clash with the names coming (the plan asks for the rest: `Plan::unlisted`).
-    let mut missing = b.input.remote.missing_parents();
-    if scope.top.is_root() && !missing.is_empty() {
+    let missing = looked_up_removed(&b.input.remote, scope.top);
+    if missing.contains(&NodeId::RECOVERED) {
         b.load(NodeId::RECOVERED)?;
-        missing.insert(NodeId::RECOVERED);
     }
     // The folders in Recently deleted that remote nodes are in, and the removed ones above them
     // in this folder's part of the drive: what a folder's delete took along goes by their times
@@ -341,6 +340,17 @@ fn build(
         b.input.listed = Some(listed);
     }
     Ok(b.input)
+}
+
+/// The folders whose rows in Recently deleted a plan of `remote` looks up, in the folder whose
+/// top is `top`: those remote nodes are in that aren't in it, and Recovered files where one may
+/// be an orphan the main folder adopts (sync semantics §6.3).
+pub fn looked_up_removed(remote: &crate::tree::Tree, top: NodeId) -> HashSet<NodeId> {
+    let mut missing = remote.missing_parents();
+    if top.is_root() && !missing.is_empty() {
+        missing.insert(NodeId::RECOVERED);
+    }
+    missing
 }
 
 /// Whether the mirror no longer has `node` as the plan reads it: not there, or taken along by

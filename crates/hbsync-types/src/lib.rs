@@ -47,8 +47,7 @@ impl NodeId {
 
     /// The folder at the drive's top that holds what lost its folder for good (node schema,
     /// "Recovered files"), named [`RECOVERED_NAME`] when made. Fixed, the same on every drive,
-    /// so devices that adopt at once share one. It sorts above the ids clients make (UUIDv7,
-    /// and nearly every v4): a plain folder of the same name keeps its name.
+    /// so devices that adopt at once share one.
     pub const RECOVERED: NodeId = NodeId(Uuid::from_u128(0xfa4646cb_2df0_4f18_a3c6_1fc2b2f6ac4b));
 
     /// A fresh id. UUIDv7 keeps DB index inserts roughly sequential.
@@ -241,15 +240,13 @@ mod tests {
 
     /// On every drive: the node schema names it, and other clients know the folder by it.
     #[test]
-    fn recovered_files_id_matches_spec_and_sorts_high() {
+    fn recovered_files_id_matches_spec() {
         assert_eq!(
             NodeId::RECOVERED.0.to_string(),
             "fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b"
         );
         assert!(Role::of(NodeId::RECOVERED).is_none());
         assert!(![NodeId::ROOT, NodeId::OUTSIDE].contains(&NodeId::RECOVERED));
-        // A plain folder of the same name, made by any client of ours, keeps its name.
-        assert!(NodeId::new() < NodeId::RECOVERED);
     }
 
     #[test]

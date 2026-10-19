@@ -706,7 +706,11 @@ fn orphan_with_unknown_parent_is_recovered_when_mirror_is_complete() {
     let plan = w.plan();
     // Recovered files is made on both sides, before the orphan moves into it.
     let ops = without_drive(&plan.ops);
-    let at = |want: &Op| ops.iter().position(|op| op == want).expect("{want:?}");
+    let at = |want: &Op| {
+        ops.iter()
+            .position(|op| op == want)
+            .unwrap_or_else(|| panic!("{want:?}"))
+    };
     let made = at(&Op::RemoteCreate {
         node: recovered,
         parent: ROOT,
@@ -746,6 +750,31 @@ fn orphan_with_unknown_parent_is_recovered_when_mirror_is_complete() {
         "{:#?}", plan.ops
     );
     assert!(!plan.ops.iter().any(|op| op.node() == recovered));
+}
+
+/// Recovered files made beside a plain folder of its name, whose id sorts above its own: the
+/// plain folder keeps the name all the same.
+#[test]
+fn recovered_files_loses_a_name_clash_at_the_top() {
+    let [gone, child] = ids(2)[..] else {
+        unreachable!()
+    };
+    let plain = NodeId(Uuid::from_u128(u128::MAX));
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(plain, folder(ROOT, RECOVERED_NAME));
+    w.remote(child, Some(file(gone, "kept.txt", "data")));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteCreate { node, name, .. } if *node == NodeId::RECOVERED && *name == format!("{RECOVERED_NAME} (conflict 1)"))),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        !plan.ops.iter().any(|op| op.node() == plain),
+        "{:#?}",
+        plan.ops
+    );
 }
 
 /// Recovered files in Recently deleted comes back (alone) for a new orphan, where it was; one

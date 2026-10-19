@@ -106,6 +106,8 @@ struct Reconciler<'a> {
     forks: BTreeMap<NodeId, NodeId>,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
+    /// Orphans the repairs move into Recovered files (§6.3): they lose a name clash there.
+    adopted: HashSet<NodeId>,
     /// Remote nodes a folder's removal takes along ([`merge::taken_along`]).
     taken: HashSet<NodeId>,
     plan: Plan,
@@ -122,6 +124,7 @@ impl<'a> Reconciler<'a> {
             origin: HashMap::new(),
             forks: BTreeMap::new(),
             deferred: BTreeSet::new(),
+            adopted: HashSet::new(),
             taken: merge::taken_along(input),
             plan: Plan::default(),
         }

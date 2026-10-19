@@ -792,10 +792,23 @@ impl Sim {
             .collect()
     }
 
+    /// The folder `pick` picks of [`Sim::stopped_folders`], if the drive holds one.
+    fn pick_folder(&self, pick: usize) -> Option<NodeId> {
+        let folders = self.stopped_folders();
+        folders.get(pick % folders.len().max(1)).copied()
+    }
+
+    /// [`Action::DeleteOutright`].
+    fn delete_outright(&mut self, pick: usize) {
+        if let Some(folder) = self.pick_folder(pick) {
+            self.server.live.remove(&folder);
+            self.deleted_now(folder);
+        }
+    }
+
     /// [`Action::DeleteStopped`].
     fn delete_stopped(&mut self, pick: usize, done: usize) {
-        let folders = self.stopped_folders();
-        let Some(&folder) = folders.get(pick % folders.len().max(1)) else {
+        let Some(folder) = self.pick_folder(pick) else {
             return;
         };
         let tree = self.server.tree();
@@ -1357,13 +1370,7 @@ impl Sim {
             Action::Phone { op, pick } => self.phone(op, pick),
             Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
-            Action::DeleteOutright { pick } => {
-                let folders = self.stopped_folders();
-                if let Some(&folder) = folders.get(pick % folders.len().max(1)) {
-                    self.server.live.remove(&folder);
-                    self.deleted_now(folder);
-                }
-            }
+            Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;
@@ -1864,12 +1871,7 @@ impl Sim {
         // The folders in Recently deleted that live nodes are in, and the removed ones above
         // them, and the server's time of each live node's version, as the engine's view has them.
         let outside = client.scope().outside;
-        // Recovered files too, where an orphan may go, as the engine's view has it.
-        let mut missing = remote.missing_parents();
-        if client.coords.top.is_root() && !missing.is_empty() {
-            missing.insert(NodeId::RECOVERED);
-        }
-        for mut folder in missing {
+        for mut folder in hbsync_engine::view::looked_up_removed(&remote, client.coords.top) {
             while !input.removed.contains_key(&folder)
                 && !outside.contains(&folder)
                 && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))

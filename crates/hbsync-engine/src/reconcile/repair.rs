@@ -52,24 +52,28 @@ impl Reconciler<'_> {
     /// meets one but through a folder it filters, and puts that at its top, as does the main
     /// folder where Recovered files isn't synced here (filtered) or is the orphan itself.
     fn recovered_files(&mut self, node: NodeId) -> NodeId {
-        let recovered = NodeId::RECOVERED;
-        let synced = || {
-            self.opts
-                .filter
-                .in_folder("", RECOVERED_NAME, true)
-                .is_sync()
-        };
-        if node == recovered
+        if node == NodeId::RECOVERED
             || !self.opts.scope.top.is_root()
-            || self.masks.masked.contains(&recovered)
-            || !synced()
+            || self.masks.masked.contains(&NodeId::RECOVERED)
         {
             return NodeId::ROOT;
         }
-        if !self.merged.exists(recovered) && self.known_state(recovered).is_none() {
-            self.retarget(recovered, NodeState::folder(NodeId::ROOT, RECOVERED_NAME));
+        if !self.merged.exists(NodeId::RECOVERED) && self.known_state(NodeId::RECOVERED).is_none() {
+            // Made here: under the name it gets, if this device syncs that.
+            if !self
+                .opts
+                .filter
+                .in_folder("", RECOVERED_NAME, true)
+                .is_sync()
+            {
+                return NodeId::ROOT;
+            }
+            self.retarget(
+                NodeId::RECOVERED,
+                NodeState::folder(NodeId::ROOT, RECOVERED_NAME),
+            );
         }
-        recovered
+        NodeId::RECOVERED
     }
 
     pub(super) fn fix_orphans(&mut self) {
@@ -116,6 +120,7 @@ impl Reconciler<'_> {
                     if let Some(mut state) = self.merged.get(node).cloned() {
                         state.parent = self.recovered_files(node);
                         self.retarget(node, state);
+                        self.adopted.insert(node);
                         self.plan.conflicts.push(Conflict::Orphan { node });
                         // Its new folder may have to come back first.
                         queue.push(node);
@@ -200,15 +205,6 @@ impl Reconciler<'_> {
     }
 
     pub(super) fn fix_names(&mut self) {
-        let adopted: HashSet<NodeId> = self
-            .plan
-            .conflicts
-            .iter()
-            .filter_map(|c| match c {
-                Conflict::Orphan { node } => Some(*node),
-                _ => None,
-            })
-            .collect();
         let parents: BTreeSet<NodeId> = self
             .scope
             .iter()
@@ -250,8 +246,12 @@ impl Reconciler<'_> {
                 unlisted |= part.is_some();
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses;
-                // and an orphan moving in loses to what is there.
-                group.sort_by_key(|n| (!self.deferred.contains(n), adopted.contains(n), *n));
+                // and an orphan moving in, or Recovered files made beside a folder of its
+                // name, loses to what is there.
+                group.sort_by_key(|n| {
+                    let arriving = self.adopted.contains(n) || *n == NodeId::RECOVERED;
+                    (!self.deferred.contains(n), arriving, *n)
+                });
                 for loser in group.into_iter().skip(keep) {
                     if self.deferred.contains(&loser) {
                         continue;

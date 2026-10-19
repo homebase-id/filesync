@@ -68,8 +68,8 @@ Computers syncing the main folder move such a node into it (sync semantics §6.3
   `versionTag` (a removed folder a live node brings back: restored and moved in one update). A
   name taken in it: the orphan gets `<stem> (conflict <n>)`.
 - An orphan only removed (in Recently deleted) isn't moved: it stays an item of its own there.
-- The id sorts above the ids clients make: in a name clash at the top, a plain folder called
-  `Recovered files` keeps its name and this one is renamed.
+- In a name clash at the top it is the one renamed (`Recovered files (conflict 1)`): a plain
+  folder called `Recovered files` keeps its name, whatever the ids.
 
 ## File header fields
 

@@ -135,7 +135,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 1. **Unique names per folder**, compared by `key(name) = casefold(NFC(name))`. On a clash the
    node with the lower node id (byte order) keeps the name; each other node is renamed to
    `<stem> (conflict <n>)<ext>` with the smallest `n ≥ 1` that is free. Applies equally to
-   files and folders.
+   files and folders. Recovered files, and an orphan moving into it, lose a clash whatever the
+   ids (rule 3).
 2. **No cycles.** If merged moves form a cycle, revert the local moves taking part in it (the
    remote side has already published its moves). Revert one at a time until no cycle remains.
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
@@ -172,8 +173,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      move things out or delete it, and a deleted one comes back only for a new orphan. Nothing
      removes it when empty (that would only fill Recently deleted).
    - Names: an orphan moving in loses a clash to what is there (`<stem> (conflict <n>)`); the
-     folder itself clashes at the top like any folder, and its id sorts high, so a plain
-     folder of the same name keeps its name.
+     folder itself loses a clash at the top too, so a plain folder of the same name keeps its
+     name.
    - A device that filters Recovered files (§10), and a role folder (a node written into a
      removed folder it filters), puts the orphan at its top instead.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
