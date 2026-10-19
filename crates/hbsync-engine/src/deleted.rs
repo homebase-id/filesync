@@ -1311,14 +1311,17 @@ fn delete_for_good(
     // The rows of the passes not yet begun, at their versions.
     let mut later: HashSet<RemoteRef> = passes
         .iter()
+        .skip(1)
         .flatten()
         .map(|r| r.row.remote_ref())
         .collect();
     let mut gone = 0;
-    for pass in passes {
+    for (i, pass) in passes.iter().enumerate() {
         let began = Instant::now();
-        for r in pass {
-            later.remove(&r.row.remote_ref());
+        if i > 0 {
+            for r in pass {
+                later.remove(&r.row.remote_ref());
+            }
         }
         let mut going: Vec<&RemovedRow> = Vec::new();
         for r in pass {
@@ -1326,7 +1329,8 @@ fn delete_for_good(
             if let Some(n) = to_go.get_mut(&r.row.parent) {
                 *n -= 1;
             }
-            // A folder holding anything else here (what failed to go, or came meanwhile) stays.
+            // A folder holding anything else here (what failed to go, or came meanwhile) stays:
+            // the drive's answer below covers it too, this keeps it out of the question.
             if r.row.kind == NodeKind::Folder
                 && locked(account).read(|s| s.child_count(r.row.node))? > held
             {

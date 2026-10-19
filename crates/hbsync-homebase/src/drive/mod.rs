@@ -531,6 +531,10 @@ impl Remote for HomebaseRemote {
                         holding.insert(folder);
                     }
                 }
+                // Each folder known to hold one: the rest of the pages can't change that.
+                if some.iter().all(|f| holding.contains(f)) {
+                    break;
+                }
                 // A page may be empty with more to come (the query's hold-back).
                 match page.cursor_state {
                     Some(next) if page.has_more_rows && Some(&next) != cursor.as_ref() => {

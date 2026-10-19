@@ -470,12 +470,7 @@ impl FakeServer {
         self.files
             .values()
             .filter(|f| {
-                let at = RemoteRef {
-                    file_id: f.header.file_id,
-                    version: f.header.version,
-                };
-                matches!(f.header.body, RemoteBody::Live { .. })
-                    && holds.counts(at, f.header.removed_at.is_some())
+                !f.header.is_deleted() && holds.counts(f.header.at(), f.header.removed_at.is_some())
             })
             .map(|f| f.header.parent)
             .filter(|p| folders.contains(p))

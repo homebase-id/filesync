@@ -58,7 +58,7 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
     ("deletes", deletes),
     ("deletes_in_one_request", deletes_in_one_request),
     ("deletes_for_good", deletes_for_good),
-    ("live_children", live_children),
+    ("folder_holdings", folder_holdings),
     ("tombstone_in_the_feed", tombstone_in_the_feed),
     (
         "removal_keeps_the_bytes_and_restores",
@@ -613,7 +613,7 @@ fn deletes_in_one_request(b: &Bench) -> Outcome {
 /// tombstone doesn't count, nor one in another folder. It holds any file while one that isn't
 /// deleted is in it, removed too, a tombstone not; but the files named at their versions (one
 /// written since counts). Several folders are asked at once.
-fn live_children(b: &Bench) -> Outcome {
+fn folder_holdings(b: &Bench) -> Outcome {
     let (dir, _) = b.folder("children")?;
     let (other, _) = b.folder("other")?;
     let (empty, _) = b.folder("empty")?;
