@@ -178,9 +178,16 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      a level at a time), it removes them with `update-archival-status-batch`, each at the
      version the client knows: one written since (`versionTagMismatch`), or gone, stays live,
      and so does what is in it. It leaves alone a node whose time the client doesn't know, a
-     node written after the removal (an edit, a folder moved in) and a role folder, and the
-     live folders above them. Each node it removes is deleted with its folder (removed after
-     it) and has its own 30 days: the item goes once they are past too. What the purge
+     node written after the removal (an edit, a folder moved in) and a role folder, the live
+     folders above them, and what is in a folder one of them keeps. A live folder it removes is
+     the nearest removed folder of what is in it from then on, so a node in it the client
+     didn't know of (written since its last read, or one it doesn't read) would count as taken
+     along by it: once the server's queries show what was written up to its last removal (1.1
+     s), it asks, in one question, whether any of those folders still holds a live node, and
+     puts those back (`archivalStatus` 0, at the version it wrote), with the ones above them
+     it removed, top-down; what went with them stays removed. Each node it removes is deleted
+     with its folder (removed after it) and has its own 30 days: the item goes once they are
+     past too. What the purge
      doesn't take (a node written after the removal, one whose time isn't known, a file this
      client doesn't read, such as another app's) keeps its folder in Recently deleted,
      restorable, until it is restored or the node is removed. Before a pass of folders goes, the server is asked,
@@ -274,8 +281,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
 - 2026-10-19: the purge removes what a delete that stopped half way left live (The purge, 2.):
   the live nodes the delete of an item it would delete took along (written no later than the
   removal, by the server's time, at the version the client knows; the folder confirmed still
-  removed), top-down, with `update-archival-status-batch`. They go for good 30 days after
-  their own removal, the folder with them. A removed folder no longer stays indefinitely for
+  removed), top-down, with `update-archival-status-batch`; a live folder it removed that the
+  server then says still holds a live node is put back. They go for good 30 days after their
+  own removal, the folder with them. A removed folder no longer stays indefinitely for
   a delete that never finished; one holding a node written after the removal, or one the
   client doesn't read, still does. The node is the same.
 - 2026-10-18: emptying an item of Recently deleted by hand takes everything removed below it,

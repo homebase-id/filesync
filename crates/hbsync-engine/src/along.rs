@@ -1,7 +1,7 @@
 //! What a folder's delete took along (node schema, Recently deleted): one rule, for the
 //! reconciler, the purge and the simulator. Deleting for good takes removed nodes only: the
-//! purge first removes what a delete took along and left live ([`crate::deleted::taken_levels`],
-//! node schema, The purge, 2.), and a removed folder holding a live node stays.
+//! purge first removes what a delete took along and left live ([`taken_levels`], node schema,
+//! The purge, 2.), and a removed folder holding a live node stays.
 
 use std::collections::{HashMap, HashSet};
 
@@ -22,7 +22,10 @@ pub fn taken_along(
     changed_at: impl Fn(NodeId) -> Option<i64>,
 ) -> HashSet<NodeId> {
     let written_by = |node: NodeId, removed: i64| changed_at(node).is_none_or(|at| at <= removed);
-    verdicts(live, removed_at, written_by).into_keys().collect()
+    verdicts(live, removed_at, written_by)
+        .1
+        .into_keys()
+        .collect()
 }
 
 /// What the purge removes of what deletes left live (node schema, The purge, 2.), in levels
@@ -39,15 +42,24 @@ pub fn taken_levels(
     let written_by = |node: NodeId, removed: i64| {
         !keep(node) && changed_at(node).is_some_and(|at| at <= removed)
     };
+    let (parent, depths) = verdicts(live, removed_at, written_by);
     let mut levels: Vec<Vec<NodeId>> = Vec::new();
-    for (node, depth) in verdicts(live, removed_at, written_by) {
+    for (node, depth) in depths.iter().map(|(n, d)| (*n, *d)) {
         if levels.len() <= depth {
             levels.resize_with(depth + 1, Vec::new);
         }
         levels[depth].push(node);
     }
-    for level in &mut levels {
+    // Only below what goes: one in a folder another node keeps (taken along, for the
+    // reconciler, but its folder stays) would go on its own.
+    let mut going: HashSet<NodeId> = HashSet::new();
+    for (depth, level) in levels.iter_mut().enumerate() {
+        level.retain(|n| depth == 0 || going.contains(&parent[n]));
         level.sort();
+        going.extend(level.iter().copied());
+    }
+    while levels.last().is_some_and(Vec::is_empty) {
+        levels.pop();
     }
     levels
 }
@@ -55,46 +67,45 @@ pub fn taken_levels(
 /// The live nodes `live` (each with its folder) taken along by the removal of a folder, each
 /// with its depth below it (0: right in it): those `written_by(node, removal)` says were
 /// written by that removal's time, through live folders taken along too, but the folders above
-/// one not taken.
+/// one not taken. And `live` by node.
+#[allow(clippy::type_complexity)]
 fn verdicts(
     live: impl IntoIterator<Item = (NodeId, NodeId)>,
     removed_at: impl Fn(NodeId) -> Option<i64>,
     written_by: impl Fn(NodeId, i64) -> bool,
-) -> HashMap<NodeId, usize> {
+) -> (HashMap<NodeId, NodeId>, HashMap<NodeId, usize>) {
     let parent: HashMap<NodeId, NodeId> = live.into_iter().collect();
     // Each node's verdict: taken by the removal at that time, at that depth below it, or not
     // (`None`).
     let mut verdict: HashMap<NodeId, Option<(i64, usize)>> = HashMap::new();
     let mut chain = Vec::new();
     for &start in parent.keys() {
-        // Up to a node decided, a removed folder, or the top of the live nodes (or a cycle).
+        // Up to a node decided, a removed folder, or the top of the live nodes (or a cycle):
+        // the removal the last node of the chain is under, and its depth below it.
         chain.clear();
         let mut at = start;
         let mut above = loop {
             if let Some(&known) = verdict.get(&at) {
-                break known;
+                break known.map(|(removed, depth)| (removed, depth + 1));
             }
             chain.push(at);
             let up = parent[&at];
             if let Some(removed) = removed_at(up) {
-                // The removed folder itself, one above depth 0.
-                break Some((removed, usize::MAX));
+                break Some((removed, 0));
             }
             if !parent.contains_key(&up) || chain.contains(&up) {
                 break None;
             }
             if let Some(&known) = verdict.get(&up) {
-                break known;
+                break known.map(|(removed, depth)| (removed, depth + 1));
             }
             at = up;
         };
-        // `above` is what the last node of the chain is in: down from there.
+        // Down from there.
         for &node in chain.iter().rev() {
-            let taken = above
-                .filter(|(removed, _)| written_by(node, *removed))
-                .map(|(removed, depth)| (removed, depth.wrapping_add(1)));
+            let taken = above.filter(|(removed, _)| written_by(node, *removed));
             verdict.insert(node, taken);
-            above = taken;
+            above = taken.map(|(removed, depth)| (removed, depth + 1));
         }
     }
     // A node not taken keeps the folders above it.
@@ -112,10 +123,11 @@ fn verdicts(
             at = up;
         }
     }
-    verdict
+    let taken = verdict
         .into_iter()
         .filter_map(|(n, v)| Some((n, v?.1)))
-        .collect()
+        .collect();
+    (parent, taken)
 }
 
 #[cfg(test)]
@@ -183,18 +195,8 @@ mod tests {
     /// role folder, and the folders above them, stay.
     #[test]
     fn the_purge_takes_what_was_taken_along_top_down() {
-        let [
-            f,
-            a,
-            b,
-            c,
-            late,
-            in_late,
-            unknown_dir,
-            unknown,
-            role_parent,
-            role,
-        ] = ids();
+        let [f, a, b, c, late, in_late, unknown_dir, unknown] = ids();
+        let [role_parent, role, beside, late_dir, late_file] = ids();
         let live = [
             (a, f, Some(5)),
             (b, a, Some(6)),
@@ -209,6 +211,10 @@ mod tests {
             // the folder above it.
             (role_parent, f, Some(1)),
             (role, role_parent, Some(1)),
+            // Taken along, but its folder stays (late keeps it): not on its own.
+            (beside, late_dir, Some(1)),
+            (late_dir, f, Some(1)),
+            (late_file, late_dir, Some(30)),
         ];
         let times: HashMap<NodeId, Option<i64>> = live.iter().map(|(n, _, t)| (*n, *t)).collect();
         let levels = |removed: Option<i64>| {

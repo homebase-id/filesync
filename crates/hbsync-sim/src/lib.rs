@@ -94,8 +94,8 @@ pub enum Action {
     Purge,
     /// Another device (the phone, or a computer never seen again) deletes a folder of the
     /// drive and stops half way: the folder, then the first `done` of what is in it, top-down
-    /// (node schema, Recently deleted); the rest stays live, taken along. Not the role folder
-    /// ([`Action::DeleteRoleFolder`]); nothing when the drive holds no other folder.
+    /// (node schema, Recently deleted); the rest stays live, taken along. Outside the role
+    /// folder ([`Sim::stopped_folders`]); nothing when the drive holds no such folder.
     DeleteStopped {
         pick: usize,
         done: usize,
@@ -766,13 +766,13 @@ impl Sim {
         }
     }
 
-    /// The folders [`Action::DeleteStopped`] picks from: the drive's, but the role folder.
+    /// The folders [`Action::DeleteStopped`] picks from: the drive's, outside the role folder
+    /// (the phone's deletes there are [`Action::Phone`]'s and [`Action::DeleteRoleFolder`]'s).
     fn stopped_folders(&self) -> Vec<NodeId> {
-        let docs = Role::Documents.node();
         self.server
             .live
             .iter()
-            .filter(|(n, s)| s.state.kind == NodeKind::Folder && **n != docs)
+            .filter(|(n, s)| s.state.kind == NodeKind::Folder && !self.server.in_role_folder(**n))
             .map(|(n, _)| *n)
             .collect()
     }

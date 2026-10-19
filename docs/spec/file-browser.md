@@ -165,8 +165,11 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
     removed folder that directly holds one first: go on only if it is still removed at the version you
     have. Then remove them top-down, a level at a time, with `update-archival-status-batch`
     (`archivalStatus` 2, each at its `versionTag`): one answered `versionTagMismatch` or not found stays
-    live, and so does everything in it. Don't delete them for good in the same purge: each has its own 30
-    days from this removal. A mini-app that doesn't do this leaves it to the desktop clients' purge; it
+    live, and so does everything in it. Then, 1.1 s after the last of those requests, ask the server (a
+    `groupId` query) whether any live folder you removed still holds a live node (one you didn't know of
+    would count as taken along by your removal), and put those back (`archivalStatus` 0, at the version you
+    wrote), with the folders above them you removed, top-down. Don't delete them for good in the same
+    purge: each has its own 30 days from this removal. A mini-app that doesn't do this leaves it to the desktop clients' purge; it
     must never delete a live node for good instead.
 - **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.
 - **Every write sends `archivalStatus`:** the server replaces the whole header and takes a missing one for 0.
