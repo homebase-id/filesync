@@ -68,6 +68,122 @@ pub fn sync_dirs(dirs: impl IntoIterator<Item = PathBuf>) {
     drop(dirs);
 }
 
+/// Starts writing `file`'s data to the disk without waiting (Linux: `sync_file_range`), so a
+/// later [`sync_files`] of it has little left to wait for. Nothing elsewhere.
+pub fn start_writeback(file: &fs::File) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: a valid descriptor; only a hint, its result doesn't matter.
+        unsafe { libc::sync_file_range(file.as_raw_fd(), 0, 0, libc::SYNC_FILE_RANGE_WRITE) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = file;
+}
+
+/// Makes the data of each of `files` durable, as `fsync` would each, touching nothing but
+/// them: they are flushed from a few threads at once, which the file system serves with
+/// shared journal commits and drive-cache flushes (ext4, XFS, btrfs; Linux `fdatasync`).
+/// On macOS a plain `fsync` each, then one `F_FULLFSYNC` per volume: each is a flush of the
+/// whole drive's cache, which also takes every plain one before it. On Windows
+/// `FlushFileBuffers` each. The answer per file: one whose data may not be on the disk must
+/// not be put in place. A few files are open at a time, however many there are.
+pub fn sync_files(files: &[&Path]) -> Vec<io::Result<()>> {
+    let threads = (files.len() / 4).clamp(1, SYNC_THREADS);
+    let chunk = files.len().div_ceil(threads).max(1);
+    #[allow(unused_mut)]
+    let mut synced: Vec<io::Result<()>> = if threads == 1 {
+        files.iter().map(|p| sync_one(p)).collect()
+    } else {
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = files
+                .chunks(chunk)
+                .map(|part| {
+                    let n = part.len();
+                    (
+                        n,
+                        scope.spawn(move || part.iter().map(|p| sync_one(p)).collect()),
+                    )
+                })
+                .collect();
+            workers
+                .into_iter()
+                .flat_map(|(n, w)| {
+                    w.join().unwrap_or_else(|_| {
+                        (0..n)
+                            .map(|_| Err(io::Error::other("a sync panicked")))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect()
+        })
+    };
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        // One flush of the drive's cache per volume, through any file on it; a volume whose
+        // flush fails has none of its files durable.
+        let mut volumes: std::collections::HashMap<u64, io::Result<()>> = Default::default();
+        for (path, result) in files.iter().zip(synced.iter_mut()) {
+            if result.is_err() {
+                continue;
+            }
+            let flushed = fs::metadata(path).and_then(|m| {
+                let dev = m.dev();
+                if let Some(r) = volumes.get(&dev) {
+                    return r
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|e| io::Error::new(e.kind(), e.to_string()));
+                }
+                let r = fs::File::open(path).and_then(|file| {
+                    // SAFETY: a valid open descriptor.
+                    match unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } {
+                        -1 => Err(io::Error::last_os_error()),
+                        _ => Ok(()),
+                    }
+                });
+                let answer = r
+                    .as_ref()
+                    .map(|_| ())
+                    .map_err(|e| io::Error::new(e.kind(), e.to_string()));
+                volumes.insert(dev, r);
+                answer
+            });
+            *result = flushed;
+        }
+    }
+    synced
+}
+
+/// At most this many threads flush files at once ([`sync_files`]).
+const SYNC_THREADS: usize = 16;
+
+/// Flushes one file's data as far as [`sync_files`] needs (on macOS to the drive: its cache is
+/// flushed once after).
+fn sync_one(path: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::fd::AsRawFd;
+        let file = fs::File::open(path)?;
+        // SAFETY: a valid open descriptor. A plain fsync: Rust's `sync_data` is F_FULLFSYNC.
+        match unsafe { libc::fsync(file.as_raw_fd()) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // `fdatasync` (Linux); Windows flushes only through a handle that may write.
+        fs::OpenOptions::new()
+            .read(true)
+            .write(cfg!(windows))
+            .open(path)?
+            .sync_data()
+    }
+}
+
 /// Sets the modification time of a file or directory, in nanoseconds since the Unix epoch.
 pub fn set_mtime(path: &Path, mtime_ns: i64) -> io::Result<()> {
     let secs = mtime_ns.div_euclid(1_000_000_000);
@@ -355,6 +471,33 @@ mod tests {
             assert_ne!(fs::metadata(&state)?.file_attributes() & HIDDEN, 0);
         }
         assert!(state.is_dir());
+        Ok(())
+    }
+
+    /// Many files flushed together (more than the threads), each with its own answer.
+    #[test]
+    fn sync_files_flushes_many_and_fails_for_any() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let paths: Vec<PathBuf> = (0..100).map(|i| dir.path().join(format!("f{i}"))).collect();
+        for p in &paths {
+            let file = fs::File::create(p)?;
+            start_writeback(&file);
+        }
+        let all: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        assert!(sync_files(&all).iter().all(Result::is_ok));
+        assert!(sync_files(&[]).is_empty());
+        // A missing one fails alone.
+        let missing = dir.path().join("missing");
+        let mut some = all.clone();
+        some.insert(50, &missing);
+        let answers = sync_files(&some);
+        assert_eq!(answers.len(), 101);
+        assert!(
+            answers
+                .iter()
+                .enumerate()
+                .all(|(i, r)| r.is_err() == (i == 50))
+        );
         Ok(())
     }
 

@@ -178,6 +178,34 @@ fn a_clash_in_a_large_folder_takes_a_name_free_in_all_of_it() -> R {
     Ok(())
 }
 
+/// Downloads are put in place only once their bytes are durable, together: a group whose
+/// barrier fails places none of them, and they come in a later try.
+#[test]
+fn downloads_wait_for_their_bytes_to_be_durable() -> R {
+    let server = server();
+    let faults = Arc::new(hbsync_engine::exec::Faults::default());
+    let mut a = Client::new(&server, "a")?;
+    let failing = Arc::clone(&faults);
+    let mut b = Client::with_config(&server, "b", move |c| {
+        c.exec.faults = Arc::clone(&failing);
+    })?;
+    for i in 0..20 {
+        a.write(&format!("d/f{i}"), format!("{i}"))?;
+    }
+    a.sync()?;
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    assert!(
+        b.entries("d").is_empty(),
+        "nothing placed: {:?}",
+        b.entries("d")
+    );
+    faults.fail(FailPoint::Barrier, 1);
+    b.sync()?;
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    Ok(())
+}
+
 #[test]
 fn name_swap_uses_a_parked_name() -> R {
     let server = server();

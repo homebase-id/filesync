@@ -115,6 +115,32 @@ impl PartialFile {
         expected_size: Option<u64>,
     ) -> Result<CompletedFile, FileIoError> {
         self.file.sync_all()?;
+        self.complete(expected_hash, expected_size, true)
+    }
+
+    /// [`PartialFile::finish`] for one of many finishing together: a small file's bytes may
+    /// not be on the disk yet (their write-back is started), and it can't be put in place until
+    /// [`sync_completed`] has made them durable with the others' (in fewer flushes of the
+    /// drive's cache). A large one, and every one on Windows (which has no cheaper way to
+    /// flush many), is flushed here.
+    pub fn finish_in_group(
+        self,
+        expected_hash: Option<ContentHash>,
+        expected_size: Option<u64>,
+    ) -> Result<CompletedFile, FileIoError> {
+        if cfg!(windows) || self.written >= SYNC_ALONE_FROM {
+            return self.finish(expected_hash, expected_size);
+        }
+        ops::start_writeback(&self.file);
+        self.complete(expected_hash, expected_size, false)
+    }
+
+    fn complete(
+        self,
+        expected_hash: Option<ContentHash>,
+        expected_size: Option<u64>,
+        synced: bool,
+    ) -> Result<CompletedFile, FileIoError> {
         let actual = self.hasher.finalize();
         let fail = |err: FileIoError| {
             let _ = fs::remove_file(&self.path);
@@ -138,9 +164,14 @@ impl PartialFile {
             hash: actual,
             size: self.written,
             adopted: false,
+            synced,
         })
     }
 }
+
+/// Files from this size on flush their own bytes ([`PartialFile::finish_in_group`]): one flush
+/// costs little against writing them, and they flush in parallel.
+const SYNC_ALONE_FROM: u64 = 4 << 20;
 
 /// Where [`PartialFile::open`] keeps the download `key`.
 fn partial_path(dir: &Path, key: &str) -> PathBuf {
@@ -169,6 +200,22 @@ pub struct CompletedFile {
     pub hash: ContentHash,
     pub size: u64,
     adopted: bool,
+    /// Its bytes are durable: only then may it be put in place (a rename that a power cut
+    /// keeps, of a file whose bytes it lost, would show garbage under the name).
+    synced: bool,
+}
+
+/// Makes the bytes of `files` durable together ([`ops::sync_files`]: a few flushes of the
+/// drive's cache, not one each), so they can be put in place. Those already durable are left
+/// alone; one that fails stays not durable ([`CompletedFile::synced`]), the others count.
+pub fn sync_completed(files: &mut [&mut CompletedFile]) {
+    let mut waiting: Vec<&mut &mut CompletedFile> =
+        files.iter_mut().filter(|f| !f.synced).collect();
+    let paths: Vec<&Path> = waiting.iter().map(|f| f.path.as_path()).collect();
+    let answers = ops::sync_files(&paths);
+    for (f, answer) in waiting.iter_mut().zip(answers) {
+        f.synced = answer.is_ok();
+    }
 }
 
 impl CompletedFile {
@@ -204,6 +251,7 @@ impl CompletedFile {
             hash: expected,
             size,
             adopted: true,
+            synced: true,
         }))
     }
 
@@ -211,6 +259,21 @@ impl CompletedFile {
     /// the temp folder: until it is persisted it stays there, its bytes as they were.
     pub fn adopted(&self) -> bool {
         self.adopted
+    }
+
+    /// Whether its bytes are durable, so it may be put in place ([`sync_completed`]).
+    pub fn synced(&self) -> bool {
+        self.synced
+    }
+
+    /// A file whose bytes may not be durable is never put in place.
+    fn durable(&self) -> Result<(), FileIoError> {
+        match self.synced {
+            true => Ok(()),
+            false => Err(FileIoError::Io(io::Error::other(
+                "its bytes aren't on the disk yet (a fault of this client)",
+            ))),
+        }
     }
 
     /// Sets mtime and executable bit before the file becomes visible.
@@ -236,6 +299,7 @@ impl CompletedFile {
         target: &Path,
         created_ms: Option<i64>,
     ) -> Result<LocalMeta, FileIoError> {
+        self.durable()?;
         ops::rename_noreplace(&self.path, target)?;
         placed(target, created_ms)
     }
@@ -251,6 +315,7 @@ impl CompletedFile {
         expected: &Fingerprint,
         created_ms: Option<i64>,
     ) -> Result<LocalMeta, FileIoError> {
+        self.durable()?;
         let current = hbsync_platform::stat(target)?;
         if current.fingerprint() != *expected {
             return Err(FileIoError::TargetChanged);
@@ -283,6 +348,33 @@ mod tests {
     use crate::hash::hash_bytes;
 
     const ALG: HashAlgorithm = HashAlgorithm::Blake3;
+
+    /// A download whose bytes may not be on the disk is never put in place: only once a
+    /// barrier made them durable.
+    #[test]
+    fn an_unsynced_download_is_not_put_in_place() -> Result<(), FileIoError> {
+        let dir = tempfile::tempdir()?;
+        let mut done = Vec::new();
+        for name in ["a", "b"] {
+            let mut partial = PartialFile::open(dir.path(), name, ALG)?;
+            partial.write_all(name.as_bytes())?;
+            done.push(partial.finish_in_group(Some(hash_bytes(name.as_bytes(), ALG)), Some(1))?);
+        }
+        assert!(done.iter().all(|f| f.synced() == cfg!(windows)));
+        let target = dir.path().join("placed");
+        let first = done.remove(0);
+        if !cfg!(windows) {
+            assert!(first.persist_new(&target, None).is_err());
+            assert!(!target.exists());
+        }
+        let mut again = PartialFile::open(dir.path(), "a", ALG)?
+            .finish_in_group(Some(hash_bytes(b"a", ALG)), Some(1))?;
+        sync_completed(&mut [&mut again, &mut done[0]]);
+        assert!(again.synced() && done[0].synced());
+        again.persist_new(&target, None)?;
+        assert_eq!(fs::read(&target)?, b"a");
+        Ok(())
+    }
 
     #[test]
     fn hash_file_matches_bytes() -> Result<(), FileIoError> {
