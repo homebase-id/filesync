@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    Answers, ChangesPage, Deletes, ForGood, NodeMeta, Paced, RefsPage, Remote, RemoteBody,
+    Answers, ChangesPage, Deletes, ForGood, Holds, NodeMeta, Paced, RefsPage, Remote, RemoteBody,
     RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
@@ -501,7 +501,10 @@ impl Remote for HomebaseRemote {
         wire::to_remote(self.raw_header(file_id)?, self.client.key()).map_err(RemoteError::Fatal)
     }
 
-    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>> {
+    /// One `groupId` query a page at a time (any type, active files only): a removed file is
+    /// told by its `archivalStatus`, a file's version by its `versionTag` (minimal rows carry
+    /// both, **[verified]** odin-core #1967 `QueryBatchFileRef`: [`wire::FileRef`]).
+    fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
         let mut holding = HashSet::new();
         for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {
             let mut cursor: Option<String> = None;
@@ -519,11 +522,19 @@ impl Remote for HomebaseRemote {
                         holding.extend(some.iter().copied());
                         continue;
                     };
-                    if r.archival_status != ARCHIVAL_REMOVED
+                    let at = RemoteRef {
+                        file_id: RemoteFileId(r.file_id),
+                        version: VersionTag(r.version_tag),
+                    };
+                    if holds.counts(at, r.archival_status == ARCHIVAL_REMOVED)
                         && let Some(folder) = r.group_id.map(NodeId)
                     {
                         holding.insert(folder);
                     }
+                }
+                // Each folder known to hold one: the rest of the pages can't change that.
+                if some.iter().all(|f| holding.contains(f)) {
+                    break;
                 }
                 // A page may be empty with more to come (the query's hold-back).
                 match page.cursor_state {
@@ -695,7 +706,7 @@ fn same_files<A>(
     Ok(())
 }
 
-/// Folders asked about in one query ([`HomebaseRemote::holding_live`]).
+/// Folders asked about in one query ([`HomebaseRemote::holding`]).
 const CHILDREN_QUERY_FOLDERS: usize = 100;
 
 /// The trait's error for an `OdinClientErrorCode` (its camelCase name), if it has one of its own.

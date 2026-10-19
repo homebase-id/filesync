@@ -14,7 +14,7 @@ use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags, Target};
 
-use crate::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
+use crate::{ChangeRef, Holds, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
 
 pub type Outcome = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -58,7 +58,7 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
     ("deletes", deletes),
     ("deletes_in_one_request", deletes_in_one_request),
     ("deletes_for_good", deletes_for_good),
-    ("live_children", live_children),
+    ("folder_holdings", folder_holdings),
     ("tombstone_in_the_feed", tombstone_in_the_feed),
     (
         "removal_keeps_the_bytes_and_restores",
@@ -610,33 +610,52 @@ fn deletes_in_one_request(b: &Bench) -> Outcome {
 }
 
 /// A folder holds a live file while a live, not removed file is in it: a removed one or a
-/// tombstone doesn't count, nor one in another folder. Several folders are asked at once.
-fn live_children(b: &Bench) -> Outcome {
+/// tombstone doesn't count, nor one in another folder. It holds any file while one that isn't
+/// deleted is in it, removed too, a tombstone not; but the files named at their versions (one
+/// written since counts). Several folders are asked at once.
+fn folder_holdings(b: &Bench) -> Outcome {
     let (dir, _) = b.folder("children")?;
     let (other, _) = b.folder("other")?;
     let (empty, _) = b.folder("empty")?;
     let folders = [dir.node, other.node, empty.node];
-    let wait = || std::thread::sleep(b.remote.hold_back());
-    let holding = |expected: &[NodeId], why: &str| -> Outcome {
-        wait();
-        let mut got: Vec<NodeId> = b.remote.holding_live(&folders)?.into_iter().collect();
+    let none = HashSet::new();
+    let ask = |holds: Holds<'_>, expected: &[NodeId], why: &str| -> Outcome {
+        let mut got: Vec<NodeId> = b.remote.holding(&folders, holds)?.into_iter().collect();
         got.sort();
         let mut want = expected.to_vec();
         want.sort();
-        ensure!(got == want, "{why}: {got:?}");
+        ensure!(got == want, "{why}, {holds:?}: {got:?}");
         Ok(())
     };
-    holding(&[], "empty folders")?;
+    let holding = |live: &[NodeId], any: &[NodeId], why: &str| -> Outcome {
+        std::thread::sleep(b.remote.hold_back());
+        ask(Holds::Live, live, why)?;
+        ask(Holds::AnyBut(&none), any, why)
+    };
+    holding(&[], &[], "empty folders")?;
     let f = file("f", dir.node, b"1");
     let w = b.create(&f, Some(b"1"))?;
-    b.create(&file("g", other.node, b"2"), Some(b"2"))?;
-    holding(&[dir.node, other.node], "a live file in each")?;
+    let g = b.create(&file("g", other.node, b"2"), Some(b"2"))?;
+    let both = [dir.node, other.node];
+    holding(&both, &both, "a live file in each")?;
+    ask(Holds::AnyBut(&HashSet::from([g])), &[dir.node], "all but g")?;
     let gone = b.update(w, &removed(&f), None)?;
-    holding(&[other.node], "only a removed one in dir")?;
+    holding(&[other.node], &both, "only a removed one in dir")?;
+    ask(
+        Holds::AnyBut(&HashSet::from([gone])),
+        &[other.node],
+        "all but f",
+    )?;
+    // Named at the version it had before: written since, so it counts.
+    ask(
+        Holds::AnyBut(&HashSet::from([w])),
+        &both,
+        "all but f's last version",
+    )?;
     let w = b.update(gone, &f, None)?;
-    holding(&[dir.node, other.node], "restored")?;
+    holding(&both, &both, "restored")?;
     b.delete(w)?;
-    holding(&[other.node], "only a tombstone in dir")?;
+    holding(&[other.node], &[other.node], "only a tombstone in dir")?;
     Ok(())
 }
 

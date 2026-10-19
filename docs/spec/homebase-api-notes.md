@@ -260,10 +260,12 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   a re-read takes a file it had as gone only on a 404 for its header.
 - **What is in some folders**, any app's files too: `queryParams` `{groupId: [folders...],
   fileState: ["active"]}`, minimal rows, paged while `hasMoreRows` (a page may be empty with
-  more to come) (`HomebaseRemote::holding_live`); `groupId`, `fileState` and
+  more to come) (`HomebaseRemote::holding`); `groupId`, `fileState` and
   `archivalStatus` are filters of the query **[verified]** (`QueryBatch.cs:130-142, 351`,
   `FileQueryParams.cs`). Asked before folders are deleted for good, a pass of them in one
-  question: a live file in one that this client doesn't read (not in its mirror) keeps it.
+  question: any active file in one (live or removed) keeps it, one this client doesn't read
+  or doesn't know of yet (not in its DB) too, but the rows still to go in later passes, by
+  `fileId` and `versionTag`.
 - `sorting` must be sent: the default is creation order. `maxRecords: 0` → 500.
 - `cursorState` is a JSON string (`{paging:{time,row}}`), not base64. An empty page returns the
   input cursor. **An unparsable cursor silently restarts from the beginning**

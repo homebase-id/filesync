@@ -676,11 +676,15 @@ impl hbsync_remote::Remote for Watched {
         }
         self.inner.header(file_id)
     }
-    fn holding_live(&self, folders: &[NodeId]) -> hbsync_remote::Result<HashSet<NodeId>> {
+    fn holding(
+        &self,
+        folders: &[NodeId],
+        holds: hbsync_remote::Holds<'_>,
+    ) -> hbsync_remote::Result<HashSet<NodeId>> {
         if let Some(since) = self.request() {
             self.waited.lock().expect("waited").push(since);
         }
-        self.inner.holding_live(folders)
+        self.inner.holding(folders, holds)
     }
     fn hold_back(&self) -> Duration {
         self.hold

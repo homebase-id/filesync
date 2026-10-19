@@ -746,11 +746,12 @@ impl Remote for Counted {
         self.inner.cursor_time(cursor)
     }
 
-    fn holding_live(
+    fn holding(
         &self,
         folders: &[hbsync_types::NodeId],
+        holds: hbsync_remote::Holds<'_>,
     ) -> hbsync_remote::Result<std::collections::HashSet<hbsync_types::NodeId>> {
-        self.inner.holding_live(folders)
+        self.inner.holding(folders, holds)
     }
 
     fn hold_back(&self) -> Duration {

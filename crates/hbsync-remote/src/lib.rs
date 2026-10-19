@@ -455,6 +455,26 @@ impl RemoteError {
 
 pub type Result<T, E = RemoteError> = std::result::Result<T, E>;
 
+/// What [`Remote::holding`] counts in a folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holds<'a> {
+    /// A live file: not deleted, not removed.
+    Live,
+    /// Any file not deleted, live or removed (in Recently deleted), but these, each at its
+    /// version: one written since counts. A tombstone doesn't count.
+    AnyBut(&'a HashSet<RemoteRef>),
+}
+
+impl Holds<'_> {
+    /// Whether a file not deleted counts: `at` its file and version, `removed` whether it is.
+    pub fn counts(&self, at: RemoteRef, removed: bool) -> bool {
+        match self {
+            Holds::Live => !removed,
+            Holds::AnyBut(but) => !but.contains(&at),
+        }
+    }
+}
+
 /// A sync drive.
 pub trait Remote: Send + Sync {
     /// Up to `limit` changes after `cursor` (`None` = from the beginning), oldest first.
@@ -474,10 +494,11 @@ pub trait Remote: Send + Sync {
     /// The current header of a file, live or deleted.
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader>;
 
-    /// Which of `folders` hold a live file (not deleted, not removed), whatever it is: also one
-    /// this client can't read as a node, which isn't in its mirror. Asked before folders are
-    /// deleted for good; a file written in the last [`Remote::hold_back`] may be missing.
-    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>>;
+    /// Which of `folders` hold a file of the kind `holds` names, whatever it is: also one this
+    /// client can't read as a node, which isn't in its mirror. Asked before folders are deleted
+    /// for good, and after the purge removed live folders; a file written in the last
+    /// [`Remote::hold_back`] may be missing.
+    fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>>;
 
     /// How long after a write the remote's queries may still leave it out (Homebase's feed
     /// holds back its last second): a delete that relies on a query asks it that long after
@@ -550,8 +571,8 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         (**self).header(file_id)
     }
 
-    fn holding_live(&self, folders: &[NodeId]) -> Result<HashSet<NodeId>> {
-        (**self).holding_live(folders)
+    fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
+        (**self).holding(folders, holds)
     }
 
     fn hold_back(&self) -> std::time::Duration {

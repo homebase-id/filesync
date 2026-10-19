@@ -239,11 +239,12 @@ impl Remote for HeldPage {
     fn cursor_time(&self, cursor: &str) -> Option<i64> {
         self.inner.cursor_time(cursor)
     }
-    fn holding_live(
+    fn holding(
         &self,
         folders: &[hbsync_types::NodeId],
+        holds: hbsync_remote::Holds<'_>,
     ) -> hbsync_remote::Result<std::collections::HashSet<hbsync_types::NodeId>> {
-        self.inner.holding_live(folders)
+        self.inner.holding(folders, holds)
     }
     fn delete_for_good(
         &self,
@@ -475,11 +476,12 @@ impl Remote for FailsAfterAPage {
     fn cursor_time(&self, cursor: &str) -> Option<i64> {
         self.inner.cursor_time(cursor)
     }
-    fn holding_live(
+    fn holding(
         &self,
         folders: &[hbsync_types::NodeId],
+        holds: hbsync_remote::Holds<'_>,
     ) -> hbsync_remote::Result<std::collections::HashSet<hbsync_types::NodeId>> {
-        self.inner.holding_live(folders)
+        self.inner.holding(folders, holds)
     }
     fn delete_for_good(
         &self,

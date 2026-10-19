@@ -390,6 +390,7 @@ impl StateDb {
         #[cfg(target_os = "macos")]
         conn.pragma_update(None, "fullfsync", true)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(128);
         migrations::apply(&mut conn)?;
