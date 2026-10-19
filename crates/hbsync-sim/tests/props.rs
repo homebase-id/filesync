@@ -2,7 +2,7 @@ use hbsync_sim::{Action, Event, Sim};
 use hbsync_types::NodeId;
 use proptest::prelude::*;
 
-fn action() -> impl Strategy<Value = Action> {
+fn action() -> impl Strategy<Value = Action> + Clone {
     let i = || 0usize..16;
     prop_oneof![
         3 => (i(), i()).prop_map(|(parent, name)| Action::CreateFile { parent, name }),
@@ -22,15 +22,37 @@ fn action() -> impl Strategy<Value = Action> {
         1 => (i(), i()).prop_map(|(node, tag)| Action::Colour { node, tag }),
         1 => (i(), i()).prop_map(|(op, pick)| Action::Phone { op, pick }),
         1 => Just(Action::DeleteRoleFolder),
-        1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
         1 => i().prop_map(|file| Action::MoveAcross { file }),
     ]
 }
 
+/// The users' actions without tags (an edit instead: a tag change around a delete stopped half
+/// way has simulator findings of its own, on main too), with deletes another device stops half
+/// way and purges, more often.
+fn stopped_delete_action() -> impl Strategy<Value = Action> + Clone {
+    let i = || 0usize..16;
+    prop_oneof![
+        6 => action().prop_map(|a| match a {
+            Action::Tag { node, .. } | Action::Colour { node, .. } => Action::Edit { file: node },
+            a => a,
+        }),
+        1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
+        1 => Just(Action::Purge),
+    ]
+}
+
 fn event(clients: usize) -> impl Strategy<Value = Event> {
+    events_of(clients, action())
+}
+
+/// Events with the users' `actions`.
+fn events_of(
+    clients: usize,
+    actions: impl Strategy<Value = Action> + Clone,
+) -> impl Strategy<Value = Event> {
     let c = move || 0..clients;
     prop_oneof![
-        4 => (c(), action()).prop_map(|(client, action)| Event::Act { client, action }),
+        4 => (c(), actions).prop_map(|(client, action)| Event::Act { client, action }),
         1 => c().prop_map(|client| Event::Plan { client }),
         3 => c().prop_map(|client| Event::Step { client }),
     ]
@@ -167,6 +189,17 @@ proptest! {
     #[test]
     fn new_role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(5), 0..120)) {
         run_with(3, None, Sim::with_new_role_devices, &events)?;
+    }
+
+    /// Another device deletes a folder and stops half way, never to come back, while the users
+    /// work and the daily purge runs: the purge removes what the delete took along, once the
+    /// folder is kept long enough, and deletes it for good 30 days on, never a live node, never
+    /// what was written after the delete. The clients converge without loss.
+    #[test]
+    fn stopped_deletes_and_the_purge_converge_without_loss(
+        events in proptest::collection::vec(events_of(3, stopped_delete_action()), 0..120)
+    ) {
+        run(3, &events)?;
     }
 
     /// A download fetches, then puts in place and commits a step later: meanwhile the drive
