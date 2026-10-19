@@ -5,6 +5,7 @@
 //! reads aren't (encrypted files carry their own encryption).
 
 use std::io::{Read, Write};
+use std::sync::Arc;
 use std::time::Duration;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -17,6 +18,7 @@ use ureq::unversioned::transport::{
 };
 
 use crate::HomebaseError;
+use crate::connections::{Call, Connections, REUSED_WITHIN, SharedConnector};
 use crate::crypto::{Envelope, Key};
 use crate::multipart::Multipart;
 use crate::problem::ApiError;
@@ -25,13 +27,31 @@ use crate::youauth::Credentials;
 /// The largest JSON answer read (a page of the change feed is far below it).
 const MAX_JSON: u64 = 256 * 1024 * 1024;
 
-/// One connection pool for all calls. No overall timeout on a body: a large file takes as long
-/// as it takes, while [`IDLE`] ends one that stalls.
+/// An agent for a few calls (a [`Client`] keeps its own: [`connections`]). No overall timeout
+/// on a body: a large file takes as long as it takes, while [`IDLE`] ends one that stalls.
 pub(crate) fn agent() -> ureq::Agent {
     agent_with(IDLE)
 }
 
 fn agent_with(idle: Duration) -> ureq::Agent {
+    agent_on(DefaultConnector::new(), idle, REUSED_WITHIN)
+}
+
+/// A client's connections: its agents, each let go once unused for `reused_within`, connect
+/// through one connector, which keeps the TLS setup and its sessions.
+fn connections(reused_within: Duration) -> Connections {
+    let connector = Arc::new(DefaultConnector::new());
+    Connections::new(reused_within, move |reused_within| {
+        agent_on(SharedConnector(Arc::clone(&connector)), IDLE, reused_within)
+    })
+}
+
+/// An agent through `connector`, which reuses no connection idle longer than `reused_within`.
+fn agent_on(
+    connector: impl Connector<Out = Box<dyn Transport>>,
+    idle: Duration,
+    reused_within: Duration,
+) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(30)))
@@ -45,11 +65,13 @@ fn agent_with(idle: Duration) -> ureq::Agent {
         // limit is closed when it goes idle, and the next call pays a new TCP and TLS handshake.
         .max_idle_connections_per_host(16)
         .max_idle_connections(16)
+        // What `Connections` counts on.
+        .max_idle_age(reused_within)
         .user_agent(concat!("hbsync/", env!("CARGO_PKG_VERSION")))
         .build();
     ureq::Agent::with_parts(
         config,
-        DefaultConnector::new().chain(IdleTimeout(idle)),
+        connector.chain(IdleTimeout(idle)),
         DefaultResolver::default(),
     )
 }
@@ -131,7 +153,7 @@ pub struct Client {
     /// The client auth token (CAT), base64.
     token: String,
     key: Key,
-    agent: ureq::Agent,
+    connections: Arc<Connections>,
 }
 
 impl std::fmt::Debug for Client {
@@ -155,7 +177,7 @@ impl Client {
             identity: credentials.identity.clone(),
             token: credentials.client_auth_token.clone(),
             key: credentials.shared_secret_key()?,
-            agent: agent(),
+            connections: Arc::new(connections(REUSED_WITHIN)),
         })
     }
 
@@ -197,8 +219,8 @@ impl Client {
             self.url(path),
             utf8_percent_encode(&ss, NON_ALPHANUMERIC)
         );
-        let response = self
-            .agent
+        let call = self.connections.call();
+        let response = call
             .get(&url)
             .header("Authorization", &self.bearer())
             .call();
@@ -212,8 +234,8 @@ impl Client {
         body: &serde_json::Value,
     ) -> Result<T, HomebaseError> {
         let sealed = Envelope::seal(&self.key, &serde_json::to_vec(body)?)?;
-        let response = self
-            .agent
+        let call = self.connections.call();
+        let response = call
             .post(self.url(path))
             .header("Authorization", &self.bearer())
             .send_json(&sealed);
@@ -228,9 +250,10 @@ impl Client {
         form: Multipart<'_>,
     ) -> Result<T, HomebaseError> {
         let url = self.url(path);
+        let call = self.connections.call();
         let request = match method {
-            UploadMethod::Post => self.agent.post(&url),
-            UploadMethod::Patch => self.agent.patch(&url),
+            UploadMethod::Post => call.post(&url),
+            UploadMethod::Patch => call.patch(&url),
         };
         let (content_type, len) = (form.content_type(), form.content_length());
         let mut body = Recording {
@@ -254,13 +277,13 @@ impl Client {
     /// `GET {path}` with a `Range` of `start..=last`: what the response says about the payload,
     /// and its bytes to read (encrypted payloads come as ciphertext).
     pub fn fetch(&self, path: &str, start: u64, last: u64) -> Result<Fetched, HomebaseError> {
-        let response = self
-            .agent
+        let call = self.connections.call();
+        let response = call
             .get(self.url(path))
             .header("Authorization", &self.bearer())
             .header("Range", &format!("bytes={start}-{last}"))
             .call();
-        Fetched::new(response, path, start, last)
+        Fetched::new(call, response, path, start, last)
     }
 
     fn decode<T: DeserializeOwned>(
@@ -299,6 +322,8 @@ pub struct Fetched {
     pub size: u64,
     what: String,
     body: ureq::BodyReader<'static>,
+    /// Keeps the agent while the body is read (after the body: its connection is back first).
+    _call: Call,
 }
 
 /// The first and last byte and the whole size of a `Content-Range: bytes first-last/size`.
@@ -322,8 +347,10 @@ impl std::fmt::Debug for Fetched {
 }
 
 impl Fetched {
-    /// A ranged GET's response for `start..=last` of the payload at `path`.
+    /// A ranged GET's response for `start..=last` of the payload at `path`, made as `call`,
+    /// which the body keeps.
     fn new(
+        call: Call,
         response: Result<Response<ureq::Body>, ureq::Error>,
         path: &str,
         start: u64,
@@ -368,6 +395,7 @@ impl Fetched {
                 .into_with_config()
                 .limit(u64::MAX)
                 .reader(),
+            _call: call,
         })
     }
 
@@ -471,8 +499,9 @@ mod tests {
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
-    use super::{Fetched, IDLE, agent_with, content_range};
+    use super::{Fetched, REUSED_WITHIN, agent_with, connections, content_range};
     use crate::HomebaseError;
+    use crate::connections::Connections;
 
     /// A keep-alive server answering every request with `body` as bytes `0..len` of a payload
     /// (its `Content-Length` is the body's): the connections it accepted, once the client is done.
@@ -522,12 +551,23 @@ mod tests {
         Ok((url, server))
     }
 
-    fn fetch(agent: &ureq::Agent, url: &str, len: u64) -> Result<Fetched, HomebaseError> {
-        let response = agent
+    fn fetch(connections: &Connections, url: &str, len: u64) -> Result<Fetched, HomebaseError> {
+        let call = connections.call();
+        let response = call
             .get(url)
             .header("Range", &format!("bytes=0-{}", len - 1))
             .call();
-        Fetched::new(response, "payload", 0, len - 1)
+        Fetched::new(call, response, "payload", 0, len - 1)
+    }
+
+    /// Stops `ranges_server`: the connections it accepted.
+    fn stop(
+        connections: &Connections,
+        url: &str,
+        server: std::thread::JoinHandle<usize>,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let _ = connections.call().get(format!("{url}stop")).call();
+        Ok(server.join().map_err(|_| "server panicked")?)
     }
 
     /// Reading a payload to its end gives its connection back to the pool: many downloads, one
@@ -537,14 +577,60 @@ mod tests {
         const BODY: &[u8] = b"0123456789";
         const LEN: u64 = BODY.len() as u64;
         let (url, server) = ranges_server(BODY, BODY.len())?;
-        let agent = agent_with(IDLE);
+        let connections = connections(REUSED_WITHIN);
         for _ in 0..5 {
             let mut got = Vec::new();
-            let n = fetch(&agent, &url, LEN)?.copy_to(&mut got, LEN)?;
+            let n = fetch(&connections, &url, LEN)?.copy_to(&mut got, LEN)?;
             assert_eq!((n, got.as_slice()), (LEN, BODY));
         }
-        let _ = agent.get(format!("{url}stop")).call();
-        assert_eq!(server.join().map_err(|_| "server panicked")?, 1);
+        assert_eq!(stop(&connections, &url, server)?, 1);
+        Ok(())
+    }
+
+    /// Calls in a row share a connection; once none has run for a while, the agent goes with
+    /// its connections, and the next call makes another.
+    #[test]
+    fn idle_connections_are_let_go() -> Result<(), Box<dyn std::error::Error>> {
+        const BODY: &[u8] = b"0123456789";
+        const LEN: u64 = BODY.len() as u64;
+        let (url, server) = ranges_server(BODY, BODY.len())?;
+        let connections = connections(Duration::from_millis(300));
+        for _ in 0..3 {
+            fetch(&connections, &url, LEN)?.copy_to(&mut Vec::new(), LEN)?;
+        }
+        let began = Instant::now();
+        while connections.kept() {
+            assert!(began.elapsed() < Duration::from_secs(5), "the agent stays");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // The first connection is closed: the server, which serves one at a time, takes the
+        // next at once (not after its 5 s read timeout).
+        let began = Instant::now();
+        fetch(&connections, &url, LEN)?.copy_to(&mut Vec::new(), LEN)?;
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(stop(&connections, &url, server)?, 2);
+        Ok(())
+    }
+
+    /// A body still being read keeps its agent, however long it takes: its connection comes
+    /// back to the pool, and the next call reuses it.
+    #[test]
+    fn a_call_on_its_way_keeps_the_agent() -> Result<(), Box<dyn std::error::Error>> {
+        const BODY: &[u8] = b"0123456789";
+        const LEN: u64 = BODY.len() as u64;
+        let (url, server) = ranges_server(BODY, BODY.len())?;
+        let connections = connections(Duration::from_millis(500));
+        let mut fetched = fetch(&connections, &url, LEN)?;
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(connections.kept());
+        fetched.copy_to(&mut Vec::new(), LEN)?;
+        drop(fetched);
+        fetch(&connections, &url, LEN)?.copy_to(&mut Vec::new(), LEN)?;
+        assert_eq!(stop(&connections, &url, server)?, 1);
         Ok(())
     }
 
@@ -552,16 +638,15 @@ mod tests {
     #[test]
     fn bytes_past_the_range_are_an_error() -> Result<(), Box<dyn std::error::Error>> {
         let (url, server) = ranges_server(b"0123456789abc", 10)?;
-        let agent = agent_with(IDLE);
+        let connections = connections(REUSED_WITHIN);
         let mut got = Vec::new();
-        let err = fetch(&agent, &url, 10)?.copy_to(&mut got, 10);
+        let err = fetch(&connections, &url, 10)?.copy_to(&mut got, 10);
         assert!(
             matches!(&err, Err(HomebaseError::Protocol(why)) if why.contains("more than")),
             "{err:?}"
         );
         assert_eq!(got, b"0123456789");
-        let _ = agent.get(format!("{url}stop")).call();
-        server.join().map_err(|_| "server panicked")?;
+        stop(&connections, &url, server)?;
         Ok(())
     }
 

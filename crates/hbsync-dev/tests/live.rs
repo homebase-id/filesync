@@ -501,7 +501,8 @@ fn read_feed(
 }
 
 /// Bytes this process's open TCP connections have received (`ss -tip`: TLS, after gzip). The
-/// HTTP client keeps its connections open, so the counts carry on between two readings.
+/// counts carry on between two readings only while the connections stay open: the HTTP client
+/// closes them once no call has run for 15 s, so a phase with such a pause undercounts.
 fn socket_bytes() -> Result<u64, Box<dyn std::error::Error>> {
     socket_count("bytes_received:")
 }
