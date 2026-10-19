@@ -13,7 +13,7 @@
 //! off starts over).
 
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -122,6 +122,9 @@ impl<W: Write> Write for MeteredWrite<'_, W> {
         self.inner.flush()
     }
 }
+
+/// Bytes of a download gathered before they are written to its temp file.
+const DOWNLOAD_BUFFER: usize = 64 * 1024;
 
 /// A download: the payload of `file_id`, verified against `expected`, into the temp folder.
 #[derive(Debug, Clone)]
@@ -475,11 +478,16 @@ fn fetch(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<Complet
     // The size is known, so always name the range: a remote needn't look it up first.
     if offset < d.size {
         let range = Some(offset..d.size);
+        // A body comes a few KB per read (a TLS record or less): each piece written to the
+        // file on its own was a system call and a change for the folder's watcher. Whatever
+        // ends the read, what came reaches the file (on an error, as the buffer is dropped).
+        let mut file = BufWriter::with_capacity(DOWNLOAD_BUFFER, &mut partial);
         let mut sink = MeteredWrite {
-            inner: &mut partial,
+            inner: &mut file,
             meter,
         };
         remote.read(d.file_id, range, &mut sink)?;
+        file.flush()?;
     }
     Ok(partial.finish(Some(d.expected), Some(d.size))?)
 }

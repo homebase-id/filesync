@@ -180,6 +180,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
         ..TransferConfig::default()
     };
 
+    // Cut before the download's buffer is full: what came still reaches the partial file.
     remote.faults().cut_download_after = Some(30_000);
     let mut first = None;
     run_jobs(&remote, cfg, vec![(false, job.clone())], |_, r| {
