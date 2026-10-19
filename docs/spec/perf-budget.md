@@ -20,7 +20,8 @@ Rules that keep these reachable (from [../foundations.md](../foundations.md) §3
 - Never re-hash at start; hash only when `(size, mtime, ctime, file id)` changed.
 - Streaming, sorted merge of the walk against DB rows; never load the whole tree.
 - The reconciler works on the dirty set plus the ancestors and siblings it needs, not the
-  whole tree.
+  whole tree: in a folder, only the children whose names may clash with a dirty node's (found
+  by their sibling hash, an indexed column), unless a plan finds a clash there.
 - Catch-up runs at background I/O and CPU priority.
 
 ## Measured: sync with a live identity (2026-10-09)

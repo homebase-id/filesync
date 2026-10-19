@@ -15,7 +15,9 @@
 //! escape code points. For those, [`LocalName::recorded`] is set and the engine stores the
 //! local spelling in the state DB instead of relying on [`to_remote`].
 
-use hbsync_platform::name::{NameIssue, check_local_name, check_remote_name, is_windows_reserved};
+use hbsync_platform::name::{
+    NameIssue, check_local_name, check_remote_name, is_windows_reserved, name_key,
+};
 use hbsync_platform::{Os, nfc};
 
 /// Marker inserted after the stem of a Windows device name.
@@ -66,6 +68,21 @@ pub fn to_remote(local: &str, os: Os) -> Result<String, NameIssue> {
     let remote = nfc(&unescaped);
     check_remote_name(&remote)?;
     Ok(remote)
+}
+
+/// A small hash that names which share a place in a folder have in common, on any OS: the
+/// same name under [`name_key`], and a local spelling and the remote name it stands for
+/// (whichever OS spelled it). The state DB stores it with each row of every side, so a folder's
+/// rows that may clash with a name are found without listing the folder. Different names can
+/// share one (a lookup by it finds a few more rows, never fewer).
+///
+/// Stored: never change what it gives for a name. It rests on [`name_key`]'s Unicode tables
+/// (case folding, normalization): an update of them that changes a key needs a migration that
+/// computes the stored hashes again (`sibling_hashes_are_pinned` fails then).
+pub fn sibling_hash(name: &str) -> i32 {
+    // The key with the Windows escapes taken back; its low 32 bits fit an SQLite row in 4 bytes.
+    let key = name_key(&unescape_windows(name));
+    hbsync_fileio::fnv1a64(key.as_bytes()) as i32
 }
 
 fn escape_windows(remote: &str) -> String {
@@ -200,6 +217,25 @@ mod tests {
         assert_eq!(to_remote("..", Os::Linux), Err(NameIssue::DotOrDotDot));
     }
 
+    /// [`sibling_hash`] is stored: pinned.
+    #[test]
+    fn sibling_hashes_are_pinned() {
+        assert_eq!(sibling_hash("Report.pdf"), sibling_hash("report.PDF"));
+        assert_eq!(sibling_hash("a:b"), sibling_hash("A\u{F022}B"));
+        assert_eq!(sibling_hash("CON\u{F02A}.txt"), sibling_hash("con.txt"));
+        assert_eq!(sibling_hash("Report.pdf"), 757_669_927);
+        assert_eq!(sibling_hash(""), -2_078_137_563);
+        // Case pairs and compositions across scripts, the newer ones included (Georgian
+        // Mtavruli, Unicode 11; Cherokee small letters, 8): an update of the tables that
+        // changes any of these keys changes this hash.
+        let scripts = "ÀÉÎÕÜßẞ ΑΒΓΣςσ АБВЁЙ ᲐᲑᲒ ᏣᏤᏥ ꭰꭱ ǅǈǋ ﬁﬀ Å Ω K e\u{301} ᄀ\u{1161}";
+        assert_eq!(
+            name_key(scripts),
+            "àéîõüssss αβγσσσ абвёй აბგ ᏣᏤᏥ ᎠᎡ ǆǉǌ fiff å ω k é 가"
+        );
+        assert_eq!(sibling_hash(scripts), 738_829_446);
+    }
+
     fn any_os() -> impl Strategy<Value = Os> {
         prop_oneof![Just(Os::Windows), Just(Os::MacOs), Just(Os::Linux)]
     }
@@ -234,6 +270,24 @@ mod tests {
         ) {
             prop_assume!(check_remote_name(&raw).is_ok());
             prop_assert!(!to_local(&raw, os)?.recorded);
+        }
+
+        /// A name, its local spelling on any OS, the remote name a local one stands for, and
+        /// every name with the same key share a sibling hash.
+        #[test]
+        fn spellings_share_a_sibling_hash(
+            raw in "[a-zA-Z0-9 .:*?\"<>|\\\\\\t\\u{1}-\\u{1f}éÉßẞ\u{301}\u{338}😀\\u{F020}-\\u{F02A}-]{1,40}",
+            os in any_os(),
+        ) {
+            let hash = sibling_hash(&raw);
+            prop_assert_eq!(sibling_hash(&name_key(&raw)), hash);
+            prop_assert_eq!(sibling_hash(&raw.to_uppercase()), sibling_hash(&raw.to_lowercase()));
+            if let Ok(local) = to_local(&raw, os) {
+                prop_assert_eq!(sibling_hash(&local.name), hash);
+            }
+            if let Ok(remote) = to_remote(&raw, os) {
+                prop_assert_eq!(sibling_hash(&remote), hash);
+            }
         }
     }
 }

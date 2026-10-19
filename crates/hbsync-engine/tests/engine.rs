@@ -137,6 +137,47 @@ fn concurrent_edits_keep_both_versions() -> R {
     Ok(())
 }
 
+/// A change in a folder is planned from the few rows that may clash with its names; a clash
+/// is then judged against the whole folder: the numbered name taken already is skipped. (The
+/// test kit checks every plan against one made from whole folders.)
+#[test]
+fn a_clash_in_a_large_folder_takes_a_name_free_in_all_of_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..40 {
+        a.write(&format!("big/f{i:02}.txt"), format!("{i}"))?;
+    }
+    a.write("big/x (conflict 1).txt", "taken")?;
+    a.write("big/X.md", "other extension")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("big/X.txt", "from a")?;
+    b.write("big/x.txt", "from b")?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert_eq!(report.conflicts.len(), 1, "{report:?}");
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    let tree = b.tree_text("big");
+    assert!(
+        tree.contains(&"x (conflict 1).txt = taken".to_owned()),
+        "{tree:?}"
+    );
+    let kept = tree
+        .iter()
+        .filter(|e| e.ends_with("= from a") || e.ends_with("= from b"));
+    let mut names: Vec<&str> = kept.map(|e| e.split(" = ").next().unwrap_or("")).collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    assert_eq!(names.len(), 2, "{tree:?}");
+    assert!(
+        names[0].eq_ignore_ascii_case("x (conflict 2).txt"),
+        "{tree:?}"
+    );
+    assert!(names[1].eq_ignore_ascii_case("x.txt"), "{tree:?}");
+    Ok(())
+}
+
 #[test]
 fn name_swap_uses_a_parked_name() -> R {
     let server = server();

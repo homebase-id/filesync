@@ -100,6 +100,31 @@ pub struct Input {
     /// schema, Recently deleted): a node in a removed folder written no later than the
     /// folder's removal went with it.
     pub changed_at: HashMap<NodeId, i64>,
+    /// Which children the trees hold: `None`, all of every folder's that matters; else as
+    /// [`Listed`] says.
+    pub listed: Option<Listed>,
+}
+
+/// The children of each folder that an [`Input`] holds, on every side, when it doesn't hold
+/// them all: those of the folders in `full`, and in the others those whose names have one of
+/// the folder's sibling hashes in `named` ([`hbsync_namemap::sibling_hash`]): everything that
+/// may clash with those names. A plan that needs more says which folders in
+/// [`Plan::unlisted`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub full: HashSet<NodeId>,
+    pub named: HashMap<NodeId, HashSet<i32>>,
+}
+
+impl Listed {
+    /// Whether every child of `folder` whose name may clash with `name` is held.
+    pub fn holds(&self, folder: NodeId, name: &str) -> bool {
+        self.full.contains(&folder)
+            || self
+                .named
+                .get(&folder)
+                .is_some_and(|keys| keys.contains(&hbsync_namemap::sibling_hash(name)))
+    }
 }
 
 /// A folder in Recently deleted, as [`Input::removed`] has it.
@@ -553,4 +578,7 @@ pub struct Plan {
     pub clean: Vec<NodeId>,
     /// Dirty nodes that can't be decided yet (unhashed, unknown parent): keep them dirty.
     pub deferred: Vec<NodeId>,
+    /// Folders whose names the plan judged without all their children in the input
+    /// ([`Input::listed`]): plan again with them listed in full.
+    pub unlisted: BTreeSet<NodeId>,
 }

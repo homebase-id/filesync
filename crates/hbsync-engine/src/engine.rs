@@ -1,5 +1,6 @@
 //! The sync loop for one sync root.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +17,7 @@ use crate::adopt::adopt;
 use crate::drive::Drive;
 use crate::exec::{ExecConfig, Executor, Stopped, record_dirs, recover, recover_placements};
 use crate::feed::{FeedError, FeedReport};
-use crate::reconcile::{Conflict, Op, Options, reconcile_with_known};
+use crate::reconcile::{Conflict, Op, Options, Plan, reconcile_with_known};
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
@@ -36,6 +37,9 @@ pub struct EngineConfig {
     pub mass_delete_min: usize,
     pub mass_delete_fraction: f64,
     pub allow_mass_delete: bool,
+    /// Tests: every plan from a narrow view ([`view::build_narrow`]) is checked against one
+    /// from whole folders ([`view::build_input`]).
+    pub check_narrow: bool,
 }
 
 impl EngineConfig {
@@ -61,6 +65,7 @@ impl EngineConfig {
             mass_delete_min: 50,
             mass_delete_fraction: 0.25,
             allow_mass_delete: false,
+            check_narrow: false,
         }
     }
 }
@@ -524,6 +529,42 @@ impl Engine {
         Ok(())
     }
 
+    /// Plans `dirty` from a view of what the rules may need ([`view::build_narrow`]), again
+    /// with the folders a plan judged in part listed whole, until a plan needs no more.
+    fn plan(&mut self, dirty: &[NodeId], opts: &Options) -> Result<Plan, EngineError> {
+        let (os, filter, scope) = (
+            self.cfg.exec.os,
+            &self.cfg.exec.filter,
+            &self.cfg.exec.scope,
+        );
+        let db = &mut self.db;
+        let reconcile = |input: &crate::reconcile::Input, db: &mut StateDb| {
+            reconcile_with_known(input, opts, |id| {
+                db.read(|s| s.knows_node(id)).unwrap_or(true)
+            })
+        };
+        let mut full: HashSet<NodeId> = HashSet::new();
+        loop {
+            let input = db.read(|s| view::build_narrow(s, dirty, os, filter, scope, &full))?;
+            let plan = reconcile(&input, db);
+            // Each round lists at least one more folder whole: it ends.
+            let listed = full.len();
+            full.extend(&plan.unlisted);
+            if full.len() > listed {
+                continue;
+            }
+            if self.cfg.check_narrow {
+                let input = db.read(|s| view::build_input(s, dirty, os, filter, scope))?;
+                assert_eq!(
+                    plan,
+                    reconcile(&input, db),
+                    "the narrow view plans as the whole one"
+                );
+            }
+            return Ok(plan);
+        }
+    }
+
     /// Plans one page of dirty nodes and executes the plan. No feed read after it: each write
     /// is recorded from its answer (version, token, the server's time), and the notifications
     /// leave this device's own writes out. Returns the deletes the mass-delete guard held.
@@ -533,18 +574,11 @@ impl Engine {
         opts: &Options,
         report: &mut SyncReport,
     ) -> Result<Vec<Op>, EngineError> {
-        let os = self.cfg.exec.os;
         // What an earlier round left placed (its operation failed after), as at the start of a
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
         recover_placements(&mut self.db, &self.cfg.exec)?;
-        let input = self.db.read(|s| {
-            view::build_input(s, dirty, os, &self.cfg.exec.filter, &self.cfg.exec.scope)
-        })?;
-        let db = &mut self.db;
-        let plan = reconcile_with_known(&input, opts, |id| {
-            db.read(|s| s.knows_node(id)).unwrap_or(true)
-        });
+        let plan = self.plan(dirty, opts)?;
         // A confirmation lasts while its node's plan deletes it: one whose delete was undone
         // (the file back) is forgotten, so a later delete is judged anew.
         let deleting: std::collections::HashSet<NodeId> =

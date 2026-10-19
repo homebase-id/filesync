@@ -157,6 +157,16 @@ impl Reconciler<'_> {
         fixed
     }
 
+    /// The folder whose listing holds `folder`'s children: a detached folder's are its old
+    /// node's.
+    fn listed_as(&self, folder: NodeId) -> NodeId {
+        self.masks
+            .detached
+            .iter()
+            .find_map(|(&old, &new)| (new == folder).then_some(old))
+            .unwrap_or(folder)
+    }
+
     pub(super) fn fix_names(&mut self) {
         let parents: BTreeSet<NodeId> = self
             .scope
@@ -170,6 +180,23 @@ impl Reconciler<'_> {
                     by_key.entry(name_key(&s.name)).or_default().push(child);
                 }
             }
+            // Judged on part of the folder: right only for the names whose possible clashes
+            // the input holds, and with no rename (a numbered name must be free among all).
+            let listed_as = self.listed_as(parent);
+            let input = self.input;
+            let part = input
+                .listed
+                .as_ref()
+                .filter(|l| !l.full.contains(&listed_as));
+            let mut unlisted = part.is_some_and(|listed| {
+                self.merged.children(parent).any(|c| {
+                    self.scope.contains(&c)
+                        && self
+                            .merged
+                            .get(c)
+                            .is_some_and(|s| !listed.holds(listed_as, &s.name))
+                })
+            });
             // Names held remotely by nodes this device doesn't sync (§10) are taken: their
             // holders keep them, and every node here loses.
             let masked = self.masks.names.get(&parent);
@@ -179,6 +206,7 @@ impl Reconciler<'_> {
                 if group.len() <= keep {
                     continue;
                 }
+                unlisted |= part.is_some();
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses.
                 group.sort_by_key(|n| (!self.deferred.contains(n), *n));
@@ -205,6 +233,9 @@ impl Reconciler<'_> {
                         .conflicts
                         .push(Conflict::NameClash { node: loser });
                 }
+            }
+            if unlisted {
+                self.plan.unlisted.insert(listed_as);
             }
         }
     }

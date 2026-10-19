@@ -292,6 +292,20 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE gone_files ADD COLUMN gone_at INTEGER;
     INSERT OR REPLACE INTO kv (key, value) VALUES ('remote.rereading', '1');
     UPDATE removed SET removed_at = NULL WHERE removed_at = 0;",
+    // 14: each row's sibling hash (`hbsync_namemap::sibling_hash` of its name, which `apply`
+    // gives SQL as `sibling_hash`), indexed with its folder on every side: planning a change
+    // reads the rows that may clash with its name, not the whole folder.
+    "ALTER TABLE base ADD COLUMN name_key INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE local ADD COLUMN name_key INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE remote ADD COLUMN name_key INTEGER NOT NULL DEFAULT 0;
+    UPDATE base SET name_key = sibling_hash(name);
+    UPDATE local SET name_key = sibling_hash(name);
+    UPDATE remote SET name_key = sibling_hash(name);
+    DROP INDEX base_parent;
+    CREATE INDEX base_parent ON base(parent, name_key, folder);
+    DROP INDEX remote_parent;
+    CREATE INDEX remote_parent ON remote(parent, name_key);
+    CREATE INDEX local_key ON local(parent, name_key, folder);",
 ];
 
 /// Migration 8, which [`repair_early_8`] runs again.
@@ -319,8 +333,21 @@ pub(crate) fn check(version: u32) -> Result<()> {
 }
 
 pub fn apply(conn: &mut Connection) -> Result<()> {
+    sibling_hash_in_sql(conn)?;
     migrate(conn)?;
     give_id(conn)
+}
+
+/// `sibling_hash(name)` in SQL: what migration 14 fills the new columns with.
+fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    conn.create_scalar_function(
+        "sibling_hash",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(hbsync_namemap::sibling_hash(&ctx.get::<String>(0)?)),
+    )?;
+    Ok(())
 }
 
 /// Gives the DB its own random id (kv `db.id`) if it has none (or an empty one): a listing of
@@ -636,6 +663,35 @@ mod tests {
             )
             .optional()?;
         assert_eq!(reread.as_deref(), Some("1"), "the feed is read again once");
+        Ok(())
+    }
+
+    /// A DB at version 13 gets each row's sibling hash, on every side.
+    #[test]
+    fn version_13_gets_sibling_hashes() -> Result<()> {
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(SCHEMA)?;
+        for sql in &MIGRATIONS[..(13 - BASE) as usize] {
+            conn.execute_batch(sql)?;
+        }
+        conn.pragma_update(None, "user_version", 13)?;
+        conn.execute_batch(
+            "INSERT INTO folders (top, path, marker, added_at) VALUES (x'00', '/f', 'm', 0);
+             INSERT INTO base (folder, id, parent, name, kind, remote_file_id, version_tag)
+                 VALUES (1, 2, 1, 'Report.pdf', 0, x'01', x'02');
+             INSERT INTO local (folder, id, parent, name, kind, size, mtime_ns, ctime_ns,
+                 volume, file_id) VALUES (1, 2, 1, 'a\u{F022}b', 0, 0, 0, 0, 0, 0);
+             INSERT INTO remote (id, file_id, version_tag, parent, kind, name)
+                 VALUES (2, x'01', x'02', 1, 0, 'REPORT.pdf');",
+        )?;
+        apply(&mut conn)?;
+        let key = |table: &str| -> Result<i32> {
+            Ok(conn.query_row(&format!("SELECT name_key FROM {table}"), [], |r| r.get(0))?)
+        };
+        let report = hbsync_namemap::sibling_hash("report.pdf");
+        assert_eq!(key("base")?, report);
+        assert_eq!(key("remote")?, report);
+        assert_eq!(key("local")?, hbsync_namemap::sibling_hash("a:b"));
         Ok(())
     }
 

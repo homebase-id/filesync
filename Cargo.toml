@@ -23,7 +23,7 @@ hbsync-state = { path = "crates/hbsync-state" }
 hbsync-tray = { path = "crates/hbsync-tray" }
 hbsync-types = { path = "crates/hbsync-types" }
 proptest = "1.11"
-rusqlite = { version = "0.40", features = ["bundled", "collation", "hooks"] }
+rusqlite = { version = "0.40", features = ["bundled", "collation", "functions", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 tempfile = "3.27"
