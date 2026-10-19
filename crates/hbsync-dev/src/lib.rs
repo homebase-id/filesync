@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hbsync_homebase::{Client, Credentials};
 use hbsync_remote::{Remote, RemoteError};
+use hbsync_types::RemoteRef;
 
 /// Where the development tools keep the credentials of `identity`:
 /// `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json` (default `~/.config`). The product keeps them
@@ -129,8 +130,7 @@ pub fn run_name(what: &str) -> String {
 
 /// A file under one of the drive's top-level folders, as [`delete_top_folders`] finds it.
 struct Found {
-    file_id: hbsync_types::RemoteFileId,
-    version: hbsync_types::VersionTag,
+    at: RemoteRef,
     parent: hbsync_types::NodeId,
     name: String,
     size: u64,
@@ -154,12 +154,12 @@ pub fn delete_top_folders(
     loop {
         let page = remote.changes(cursor.as_deref(), 500)?;
         for h in page.entries {
+            let at = h.at();
             if let RemoteBody::Live { node, content, .. } = h.body {
                 nodes.insert(
                     node,
                     Found {
-                        file_id: h.file_id,
-                        version: h.version,
+                        at,
                         parent: h.parent,
                         name: content.name,
                         size: content.size.unwrap_or(0),
@@ -197,21 +197,30 @@ pub fn delete_top_folders(
         doomed.push(found);
     }
     if !dry {
-        for found in doomed {
-            match remote.delete(found.file_id, found.version) {
-                Ok(()) | Err(RemoteError::NotFound) => {}
-                // Written since it was read: once more at its version now.
-                Err(RemoteError::VersionMismatch) => {
-                    let h = remote.header(found.file_id)?;
-                    if !h.is_deleted() {
-                        match remote.delete(found.file_id, h.version) {
-                            Ok(()) | Err(RemoteError::NotFound) => {}
-                            Err(e) => return Err(e),
-                        }
+        let mut asked: Vec<RemoteRef> = doomed.iter().map(|f| f.at).collect();
+        // A request that failed after others went: the answers before it still count.
+        let mut stopped = None;
+        // Written since it was read: once more at its version now.
+        for round in 0..2 {
+            let mut again = Vec::new();
+            let answered = remote.delete(&asked)?;
+            stopped = stopped.or(answered.stopped);
+            for (at, answer) in asked.iter().zip(answered.answers) {
+                match answer {
+                    Ok(_) | Err(RemoteError::NotFound) => {}
+                    Err(RemoteError::VersionMismatch) if round == 0 => {
+                        again.push(remote.header(at.file_id)?.at())
                     }
+                    Err(e) => return Err(e),
                 }
-                Err(e) => return Err(e),
             }
+            if again.is_empty() {
+                break;
+            }
+            asked = again;
+        }
+        if let Some(e) = stopped {
+            return Err(e);
         }
     }
     let mut folders: Vec<_> = folders.into_values().collect();

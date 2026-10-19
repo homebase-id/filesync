@@ -168,7 +168,7 @@ impl Route {
             Route::Rename => "PATCH /api/v2/drives/{d}/files/{f} (header only: rename)",
             Route::Move => "PATCH /api/v2/drives/{d}/files/{f} (header only: groupId)",
             Route::Remove => "PATCH /api/v2/drives/{d}/files/{f} (header only: archivalStatus 2)",
-            Route::Delete => "POST /api/v2/drives/{d}/files/{f}/delete (tombstone)",
+            Route::Delete => "POST /api/v2/drives/{d}/files/soft-delete-batch (tombstone)",
             Route::HardDeleteBatch => "POST /api/v2/drives/{d}/files/hard-delete-batch",
         }
     }
@@ -333,8 +333,8 @@ impl Harness {
     /// `Ok(false)`: changed meanwhile (a conflict), left alone.
     fn delete(&self, by: usize, node: NodeId) -> Res<bool> {
         let at = self.doc(node)?.target.at;
-        match self.remote(by).delete(at.file_id, at.version) {
-            Ok(()) => {}
+        match self.remote(by).delete(&[at])?.single() {
+            Ok(_) => {}
             Err(RemoteError::VersionMismatch) => {
                 self.conflicts.fetch_add(1, Ordering::Relaxed);
                 return Ok(false);

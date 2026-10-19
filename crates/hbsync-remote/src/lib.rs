@@ -316,8 +316,8 @@ pub enum RemoteError {
     Fatal(String),
 }
 
-/// What a write of many files answered, file by file ([`Remote::delete_for_good`],
-/// [`Remote::set_removed`]).
+/// What a write of many files answered, file by file ([`Remote::delete`],
+/// [`Remote::delete_for_good`], [`Remote::set_removed`]).
 #[derive(Debug)]
 pub struct Answers<T> {
     /// The drive's answer for each of the first files asked, in order (all of them unless
@@ -329,6 +329,14 @@ pub struct Answers<T> {
     /// and weren't written.
     pub stopped: Option<RemoteError>,
 }
+
+/// Files a batch write takes per request (Homebase's `soft-delete-batch`, `hard-delete-batch`,
+/// `update-archival-status-batch`: odin-core `FileVersionTagBatchV2.MaxFiles`).
+pub const BATCH_FILES: usize = 1000;
+
+/// What a delete answered: for each file deleted, its tombstone's time (Unix ms, the server's,
+/// as the feed shows it), if the remote said.
+pub type Deletes = Answers<Option<i64>>;
 
 /// What a delete for good answered.
 pub type ForGood = Answers<()>;
@@ -384,6 +392,39 @@ impl<T> Answers<T> {
             Some(e) => Err(e),
             None => Ok(self.answers),
         }
+    }
+
+    /// The answer for the one file asked: the call's error, else that file's.
+    pub fn single(self) -> Result<T> {
+        let answers = self.into_answers()?;
+        let count = answers.len();
+        match <[_; 1]>::try_from(answers) {
+            Ok([answer]) => answer,
+            Err(_) => Err(RemoteError::Fatal(format!("{count} answers for one file"))),
+        }
+    }
+
+    /// `files` sent `size` at a time ([`BATCH_FILES`] a request on Homebase): each one's
+    /// answer. A request that fails after earlier ones went keeps their answers and stops
+    /// there: the files left weren't answered (nor written). One that fails first is the whole
+    /// call's error.
+    pub fn in_batches<F>(
+        files: &[F],
+        size: usize,
+        mut send: impl FnMut(&[F]) -> Result<Vec<Result<T>>>,
+    ) -> Result<Self> {
+        let mut done = Answers::default();
+        for batch in files.chunks(size) {
+            match send(batch) {
+                Ok(answers) => done.answers.extend(answers),
+                Err(e) if done.answers.is_empty() => return Err(e),
+                Err(e) => {
+                    done.stopped = Some(e);
+                    break;
+                }
+            }
+        }
+        Ok(done)
     }
 }
 
@@ -461,9 +502,12 @@ pub trait Remote: Send + Sync {
         payload: Option<Upload<'_>>,
     ) -> Result<Target>;
 
-    /// Deletes (tombstones) a file if it is still at `expected`: it stays in the feed as a
-    /// tombstone, which is how a device learns of the delete.
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()>;
+    /// Deletes (tombstones) files, each only if still at its version: each stays in the feed as
+    /// a tombstone, which is how a device learns of the delete. What the drive answered for
+    /// each, in order ([`Deletes`]): a file already a tombstone (a retry, another device's
+    /// delete) answers as deleted, its version not looked at, with its tombstone's own time. An
+    /// outer error stopped it before any file was answered.
+    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes>;
 
     /// Deletes files for good, leaving nothing in the feed (Homebase's hard delete), live ones
     /// and tombstones, each only if still at its version: what the drive answered for each
@@ -527,8 +571,8 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         (**self).update(target, meta, payload)
     }
 
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
-        (**self).delete(file_id, expected)
+    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
+        (**self).delete(files)
     }
 
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {

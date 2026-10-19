@@ -769,10 +769,9 @@ impl Remote for Counted {
 
     fn delete(
         &self,
-        file_id: hbsync_types::RemoteFileId,
-        expected: hbsync_types::VersionTag,
-    ) -> hbsync_remote::Result<()> {
-        self.inner.delete(file_id, expected)
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
+        self.inner.delete(files)
     }
 
     fn read(
@@ -787,8 +786,7 @@ impl Remote for Counted {
 
 /// Each write's answer carries `updated`, the time the feed then shows for it (odin-core
 /// #1971): a create, a new version, a removal and a restore (PATCH), the archival-status batch,
-/// and a delete
-/// (the tombstone's). One file per kind, as the feed shows only a file's last write; their rows
+/// and the soft-delete batch (the tombstone's, odin-core #1977). One file per kind, as the feed shows only a file's last write; their rows
 /// are read minimal from a cursor taken before. Prints a table.
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
@@ -863,18 +861,15 @@ fn write_answers_carry_the_feeds_time() -> R {
             r["updated"].as_i64(),
         ));
         let (_, w) = made("deleted")?;
-        let deleted: serde_json::Value = remote.client().post(
-            &format!("{}/delete", remote.file(w.at.file_id)),
-            &serde_json::json!({"recipients": [], "versionTag": w.at.version.0}),
-        )?;
+        let deleted = remote.delete(&[w.at])?.single()?;
         let tomb = remote.header(w.at.file_id)?;
         answers.push((
-            "delete (tombstone)",
+            "soft-delete batch",
             hbsync_types::RemoteRef {
                 file_id: w.at.file_id,
                 version: tomb.version,
             },
-            deleted["updated"].as_i64(),
+            deleted,
         ));
 
         // The feed's rows since the cursor: each file's last write.

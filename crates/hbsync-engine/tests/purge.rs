@@ -704,17 +704,17 @@ impl hbsync_remote::Remote for Watched {
     }
     fn delete(
         &self,
-        file_id: RemoteFileId,
-        expected: hbsync_types::VersionTag,
-    ) -> hbsync_remote::Result<()> {
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         self.request();
         if let Some(answer) = self.answer {
-            return Err(answer());
+            let answers = files.iter().map(|_| Err(answer())).collect();
+            return Ok(hbsync_remote::Deletes::all(answers));
         }
         if self.soft_fails {
             return Err(RemoteError::Transient("cut".into()));
         }
-        self.inner.delete(file_id, expected)
+        self.inner.delete(files)
     }
     fn delete_for_good(
         &self,
@@ -1085,5 +1085,129 @@ fn the_trash_waits_for_the_items() -> common::Res<()> {
     remote.soft_fails = false;
     deleted::purge(&account, &remote, -10_000, now, &mut false)?;
     assert!(!entry.exists(), "emptied");
+    Ok(())
+}
+
+/// Emptying many files deletes them softly a batch at a time (`soft-delete-batch`, 1,000 files a
+/// request), not a request each: 2,041 files, three requests and nothing else. Each is
+/// recorded gone at once with its tombstone's time; the tombstones' versions come with the
+/// feed, and they go hard [`TRACE_MS`] after their time.
+#[test]
+fn emptying_many_files_takes_a_request_per_thousand() -> common::Res<()> {
+    let server = server();
+    let names: Vec<String> = (0..2041).map(|i| format!("f{i:04}.txt")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (account, files) = removed_now(&server, &names)?;
+    let remote = Watched::new(&server, &account, Duration::ZERO);
+    let now = pull_into(&account, &remote)?;
+    let requests = || remote.inner.faults().requests;
+    let before = requests();
+    let began = Instant::now();
+    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut false)?, 2041);
+    eprintln!(
+        "emptied 2,041 files: {} requests, {:?}",
+        requests() - before,
+        began.elapsed()
+    );
+    assert_eq!(requests() - before, 3, "a request per 1,000 files");
+    {
+        let mut db = account.lock().map_err(|_| "poisoned")?;
+        assert!(db.read(|s| s.list_removed(10))?.is_empty());
+        for f in &files {
+            assert!(db.read(|s| s.file_gone(*f))?, "recorded gone");
+        }
+        assert!(
+            db.read(|s| s.tombstones_before(i64::MAX))?.is_empty(),
+            "no tombstone's version is known before the feed brings it"
+        );
+    }
+    let now = pull_into(&account, &remote)?;
+    assert_eq!(
+        account
+            .lock()
+            .map_err(|_| "poisoned")?
+            .read(|s| s.tombstones_before(now + 1))?
+            .len(),
+        2041,
+        "the feed brought every tombstone's version"
+    );
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    let now = pull_into(&account, &remote)?;
+    deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?;
+    let server = server.lock().map_err(|_| "poisoned")?;
+    assert!(
+        files
+            .iter()
+            .all(|f| matches!(server.header(*f), Err(RemoteError::NotFound))),
+        "every tombstone went hard"
+    );
+    Ok(())
+}
+
+/// A tombstone this device's delete left whose version the feed hasn't brought isn't deleted
+/// hard (a hard delete needs it): it stays on the drive, and its id is forgotten by its own time,
+/// [`TRACE_MS`] on. Once the feed brings it, the next purge deletes it hard.
+#[test]
+fn a_tombstone_without_its_version_waits_for_the_feed() -> common::Res<()> {
+    let server = server();
+    let (account, files) = removed_now(&server, &["x.txt"])?;
+    let remote = Watched::new(&server, &account, Duration::ZERO);
+    let now = pull_into(&account, &remote)?;
+    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut false)?, 1);
+    let x = files[0];
+    // Long after, the feed unread meanwhile.
+    let now = now + LATER;
+    deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?;
+    assert!(
+        server
+            .lock()
+            .map_err(|_| "poisoned")?
+            .header(x)?
+            .is_deleted(),
+        "the tombstone stays"
+    );
+    assert!(
+        !account
+            .lock()
+            .map_err(|_| "poisoned")?
+            .read(|s| s.file_gone(x))?,
+        "forgotten by the tombstone's own time"
+    );
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    let now = pull_into(&account, &remote)?;
+    deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?;
+    assert!(
+        matches!(
+            server.lock().map_err(|_| "poisoned")?.header(x),
+            Err(RemoteError::NotFound)
+        ),
+        "the tombstone went hard"
+    );
+    Ok(())
+}
+
+/// In one batch, a file written since stays (the account is behind), and the others go.
+#[test]
+fn a_file_written_since_stays_and_the_rest_of_its_batch_go() -> common::Res<()> {
+    let server = server();
+    let (account, files) = removed_now(&server, &["x.txt", "y.txt", "z.txt"])?;
+    let remote = Watched::new(&server, &account, Duration::ZERO);
+    let now = pull_into(&account, &remote)?;
+    // Another device writes y since this one read it: removed still, at a new version.
+    remove_on_server(&server, &header_named(&server, "y.txt"));
+    let mut moved = false;
+    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut moved)?, 2);
+    assert!(moved, "behind");
+    let server = server.lock().map_err(|_| "poisoned")?;
+    for (f, deleted) in files.iter().zip([true, false, true]) {
+        assert_eq!(server.header(*f)?.is_deleted(), deleted, "{f:?}");
+    }
+    let mut db = account.lock().map_err(|_| "poisoned")?;
+    let left: Vec<RemoteFileId> = db
+        .read(|s| s.list_removed(10))?
+        .iter()
+        .map(|r| r.row.file_id)
+        .collect();
+    assert_eq!(left, [files[1]], "y stays in Recently deleted");
     Ok(())
 }

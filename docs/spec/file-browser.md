@@ -141,17 +141,20 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
     extension.
   - A `VersionTagMismatch` or not-found skips the item: another device changed it.
 - **Delete forever:** only what the user saw.
-  - Send each item's `versionTag` with it (`delete-batch/by-file-id` takes one per request, from
-    odin-core v0.1.960): an item changed since isn't deleted. One stale tag refuses the whole batch
-    before anything is deleted (4160; the message names the tag, not the file: **[verified]**
-    odin-core `V2DriveControllerBase.DeleteFileIdBatchInternal`): re-read the items, leave the
-    changed ones, send the rest again.
-  - Delete files before folders (`delete-batch/by-file-id`): soft, leaving tombstones (node
-    schema, "The purge", 3.).
+  - Use `soft-delete-batch` (odin-core #1977), up to 1,000 files a request, each with its
+    `versionTag` and no recipients: an item changed since isn't deleted, and the rest of the
+    batch goes ahead. Read the answer per file: `errorCode` null is deleted (an item already a
+    tombstone too), `versionTagMismatch` was written since and stays (with the folders above
+    it), `fileNotFound` is done once its header is not found too (or a tombstone), any other
+    code stays. A request that fails leaves the files it didn't answer as they were.
+  - Delete files before folders, a folder only once what is in it went: soft, leaving
+    tombstones (node schema, "The purge", 3.).
+  - Not `delete-batch/by-file-id`: one stale tag refuses its whole batch.
 - **The purge:** the mini-app purges too (when it opens, say), as every client does, by the
   one rule in node schema, "The purge": all of it (what goes, never a live node, without a
   trace or with one per node, asking the server 1.1 s into a pass before its folders go). On
-  the wire: `hard-delete-batch` (odin-core #1968), each file with its `versionTag`; read the
+  the wire: `hard-delete-batch` (odin-core #1968) without a trace, `soft-delete-batch`
+  (odin-core #1977, as Delete forever) leaving one, each file with its `versionTag`; read the
   answer per file: `versionTagMismatch` was written since and stays (with the folders above
   it), `fileNotFound` is done once the file's header is not found too (or a tombstone), any
   other code stays and makes the purge fail (it runs again later). A request that fails

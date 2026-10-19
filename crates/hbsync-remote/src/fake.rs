@@ -36,8 +36,8 @@ use hbsync_types::{
 };
 
 use crate::{
-    Answers, ChangeRef, ChangesPage, ForGood, NodeMeta, PayloadInfo, RefsPage, Remote, RemoteBody,
-    RemoteError, RemoteHeader, Result, Upload,
+    Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, NodeMeta, PayloadInfo,
+    RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -345,9 +345,10 @@ impl FakeServer {
         Ok(written(RemoteRef { file_id, version }, at))
     }
 
-    /// Deletes a file if it is still at `expected` (4160 otherwise). Like Homebase, deleting a
-    /// tombstone at its own version rewrites it: a new version and a new feed row.
-    pub fn delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
+    /// Deletes a file if it is still at `expected` (4160 otherwise), as Homebase's
+    /// `soft-delete-batch` does for each file: a tombstone is left as it is, whatever the
+    /// version asked (a retry, another device's delete). Returns the tombstone's time.
+    pub fn delete(&mut self, file_id: RemoteFileId, expected: VersionTag) -> Result<Option<i64>> {
         self.delete_by(None, file_id, expected)
     }
 
@@ -356,8 +357,11 @@ impl FakeServer {
         writer: Option<ClientId>,
         file_id: RemoteFileId,
         expected: VersionTag,
-    ) -> Result<()> {
+    ) -> Result<Option<i64>> {
         let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
+        if f.header.body == RemoteBody::Deleted {
+            return Ok(f.header.changed_at);
+        }
         if f.header.version != expected {
             return Err(RemoteError::VersionMismatch);
         }
@@ -365,15 +369,16 @@ impl FakeServer {
             self.by_node.remove(&node);
         }
         let version = VersionTag(self.fresh_uuid());
+        let now = self.clock_ms;
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
         f.header.removed_at = None;
-        f.header.changed_at = Some(self.clock_ms);
+        f.header.changed_at = Some(now);
         f.header.token = None;
         f.bytes = None;
         self.touch(file_id, writer);
-        Ok(())
+        Ok(Some(now))
     }
 
     /// Sets only a file's removal, if it is still at `expected`, as Homebase's
@@ -450,6 +455,14 @@ impl FakeServer {
             .get(&file_id)
             .map(|f| f.header.clone())
             .ok_or(RemoteError::NotFound)
+    }
+
+    /// The name of file `file_id`, unless it is a tombstone or missing.
+    fn live_name(&self, file_id: RemoteFileId) -> Option<&str> {
+        match &self.files.get(&file_id)?.header.body {
+            RemoteBody::Live { content, .. } => Some(&content.name),
+            RemoteBody::Deleted => None,
+        }
     }
 
     /// Which of `folders` hold a live, not removed file (unlisted ones too).
@@ -745,6 +758,25 @@ impl FakeRemote {
         Ok(())
     }
 
+    /// One request of [`Remote::delete`]: each file's answer.
+    fn delete_batch(&self, files: &[RemoteRef]) -> Result<Vec<Result<Option<i64>>>> {
+        self.gate()?;
+        batch_of(files.iter().map(|f| f.file_id))?;
+        // The faults on every write (no file is named so).
+        self.gate_name("")?;
+        let failing = self.faults().fail_writes_named.clone();
+        let mut server = self.server();
+        Ok(files
+            .iter()
+            .map(
+                |f| match failing.is_some() && server.live_name(f.file_id) == failing.as_deref() {
+                    true => Err(RemoteError::Transient("injected write failure".into())),
+                    false => server.delete_by(Some(self.client), f.file_id, f.version),
+                },
+            )
+            .collect())
+    }
+
     /// Reads an upload stream outside the server lock, applying an injected connection cut.
     fn receive(
         &self,
@@ -880,38 +912,25 @@ impl Remote for FakeRemote {
         Ok(written)
     }
 
-    fn delete(&self, file_id: RemoteFileId, expected: VersionTag) -> Result<()> {
-        self.gate()?;
-        let body = self.server().header(file_id)?.body;
-        if let RemoteBody::Live { content, .. } = body {
-            self.gate_name(&content.name)?;
-        }
-        let result = self
-            .server()
-            .delete_by(Some(self.client), file_id, expected);
-        match result {
-            // A retry, as the Homebase adapter takes it.
-            Err(RemoteError::VersionMismatch)
-                if self
-                    .server()
-                    .header(file_id)
-                    .is_ok_and(|h| h.body == RemoteBody::Deleted) =>
-            {
-                Ok(())
-            }
-            result => result,
-        }
+    /// A request per [`BATCH_FILES`] files, as Homebase's `soft-delete-batch`: a refusal of all
+    /// writes is the request's, and so is a batch odin-core refuses whole (a file twice); a
+    /// write failure injected for a name ([`Faults::fail_writes_named`]) fails that file
+    /// alone, undeleted.
+    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
+        Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
+    /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`.
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
-        self.gate()?;
-        let mut server = self.server();
-        Ok(ForGood::all(
-            files
+        Answers::in_batches(files, BATCH_FILES, |batch| {
+            self.gate()?;
+            batch_of(batch.iter().map(|f| f.file_id))?;
+            let mut server = self.server();
+            Ok(batch
                 .iter()
                 .map(|f| server.hard_delete(f.file_id, f.version))
-                .collect(),
-        ))
+                .collect())
+        })
     }
 
     /// One request: a refusal of all writes, or an answer lost (after the server wrote the
@@ -920,22 +939,14 @@ impl Remote for FakeRemote {
     /// (Homebase answers a file only with a client error) to hold one file back.
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
         self.gate()?;
-        // As odin-core's `FileVersionTagBatchV2.AssertValid`: else a 400 for all of it.
-        let ids: HashSet<RemoteFileId> = files.iter().map(|t| t.at.file_id).collect();
-        if files.is_empty() || files.len() > 1000 || ids.len() != files.len() {
-            return Err(RemoteError::Fatal(format!(
-                "1 to 1,000 files, none twice: {} asked, {} different",
-                files.len(),
-                ids.len()
-            )));
-        }
-        let names: Vec<Option<String>> = files
-            .iter()
-            .map(|t| match self.server().header(t.at.file_id).ok()?.body {
-                RemoteBody::Live { content, .. } => Some(content.name),
-                RemoteBody::Deleted => None,
-            })
-            .collect();
+        batch_of(files.iter().map(|t| t.at.file_id))?;
+        let names: Vec<Option<String>> = {
+            let server = self.server();
+            files
+                .iter()
+                .map(|t| server.live_name(t.at.file_id).map(str::to_owned))
+                .collect()
+        };
         // The faults on every write (no file is named so).
         self.gate_name("")?;
         if self.faults().not_found_writes {
@@ -994,6 +1005,20 @@ impl Remote for FakeRemote {
     }
 }
 
+/// Whether `files` make a batch odin-core takes (`FileVersionTagBatchV2.AssertValidBatch`): 1
+/// to 1,000 files, none twice; else a 400 for all of it.
+fn batch_of(files: impl ExactSizeIterator<Item = RemoteFileId>) -> Result<()> {
+    let asked = files.len();
+    let ids: HashSet<RemoteFileId> = files.collect();
+    if asked == 0 || asked > BATCH_FILES || ids.len() != asked {
+        return Err(RemoteError::Fatal(format!(
+            "1 to {BATCH_FILES} files, none twice: {asked} asked, {} different",
+            ids.len()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,7 +1044,7 @@ mod tests {
         let mine = a.create(&folder("mine"), None)?;
         let theirs = b.create(&folder("theirs"), None)?;
         let copied = copy.create(&folder("copied"), None)?;
-        a.delete(mine.at.file_id, mine.at.version)?;
+        a.delete(&[mine.at])?.single()?;
         let seeded = server
             .lock()
             .unwrap_or_else(|p| p.into_inner())

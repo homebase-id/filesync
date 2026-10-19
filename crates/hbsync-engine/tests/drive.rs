@@ -180,7 +180,7 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
 
     // Deleted for good, the node made again (a new file id), then the delete is announced.
     let late_delete = ChangeRef::of(&remote.header(file)?).tombstone();
-    remote.delete(file, back.at.version)?;
+    remote.delete(&[back.at])?.single()?;
     let again = remote.create(&docs, None)?;
     assert_ne!(again.at.file_id, file, "a new file id");
     drive.pull(None)?;
@@ -275,10 +275,9 @@ impl Remote for HeldPage {
     }
     fn delete(
         &self,
-        file_id: hbsync_types::RemoteFileId,
-        expected: hbsync_types::VersionTag,
-    ) -> hbsync_remote::Result<()> {
-        self.inner.delete(file_id, expected)
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
+        self.inner.delete(files)
     }
     fn read(
         &self,
@@ -512,10 +511,9 @@ impl Remote for FailsAfterAPage {
     }
     fn delete(
         &self,
-        file_id: hbsync_types::RemoteFileId,
-        expected: hbsync_types::VersionTag,
-    ) -> hbsync_remote::Result<()> {
-        self.inner.delete(file_id, expected)
+        files: &[hbsync_types::RemoteRef],
+    ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
+        self.inner.delete(files)
     }
     fn read(
         &self,
@@ -881,7 +879,7 @@ fn a_role_folder_made_leaves_recently_deleted() -> R {
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     assert!(db.read(|s| s.removed_by_node(top))?.is_some());
     // Deleted for good, not yet read: the restore finds nothing, and the folder is made anew.
-    remote.delete(gone.at.file_id, gone.at.version)?;
+    remote.delete(&[gone.at])?.single()?;
     drive.announcing_from(drive.connection());
     drive.ensure_role(Role::Documents)?;
     assert!(db.read(|s| s.get_mirror(top))?.is_some(), "made");

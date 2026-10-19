@@ -418,6 +418,27 @@ mod mirror {
             db.read(|s| s.file_gone(young.file_id))?,
             "its tombstone is on the drive"
         );
+
+        // Gone at a tombstone's time (a delete's answer): forgotten once that is older than the
+        // cut-off; one known gone already stays as it was.
+        let (own, known) = (RemoteFileId(Uuid::now_v7()), young.file_id);
+        db.write(|s| {
+            s.mark_file_gone_at(own, 300)?;
+            s.mark_file_gone_at(known, 300)
+        })?;
+        assert!(db.read(|s| s.file_gone(own))?);
+        assert_eq!(db.write(|s| s.prune_gone(300, 1000))?, 0, "not before 300");
+        assert_eq!(db.write(|s| s.prune_gone(301, 1000))?, 1, "own");
+        assert!(!db.read(|s| s.file_gone(own))?);
+        assert_eq!(db.read(|s| s.tombstones_before(15))?.len(), 0);
+        assert!(
+            db.read(|s| s.file_gone(known))? && db.read(|s| s.tombstones_before(21))?.len() == 1,
+            "the feed's tombstone stays"
+        );
+        // Its tombstone deleted hard: the id kept from then on, whatever its time before.
+        db.write(|s| s.delete_tombstone_at(young).map(drop))?;
+        assert_eq!(db.write(|s| s.prune_gone(301, 1000))?, 0, "kept from 1000");
+        assert_eq!(db.write(|s| s.prune_gone(1001, 2000))?, 1);
         Ok(())
     }
 

@@ -24,6 +24,19 @@ impl Store<'_> {
         Ok(())
     }
 
+    /// Records file `file_id` gone since `at` (Unix ms, the server's): the time of the tombstone
+    /// a delete of this device left, from the delete's answer ([`Store::prune_gone`] counts
+    /// from it). The tombstone itself, at its version, comes with the feed's row
+    /// ([`Store::put_tombstone`]). A file already known gone stays as it is.
+    pub fn mark_file_gone_at(&self, file_id: RemoteFileId, at: i64) -> Result<()> {
+        self.prep(
+            "INSERT INTO gone_files (file_id, gone_at) VALUES (?1, ?2)
+             ON CONFLICT (file_id) DO NOTHING",
+        )?
+        .execute(params![file_id.0.as_bytes(), at])?;
+        Ok(())
+    }
+
     /// The tombstones still on the drive written before `at_ms` (Unix ms), oldest first.
     pub fn tombstones_before(&self, at_ms: i64) -> Result<Vec<RemoteRef>> {
         self.many(
@@ -40,11 +53,12 @@ impl Store<'_> {
     }
 
     /// The tombstone at `at` (its version) was deleted hard, by this device or another: its file
-    /// stays gone. A delete of another version changes nothing.
+    /// stays gone, its id kept [`Store::prune_gone`]'s time from now (a page read before may
+    /// still show the tombstone). A delete of another version changes nothing.
     pub fn delete_tombstone_at(&self, at: RemoteRef) -> Result<bool> {
         Ok(self
             .prep(
-                "UPDATE gone_files SET version_tag = NULL, at = NULL
+                "UPDATE gone_files SET version_tag = NULL, at = NULL, gone_at = NULL
                  WHERE file_id = ?1 AND version_tag = ?2",
             )?
             .execute(params![at.file_id.0.as_bytes(), at.version.0.as_bytes()])?
