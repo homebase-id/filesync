@@ -315,6 +315,8 @@ pub struct Executor<'a> {
     /// The ids the scan gave new items are durable: before anything goes to the drive, they
     /// are (a power cut must not make the scan give others to what went out).
     ids_durable: bool,
+    /// The folder's trash, read when a download first asks this run ([`Executor::in_trash`]).
+    trash: Option<Trash>,
 }
 
 /// An operation whose guards passed, its job waiting for a worker.
@@ -450,6 +452,7 @@ impl<'a> Executor<'a> {
             counted: HashSet::new(),
             full: false,
             ids_durable: false,
+            trash: None,
         }
     }
 
@@ -1340,6 +1343,7 @@ mod transfer_ops;
 #[cfg(test)]
 mod tests;
 
+use local::Trash;
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
@@ -1381,6 +1385,12 @@ fn rename_ordered(db: &mut StateDb, from: &Path, to: &Path) -> Result<io::Result
 /// When a trash entry (named by `move_to_trash`) went there, Unix s.
 pub(crate) fn trashed_at(entry: &str) -> Option<u64> {
     entry.split_once('-')?.0.parse().ok()
+}
+
+/// When a trash entry (named by `move_to_trash`) went there, Unix s, and whose it is.
+fn trash_entry(entry: &str) -> Option<(u64, NodeId)> {
+    let node = hbsync_types::Uuid::try_parse(entry.split_once('-')?.1).ok()?;
+    Some((trashed_at(entry)?, NodeId(node)))
 }
 
 /// Deletes a file or a folder with everything in it (a link, not what it points to).

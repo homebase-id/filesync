@@ -173,6 +173,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
         tmp_dir: dir.path().join("tmp"),
         key: "big".into(),
         local_algorithm: HashAlgorithm::Blake3,
+        from_trash: Vec::new(),
     });
     let cfg = TransferConfig {
         workers: 1,

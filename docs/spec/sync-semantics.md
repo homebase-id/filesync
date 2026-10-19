@@ -172,6 +172,16 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   old one comes back at once (gone, it would read as the user deleting it, against the drive's
   edit: a conflict, and the download again), and its emptied entry goes. Where that fails, or
   a crash came between, it stays in the trash.
+- **Downloads look in the trash first.** A download (a delete taken back, say: a restore from
+  Recently deleted) first looks for the file in the trash: in the entry of the node, or of a
+  folder above it, under the names the download's place has. It takes one only once it hashed
+  it there and it holds exactly the bytes wanted (the drive's content hash and size; one of
+  another size or mtime isn't read): its bytes synced, it is put in place from there as any
+  download is (the placement record first, the same durability), in one rename. Anything
+  else stays in the trash, untouched, and the file is downloaded; so does one whose
+  placement doesn't go through (it is still in the trash), and one whose tags couldn't be
+  written over the ones it had there (downloaded instead). Nothing is read where no entry is
+  there.
 - **Fingerprint guard.** Before deleting, overwriting or moving a local item, the executor
   checks that the local fingerprint still equals the one the plan was made from. On mismatch
   the operation is skipped and the node is re-planned.

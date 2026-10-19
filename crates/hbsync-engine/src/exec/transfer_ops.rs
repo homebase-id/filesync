@@ -142,6 +142,7 @@ impl Executor<'_> {
             base_at: acted.base_at.into(),
             held_ms: None,
         };
+        let from_trash = self.in_trash(node, parent, &record.target)?;
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -152,6 +153,7 @@ impl Executor<'_> {
             tmp_dir: layout::tmp_dir(&self.cfg.root),
             key: download_key(node, &expected),
             local_algorithm: self.cfg.algorithm,
+            from_trash,
         });
         Ok((
             job,
@@ -389,6 +391,14 @@ impl Executor<'_> {
             && let Some(held) = current.as_ref().and_then(|r| r.tags.as_ref())
             && tags_lost(held, &to_write, &record.base.state.tags)
         {
+            done.keep_for_retry();
+            return Ok(Outcome::Retry("its tags weren't written".into()));
+        }
+        // A file taken from the trash holds the tags it had there: written over, or not used.
+        if left.failed && done.adopted() {
+            if let Some(trash) = &mut self.trash {
+                trash.refused.insert(node);
+            }
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }

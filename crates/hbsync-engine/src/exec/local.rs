@@ -471,7 +471,64 @@ impl Executor<'_> {
             return Ok(Err(e));
         }
         let to = dir.join(path.name().unwrap_or("item"));
-        Ok(rename_ordered(self.db, &self.abs(path), &to)?.map(|()| to))
+        let moved = rename_ordered(self.db, &self.abs(path), &to)?.map(|()| to);
+        if moved.is_ok()
+            && let Some(trash) = &mut self.trash
+        {
+            let entries = trash.entries.entry(node).or_default();
+            if !entries.contains(&dir) {
+                entries.insert(0, dir);
+            }
+        }
+        Ok(moved)
+    }
+
+    /// Files of the folder's trash that may hold the bytes a download of `node` (in `parent`)
+    /// to `target` wants: where its own entry, or the entry of a folder above it, holds it
+    /// under the names `target` has (a delete taken back); its own entries first, then each
+    /// folder's above it, each newest first. Only candidates: the download takes one only once
+    /// it read exactly the bytes wanted ([`hbsync_fileio::CompletedFile::adopt`]). Nothing to
+    /// look up while the trash is empty, or for a node one was refused for this run.
+    pub(super) fn in_trash(
+        &mut self,
+        node: NodeId,
+        parent: NodeId,
+        target: &RelPath,
+    ) -> Result<Vec<PathBuf>, StateError> {
+        let root = &self.cfg.root;
+        let trash = self
+            .trash
+            .get_or_insert_with(|| Trash::read(&layout::trash_dir(root)));
+        if trash.entries.is_empty() || trash.refused.contains(&node) {
+            return Ok(Vec::new());
+        }
+        let names: Vec<&str> = target.components().collect();
+        // The folders above it, as far as `target` names them.
+        let mut left = names.len().saturating_sub(1);
+        let above = self.db.read(|s| {
+            crate::walk::up::<_, StateError>(parent, |at| {
+                if left == 0 {
+                    return Ok(None);
+                }
+                left -= 1;
+                Ok(s.get_mirror(at)?.map(|m| (at, m.parent)))
+            })
+        })?;
+        let mut found = Vec::new();
+        for (i, at) in (0..names.len())
+            .rev()
+            .zip(std::iter::once(node).chain(above.items))
+        {
+            let Some(entries) = trash.entries.get(&at) else {
+                continue;
+            };
+            // Its place in the entry: its name there, and the names below it to the item.
+            let Ok(place) = RelPath::new(&names[i..].join("/")) else {
+                continue;
+            };
+            found.extend(entries.iter().map(|e| place.to_native(e)));
+        }
+        Ok(found)
     }
 
     /// Brings an old version a download just put in the trash (at `entry`) back to `path`, and
@@ -492,5 +549,34 @@ impl Executor<'_> {
             drop(fs::remove_dir(dir));
         }
         Ok(back)
+    }
+}
+
+/// The folder's trash (`.hbsync/trash`), as a run's downloads look in it
+/// ([`Executor::in_trash`]).
+#[derive(Debug, Default)]
+pub(super) struct Trash {
+    /// Its entries (`<Unix s>-<node>`, [`Executor::move_to_trash`]) by node, newest first.
+    entries: HashMap<NodeId, Vec<PathBuf>>,
+    /// The nodes a file taken from it didn't do for (its tags weren't written): downloaded.
+    pub(super) refused: HashSet<NodeId>,
+}
+
+impl Trash {
+    fn read(dir: &Path) -> Trash {
+        let mut entries: HashMap<NodeId, Vec<(u64, PathBuf)>> = HashMap::new();
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            if let Some((at, node)) = entry.file_name().to_str().and_then(trash_entry) {
+                entries.entry(node).or_default().push((at, entry.path()));
+            }
+        }
+        let mut trash = Trash::default();
+        for (node, mut e) in entries {
+            e.sort_by(|a, b| b.cmp(a));
+            trash
+                .entries
+                .insert(node, e.into_iter().map(|(_, p)| p).collect());
+        }
+        trash
     }
 }
