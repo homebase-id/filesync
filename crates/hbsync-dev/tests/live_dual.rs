@@ -28,12 +28,11 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hbsync_dev::{
-    OTHER_CLIENT, credentials_path_as, cursor_at_end, live_identity, on_threads, run_name,
-    saved_client_as,
+    OTHER_CLIENT, credentials_path_as, live_identity, on_threads, run_name, saved_client_as,
 };
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier, OwnWrites};
-use hbsync_remote::contract::{file, folder, removed, upload, with};
+use hbsync_remote::contract::{feed_end, file, folder, removed, upload, with};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, RemoteFileId, Target, VersionTag};
@@ -221,7 +220,7 @@ struct Mark {
 impl Harness {
     fn new(computers: Vec<Computer>, run: &str) -> Res<Harness> {
         // The feed's end, once: each computer's check reads on from a copy of it.
-        let cursor = cursor_at_end(&computers[0].remote, None)?;
+        let cursor = feed_end(&computers[0].remote, None)?;
         let top = folder(run, NodeId::ROOT);
         let h = Harness {
             cursors: Mutex::new(vec![cursor; computers.len()]),
