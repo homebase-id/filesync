@@ -1,8 +1,8 @@
 //! Development tools around the sync engine and a live Homebase identity:
 //! - `hbsync-register <identity>`: registers the app and authorizes this machine;
 //! - `hbsync-sync <identity> <folder>`: syncs a folder with the identity's Filesync drive;
-//! - `hbsync-clean <identity> --tombstones`: deletes the drive's tombstones for good (a test
-//!   identity's, between runs).
+//! - `hbsync-clean <identity> --tombstones [--yes]`: counts the drive's tombstones, and with
+//!   `--yes` deletes them for good (a test identity's, between runs).
 //!
 //! Not the product: the daemon, its configuration and the keychain are roadmap Layer 6.
 
@@ -286,11 +286,20 @@ pub fn delete_tombstones(
     Ok(swept)
 }
 
-/// The run folders this process holds ([`RunFolder`]): how many, and the feed's end when the
-/// first of them was made. The last one out clears the tombstones written since.
-static RUNS: Mutex<Option<(usize, String)>> = Mutex::new(None);
+/// The run folders this process holds ([`RunFolder`]): the last one out clears the tombstones
+/// written since the first was made.
+struct Runs {
+    held: usize,
+    /// The feed's end when the first run held was made (kept after, to read on from).
+    since: Option<String>,
+}
 
-fn runs() -> std::sync::MutexGuard<'static, Option<(usize, String)>> {
+static RUNS: Mutex<Runs> = Mutex::new(Runs {
+    held: 0,
+    since: None,
+});
+
+fn runs() -> std::sync::MutexGuard<'static, Runs> {
     RUNS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -317,15 +326,13 @@ impl RunFolder {
     pub fn new(name: &str) -> Result<RunFolder, Box<dyn std::error::Error>> {
         let remote =
             hbsync_homebase::drive::HomebaseRemote::connect(saved_client(&live_identity()?)?)?;
-        // After the clearing of runs that ended, if one is going on; read on from where the
-        // first run held began.
+        // After the clearing of runs that ended, if one is going on.
         let mut runs = runs();
-        let since = runs.as_ref().map(|(_, since)| since.as_str());
-        let from = hbsync_remote::contract::feed_end(&remote, since)?;
-        match &mut *runs {
-            Some((held, _)) => *held += 1,
-            None => *runs = Some((1, from.clone())),
+        let from = hbsync_remote::contract::feed_end(&remote, runs.since.as_deref())?;
+        if runs.held == 0 {
+            runs.since = Some(from.clone());
         }
+        runs.held += 1;
         Ok(RunFolder {
             remote,
             name: name.to_owned(),
@@ -350,19 +357,17 @@ impl Drop for RunFolder {
             eprintln!("the run folder {:?} is left on the drive: {e}", self.name);
         }
         let mut runs = runs();
-        let Some((held, since)) = runs.take() else {
+        runs.held -= 1;
+        // Never the whole drive (`None`): a run held was made at a point of the feed.
+        let (0, Some(since)) = (runs.held, runs.since.clone()) else {
             return;
         };
-        if held > 1 {
-            *runs = Some((held - 1, since));
-            return;
-        }
         // The feed shows the last writes once its hold-back has passed.
         std::thread::sleep(self.remote.hold_back().saturating_sub(began.elapsed()));
         let cleared = tombstones(&self.remote, Some(&since))
             .and_then(|t| delete_tombstones(&self.remote, &t));
         if let Err(e) = cleared {
-            eprintln!("the runs' tombstones are left on the drive: {e}");
+            eprintln!("some of the runs' tombstones may be left on the drive: {e}");
         }
     }
 }

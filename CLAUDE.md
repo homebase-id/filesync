@@ -34,9 +34,9 @@ product runs as a per-user daemon (`hbsyncd`) shown and controlled by the tray a
 - `cargo run -p hbsync-dev --bin hbsync-register -- <identity> [--browser firefox]`
 - `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]
   [--allow-mass-delete]`
-- `cargo run -p hbsync-dev --bin hbsync-clean -- <identity> --tombstones [--dry]`: deletes the
-  drive's tombstones for good (a test identity's: the live tests clear their own; for a
-  benchmark harness outside the repo, after its run)
+- `cargo run -p hbsync-dev --bin hbsync-clean -- <identity> --tombstones [--yes]`: counts the
+  drive's tombstones, and with `--yes` deletes them for good (a test identity's: the live tests
+  clear their own; for a benchmark harness outside the repo, after its run)
 
 Server dependencies: every odin-core issue the client waits on has a tracking issue here,
 labelled `odin-core` (`gh issue list -R homebase-id/filesync --label odin-core`). Each one names
