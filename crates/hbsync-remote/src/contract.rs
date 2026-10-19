@@ -28,6 +28,11 @@ pub struct Bench<'a> {
     created: Mutex<Vec<RemoteFileId>>,
     /// Each file's token from its last write, as the engine keeps it.
     tokens: Mutex<HashMap<RemoteFileId, FileToken>>,
+    /// The feed's end before the scratch folder was made: every change of the run comes after it.
+    start: String,
+    /// The furthest feed end read so far, so finding the end reads only what came since (a
+    /// shared drive's whole feed can be long).
+    end: Mutex<String>,
 }
 
 impl std::fmt::Debug for Bench<'_> {
@@ -77,6 +82,15 @@ impl<'a> Bench<'a> {
     /// Creates a scratch folder named `name` at the top of the drive.
     pub fn new(remote: &'a dyn Remote, name: &str, settle: Duration) -> Result<Self, RemoteError> {
         let scratch = folder(name, NodeId::ROOT);
+        let mut start = None;
+        loop {
+            let page = remote.change_refs(start.as_deref(), 500)?;
+            start = Some(page.cursor);
+            if !page.has_more {
+                break;
+            }
+        }
+        let start = start.unwrap_or_default();
         let written = remote.create(&scratch, None)?;
         Ok(Bench {
             remote,
@@ -84,6 +98,8 @@ impl<'a> Bench<'a> {
             settle,
             created: Mutex::new(vec![written.at.file_id]),
             tokens: Mutex::default(),
+            end: Mutex::new(start.clone()),
+            start,
         })
     }
 
@@ -221,7 +237,10 @@ impl<'a> Bench<'a> {
 
     /// The feed's end: a cursor after every change so far.
     pub fn cursor_now(&self) -> Result<String, RemoteError> {
-        Ok(self.changes_after(None)?.1)
+        let from = self.end.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let (_, end) = self.changes_after(Some(&from))?;
+        end.clone_into(&mut self.end.lock().unwrap_or_else(|e| e.into_inner()));
+        Ok(end)
     }
 
     /// Every change after `cursor` (all pages) and the cursor after them.
@@ -582,7 +601,7 @@ fn deletes_for_good(b: &Bench) -> Outcome {
     ensure!(!b.remote.header(w.file_id)?.is_deleted(), "deleted anyway");
     ensure_err!(b.remote.header(o.file_id), RemoteError::NotFound);
     ensure_err!(b.remote.header(t.file_id), RemoteError::NotFound);
-    let (feed, _) = b.changes_after(None)?;
+    let (feed, _) = b.changes_after(Some(&b.start))?;
     ensure!(
         !feed
             .iter()
