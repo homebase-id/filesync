@@ -14,6 +14,19 @@ use hbsync_remote::contract::{Bench, feed_end};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
+/// The contract's feed checks compare pages read moments apart, and another test's writes (the
+/// 2,000-file ones above all) land between the reads: the contract runs alone, the rest of this
+/// binary's tests side by side.
+static DRIVE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+fn alone() -> std::sync::RwLockWriteGuard<'static, ()> {
+    DRIVE.write().unwrap_or_else(|e| e.into_inner())
+}
+
+fn beside_others() -> std::sync::RwLockReadGuard<'static, ()> {
+    DRIVE.read().unwrap_or_else(|e| e.into_inner())
+}
+
 fn live_remote() -> Result<HomebaseRemote, Box<dyn std::error::Error>> {
     Ok(HomebaseRemote::connect(saved_client(&live_identity()?)?)?)
 }
@@ -21,6 +34,7 @@ fn live_remote() -> Result<HomebaseRemote, Box<dyn std::error::Error>> {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn the_contract_holds_on_a_live_drive() -> R {
+    let _drive = alone();
     let remote = live_remote()?;
     let run_folder = run_name("contract");
     let _guard = RunFolder::new(&run_folder)?;
@@ -38,6 +52,7 @@ fn the_contract_holds_on_a_live_drive() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn the_app_circle_is_found_by_its_slug() -> R {
+    let _drive = beside_others();
     let identity = live_identity()?;
     let circle = hbsync_homebase::app::app_circle(&live_remote()?)?;
     assert_eq!(hbsync_homebase::app::app_circle(&live_remote()?)?, circle);
@@ -63,6 +78,7 @@ fn the_app_circle_is_found_by_its_slug() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn a_change_on_the_drive_is_announced() -> R {
+    let _drive = beside_others();
     use hbsync_homebase::notify::OwnWrites;
     use hbsync_remote::contract::folder;
     use std::sync::mpsc::Receiver;
@@ -139,6 +155,7 @@ fn a_change_on_the_drive_is_announced() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn nodes_are_stored_encrypted() -> R {
+    let _drive = beside_others();
     use hbsync_homebase::drive::sealed::sealed_len;
     use hbsync_remote::contract::file;
 
@@ -193,6 +210,7 @@ fn nodes_are_stored_encrypted() -> R {
 #[test]
 #[ignore = "a measurement against a live identity (HBSYNC_LIVE)"]
 fn throughput() -> R {
+    let _drive = beside_others();
     use std::io::{Cursor, Seek, SeekFrom, Write};
     use std::time::Instant;
 
@@ -313,6 +331,7 @@ fn throughput() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
+    let _drive = beside_others();
     use hbsync_remote::RemoteBody;
     use hbsync_remote::contract::{file, with};
     use hbsync_types::schema::NodeContent;
@@ -352,6 +371,7 @@ fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
 fn feed_sizes() -> R {
+    let _drive = beside_others();
     use hbsync_remote::contract::{file, removed};
     use std::sync::Mutex;
     let remote = live_remote()?;
@@ -518,6 +538,7 @@ fn socket_count(counter: &str) -> Result<u64, Box<dyn std::error::Error>> {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
 fn own_write_echoes() -> R {
+    let _drive = beside_others();
     use hbsync_homebase::notify::OwnWrites;
     let n = std::env::var("ECHO_FILES")
         .ok()
@@ -791,6 +812,7 @@ impl Remote for Counted {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
 fn write_answers_carry_the_feeds_time() -> R {
+    let _drive = beside_others();
     use hbsync_homebase::drive::wire::{Shape, feed_query};
     use hbsync_remote::contract::{file, removed};
     use std::collections::HashMap;
@@ -939,6 +961,7 @@ fn write_answers_carry_the_feeds_time() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn another_clients_write_is_in_the_feed_at_once() -> R {
+    let _drive = beside_others();
     use hbsync_remote::contract::folder;
     use std::time::Instant;
     let rounds = std::env::var("FEED_AT_ONCE_ROUNDS")
@@ -1026,6 +1049,7 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE) and a second client (hbsync-register --as b)"]
 fn a_page_read_during_a_write_may_be_kept_stale() -> R {
+    let _drive = beside_others();
     use hbsync_remote::contract::folder;
     use std::sync::atomic::{AtomicBool, Ordering};
     let rounds = std::env::var("CACHE_RACE_ROUNDS")
@@ -1129,6 +1153,7 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
 fn hard_purge() -> R {
+    let _drive = beside_others();
     use hbsync_homebase::drive::BATCH_FILES;
     use hbsync_remote::contract::{file, removed};
     use hbsync_types::RemoteRef;
