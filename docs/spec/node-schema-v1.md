@@ -163,13 +163,27 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      purge that knows it. A user emptying an item takes everything removed below it, through
      removed folders: what was deleted from it before too (a sub-folder deleted first, listed
      on its own), else the folder would stay holding it.
-  2. **Never a live node:** the purge and emptying delete removed nodes only, and write nothing
-     live. A folder holding a live node, or a removed node that isn't going, stays with the
-     folders it is in, emptied of the rest. So a removed folder still holding a live node (a
-     delete that stopped half way, before it removed what is in it; or a node written into it
-     since) stays in Recently deleted, restorable, until its delete finishes or someone
-     restores it: it never goes for good while it holds one, however old. A delete that never
-     finishes leaves it there indefinitely. Before a pass of folders goes, the server is asked,
+  2. **Never a live node:** the purge and emptying delete removed nodes only, never a live
+     node. A folder holding a live node, or a removed node that isn't going, stays with the
+     folders it is in, emptied of the rest: it never goes for good while it holds one, however
+     old. **What a delete left:** a delete that stopped half way (the device that made it
+     never came back, and no syncing device finished it) leaves live nodes in the removed
+     folder that its delete took along (below). So the purge first removes them (to Recently
+     deleted, restorable), for the items it would delete (removed more than 30 days ago): a
+     live node below a removed folder of such an item, directly or through live folders,
+     written no later than the removal of the nearest removed folder above it (the server's
+     `updated` of the version the client knows, against the folder's removal). It reads each
+     removed folder that directly holds such a node first, and goes on only if it is still
+     removed at the version the client knows. Then, top-down (a folder before what is in it,
+     a level at a time), it removes them with `update-archival-status-batch`, each at the
+     version the client knows: one written since (`versionTagMismatch`), or gone, stays live,
+     and so does what is in it. It leaves alone a node whose time the client doesn't know, a
+     node written after the removal (an edit, a folder moved in) and a role folder, and the
+     live folders above them. Each node it removes is deleted with its folder (removed after
+     it) and has its own 30 days: the item goes once they are past too. What the purge
+     doesn't take (a node written after the removal, one whose time isn't known, a file this
+     client doesn't read, such as another app's) keeps its folder in Recently deleted,
+     restorable, until it is restored or the node is removed. Before a pass of folders goes, the server is asked,
      in one question, whether a live file is in any of them (one this client doesn't read too:
      homebase-api-notes, Change feed); as that query leaves out what changed in its last
      second, the client asks 1.1 s after the pass begins, when it shows all written before (a
@@ -207,8 +221,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   against the folder's) was in the folder when it was deleted: it is deleted with it, though
   its own removal may still be on its way (a folder goes first). A client takes it as removed,
   and any client may mark it so; one that doesn't know the node's time (its own write, not
-  back from the feed yet) takes it as written before. Deleting for good leaves it alone: it is
-  live (The purge, 2.). A node written after the removal (an edit, a new file, a folder moved in, by
+  back from the feed yet) takes it as written before. Deleting for good never takes it while
+  it is live: the purge removes it first, 30 days after the folder's removal (The purge, 2.). A node written after the removal (an edit, a new file, a folder moved in, by
   a device that didn't know of the delete yet) is a change of its own: it stays with all that
   is in it, and brings its folders back (the folders alone, not what was deleted with them;
   sync-semantics §6.3). One rule decides this for the reconciler and Recently deleted
@@ -257,6 +271,13 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-19: the purge removes what a delete that stopped half way left live (The purge, 2.):
+  the live nodes the delete of an item it would delete took along (written no later than the
+  removal, by the server's time, at the version the client knows; the folder confirmed still
+  removed), top-down, with `update-archival-status-batch`. They go for good 30 days after
+  their own removal, the folder with them. A removed folder no longer stays indefinitely for
+  a delete that never finished; one holding a node written after the removal, or one the
+  client doesn't read, still does. The node is the same.
 - 2026-10-18: emptying an item of Recently deleted by hand takes everything removed below it,
   what was deleted from it before too (it stayed, holding that); the node is the same.
 - 2026-10-18: removals and restores that change nothing else go through

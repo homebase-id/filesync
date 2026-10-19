@@ -86,11 +86,20 @@ pub enum Action {
     Restore {
         node: usize,
     },
-    /// The daily purge ([`Server::purge`]): the server's clock moves on by [`PURGE_EVERY`], and
-    /// the items of Recently deleted removed [`TRACE`] before go for good, as the engine selects
-    /// them ([`hbsync_engine::deleted::select`]): never a live node, so a folder holding one
-    /// stays.
+    /// The daily purge ([`Server::purge`]): the server's clock moves on by [`PURGE_EVERY`];
+    /// what the deletes of the items of Recently deleted removed [`TRACE`] before took along
+    /// and left live is removed (`along::taken_levels`), and those items go for good, as the
+    /// engine selects them ([`hbsync_engine::deleted::select`]): never a live node, so a folder
+    /// holding one stays.
     Purge,
+    /// Another device (the phone, or a computer never seen again) deletes a folder of the
+    /// drive and stops half way: the folder, then the first `done` of what is in it, top-down
+    /// (node schema, Recently deleted); the rest stays live, taken along. Not the role folder
+    /// ([`Action::DeleteRoleFolder`]); nothing when the drive holds no other folder.
+    DeleteStopped {
+        pick: usize,
+        done: usize,
+    },
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
@@ -282,50 +291,81 @@ impl Server {
         .collect()
     }
 
-    /// The engine's purge (`deleted::purge`), its clock moved on [`PURGE_EVERY`]: the items
-    /// all removed [`TRACE`] before now (each deleted on its own), with what was deleted with each,
-    /// at their versions: what [`Sim::delete_for_good`] deletes as the engine selects it (never
-    /// a live node, nor a folder holding one: the purge writes nothing live). Without a trace
-    /// or leaving a tombstone is the same here (no feed: a client finds it missing).
-    fn purge(&mut self) -> BTreeSet<(NodeId, VersionTag)> {
+    /// The engine's purge (`deleted::purge`), its clock moved on [`PURGE_EVERY`], first part:
+    /// what the deletes of the items removed [`TRACE`] before now (each deleted on its own)
+    /// took along and left live, top-down, as the engine picks it
+    /// ([`hbsync_engine::along::taken_levels`]; the purging device knows every version here),
+    /// for [`Sim::remove_live`]. Then [`Server::due`].
+    fn purge(&mut self) -> Vec<NodeId> {
         self.next += PURGE_EVERY as u128;
-        let before = self.next as i64 - TRACE;
-        let time = |s: &Server, n: &NodeId| s.removed_at.get(n).copied().unwrap_or(i64::MAX);
-        let tops: Vec<NodeId> = self
-            .removed
-            .iter()
-            .filter(|(n, r)| {
-                time(self, n) < before
-                    && !(self.removed.contains_key(&r.state.parent)
-                        && time(self, &r.state.parent) <= time(self, n))
-            })
-            .map(|(n, _)| *n)
+        let folders: HashMap<NodeId, i64> = self
+            .items(self.purge_before())
+            .into_iter()
+            .flatten()
+            .filter(|n| self.removed[n].state.kind == NodeKind::Folder)
+            .filter_map(|n| Some((n, *self.removed_at.get(&n)?)))
             .collect();
+        hbsync_engine::along::taken_levels(
+            self.live.iter().map(|(n, l)| (*n, l.state.parent)),
+            |f| folders.get(&f).copied(),
+            |n| self.live.get(&n).map(|l| time(l.remote.version)),
+            |n| n == Role::Documents.node(),
+        )
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The purge's cut-off: removed before it is kept long enough.
+    fn purge_before(&self) -> i64 {
+        self.next as i64 - TRACE
+    }
+
+    /// The purge's second part: the items all removed [`TRACE`] before now, with what was
+    /// deleted with each, at their versions: what [`Sim::delete_for_good`] deletes as the
+    /// engine selects it (never a live node, nor a folder holding one). Without a trace or
+    /// leaving a tombstone is the same here (no feed: a client finds it missing).
+    fn due(&self) -> BTreeSet<(NodeId, VersionTag)> {
+        let before = self.purge_before();
         let mut due = BTreeSet::new();
-        for top in tops {
-            // The item: removed nodes deleted with their folder, level by level.
-            let mut item = vec![top];
+        for item in self.items(before) {
+            // Due once all of it is: one removed later has its own time.
+            if item
+                .iter()
+                .all(|n| self.removed_at.get(n).is_some_and(|at| *at < before))
+            {
+                due.extend(item.iter().map(|n| (*n, self.removed[n].remote.version)));
+            }
+        }
+        due
+    }
+
+    /// The items of Recently deleted removed before `before` (each deleted on its own), each
+    /// with what was deleted with it: removed nodes deleted with their folder, level by level.
+    fn items(&self, before: i64) -> Vec<Vec<NodeId>> {
+        let time = |n: &NodeId| self.removed_at.get(n).copied().unwrap_or(i64::MAX);
+        let tops = self.removed.iter().filter(|(n, r)| {
+            time(n) < before
+                && !(self.removed.contains_key(&r.state.parent) && time(&r.state.parent) <= time(n))
+        });
+        tops.map(|(top, _)| {
+            let mut item = vec![*top];
             let mut next = 0;
             while next < item.len() {
                 let folder = item[next];
-                let at = time(self, &folder);
+                let at = time(&folder);
                 let with: Vec<NodeId> = self
                     .removed
                     .iter()
-                    .filter(|(n, r)| {
-                        r.state.parent == folder && time(self, n) >= at && !item.contains(n)
-                    })
+                    .filter(|(n, r)| r.state.parent == folder && time(n) >= at && !item.contains(n))
                     .map(|(n, _)| *n)
                     .collect();
                 item.extend(with);
                 next += 1;
             }
-            // Due once all of it is: one removed later has its own time.
-            if item.iter().all(|n| time(self, n) < before) {
-                due.extend(item.iter().map(|n| (*n, self.removed[n].remote.version)));
-            }
-        }
-        due
+            item
+        })
+        .collect()
     }
 
     fn tree(&self) -> Tree {
@@ -711,14 +751,47 @@ impl Sim {
         // The folder first, then what is in it, top-down (node schema, Recently deleted).
         let tree = self.server.tree();
         below.sort_by_key(|n| tree.ancestors(*n).len());
-        for node in [docs].into_iter().chain(below.iter().copied()) {
+        self.remove_live([docs].into_iter().chain(below.iter().copied()));
+        self.role_folder_deleted_with = below;
+    }
+
+    /// Moves `nodes`, in order, from the tree to Recently deleted, on the server at once. A tag
+    /// change loses to a delete (§11).
+    fn remove_live(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+        for node in nodes {
             if let Some(n) = self.server.live.remove(&node) {
                 self.server.remove(node, n);
-                // A tag change loses to a delete (§11).
                 self.deleted_now(node);
             }
         }
-        self.role_folder_deleted_with = below;
+    }
+
+    /// The folders [`Action::DeleteStopped`] picks from: the drive's, but the role folder.
+    fn stopped_folders(&self) -> Vec<NodeId> {
+        let docs = Role::Documents.node();
+        self.server
+            .live
+            .iter()
+            .filter(|(n, s)| s.state.kind == NodeKind::Folder && **n != docs)
+            .map(|(n, _)| *n)
+            .collect()
+    }
+
+    /// [`Action::DeleteStopped`].
+    fn delete_stopped(&mut self, pick: usize, done: usize) {
+        let folders = self.stopped_folders();
+        let Some(&folder) = folders.get(pick % folders.len().max(1)) else {
+            return;
+        };
+        let tree = self.server.tree();
+        let mut below: Vec<NodeId> = tree
+            .subtree(folder)
+            .into_iter()
+            .filter(|n| *n != folder)
+            .collect();
+        below.sort_by_cached_key(|n| (tree.ancestors(*n).len(), *n));
+        below.truncate(done % (below.len() + 1));
+        self.remove_live([folder].into_iter().chain(below));
     }
 
     /// Another device (the phone) changes a file in the role folder: `op` picks adding, editing,
@@ -1204,6 +1277,11 @@ impl Sim {
         paths
     }
 
+    /// For scripted tests: what [`Action::DeleteStopped`]'s `pick` is to pick folder `node`.
+    pub fn stopped_pick(&self, node: NodeId) -> Option<usize> {
+        self.stopped_folders().iter().position(|n| *n == node)
+    }
+
     /// Whether `node` is in Recently deleted.
     pub fn is_removed(&self, node: NodeId) -> bool {
         self.server.removed.contains_key(&node)
@@ -1263,6 +1341,7 @@ impl Sim {
             Action::Restore { node } => self.restore(node),
             Action::Phone { op, pick } => self.phone(op, pick),
             Action::DeleteRoleFolder => self.delete_role_folder(),
+            Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;
@@ -1330,7 +1409,9 @@ impl Sim {
                 }
             }
             Action::Purge => {
-                let due = self.server.purge();
+                let taken = self.server.purge();
+                self.remove_live(taken);
+                let due = self.server.due();
                 self.delete_for_good(&due);
             }
             Action::ToggleIgnore => {

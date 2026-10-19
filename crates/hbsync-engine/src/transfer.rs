@@ -206,7 +206,7 @@ impl Job {
 
 /// Removals sent in one request: as many as Homebase takes in one. A level of more goes in
 /// requests that run at once, on the workers.
-const REMOVALS_AT_ONCE: usize = 1000;
+pub(crate) const REMOVALS_AT_ONCE: usize = 1000;
 
 /// What a worker takes on: a job, or removals sent together.
 enum Task {
@@ -437,15 +437,13 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
 /// them (an answer lost), so they are planned again, never sent again blind.
 fn remove(remote: &dyn Remote, jobs: Vec<Job>) -> Vec<(Job, JobResult)> {
     let files: Vec<Target> = jobs.iter().filter_map(Job::removal).cloned().collect();
-    let Answers { answers, stopped } = remote
+    let (answers, _) = remote
         .set_removed(&files, true)
-        .unwrap_or_else(Answers::stopped);
-    let stopped =
-        stopped.unwrap_or_else(|| RemoteError::Fatal("removals the drive didn't answer".into()));
-    let mut answers = answers.into_iter();
+        .unwrap_or_else(Answers::stopped)
+        .padded(jobs.len());
     jobs.into_iter()
-        .map(|job| {
-            let answer = answers.next().unwrap_or_else(|| Err(stopped.again()));
+        .zip(answers)
+        .map(|(job, answer)| {
             let result = answer.map_or_else(|e| JobResult::Failed(e.into()), JobResult::Written);
             (job, result)
         })

@@ -263,11 +263,12 @@ fn node_of(header: &hbsync_remote::RemoteHeader) -> NodeId {
     }
 }
 
-/// The purge never writes a live node: a removed folder still holding one (another device's
-/// delete, stopped before it removed what is in it) stays in Recently deleted, purge after
-/// purge, what it holds untouched; and it can be restored.
+/// The purge never deletes a live node for good: what another device's delete took along and
+/// left live (it stopped before it removed what is in the folder) the purge removes first,
+/// top-down, once the folder is kept long enough, at the versions it knows, the bytes kept; d
+/// stays in Recently deleted with them, and a restore brings all of it back.
 #[test]
-fn a_removed_folder_holding_a_live_node_stays_and_nothing_live_is_touched() -> common::Res<()> {
+fn a_purge_removes_what_a_stopped_delete_left_and_a_restore_brings_it_back() -> common::Res<()> {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("d/e/x.txt", "x")?;
@@ -277,28 +278,27 @@ fn a_removed_folder_holding_a_live_node_stays_and_nothing_live_is_touched() -> c
     // The purge reads the feed itself, before a sync would carry the removal on to e and x.
     remove_on_server(&server, &d);
     let (e, x) = (header_named(&server, "e"), header_named(&server, "x.txt"));
-    for _ in 0..2 {
-        server.lock().map_err(|_| "poisoned")?.advance(LATER);
-        assert_eq!(a.engine.drive().purge(TRACE_MS)?, 0, "d stays");
-    }
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    assert_eq!(a.engine.drive().purge(TRACE_MS)?, 0, "d holds e and x");
     {
         let server = server.lock().map_err(|_| "poisoned")?;
-        assert!(
-            server.header(d.file_id)?.removed_at.is_some(),
-            "d is removed"
-        );
-        for held in [&e, &x] {
+        for held in [&d, &e, &x] {
             let now = server.header(held.file_id)?;
-            assert_eq!(now.version, held.version, "untouched: {now:?}");
+            assert!(now.removed_at.is_some(), "removed: {now:?}");
         }
+        // A folder before what is in it.
+        let at = |h: &hbsync_remote::RemoteHeader| server.header(h.file_id).map(|h| h.removed_at);
+        assert!(at(&e)? < at(&x)?, "e first");
         assert_eq!(server.payload(x.file_id)?.as_slice(), b"x");
     }
+    assert_eq!(live(&server), ["y.txt"]);
     let items = a.recently_deleted(10)?;
-    assert!(
-        items.iter().any(|i| i.node == node_of(&d)),
-        "d in Recently deleted: {items:?}"
-    );
-    assert_eq!(a.engine.drive().restore(&[node_of(&d)])?, 1);
+    let listed = items
+        .iter()
+        .find(|i| i.node == node_of(&d))
+        .ok_or("d in Recently deleted")?;
+    assert!(!listed.stays, "nothing live holds d any more");
+    assert_eq!(a.engine.drive().restore(&[node_of(&d)])?, 3);
     a.sync()?;
     assert_eq!(a.read_text("d/e/x.txt")?, "x");
     assert_eq!(live(&server), ["d", "e", "x.txt", "y.txt"]);
@@ -317,8 +317,7 @@ fn a_member_removed_later_keeps_its_own_time() -> common::Res<()> {
     let m = header_named(&server, "m");
     remove_on_server(&server, &m);
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(TRACE_MS)?, 0, "m holds f");
-    // The delete carries on: f removed now, with m.
+    // The delete carries on, long after: f removed now, with m.
     let f = header_named(&server, "f.txt");
     remove_on_server(&server, &f);
     assert_eq!(a.engine.drive().purge(TRACE_MS)?, 0, "f has its own time");

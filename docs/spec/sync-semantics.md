@@ -245,7 +245,8 @@ expected fingerprint is treated as done.
   the plan still has the removal of its folder to run (one retried goes to the back of the
   queue); one whose folder's removal didn't happen in the run waits for the next plan. A child
   whose removal failed or was skipped stays live in the removed folder until a later plan
-  removes it; meanwhile §6.3 takes it as deleted with the folder by its time.
+  removes it (or, where no device does, the purge: node schema, "The purge", 2.); meanwhile
+  §6.3 takes it as deleted with the folder by its time.
 - **Together on the pool.** Transfers and remote writes (folder creates, renames, moves, tags,
   deletes) are collected and run together on the worker pool, in any order. An operation that
   depends on one collected waits until they all ran: a create or move into a folder created
