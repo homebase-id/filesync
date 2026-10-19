@@ -433,23 +433,23 @@ pub fn restore(
                 rest.push(row)
             }
         }
-        let targets: Vec<Target> = asked.iter().map(|row| row.target()).collect();
-        let (answers, stopped) = if targets.is_empty() {
-            Answers::default()
-        } else {
-            remote
+        // As many a request as the drive takes.
+        for part in asked.chunks(crate::transfer::REMOVALS_AT_ONCE) {
+            let targets: Vec<Target> = part.iter().map(|row| row.target()).collect();
+            let (answers, stopped) = remote
                 .set_removed(&targets, false)
                 .unwrap_or_else(Answers::stopped)
-        }
-        .padded(targets.len());
-        // One the call left unanswered fails as it did.
-        for (row, answer) in asked.into_iter().zip(answers) {
-            let meta = meta_at(row, row.parent, &row.name, false);
-            r.settle(row, &meta, answer);
-        }
-        if let Some(e) = stopped {
-            *r.moved = true; // it may have landed
-            r.failed.get_or_insert(e);
+                .padded(targets.len());
+            // One the call left unanswered fails as it did.
+            for (row, answer) in part.iter().zip(answers) {
+                let meta = meta_at(row, row.parent, &row.name, false);
+                r.settle(row, &meta, answer);
+            }
+            if let Some(e) = stopped {
+                *r.moved = true; // it may have landed
+                r.failed.get_or_insert(e);
+                break;
+            }
         }
         for row in rest {
             if r.failed.is_some() {
