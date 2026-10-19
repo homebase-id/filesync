@@ -1615,6 +1615,59 @@ fn nothing_is_created_under_a_folder_the_server_does_not_have() -> R {
     Ok(())
 }
 
+/// Another app deletes a folder for good outright (a hard delete), leaving the files in it
+/// live with no folder. A device that never had the folder puts them into Recovered files on
+/// the drive, made there at the top beside a plain folder of the same name, which keeps its
+/// name; another device finds them there and joins the folder. Nothing lost.
+#[test]
+fn files_whose_folder_is_gone_for_good_are_recovered() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("docs/report.txt", "r")?;
+    a.write("docs/sub/deep.txt", "d")?;
+    a.write("Recovered files/mine.txt", "m")?;
+    a.sync()?;
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        let docs = s
+            .live()
+            .find(|h| h.state().is_some_and(|st| st.name == "docs"))
+            .map(|h| h.at())
+            .ok_or("docs")?;
+        s.hard_delete(docs.file_id, docs.version)?;
+    }
+    let mut b = Client::new(&server, "b")?;
+    let report = b.sync()?;
+    let orphans = report
+        .conflicts
+        .iter()
+        .filter(|c| matches!(c, hbsync_engine::Conflict::Orphan { .. }))
+        .count();
+    assert_eq!(orphans, 2, "docs/report.txt and docs/sub: {report:?}");
+    let recovered = [
+        "Recovered files (conflict 1)/",
+        "Recovered files (conflict 1)/report.txt = r",
+        "Recovered files (conflict 1)/sub/",
+        "Recovered files (conflict 1)/sub/deep.txt = d",
+        "Recovered files/",
+        "Recovered files/mine.txt = m",
+    ];
+    assert_eq!(b.tree_text(""), recovered);
+    let s = server.lock().map_err(|_| "poisoned")?;
+    let folder = s
+        .live()
+        .find(|h| h.node() == Some(NodeId::RECOVERED))
+        .and_then(|h| h.state())
+        .ok_or("Recovered files on the drive")?;
+    assert_eq!(folder.parent, NodeId::ROOT);
+    drop(s);
+    let mut c = Client::new(&server, "c")?;
+    let report = c.sync()?;
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert_eq!(c.tree_text(""), recovered);
+    Ok(())
+}
+
 /// A folder's delete removes the folder first, then what is in it (node schema, Recently
 /// deleted). A child whose removal failed follows later; meanwhile another client doesn't bring
 /// the folder back for it (§6.3), and the folder's restore brings both back.

@@ -50,6 +50,27 @@ the same on every drive: devices that add one join it.
 - A role folder in Recently deleted still holds its `uniqueId` (Homebase refuses a second live
   one, inferred): restore it rather than create it.
 
+## Recovered files
+A folder at the top holding what lost its folder for good: a live node whose `groupId` is no
+node on the drive (deleted for good while something was written into it, or by another app).
+Computers syncing the main folder move such a node into it (sync semantics §6.3).
+
+| `uniqueId` | Name when created |
+|---|---|
+| `fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b` | `Recovered files` |
+
+- The id is the same on every drive, so devices adopting at once share one folder. Recognise
+  it by its `uniqueId`, never by its name: the user may rename it.
+- It is made when an orphan first needs one (one in Recently deleted is restored instead,
+  alone), and is an ordinary folder otherwise (content `v`, `name`): open, rename, move out of,
+  delete. Nothing removes it when it is empty; a deleted one comes back only for a new orphan.
+- The adopting device moves an orphan in with one metadata update of `groupId` at its
+  `versionTag` (a removed folder a live node brings back: restored and moved in one update). A
+  name taken in it: the orphan gets `<stem> (conflict <n>)`.
+- An orphan only removed (in Recently deleted) isn't moved: it stays an item of its own there.
+- The id sorts above the ids clients make: in a name clash at the top, a plain folder called
+  `Recovered files` keeps its name and this one is renamed.
+
 ## File header fields
 
 | Field | Folder | File |
@@ -203,8 +224,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      second, the client asks 1.1 s after the pass begins, when it shows all written before (a
      pass deleting no folder asks nothing, and doesn't wait).
      What a client still misses (a live file written into a folder in the moment between the
-     question and the delete) is left with no folder: clients show it at the top (the "Lost
-     files" follow-up).
+     question and the delete) is left with no folder: computers move it into Recovered files
+     (above).
   3. **Without a trace, or with one:** each node by its own trace and time. A removed node
      removed more than 30 days ago goes without a trace (a hard delete: `hard-delete-batch`,
      odin-core #1968), nothing of the file left, in the feed either. Anything else (a younger
@@ -279,6 +300,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   be now (the other keys as read), never a part of it. A client that doesn't keeps `tags` as
   read, like any other key.
 - **Every write** sends `archivalStatus`: Homebase sets a missing one to `0`.
+- **Recovered files** (see above): show it as any folder, known by its `uniqueId`. Moving
+  orphans into it is the computers' job; another client may leave it to them, as it may the
+  purge's first step. One that does it follows the rules above: the fixed id, and a restore
+  rather than a create when the folder is in Recently deleted.
 - **Role folders** (see above): keep them at the top: never move one into a folder (a computer
   then leaves it out there), and never create one, under any parent (that is the computers'
   job; restore one that is in Recently deleted). Renaming one changes only the drive's name:
@@ -287,6 +312,11 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-19: Recovered files, a folder at the top with the fixed node id
+  `fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b`, named `Recovered files` when made: a live node whose
+  folder is nowhere on the drive is moved into it on the drive (before, computers moved it to
+  the top, or, where its folder was in Recently deleted with no folder above it, it showed
+  nowhere). The node is the same.
 - 2026-10-19: before a pass of folders goes for good, the server's answer counts any file in
   them that isn't deleted, a removed one too, but the later passes' rows at their versions
   (The purge, 2.): a removed node the client didn't know of (removed since its last read, or

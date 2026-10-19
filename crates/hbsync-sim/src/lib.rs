@@ -101,6 +101,13 @@ pub enum Action {
         pick: usize,
         done: usize,
     },
+    /// Another app deletes a live folder of the drive for good, outright (no trace in the feed:
+    /// a hard delete): what was in it stays live with no folder, an orphan, which the main
+    /// folders put into Recovered files. Any folder, as [`Action::DeleteStopped`] picks it;
+    /// nothing when the drive holds none.
+    DeleteOutright {
+        pick: usize,
+    },
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
@@ -1350,6 +1357,13 @@ impl Sim {
             Action::Phone { op, pick } => self.phone(op, pick),
             Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
+            Action::DeleteOutright { pick } => {
+                let folders = self.stopped_folders();
+                if let Some(&folder) = folders.get(pick % folders.len().max(1)) {
+                    self.server.live.remove(&folder);
+                    self.deleted_now(folder);
+                }
+            }
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;
@@ -1850,7 +1864,12 @@ impl Sim {
         // The folders in Recently deleted that live nodes are in, and the removed ones above
         // them, and the server's time of each live node's version, as the engine's view has them.
         let outside = client.scope().outside;
-        for mut folder in remote.missing_parents() {
+        // Recovered files too, where an orphan may go, as the engine's view has it.
+        let mut missing = remote.missing_parents();
+        if client.coords.top.is_root() && !missing.is_empty() {
+            missing.insert(NodeId::RECOVERED);
+        }
+        for mut folder in missing {
             while !input.removed.contains_key(&folder)
                 && !outside.contains(&folder)
                 && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))

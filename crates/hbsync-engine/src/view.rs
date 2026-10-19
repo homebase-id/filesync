@@ -310,10 +310,18 @@ fn build(
             }
         }
     }
+    // A remote node whose folder isn't in the mirror may be an orphan, which the main folder
+    // puts into Recovered files: where that is (live, removed or synced here before), and what
+    // in it may clash with the names coming (the plan asks for the rest: `Plan::unlisted`).
+    let mut missing = b.input.remote.missing_parents();
+    if scope.top.is_root() && !missing.is_empty() {
+        b.load(NodeId::RECOVERED)?;
+        missing.insert(NodeId::RECOVERED);
+    }
     // The folders in Recently deleted that remote nodes are in, and the removed ones above them
     // in this folder's part of the drive: what a folder's delete took along goes by their times
     // (node schema, Recently deleted).
-    for mut folder in b.input.remote.missing_parents() {
+    for mut folder in missing {
         while !b.input.removed.contains_key(&folder)
             && !scope.outside.contains(&folder)
             && let Some(r) = s.removed_by_node(folder)?

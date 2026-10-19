@@ -1,6 +1,7 @@
 //! Step 3: the merged tree made whole again: orphans, cycles, duplicate names (§6).
 
 use super::*;
+use hbsync_types::RECOVERED_NAME;
 
 impl Reconciler<'_> {
     // ---- 3: invariants on the merged tree ----
@@ -45,6 +46,32 @@ impl Reconciler<'_> {
             .cloned()
     }
 
+    /// Where the orphan `node` goes: Recovered files ([`NodeId::RECOVERED`]), made here if no
+    /// side knows it (one in Recently deleted, or synced here before, comes back as any folder
+    /// a live child keeps does). The main folder adopts orphans (§12); a role folder's never
+    /// meets one but through a folder it filters, and puts that at its top, as does the main
+    /// folder where Recovered files isn't synced here (filtered) or is the orphan itself.
+    fn recovered_files(&mut self, node: NodeId) -> NodeId {
+        let recovered = NodeId::RECOVERED;
+        let synced = || {
+            self.opts
+                .filter
+                .in_folder("", RECOVERED_NAME, true)
+                .is_sync()
+        };
+        if node == recovered
+            || !self.opts.scope.top.is_root()
+            || self.masks.masked.contains(&recovered)
+            || !synced()
+        {
+            return NodeId::ROOT;
+        }
+        if !self.merged.exists(recovered) && self.known_state(recovered).is_none() {
+            self.retarget(recovered, NodeState::folder(NodeId::ROOT, RECOVERED_NAME));
+        }
+        recovered
+    }
+
     pub(super) fn fix_orphans(&mut self) {
         let mut queue: Vec<NodeId> = self.merged.ids().collect();
         queue.sort();
@@ -78,15 +105,20 @@ impl Reconciler<'_> {
                     queue.push(parent);
                 }
                 None if self.input.remote_complete
-                    && self.input.remote.contains(node)
+                    && (self.input.remote.contains(node)
+                        || self.input.removed.contains_key(&node))
                     && !withdrawn.contains(&parent) =>
                 {
-                    // Nobody knows the parent: the server kept a child of a folder deleted
-                    // concurrently. Keep the data visible by moving it to the root.
+                    // Nobody knows the parent, though the drive's picture is whole: the server
+                    // kept a child of a folder deleted for good (a create racing the delete,
+                    // another app), live or brought back from Recently deleted by what is in
+                    // it. Keep the data visible: it moves into Recovered files on the drive.
                     if let Some(mut state) = self.merged.get(node).cloned() {
-                        state.parent = NodeId::ROOT;
+                        state.parent = self.recovered_files(node);
                         self.retarget(node, state);
                         self.plan.conflicts.push(Conflict::Orphan { node });
+                        // Its new folder may have to come back first.
+                        queue.push(node);
                     }
                 }
                 _ => {
@@ -168,6 +200,15 @@ impl Reconciler<'_> {
     }
 
     pub(super) fn fix_names(&mut self) {
+        let adopted: HashSet<NodeId> = self
+            .plan
+            .conflicts
+            .iter()
+            .filter_map(|c| match c {
+                Conflict::Orphan { node } => Some(*node),
+                _ => None,
+            })
+            .collect();
         let parents: BTreeSet<NodeId> = self
             .scope
             .iter()
@@ -208,8 +249,9 @@ impl Reconciler<'_> {
                 }
                 unlisted |= part.is_some();
                 // The lowest id keeps the name, except that a deferred node (a file still
-                // being written) is never renamed: it wins, and is left alone if it loses.
-                group.sort_by_key(|n| (!self.deferred.contains(n), *n));
+                // being written) is never renamed: it wins, and is left alone if it loses;
+                // and an orphan moving in loses to what is there.
+                group.sort_by_key(|n| (!self.deferred.contains(n), adopted.contains(n), *n));
                 for loser in group.into_iter().skip(keep) {
                     if self.deferred.contains(&loser) {
                         continue;
