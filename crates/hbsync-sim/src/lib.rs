@@ -94,8 +94,9 @@ pub enum Action {
     Purge,
     /// Another device (the phone, or a computer never seen again) deletes a folder of the
     /// drive and stops half way: the folder, then the first `done` of what is in it, top-down
-    /// (node schema, Recently deleted); the rest stays live, taken along. Outside the role
-    /// folder ([`Sim::stopped_folders`]); nothing when the drive holds no such folder.
+    /// (node schema, Recently deleted); the rest stays live, taken along. Any folder, the role
+    /// folder and what is in it too ([`Sim::stopped_folders`]); nothing when the drive holds
+    /// none.
     DeleteStopped {
         pick: usize,
         done: usize,
@@ -201,6 +202,9 @@ struct ServerNode {
     state: NodeState,
     remote: RemoteRef,
 }
+
+/// [`Server::snapshot`].
+type Snapshot = (BTreeMap<NodeId, ServerNode>, BTreeMap<NodeId, ServerNode>);
 
 #[derive(Debug, Default)]
 struct Server {
@@ -403,6 +407,15 @@ impl Server {
     fn in_role_folder(&self, node: NodeId) -> bool {
         self.place(node) == End::At(Role::Documents.node())
     }
+
+    /// What the drive holds, live and in Recently deleted: to tell whether it changed since.
+    fn snapshot(&self) -> Snapshot {
+        (self.live.clone(), self.removed.clone())
+    }
+
+    fn changed_since(&self, snapshot: &Snapshot) -> bool {
+        (&self.live, &self.removed) != (&snapshot.0, &snapshot.1)
+    }
 }
 
 #[derive(Debug)]
@@ -551,8 +564,6 @@ pub struct Sim {
     /// elsewhere meanwhile may come back (sync semantics §8, §11: the known limit).
     tags_unproven: BTreeSet<(usize, NodeId, String)>,
     deleted: BTreeSet<NodeId>,
-    /// What the phone deleted with the role folder, brought back with it.
-    role_folder_deleted_with: Vec<NodeId>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
     /// The first folder a plan removed after something in it (node schema, Recently deleted:
@@ -603,7 +614,6 @@ impl Sim {
             tags_unproven: BTreeSet::new(),
             tags_cleared: BTreeSet::new(),
             deleted: BTreeSet::new(),
-            role_folder_deleted_with: Vec::new(),
             scope_breach: None,
             removed_after_contents: None,
             computers: Vec::new(),
@@ -751,8 +761,7 @@ impl Sim {
         // The folder first, then what is in it, top-down (node schema, Recently deleted).
         let tree = self.server.tree();
         below.sort_by_key(|n| tree.ancestors(*n).len());
-        self.remove_live([docs].into_iter().chain(below.iter().copied()));
-        self.role_folder_deleted_with = below;
+        self.remove_live([docs].into_iter().chain(below));
     }
 
     /// Moves `nodes`, in order, from the tree to Recently deleted, on the server at once. A tag
@@ -766,13 +775,12 @@ impl Sim {
         }
     }
 
-    /// The folders [`Action::DeleteStopped`] picks from: the drive's, outside the role folder
-    /// (the phone's deletes there are [`Action::Phone`]'s and [`Action::DeleteRoleFolder`]'s).
+    /// The folders [`Action::DeleteStopped`] picks from: the drive's, the role folder too.
     fn stopped_folders(&self) -> Vec<NodeId> {
         self.server
             .live
             .iter()
-            .filter(|(n, s)| s.state.kind == NodeKind::Folder && !self.server.in_role_folder(**n))
+            .filter(|(_, s)| s.state.kind == NodeKind::Folder)
             .map(|(n, _)| *n)
             .collect()
     }
@@ -1735,28 +1743,13 @@ impl Sim {
         self.clients[c].fetched.clear();
         self.recover(c);
         // A role folder that isn't on the drive comes back from Recently deleted with what was
-        // deleted with it, or is made, by the first of its devices to sync (as
-        // `Drive::ensure_role`), named like the users' items.
+        // deleted with it (node schema: in it, removed no earlier than it; not what was restored
+        // from it since and deleted again elsewhere), or is made, by the first of its devices to
+        // sync (as `Drive::ensure_role`), named like the users' items.
         let top = self.clients[c].coords.top;
         if !top.is_root() && !self.server.live.contains_key(&top) {
             if self.server.removed.contains_key(&top) {
-                self.restore_node(top);
-                // Folders before what is in them; one whose folder didn't come back, at the top.
-                let mut with = std::mem::take(&mut self.role_folder_deleted_with);
-                while !with.is_empty() {
-                    let before = with.len();
-                    for n in with.clone() {
-                        let parent = self.server.removed.get(&n).map(|r| r.state.parent);
-                        if parent.is_none_or(|p| self.server.live.contains_key(&p)) {
-                            self.restore_node(n);
-                            with.retain(|w| *w != n);
-                        }
-                    }
-                    if with.len() == before {
-                        with.iter().for_each(|n| self.restore_node(*n));
-                        break;
-                    }
-                }
+                self.restore_with(top);
             } else {
                 self.server
                     .put(top, NodeState::folder(NodeId::ROOT, NAMES[0]));
@@ -2154,10 +2147,12 @@ impl Sim {
             }
         }
         if outcome == Outcome::Done {
-            // A remote write sends up what this client's user added to the node's tags.
+            // A remote write sends up what this client's user added to the node's tags; a create
+            // that found the node there (another device brought it back) wrote nothing.
             if let Op::RemoteTags { tags, .. }
             | Op::RemoteUpdate { tags, .. }
             | Op::RemoteCreate { tags, .. } = &op
+                && !landed
             {
                 for tag in tags.iter() {
                     let add = (c, node, tag.name.clone());
@@ -2519,7 +2514,7 @@ impl Sim {
                 tags,
             } => {
                 if self.server.live.contains_key(&node) {
-                    return Outcome::Landed; // 4105: an earlier attempt landed
+                    return Outcome::Landed; // 4105: another device brought it back
                 }
                 // In Recently deleted: restored at its file id (an edit wins over the delete),
                 // unless it holds a version this client never had: that one stays, and this
@@ -2555,10 +2550,7 @@ impl Sim {
                 };
                 // A restore keeps the tags the removed version has (the executor merges them).
                 let tags = match self.server.removed.get(&node) {
-                    Some(r) => {
-                        let base = client.base.get(node).map(|b| b.tags.clone());
-                        Tags::merge(&base.unwrap_or_default(), &tags, &r.state.tags)
-                    }
+                    Some(r) => self.merged_with_drive(c, node, &tags, &r.state.tags),
                     None => tags,
                 };
                 let state = NodeState {
@@ -2611,15 +2603,14 @@ impl Sim {
                     return self.execute(c, &Op::LocalDetach { node, new_node });
                 }
                 let version = VersionTag(self.server.uuid());
-                let base_tags = self.clients[c].base.get(node).map(|b| b.tags.clone());
+                let drive = self.server.live.get(&node).map(|n| n.state.tags.clone());
+                let tags = self.merged_with_drive(c, node, &tags, &drive.unwrap_or_default());
                 let Some(server) = self.server.live.get_mut(&node) else {
                     return Skip;
                 };
                 if server.remote.version != expected {
                     return Skip; // 4160
                 }
-                // As the executor's `merged_with_drive`: the version written over's tags merge in.
-                let tags = Tags::merge(&base_tags.unwrap_or_default(), &tags, &server.state.tags);
                 if upload {
                     let Some(content) = local_content else {
                         return Skip;
@@ -2640,15 +2631,15 @@ impl Sim {
                 ..
             } => {
                 let version = VersionTag(self.server.uuid());
-                let base_tags = self.clients[c].base.get(node).map(|b| b.tags.clone());
+                let drive = self.server.live.get(&node).map(|n| n.state.tags.clone());
+                let tags = self.merged_with_drive(c, node, &tags, &drive.unwrap_or_default());
                 let Some(server) = self.server.live.get_mut(&node) else {
                     return Skip;
                 };
                 if server.remote.version != expected {
                     return Skip; // 4160
                 }
-                server.state.tags =
-                    Tags::merge(&base_tags.unwrap_or_default(), &tags, &server.state.tags);
+                server.state.tags = tags;
                 server.remote.version = version;
                 self.record_remote(c, node);
                 Done
@@ -2848,6 +2839,14 @@ impl Sim {
         Done
     }
 
+    /// The tags client `c`'s write of `node` sends over the drive's version with `drive`'s, as
+    /// the executor's `merged_with_drive`: its own merged with that version's.
+    fn merged_with_drive(&self, c: usize, node: NodeId, ours: &Tags, drive: &Tags) -> Tags {
+        let client = &self.clients[c];
+        let base = client.base.get(node).map(|b| b.tags.clone());
+        Tags::merge_onto(&base.unwrap_or_default(), ours, drive, client.os)
+    }
+
     /// Moves parked nodes back where they came from, when that name is free again.
     fn unpark(&mut self, c: usize) {
         let client = &mut self.clients[c];
@@ -3022,6 +3021,9 @@ impl Sim {
     pub fn quiesce(&mut self, max_rounds: usize) -> bool {
         for _ in 0..max_rounds {
             let before = self.ops_executed;
+            // A sync may change the drive without an operation (a role folder brought back, as
+            // `Drive::ensure_role`): the others have to see it.
+            let server = self.server.snapshot();
             let mut any_planned = false;
             for c in 0..self.clients.len() {
                 self.plan(c);
@@ -3038,7 +3040,8 @@ impl Sim {
                     || !client.placing.is_empty();
                 while self.step(c) {}
             }
-            if !any_planned || (self.ops_executed == before && self.all_settled()) {
+            let unchanged = !self.server.changed_since(&server);
+            if unchanged && (!any_planned || (self.ops_executed == before && self.all_settled())) {
                 return true;
             }
         }
@@ -3061,7 +3064,7 @@ impl Sim {
                 return self.all_settled();
             };
             asked[c] = false;
-            let server = (self.server.live.clone(), self.server.removed.clone());
+            let server = self.server.snapshot();
             for _ in 0..30 {
                 let before = self.ops_executed;
                 self.plan(c);
@@ -3075,7 +3078,7 @@ impl Sim {
                     break;
                 }
             }
-            if (&self.server.live, &self.server.removed) != (&server.0, &server.1) {
+            if self.server.changed_since(&server) {
                 for (other, a) in asked.iter_mut().enumerate() {
                     *a |= other != c;
                 }
@@ -3508,7 +3511,8 @@ enum Outcome {
     Skip,
     /// A download fetched its bytes: the next step puts them in place.
     Fetched,
-    /// Done by an earlier attempt, with the bytes the item had then.
+    /// A create found its node on the drive (another device brought it back): it wrote
+    /// nothing, and settles against what is there.
     Landed,
 }
 

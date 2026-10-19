@@ -455,7 +455,9 @@ is in Recently deleted, with its tags); it never makes a conflict copy. A confli
 the local file's tags. Every write over a drive version merges that version's tags in (it may
 hold tags this device never saw): a restore from Recently deleted, bringing back a node a
 folder's removal took along (§6.3), any update; a version detached as a new item writes over
-none, and keeps the local tags.
+none, and keeps the local tags. What the device can't hold it writes as that version has it:
+its plan took those from the drive it saw, which may be older (a restore planned while the
+node was deleted, sent after another device brought it back with a tag and deleted it again).
 
 **Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
 then reads the tags. Tags that couldn't be read are tried again at the next scan.

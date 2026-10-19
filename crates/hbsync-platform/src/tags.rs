@@ -141,6 +141,15 @@ impl Tags {
         }))
     }
 
+    /// [`Tags::merge`] for a write over the drive's version (`remote`) by a device on `os`:
+    /// what it can't hold of `local` is `remote`'s. It never removes or recolours a tag it can't
+    /// see, though `local` took those from the drive its plan saw, which may be older than the
+    /// version written over (and the base settled against one in between).
+    pub fn merge_onto(base: &Tags, local: &Tags, remote: &Tags, os: Os) -> Tags {
+        let local = Tags::fill(Some(&local.held_by(os)), remote, os);
+        Tags::merge(base, &local, remote)
+    }
+
     /// What a device's tags are, from what it `read` (`None`: it can't tell, as on Windows)
     /// and `reference`, the drive's (else the agreed) tags: the reference's tags it can't
     /// hold are kept, and one it read as [`express`] shows a reference tag is that tag (Linux
@@ -520,6 +529,28 @@ mod tests {
         // macOS holds everything: what it read is what it has.
         let read = tags(&[("Red", 2)]);
         assert_eq!(Tags::fill(Some(&read), &reference, Os::MacOs), read);
+    }
+
+    #[test]
+    fn a_write_over_the_drive_never_removes_a_tag_the_device_cant_hold() {
+        // The base took the drive's tags since the plan; the plan saw none.
+        let (base, drive) = (
+            tags(&[("a,b", 0), ("x\ny", 0)]),
+            tags(&[("a,b", 0), ("x\ny", 0)]),
+        );
+        let ours = tags(&[("New", 0)]);
+        assert_eq!(Tags::merge_onto(&base, &ours, &drive, Os::Windows), drive);
+        assert_eq!(
+            Tags::merge_onto(&base, &ours, &drive, Os::Linux),
+            tags(&[("New", 0), ("a,b", 0)])
+        );
+        assert_eq!(
+            Tags::merge_onto(&base, &ours, &drive, Os::MacOs),
+            tags(&[("New", 0), ("x\ny", 0)])
+        );
+        // What it holds merges as ever: a removal goes.
+        let ours = tags(&[("x\ny", 0)]);
+        assert_eq!(Tags::merge_onto(&base, &ours, &drive, Os::MacOs), ours);
     }
 
     #[test]
