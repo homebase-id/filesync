@@ -219,7 +219,7 @@ impl Executor<'_> {
             // In Recently deleted: restored with these bytes (an edit wins over the delete).
             None if let Some(r) = &removed => {
                 content.unknown = r.row.carried_keys();
-                tags = merged_with_drive(base.as_ref(), &tags, &r.row.tags());
+                tags = self.merged_with_drive(base.as_ref(), &tags, &r.row.tags());
                 Some(r.row.target())
             }
             // A new node: the file's own creation time, kept from then on.
@@ -232,7 +232,7 @@ impl Executor<'_> {
                     return Err(Outcome::stale("gone remotely"));
                 };
                 content.unknown = mirror.carried_keys();
-                tags = merged_with_drive(base.as_ref(), &tags, &mirror.tags());
+                tags = self.merged_with_drive(base.as_ref(), &tags, &mirror.tags());
                 // A node from before creation times, or from a client that sends none.
                 if content.created_ms().is_none() {
                     content.set_created_ms(ops::created_ms(&path));

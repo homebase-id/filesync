@@ -26,16 +26,11 @@ fn action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
-/// The users' actions without tags (an edit instead: a tag change around a delete stopped half
-/// way has simulator findings of its own, on main too), with deletes another device stops half
-/// way and purges, more often.
+/// The users' actions, with deletes another device stops half way and purges, more often.
 fn stopped_delete_action() -> impl Strategy<Value = Action> + Clone {
     let i = || 0usize..16;
     prop_oneof![
-        6 => action().prop_map(|a| match a {
-            Action::Tag { node, .. } | Action::Colour { node, .. } => Action::Edit { file: node },
-            a => a,
-        }),
+        6 => action(),
         1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
         1 => Just(Action::Purge),
     ]
@@ -191,15 +186,16 @@ proptest! {
         run_with(3, None, Sim::with_new_role_devices, &events)?;
     }
 
-    /// Another device deletes a folder and stops half way, never to come back, while the users
-    /// work and the daily purge runs: the purge removes what the delete took along, once the
-    /// folder is kept long enough, and deletes it for good 30 days on, never a live node, never
-    /// what was written after the delete. The clients converge without loss.
+    /// Another device deletes a folder and stops half way, never to come back (any folder,
+    /// Documents and what is in it too, beside a computer syncing it), while the users work and
+    /// the daily purge runs: the purge removes what the delete took along, once the folder is
+    /// kept long enough, and deletes it for good 30 days on, never a live node, never what was
+    /// written after the delete. The clients converge without loss.
     #[test]
     fn stopped_deletes_and_the_purge_converge_without_loss(
-        events in proptest::collection::vec(events_of(3, stopped_delete_action()), 0..120)
+        events in proptest::collection::vec(events_of(4, stopped_delete_action()), 0..120)
     ) {
-        run(3, &events)?;
+        run_with(3, None, Sim::with_role_device, &events)?;
     }
 
     /// A download fetches, then puts in place and commits a step later: meanwhile the drive
@@ -3018,4 +3014,118 @@ fn regression_an_add_not_sent_up_outlives_a_restore() {
     run(3, &events)
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// A Linux client tags a folder and writes a file into it as a macOS client deletes it: the
+/// file brings the folder back with the tag, and the Windows client's plan, made while the
+/// folder was deleted, restores it too. The macOS client deletes it again before that restore
+/// is sent: the restore merges with the version deleted, and a tag neither of the two clients
+/// can hold comes back with it, never removed by them (§11).
+#[test]
+fn regression_a_late_restore_keeps_a_tag_its_device_cant_hold() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        plan(1),
+        step(1),
+        plan(0),
+        step(0),
+        act(1, Tag { node: 0, tag: 3 }),
+        act(
+            1,
+            CreateFile {
+                parent: 14,
+                name: 0,
+            },
+        ),
+        plan(1),
+        act(0, Delete { node: 0 }),
+        plan(0),
+        step(0),
+        step(1),
+        plan(2),
+        plan(1),
+        step(1),
+        step(2),
+        plan(0),
+        step(0),
+        step(0),
+        act(0, Delete { node: 0 }),
+        plan(0),
+        step(0),
+        step(2),
+    ];
+    if let Err(e) = run(3, &events) {
+        panic!("{e}");
+    }
+}
+
+/// A Documents folder restores a folder deleted elsewhere, tagged and renamed here meanwhile,
+/// as the phone deletes Documents and the user restores that folder at the drive's top: the
+/// restore finds it there, written by another, and sends nothing; Documents lets go of it, the
+/// tag not sent up with it (§12).
+#[test]
+fn regression_a_restore_found_done_elsewhere_sends_no_tag() {
+    use hbsync_sim::Action::{CreateFolder, Delete, DeleteRoleFolder, Move, Restore, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(4, CreateFolder { parent: 0, name: 2 }),
+        plan(4),
+        step(4),
+        plan(3),
+        act(4, Delete { node: 0 }),
+        plan(4),
+        step(4),
+        step(3),
+        act(
+            3,
+            Move {
+                node: 0,
+                parent: 1,
+                name: 0,
+            },
+        ),
+        act(3, Tag { node: 0, tag: 4 }),
+        plan(3),
+        act(0, DeleteRoleFolder),
+        act(0, Restore { node: 2 }),
+        step(3),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_new_role_devices, &events) {
+        panic!("{e}");
+    }
+}
+
+/// The phone deletes Documents with its file, the user restores the file alone (at the drive's
+/// top, its folder gone) and deletes it again there. The device syncing Documents brings the
+/// folder back with what was deleted with it: not that file, deleted on its own since.
+#[test]
+fn regression_a_role_folder_comes_back_without_what_was_restored_from_it() {
+    use hbsync_sim::Action::{Delete, DeleteRoleFolder, Restore};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(0, DeleteRoleFolder),
+        act(0, Restore { node: 7 }),
+        plan(0),
+        step(0),
+        act(0, Delete { node: 0 }),
+        plan(0),
+        step(0),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
+        panic!("{e}");
+    }
 }

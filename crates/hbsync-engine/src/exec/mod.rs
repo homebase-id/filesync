@@ -1350,7 +1350,7 @@ use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub(crate) use settle::spells;
-use settle::{Placed, mark_children, merged_with_drive, settle_placement};
+use settle::{Placed, mark_children, settle_placement};
 pub use settle::{Settle, settle};
 pub(crate) use settle::{meta, meta_at, record_removed};
 pub use transfer_ops::tags_lost;

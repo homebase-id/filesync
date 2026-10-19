@@ -354,12 +354,20 @@ pub(crate) fn record_removed(
     }
 }
 
-/// The tags a write over a drive version sends: `ours` merged with that version's, which may
-/// hold tags this device never saw (§11): a no-op where the plan merged them already, the
-/// drive's tags kept where it didn't (a node restored from Recently deleted, or taken along).
-pub(super) fn merged_with_drive(base: Option<&BaseRow>, ours: &Tags, drive: &Tags) -> Tags {
-    let base = base.map(|b| b.state.tags.clone()).unwrap_or_default();
-    Tags::merge(&base, ours, drive)
+impl Executor<'_> {
+    /// The tags a write over a drive version sends: `ours` merged with that version's, which may
+    /// hold tags this device never saw (§11): a no-op where the plan merged them already, the
+    /// drive's tags kept where it didn't (a node restored from Recently deleted, or taken along).
+    /// What this device can't hold is that version's ([`Tags::merge_onto`]).
+    pub(super) fn merged_with_drive(
+        &self,
+        base: Option<&BaseRow>,
+        ours: &Tags,
+        drive: &Tags,
+    ) -> Tags {
+        let base = base.map(|b| b.state.tags.clone()).unwrap_or_default();
+        Tags::merge_onto(&base, ours, drive, self.cfg.os)
+    }
 }
 
 #[cfg(test)]
