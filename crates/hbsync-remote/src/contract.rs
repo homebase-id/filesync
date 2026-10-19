@@ -82,15 +82,7 @@ impl<'a> Bench<'a> {
     /// Creates a scratch folder named `name` at the top of the drive.
     pub fn new(remote: &'a dyn Remote, name: &str, settle: Duration) -> Result<Self, RemoteError> {
         let scratch = folder(name, NodeId::ROOT);
-        let mut start = None;
-        loop {
-            let page = remote.change_refs(start.as_deref(), 500)?;
-            start = Some(page.cursor);
-            if !page.has_more {
-                break;
-            }
-        }
-        let start = start.unwrap_or_default();
+        let start = feed_end(remote, None)?;
         let written = remote.create(&scratch, None)?;
         Ok(Bench {
             remote,
@@ -237,10 +229,10 @@ impl<'a> Bench<'a> {
 
     /// The feed's end: a cursor after every change so far.
     pub fn cursor_now(&self) -> Result<String, RemoteError> {
-        let from = self.end.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let (_, end) = self.changes_after(Some(&from))?;
-        end.clone_into(&mut self.end.lock().unwrap_or_else(|e| e.into_inner()));
-        Ok(end)
+        std::thread::sleep(self.settle);
+        let mut end = self.end.lock().unwrap_or_else(|e| e.into_inner());
+        *end = feed_end(self.remote, Some(&end))?;
+        Ok(end.clone())
     }
 
     /// Every change after `cursor` (all pages) and the cursor after them.
@@ -284,6 +276,15 @@ impl<'a> Bench<'a> {
 }
 
 /// `data` as an upload with its BLAKE3 hash.
+/// The cursor at the end of the feed, read on from `from` (`None`: the beginning) in slim pages.
+pub fn feed_end(remote: &dyn Remote, from: Option<&str>) -> Result<String, RemoteError> {
+    let mut page = remote.change_refs(from, 1000)?;
+    while page.has_more {
+        page = remote.change_refs(Some(&page.cursor), 1000)?;
+    }
+    Ok(page.cursor)
+}
+
 pub fn upload<'a>(reader: &'a mut Cursor<&[u8]>) -> Upload<'a> {
     let data: &[u8] = reader.get_ref();
     Upload {

@@ -861,7 +861,13 @@ mod tests {
         for name in ["a.txt", "b.txt"] {
             assert!(db.read(|s| s.get_local(&rp(name)))?.is_some(), "{name}");
         }
-        assert!(!observer.rules_touched());
+        // FSEvents can deliver `.hbsync`'s creation late, or fold it into a rescan, so on
+        // macOS a stray touch may show here (it costs one read of the rules, no sync). Taken
+        // either way, so the rules' own write below is what sets it.
+        let touched = observer.rules_touched();
+        if !cfg!(target_os = "macos") {
+            assert!(!touched, "a file's change touched the rules");
+        }
 
         fs::write(root.join(".hbsync").join("ignore"), "*.tmp\n")?;
         wait_for("the rules ring", &|| rang.load(Ordering::SeqCst) == 2)?;

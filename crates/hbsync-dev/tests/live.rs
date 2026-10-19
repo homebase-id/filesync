@@ -5,13 +5,12 @@
 use std::time::Duration;
 
 use hbsync_dev::{
-    OTHER_CLIENT, RunFolder, cursor_at_end, live_identity, on_threads, run_name, saved_client,
-    saved_client_as,
+    OTHER_CLIENT, RunFolder, live_identity, on_threads, run_name, saved_client, saved_client_as,
 };
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_remote::Remote;
-use hbsync_remote::contract::Bench;
+use hbsync_remote::contract::{Bench, feed_end};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -964,7 +963,7 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
         for i in 0..rounds {
             // Other tests may write meanwhile: from the feed's end, and primed only where the
             // read there came back empty.
-            cursor = cursor_at_end(&remote, Some(&cursor))?;
+            cursor = feed_end(&remote, Some(&cursor))?;
             let primed = i % 2 == 1 && {
                 let page = remote.change_refs(Some(&cursor), 100)?;
                 page.refs.is_empty() && !page.has_more
@@ -1100,7 +1099,7 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
                 Ok((same, other_key))
             })?;
             // The feed's end again, for the next round.
-            end = cursor_at_end(&remote, Some(&end))?;
+            end = feed_end(&remote, Some(&end))?;
             if !seen_same.2 {
                 stale.push(format!(
                     "round {i}: same key {seen_same:?}, another key {seen_other:?} \

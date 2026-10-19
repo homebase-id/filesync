@@ -113,18 +113,6 @@ pub fn on_threads<E: std::fmt::Display>(
     }
 }
 
-/// The cursor at the end of the feed, read on from `from` (`None`: the beginning) in slim pages.
-pub fn cursor_at_end(remote: &dyn Remote, from: Option<&str>) -> Result<String, RemoteError> {
-    let mut cursor = from.map(str::to_owned);
-    loop {
-        let page = remote.change_refs(cursor.as_deref(), 1000)?;
-        cursor = Some(page.cursor);
-        if !page.has_more {
-            return Ok(cursor.unwrap_or_default());
-        }
-    }
-}
-
 /// The identity the live tests run against (`HBSYNC_LIVE`).
 pub fn live_identity() -> Result<String, String> {
     std::env::var("HBSYNC_LIVE")
@@ -246,7 +234,7 @@ impl RunFolder {
     pub fn new(name: &str) -> Result<RunFolder, Box<dyn std::error::Error>> {
         let remote =
             hbsync_homebase::drive::HomebaseRemote::connect(saved_client(&live_identity()?)?)?;
-        let from = cursor_at_end(&remote, None)?;
+        let from = hbsync_remote::contract::feed_end(&remote, None)?;
         Ok(RunFolder {
             remote,
             name: name.to_owned(),
