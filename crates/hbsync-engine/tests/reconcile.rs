@@ -777,6 +777,26 @@ fn recovered_files_loses_a_name_clash_at_the_top() {
     );
 }
 
+/// The user moved Recovered files into o, whose folder is then deleted for good: o, the
+/// orphan, goes to the top, never into what it holds.
+#[test]
+fn an_orphan_holding_recovered_files_goes_to_the_top() {
+    let [gone, o] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.remote(o, Some(folder(gone, "o")));
+    w.remote(NodeId::RECOVERED, Some(folder(o, RECOVERED_NAME)));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == o && *parent == ROOT)),
+        "{:#?}",
+        plan.ops
+    );
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: o }]);
+}
+
 /// Recovered files in Recently deleted comes back (alone) for a new orphan, where it was; one
 /// this device filters takes none: the orphan goes to the top instead.
 #[test]

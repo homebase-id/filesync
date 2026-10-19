@@ -212,7 +212,7 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
         ),
         // Where it is now: in Recovered files, as a rule.
         Conflict::Orphan { node } => format!(
-            "{}: kept here, as its folder was deleted for good elsewhere",
+            "{}: moved here, as its folder was deleted for good elsewhere",
             path(*node)?
         ),
         Conflict::CopyWaits { node } => format!(

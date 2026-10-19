@@ -12,13 +12,13 @@
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
 //! node parked under a temporary name is reported at its original place ([`parked_place`]).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
 use hbsync_local::Filter;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
-use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, Tags};
+use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
 use crate::exec::parked_name;
 use crate::plan::Listed;
@@ -311,11 +311,35 @@ fn build(
         }
     }
     // A remote node whose folder isn't in the mirror may be an orphan, which the main folder
-    // puts into Recovered files: where that is (live, removed or synced here before), and what
-    // in it may clash with the names coming (the plan asks for the rest: `Plan::unlisted`).
+    // puts into Recovered files: where that is (live, removed or synced here before; loaded
+    // after the role folders held nothing of are dropped: one holding it masks it), and what
+    // may clash with the names coming, in it and, for its own, at the top (the plan asks for
+    // the rest: `Plan::unlisted`).
     let missing = looked_up_removed(&b.input.remote, scope.top);
     if missing.contains(&NodeId::RECOVERED) {
         b.load(NodeId::RECOVERED)?;
+        match full {
+            None => b.load_children(NodeId::RECOVERED)?,
+            Some(_) => {
+                let remote = &b.input.remote;
+                let coming: BTreeSet<i32> = remote
+                    .iter()
+                    .filter(|(_, st)| missing.contains(&st.parent))
+                    .map(|(_, st)| hbsync_namemap::sibling_hash(&st.name))
+                    .collect();
+                let own = BTreeSet::from([hbsync_namemap::sibling_hash(RECOVERED_NAME)]);
+                for (folder, keys) in [(NodeId::RECOVERED, coming), (NodeId::ROOT, own)] {
+                    if listed.full.contains(&folder) {
+                        continue;
+                    }
+                    let keys: Vec<i32> = keys
+                        .into_iter()
+                        .filter(|k| listed.named.entry(folder).or_default().insert(*k))
+                        .collect();
+                    b.load_named(folder, &keys)?;
+                }
+            }
+        }
     }
     // The folders in Recently deleted that remote nodes are in, and the removed ones above them
     // in this folder's part of the drive: what a folder's delete took along goes by their times

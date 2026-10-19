@@ -52,9 +52,15 @@ impl Reconciler<'_> {
     /// meets one but through a folder it filters, and puts that at its top, as does the main
     /// folder where Recovered files isn't synced here (filtered) or is the orphan itself.
     fn recovered_files(&mut self, node: NodeId) -> NodeId {
+        // Never into itself: Recovered files moved by the user into what is now the orphan.
+        let inside = |at: NodeId| at == node || self.merged.ancestors(at).contains(&node);
         if node == NodeId::RECOVERED
             || !self.opts.scope.top.is_root()
             || self.masks.masked.contains(&NodeId::RECOVERED)
+            || inside(NodeId::RECOVERED)
+            || self
+                .known_state(NodeId::RECOVERED)
+                .is_some_and(|known| inside(known.parent))
         {
             return NodeId::ROOT;
         }
@@ -110,7 +116,8 @@ impl Reconciler<'_> {
                 }
                 None if self.input.remote_complete
                     && (self.input.remote.contains(node)
-                        || self.input.removed.contains_key(&node))
+                        || (self.opts.scope.top.is_root()
+                            && self.input.removed.contains_key(&node)))
                     && !withdrawn.contains(&parent) =>
                 {
                     // Nobody knows the parent, though the drive's picture is whole: the server
@@ -133,6 +140,12 @@ impl Reconciler<'_> {
                     self.merged.remove(node);
                     self.scope.remove(&node);
                     withdrawn.insert(node);
+                    // An orphan whose Recovered files waits too: not moved after all.
+                    if self.adopted.remove(&node) {
+                        self.plan
+                            .conflicts
+                            .retain(|c| *c != Conflict::Orphan { node });
+                    }
                     if self.input.dirty.contains(&node) {
                         self.deferred.insert(node);
                     }
