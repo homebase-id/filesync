@@ -142,7 +142,7 @@ impl PartialFile {
 }
 
 /// Where [`PartialFile::open`] keeps the download `key`.
-pub fn partial_path(dir: &Path, key: &str) -> PathBuf {
+fn partial_path(dir: &Path, key: &str) -> PathBuf {
     dir.join(format!("{key}.partial"))
 }
 
@@ -177,26 +177,32 @@ impl CompletedFile {
     /// Takes the file at `src` (on the volume of `dir`) for the download `key` into `dir`
     /// ([`PartialFile::open`]'s place), if it holds exactly the bytes `expected` (`size` of
     /// them): it is hashed now, then moved there in one rename and its bytes synced, as a
-    /// download's are. It holds other bytes: nothing moves (`None`). Changed between its hash
-    /// and the move (its identity, size or mtime other): it goes back, and `None`. Fails where a
-    /// partial file of `key` is there already.
+    /// download's are. Nothing moves (`None`) where it holds other bytes, where its size or
+    /// mtime (Unix ms) isn't `size` and `mtime_ms` (nothing read then), or where a partial file
+    /// of `key` is there already (that download goes on). Changed between its hash and the
+    /// move (its identity, size or mtime other): it goes back, and `None`.
     pub fn adopt(
         src: &Path,
         dir: &Path,
         key: &str,
         expected: ContentHash,
         size: u64,
+        mtime_ms: i64,
     ) -> Result<Option<CompletedFile>, FileIoError> {
+        let path = partial_path(dir, key);
         let meta = hbsync_platform::stat(src)?;
-        if meta.kind != hbsync_platform::EntryKind::File || meta.size != size {
+        if meta.kind != hbsync_platform::EntryKind::File
+            || meta.size != size
+            || meta.mtime_ns.div_euclid(1_000_000) != mtime_ms
+            || path.exists()
+        {
             return Ok(None);
         }
         let hashed = hash_file(src, expected.algorithm)?;
-        if hashed.hash != expected || hashed.size != size {
+        if hashed.hash != expected {
             return Ok(None);
         }
         fs::create_dir_all(dir)?;
-        let path = partial_path(dir, key);
         ops::rename_noreplace(src, &path)?;
         let moved = hbsync_platform::stat(&path)?;
         if moved.file_id != hashed.meta.file_id
@@ -206,7 +212,7 @@ impl CompletedFile {
             ops::rename_noreplace(&path, src)?;
             return Ok(None);
         }
-        File::open(&path)?.sync_all()?;
+        File::open(&path)?.sync_data()?;
         Ok(Some(CompletedFile {
             path,
             hash: expected,
@@ -337,20 +343,24 @@ mod tests {
         fs::write(&same, b"wanted")?;
         fs::write(&other, b"wanteD")?;
         let expected = hash_bytes(b"wanted", ALG);
-        assert!(CompletedFile::adopt(&other, &tmp, "k", expected, 6)?.is_none());
-        assert!(CompletedFile::adopt(&same, &tmp, "k", expected, 5)?.is_none());
+        let mtime = |p: &Path| hbsync_platform::stat(p).map(|m| m.mtime_ns.div_euclid(1_000_000));
+        let (at, other_at) = (mtime(&same)?, mtime(&other)?);
+        assert!(CompletedFile::adopt(&other, &tmp, "k", expected, 6, other_at)?.is_none());
+        assert!(CompletedFile::adopt(&same, &tmp, "k", expected, 5, at)?.is_none());
+        assert!(CompletedFile::adopt(&same, &tmp, "k", expected, 6, at + 1)?.is_none());
         assert_eq!(fs::read(&other)?, b"wanteD");
         assert!(same.exists());
-        let done = CompletedFile::adopt(&same, &tmp, "k", expected, 6)?.expect("taken");
+        let done = CompletedFile::adopt(&same, &tmp, "k", expected, 6, at)?.expect("taken");
         assert!(!same.exists());
         assert_eq!(done.hash, expected);
         let target = dir.path().join("placed");
         done.persist_new(&target, None)?;
         assert_eq!(fs::read(&target)?, b"wanted");
-        // A partial file there already: refused, the source stays.
+        // A partial file there already: that download goes on, the source stays.
         fs::write(&same, b"wanted")?;
         PartialFile::open(&tmp, "k2", ALG)?;
-        assert!(CompletedFile::adopt(&same, &tmp, "k2", expected, 6).is_err());
+        let at = mtime(&same)?;
+        assert!(CompletedFile::adopt(&same, &tmp, "k2", expected, 6, at)?.is_none());
         assert_eq!(fs::read(&same)?, b"wanted");
         Ok(())
     }

@@ -5,6 +5,6 @@ pub mod file;
 pub mod hash;
 pub mod small;
 
-pub use file::{CompletedFile, FileIoError, HashedFile, PartialFile, hash_file, partial_path};
+pub use file::{CompletedFile, FileIoError, HashedFile, PartialFile, hash_file};
 pub use hash::{ContentHash, HashAlgorithm, Hasher, hash_bytes, hash_reader};
 pub use small::{FNV1A64_OFFSET, fnv1a64, fnv1a64_from, write_atomic, write_if_changed};

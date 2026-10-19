@@ -108,7 +108,6 @@ impl Executor<'_> {
             return Err(rescan(&mut self.report, &row.path));
         }
         let target = self.target_path(parent, name)?;
-        let from_trash = self.in_trash(node, parent, &target)?;
         let created_ms = mirror.created_ms();
         // What it acts on: the drive's version the plan saw, only while the mirror still holds
         // it, or the one this run's own write made of it since, the bytes the same (a tag
@@ -143,6 +142,7 @@ impl Executor<'_> {
             base_at: acted.base_at.into(),
             held_ms: None,
         };
+        let from_trash = self.in_trash(node, parent, &record.target)?;
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,

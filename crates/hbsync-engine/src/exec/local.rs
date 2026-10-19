@@ -499,32 +499,25 @@ impl Executor<'_> {
             return Ok(Vec::new());
         }
         let names: Vec<&str> = target.components().collect();
-        // The node, then the folders above it, each with its name in `target`.
+        // The folders above it, as far as `target` names them.
+        let above = self.db.read(|s| {
+            crate::walk::up::<_, StateError>(parent, |at| {
+                Ok(s.get_mirror(at)?.map(|m| (at, m.parent)))
+            })
+        })?;
         let mut found = Vec::new();
-        let (mut at, mut up) = (node, parent);
-        for i in (0..names.len()).rev() {
-            if let Some(entries) = trash.entries.get(&at) {
-                found.extend(
-                    entries
-                        .iter()
-                        .map(|e| names[i..].iter().fold(e.clone(), |p, n| p.join(n))),
-                );
-            }
-            if up.is_root() {
-                break;
-            }
-            at = up;
-            up = match trash.parents.get(&at) {
-                Some(p) => *p,
-                None => {
-                    let p = self
-                        .db
-                        .read(|s| s.get_mirror(at))?
-                        .map_or(NodeId::ROOT, |m| m.parent);
-                    trash.parents.insert(at, p);
-                    p
-                }
+        for (i, at) in (0..names.len())
+            .rev()
+            .zip(std::iter::once(node).chain(above.items))
+        {
+            let Some(entries) = trash.entries.get(&at) else {
+                continue;
             };
+            // Its place in the entry: its name there, and the names below it to the item.
+            let Ok(place) = RelPath::new(&names[i..].join("/")) else {
+                continue;
+            };
+            found.extend(entries.iter().map(|e| place.to_native(e)));
         }
         Ok(found)
     }
@@ -556,34 +549,23 @@ impl Executor<'_> {
 pub(super) struct Trash {
     /// Its entries (`<Unix s>-<node>`, [`Executor::move_to_trash`]) by node, newest first.
     entries: HashMap<NodeId, Vec<PathBuf>>,
-    /// The folders asked for so far, each with its folder on the drive.
-    parents: HashMap<NodeId, NodeId>,
 }
 
 impl Trash {
     fn read(dir: &Path) -> Trash {
         let mut entries: HashMap<NodeId, Vec<(u64, PathBuf)>> = HashMap::new();
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-            let name = entry.file_name();
-            let Some((at, node)) = name.to_str().and_then(|n| n.split_once('-')) else {
-                continue;
-            };
-            if let (Ok(at), Ok(node)) = (at.parse(), hbsync_types::Uuid::try_parse(node)) {
-                entries
-                    .entry(NodeId(node))
-                    .or_default()
-                    .push((at, entry.path()));
+            if let Some((at, node)) = entry.file_name().to_str().and_then(trash_entry) {
+                entries.entry(node).or_default().push((at, entry.path()));
             }
         }
-        Trash {
-            entries: entries
-                .into_iter()
-                .map(|(node, mut e)| {
-                    e.sort_by(|a, b| b.cmp(a));
-                    (node, e.into_iter().map(|(_, p)| p).collect())
-                })
-                .collect(),
-            parents: HashMap::new(),
+        let mut trash = Trash::default();
+        for (node, mut e) in entries {
+            e.sort_by(|a, b| b.cmp(a));
+            trash
+                .entries
+                .insert(node, e.into_iter().map(|(_, p)| p).collect());
         }
+        trash
     }
 }

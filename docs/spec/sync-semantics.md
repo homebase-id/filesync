@@ -175,7 +175,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 - **Downloads look in the trash first.** A download (a delete taken back, say: a restore from
   Recently deleted) first looks for the file in the trash: in the entry of the node, or of a
   folder above it, under the names the download's place has. It takes one only once it hashed
-  it there and it holds exactly the bytes wanted (the drive's content hash and size): then it
+  it there and it holds exactly the bytes wanted (the drive's content hash and size; one of
+  another size or mtime isn't read): then it
   moves it into the temp folder in one rename (back to the trash where its identity, size or
   mtime changed after the hash), syncs its bytes, and puts it in place as any download (the
   placement record first, the same durability). Anything else stays in the trash, untouched,

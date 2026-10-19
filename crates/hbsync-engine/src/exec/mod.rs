@@ -1387,6 +1387,12 @@ pub(crate) fn trashed_at(entry: &str) -> Option<u64> {
     entry.split_once('-')?.0.parse().ok()
 }
 
+/// When a trash entry (named by `move_to_trash`) went there, Unix s, and whose it is.
+fn trash_entry(entry: &str) -> Option<(u64, NodeId)> {
+    let node = hbsync_types::Uuid::try_parse(entry.split_once('-')?.1).ok()?;
+    Some((trashed_at(entry)?, NodeId(node)))
+}
+
 /// Deletes a file or a folder with everything in it (a link, not what it points to).
 pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path)?.is_dir() {
