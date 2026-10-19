@@ -781,7 +781,11 @@ fn interleaved_and_concurrent(h: &Harness, a: usize, b: usize) -> Res {
                 ) {
                     Ok(_) => {}
                     // Deleted first: the client takes it as gone.
-                    Err(e) if matches!(e.downcast_ref(), Some(RemoteError::NotFound)) => {}
+                    Err(e)
+                        if matches!(
+                            e.downcast_ref(),
+                            Some(RemoteError::NotFound | RemoteError::Deleted)
+                        ) => {}
                     Err(e) => return Err(e.to_string()),
                 }
             }

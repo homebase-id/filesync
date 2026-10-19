@@ -135,22 +135,62 @@ impl Executor<'_> {
         written: Option<Target>,
     ) -> Step {
         let node = meta.node;
-        let row = written
-            .map(|w| MirrorRow::written(w, meta.node, meta.parent, meta.kind, &meta.content, hash));
+        let row = written.map(|w| written_row(&meta, hash, w));
         self.finish(&[Settle::node(node)], |s| match after {
             After::Created => {
                 s.delete_removed(node)?;
                 row.map_or(Ok(()), |row| s.put_mirror(&row))
             }
             After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
-            // Out of the tree, into Recently deleted at the server's time of the write, which
-            // its answer has (`updated`, odin-core #1971). Never this device's clock.
-            After::Removed { file_id } => {
-                record_removed(s, file_id, row)?;
-                s.mark_dirty(node)
-            }
+            After::Removed { file_id } => removed(s, node, file_id, row),
         })
     }
+
+    /// Records removals that landed together (one request's answers) as
+    /// [`Executor::commit_meta`] records each, in one transaction: a commit for the request,
+    /// not one per file. They change nothing on disk: a crash before it loses only their
+    /// answers, as one before the first commit did (the nodes stay dirty, planned again from
+    /// the feed).
+    pub(super) fn commit_removed(&mut self, landed: Vec<Landed>) -> Step {
+        let nodes: Vec<Settle<'_>> = landed.iter().map(|l| Settle::node(l.meta.node)).collect();
+        let rows: Vec<(NodeId, hbsync_types::RemoteFileId, MirrorRow)> = landed
+            .into_iter()
+            .map(|l| {
+                let row = written_row(&l.meta, l.hash, l.written);
+                (l.meta.node, l.file_id, row)
+            })
+            .collect();
+        self.finish(&nodes, |s| {
+            rows.into_iter()
+                .try_for_each(|(node, file_id, row)| removed(s, node, file_id, Some(row)))
+        })
+    }
+}
+
+/// The mirror's row of `meta` as written (`w`, the drive's answer).
+fn written_row(meta: &NodeMeta, hash: Option<hbsync_types::ContentHash>, w: Target) -> MirrorRow {
+    MirrorRow::written(w, meta.node, meta.parent, meta.kind, &meta.content, hash)
+}
+
+/// A removal the drive answered, as written.
+pub(super) struct Landed {
+    pub meta: NodeMeta,
+    pub hash: Option<hbsync_types::ContentHash>,
+    pub file_id: hbsync_types::RemoteFileId,
+    pub written: Target,
+}
+
+/// `node` out of the tree (its mirror row `file_id`), into Recently deleted at the server's time
+/// of the write, which its answer `row` has (`updated`, odin-core #1971; `None`: the drive no
+/// longer had the file). Never this device's clock.
+fn removed(
+    s: &Store<'_>,
+    node: NodeId,
+    file_id: hbsync_types::RemoteFileId,
+    row: Option<MirrorRow>,
+) -> Result<(), StateError> {
+    record_removed(s, file_id, row)?;
+    s.mark_dirty(node)
 }
 
 /// The job and the commit context of a metadata write; `from`: the folder the node leaves

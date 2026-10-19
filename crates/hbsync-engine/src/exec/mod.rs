@@ -1052,15 +1052,12 @@ impl<'a> Executor<'a> {
             Some(&progress.bytes_done),
             halt.as_deref(),
             jobs,
-            |job, result| {
+            |ran| {
                 if first_error.is_some() {
                     return false;
                 }
-                if let Some(p) = pending.remove(&job.node()) {
-                    let outcome = self.commit(p.ctx, job, result).unwrap_or_else(|o| o);
-                    if let Err(e) = self.handle(p.op, p.attempts, outcome, p.gone) {
-                        first_error = Some(e);
-                    }
+                if let Err(e) = self.commit_ran(ran, &mut pending) {
+                    first_error = Some(e);
                 }
                 first_error.is_none() && !self.should_stop() && self.resume_at.is_none()
             },
@@ -1092,6 +1089,60 @@ impl<'a> Executor<'a> {
         }
         if self.crashed {
             return Err(StateError::Conflict("crash point reached".into()));
+        }
+        Ok(())
+    }
+
+    /// Records what jobs that ran together did (taking them out of `pending`): the removals
+    /// that landed in one go, in one transaction ([`Executor::commit_removed`]: one commit for
+    /// a request's thousand answers, not one each); every other result on its own.
+    fn commit_ran(
+        &mut self,
+        ran: Vec<(Job, JobResult)>,
+        pending: &mut BTreeMap<NodeId, Prepared>,
+    ) -> Result<(), StateError> {
+        let (mut ops, mut landed, mut rest) = (Vec::new(), Vec::new(), Vec::new());
+        for (job, result) in ran {
+            let Some(p) = pending.remove(&job.node()) else {
+                continue;
+            };
+            match (p.ctx, job, result) {
+                (
+                    Ctx::Meta {
+                        hash,
+                        after: remote::After::Removed { file_id },
+                        ..
+                    },
+                    Job::Meta { meta, .. },
+                    JobResult::Written(written),
+                ) => {
+                    ops.push((p.op, p.attempts, p.gone));
+                    landed.push(remote::Landed {
+                        meta,
+                        hash,
+                        file_id,
+                        written,
+                    });
+                }
+                (ctx, job, result) => rest.push((p.op, p.attempts, p.gone, ctx, job, result)),
+            }
+        }
+        // What landed first: it is recorded whatever becomes of the rest.
+        if !landed.is_empty() {
+            // Not recorded: planned again, as one that failed on its own.
+            let failed = match self.commit_removed(landed) {
+                Ok(_) => None,
+                Err(Outcome::Retry(why)) => Some(why),
+                Err(_) => Some("removals answered, not recorded".to_owned()),
+            };
+            for (op, attempts, gone) in ops {
+                let outcome = failed.clone().map_or(Outcome::Settled, Outcome::Retry);
+                self.handle(op, attempts, outcome, gone)?;
+            }
+        }
+        for (op, attempts, gone, ctx, job, result) in rest {
+            let outcome = self.commit(ctx, job, result).unwrap_or_else(|o| o);
+            self.handle(op, attempts, outcome, gone)?;
         }
         Ok(())
     }
@@ -1385,6 +1436,7 @@ fn remote_outcome(e: RemoteError) -> Outcome {
         RemoteError::AlreadyExists
         | RemoteError::VersionMismatch
         | RemoteError::NotFound
+        | RemoteError::Deleted
         | RemoteError::StaleRange(_)
         | RemoteError::HashMismatch => Outcome::stale(e.to_string()),
     }

@@ -534,6 +534,19 @@ fn tombstone(s: &Store<'_>, tombstone: RemoteRef, at: Option<i64>) -> Result<(),
     apply_tombstone(s, tombstone.file_id)
 }
 
+/// Whether a file a write was refused with `e` (not found, or a tombstone) is deleted for good:
+/// a tombstone's answer says so, else its header is read ([`gone_for_good`]).
+pub(crate) fn gone_after(
+    remote: &dyn Remote,
+    e: &RemoteError,
+    file_id: RemoteFileId,
+) -> Result<bool, RemoteError> {
+    match e {
+        RemoteError::Deleted => Ok(true),
+        _ => gone_for_good(remote, file_id),
+    }
+}
+
 /// Whether the drive has file `file_id` no more (not found, or only its tombstone), by its
 /// header: a write or read answered not found may have other reasons.
 pub(crate) fn gone_for_good(

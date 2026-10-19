@@ -112,7 +112,11 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   written no later than the folder's removal is deleted with it too: it doesn't show anywhere, and comes back
   with the folder; one written after it keeps the folder alive (node schema, "Recently deleted").
 - **Lists:** the whole drive with `archivalStatus: [2]`. The items are the ones not deleted with their folder;
-  each counts the items deleted with it, below it: what restoring it restores (filesync's `along`).
+  each counts what is below it in Recently deleted (filesync's `along`): what was deleted with it, which
+  restoring it restores, and what was deleted from it before, listed on its own too.
+- **Emptying an item** takes everything removed below it, through removed folders: what was deleted with it and
+  what was deleted from it before (a sub-folder deleted first). Taking only what was deleted with it leaves the
+  folder holding the earlier delete, so it stays.
 - **Deleting for good** (emptying, or the 30-day purge) takes removed nodes only, never a live node: a folder
   holding a live node, or a removed node that isn't going, stays with the folders it is in, emptied of the
   rest. So a removed folder still holding a live node (its delete stopped half way) stays in Recently deleted,

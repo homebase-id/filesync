@@ -350,6 +350,7 @@ mod tests {
                 removed_at_ms: Some(1_800_000_000_000 - i as i64),
                 root: node,
                 folder: Some("/home/a/Homebase".into()),
+                stays: false,
             },
             along: 0,
         }

@@ -25,6 +25,7 @@ use hbsync_types::activity::Deleted;
 use hbsync_types::unix_now;
 
 use super::DaemonError;
+use super::keeper::Keeper;
 use crate::protocol::{
     AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Hints, RecentItem,
     State, Until,
@@ -312,7 +313,7 @@ impl Account {
     }
 
     /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
-    /// items it took along; and, when it holds anything, all of it as listed now.
+    /// items are in it; and, when it holds anything, all of it as listed now.
     pub fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
         let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
             return (Vec::new(), None);
@@ -322,6 +323,7 @@ impl Account {
             identity: self.identity.clone(),
             deletes: summary.deletes,
             items: summary.items,
+            stays: summary.stays,
             db: summary.listed.db,
             seq: summary.listed.seq,
         });
@@ -486,6 +488,7 @@ impl Account {
         }
         let mut notifications =
             Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now());
+        let mut keeper = Keeper::spawn(Arc::clone(&drive));
         let mut runners: Vec<Running> = Vec::new();
         // A runner that couldn't start: the account stops its runners and ends with it, the
         // daemon with it (restarted whole). One that ended with an error is started again after a
@@ -549,7 +552,7 @@ impl Account {
                             r.handle.send(Command::Woke);
                         }
                     }
-                    Msg::Request(Request::Deleted(control)) => run_request(&drive, control),
+                    Msg::Request(Request::Deleted(control)) => keeper.request(control),
                     // Started below, once no runner of the folder is left (one removed a moment
                     // ago may still be finishing an operation).
                     Msg::Request(Request::AddFolder(folder)) => {
@@ -570,16 +573,12 @@ impl Account {
                 }
             }
             notifications.tick(Instant::now(), paused);
-            // Not while paused: no deletes for good, no pulls.
+            keeper.paused(paused);
+            // Not while paused: no deletes for good, no pulls. On the keeper's thread: this one
+            // never waits for it.
             if Instant::now() >= next_purge && !paused {
                 next_purge = Instant::now() + PURGE_LOOK;
-                match drive.purge_when_due(keep_days) {
-                    Ok(Some(n)) if n > 0 => {
-                        tracing::info!("{n} items deleted for good after {keep_days} days")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
-                }
+                keeper.purge(keep_days);
             }
             // A runner that ended takes its folder out, unless it failed: then it starts again
             // after a pause. The account ends with the last.
@@ -633,6 +632,7 @@ impl Account {
             }
             if runners.is_empty() {
                 notifications.finish();
+                keeper.finish();
                 return result;
             }
 
@@ -1301,27 +1301,6 @@ fn shown(runners: &[Running]) -> Vec<(PathBuf, Handle)> {
         .filter(|r| r.shows())
         .map(|r| (r.path.clone(), r.handle.clone()))
         .collect()
-}
-
-/// Runs a request for Recently deleted; the folders it concerns sync next.
-fn run_request(drive: &Drive, control: AccountControl) {
-    match control {
-        AccountControl::Restore { nodes } => match drive.restore(&nodes) {
-            Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
-            Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
-        },
-        AccountControl::EmptyDeleted { nodes } => report_emptied(drive.empty(&nodes)),
-        AccountControl::EmptyListed { db, seq } => {
-            report_emptied(drive.empty_listed(&Listed { db, seq }))
-        }
-    }
-}
-
-fn report_emptied(result: Result<usize, hbsync_engine::EngineError>) {
-    match result {
-        Ok(n) => tracing::info!("{n} items deleted for good"),
-        Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
-    }
 }
 
 #[cfg(test)]

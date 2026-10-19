@@ -270,6 +270,7 @@ impl Executor<'_> {
             RemoteError::AlreadyExists
             | RemoteError::VersionMismatch
             | RemoteError::NotFound
+            | RemoteError::Deleted
             | RemoteError::StaleRange(_),
         )) = &result
         {
@@ -288,11 +289,16 @@ impl Executor<'_> {
             // a trace in the feed, if its header says so too. Then a removal is done (out of the
             // tree all the same), and anything else is forgotten, so the next plan sees it gone
             // (and creates the node anew where it is still wanted). If the header denies it, the
-            // write stays to do, a removal too: the next plan sends it again.
-            (ctx, job, JobResult::Failed(JobError::Remote(RemoteError::NotFound)))
-                if let Some(file_id) = job.file_id() =>
-            {
-                match crate::feed::gone_for_good(self.remote, file_id) {
+            // write stays to do, a removal too: the next plan sends it again. An answer that it
+            // is a tombstone says what the header would: it isn't read.
+            (
+                ctx,
+                job,
+                JobResult::Failed(JobError::Remote(
+                    e @ (RemoteError::NotFound | RemoteError::Deleted),
+                )),
+            ) if let Some(file_id) = job.file_id() => {
+                match crate::feed::gone_after(self.remote, &e, file_id) {
                     Ok(true) => match (ctx, job) {
                         (
                             Ctx::Meta {

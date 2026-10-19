@@ -126,6 +126,24 @@ pub fn deleted(d: &Deleted, main: Option<&Path>, now: u64) -> String {
     format!("{place}{folder}{size}, deleted {when}")
 }
 
+/// Why an item of Recently deleted stays when emptied.
+pub const STAYS: &str = "stays when emptied: it holds items that aren't deleted";
+
+/// What emptying leaves of Recently deleted, `n` items deleted on their own that hold a live
+/// node: a sentence, empty for none.
+pub fn staying(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => "One folder stays: it holds items that aren't deleted (restoring it shows what it \
+              holds)."
+            .to_owned(),
+        n => format!(
+            "{n} folders stay: they hold items that aren't deleted (restoring one shows what it \
+             holds)."
+        ),
+    }
+}
+
 /// Before a deleted item's path in a part of the drive no folder here syncs.
 const ON_THE_DRIVE: &str = "(on the drive) ";
 
@@ -238,6 +256,7 @@ mod tests {
             removed_at_ms: Some(0),
             root: hbsync_types::NodeId::ROOT,
             folder: folder.map(Into::into),
+            stays: false,
         };
         let main = Some(Path::new("/home/a/Homebase"));
         assert_eq!(

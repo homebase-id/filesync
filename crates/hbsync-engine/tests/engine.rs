@@ -1428,6 +1428,17 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
         .into_iter()
         .find(|i| i.path == "Photos")
         .ok_or("Photos not listed")?;
+    // Listed as staying: emptying it leaves it.
+    assert!(photos.stays);
+    let mut reader =
+        hbsync_engine::root::AccountReader::open(&a.db_path(), "test.example")?.ok_or("no DB")?;
+    let (items, summary) = reader.deletes(10)?;
+    assert!(items[0].0.stays);
+    assert_eq!(
+        (summary.stays, summary.items),
+        (1, 1),
+        "x.txt goes, Photos stays"
+    );
     // Another device, which never synced, empties it.
     let mut b = Client::new(&server, "b")?;
     assert_eq!(b.engine.drive().empty(&[photos.node])?, 1, "x.txt");
@@ -1440,6 +1451,55 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     assert_eq!(left, ["Photos"]);
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
+/// A folder emptied from Recently deleted takes with it what was deleted from it before, listed
+/// on its own (a sub-folder deleted first): all removed, so it may go. The listing counts that
+/// as in it, and nothing of it stays.
+#[test]
+fn emptying_a_folder_takes_what_was_deleted_from_it_before() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("other.txt", "o")?;
+    a.write("run/keep.txt", "k")?;
+    a.write("run/data/x.txt", "x")?;
+    a.write("run/data/sub/y.txt", "y")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("run/data"))?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("run"))?;
+    a.sync()?;
+    let mut reader =
+        hbsync_engine::root::AccountReader::open(&a.db_path(), "test.example")?.ok_or("no DB")?;
+    let (items, summary) = reader.deletes(10)?;
+    let listed: Vec<(String, usize, bool)> = items
+        .iter()
+        .map(|(d, along)| (d.path.clone(), *along, d.stays))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("run".to_owned(), 5, false),
+            ("run/data".to_owned(), 3, false)
+        ],
+        "run holds keep.txt, data and data's three"
+    );
+    assert_eq!(summary.items, 6);
+    let run = items[0].0.node;
+    assert_eq!(a.engine.drive().empty(&[run])?, 6);
+    assert!(a.recently_deleted(10)?.is_empty());
+    let s = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!(
+        (s.removed().count(), s.live_names()),
+        (0, vec!["other.txt".to_owned()])
+    );
+    drop(s);
+    b.sync()?;
+    assert!(b.recently_deleted(10)?.is_empty());
+    assert_eq!(b.tree_text(""), ["other.txt = o"]);
     Ok(())
 }
 
@@ -3184,5 +3244,125 @@ fn a_download_after_the_runs_own_write_is_fetched_once() -> R {
         b.sync()?;
         assert_eq!(a.tree_text(""), b.tree_text(""), "{case}");
     }
+    Ok(())
+}
+
+/// A folder's delete, its removals answered a request at a time and recorded a request at a
+/// time: a crash or a power cut at any of its commits loses nothing, and the next sync finishes
+/// the delete. Every node of the folder ends removed on the drive (restorable, as one item),
+/// none live, and the other device has the folder gone.
+#[test]
+fn a_crash_at_any_commit_of_a_folders_delete_finishes_it() -> R {
+    for at in 0..8 {
+        for before in [true, false] {
+            for kept in [common::Kept::All, common::Kept::Durable(None)] {
+                let server = server();
+                let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+                a.write("keep.txt", "k")?;
+                for i in 0..5 {
+                    a.write(&format!("F/f{i}.txt"), format!("{i}"))?;
+                }
+                a.write("F/G/g.txt", "g")?;
+                a.sync()?;
+                let mut b = Client::new(&server, "b")?;
+                b.sync()?;
+                fs::remove_dir_all(a.root.join("F"))?;
+                let case = format!("at {at}, before {before}, {kept:?}");
+                common::crash(&mut a, kept, move |now, n| {
+                    n == at && (now == Commit::Before) == before
+                })?;
+                a.sync()?;
+                b.sync()?;
+                let s = server.lock().map_err(|_| "poisoned")?;
+                let live: Vec<String> = s.live_names();
+                assert_eq!(live, ["keep.txt"], "{case}");
+                assert_eq!(s.removed().count(), 8, "{case}");
+                drop(s);
+                assert_eq!(b.tree_text(""), ["keep.txt = k"], "{case}");
+                // One item, with all of the folder in it.
+                let deleted = a.recently_deleted(10)?;
+                let items = deleted.iter().filter(|d| d.root == d.node).count();
+                assert_eq!((items, deleted.len()), (1, 8), "{case}: {deleted:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A folder's delete that its device never finished (the folder removed on the drive, what is
+/// in it still live, and the device never back) is finished by another device that syncs it:
+/// what the removal took along goes to Recently deleted with the folder, and off its disk.
+#[test]
+fn another_device_finishes_a_folders_delete_left_half_done() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    for i in 0..5 {
+        a.write(&format!("F/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+    b.sync()?;
+    // a removes the folder alone, and is never seen again.
+    let f = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        let h = s
+            .live()
+            .find(|h| h.state().is_some_and(|st| st.name == "F"))
+            .ok_or("no F")?
+            .clone();
+        Target {
+            at: RemoteRef {
+                file_id: h.file_id,
+                version: h.version,
+            },
+            token: Some(hbsync_remote::fake::token_of(h.file_id)),
+            changed_at: None,
+        }
+    };
+    a.remote.set_removed(&[f], true)?.into_answers()?;
+    drop(a);
+    b.sync()?;
+    let s = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!(s.live_names(), ["keep.txt"]);
+    assert_eq!(s.removed().count(), 6);
+    drop(s);
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
+    let deleted = b.recently_deleted(10)?;
+    let items = deleted.iter().filter(|d| d.root == d.node).count();
+    assert_eq!((items, deleted.len()), (1, 6), "{deleted:?}");
+    Ok(())
+}
+
+/// A file removed here that another device deleted for good meanwhile (a tombstone, not in the
+/// picture yet): the removal's answer says so, and its header isn't read to make sure. It is
+/// gone here too, out of Recently deleted.
+#[test]
+fn a_removal_answered_as_a_tombstone_reads_no_header() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    a.announced();
+    // Deleted for good elsewhere, leaving a tombstone a hasn't heard of.
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        let h = s
+            .live()
+            .find(|h| h.state().is_some_and(|st| st.name == "x.txt"))
+            .ok_or("no x")?
+            .clone();
+        s.delete(h.file_id, h.version)?;
+    }
+    fs::remove_file(a.root.join("x.txt"))?;
+    a.sync_unasked()?;
+    assert_eq!(a.remote.faults().headers, 0);
+    assert!(a.recently_deleted(10)?.is_empty());
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["keep.txt"]
+    );
     Ok(())
 }

@@ -216,6 +216,7 @@ pub fn listed_from_field(field: &str) -> Vec<DeletedAccount> {
                 identity: identity.to_owned(),
                 deletes: 0,
                 items: 0,
+                stays: 0,
                 db: db.to_owned(),
                 seq: seq.parse().ok()?,
             })
@@ -474,6 +475,7 @@ mod tests {
             identity: identity.into(),
             deletes: 0,
             items: 0,
+            stays: 0,
             db: "d1".into(),
             seq,
         };

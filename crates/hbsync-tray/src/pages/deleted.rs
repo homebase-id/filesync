@@ -66,8 +66,8 @@ impl Server {
             .ok()
             .flatten()
             .map(|r| r.folder);
-        // Shown: the items deleted on their own, each with how many items its delete took
-        // along: its restore brings them back.
+        // Shown: the items deleted on their own, each with how many items are in it, and whether
+        // emptying leaves it.
         let rows: String = list
             .items
             .iter()
@@ -76,6 +76,10 @@ impl Server {
                 let along = match item.along {
                     0 => String::new(),
                     n => format!(" <span class=small>with {n} items in it</span>"),
+                };
+                let along = match d.stays {
+                    true => format!("{along} <span class=small>({})</span>", words::STAYS),
+                    false => along,
                 };
                 format!(
                     "<li><form method=post action=\"{url}\">\
@@ -100,10 +104,17 @@ impl Server {
 
     pub(super) fn empty_page(&self, form: &HashMap<String, String>) -> String {
         let field = |name| escape(form.get(name).map_or("", String::as_str));
+        let stays = form
+            .get("stays")
+            .and_then(|n| n.parse().ok())
+            .map(words::staying)
+            .filter(|said| !said.is_empty())
+            .map(|said| format!("<p>{said}</p>"))
+            .unwrap_or_default();
         format!(
             "<h1>Empty Recently deleted?</h1>\
-             <p>The {count} items in it are deleted for good, from your Homebase and every \
-             device. This can't be undone.</p>\
+             <p>The {count} items in it that can go are deleted for good, from your Homebase \
+             and every device. This can't be undone.</p>{stays}\
              <form method=post action=\"{url}\">\
              <input type=hidden name=listed value=\"{listed}\">\
              <button>Delete them for good</button></form>\
@@ -213,9 +224,11 @@ fn empty_offer(list: &hbsync_app::protocol::DeletedList, url: &str) -> String {
     format!(
         "<form method=post action=\"{url}\">\
          <input type=hidden name=count value=\"{count}\">\
+         <input type=hidden name=stays value=\"{stays}\">\
          <input type=hidden name=listed value=\"{listed}\">\
          <button class=secondary>Empty now…</button></form>",
         count = list.total(),
+        stays = list.staying(),
         listed = escape(&control::listed_field(&list.accounts)),
     )
 }
@@ -234,11 +247,13 @@ mod tests {
                 identity: "a.example".into(),
                 deletes: 1,
                 items,
+                stays: 1,
                 db: "d1".into(),
                 seq: 3,
             }],
         };
-        assert!(empty_offer(&list(2), "/e").contains("Empty now"));
+        let offer = empty_offer(&list(2), "/e");
+        assert!(offer.contains("Empty now") && offer.contains("name=stays value=\"1\""));
         let none = empty_offer(&list(0), "/e");
         assert!(
             !none.contains("<form") && none.contains("can be emptied yet"),

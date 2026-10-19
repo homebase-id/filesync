@@ -256,23 +256,26 @@ pub fn run_jobs(
     jobs: Vec<(bool, Job)>,
     mut commit: impl FnMut(Job, JobResult),
 ) {
-    run_jobs_while(remote, cfg, None, None, jobs, |job, result| {
-        commit(job, result);
+    run_jobs_while(remote, cfg, None, None, jobs, |ran| {
+        for (job, result) in ran {
+            commit(job, result);
+        }
         true
     });
 }
 
 /// [`run_jobs`], until `commit` returns `false`, `halt` is set, or the remote is out (a job
 /// failed with [`RemoteError::Transient`]: the next would too). Jobs not started by then are
-/// dropped; jobs already running finish and are committed. The bytes moved are added to
-/// `moved`.
+/// dropped; jobs already running finish and are committed. `commit` is given the jobs that ran
+/// together, each with its result: a job on its own, or removals one request answered (to
+/// record in one go). The bytes moved are added to `moved`.
 pub fn run_jobs_while(
     remote: &dyn Remote,
     cfg: TransferConfig,
     moved: Option<&AtomicU64>,
     halt: Option<&AtomicBool>,
     mut jobs: Vec<(bool, Job)>,
-    mut commit: impl FnMut(Job, JobResult) -> bool,
+    mut commit: impl FnMut(Vec<(Job, JobResult)>) -> bool,
 ) {
     jobs.sort_by_key(|(urgent, job)| (!*urgent, job.size()));
     let (mut removals, jobs): (Vec<Job>, Vec<Job>) = jobs
@@ -298,7 +301,7 @@ pub fn run_jobs_while(
         moved,
     };
     let out = AtomicBool::new(false);
-    let (tx, rx) = mpsc::channel::<(Job, JobResult)>();
+    let (tx, rx) = mpsc::channel::<Vec<(Job, JobResult)>>();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let tx = tx.clone();
@@ -330,15 +333,15 @@ pub fn run_jobs_while(
                     }) {
                         out.store(true, Ordering::Relaxed);
                     }
-                    if results.into_iter().any(|r| tx.send(r).is_err()) {
+                    if tx.send(results).is_err() {
                         break;
                     }
                 }
             });
         }
         drop(tx);
-        for (job, result) in rx {
-            if !commit(job, result)
+        for ran in rx {
+            if !commit(ran)
                 && let Ok(mut q) = queue.lock()
             {
                 q.jobs.clear();

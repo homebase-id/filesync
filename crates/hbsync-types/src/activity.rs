@@ -97,6 +97,11 @@ pub struct Deleted {
     /// folder here syncs. `path` is below that folder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// An item deleted on its own that emptying it leaves in Recently deleted: it holds a node
+    /// that isn't deleted (a delete that never finished, or one written into it since). Emptying
+    /// it still takes what else is in it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stays: bool,
 }
 
 impl Deleted {

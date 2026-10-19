@@ -156,11 +156,13 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
   rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.
   1. **What goes:** an item deleted on its own, with everything deleted with it, once all of it
-     is 30 days old (the client's `keep_deleted_days`), each node by its own removal: one
-     removed later (in a folder a live node held, say) has its own 30 days, and the item waits
-     with it. Files go before their folders, each at the version the client knows: one written
+     was removed more than 30 days ago (the client's `keep_deleted_days`; strictly: `updated`
+     before `queryTime` − 30 days), each node by its own removal: one removed later (in a
+     folder a live node held, say) has its own 30 days, and the item waits with it. Files go before their folders, each at the version the client knows: one written
      since stays. An item holding a removal whose time the client doesn't know yet waits for a
-     purge that knows it.
+     purge that knows it. A user emptying an item takes everything removed below it, through
+     removed folders: what was deleted from it before too (a sub-folder deleted first, listed
+     on its own), else the folder would stay holding it.
   2. **Never a live node:** the purge and emptying delete removed nodes only, and write nothing
      live. A folder holding a live node, or a removed node that isn't going, stays with the
      folders it is in, emptied of the rest. So a removed folder still holding a live node (a
@@ -176,10 +178,10 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      question and the delete) is left with no folder: clients show it at the top (the "Lost
      files" follow-up).
   3. **Without a trace, or with one:** each node by its own trace and time. A removed node
-     removed 30 days ago or more goes without a trace (a hard delete: `hard-delete-batch`,
+     removed more than 30 days ago goes without a trace (a hard delete: `hard-delete-batch`,
      odin-core #1968), nothing of the file left, in the feed either. Anything else (a younger
      node, and anything a user empties by hand) is deleted softly, leaving a tombstone, the
-     trace; any client deletes a tombstone hard 30 days after its own `updated`. A node whose
+     trace; any client deletes a tombstone hard more than 30 days after its own `updated`. A node whose
      time isn't known never goes without a trace.
   4. **Why 30 days:** the feed keeps a trace of a delete that long and no longer, so every
      device that reads the feed at least every 30 days learns of every delete. One that hasn't
@@ -190,7 +192,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      taken up after as long starts over.
   5. **Gone for good:** a hard delete is announced on the notification socket, and a device
      takes it at once. A write at a version the client knows that finds the file not there,
-     and its header not found either (or a tombstone), forgets it: the next sync puts what the
+     and its header not found either (or a tombstone; an answer per file that says it is one
+     needs no header read), forgets it: the next sync puts what the
      device has up anew. A delete, soft or hard, answered not found for that file (not a failed
      request) is checked the same way. A request that fails leaves the files it didn't answer
      for the next purge, whatever its error. A client keeps the ids of files
@@ -254,6 +257,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-18: emptying an item of Recently deleted by hand takes everything removed below it,
+  what was deleted from it before too (it stayed, holding that); the node is the same.
 - 2026-10-18: removals and restores that change nothing else go through
   `update-archival-status-batch` (odin-core #1964), many files a request; the node is the same.
 - 2026-10-16: emptying and the purge delete for good only removed nodes, never a live node: a

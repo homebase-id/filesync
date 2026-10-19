@@ -98,6 +98,13 @@ pub enum Action {
     /// engine selects of the rows still as listed ([`hbsync_engine::deleted::select`]), in its
     /// order.
     EmptyListed,
+    /// The user empties one item of Recently deleted as last listed (a pick of its rows; nothing
+    /// without a listing): it and all of Recently deleted in it ([`deleted::inside`]: what was
+    /// deleted from it before too), at their listed versions, as the engine selects them. An
+    /// item holding nothing live and nothing written since the listing goes.
+    EmptyItem {
+        pick: usize,
+    },
     /// Another device (the phone, which opened it before) saves an edit of a file a folder's
     /// delete took along, its own removal still on its way: on the server at once, the folder
     /// still deleted. Nothing when no file is taken along.
@@ -206,6 +213,8 @@ struct Server {
     /// The first node emptying or the purge deleted for good that wasn't a removed row chosen
     /// at that version (a live node, say), or a folder holding anything not going after it.
     emptied_unlisted: Option<String>,
+    /// The first item emptied on its own that stayed though nothing kept it.
+    emptied_kept: Option<String>,
 }
 
 /// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed
@@ -1300,6 +1309,7 @@ impl Sim {
                 self.server.listed = Some(self.server.removed.iter().map(Server::at).collect());
             }
             Action::EmptyListed => self.empty_listed(),
+            Action::EmptyItem { pick } => self.empty_item(pick),
             Action::EditTaken { pick } => {
                 let taken: Vec<NodeId> = self
                     .server
@@ -1522,6 +1532,56 @@ impl Sim {
     fn empty_listed(&mut self) {
         if let Some(listed) = self.server.listed.clone() {
             self.delete_for_good(&listed);
+        }
+    }
+
+    /// [`Action::EmptyItem`].
+    fn empty_item(&mut self, pick: usize) {
+        let Some(listed) = self.server.listed.clone() else {
+            return;
+        };
+        let rows: Vec<(NodeId, VersionTag)> = listed.iter().copied().collect();
+        let Some(&(item, _)) = rows.get(pick % rows.len().max(1)) else {
+            return;
+        };
+        let server = &self.server;
+        if !server.removed.contains_key(&item) {
+            return;
+        }
+        let folder = |n: NodeId| {
+            server
+                .removed
+                .get(&n)
+                .is_some_and(|r| r.state.kind == NodeKind::Folder)
+        };
+        let Ok(inside) = deleted::inside(
+            item,
+            |n| (*n, folder(*n)),
+            |f| {
+                Ok::<_, std::convert::Infallible>(
+                    server
+                        .removed
+                        .iter()
+                        .filter(|(_, r)| r.state.parent == f)
+                        .map(|(n, _)| *n)
+                        .collect(),
+                )
+            },
+        );
+        let chosen: BTreeSet<(NodeId, VersionTag)> = inside
+            .iter()
+            .filter_map(|n| server.removed.get_key_value(n).map(Server::at))
+            .filter(|at| listed.contains(at))
+            .collect();
+        // Kept only by a live node in it, or a row in it written since the listing.
+        let kept = chosen.len() < inside.len()
+            || server
+                .live
+                .values()
+                .any(|n| inside.contains(&n.state.parent));
+        self.delete_for_good(&chosen);
+        if !kept && self.server.removed.contains_key(&item) && self.server.emptied_kept.is_none() {
+            self.server.emptied_kept = Some(format!("{item:?}"));
         }
     }
 
@@ -3047,6 +3107,11 @@ impl Sim {
         }
         if let Some(what) = &self.server.emptied_unlisted {
             return Err(format!("deleting for good took what it mustn't: {what}"));
+        }
+        if let Some(what) = &self.server.emptied_kept {
+            return Err(format!(
+                "an item emptied stayed, though nothing kept it: {what}"
+            ));
         }
         // No folder wrote outside its part of the drive.
         if let Some(op) = &self.scope_breach {

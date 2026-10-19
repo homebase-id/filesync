@@ -249,7 +249,7 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Deleted { limit } => match daemon::deleted(&paths, limit)?.map(|l| l.items) {
             Some(list) if list.is_empty() => println!("Recently deleted is empty."),
             Some(list) => {
-                // Each item deleted on its own, with how many its delete took along.
+                // Each item deleted on its own, with how many items are in it.
                 for (item, what) in list.iter().zip(described(&paths, &list)?) {
                     println!("{}  {what}", item.deleted.node.0);
                 }
@@ -278,7 +278,12 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             daemon::empty(&paths, &found)?;
-            println!("Deleting for good.");
+            let staying: Vec<DeletedItem> =
+                found.iter().filter(|i| i.deleted.stays).cloned().collect();
+            println!("{}", emptied(staying.len()));
+            for what in described(&paths, &staying)? {
+                println!("  {what}");
+            }
         }
         Command::EmptyDeleted { yes, .. } => {
             // Everything it holds now, nothing deleted after this look: the counts only.
@@ -312,7 +317,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             daemon::empty_listed(&paths, &list.accounts)?;
-            println!("Deleting for good.");
+            println!("{}", emptied(list.staying()));
         }
         Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
         Command::Start => {
@@ -425,8 +430,8 @@ fn parse_role(s: &str) -> Result<Role, String> {
     s.parse()
 }
 
-/// Items of Recently deleted as `hbsync deleted` shows them: where, when deleted, and how many
-/// items each delete took along.
+/// Items of Recently deleted as `hbsync deleted` shows them: where, when deleted, how many
+/// items are in each, and which stay when emptied.
 fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
     let now = words::now();
     let main = daemon::configured(paths)?.map(|r| r.folder);
@@ -437,12 +442,24 @@ fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
                 0 => String::new(),
                 n => format!(" (with {n} items in it)"),
             };
+            let stays = match item.deleted.stays {
+                true => format!("; {}", words::STAYS),
+                false => String::new(),
+            };
             format!(
-                "{}{along}",
+                "{}{along}{stays}",
                 words::deleted(&item.deleted, main.as_deref(), now)
             )
         })
         .collect())
+}
+
+/// What emptying does, `staying` items left (they hold a live node): never "deleting" alone
+/// where something stays.
+fn emptied(staying: usize) -> String {
+    format!("Deleting for good. {}", words::staying(staying))
+        .trim_end()
+        .to_owned()
 }
 
 /// Asks `question` with [y/N]; whether the answer is yes.

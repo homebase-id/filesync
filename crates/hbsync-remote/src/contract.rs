@@ -96,28 +96,44 @@ impl<'a> Bench<'a> {
     }
 
     /// Deletes for good everything the scenarios (and the scratch folder) left, tombstones
-    /// too: nothing of them stays in the feed.
+    /// too: nothing of them stays in the feed. Each file at the version its header has: one
+    /// answered as written since (a header read that raced a write still landing, as under a
+    /// whole live suite's load) is read and deleted again, a few times.
     pub fn cleanup(&self) -> Result<(), RemoteError> {
-        let created = std::mem::take(&mut *self.created.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut left = Vec::new();
-        for file_id in created {
-            match self.remote.header(file_id) {
-                Ok(h) => left.push(RemoteRef {
-                    file_id,
-                    version: h.version,
-                }),
-                Err(RemoteError::NotFound) => {}
-                Err(e) => return Err(e),
+        let mut files =
+            std::mem::take(&mut *self.created.lock().unwrap_or_else(|e| e.into_inner()));
+        for round in 0..4 {
+            let mut left = Vec::new();
+            for file_id in files {
+                match self.remote.header(file_id) {
+                    Ok(h) => left.push(RemoteRef {
+                        file_id,
+                        version: h.version,
+                    }),
+                    Err(RemoteError::NotFound) => {}
+                    Err(e) => return Err(e),
+                }
             }
-        }
-        if left.is_empty() {
-            return Ok(());
-        }
-        for result in self.remote.delete_for_good(&left)?.into_answers()? {
-            match result {
-                Ok(()) | Err(RemoteError::NotFound) => {}
-                Err(e) => return Err(e),
+            if left.is_empty() {
+                return Ok(());
             }
+            let answers = self.remote.delete_for_good(&left)?.into_answers()?;
+            files = Vec::new();
+            for (at, result) in left.iter().zip(answers) {
+                match result {
+                    Ok(()) | Err(RemoteError::NotFound) => {}
+                    Err(RemoteError::VersionMismatch) if round < 3 => files.push(at.file_id),
+                    Err(e) => return Err(e),
+                }
+            }
+            if files.is_empty() {
+                return Ok(());
+            }
+            eprintln!(
+                "cleanup: {} files written since their header was read; reading them again",
+                files.len()
+            );
+            std::thread::sleep(Duration::from_secs(1));
         }
         Ok(())
     }
@@ -503,11 +519,11 @@ fn deletes(b: &Bench) -> Outcome {
     // deleted it meanwhile).
     ensure_err!(
         b.update(w2, &f, None),
-        RemoteError::NotFound | RemoteError::VersionMismatch
+        RemoteError::NotFound | RemoteError::Deleted | RemoteError::VersionMismatch
     );
     ensure_err!(
         b.update(w2, &f, Some(b"edited")),
-        RemoteError::NotFound | RemoteError::VersionMismatch
+        RemoteError::NotFound | RemoteError::Deleted | RemoteError::VersionMismatch
     );
     ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
     Ok(())
@@ -658,7 +674,7 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
 
 /// Removals and restores in one request ([`Remote::set_removed`]): each file at its version,
 /// its header kept but for the removal, an answer per file in order. A file changed since stays
-/// as it is; a tombstone or an unknown file is not found; one already at the status asked for
+/// as it is; a tombstone is deleted for good; one already at the status asked for
 /// is left alone (its version and removal time stay).
 fn removals_in_one_request(b: &Bench) -> Outcome {
     let (f, w) = b.file("f", b"kept")?;
@@ -681,7 +697,7 @@ fn removals_in_one_request(b: &Bench) -> Outcome {
     let answers = b.remote.set_removed(&asked, true)?.into_answers()?;
     ensure!(answers.len() == 4, "{} answers for 4 files", answers.len());
     ensure_err!(&answers[1], RemoteError::VersionMismatch);
-    ensure_err!(&answers[3], RemoteError::NotFound);
+    ensure_err!(&answers[3], RemoteError::Deleted);
     let (Ok(gone_f), Ok(gone_x)) = (&answers[0], &answers[2]) else {
         return Err(format!("not removed: {answers:?}").into());
     };
