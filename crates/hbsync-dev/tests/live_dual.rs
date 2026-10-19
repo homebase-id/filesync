@@ -334,8 +334,7 @@ impl Harness {
     /// `Ok(false)`: changed meanwhile (a conflict), left alone.
     fn delete(&self, by: usize, node: NodeId) -> Res<bool> {
         let at = self.doc(node)?.target.at;
-        let answers = self.remote(by).delete(&[at])?.into_answers()?;
-        match answers.into_iter().next().ok_or("no answer")? {
+        match self.remote(by).delete(&[at])?.single() {
             Ok(_) => {}
             Err(RemoteError::VersionMismatch) => {
                 self.conflicts.fetch_add(1, Ordering::Relaxed);

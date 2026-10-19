@@ -153,8 +153,10 @@ main e0d52f336 (frodo runs it): `V2DriveBatchFileWriteOperationsController.SoftD
   as the feed shows it (Unix ms; a tombstone already answers its own), null when it stayed.
   The answer carries no `versionTag`: the tombstone's comes with its row in the feed.
 - The client deletes softly through it (`HomebaseRemote::delete`: emptying Recently deleted,
-  and the purge's younger nodes), a request per 1,000 files. It records each tombstone's time
-  from `updated` at once, and its version from the feed (node schema, The purge, 3.).
+  and the purge's younger nodes), a request per 1,000 files. It records each file gone at once,
+  since `updated` (`gone_files.gone_at`, which the 30 days of keeping its id count from), and
+  the tombstone, at its version and time, from the feed's row, which the hard delete 30 days
+  on needs (node schema, The purge, 3.).
 
 `POST /api/v2/drives/{d}/files/update-archival-status-batch` (odin-core #1964, v0.1.962)
 **[verified]** `V2DriveBatchFileWriteOperationsController.UpdateArchivalStatusBatch`,
@@ -399,8 +401,8 @@ on an enveloped route comes back as 404 with an encrypted empty body: check the 
   PATCH, the archival-status batch and a delete: `write_answers_carry_the_feeds_time`). The
   client records a version's and a removal's time from it (`drive::HomebaseRemote`'s
   `Target::changed_at`) and reads no feed after its writes. A soft delete's gives the
-  tombstone's time, which the client records (`gone_files.at`); the tombstone's version still
-  comes with the feed's row (`soft-delete-batch`, above). Before #1971 the answers had no time (`payloads[].lastModified` is
+  tombstone's time, which the client records as the time the file went; the tombstone's
+  version still comes with the feed's row (`soft-delete-batch`, above). Before #1971 the answers had no time (`payloads[].lastModified` is
   the payload's, not the header's `updated`).
 
 ## Conventions

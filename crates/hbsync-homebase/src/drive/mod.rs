@@ -70,9 +70,7 @@ struct WriteResult {
     updated: Option<i64>,
 }
 
-/// Files a batch of per-file writes takes per request (`soft-delete-batch`, `hard-delete-batch`,
-/// `update-archival-status-batch`: odin-core `FileVersionTagBatchV2.MaxFiles`).
-pub const BATCH_FILES: usize = 1000;
+pub use hbsync_remote::BATCH_FILES;
 
 /// The answer of a batch write with an answer per file, in request order (`soft-delete-batch`,
 /// `hard-delete-batch`, `update-archival-status-batch`).
@@ -569,7 +567,7 @@ impl Remote for HomebaseRemote {
     /// time), one after another in the order asked; one file's answer never stops the others.
     /// No recipients: nothing goes to peers.
     fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
-        in_batches(files, BATCH_FILES, |batch| {
+        Answers::in_batches(files, BATCH_FILES, |batch| {
             let answer: BatchAnswer<SoftDeleted> = self
                 .client
                 .post(
@@ -586,7 +584,7 @@ impl Remote for HomebaseRemote {
     /// One request per [`BATCH_FILES`] files (`hard-delete-batch`, odin-core #1968): each
     /// file goes only at its version, and one file's answer never stops the others.
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
-        in_batches(files, BATCH_FILES, |batch| {
+        Answers::in_batches(files, BATCH_FILES, |batch| {
             let answer: BatchAnswer<HardDeleted> = self
                 .client
                 .post(
@@ -604,7 +602,7 @@ impl Remote for HomebaseRemote {
     /// #1964): only `archivalStatus` changes (2 removed, 0 back), each file only at its version,
     /// one after another in the order asked; one file's answer never stops the others.
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
-        in_batches(files, BATCH_FILES, |batch| {
+        Answers::in_batches(files, BATCH_FILES, |batch| {
             let mut body = versioned(batch.iter().map(|t| &t.at));
             body["archivalStatus"] = json!(if removed { ARCHIVAL_REMOVED } else { 0 });
             let answer: BatchAnswer<ArchivalSet> = self
@@ -703,28 +701,6 @@ fn same_files<A>(
     Ok(())
 }
 
-/// `files` sent `size` at a time: each one's answer. A request that fails after earlier ones
-/// went keeps their answers and stops there: the files left weren't answered (nor written).
-/// One that fails first is the whole call's error.
-fn in_batches<F, T>(
-    files: &[F],
-    size: usize,
-    mut send: impl FnMut(&[F]) -> Result<Vec<Result<T>>>,
-) -> Result<Answers<T>> {
-    let mut done = Answers::default();
-    for batch in files.chunks(size) {
-        match send(batch) {
-            Ok(answers) => done.answers.extend(answers),
-            Err(e) if done.answers.is_empty() => return Err(e),
-            Err(e) => {
-                done.stopped = Some(e);
-                break;
-            }
-        }
-    }
-    Ok(done)
-}
-
 /// Folders asked about in one query ([`HomebaseRemote::holding_live`]).
 const CHILDREN_QUERY_FOLDERS: usize = 100;
 
@@ -802,7 +778,7 @@ mod tests {
             })
             .collect();
         let mut sent = 0;
-        let done = in_batches(&files, 2, |batch| {
+        let done = Answers::in_batches(&files, 2, |batch| {
             sent += 1;
             match sent {
                 1 => Ok(batch.iter().map(|_| Ok(())).collect()),
@@ -814,7 +790,8 @@ mod tests {
         assert!(done.answers.iter().all(Result::is_ok));
         assert!(matches!(done.stopped, Some(RemoteError::NotFound)));
         assert!(
-            in_batches::<_, ()>(&files, 2, |_| Err(RemoteError::Transient("cut".into()))).is_err(),
+            Answers::<()>::in_batches(&files, 2, |_| Err(RemoteError::Transient("cut".into())))
+                .is_err(),
             "the first fails: the call's error"
         );
         Ok(())

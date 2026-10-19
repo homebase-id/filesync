@@ -419,37 +419,22 @@ mod mirror {
             "its tombstone is on the drive"
         );
 
-        // A tombstone this device's delete left, at the answer's time: gone at once, deleted
-        // hard only once the feed's row brings its version; one whose version never comes is
-        // forgotten by its own time.
-        let (own, never) = (
-            RemoteRef {
-                file_id: RemoteFileId(Uuid::now_v7()),
-                version: VersionTag(Uuid::now_v7()),
-            },
-            RemoteFileId(Uuid::now_v7()),
-        );
+        // Gone at a tombstone's time (a delete's answer): forgotten once that is older than the
+        // cut-off; one known gone already stays as it was.
+        let (own, known) = (RemoteFileId(Uuid::now_v7()), young.file_id);
         db.write(|s| {
-            s.put_own_tombstone(own.file_id, 300)?;
-            s.put_own_tombstone(never, 300)
+            s.mark_file_gone_at(own, 300)?;
+            s.mark_file_gone_at(known, 300)
         })?;
-        assert!(db.read(|s| Ok(s.file_gone(own.file_id)? && s.file_gone(never)?))?);
-        let held = |db: &mut StateDb| -> hbsync_state::Result<Vec<RemoteRef>> {
-            Ok(db
-                .read(|s| s.tombstones_before(1000))?
-                .into_iter()
-                .filter(|t| t.file_id != young.file_id)
-                .collect())
-        };
-        assert!(held(&mut db)?.is_empty(), "no version");
-        db.write(|s| s.put_tombstone(own, 300))?;
-        // A late answer (a retry) leaves the feed's row as it is.
-        db.write(|s| s.put_own_tombstone(own.file_id, 400))?;
-        assert_eq!(held(&mut db)?, [own]);
+        assert!(db.read(|s| s.file_gone(own))?);
         assert_eq!(db.write(|s| s.prune_gone(300, 1000))?, 0, "not before 300");
-        assert_eq!(db.write(|s| s.prune_gone(301, 1000))?, 1, "never");
-        assert!(!db.read(|s| s.file_gone(never))?);
-        assert!(db.read(|s| s.file_gone(own.file_id))?, "on the drive");
+        assert_eq!(db.write(|s| s.prune_gone(301, 1000))?, 1, "own");
+        assert!(!db.read(|s| s.file_gone(own))?);
+        assert_eq!(db.read(|s| s.tombstones_before(15))?.len(), 0);
+        assert!(
+            db.read(|s| s.file_gone(known))? && db.read(|s| s.tombstones_before(21))?.len() == 1,
+            "the feed's tombstone stays"
+        );
         Ok(())
     }
 

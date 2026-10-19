@@ -36,8 +36,8 @@ use hbsync_types::{
 };
 
 use crate::{
-    Answers, ChangeRef, ChangesPage, Deletes, ForGood, NodeMeta, PayloadInfo, RefsPage, Remote,
-    RemoteBody, RemoteError, RemoteHeader, Result, Upload,
+    Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, NodeMeta, PayloadInfo,
+    RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -457,6 +457,14 @@ impl FakeServer {
             .ok_or(RemoteError::NotFound)
     }
 
+    /// The name of file `file_id`, unless it is a tombstone or missing.
+    fn live_name(&self, file_id: RemoteFileId) -> Option<&str> {
+        match &self.files.get(&file_id)?.header.body {
+            RemoteBody::Live { content, .. } => Some(&content.name),
+            RemoteBody::Deleted => None,
+        }
+    }
+
     /// Which of `folders` hold a live, not removed file (unlisted ones too).
     pub fn holding_live(&self, folders: &[NodeId]) -> HashSet<NodeId> {
         self.files
@@ -760,16 +768,12 @@ impl FakeRemote {
         let mut server = self.server();
         Ok(files
             .iter()
-            .map(|f| {
-                let named = match server.header(f.file_id).map(|h| h.body) {
-                    Ok(RemoteBody::Live { content, .. }) => Some(content.name),
-                    _ => None,
-                };
-                match failing.is_some() && named == failing {
+            .map(
+                |f| match failing.is_some() && server.live_name(f.file_id) == failing.as_deref() {
                     true => Err(RemoteError::Transient("injected write failure".into())),
                     false => server.delete_by(Some(self.client), f.file_id, f.version),
-                }
-            })
+                },
+            )
             .collect())
     }
 
@@ -911,20 +915,9 @@ impl Remote for FakeRemote {
     /// A request per [`BATCH_FILES`] files, as Homebase's `soft-delete-batch`: a refusal of all
     /// writes is the request's, and so is a batch odin-core refuses whole (a file twice); a
     /// write failure injected for a name ([`Faults::fail_writes_named`]) fails that file
-    /// alone, undeleted. A request that fails after others went keeps their answers.
+    /// alone, undeleted.
     fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
-        let mut done = Deletes::default();
-        for batch in files.chunks(BATCH_FILES) {
-            match self.delete_batch(batch) {
-                Ok(answers) => done.answers.extend(answers),
-                Err(e) if done.answers.is_empty() => return Err(e),
-                Err(e) => {
-                    done.stopped = Some(e);
-                    break;
-                }
-            }
-        }
-        Ok(done)
+        Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
@@ -945,13 +938,13 @@ impl Remote for FakeRemote {
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
         self.gate()?;
         batch_of(files.iter().map(|t| t.at.file_id))?;
-        let names: Vec<Option<String>> = files
-            .iter()
-            .map(|t| match self.server().header(t.at.file_id).ok()?.body {
-                RemoteBody::Live { content, .. } => Some(content.name),
-                RemoteBody::Deleted => None,
-            })
-            .collect();
+        let names: Vec<Option<String>> = {
+            let server = self.server();
+            files
+                .iter()
+                .map(|t| server.live_name(t.at.file_id).map(str::to_owned))
+                .collect()
+        };
         // The faults on every write (no file is named so).
         self.gate_name("")?;
         if self.faults().not_found_writes {
@@ -1010,9 +1003,6 @@ impl Remote for FakeRemote {
     }
 }
 
-/// Files a batch write takes per request (odin-core's `FileVersionTagBatchV2.MaxFiles`).
-pub const BATCH_FILES: usize = 1000;
-
 /// Whether `files` make a batch odin-core takes (`FileVersionTagBatchV2.AssertValidBatch`): 1
 /// to 1,000 files, none twice; else a 400 for all of it.
 fn batch_of(files: impl ExactSizeIterator<Item = RemoteFileId>) -> Result<()> {
@@ -1020,7 +1010,7 @@ fn batch_of(files: impl ExactSizeIterator<Item = RemoteFileId>) -> Result<()> {
     let ids: HashSet<RemoteFileId> = files.collect();
     if asked == 0 || asked > BATCH_FILES || ids.len() != asked {
         return Err(RemoteError::Fatal(format!(
-            "1 to 1,000 files, none twice: {asked} asked, {} different",
+            "1 to {BATCH_FILES} files, none twice: {asked} asked, {} different",
             ids.len()
         )));
     }
@@ -1052,7 +1042,7 @@ mod tests {
         let mine = a.create(&folder("mine"), None)?;
         let theirs = b.create(&folder("theirs"), None)?;
         let copied = copy.create(&folder("copied"), None)?;
-        a.delete(&[mine.at])?.into_answers()?;
+        a.delete(&[mine.at])?.single()?;
         let seeded = server
             .lock()
             .unwrap_or_else(|p| p.into_inner())

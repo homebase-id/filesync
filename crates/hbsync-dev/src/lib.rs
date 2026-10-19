@@ -142,8 +142,7 @@ pub fn run_name(what: &str) -> String {
 
 /// A file under one of the drive's top-level folders, as [`delete_top_folders`] finds it.
 struct Found {
-    file_id: hbsync_types::RemoteFileId,
-    version: hbsync_types::VersionTag,
+    at: RemoteRef,
     parent: hbsync_types::NodeId,
     name: String,
     size: u64,
@@ -167,12 +166,12 @@ pub fn delete_top_folders(
     loop {
         let page = remote.changes(cursor.as_deref(), 500)?;
         for h in page.entries {
+            let at = h.at();
             if let RemoteBody::Live { node, content, .. } = h.body {
                 nodes.insert(
                     node,
                     Found {
-                        file_id: h.file_id,
-                        version: h.version,
+                        at,
                         parent: h.parent,
                         name: content.name,
                         size: content.size.unwrap_or(0),
@@ -210,32 +209,23 @@ pub fn delete_top_folders(
         doomed.push(found);
     }
     if !dry {
-        let asked: Vec<RemoteRef> = doomed
-            .iter()
-            .map(|f| RemoteRef {
-                file_id: f.file_id,
-                version: f.version,
-            })
-            .collect();
+        let mut asked: Vec<RemoteRef> = doomed.iter().map(|f| f.at).collect();
         // Written since it was read: once more at its version now.
-        let mut again = Vec::new();
-        for (at, answer) in asked.iter().zip(remote.delete(&asked)?.into_answers()?) {
-            match answer {
-                Ok(_) | Err(RemoteError::NotFound) => {}
-                Err(RemoteError::VersionMismatch) => again.push(RemoteRef {
-                    file_id: at.file_id,
-                    version: remote.header(at.file_id)?.version,
-                }),
-                Err(e) => return Err(e),
-            }
-        }
-        if !again.is_empty() {
-            for answer in remote.delete(&again)?.into_answers()? {
+        for round in 0..2 {
+            let mut again = Vec::new();
+            for (at, answer) in asked.iter().zip(remote.delete(&asked)?.into_answers()?) {
                 match answer {
                     Ok(_) | Err(RemoteError::NotFound) => {}
+                    Err(RemoteError::VersionMismatch) if round == 0 => {
+                        again.push(remote.header(at.file_id)?.at())
+                    }
                     Err(e) => return Err(e),
                 }
             }
+            if again.is_empty() {
+                break;
+            }
+            asked = again;
         }
     }
     let mut folders: Vec<_> = folders.into_values().collect();

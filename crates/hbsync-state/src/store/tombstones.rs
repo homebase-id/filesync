@@ -24,26 +24,24 @@ impl Store<'_> {
         Ok(())
     }
 
-    /// Records the tombstone a delete of this device left, written at `at` (Unix ms, the
-    /// server's: the delete's answer): its file is gone ([`Store::mark_file_gone`]), and the
-    /// tombstone is on the drive from then on. Its version, which a hard delete of it needs,
-    /// comes with the feed's row ([`Store::put_tombstone`]); a row the feed brought already
-    /// stays as it is.
-    pub fn put_own_tombstone(&self, file_id: RemoteFileId, at: i64) -> Result<()> {
+    /// Records file `file_id` gone since `at` (Unix ms, the server's): the time of the tombstone
+    /// a delete of this device left, from the delete's answer ([`Store::prune_gone`] counts
+    /// from it). The tombstone itself, at its version, comes with the feed's row
+    /// ([`Store::put_tombstone`]). A file already known gone stays as it is.
+    pub fn mark_file_gone_at(&self, file_id: RemoteFileId, at: i64) -> Result<()> {
         self.prep(
-            "INSERT INTO gone_files (file_id, at) VALUES (?1, ?2)
-             ON CONFLICT (file_id) DO UPDATE SET at = excluded.at WHERE version_tag IS NULL",
+            "INSERT INTO gone_files (file_id, gone_at) VALUES (?1, ?2)
+             ON CONFLICT (file_id) DO NOTHING",
         )?
         .execute(params![file_id.0.as_bytes(), at])?;
         Ok(())
     }
 
-    /// The tombstones still on the drive written before `at_ms` (Unix ms), oldest first: those
-    /// whose version is known ([`Store::put_own_tombstone`]).
+    /// The tombstones still on the drive written before `at_ms` (Unix ms), oldest first.
     pub fn tombstones_before(&self, at_ms: i64) -> Result<Vec<RemoteRef>> {
         self.many(
             "SELECT file_id, version_tag FROM gone_files
-             WHERE at IS NOT NULL AND at < ?1 AND version_tag IS NOT NULL ORDER BY at",
+             WHERE at IS NOT NULL AND at < ?1 ORDER BY at",
             [at_ms],
             |r| {
                 Ok(RemoteRef {
@@ -67,18 +65,14 @@ impl Store<'_> {
     }
 
     /// Forgets the files gone since before `before_ms` (Unix ms, the server's) that left
-    /// nothing on the drive this device can delete: no page read since can show them any more
-    /// (node schema, Recently deleted). Those whose time is not known yet are gone from `now_ms`
-    /// on; a tombstone of this device's whose version the feed never brought
-    /// ([`Store::put_own_tombstone`]), from its own time. Returns how many went.
+    /// nothing on the drive: no page read since can show them any more (node schema, Recently
+    /// deleted). Those whose time is not known yet are gone from `now_ms` on. Returns how many
+    /// went.
     pub fn prune_gone(&self, before_ms: i64, now_ms: i64) -> Result<usize> {
         self.prep("UPDATE gone_files SET gone_at = ?1 WHERE gone_at IS NULL AND at IS NULL")?
             .execute([now_ms])?;
         Ok(self
-            .prep(
-                "DELETE FROM gone_files
-                 WHERE version_tag IS NULL AND COALESCE(at, gone_at) < ?1",
-            )?
+            .prep("DELETE FROM gone_files WHERE at IS NULL AND gone_at < ?1")?
             .execute([before_ms])?)
     }
 

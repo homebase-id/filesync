@@ -222,14 +222,7 @@ impl<'a> Bench<'a> {
 
     /// Deletes one file at `at` ([`Remote::delete`]): its answer, the tombstone's time.
     pub fn delete(&self, at: RemoteRef) -> Result<Option<i64>, RemoteError> {
-        let answers = self.remote.delete(&[at])?.into_answers()?;
-        match <[_; 1]>::try_from(answers) {
-            Ok([answer]) => answer,
-            Err(answers) => Err(RemoteError::Fatal(format!(
-                "{} answers for one file",
-                answers.len()
-            ))),
-        }
+        self.remote.delete(&[at])?.single()
     }
 
     fn read(

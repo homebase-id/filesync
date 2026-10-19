@@ -862,7 +862,7 @@ fn write_answers_carry_the_feeds_time() -> R {
             r["updated"].as_i64(),
         ));
         let (_, w) = made("deleted")?;
-        let deleted = remote.delete(&[w.at])?.into_answers()?;
+        let deleted = remote.delete(&[w.at])?.single()?;
         let tomb = remote.header(w.at.file_id)?;
         answers.push((
             "soft-delete batch",
@@ -870,7 +870,7 @@ fn write_answers_carry_the_feeds_time() -> R {
                 file_id: w.at.file_id,
                 version: tomb.version,
             },
-            *deleted[0].as_ref().map_err(|e| e.to_string())?,
+            deleted,
         ));
 
         // The feed's rows since the cursor: each file's last write.

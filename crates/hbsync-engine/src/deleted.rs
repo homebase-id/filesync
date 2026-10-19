@@ -1336,12 +1336,13 @@ fn delete_for_good(
         }
         let (hard, soft): (Vec<&RemovedRow>, Vec<&RemovedRow>) =
             going.into_iter().partition(|r| hard(r));
-        let refs: Vec<RemoteRef> = hard.iter().map(|r| r.row.remote_ref()).collect();
-        let (answers, mut failed) = hard_delete(remote, &refs);
+        let refs = |rows: &[&RemovedRow]| -> Vec<RemoteRef> {
+            rows.iter().map(|r| r.row.remote_ref()).collect()
+        };
+        let (answers, mut failed) = hard_delete(remote, &refs(&hard));
         let mut answered: Vec<(&RemovedRow, Answer)> = hard.into_iter().zip(answers).collect();
         if failed.is_none() {
-            let refs: Vec<RemoteRef> = soft.iter().map(|r| r.row.remote_ref()).collect();
-            let (answers, stopped) = soft_delete(remote, &refs);
+            let (answers, stopped) = answers_to(&refs(&soft), |f| remote.delete(f), |at| at);
             failed = stopped;
             answered.extend(soft.into_iter().zip(answers));
         }
@@ -1378,10 +1379,11 @@ fn delete_for_good(
         locked(account).write(|s| {
             for (r, tombstone) in &gone_now {
                 s.delete_removed(r.row.node)?;
-                // Its id never comes back, nor its row from a page read before. A tombstone's
-                // time comes with the answer, its version with the feed's row.
+                // Its id never comes back, nor its row from a page read before: gone since its
+                // tombstone's time, if the answer gave it (the tombstone itself, at its
+                // version, comes with the feed's row).
                 match tombstone {
-                    Some(at) => s.put_own_tombstone(r.row.file_id, *at)?,
+                    Some(at) => s.mark_file_gone_at(r.row.file_id, *at)?,
                     None => s.mark_file_gone(r.row.file_id)?,
                 }
             }
@@ -1408,32 +1410,24 @@ enum Answer {
     Kept,
 }
 
-/// Deletes `files` without a trace, each only at its version: [`answers`].
+/// Deletes `files` without a trace, each only at its version: [`answers_to`].
 fn hard_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option<RemoteError>) {
-    if files.is_empty() {
-        return (Vec::new(), None);
-    }
-    answers(files.len(), remote.delete_for_good(files), |()| None)
+    answers_to(files, |f| remote.delete_for_good(f), |()| None)
 }
 
-/// Deletes `files`, each only at its version, leaving tombstones (many a request): [`answers`],
-/// each with its tombstone's time.
-fn soft_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option<RemoteError>) {
-    if files.is_empty() {
-        return (Vec::new(), None);
-    }
-    answers(files.len(), remote.delete(files), |at| at)
-}
-
-/// What the drive answered for each of the first of `asked` files (each deleted with
-/// `tombstone` of its answer), and the error of the request that stopped it there, if one did
-/// (the files not answered stay), or else the first answer that isn't one of [`Answer`]'s.
-fn answers<T>(
-    asked: usize,
-    answered: Result<Answers<T>, RemoteError>,
+/// What the drive answered when `delete` asked about `files` (nothing for none), each deleted
+/// with `tombstone` of its answer: an answer for each of the first files, and the error of the
+/// request that stopped it there, if one did (the files not answered stay), or else the first
+/// answer that isn't one of [`Answer`]'s.
+fn answers_to<T>(
+    files: &[RemoteRef],
+    delete: impl FnOnce(&[RemoteRef]) -> Result<Answers<T>, RemoteError>,
     tombstone: impl Fn(T) -> Option<i64>,
 ) -> (Vec<Answer>, Option<RemoteError>) {
-    let Answers { answers, stopped } = answered.unwrap_or_else(Answers::stopped);
+    if files.is_empty() {
+        return (Vec::new(), None);
+    }
+    let Answers { answers, stopped } = delete(files).unwrap_or_else(Answers::stopped);
     // Any other answer for a file: it stays, and fails the purge (retried later).
     let mut refused: Option<(usize, RemoteError)> = None;
     let answers = answers
@@ -1452,7 +1446,7 @@ fn answers<T>(
         })
         .collect();
     let refused = refused.map(|(n, e)| {
-        tracing::warn!("{n} of {asked} files weren't deleted: {e}");
+        tracing::warn!("{n} of {} files weren't deleted: {e}", files.len());
         e
     });
     (answers, stopped.or(refused))
