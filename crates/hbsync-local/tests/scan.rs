@@ -830,9 +830,13 @@ mod entries {
             let (report, _) = f.look(exact, &["big/new"])?;
             assert_eq!(report.added, 1, "{report:?}");
             assert!(f.node("big/new").is_ok());
+            // On a volume that folds case this writes f1 itself: its file id is a row's, and the
+            // folder is rescanned either way.
+            let folds = !hbsync_platform::fskind::probe_case_sensitive(f.root())?;
             f.write("big/F1", b"another spelling?")?;
             let (report, _) = f.look(exact, &["big/F1"])?;
-            assert_eq!(report.added, if exact { 1 } else { 2 }, "{report:?}");
+            assert_eq!(f.node("big/unnamed").is_ok(), !exact || folds, "{report:?}");
+            assert_eq!(f.node("big/F1").is_ok(), !folds, "{report:?}");
             Ok(())
         })
     }
