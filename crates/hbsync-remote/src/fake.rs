@@ -920,15 +920,17 @@ impl Remote for FakeRemote {
         Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
+    /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`.
     fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
-        self.gate()?;
-        let mut server = self.server();
-        Ok(ForGood::all(
-            files
+        Answers::in_batches(files, BATCH_FILES, |batch| {
+            self.gate()?;
+            batch_of(batch.iter().map(|f| f.file_id))?;
+            let mut server = self.server();
+            Ok(batch
                 .iter()
                 .map(|f| server.hard_delete(f.file_id, f.version))
-                .collect(),
-        ))
+                .collect())
+        })
     }
 
     /// One request: a refusal of all writes, or an answer lost (after the server wrote the

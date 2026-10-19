@@ -96,8 +96,7 @@ struct SoftDeleted {
 fn soft_deleted(answer: &SoftDeleted) -> Result<Option<i64>> {
     match &answer.error_code {
         None => Ok(answer.updated),
-        Some(code) => Err(code_error(code)
-            .unwrap_or_else(|| RemoteError::Fatal(format!("soft delete refused: {code}")))),
+        Some(code) => Err(refused("soft delete", code)),
     }
 }
 
@@ -111,13 +110,9 @@ struct HardDeleted {
 
 /// One file's answer to a hard delete.
 fn hard_deleted(answer: &HardDeleted) -> Result<()> {
-    match answer.error_code.as_deref() {
+    match &answer.error_code {
         None => Ok(()),
-        Some(code) if code.eq_ignore_ascii_case("versionTagMismatch") => {
-            Err(RemoteError::VersionMismatch)
-        }
-        Some(code) if code.eq_ignore_ascii_case("fileNotFound") => Err(RemoteError::NotFound),
-        Some(code) => Err(RemoteError::Fatal(format!("hard delete refused: {code}"))),
+        Some(code) => Err(refused("hard delete", code)),
     }
 }
 
@@ -138,7 +133,7 @@ struct ArchivalSet {
 /// (its key didn't change).
 fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Target> {
     if let Some(code) = &answer.error_code {
-        return Err(refused(code));
+        return Err(refused("archival status", code));
     }
     let version = answer.new_version_tag.ok_or_else(|| {
         RemoteError::Fatal("update-archival-status-batch answered no version".into())
@@ -153,11 +148,10 @@ fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Target> {
     })
 }
 
-/// Why `update-archival-status-batch` left a file as it was (`OdinClientErrorCode`'s camelCase
-/// name): written since, not there, a tombstone, or anything else.
-fn refused(code: &str) -> RemoteError {
-    code_error(code)
-        .unwrap_or_else(|| RemoteError::Fatal(format!("archival status refused: {code}")))
+/// Why a batch write (`what`) left a file as it was, by its `OdinClientErrorCode` (camelCase):
+/// written since, not there, a tombstone, or anything else.
+fn refused(what: &str, code: &str) -> RemoteError {
+    code_error(code).unwrap_or_else(|| RemoteError::Fatal(format!("{what} refused: {code}")))
 }
 
 impl HomebaseRemote {

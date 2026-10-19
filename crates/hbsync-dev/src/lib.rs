@@ -210,10 +210,14 @@ pub fn delete_top_folders(
     }
     if !dry {
         let mut asked: Vec<RemoteRef> = doomed.iter().map(|f| f.at).collect();
+        // A request that failed after others went: the answers before it still count.
+        let mut stopped = None;
         // Written since it was read: once more at its version now.
         for round in 0..2 {
             let mut again = Vec::new();
-            for (at, answer) in asked.iter().zip(remote.delete(&asked)?.into_answers()?) {
+            let answered = remote.delete(&asked)?;
+            stopped = stopped.or(answered.stopped);
+            for (at, answer) in asked.iter().zip(answered.answers) {
                 match answer {
                     Ok(_) | Err(RemoteError::NotFound) => {}
                     Err(RemoteError::VersionMismatch) if round == 0 => {
@@ -226,6 +230,9 @@ pub fn delete_top_folders(
                 break;
             }
             asked = again;
+        }
+        if let Some(e) = stopped {
+            return Err(e);
         }
     }
     let mut folders: Vec<_> = folders.into_values().collect();

@@ -435,6 +435,10 @@ mod mirror {
             db.read(|s| s.file_gone(known))? && db.read(|s| s.tombstones_before(21))?.len() == 1,
             "the feed's tombstone stays"
         );
+        // Its tombstone deleted hard: the id kept from then on, whatever its time before.
+        db.write(|s| s.delete_tombstone_at(young).map(drop))?;
+        assert_eq!(db.write(|s| s.prune_gone(301, 1000))?, 0, "kept from 1000");
+        assert_eq!(db.write(|s| s.prune_gone(1001, 2000))?, 1);
         Ok(())
     }
 
