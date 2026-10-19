@@ -695,6 +695,14 @@ fn tombstone_in_the_feed(b: &Bench) -> Outcome {
         tomb.body == RemoteBody::Deleted && tomb.node().is_none(),
         "{tomb:?}"
     );
+    // It goes for good at the version its feed row has, as a live file does (the purge's
+    // clearing of tombstones; a test drive's, `hbsync_dev::delete_tombstones`).
+    let answers = b.remote.delete_for_good(&[tomb.at()])?.into_answers()?;
+    ensure!(matches!(answers[..], [Ok(())]), "{answers:?}");
+    ensure!(
+        matches!(b.remote.header(w.file_id), Err(RemoteError::NotFound)),
+        "the tombstone is still there"
+    );
     Ok(())
 }
 

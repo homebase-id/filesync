@@ -1,6 +1,8 @@
 //! Development tools around the sync engine and a live Homebase identity:
 //! - `hbsync-register <identity>`: registers the app and authorizes this machine;
-//! - `hbsync-sync <identity> <folder>`: syncs a folder with the identity's Filesync drive.
+//! - `hbsync-sync <identity> <folder>`: syncs a folder with the identity's Filesync drive;
+//! - `hbsync-clean <identity> --tombstones`: deletes the drive's tombstones for good (a test
+//!   identity's, between runs).
 //!
 //! Not the product: the daemon, its configuration and the keychain are roadmap Layer 6.
 
@@ -136,9 +138,10 @@ struct Found {
     size: u64,
 }
 
-/// Deletes for good (not to Recently deleted) the top-level folders whose name `pick` chooses,
-/// with everything under them, of those the feed shows from `from` on (`None`: all of it).
-/// With `dry`, deletes nothing. Returns each folder's name, its files and their bytes.
+/// Deletes for good without a trace (`hard-delete-batch`: no tombstone, not to Recently
+/// deleted) the top-level folders whose name `pick` chooses, with everything under them, of
+/// those the feed shows from `from` on (`None`: all of it). With `dry`, deletes nothing.
+/// Returns each folder's name, its files and their bytes.
 pub fn delete_top_folders(
     remote: &dyn Remote,
     from: Option<&str>,
@@ -203,11 +206,11 @@ pub fn delete_top_folders(
         // Written since it was read: once more at its version now.
         for round in 0..2 {
             let mut again = Vec::new();
-            let answered = remote.delete(&asked)?;
+            let answered = remote.delete_for_good(&asked)?;
             stopped = stopped.or(answered.stopped);
             for (at, answer) in asked.iter().zip(answered.answers) {
                 match answer {
-                    Ok(_) | Err(RemoteError::NotFound) => {}
+                    Ok(()) | Err(RemoteError::NotFound) => {}
                     Err(RemoteError::VersionMismatch) if round == 0 => {
                         again.push(remote.header(at.file_id)?.at())
                     }
@@ -228,10 +231,81 @@ pub fn delete_top_folders(
     Ok(folders)
 }
 
+/// The tombstones the feed shows from `from` on (`None`: the whole drive), each at the version
+/// its row has: what a delete left (a removal, a live or removed row, is never one).
+pub fn tombstones(remote: &dyn Remote, from: Option<&str>) -> Result<Vec<RemoteRef>, RemoteError> {
+    // A file's last row tells what it is now (a page read during a write may show it twice).
+    let mut found = std::collections::HashMap::new();
+    let mut cursor = from.map(str::to_owned);
+    loop {
+        let page = remote.change_refs(cursor.as_deref(), 1000)?;
+        for r in page.refs {
+            match r.deleted {
+                true => found.insert(r.file_id, r.version),
+                false => found.remove(&r.file_id),
+            };
+        }
+        cursor = Some(page.cursor);
+        if !page.has_more {
+            break;
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|(file_id, version)| RemoteRef { file_id, version })
+        .collect())
+}
+
+/// What [`delete_tombstones`] did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Swept {
+    /// Deleted for good.
+    pub deleted: usize,
+    /// Not there (deleted for good meanwhile).
+    pub gone: usize,
+    /// Written since the feed showed it: left as it is.
+    pub written: usize,
+}
+
+/// Deletes `tombstones` for good (`hard-delete-batch`, [`hbsync_remote::BATCH_FILES`] a
+/// request), each only at its version. A file any other answer refuses, or a request that
+/// fails, stops it with that error.
+pub fn delete_tombstones(
+    remote: &dyn Remote,
+    tombstones: &[RemoteRef],
+) -> Result<Swept, RemoteError> {
+    let mut swept = Swept::default();
+    for answer in remote.delete_for_good(tombstones)?.into_answers()? {
+        match answer {
+            Ok(()) => swept.deleted += 1,
+            Err(RemoteError::NotFound) => swept.gone += 1,
+            Err(RemoteError::VersionMismatch) => swept.written += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(swept)
+}
+
+/// The run folders this process holds ([`RunFolder`]): how many, and the feed's end when the
+/// first of them was made. The last one out clears the tombstones written since.
+static RUNS: Mutex<Option<(usize, String)>> = Mutex::new(None);
+
+fn runs() -> std::sync::MutexGuard<'static, Option<(usize, String)>> {
+    RUNS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// A live test's run folder on the drive (`name`, a top-level folder): deleted for good with
 /// everything in it when the guard is dropped, also when the test panics, so a run that ends
 /// early leaves nothing for the next whole-drive sync to take down. Made before the test writes
 /// anything: it finds the folder in the feed from where the feed stood then.
+///
+/// The tombstones a run leaves (its deletes, emptying Recently deleted) would stay on the drive
+/// for the 30 days a client keeps them. The last guard of the process to go deletes for good
+/// every tombstone written since the first was made: the live tests of one binary run in
+/// parallel, so no guard clears them while another run may still read its own. A guard made
+/// meanwhile waits for that. Another process's run at the same time (runs on one drive are
+/// serialized by a lock, but a daemon or a benchmark may write) may lose its tombstones too:
+/// harmless on a test drive, where each is announced as deleted for good.
 pub struct RunFolder {
     remote: hbsync_homebase::drive::HomebaseRemote,
     name: String,
@@ -243,7 +317,15 @@ impl RunFolder {
     pub fn new(name: &str) -> Result<RunFolder, Box<dyn std::error::Error>> {
         let remote =
             hbsync_homebase::drive::HomebaseRemote::connect(saved_client(&live_identity()?)?)?;
-        let from = hbsync_remote::contract::feed_end(&remote, None)?;
+        // After the clearing of runs that ended, if one is going on; read on from where the
+        // first run held began.
+        let mut runs = runs();
+        let since = runs.as_ref().map(|(_, since)| since.as_str());
+        let from = hbsync_remote::contract::feed_end(&remote, since)?;
+        match &mut *runs {
+            Some((held, _)) => *held += 1,
+            None => *runs = Some((1, from.clone())),
+        }
         Ok(RunFolder {
             remote,
             name: name.to_owned(),
@@ -262,9 +344,25 @@ impl std::fmt::Debug for RunFolder {
 
 impl Drop for RunFolder {
     fn drop(&mut self) {
+        let began = std::time::Instant::now();
         let name = self.name.clone();
         if let Err(e) = delete_top_folders(&self.remote, Some(&self.from), |n| n == name, false) {
             eprintln!("the run folder {:?} is left on the drive: {e}", self.name);
+        }
+        let mut runs = runs();
+        let Some((held, since)) = runs.take() else {
+            return;
+        };
+        if held > 1 {
+            *runs = Some((held - 1, since));
+            return;
+        }
+        // The feed shows the last writes once its hold-back has passed.
+        std::thread::sleep(self.remote.hold_back().saturating_sub(began.elapsed()));
+        let cleared = tombstones(&self.remote, Some(&since))
+            .and_then(|t| delete_tombstones(&self.remote, &t));
+        if let Err(e) = cleared {
+            eprintln!("the runs' tombstones are left on the drive: {e}");
         }
     }
 }
@@ -325,6 +423,61 @@ mod tests {
         left.sort();
         assert_eq!(left, ["Documents", "mine"]);
         assert!(super::delete_top_folders(&remote, None, picked, true)?.is_empty());
+        Ok(())
+    }
+
+    /// Only tombstones go, from the cursor given on, each at its version: never a live row,
+    /// removed or not, nor a tombstone from before.
+    #[test]
+    fn only_tombstones_go_for_good() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::contract::feed_end;
+        use std::collections::HashSet;
+        let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
+        let mut made = Vec::new();
+        for name in ["old", "a", "b", "kept", "removed"] {
+            made.push(remote.create(&folder(name, NodeId::ROOT), None)?);
+        }
+        remote.delete(&[made[0].at])?.into_answers()?;
+        let from = feed_end(&remote, None)?;
+        remote.delete(&[made[1].at, made[2].at])?.into_answers()?;
+        remote
+            .set_removed(&[made[4].clone()], true)?
+            .into_answers()?;
+
+        let found = super::tombstones(&remote, Some(&from))?;
+        let ids: HashSet<_> = found.iter().map(|t| t.file_id).collect();
+        assert_eq!(ids, made[1..3].iter().map(|t| t.at.file_id).collect());
+        assert_eq!(
+            super::tombstones(&remote, None)?.len(),
+            3,
+            "the old one too"
+        );
+
+        let swept = super::delete_tombstones(&remote, &found)?;
+        assert_eq!(
+            swept,
+            super::Swept {
+                deleted: 2,
+                ..Default::default()
+            }
+        );
+        assert_eq!(super::tombstones(&remote, Some(&from))?, []);
+        assert_eq!(
+            super::tombstones(&remote, None)?.len(),
+            1,
+            "the old one stays"
+        );
+        assert_eq!(remote.server().live_names(), ["kept"]);
+        assert_eq!(remote.server().removed().count(), 1, "a removed row stays");
+        // Gone meanwhile: counted, not an error.
+        let again = super::delete_tombstones(&remote, &found)?;
+        assert_eq!(
+            again,
+            super::Swept {
+                gone: 2,
+                ..Default::default()
+            }
+        );
         Ok(())
     }
 }

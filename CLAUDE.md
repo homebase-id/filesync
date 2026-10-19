@@ -34,6 +34,9 @@ product runs as a per-user daemon (`hbsyncd`) shown and controlled by the tray a
 - `cargo run -p hbsync-dev --bin hbsync-register -- <identity> [--browser firefox]`
 - `cargo run --release -p hbsync-dev --bin hbsync-sync -- <identity> <folder> [--once]
   [--allow-mass-delete]`
+- `cargo run -p hbsync-dev --bin hbsync-clean -- <identity> --tombstones [--dry]`: deletes the
+  drive's tombstones for good (a test identity's: the live tests clear their own; for a
+  benchmark harness outside the repo, after its run)
 
 Server dependencies: every odin-core issue the client waits on has a tracking issue here,
 labelled `odin-core` (`gh issue list -R homebase-id/filesync --label odin-core`). Each one names
@@ -120,4 +123,4 @@ ID and notarized, its Windows packages signed by Azure Trusted Signing (keys fro
 | `hbsync-app` | the product shell: paths, `config.toml`, credentials in the OS keychain (a 0600 file when there is none), setting the app up on an identity, the sync runner (the daemon's loop: pause, sync now, confirming held deletes, sleep, live rule changes), the daemon, its control socket and one-daemon lock, autostart (launchd agent, systemd user unit, the Windows `Run` key) |
 | `hbsync` | the daemon `hbsyncd` and the CLI `hbsync` (`setup`, `add <role>`, `remove <role>`, `status`, `recent`, `sync`, `pause [--for]`, `resume`, `confirm-deletes`, `deleted`, `restore`, `empty-deleted`, `start`, `stop`, `autostart`, `logout`, `unlink`, `log`) |
 | `hbsync-tray` | the tray app: menu from the daemon's status (`model.rs`, pure), local pages for logging in and held deletes, notifications, the folder's icon and sidebar shortcut; Linux via StatusNotifierItem (no GTK), tao's event loop elsewhere |
-| `hbsync-dev` | development tools: `hbsync-register`, `hbsync-sync` (a folder synced with a live identity), the live end-to-end test |
+| `hbsync-dev` | development tools: `hbsync-register`, `hbsync-sync` (a folder synced with a live identity), `hbsync-clean` (a test drive's tombstones), the live tests' run folders, the live end-to-end test |
