@@ -1,6 +1,7 @@
 //! Step 3: the merged tree made whole again: orphans, cycles, duplicate names (§6).
 
 use super::*;
+use hbsync_types::RECOVERED_NAME;
 
 impl Reconciler<'_> {
     // ---- 3: invariants on the merged tree ----
@@ -45,6 +46,42 @@ impl Reconciler<'_> {
             .cloned()
     }
 
+    /// Where the orphan `node` goes: Recovered files ([`NodeId::RECOVERED`]), made here if no
+    /// side knows it (one in Recently deleted, or synced here before, comes back as any folder
+    /// a live child keeps does). The main folder adopts orphans (§12); a role folder's never
+    /// meets one but through a folder it filters, and puts that at its top, as does the main
+    /// folder where Recovered files isn't synced here (filtered) or is the orphan itself.
+    fn recovered_files(&mut self, node: NodeId) -> NodeId {
+        // Never into itself: Recovered files moved by the user into what is now the orphan.
+        let inside = |at: NodeId| at == node || self.merged.ancestors(at).contains(&node);
+        if node == NodeId::RECOVERED
+            || !self.opts.scope.top.is_root()
+            || self.masks.masked.contains(&NodeId::RECOVERED)
+            || inside(NodeId::RECOVERED)
+            || self
+                .known_state(NodeId::RECOVERED)
+                .is_some_and(|known| inside(known.parent))
+        {
+            return NodeId::ROOT;
+        }
+        if !self.merged.exists(NodeId::RECOVERED) && self.known_state(NodeId::RECOVERED).is_none() {
+            // Made here: under the name it gets, if this device syncs that.
+            if !self
+                .opts
+                .filter
+                .in_folder("", RECOVERED_NAME, true)
+                .is_sync()
+            {
+                return NodeId::ROOT;
+            }
+            self.retarget(
+                NodeId::RECOVERED,
+                NodeState::folder(NodeId::ROOT, RECOVERED_NAME),
+            );
+        }
+        NodeId::RECOVERED
+    }
+
     pub(super) fn fix_orphans(&mut self) {
         let mut queue: Vec<NodeId> = self.merged.ids().collect();
         queue.sort();
@@ -78,15 +115,22 @@ impl Reconciler<'_> {
                     queue.push(parent);
                 }
                 None if self.input.remote_complete
-                    && self.input.remote.contains(node)
+                    && (self.input.remote.contains(node)
+                        || (self.opts.scope.top.is_root()
+                            && self.input.removed.contains_key(&node)))
                     && !withdrawn.contains(&parent) =>
                 {
-                    // Nobody knows the parent: the server kept a child of a folder deleted
-                    // concurrently. Keep the data visible by moving it to the root.
+                    // Nobody knows the parent, though the drive's picture is whole: the server
+                    // kept a child of a folder deleted for good (a create racing the delete,
+                    // another app), live or brought back from Recently deleted by what is in
+                    // it. Keep the data visible: it moves into Recovered files on the drive.
                     if let Some(mut state) = self.merged.get(node).cloned() {
-                        state.parent = NodeId::ROOT;
+                        state.parent = self.recovered_files(node);
                         self.retarget(node, state);
+                        self.adopted.insert(node);
                         self.plan.conflicts.push(Conflict::Orphan { node });
+                        // Its new folder may have to come back first.
+                        queue.push(node);
                     }
                 }
                 _ => {
@@ -96,6 +140,12 @@ impl Reconciler<'_> {
                     self.merged.remove(node);
                     self.scope.remove(&node);
                     withdrawn.insert(node);
+                    // An orphan whose Recovered files waits too: not moved after all.
+                    if self.adopted.remove(&node) {
+                        self.plan
+                            .conflicts
+                            .retain(|c| *c != Conflict::Orphan { node });
+                    }
                     if self.input.dirty.contains(&node) {
                         self.deferred.insert(node);
                     }
@@ -208,8 +258,13 @@ impl Reconciler<'_> {
                 }
                 unlisted |= part.is_some();
                 // The lowest id keeps the name, except that a deferred node (a file still
-                // being written) is never renamed: it wins, and is left alone if it loses.
-                group.sort_by_key(|n| (!self.deferred.contains(n), *n));
+                // being written) is never renamed: it wins, and is left alone if it loses;
+                // and an orphan moving in, or Recovered files made beside a folder of its
+                // name, loses to what is there.
+                group.sort_by_key(|n| {
+                    let arriving = self.adopted.contains(n) || *n == NodeId::RECOVERED;
+                    (!self.deferred.contains(n), arriving, *n)
+                });
                 for loser in group.into_iter().skip(keep) {
                     if self.deferred.contains(&loser) {
                         continue;

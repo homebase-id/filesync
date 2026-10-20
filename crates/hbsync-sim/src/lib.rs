@@ -101,6 +101,13 @@ pub enum Action {
         pick: usize,
         done: usize,
     },
+    /// Another app deletes a live folder of the drive for good, outright (no trace in the feed:
+    /// a hard delete): what was in it stays live with no folder, an orphan, which the main
+    /// folders put into Recovered files. Any folder, as [`Action::DeleteStopped`] picks it;
+    /// nothing when the drive holds none.
+    DeleteOutright {
+        pick: usize,
+    },
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
@@ -785,10 +792,26 @@ impl Sim {
             .collect()
     }
 
+    /// The folder `pick` picks of [`Sim::stopped_folders`], if the drive holds one.
+    fn pick_folder(&self, pick: usize) -> Option<NodeId> {
+        let folders = self.stopped_folders();
+        folders.get(pick % folders.len().max(1)).copied()
+    }
+
+    /// [`Action::DeleteOutright`].
+    fn delete_outright(&mut self, pick: usize) {
+        if let Some(folder) = self.pick_folder(pick) {
+            // Gone for good, as the purge's deletes: what an earlier removal kept goes too.
+            self.server.live.remove(&folder);
+            self.server.removed_at.remove(&folder);
+            self.server.tags_at_removal.remove(&folder);
+            self.deleted_now(folder);
+        }
+    }
+
     /// [`Action::DeleteStopped`].
     fn delete_stopped(&mut self, pick: usize, done: usize) {
-        let folders = self.stopped_folders();
-        let Some(&folder) = folders.get(pick % folders.len().max(1)) else {
+        let Some(folder) = self.pick_folder(pick) else {
             return;
         };
         let tree = self.server.tree();
@@ -1350,6 +1373,7 @@ impl Sim {
             Action::Phone { op, pick } => self.phone(op, pick),
             Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
+            Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;
@@ -1850,7 +1874,7 @@ impl Sim {
         // The folders in Recently deleted that live nodes are in, and the removed ones above
         // them, and the server's time of each live node's version, as the engine's view has them.
         let outside = client.scope().outside;
-        for mut folder in remote.missing_parents() {
+        for mut folder in hbsync_engine::view::looked_up_removed(&remote, client.coords.top) {
             while !input.removed.contains_key(&folder)
                 && !outside.contains(&folder)
                 && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))

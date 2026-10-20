@@ -135,7 +135,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 1. **Unique names per folder**, compared by `key(name) = casefold(NFC(name))`. On a clash the
    node with the lower node id (byte order) keeps the name; each other node is renamed to
    `<stem> (conflict <n>)<ext>` with the smallest `n ≥ 1` that is free. Applies equally to
-   files and folders.
+   files and folders. Recovered files, and an orphan moving into it, lose a clash whatever the
+   ids (rule 3).
 2. **No cycles.** If merged moves form a cycle, revert the local moves taking part in it (the
    remote side has already published its moves). Revert one at a time until no cycle remains.
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
@@ -152,8 +153,30 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    settles (another device may restore it first, with changes of its own: a tag it removed
    stays removed). A removed folder outside this
    folder's part of the drive, or one it filters (§10), isn't its to bring back: a node written
-   into it waits for the folder that syncs that part, or, filtered, goes to the root as an
-   orphan does.
+   into it waits for the folder that syncs that part, or, filtered, goes where an orphan does.
+
+   **Orphans go into Recovered files.** A live node whose folder is nowhere on the drive
+   (deleted for good: a stale plan's create racing a delete and an emptied Recently deleted,
+   another app, a hard delete), or a folder in Recently deleted that such a node brings back,
+   is moved on the drive into **Recovered files** (one metadata update at its version; a
+   mismatch plans again), a folder at the top with a fixed node id (node schema, "Recovered
+   files"). Nowhere means on a whole picture of the drive: the feed read to its end (it reads on
+   past the rows the server holds back) or kept current by the notifications, so a folder not
+   in the mirror isn't on the drive. A folder merely not read yet never counts: a node whose
+   folder the picture lacks waits while the picture isn't whole. An orphan in Recently deleted
+   stays there, an item of its own; only what is live, or brought back, moves.
+   - The main folder adopts: a node whose place isn't known is never a role folder's (§12).
+   - Recovered files is made when an orphan first needs it, with its fixed id, so devices
+     adopting at once make one folder (a create that finds it made joins it). One in Recently
+     deleted comes back, alone, as any folder a live node keeps; one synced here before and
+     gone for good is made again. It is an ordinary folder otherwise: the user may rename it,
+     move things out or delete it, and a deleted one comes back only for a new orphan. Nothing
+     removes it when empty (that would only fill Recently deleted).
+   - Names: an orphan moving in loses a clash to what is there (`<stem> (conflict <n>)`); the
+     folder itself loses a clash at the top too, so a plain folder of the same name keeps its
+     name.
+   - A device that filters Recovered files (§10), and a role folder (a node written into a
+     removed folder it filters), puts the orphan at its top instead.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it trashes the topmost folder (its base goes after its children's).
 
@@ -280,7 +303,8 @@ expected fingerprint is treated as done.
 - **Case-insensitive volumes** (probed once): a name's occupant is any sibling with the same
   name key; a node may take its own name in another case.
 - **Orphans.** With a fully drained feed, a remote node whose parent is unknown everywhere (a
-  child created while another client deleted its folder) is moved to the root.
+  child created while another client deleted its folder for good) is moved into Recovered
+  files (§6.3), made first where it isn't there.
 - **Crash recovery** needs no operation log: every operation is idempotent or detectable
   (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
   feed, and parked items come back from their records. A download (or a folder synced before,
@@ -504,7 +528,8 @@ state DB (one mirror, one feed) and keep their own base and local rows:
 - a role folder's scope is what lies in that folder. Its engine sees the folder as its root
   and the rest of the drive as one folder at its top that it leaves out; what it writes at its
   root goes into the role folder. A node whose place isn't known (its folder gone from the
-  drive, a cycle) isn't a role folder's: the main folder repairs it (§6); one that sits in a
+  drive, a cycle) isn't a role folder's: the main folder repairs it (§6; into Recovered files,
+  §6.3); one that sits in a
   role folder in Recently deleted (another device put it there as it was deleted) is that role
   folder's.
 

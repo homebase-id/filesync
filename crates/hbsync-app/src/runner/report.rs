@@ -210,8 +210,9 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
             "{}: a move that would have put a folder inside itself was undone",
             path(*node)?
         ),
+        // Where it is now: in Recovered files, as a rule.
         Conflict::Orphan { node } => format!(
-            "{}: its folder was deleted everywhere; it was moved to the top folder",
+            "{}: moved here, as its folder was deleted for good elsewhere",
             path(*node)?
         ),
         Conflict::CopyWaits { node } => format!(

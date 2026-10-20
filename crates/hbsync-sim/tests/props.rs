@@ -36,6 +36,15 @@ fn stopped_delete_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// The users' actions, with folders another app deletes outright (their contents left with no
+/// folder), more often.
+fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
+    prop_oneof![
+        6 => action(),
+        1 => (0usize..16).prop_map(|pick| Action::DeleteOutright { pick }),
+    ]
+}
+
 fn event(clients: usize) -> impl Strategy<Value = Event> {
     events_of(clients, action())
 }
@@ -194,6 +203,17 @@ proptest! {
     #[test]
     fn stopped_deletes_and_the_purge_converge_without_loss(
         events in proptest::collection::vec(events_of(4, stopped_delete_action()), 0..120)
+    ) {
+        run_with(3, None, Sim::with_role_device, &events)?;
+    }
+
+    /// Another app deletes folders outright, leaving what is in them with no folder, while the
+    /// users work (in the role folder too) and the purge runs: the main folders put what is
+    /// left into Recovered files, made by the first and joined by the others, and the clients
+    /// converge without loss.
+    #[test]
+    fn orphans_are_recovered_without_loss(
+        events in proptest::collection::vec(events_of(4, orphaning_action()), 0..120)
     ) {
         run_with(3, None, Sim::with_role_device, &events)?;
     }
@@ -3197,5 +3217,97 @@ fn regression_a_role_folder_comes_back_without_what_was_restored_from_it() {
     ];
     if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
         panic!("{e}");
+    }
+}
+
+/// Seed 4e17c897: the computer syncing Documents plans "make a/a, then a/a/a" and makes a/a;
+/// meanwhile the phone deletes Documents, Recently deleted is emptied (a goes for good, a/a
+/// was made in it after), another device's stopped delete removes a/a, and the stale plan
+/// makes a/a/a in it. Written after a/a's removal, the file brings a/a back, but a is nowhere:
+/// the main folders put a/a, with the file, into Recovered files (it was shown nowhere).
+#[test]
+fn regression_a_file_made_in_a_folder_gone_for_good_is_recovered() {
+    use hbsync_sim::Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(3, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 3 },
+        act(3, CreateFolder { parent: 6, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, DeleteStopped { pick: 0, done: 0 }),
+        act(3, CreateFile { parent: 4, name: 0 }),
+        Event::Step { client: 3 },
+        Event::Plan { client: 3 },
+        act(0, DeleteRoleFolder),
+        act(0, ListDeleted),
+        act(0, EmptyListed),
+        Event::Step { client: 3 },
+        act(0, DeleteStopped { pick: 0, done: 0 }),
+        Event::Step { client: 3 },
+    ];
+    let mut sim = Sim::with_role_device(Sim::new(3));
+    sim.run(&events);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    let paths = sim.server_paths();
+    assert!(
+        // a/a is named a, and so is the file in it.
+        paths.contains(&"Recovered files/a/a".to_owned()),
+        "{paths:?}"
+    );
+}
+
+/// Another app deletes folder b outright, which c2 made with a file in it; the other two
+/// computers never had it. Both find the file with no folder and plan, before either runs:
+/// both make Recovered files and move the file into it. One folder, one copy of the file, no
+/// conflict copies, and the computer that made b lets go of it.
+#[test]
+fn regression_two_computers_recover_the_same_orphan_at_once() {
+    use Action::*;
+    let mut sim = Sim::new(3);
+    let act = |client, action| Event::Act { client, action };
+    let (b, c) = (1, 3); // NAMES: "b", "c.txt"
+    let root = sim.pick(2, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        2,
+        CreateFolder {
+            parent: root,
+            name: b,
+        },
+    )]);
+    let folder = sim.item(2, "b").expect("b");
+    let parent = sim.pick(2, folder, true).expect("b");
+    sim.run(&[
+        act(2, CreateFile { parent, name: c }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+    ]);
+    let pick = sim.stopped_pick(folder).expect("b on the drive");
+    sim.run(&[act(0, DeleteOutright { pick })]);
+    assert!(
+        !sim.server_paths().iter().any(|p| p == "b"),
+        "gone for good"
+    );
+    sim.run(&[Event::Plan { client: 0 }, Event::Plan { client: 1 }]);
+    for _ in 0..6 {
+        sim.run(&[Event::Step { client: 0 }, Event::Step { client: 1 }]);
+    }
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(
+        sim.server_paths(),
+        ["Recovered files", "Recovered files/c.txt"],
+    );
+    for client in 0..3 {
+        assert!(
+            sim.item(client, "Recovered files/c.txt").is_some(),
+            "c{client}"
+        );
     }
 }

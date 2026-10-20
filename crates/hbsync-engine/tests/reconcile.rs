@@ -3,8 +3,8 @@
 use hbsync_engine::{BaseExtra, Conflict, DriveVersion, Input, Listed, Op, Options, reconcile};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::{
-    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Tag, Tags, Uuid, VersionTag,
+    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME,
+    RemoteFileId, RemoteRef, Tag, Tags, Uuid, VersionTag,
 };
 
 fn h(data: &str) -> ContentHash {
@@ -571,14 +571,14 @@ fn names_judged_in_part_of_a_folder_ask_for_all_of_it() {
         ..Listed::default()
     });
     assert!(w.plan().unlisted.is_empty());
-    // An orphan the server kept goes to the root, which wasn't read.
+    // An orphan the server kept goes into Recovered files, made at the root: neither was read.
     let mut w = World::default();
     w.remote(orphan, Some(file(gone, "kept.txt", "data")));
     w.input.remote_complete = true;
     w.input.listed = Some(Listed::default());
     let plan = w.plan();
     assert_eq!(plan.conflicts, [Conflict::Orphan { node: orphan }]);
-    assert_eq!(plan.unlisted, [ROOT].into());
+    assert_eq!(plan.unlisted, [ROOT, NodeId::RECOVERED].into());
 }
 
 #[test]
@@ -694,24 +694,154 @@ fn file_moved_into_remotely_deleted_folder_keeps_the_folder() {
 }
 
 #[test]
-fn orphan_with_unknown_parent_moves_to_root_when_mirror_is_complete() {
+fn orphan_with_unknown_parent_is_recovered_when_mirror_is_complete() {
     let [gone, child] = ids(2)[..] else {
         unreachable!()
     };
+    let recovered = NodeId::RECOVERED;
     let mut w = World::default();
     w.remote(child, Some(folder(gone, "kept")));
     assert_eq!(w.plan().deferred, [child], "incomplete mirror: wait");
     w.input.remote_complete = true;
     let plan = w.plan();
-    assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == child && *parent == ROOT)));
-    assert!(without_drive(&plan.ops).contains(&Op::LocalMkdir {
-        node: child,
+    // Recovered files is made on both sides, before the orphan moves into it.
+    let ops = without_drive(&plan.ops);
+    let at = |want: &Op| {
+        ops.iter()
+            .position(|op| op == want)
+            .unwrap_or_else(|| panic!("{want:?}"))
+    };
+    let made = at(&Op::RemoteCreate {
+        node: recovered,
         parent: ROOT,
+        name: RECOVERED_NAME.into(),
+        kind: NodeKind::Folder,
+        tags: Tags::default(),
+    });
+    at(&Op::LocalMkdir {
+        node: recovered,
+        parent: ROOT,
+        name: RECOVERED_NAME.into(),
+        tags: Tags::default(),
+        drive: None,
+    });
+    let moved = ops
+        .iter()
+        .position(|op| matches!(op, Op::RemoteUpdate { node, parent, name, .. } if *node == child && *parent == recovered && name == "kept"))
+        .expect("moved on the drive");
+    assert!(made < moved);
+    at(&Op::LocalMkdir {
+        node: child,
+        parent: recovered,
         name: "kept".into(),
         tags: Tags::default(),
         drive: None,
-    }));
+    });
     assert_eq!(plan.conflicts, [Conflict::Orphan { node: child }]);
+
+    // Recovered files there already, live (renamed): the orphan joins it, under a free name
+    // where it clashes with what is there (a higher id, which keeps its name all the same).
+    let other = NodeId::new();
+    w.synced(recovered, folder(ROOT, "Renamed by the user"));
+    w.synced(other, folder(recovered, "kept"));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, name, .. } if *node == child && *parent == recovered && name == "kept (conflict 1)")),
+        "{:#?}", plan.ops
+    );
+    assert!(!plan.ops.iter().any(|op| op.node() == recovered));
+}
+
+/// Recovered files made beside a plain folder of its name, whose id sorts above its own: the
+/// plain folder keeps the name all the same.
+#[test]
+fn recovered_files_loses_a_name_clash_at_the_top() {
+    let [gone, child] = ids(2)[..] else {
+        unreachable!()
+    };
+    let plain = NodeId(Uuid::from_u128(u128::MAX));
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(plain, folder(ROOT, RECOVERED_NAME));
+    w.remote(child, Some(file(gone, "kept.txt", "data")));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteCreate { node, name, .. } if *node == NodeId::RECOVERED && *name == format!("{RECOVERED_NAME} (conflict 1)"))),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        !plan.ops.iter().any(|op| op.node() == plain),
+        "{:#?}",
+        plan.ops
+    );
+}
+
+/// The user moved Recovered files into o, whose folder is then deleted for good: o, the
+/// orphan, goes to the top, never into what it holds.
+#[test]
+fn an_orphan_holding_recovered_files_goes_to_the_top() {
+    let [gone, o] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.remote(o, Some(folder(gone, "o")));
+    w.remote(NodeId::RECOVERED, Some(folder(o, RECOVERED_NAME)));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == o && *parent == ROOT)),
+        "{:#?}",
+        plan.ops
+    );
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: o }]);
+}
+
+/// Recovered files in Recently deleted comes back (alone) for a new orphan, where it was; one
+/// this device filters takes none: the orphan goes to the top instead.
+#[test]
+fn a_deleted_or_filtered_recovered_files_and_a_new_orphan() {
+    let [gone, child] = ids(2)[..] else {
+        unreachable!()
+    };
+    let recovered = NodeId::RECOVERED;
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.remote(child, Some(file(gone, "kept.txt", "data")));
+    w.input.removed.insert(
+        recovered,
+        hbsync_engine::reconcile::Removed {
+            at: 1,
+            state: folder(ROOT, "Found"),
+        },
+    );
+    let plan = w.plan();
+    assert!(
+        without_drive(&plan.ops).contains(&Op::RemoteCreate {
+            node: recovered,
+            parent: ROOT,
+            name: "Found".into(),
+            kind: NodeKind::Folder,
+            tags: Tags::default(),
+        }),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == child && *parent == recovered)));
+
+    let mut w = World {
+        opts: ignoring(&format!("/{RECOVERED_NAME}/\n")),
+        ..World::default()
+    };
+    w.input.remote_complete = true;
+    w.remote(child, Some(file(gone, "kept.txt", "data")));
+    let plan = w.plan();
+    assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == child && *parent == ROOT)));
+    assert!(
+        !plan.ops.iter().any(|op| op.node() == recovered),
+        "{:#?}",
+        plan.ops
+    );
 }
 
 #[test]

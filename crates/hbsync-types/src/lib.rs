@@ -12,6 +12,9 @@ pub mod activity;
 pub mod role;
 pub mod schema;
 
+/// The name [`NodeId::RECOVERED`] gets when a device makes it; the user may rename it.
+pub const RECOVERED_NAME: &str = "Recovered files";
+
 /// Now, in Unix milliseconds.
 pub fn unix_now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -41,6 +44,11 @@ impl NodeId {
     /// Never on a drive: in a folder holding part of the drive (a role folder), the rest of
     /// the drive, seen as one folder at its top that the folder leaves out.
     pub const OUTSIDE: NodeId = NodeId(Uuid::from_u128(0x5c1e7f0a_3b2d_4e8f_9a61_0d4c2b7e9f13));
+
+    /// The folder at the drive's top that holds what lost its folder for good (node schema,
+    /// "Recovered files"), named [`RECOVERED_NAME`] when made. Fixed, the same on every drive,
+    /// so devices that adopt at once share one.
+    pub const RECOVERED: NodeId = NodeId(Uuid::from_u128(0xfa4646cb_2df0_4f18_a3c6_1fc2b2f6ac4b));
 
     /// A fresh id. UUIDv7 keeps DB index inserts roughly sequential.
     pub fn new() -> Self {
@@ -228,6 +236,17 @@ mod tests {
             NodeId::ROOT.0.to_string(),
             "2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e"
         );
+    }
+
+    /// On every drive: the node schema names it, and other clients know the folder by it.
+    #[test]
+    fn recovered_files_id_matches_spec() {
+        assert_eq!(
+            NodeId::RECOVERED.0.to_string(),
+            "fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b"
+        );
+        assert!(Role::of(NodeId::RECOVERED).is_none());
+        assert!(![NodeId::ROOT, NodeId::OUTSIDE].contains(&NodeId::RECOVERED));
     }
 
     #[test]

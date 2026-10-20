@@ -48,6 +48,22 @@ place, from its own Documents folder and so on, never inside the main folder.
 - Deleting one while a computer syncs it doesn't last: that computer brings it back, with what
   was in it, at its next sync. Say so before deleting one; don't upload into a deleted one.
 
+## Recovered files
+A top-level folder with the fixed node id `fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b`, named
+`Recovered files` when made (node schema, "Recovered files"). The desktop computers move into it
+what lost its folder for good: a live node whose `groupId` is no node on the drive (another
+device wrote into a folder as it was deleted for good, or another app deleted a folder outright).
+- Recognise it by `uniqueId`, never by name: the user may rename it, and a plain folder may be
+  called `Recovered files` too (both are listed).
+- Hide it while it is empty, or show it dimmed (slightly transparent); show it as any folder
+  once it holds something. The desktops can't dim a folder: there it exists only once an orphan
+  appears, and stays until the user deletes it (nothing removes it when empty: that would only
+  add to Recently deleted).
+- Otherwise it is an ordinary folder: list, open, move things out, rename or delete it.
+- Leave the adopting to the desktops, as the purge's first step: don't move orphans into it,
+  and don't create it. An item with no folder is simply not listed by the mini-app (no listing
+  reaches it) until a computer moves it in.
+
 ## Listing a folder
 - One `query-batch` with `groupId: [<folder's node id>]`, `fileType: [7101, 7102]`,
   `fileState: [active]` and `archivalStatus: [0]`, in pages. A deleted node is only removed:

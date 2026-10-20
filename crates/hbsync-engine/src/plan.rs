@@ -90,8 +90,9 @@ pub struct Input {
     pub local_unhashed: HashSet<NodeId>,
     pub dirty: BTreeSet<NodeId>,
     /// The remote tree holds every live node the remote has that matters here (the feed is
-    /// drained and parents were looked up). Then a remote node whose parent is unknown
-    /// everywhere is a true orphan and is moved to the root instead of waiting forever.
+    /// drained, which reads past the rows it holds back, and parents were looked up). Then a
+    /// remote node whose parent is unknown everywhere is a true orphan and moves into
+    /// Recovered files instead of waiting forever (§6.3).
     pub remote_complete: bool,
     /// The folders in Recently deleted that nodes of `remote` are in, and the removed folders
     /// above them: a folder's delete removes the folder first, then what is in it (§6.3).
@@ -545,7 +546,8 @@ pub enum Conflict {
     NameClash { node: NodeId },
     /// A move would have created a cycle and was undone.
     Cycle { node: NodeId },
-    /// The node's folder no longer exists anywhere; it was moved to the root.
+    /// The node's folder is gone from the drive for good; it was moved into Recovered files
+    /// ([`NodeId::RECOVERED`]; §6.3).
     Orphan { node: NodeId },
     /// Both sides edited the file, and the local version's conflict copy can't be made yet
     /// (its folder waits for its own): both versions stay as they are until it can.
