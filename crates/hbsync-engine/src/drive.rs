@@ -152,7 +152,7 @@ impl Drive {
     }
 
     /// Reads the feed ([`Drive::pull`]) unless the picture is [`Drive::current`].
-    pub(crate) fn catch_up(&self, from: Option<i64>) -> Result<FeedReport, FeedError> {
+    pub fn catch_up(&self, from: Option<i64>) -> Result<FeedReport, FeedError> {
         if self.current() {
             return Ok(FeedReport::default());
         }
