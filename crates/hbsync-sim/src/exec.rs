@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use hbsync_engine::Against;
 use hbsync_engine::mask::masked;
-use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached};
+use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached, tags_written};
 use hbsync_engine::reconcile::{
     Agreement, BaseExtra, DriveVersion, Input, Masking, Op, Options, Removed, reconcile_with_known,
 };
@@ -17,9 +17,8 @@ use hbsync_engine::tree::{Tree, first_free, numbered_names};
 use hbsync_local::Verdict;
 use hbsync_local::layout::parked_name;
 use hbsync_platform::Os;
-use hbsync_platform::tags::express;
 use hbsync_types::{
-    ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tag, Tags, VersionTag,
+    ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tags, VersionTag,
 };
 
 use crate::Sim;
@@ -1299,17 +1298,13 @@ impl Sim {
             .filter(|_| client.base.contains(node));
         let ours = ours.filter(|o| base_at == Some(*o));
         let drive = against.drive();
+        // The executor's compare and set; the sim's mirror is the drive as it is now (another
+        // folder's engine may have pulled it: the mirror lagging the drive mid-run isn't
+        // simulated).
+        let remote_ref = self.server.live.get(&node).map(|n| n.remote);
         let acted = drive.map(|d| {
-            let state = match ours {
-                _ if base_at == d.base_at => Some((d.state.clone(), d.at.version)),
-                Some(o) if o == d.at.version => Some((d.state.clone(), d.at.version)),
-                Some(o) => server.clone().filter(|_| live == Some(o)).map(|r| (r, o)),
-                None => None,
-            };
-            state.map(|(r, v)| {
-                let tags = d.state.tags.clone();
-                (NodeState { tags, ..r }, v)
-            })
+            d.settles_against(base_at, ours, || server.clone().zip(remote_ref))
+                .map(|(r, at)| (r, at.version))
         });
         let base_moved = matches!(acted, Some(None));
         // What the local tags are read against: the drive's version a local write acted on.
@@ -1336,18 +1331,13 @@ impl Sim {
         // the executor's.
         let filled = match tags {
             TagWrite::Wrote { before, written } => {
-                let written = filled_tags(client, reference.as_ref(), node, Some(written));
-                let reference = reference
-                    .as_ref()
-                    .map(|s| s.tags.clone())
-                    .unwrap_or_default();
-                let holdable: Vec<Tag> = reference
-                    .iter()
-                    .filter(|t| express(t, client.os).is_some())
-                    .cloned()
-                    .collect();
-                let before = Tags::fill(Some(before), &Tags::new(holdable), client.os);
-                Some((before, written))
+                let reference = reference.as_ref().map(|s| &s.tags);
+                Some(tags_written(
+                    before,
+                    written,
+                    reference.unwrap_or(&Tags::default()),
+                    client.os,
+                ))
             }
             _ => None,
         };

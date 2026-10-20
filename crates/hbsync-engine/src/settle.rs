@@ -3,12 +3,12 @@
 
 use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::NameIssue;
-use hbsync_platform::{Os, RelPath, tags};
+use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, ReadTx, StateError};
-use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags};
+use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef};
 
 use crate::folder::FolderCtx;
-use crate::plan::{Against, DriveVersion, TagWrite};
+use crate::plan::{Against, DriveVersion, TagWrite, tags_written};
 use crate::reconcile::Agreement;
 use crate::view;
 
@@ -175,19 +175,9 @@ pub(crate) fn settle(
     // A local write's version of the drive its content, place and version settle against
     // (`None` in it: the base moved), with the tags of the version it acted on.
     let acted = drive.map(|d| {
-        let state = match ours {
-            _ if at.map(|r| r.version) == d.base_at => Some((d.state.clone(), d.at)),
-            Some(o) if o == d.at => Some((d.state.clone(), d.at)),
-            Some(o) => mirror
-                .as_ref()
-                .filter(|m| m.remote_ref() == o)
-                .and_then(MirrorRow::state)
-                .map(|r| (r, o)),
-            None => None,
-        };
-        state.map(|(r, at)| {
-            let tags = d.state.tags.clone();
-            (NodeState { tags, ..r }, at)
+        d.settles_against(at.map(|r| r.version), ours.map(|o| o.version), || {
+            let m = mirror.as_ref()?;
+            Some((m.state()?, m.remote_ref()))
         })
     });
     // What the local tags read as, against the tags they're judged against.
@@ -221,17 +211,8 @@ pub(crate) fn settle(
     // what was there, read alike, but for a tag this device can't hold at all: the item never
     // held that, so the write leaves the drive's value of it, as the base records.
     let reference = reference.unwrap_or_default();
-    let holdable = Tags::new(
-        reference
-            .iter()
-            .filter(|t| tags::express(t, os).is_some())
-            .cloned(),
-    );
     let filled = match how.tags {
-        TagWrite::Wrote { before, written } => Some((
-            Tags::fill(Some(before), &holdable, os),
-            Tags::fill(Some(written), &reference, os),
-        )),
+        TagWrite::Wrote { before, written } => Some(tags_written(before, written, &reference, os)),
         _ => None,
     };
     let how = Settle {
@@ -390,6 +371,7 @@ mod tests {
     use hbsync_fileio::HashAlgorithm;
     use hbsync_platform::{FileId, Fingerprint};
     use hbsync_state::{LocalRow, MirrorFile, StateDb, Store};
+    use hbsync_types::Tags;
     use hbsync_types::{FileContent, RemoteFileId, RemoteRef, Uuid, VersionTag};
 
     fn content(data: &str) -> FileContent {

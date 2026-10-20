@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use hbsync_local::Filter;
+use hbsync_platform::Os;
 use hbsync_types::{
     ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Tags,
     VersionTag,
@@ -452,6 +453,51 @@ impl DriveVersion {
             _ => Acts::Mirror,
         }
     }
+}
+
+impl DriveVersion {
+    /// What a local write that acted on this version settles its content, place and version
+    /// against (sync semantics §8: compare and set), with this version's tags: this version,
+    /// where the base is still at the version the write's plan saw (`base_at`, the base's now),
+    /// or where this run's own operations settled it (`ours`) at this version; the mirror's
+    /// (`mirror`, read only then) where they settled it at the version the mirror holds (this
+    /// run's own remote write moved it past this one). `None`: the base moved otherwise, and
+    /// only the tags settle. The executor's settle and the simulator's decide by it.
+    pub fn settles_against(
+        &self,
+        base_at: Option<VersionTag>,
+        ours: Option<VersionTag>,
+        mirror: impl FnOnce() -> Option<(NodeState, RemoteRef)>,
+    ) -> Option<(NodeState, RemoteRef)> {
+        let state = match ours {
+            _ if base_at == self.base_at => Some((self.state.clone(), self.at)),
+            Some(o) if o == self.at.version => Some((self.state.clone(), self.at)),
+            Some(o) => mirror().filter(|(_, at)| at.version == o),
+            None => None,
+        };
+        state.map(|(r, at)| {
+            let tags = self.state.tags.clone();
+            (NodeState { tags, ..r }, at)
+        })
+    }
+}
+
+/// What a tag write left (`written`) and what the item held before it (`before`), read as the
+/// executor's settle reads them against the drive's tags (`reference`): what `os` can't hold is
+/// the drive's, and of what was there, a tag `os` can't hold at all is left out (the item never
+/// held it: the write leaves the drive's value of it). The executor's settle and the
+/// simulator's read them alike.
+pub fn tags_written(before: &Tags, written: &Tags, reference: &Tags, os: Os) -> (Tags, Tags) {
+    let holdable = Tags::new(
+        reference
+            .iter()
+            .filter(|t| hbsync_platform::tags::express(t, os).is_some())
+            .cloned(),
+    );
+    (
+        Tags::fill(Some(before), &holdable, os),
+        Tags::fill(Some(written), reference, os),
+    )
 }
 
 /// What a download acts on ([`DriveVersion::acted_by_download`]).
