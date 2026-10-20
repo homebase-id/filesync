@@ -159,6 +159,13 @@ fn build(
     b.input.dirty = dirty.iter().copied().collect();
     // The feed is drained before every plan, and every loaded node brings its ancestors.
     b.input.remote_complete = true;
+    // Mostly none: one query. In this folder's coordinates, as the rest.
+    let coords = s.coords()?;
+    b.input.unreadable = s
+        .unreadable_nodes()?
+        .into_iter()
+        .map(|n| coords.from_drive(n))
+        .collect();
 
     for &node in dirty {
         b.load(node)?;

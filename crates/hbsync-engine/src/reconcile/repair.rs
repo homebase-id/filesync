@@ -118,9 +118,12 @@ impl Reconciler<'_> {
             };
             let decided = match self.merged.get(parent) {
                 Some(p) if p.kind == NodeKind::Folder => continue,
+                _ if parent.is_root() => continue,
+                // There, in a version this device can't read (a folder it doesn't read, a file
+                // that is a folder now, maybe): what is in it stays in it.
+                _ if self.input.unreadable.contains(&parent) => Parent::Wait,
                 // A file: another writer put the node in it (§6.3).
                 Some(_) => self.recover_or_wait(node),
-                None if parent.is_root() => continue,
                 None if withdrawn.contains(&parent) => Parent::Wait,
                 None => match self.known_state(parent) {
                     Some(state) if state.kind == NodeKind::Folder => Parent::Folder(state),

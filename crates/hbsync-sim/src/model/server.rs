@@ -29,6 +29,9 @@ pub(crate) struct Server {
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     pub(crate) ever: BTreeSet<NodeId>,
+    /// Nodes no client reads (a newer writer's), with what was put in each: they are on the
+    /// drive, and what is in them stays there.
+    pub(crate) unreadable: BTreeMap<NodeId, BTreeSet<NodeId>>,
 }
 
 /// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed
@@ -45,6 +48,15 @@ pub(crate) fn time(version: VersionTag) -> i64 {
 }
 
 impl Server {
+    /// The folders no client reads ([`Server::unreadable`]) still on the drive, live or in
+    /// Recently deleted: one deleted for good is known gone (its tombstone, a delete for good
+    /// announced, or asked about).
+    pub(crate) fn unreadable_on_drive(&self) -> impl Iterator<Item = (&NodeId, &BTreeSet<NodeId>)> {
+        self.unreadable
+            .iter()
+            .filter(|(n, _)| self.live.contains_key(n) || self.removed.contains_key(n))
+    }
+
     /// A row of Recently deleted as a listing names it: its node at its version.
     pub(crate) fn at((node, n): (&NodeId, &ServerNode)) -> (NodeId, VersionTag) {
         (*node, n.remote.version)

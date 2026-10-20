@@ -285,6 +285,17 @@ const SCHEMA: &str = r#"
         version_tag BLOB,                             -- the version this device knew; NULL: none
         at          INTEGER NOT NULL                  -- Unix ms, this device's clock
     ) WITHOUT ROWID;
+
+    -- Rows of the drive this client can't read as nodes (a version that doesn't decrypt,
+    -- changes a node's kind, a newer writer's), there all the same: a folder that is one keeps
+    -- what is in it from being an orphan, and a node whose newer version is one is held (its
+    -- writes fork). Any later row of the file, or its delete, clears it. Few rows, if any.
+    CREATE TABLE unreadable (
+        file_id     BLOB PRIMARY KEY,
+        version_tag BLOB NOT NULL,                    -- the version that didn't read
+        node        BLOB,                             -- its uniqueId and groupId, where they read
+        parent      BLOB
+    ) WITHOUT ROWID;
 "#;
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
@@ -323,6 +334,13 @@ const MIGRATIONS: &[&str] = &[
         file_id     BLOB PRIMARY KEY,
         version_tag BLOB,                             -- the version this device knew; NULL: none
         at          INTEGER NOT NULL                  -- Unix ms, this device's clock
+    ) WITHOUT ROWID;",
+    // 17: rows this client can't read as nodes.
+    "CREATE TABLE unreadable (
+        file_id     BLOB PRIMARY KEY,
+        version_tag BLOB NOT NULL,                    -- the version that didn't read
+        node        BLOB,                             -- its uniqueId and groupId, where they read
+        parent      BLOB
     ) WITHOUT ROWID;",
 ];
 

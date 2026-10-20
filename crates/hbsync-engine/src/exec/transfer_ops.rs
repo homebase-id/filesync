@@ -8,7 +8,40 @@ use crate::plan::Acts;
 impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
 
+    /// A write to a file the drive has in a version this device can't read (a newer writer's,
+    /// one that changed its kind: [`ReadTx::held_files`]) would name the version this device knows,
+    /// which the drive no longer has, again at every sync. New bytes fork: they go up as a new
+    /// node, the drive's version stays as it is. A rename, tags, a removal or a download (of
+    /// bytes that would never match) is refused (recorded, not tried again while it is the
+    /// same): the drive's version stands.
+    fn unless_held(&mut self, op: &Op) -> Step<()> {
+        let file_id = match op {
+            Op::RemoteUpdate { file_id, .. }
+            | Op::RemoteTags { file_id, .. }
+            | Op::RemoteDelete { file_id, .. } => *file_id,
+            // The bytes the drive gives are the newer version's: they would never match.
+            Op::LocalDownload { drive: Some(d), .. } => d.at.file_id,
+            _ => return Ok(()),
+        };
+        let held = match &self.held {
+            Some(held) => held,
+            None => self.held.insert(self.db.read(|s| s.held_files())?),
+        };
+        if !held.contains(&file_id) {
+            return Ok(());
+        }
+        Err(match op {
+            Op::RemoteUpdate {
+                node, upload: true, ..
+            } => self.detach(*node, NodeId::new()).unwrap_or_else(|o| o),
+            _ => Outcome::Skip(Skip::Refused(
+                "the drive has a newer version this device can't read".into(),
+            )),
+        })
+    }
+
     pub(super) fn prepare(&mut self, op: &Op) -> Step<(Job, Ctx)> {
+        self.unless_held(op)?;
         match op {
             Op::LocalDownload {
                 node,

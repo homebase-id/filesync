@@ -37,6 +37,7 @@ mod suspects;
 pub use suspects::GoneSuspect;
 mod removed;
 mod tombstones;
+mod unreadable;
 
 /// The agreed state of one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,6 +344,9 @@ pub struct ReadTx<'a> {
     /// The last [`Recorded::seq`] given in this transaction, once read; written back when it
     /// commits ([`Store::finish`]) if one was given.
     removed_seq: std::cell::Cell<Option<(u64, bool)>>,
+    /// Whether the store has no row it can't read ([`ReadTx::unreadable_nodes`]), once read: a
+    /// feed page's rows then clear none (mostly so).
+    no_unreadable: std::cell::Cell<Option<bool>>,
 }
 
 /// A folder this account syncs here.
@@ -472,6 +476,7 @@ impl<'a> ReadTx<'a> {
             local_ids: Default::default(),
             local_paths: Default::default(),
             removed_seq: std::cell::Cell::new(None),
+            no_unreadable: std::cell::Cell::new(None),
             sqls: Default::default(),
         }
     }

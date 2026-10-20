@@ -165,8 +165,12 @@ of this schema may define some of them.)
   `fileId → node id` themselves.
 - Tombstoned UniqueIds are free again (the duplicate check skips tombstones **[verified]**), so
   a deleted node can be re-created under the same node id; it gets a new `fileId`.
-- A node whose `uniqueId` is the root id isn't read, nor is a file whose `uniqueId` is a role
-  folder's or Recovered files' (the client reports the row).
+- A node is one folder or one file for its life: a version that changes its `fileType` isn't
+  read. Nor is a node whose `uniqueId` is the root id, nor a file whose `uniqueId` is a role
+  folder's or Recovered files'. The client reports such a row, as one that doesn't decrypt,
+  and keeps it as there: what is in a folder it can't read stays in it, and a node whose newer
+  version it can't read keeps the version it had (an edit made on a computer then goes up as
+  a new node beside it).
 - A node whose `groupId` is a file's node id is moved into Recovered files by the computers,
   as an orphan is.
 
@@ -337,6 +341,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-21: a computer keeps a row it can't read (one that doesn't decrypt, a newer
+  writer's, a change of `fileType`, now not read) as there: what is in such a folder is no
+  longer moved into Recovered files, and an edit of a node whose newer version it can't read
+  goes up as a new node instead of failing at every sync. The node is the same.
 - 2026-10-20: a rewrite keeps what it doesn't act on as another writer wrote it: `tags` in their
   form until the set changes, no `mtime` on a file that had none (before, `0`; a download no
   longer dates such a file 1970), and a folder's `mtime`, `size` and `x`. The header fields

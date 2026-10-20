@@ -225,6 +225,7 @@ impl Masks {
             local_unhashed,
             dirty,
             remote_complete: input.remote_complete,
+            unreadable: input.unreadable.clone(),
             removed: input.removed.clone(),
             changed_at: input.changed_at.clone(),
             coverage: input.coverage.clone(),

@@ -214,7 +214,11 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
                     Page::Slim(_) => with_retries(|| remote.changes(cursor, whole_rows))?,
                 };
                 if let Some(r) = reread.as_mut() {
-                    r.shown(whole.entries.iter().map(|h| h.file_id));
+                    let unread = whole
+                        .skipped
+                        .iter()
+                        .filter_map(|r| r.at.map(|at| at.file_id));
+                    r.shown(whole.entries.iter().map(|h| h.file_id).chain(unread));
                 }
                 apply_whole(&db, whole, cursor, &mut report)?
             }
@@ -422,14 +426,22 @@ fn apply_slim<G: DerefMut<Target = StateDb>>(
 /// A whole page, applied: whether more follow, and whether it held nothing new.
 fn apply_whole<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
-    mut page: ChangesPage,
+    page: ChangesPage,
     cursor: Option<&str>,
     report: &mut FeedReport,
 ) -> Result<(bool, bool), FeedError> {
-    report.skipped.append(&mut page.skipped);
+    report
+        .skipped
+        .extend(page.skipped.iter().map(|r| r.why.clone()));
     let nothing_new = db().write(|s| {
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
         let nothing_new = known(s, &refs)?;
+        // There all the same, where its file and version read.
+        for row in &page.skipped {
+            if let Some(at) = row.at {
+                s.account().put_unreadable(at, row.node, row.parent)?;
+            }
+        }
         for header in &page.entries {
             report.count(apply(s.account(), header)?);
         }
@@ -539,6 +551,11 @@ fn apply_ref(s: AccountTx<'_>, r: &ChangeRef) -> Result<Applied, StateError> {
     if r.deleted {
         mirror::tombstone(s, r.at(), r.changed_at)?;
         return Ok(Applied::Left);
+    }
+    // Known as a row it can't read: nothing of it is the mirror's (its time is no older
+    // version's).
+    if s.is_unreadable_version(r.at())? {
+        return Ok(Applied::Refused(format!("{:?}: doesn't read", r.file_id)));
     }
     mirror::apply_known(s, r, None)
 }

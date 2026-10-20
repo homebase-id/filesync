@@ -395,6 +395,20 @@ impl Sim {
                 return Err(format!("{both:?} is in both folders of one computer"));
             }
         }
+        // What is in a folder no client reads stays in it while it is there.
+        for (folder, kids) in &self.server.unreadable {
+            if !self.server.live.contains_key(folder) {
+                continue;
+            }
+            if let Some(kid) = kids.iter().find(|k| {
+                self.server
+                    .live
+                    .get(k)
+                    .is_some_and(|n| n.state.parent != *folder)
+            }) {
+                return Err(format!("{kid:?} left the folder no client reads"));
+            }
+        }
         // Deleted it may be (the phone), moved never; a device syncing it brings it back.
         let docs = server.get(Role::Documents.node());
         if docs.is_some_and(|s| s.parent != NodeId::ROOT) {
@@ -499,6 +513,9 @@ impl Sim {
     /// (`taken`) and what its filter leaves out.
     fn expected(&self, c: usize, drive: &Tree, taken: &BTreeSet<NodeId>) -> Tree {
         let coords = self.clients[c].coords;
+        // A folder no client reads, while it is on the drive, and what is in it: what is in
+        // it waits for it (`Action::NewerFolder`).
+        let unread: BTreeSet<NodeId> = self.server.unreadable_on_drive().map(|(n, _)| *n).collect();
         let mut tree = Tree::new();
         for (node, n) in &self.server.live {
             let up = up_from(drive, *node);
@@ -506,7 +523,8 @@ impl Sim {
                 top if top.is_root() => !Role::ALL.iter().any(|r| up.contains(&r.node())),
                 top => *node != top && up.contains(&top),
             };
-            if ours && !taken.contains(node) {
+            let waits = up.iter().any(|a| unread.contains(a));
+            if ours && !waits && !taken.contains(node) {
                 let parent = coords.from_drive(n.state.parent);
                 tree.insert(
                     *node,

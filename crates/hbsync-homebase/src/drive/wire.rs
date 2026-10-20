@@ -7,11 +7,13 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use hbsync_remote::{ChangeRef, NodeMeta, PayloadInfo, RemoteBody, RemoteHeader};
+use hbsync_remote::{ChangeRef, NodeMeta, PayloadInfo, RemoteBody, RemoteHeader, Skipped};
 use hbsync_types::schema::{
     ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY,
 };
-use hbsync_types::{ContentHash, HashAlgorithm, NodeId, NodeKind, RemoteFileId, VersionTag};
+use hbsync_types::{
+    ContentHash, HashAlgorithm, NodeId, NodeKind, RemoteFileId, RemoteRef, VersionTag,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -112,6 +114,63 @@ pub fn file_id_of(row: &str) -> Option<Uuid> {
     serde_json::from_str::<Id>(row).ok().map(|id| id.file_id)
 }
 
+/// Whether `file_type` is a sync node's.
+fn node_type(file_type: i32) -> bool {
+    file_type == FILE_TYPE_FOLDER || file_type == FILE_TYPE_FILE
+}
+
+/// What of a feed row that isn't a usable node ([`to_remote`] said why) still reads: its file
+/// and version, `uniqueId` and `groupId`, for a sync node's file type; nothing for another
+/// app's file.
+pub(crate) fn skipped_row(row: &str, why: String) -> Skipped {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        file_id: Uuid,
+        file_metadata: Meta,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Meta {
+        version_tag: Uuid,
+        #[serde(default, deserialize_with = "lenient")]
+        app_data: Option<Ids>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Ids {
+        #[serde(default, deserialize_with = "lenient")]
+        unique_id: Option<Uuid>,
+        #[serde(default, deserialize_with = "lenient")]
+        group_id: Option<Uuid>,
+        #[serde(default, deserialize_with = "lenient")]
+        file_type: Option<i32>,
+    }
+    let Ok(row) = serde_json::from_str::<Row>(row) else {
+        return Skipped::why(why);
+    };
+    let Some(Ids {
+        unique_id,
+        group_id,
+        file_type: Some(t),
+    }) = row.file_metadata.app_data
+    else {
+        return Skipped::why(why);
+    };
+    if !node_type(t) {
+        return Skipped::why(why);
+    }
+    Skipped {
+        at: Some(RemoteRef {
+            file_id: RemoteFileId(row.file_id),
+            version: VersionTag(row.file_metadata.version_tag),
+        }),
+        node: unique_id.map(NodeId),
+        parent: group_id.map(NodeId),
+        why,
+    }
+}
+
 /// The time of the last change a feed cursor stands after: `cursorState` is odin-core's
 /// `QueryBatchCursor` as JSON, `{"paging": {"time": <Unix ms>, "row": …}, …}` (**[verified]**
 /// `QueryBatchCursor.cs`, `QueryBatchResponse.cs`).
@@ -144,8 +203,7 @@ pub struct FileRef {
 impl FileRef {
     /// Whether the row is another app's file, not a sync node (its type says so).
     pub(crate) fn not_a_node(&self) -> bool {
-        self.file_type
-            .is_some_and(|t| t != FILE_TYPE_FOLDER && t != FILE_TYPE_FILE)
+        self.file_type.is_some_and(|t| !node_type(t))
     }
 }
 
@@ -671,6 +729,38 @@ mod tests {
         let mut tomb = fixture("tombstone.json");
         tomb.file_metadata.app_data.group_id = None;
         assert!(to_remote(tomb, &SS).is_ok_and(|h| h.is_deleted()));
+        Ok(())
+    }
+
+    /// A sync node's row that doesn't read is kept as there: its file, version and ids; another
+    /// app's file is only a reason.
+    #[test]
+    fn a_skipped_row_keeps_what_reads() -> R {
+        let mut row = fixture_value("file-node.json");
+        row["fileMetadata"]["appData"]["content"] = json!("not sealed");
+        let skipped = skipped_row(&row.to_string(), "why".into());
+        let header: FileHeader = serde_json::from_value(row.clone())?;
+        let meta = &header.file_metadata;
+        assert_eq!(
+            skipped.at,
+            Some(RemoteRef {
+                file_id: RemoteFileId(header.file_id),
+                version: VersionTag(meta.version_tag),
+            })
+        );
+        assert_eq!(
+            (skipped.node, skipped.parent),
+            (
+                meta.app_data.unique_id.map(NodeId),
+                meta.app_data.group_id.map(NodeId)
+            )
+        );
+        row["fileMetadata"]["appData"]["fileType"] = json!(100);
+        assert_eq!(
+            skipped_row(&row.to_string(), "why".into()),
+            Skipped::why("why")
+        );
+        assert_eq!(skipped_row("{]", "why".into()), Skipped::why("why"));
         Ok(())
     }
 

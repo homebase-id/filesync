@@ -72,6 +72,12 @@ pub enum Action {
         pick: usize,
         file: usize,
     },
+    /// A newer client makes a folder at the drive's top, with a file in it: the folder doesn't
+    /// read here (a newer schema, say), the file does. What is in it waits for it on every
+    /// computer: it is never moved into Recovered files.
+    NewerFolder {
+        name: usize,
+    },
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,

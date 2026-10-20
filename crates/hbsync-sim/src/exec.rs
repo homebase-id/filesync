@@ -100,6 +100,12 @@ impl Sim {
             local_unhashed: client.unhashed.iter().copied().collect(),
             ..Default::default()
         };
+        // On the drive, in a version no client reads ([`Action::NewerFolder`]).
+        input.unreadable = self
+            .server
+            .unreadable_on_drive()
+            .map(|(n, _)| client.coords.from_drive(*n))
+            .collect();
         input.remote_refs = self
             .server
             .live

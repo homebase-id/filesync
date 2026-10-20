@@ -166,7 +166,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    folder the picture lacks waits while the picture isn't whole. An orphan in Recently deleted
    stays there, an item of its own; only what is live, or brought back, moves. A live node
    whose folder is a file (another writer set its `groupId` to a file's node id) is moved the
-   same way, whether the picture is whole or not.
+   same way, whether the picture is whole or not; a folder this device can't read, or a file
+   whose newer version it can't read, is no such place: what is in it waits.
    - The main folder adopts: a node whose place isn't known is never a role folder's (§12).
    - Recovered files is made when an orphan first needs it, with its fixed id, so devices
      adopting at once make one folder (a create that finds it made joins it). One in Recently
@@ -323,9 +324,15 @@ expected fingerprint is treated as done.
 - **Orphans.** With a fully drained feed, a remote node whose parent is unknown everywhere (a
   child created while another client deleted its folder for good) is moved into Recovered
   files (§6.3), made first where it isn't there. So is one whose parent is a file.
-- **Rows that aren't nodes.** A version that uses a fixed id out of place (the root's, or a
-  role folder's or Recovered files' on a file) is left out like a row that doesn't decrypt,
-  and reported (node schema, Identity and tombstones).
+- **Rows that aren't nodes.** A version that doesn't decrypt, that uses a fixed id out of place
+  (the root's, or a role folder's or Recovered files' on a file), or that changes a node's kind
+  is left out, reported, and recorded as there all the same (node schema, Identity and
+  tombstones):
+  - What is in a folder this device can't read stays in it, waiting: it is never an orphan.
+  - A node whose newer version it can't read is held as it had it: a local edit goes up as a
+    new node (a conflict copy, under a free name); a rename, tags, a delete or a download of it
+    is refused and not tried again while it is the same; the drive's version stands.
+  - A later version that reads, or the file's delete, ends it.
 - **Crash recovery** needs no operation log: every operation is idempotent or detectable
   (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
   feed, and parked items come back from their records. A download (or a folder synced before,

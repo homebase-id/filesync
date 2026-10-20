@@ -98,6 +98,10 @@ pub struct Input {
     /// remote node whose parent is unknown everywhere is a true orphan and moves into
     /// Recovered files instead of waiting forever (§6.3).
     pub remote_complete: bool,
+    /// The nodes the drive has in a version this device can't read (a newer writer's, one that
+    /// doesn't decrypt, a change of kind; the store's `unreadable`): there all the same, so
+    /// what is in one isn't an orphan, and a file that is one isn't a file to recover from.
+    pub unreadable: HashSet<NodeId>,
     /// The folders in Recently deleted that nodes of `remote` are in, and the removed folders
     /// above them: a folder's delete removes the folder first, then what is in it (§6.3).
     pub removed: HashMap<NodeId, Removed>,
