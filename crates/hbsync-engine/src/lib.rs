@@ -25,7 +25,7 @@ pub mod walk;
 pub use drive::Drive;
 pub use engine::{Engine, EngineConfig, EngineError, StartupReport, SyncReport};
 pub use plan::{
-    Against, Agreement, BaseExtra, Conflict, DriveVersion, Input, Listed, Op, Options, Plan,
+    Against, Agreement, BaseExtra, Conflict, DriveVersion, Input, Coverage, Op, Options, Plan,
     Requirement,
 };
 pub use reconcile::reconcile;

@@ -31,7 +31,7 @@ mod merge;
 mod repair;
 
 pub use crate::plan::{
-    Agreement, BaseExtra, Conflict, DriveVersion, Input, Listed, Op, Options, Plan, Removed,
+    Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Op, Options, Plan, Removed,
     Requirement,
 };
 
@@ -74,14 +74,14 @@ pub fn reconcile(input: &Input, opts: &Options) -> Plan {
     let mut plan = Reconciler::new(view, opts, &masks).run();
     // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
     // judged with all of the folder's children.
-    if let Some(listed) = &input.listed {
+    if let Some(coverage) = &input.coverage {
         plan.unlisted.extend(
             masks
                 .masked
                 .iter()
                 .filter_map(|m| input.remote.get(*m).or(input.base.get(*m)))
                 .map(|s| s.parent)
-                .filter(|p| !listed.full.contains(p)),
+                .filter(|p| !coverage.full.contains(p)),
         );
     }
     plan

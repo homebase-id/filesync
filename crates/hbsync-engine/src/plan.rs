@@ -102,8 +102,8 @@ pub struct Input {
     /// folder's removal went with it.
     pub changed_at: HashMap<NodeId, i64>,
     /// Which children the trees hold: `None`, all of every folder's that matters; else as
-    /// [`Listed`] says.
-    pub listed: Option<Listed>,
+    /// [`Coverage`] says.
+    pub coverage: Option<Coverage>,
 }
 
 /// The children of each folder that an [`Input`] holds, on every side, when it doesn't hold
@@ -112,12 +112,12 @@ pub struct Input {
 /// may clash with those names. A plan that needs more says which folders in
 /// [`Plan::unlisted`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Listed {
+pub struct Coverage {
     pub full: HashSet<NodeId>,
     pub named: HashMap<NodeId, HashSet<i32>>,
 }
 
-impl Listed {
+impl Coverage {
     /// Whether every child of `folder` whose name may clash with `name` is held.
     pub(crate) fn holds(&self, folder: NodeId, name: &str) -> bool {
         self.full.contains(&folder)
@@ -595,6 +595,6 @@ pub struct Plan {
     /// Dirty nodes that can't be decided yet (unhashed, unknown parent): keep them dirty.
     pub deferred: Vec<NodeId>,
     /// Folders whose names the plan judged without all their children in the input
-    /// ([`Input::listed`]): plan again with them listed in full.
+    /// ([`Input::coverage`]): plan again with them listed in full.
     pub unlisted: BTreeSet<NodeId>,
 }

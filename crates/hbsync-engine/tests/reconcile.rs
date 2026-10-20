@@ -1,6 +1,6 @@
 //! One test per rule of `docs/spec/sync-semantics.md`.
 
-use hbsync_engine::{BaseExtra, Conflict, DriveVersion, Input, Listed, Op, Options, reconcile};
+use hbsync_engine::{BaseExtra, Conflict, Coverage, DriveVersion, Input, Op, Options, reconcile};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME,
@@ -534,7 +534,7 @@ fn name_clash_lower_id_keeps_the_name() {
     }
 }
 
-/// A plan from part of a folder's children ([`Input::listed`]) names the folders it judged
+/// A plan from part of a folder's children ([`Input::coverage`]) names the folders it judged
 /// without all it needs: a clash (a numbered name must be free among all of them), a name
 /// whose clashes weren't read (an orphan moved to the root).
 #[test]
@@ -543,7 +543,7 @@ fn names_judged_in_part_of_a_folder_ask_for_all_of_it() {
         unreachable!()
     };
     let docs = NodeId::new();
-    let named = |names: &[&str]| Listed {
+    let named = |names: &[&str]| Coverage {
         named: [(
             docs,
             names
@@ -552,30 +552,30 @@ fn names_judged_in_part_of_a_folder_ask_for_all_of_it() {
                 .collect(),
         )]
         .into(),
-        ..Listed::default()
+        ..Coverage::default()
     };
     // No clash among the names read: nothing more needed.
     let mut w = World::default();
     w.synced(docs, folder(ROOT, "Docs"));
     w.local(low, Some(file(docs, "x.txt", "local")));
-    w.input.listed = Some(named(&["x.txt"]));
+    w.input.coverage = Some(named(&["x.txt"]));
     assert!(w.plan().unlisted.is_empty());
     // A clash: the loser's numbered name is judged against the whole folder.
     w.remote(high, Some(file(docs, "X.TXT", "remote")));
     let plan = w.plan();
     assert_eq!(plan.conflicts, [Conflict::NameClash { node: high }]);
     assert_eq!(plan.unlisted, [docs].into());
-    // Listed whole: the plan stands.
-    w.input.listed = Some(Listed {
+    // Covered whole: the plan stands.
+    w.input.coverage = Some(Coverage {
         full: [docs].into(),
-        ..Listed::default()
+        ..Coverage::default()
     });
     assert!(w.plan().unlisted.is_empty());
     // An orphan the server kept goes into Recovered files, made at the root: neither was read.
     let mut w = World::default();
     w.remote(orphan, Some(file(gone, "kept.txt", "data")));
     w.input.remote_complete = true;
-    w.input.listed = Some(Listed::default());
+    w.input.coverage = Some(Coverage::default());
     let plan = w.plan();
     assert_eq!(plan.conflicts, [Conflict::Orphan { node: orphan }]);
     assert_eq!(plan.unlisted, [ROOT, NodeId::RECOVERED].into());
