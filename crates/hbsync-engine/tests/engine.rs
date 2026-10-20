@@ -2939,6 +2939,7 @@ fn what_is_in_a_folder_that_doesnt_read_stays_in_it() -> R {
         srv.set_unreadable(folder.file_id, true);
         (folder, file)
     };
+    let folder_at = folder;
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
@@ -2952,6 +2953,17 @@ fn what_is_in_a_folder_that_doesnt_read_stays_in_it() -> R {
         .and_then(|h| h.node())
         .ok_or("live")?;
     assert_eq!(srv.header(file.file_id)?.parent, folder, "still in it");
+    drop(srv);
+    // Deleted for good: what waited in it is an orphan now, for Recovered files.
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        srv.delete(folder_at.file_id, folder_at.version)?;
+    }
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(""),
+        ["Recovered files/", "Recovered files/inside.txt = inside"]
+    );
     Ok(())
 }
 

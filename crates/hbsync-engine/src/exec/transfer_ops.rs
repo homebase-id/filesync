@@ -8,7 +8,7 @@ impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
 
     /// A write to a file the drive has in a version this device can't read (a newer writer's,
-    /// one that changed its kind: [`ReadTx::is_held`]) would name the version this device knows,
+    /// one that changed its kind: [`ReadTx::held_files`]) would name the version this device knows,
     /// which the drive no longer has, again at every sync. New bytes fork: they go up as a new
     /// node, the drive's version stays as it is. A rename, tags, a removal or a download (of
     /// bytes that would never match) is refused (recorded, not tried again while it is the

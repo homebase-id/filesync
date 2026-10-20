@@ -19,12 +19,15 @@ impl ReadTx<'_> {
             .collect())
     }
 
-    /// Whether the drive has a version of file `file_id` this client can't read: the one this
-    /// device knows of it is behind.
-    pub fn is_held(&self, file_id: RemoteFileId) -> Result<bool> {
+    /// Whether version `at` is one this client recorded it can't read (none, mostly: no query
+    /// then).
+    pub fn is_unreadable_version(&self, at: RemoteRef) -> Result<bool> {
+        if self.none_unreadable()? {
+            return Ok(false);
+        }
         Ok(self
-            .prep("SELECT 1 FROM unreadable WHERE file_id = ?1")?
-            .exists([file_id.0.as_bytes()])?)
+            .prep("SELECT 1 FROM unreadable WHERE file_id = ?1 AND version_tag = ?2")?
+            .exists([at.file_id.0.as_bytes(), at.version.0.as_bytes()])?)
     }
 
     /// The files the drive has in a version this client can't read (held, where it knows an
@@ -71,14 +74,27 @@ impl ReadTx<'_> {
 
 impl AccountTx<'_> {
     /// Records file `at` as there at that version but not a node this client reads, with its
-    /// node and folder where they read, in place of an earlier unreadable version of it; its
-    /// node is planned again, where it is held now.
+    /// node and folder where they read (never the root's id, nor the rest of the drive's), in
+    /// place of an earlier unreadable version of it; its node is planned again, where it is
+    /// held now. A file deleted for good (a page fetched before), a version recorded already,
+    /// or the very version this device has read (a client with a stricter reader since: it
+    /// isn't behind) changes nothing.
     pub fn put_unreadable(
         &self,
         at: RemoteRef,
         node: Option<NodeId>,
         parent: Option<NodeId>,
     ) -> Result<()> {
+        if self.file_gone(at.file_id)?
+            || self.is_unreadable_version(at)?
+            || self
+                .known_file(at.file_id)?
+                .is_some_and(|(v, ..)| v == at.version)
+        {
+            return Ok(());
+        }
+        let fixed = |n: &NodeId| n.is_root() || *n == NodeId::OUTSIDE;
+        let node = node.filter(|n| !fixed(n));
         self.prep(
             "INSERT OR REPLACE INTO unreadable (file_id, version_tag, node, parent) \
              VALUES (?1, ?2, ?3, ?4)",
@@ -97,12 +113,27 @@ impl AccountTx<'_> {
     }
 
     /// A new row of file `file_id`, or its delete: it is there (or gone), whatever the identity
-    /// said once, and no longer a row this client can't read.
+    /// said once, and no longer a row this client can't read. What waited in it is planned
+    /// again (a delete for good leaves it an orphan, for Recovered files).
     pub(super) fn clear_file_marks(&self, file_id: RemoteFileId) -> Result<()> {
         self.clear_gone_suspect(file_id)?;
-        if !self.none_unreadable()? {
-            self.prep("DELETE FROM unreadable WHERE file_id = ?1")?
-                .execute([file_id.0.as_bytes()])?;
+        if self.none_unreadable()? {
+            return Ok(());
+        }
+        let node = self.one(
+            "DELETE FROM unreadable WHERE file_id = ?1 RETURNING node",
+            file_id.0.as_bytes(),
+            |r| {
+                r.get::<_, Option<Vec<u8>>>(0)?
+                    .map(|n| codec::node(&n))
+                    .transpose()
+            },
+        )?;
+        if let Some(node) = node.flatten() {
+            self.fan_out(node, NodeId::ROOT)?;
+            for child in self.mirror_children(node)? {
+                self.fan_out(child.node, node)?;
+            }
         }
         Ok(())
     }

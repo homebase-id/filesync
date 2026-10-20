@@ -552,6 +552,11 @@ fn apply_ref(s: AccountTx<'_>, r: &ChangeRef) -> Result<Applied, StateError> {
         mirror::tombstone(s, r.at(), r.changed_at)?;
         return Ok(Applied::Left);
     }
+    // Known as a row it can't read: nothing of it is the mirror's (its time is no older
+    // version's).
+    if s.is_unreadable_version(r.at())? {
+        return Ok(Applied::Refused(format!("{:?}: doesn't read", r.file_id)));
+    }
     mirror::apply_known(s, r, None)
 }
 

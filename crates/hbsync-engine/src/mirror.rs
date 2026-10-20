@@ -628,7 +628,10 @@ mod tests {
             .read(|s| s.get_mirror(node))?
             .map(|m| (m.kind, m.version));
         assert_eq!(kept, Some((NodeKind::File, VersionTag(Uuid::from_u128(8)))));
-        assert!(db.read(|s| s.is_held(RemoteFileId(Uuid::from_u128(8))))?);
+        assert!(
+            db.read(|s| s.held_files())?
+                .contains(&RemoteFileId(Uuid::from_u128(8)))
+        );
         assert!(db.read(|s| s.unreadable_nodes())?.contains(&node));
         let removed = RemoteHeader {
             removed_at: Some(5),
@@ -636,7 +639,8 @@ mod tests {
         };
         db.write(|s| apply(s.account(), &removed).map(drop))?;
         assert!(
-            !db.read(|s| s.is_held(RemoteFileId(Uuid::from_u128(8))))?,
+            !db.read(|s| s.held_files())?
+                .contains(&RemoteFileId(Uuid::from_u128(8))),
             "read again"
         );
         let back = RemoteHeader {
