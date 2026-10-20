@@ -408,10 +408,11 @@ impl Drive {
         gone
     }
 
-    /// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the trash
-    /// of the same age). A failure waits for the next day's try... or the next call: it is only
-    /// recorded as done when it worked.
+    /// Once a day: deletes for good what Recently deleted has kept `keep_days`, never less
+    /// than [`deleted::MIN_KEEP_DAYS`] (and the trash of the same age). A failure waits for the
+    /// next day's try... or the next call: it is only recorded as done when it worked.
     pub fn purge_when_due(&self, keep_days: u32) -> Result<Option<usize>, EngineError> {
+        let keep_days = keep_days.max(deleted::MIN_KEEP_DAYS);
         const DAY: u64 = 24 * 60 * 60;
         let now = hbsync_types::unix_now();
         let last = self

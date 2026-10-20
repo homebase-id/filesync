@@ -25,6 +25,10 @@ use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
 
+/// The fewest days Recently deleted keeps an item: the purge is the whole account's, and every
+/// client keeps 30 (node schema, The purge). A device may keep longer, never shorter.
+pub const MIN_KEEP_DAYS: u32 = 30;
+
 /// Recently deleted as a whole: how much it holds, and what emptying all of it as it is now
 /// takes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -516,7 +516,7 @@ impl Account {
 
         // Folders to start once no runner of theirs is left.
         let mut adding: Vec<PathBuf> = Vec::new();
-        let keep_days = config.keep_deleted_days.0;
+        let keep_days = config.keep_deleted_days.days();
         let mut next_purge = Instant::now();
         loop {
             if self.stopping(stop) || result.is_err() {

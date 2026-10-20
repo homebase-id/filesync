@@ -41,7 +41,8 @@ has is adopted, nothing is copied twice.
 ```toml
 device_name = "Anna's laptop"   # optional; the computer's name otherwise
 paused = false                  # hbsync pause / resume
-keep_deleted_days = 30          # Recently deleted: removed items are deleted for good after this
+keep_deleted_days = 30          # Recently deleted: removed items are deleted for good after this;
+                                # at least 30 (the purge is the account's): less reads as 30, with a warning
 
 [mass_delete]                   # sync semantics, the mass-delete guard
 min_files = 50
