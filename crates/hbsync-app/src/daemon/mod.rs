@@ -11,7 +11,7 @@ mod keeper;
 mod sleep;
 mod watch;
 
-pub use account::{Notifications, Puller, UNANNOUNCED_READ};
+pub use account::{AccountParts, Notifications, Puller, UNANNOUNCED_READ};
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

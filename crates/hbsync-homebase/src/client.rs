@@ -153,6 +153,8 @@ pub struct Client {
     /// The client auth token (CAT), base64.
     token: String,
     key: Key,
+    /// [`Credentials::login_id`] of the credentials it was made with.
+    login: String,
     connections: Arc<Connections>,
 }
 
@@ -177,12 +179,18 @@ impl Client {
             identity: credentials.identity.clone(),
             token: credentials.client_auth_token.clone(),
             key: credentials.shared_secret_key()?,
+            login: credentials.login_id(),
             connections: Arc::new(connections(REUSED_WITHIN)),
         })
     }
 
     pub(crate) fn identity(&self) -> &str {
         &self.identity
+    }
+
+    /// Which login it speaks for ([`Credentials::login_id`]).
+    pub fn login_id(&self) -> &str {
+        &self.login
     }
 
     /// The shared secret: the key of every envelope and of upload metadata.
