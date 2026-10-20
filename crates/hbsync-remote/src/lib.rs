@@ -14,8 +14,8 @@ use std::io::{Read, Write};
 pub use hbsync_types::ErrorClass;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    ContentHash, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Target, VersionTag,
+    ContentHash, Doomed, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId,
+    RemoteRef, Target, VersionTag,
 };
 
 #[cfg(feature = "testkit")]
@@ -588,17 +588,18 @@ pub trait Remote: Send + Sync {
         payload: Option<Upload<'_>>,
     ) -> Result<Target>;
 
-    /// Deletes (tombstones) files, each only if still at its version: each stays in the feed as
+    /// Deletes (tombstones) files, each only if still at its version (a [`Doomed`] file: one
+    /// recorded in Recently deleted or as a tombstone): each stays in the feed as
     /// a tombstone, which is how a device learns of the delete. What the drive answered for
     /// each, in order ([`Deletes`]): a file already a tombstone (a retry, another device's
     /// delete) answers as deleted, its version not looked at, with its tombstone's own time. An
     /// outer error stopped it before any file was answered.
-    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes>;
+    fn delete(&self, files: &[Doomed]) -> Result<Deletes>;
 
     /// Deletes files for good, leaving nothing in the feed (Homebase's hard delete), live ones
-    /// and tombstones, each only if still at its version: what the drive answered for each
+    /// and tombstones, each only if still at its version (a [`Doomed`] file): what the drive answered for each
     /// ([`ForGood`]). An outer error stopped it before any file was answered.
-    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood>;
+    fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood>;
 
     /// Moves files to Recently deleted (`removed`), or back, each only if still at its version,
     /// leaving the rest of its header as it is: what the drive answered for each, in order, the
@@ -657,11 +658,11 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         (**self).update(target, meta, payload)
     }
 
-    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
+    fn delete(&self, files: &[Doomed]) -> Result<Deletes> {
         (**self).delete(files)
     }
 
-    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
+    fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood> {
         (**self).delete_for_good(files)
     }
 

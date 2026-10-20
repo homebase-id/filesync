@@ -783,7 +783,7 @@ impl Remote for Counted {
 
     fn delete_for_good(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
@@ -814,7 +814,7 @@ impl Remote for Counted {
 
     fn delete(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }
@@ -907,7 +907,9 @@ fn write_answers_carry_the_feeds_time() -> R {
             r["updated"].as_i64(),
         ));
         let (_, w) = made("deleted")?;
-        let deleted = remote.delete(&[w.at])?.single()?;
+        let deleted = remote
+            .delete(&hbsync_remote::contract::doomed(&[w.at]))?
+            .single()?;
         let tomb = remote.header(w.at.file_id)?;
         answers.push((
             "soft-delete batch",
@@ -1229,7 +1231,9 @@ fn hard_purge() -> R {
         for (i, batch) in made.chunks(BATCH_FILES).enumerate() {
             let (sent, recv) = (socket_count("bytes_sent:")?, socket_bytes()?);
             let start = std::time::Instant::now();
-            let results = remote.delete_for_good(batch)?.into_answers()?;
+            let results = remote
+                .delete_for_good(&hbsync_remote::contract::doomed(batch))?
+                .into_answers()?;
             let took = start.elapsed();
             total += took;
             // A socket closed meanwhile takes its counts along: none then.

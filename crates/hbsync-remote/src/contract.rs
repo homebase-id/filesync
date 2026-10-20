@@ -12,9 +12,16 @@ use std::time::Duration;
 
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags, Target};
+use hbsync_types::{
+    Doomed, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags, Target,
+};
 
 use crate::{ChangeRef, Holds, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
+
+/// `files` to delete, unchecked ([`Doomed::unchecked`]): what a test wrote itself.
+pub fn doomed(files: &[RemoteRef]) -> Vec<Doomed> {
+    files.iter().copied().map(Doomed::unchecked).collect()
+}
 
 pub type Outcome = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -126,7 +133,10 @@ impl<'a> Bench<'a> {
             if left.is_empty() {
                 return Ok(());
             }
-            let answers = self.remote.delete_for_good(&left)?.into_answers()?;
+            let answers = self
+                .remote
+                .delete_for_good(&doomed(&left))?
+                .into_answers()?;
             files = Vec::new();
             for (at, result) in left.iter().zip(answers) {
                 match result {
@@ -214,7 +224,7 @@ impl<'a> Bench<'a> {
 
     /// Deletes one file at `at` ([`Remote::delete`]): its answer, the tombstone's time.
     pub fn delete(&self, at: RemoteRef) -> Result<Option<i64>, RemoteError> {
-        self.remote.delete(&[at])?.single()
+        self.remote.delete(&doomed(&[at]))?.single()
     }
 
     fn read(
@@ -560,7 +570,7 @@ fn deletes_in_one_request(b: &Bench) -> Outcome {
     let tomb = b.remote.header(t.file_id)?;
     let (_, x) = b.file("x", b"4")?;
     ensure!(
-        b.remote.delete(&[x, x]).is_err() && !b.remote.header(x.file_id)?.is_deleted(),
+        b.remote.delete(&doomed(&[x, x])).is_err() && !b.remote.header(x.file_id)?.is_deleted(),
         "a batch naming a file twice went through"
     );
     let missing = RemoteRef {
@@ -568,7 +578,10 @@ fn deletes_in_one_request(b: &Bench) -> Outcome {
         version: w.version,
     };
     let cursor = b.cursor_now()?;
-    let answers = b.remote.delete(&[w, v, t, missing, x])?.into_answers()?;
+    let answers = b
+        .remote
+        .delete(&doomed(&[w, v, t, missing, x]))?
+        .into_answers()?;
     ensure!(answers.len() == 5, "{} answers for 5 files", answers.len());
     ensure_err!(&answers[1], RemoteError::VersionMismatch);
     ensure_err!(&answers[3], RemoteError::NotFound);
@@ -664,7 +677,10 @@ fn deletes_for_good(b: &Bench) -> Outcome {
         version: b.remote.header(t.file_id)?.version,
     };
     let (_, o) = b.file("o", b"3")?;
-    let results = b.remote.delete_for_good(&[w, tomb, o])?.into_answers()?;
+    let results = b
+        .remote
+        .delete_for_good(&doomed(&[w, tomb, o]))?
+        .into_answers()?;
     ensure!(results.len() == 3, "{} results for 3 files", results.len());
     ensure_err!(&results[0], RemoteError::VersionMismatch);
     ensure!(
@@ -682,7 +698,10 @@ fn deletes_for_good(b: &Bench) -> Outcome {
         "still in the feed"
     );
     // A retry: gone already; the file at its current version goes too.
-    let again = b.remote.delete_for_good(&[o, w2])?.into_answers()?;
+    let again = b
+        .remote
+        .delete_for_good(&doomed(&[o, w2]))?
+        .into_answers()?;
     ensure_err!(&again[0], RemoteError::NotFound);
     ensure!(again[1].is_ok(), "{:?}", again[1]);
     ensure_err!(b.remote.header(w.file_id), RemoteError::NotFound);

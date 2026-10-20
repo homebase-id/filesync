@@ -233,6 +233,16 @@ pub const fn sealed_len(plain: u64) -> u64 {
     (plain / BLOCK as u64 + 1) * BLOCK as u64
 }
 
+/// [`sealed_len`] of a size a stored payload can have: `None` past odin-core's limit, a
+/// signed 64-bit `BytesWritten` (**[verified]** `PayloadDescriptor.cs`), where the sum
+/// would also overflow.
+pub const fn checked_sealed_len(plain: u64) -> Option<u64> {
+    match (plain / BLOCK as u64 + 1).checked_mul(BLOCK as u64) {
+        Some(n) if n <= i64::MAX as u64 => Some(n),
+        _ => None,
+    }
+}
+
 /// Encrypts what `inner` yields with AES-CBC, PKCS#7 at the end.
 pub(crate) struct Encrypting<R> {
     inner: R,
@@ -506,9 +516,19 @@ mod tests {
             let sealed = encrypt(&kh, &iv, &plain);
             assert_eq!(sealed, aes_cbc_encrypt(&kh.key, &iv, &plain), "{n} bytes");
             assert_eq!(sealed.len() as u64, sealed_len(n as u64));
+            assert_eq!(checked_sealed_len(n as u64), Some(sealed_len(n as u64)));
             assert_eq!(aes_cbc_decrypt(&kh.key, &iv, &sealed)?, plain);
         }
         Ok(())
+    }
+
+    #[test]
+    fn sizes_past_what_a_payload_can_hold_have_no_sealed_size() {
+        let largest = i64::MAX as u64 - 16;
+        assert_eq!(checked_sealed_len(largest), Some(i64::MAX as u64 - 15));
+        for size in [largest + 1, i64::MAX as u64, u64::MAX - 15, u64::MAX] {
+            assert_eq!(checked_sealed_len(size), None, "{size}");
+        }
     }
 
     #[test]

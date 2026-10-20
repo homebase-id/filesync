@@ -353,10 +353,13 @@ impl Remote for StopAfterCreates {
     ) -> RemoteResult<Target> {
         self.inner.update(target, meta, payload)
     }
-    fn delete(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::Deletes> {
+    fn delete(&self, files: &[hbsync_types::Doomed]) -> RemoteResult<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }
-    fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
+    fn delete_for_good(
+        &self,
+        files: &[hbsync_types::Doomed],
+    ) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
     fn set_removed(
@@ -474,10 +477,13 @@ impl Remote for SlowWrites {
     ) -> RemoteResult<Target> {
         self.write(|| self.unless_down(|| self.inner.update(target, meta, payload)))
     }
-    fn delete(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::Deletes> {
+    fn delete(&self, files: &[hbsync_types::Doomed]) -> RemoteResult<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }
-    fn delete_for_good(&self, files: &[RemoteRef]) -> RemoteResult<hbsync_remote::ForGood> {
+    fn delete_for_good(
+        &self,
+        files: &[hbsync_types::Doomed],
+    ) -> RemoteResult<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
     fn set_removed(

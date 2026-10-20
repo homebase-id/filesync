@@ -521,7 +521,7 @@ fn fetch(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<Complet
     }
     // Made durable with the others that finished meanwhile, before any is put in place
     // (`sync_completed`, in the commit).
-    Ok(partial.finish_in_group(Some(d.expected), Some(d.size))?)
+    Ok(partial.finish_in_group(d.expected, d.size)?)
 }
 
 /// The first of `d`'s trash files that holds exactly the bytes it wants, taken for it where it

@@ -726,7 +726,11 @@ fn drive_state(db: &std::cell::RefCell<StateDb>) -> common::Res<DriveState> {
     Ok(db.borrow_mut().read(|s| {
         let mut live = s.drive_file_ids()?;
         live.sort();
-        let mut gone = s.tombstones_before(i64::MAX)?;
+        let mut gone: Vec<_> = s
+            .tombstones_before(i64::MAX)?
+            .into_iter()
+            .map(|t| t.at())
+            .collect();
         gone.sort_by_key(|t| t.file_id);
         Ok((live, gone))
     })?)
@@ -990,7 +994,7 @@ impl hbsync_remote::Remote for Watched {
     }
     fn delete(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         self.request();
         if let Some(answer) = self.answer {
@@ -1004,7 +1008,7 @@ impl hbsync_remote::Remote for Watched {
     }
     fn delete_for_good(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.request();
         if let Some(answer) = self.answer {

@@ -333,7 +333,11 @@ impl Harness {
     /// `Ok(false)`: changed meanwhile (a conflict), left alone.
     fn delete(&self, by: usize, node: NodeId) -> Res<bool> {
         let at = self.doc(node)?.target.at;
-        match self.remote(by).delete(&[at])?.single() {
+        match self
+            .remote(by)
+            .delete(&hbsync_remote::contract::doomed(&[at]))?
+            .single()
+        {
             Ok(_) => {}
             Err(RemoteError::VersionMismatch) => {
                 self.conflicts.fetch_add(1, Ordering::Relaxed);

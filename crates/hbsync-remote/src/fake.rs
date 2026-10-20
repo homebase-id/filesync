@@ -32,7 +32,7 @@ use std::time::Duration;
 use hbsync_fileio::hash_bytes;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target, Uuid, VersionTag,
+    Doomed, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target, Uuid, VersionTag,
 };
 
 use crate::{
@@ -778,21 +778,22 @@ impl FakeRemote {
     }
 
     /// One request of [`Remote::delete`]: each file's answer.
-    fn delete_batch(&self, files: &[RemoteRef]) -> Result<Vec<Result<Option<i64>>>> {
+    fn delete_batch(&self, files: &[Doomed]) -> Result<Vec<Result<Option<i64>>>> {
         self.gate()?;
-        batch_of(files.iter().map(|f| f.file_id))?;
+        batch_of(files.iter().map(|f| f.at().file_id))?;
         // The faults on every write (no file is named so).
         self.gate_name("")?;
         let failing = self.faults().fail_writes_named.clone();
         let mut server = self.server();
         Ok(files
             .iter()
-            .map(
-                |f| match failing.is_some() && server.live_name(f.file_id) == failing.as_deref() {
+            .map(|f| {
+                let f = f.at();
+                match failing.is_some() && server.live_name(f.file_id) == failing.as_deref() {
                     true => Err(RemoteError::Transient("injected write failure".into())),
                     false => server.delete_by(Some(self.client), f.file_id, f.version),
-                },
-            )
+                }
+            })
             .collect())
     }
 
@@ -942,19 +943,19 @@ impl Remote for FakeRemote {
     /// writes is the request's, and so is a batch odin-core refuses whole (a file twice); a
     /// write failure injected for a name ([`Faults::fail_writes_named`]) fails that file
     /// alone, undeleted.
-    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
+    fn delete(&self, files: &[Doomed]) -> Result<Deletes> {
         Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
     /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`.
-    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
+    fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood> {
         Answers::in_batches(files, BATCH_FILES, |batch| {
             self.gate()?;
-            batch_of(batch.iter().map(|f| f.file_id))?;
+            batch_of(batch.iter().map(|f| f.at().file_id))?;
             let mut server = self.server();
             Ok(batch
                 .iter()
-                .map(|f| server.hard_delete(f.file_id, f.version))
+                .map(|f| server.hard_delete(f.at().file_id, f.at().version))
                 .collect())
         })
     }
@@ -1083,7 +1084,7 @@ mod tests {
         let mine = a.create(&folder("mine"), None)?;
         let theirs = b.create(&folder("theirs"), None)?;
         let copied = copy.create(&folder("copied"), None)?;
-        a.delete(&[mine.at])?.single()?;
+        a.delete(&crate::contract::doomed(&[mine.at]))?.single()?;
         let seeded = server
             .lock()
             .unwrap_or_else(|p| p.into_inner())

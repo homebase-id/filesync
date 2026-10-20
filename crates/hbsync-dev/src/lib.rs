@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use hbsync_homebase::{Client, Credentials};
 use hbsync_remote::{Remote, RemoteError};
-use hbsync_types::RemoteRef;
+use hbsync_types::{Doomed, RemoteRef};
 
 /// Where the development tools keep the credentials of `identity`:
 /// `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json` (default `~/.config`). The product keeps them
@@ -201,7 +201,8 @@ pub fn delete_top_folders(
         doomed.push(found);
     }
     if !dry {
-        let mut asked: Vec<RemoteRef> = doomed.iter().map(|f| f.at).collect();
+        // A test drive's own folders, live: unchecked.
+        let mut asked: Vec<Doomed> = doomed.iter().map(|f| Doomed::unchecked(f.at)).collect();
         // A request that failed after others went: the answers before it still count.
         let mut stopped = None;
         // Written since it was read: once more at its version now.
@@ -213,7 +214,7 @@ pub fn delete_top_folders(
                 match answer {
                     Ok(()) | Err(RemoteError::NotFound) => {}
                     Err(RemoteError::VersionMismatch) if round == 0 => {
-                        again.push(remote.header(at.file_id)?.at())
+                        again.push(Doomed::unchecked(remote.header(at.at().file_id)?.at()))
                     }
                     Err(e) => return Err(e),
                 }
@@ -234,7 +235,7 @@ pub fn delete_top_folders(
 
 /// The tombstones the feed shows from `from` on (`None`: the whole drive), each at the version
 /// its row has: what a delete left (a removal, a live or removed row, is never one).
-pub fn tombstones(remote: &dyn Remote, from: Option<&str>) -> Result<Vec<RemoteRef>, RemoteError> {
+pub fn tombstones(remote: &dyn Remote, from: Option<&str>) -> Result<Vec<Doomed>, RemoteError> {
     // A file's last row tells what it is now (a page read during a write may show it twice).
     let mut found = std::collections::HashMap::new();
     let mut cursor = from.map(str::to_owned);
@@ -253,7 +254,7 @@ pub fn tombstones(remote: &dyn Remote, from: Option<&str>) -> Result<Vec<RemoteR
     }
     Ok(found
         .into_iter()
-        .map(|(file_id, version)| RemoteRef { file_id, version })
+        .map(|(file_id, version)| Doomed::unchecked(RemoteRef { file_id, version }))
         .collect())
 }
 
@@ -271,10 +272,7 @@ pub struct Swept {
 /// Deletes `tombstones` for good (`hard-delete-batch`, [`hbsync_remote::BATCH_FILES`] a
 /// request), each only at its version. A file any other answer refuses, or a request that
 /// fails, stops it with that error.
-pub fn delete_tombstones(
-    remote: &dyn Remote,
-    tombstones: &[RemoteRef],
-) -> Result<Swept, RemoteError> {
+pub fn delete_tombstones(remote: &dyn Remote, tombstones: &[Doomed]) -> Result<Swept, RemoteError> {
     let mut swept = Swept::default();
     for answer in remote.delete_for_good(tombstones)?.into_answers()? {
         match answer {
@@ -443,15 +441,19 @@ mod tests {
         for name in ["old", "a", "b", "kept", "removed"] {
             made.push(remote.create(&folder(name, NodeId::ROOT), None)?);
         }
-        remote.delete(&[made[0].at])?.into_answers()?;
+        remote
+            .delete(&hbsync_remote::contract::doomed(&[made[0].at]))?
+            .into_answers()?;
         let from = feed_end(&remote, None)?;
-        remote.delete(&[made[1].at, made[2].at])?.into_answers()?;
+        remote
+            .delete(&hbsync_remote::contract::doomed(&[made[1].at, made[2].at]))?
+            .into_answers()?;
         remote
             .set_removed(&[made[4].clone()], true)?
             .into_answers()?;
 
         let found = super::tombstones(&remote, Some(&from))?;
-        let ids: HashSet<_> = found.iter().map(|t| t.file_id).collect();
+        let ids: HashSet<_> = found.iter().map(|t| t.at().file_id).collect();
         assert_eq!(ids, made[1..3].iter().map(|t| t.at.file_id).collect());
         assert_eq!(
             super::tombstones(&remote, None)?.len(),

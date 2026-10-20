@@ -180,7 +180,9 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
 
     // Deleted for good, the node made again (a new file id), then the delete is announced.
     let late_delete = ChangeRef::of(&remote.header(file)?).tombstone();
-    remote.delete(&[back.at])?.single()?;
+    remote
+        .delete(&hbsync_remote::contract::doomed(&[back.at]))?
+        .single()?;
     let again = remote.create(&docs, None)?;
     assert_ne!(again.at.file_id, file, "a new file id");
     drive.pull(None)?;
@@ -248,7 +250,7 @@ impl Remote for HeldPage {
     }
     fn delete_for_good(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
@@ -276,7 +278,7 @@ impl Remote for HeldPage {
     }
     fn delete(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }
@@ -485,7 +487,7 @@ impl Remote for FailsAfterAPage {
     }
     fn delete_for_good(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
@@ -513,7 +515,7 @@ impl Remote for FailsAfterAPage {
     }
     fn delete(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }
@@ -879,7 +881,9 @@ fn a_role_folder_made_leaves_recently_deleted() -> R {
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     assert!(db.read(|s| s.removed_by_node(top))?.is_some());
     // Deleted for good, not yet read: the restore finds nothing, and the folder is made anew.
-    remote.delete(&[gone.at])?.single()?;
+    remote
+        .delete(&hbsync_remote::contract::doomed(&[gone.at]))?
+        .single()?;
     drive.announcing_from(drive.connection());
     drive.ensure_role(Role::Documents)?;
     assert!(db.read(|s| s.get_mirror(top))?.is_some(), "made");

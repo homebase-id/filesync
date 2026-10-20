@@ -8,16 +8,16 @@ impl ReadTx<'_> {
     // ---- tombstones ----
 
     /// The tombstones still on the drive written before `at_ms` (Unix ms), oldest first.
-    pub fn tombstones_before(&self, at_ms: i64) -> Result<Vec<RemoteRef>> {
+    pub fn tombstones_before(&self, at_ms: i64) -> Result<Vec<Doomed>> {
         self.many(
             "SELECT file_id, version_tag FROM gone_files
              WHERE at IS NOT NULL AND at < ?1 ORDER BY at",
             [at_ms],
             |r| {
-                Ok(RemoteRef {
+                Ok(Doomed::unchecked(RemoteRef {
                     file_id: RemoteFileId(codec::uuid_from(&r.get::<_, Vec<u8>>(0)?)?),
                     version: VersionTag(codec::uuid_from(&r.get::<_, Vec<u8>>(1)?)?),
-                })
+                }))
             },
         )
     }

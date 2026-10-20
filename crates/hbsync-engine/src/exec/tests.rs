@@ -1112,7 +1112,7 @@ impl Remote for ReadHook {
     }
     fn delete_for_good(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
         self.inner.delete_for_good(files)
     }
@@ -1143,7 +1143,7 @@ impl Remote for ReadHook {
 
     fn delete(
         &self,
-        files: &[hbsync_types::RemoteRef],
+        files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         self.inner.delete(files)
     }

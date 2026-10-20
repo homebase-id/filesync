@@ -127,8 +127,8 @@ impl PartialFile {
     /// since resuming it would only repeat the error.
     pub fn finish(
         self,
-        expected_hash: Option<ContentHash>,
-        expected_size: Option<u64>,
+        expected_hash: ContentHash,
+        expected_size: u64,
     ) -> Result<CompletedFile, FileIoError> {
         self.file.sync_all()?;
         self.complete(expected_hash, expected_size, true)
@@ -141,8 +141,8 @@ impl PartialFile {
     /// flush many), is flushed here.
     pub fn finish_in_group(
         self,
-        expected_hash: Option<ContentHash>,
-        expected_size: Option<u64>,
+        expected_hash: ContentHash,
+        expected_size: u64,
     ) -> Result<CompletedFile, FileIoError> {
         if cfg!(windows) || self.written >= SYNC_ALONE_FROM {
             return self.finish(expected_hash, expected_size);
@@ -153,8 +153,8 @@ impl PartialFile {
 
     fn complete(
         self,
-        expected_hash: Option<ContentHash>,
-        expected_size: Option<u64>,
+        expected_hash: ContentHash,
+        expected_size: u64,
         synced: bool,
     ) -> Result<CompletedFile, FileIoError> {
         let actual = self.hasher.finalize();
@@ -162,18 +162,17 @@ impl PartialFile {
             let _ = fs::remove_file(&self.path);
             Err(err)
         };
-        if let Some(expected) = expected_size
-            && expected != self.written
-        {
+        if expected_size != self.written {
             return fail(FileIoError::SizeMismatch {
-                expected,
+                expected: expected_size,
                 actual: self.written,
             });
         }
-        if let Some(expected) = expected_hash
-            && expected != actual
-        {
-            return fail(FileIoError::HashMismatch { expected, actual });
+        if expected_hash != actual {
+            return fail(FileIoError::HashMismatch {
+                expected: expected_hash,
+                actual,
+            });
         }
         Ok(CompletedFile {
             path: self.path,
@@ -374,7 +373,7 @@ mod tests {
         for name in ["a", "b"] {
             let mut partial = PartialFile::open(dir.path(), name, ALG)?;
             partial.write_all(name.as_bytes())?;
-            done.push(partial.finish_in_group(Some(hash_bytes(name.as_bytes(), ALG)), Some(1))?);
+            done.push(partial.finish_in_group(hash_bytes(name.as_bytes(), ALG), 1)?);
         }
         assert!(done.iter().all(|f| f.synced() == cfg!(windows)));
         let target = dir.path().join("placed");
@@ -383,8 +382,8 @@ mod tests {
             assert!(first.persist_new(&target, None).is_err());
             assert!(!target.exists());
         }
-        let mut again = PartialFile::open(dir.path(), "a", ALG)?
-            .finish_in_group(Some(hash_bytes(b"a", ALG)), Some(1))?;
+        let mut again =
+            PartialFile::open(dir.path(), "a", ALG)?.finish_in_group(hash_bytes(b"a", ALG), 1)?;
         sync_completed(&mut [&mut again, &mut done[0]]);
         assert!(again.synced() && done[0].synced());
         again.persist_new(&target, None)?;
@@ -419,7 +418,7 @@ mod tests {
         let mut partial = PartialFile::open(&tmp, "node-1", ALG)?;
         assert_eq!(partial.offset(), 300_000);
         io::copy(&mut &data[300_000..], &mut partial)?;
-        let done = partial.finish(Some(expected), Some(data.len() as u64))?;
+        let done = partial.finish(expected, data.len() as u64)?;
         assert_eq!(done.hash, expected);
 
         let target = dir.path().join("out.bin");
@@ -466,9 +465,29 @@ mod tests {
         partial.write_all(b"corrupted")?;
         let path = partial.path().to_owned();
         let err = partial
-            .finish(Some(hash_bytes(b"original", ALG)), None)
+            .finish(hash_bytes(b"original", ALG), 9)
             .expect_err("mismatch");
         assert!(matches!(err, FileIoError::HashMismatch { .. }));
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn size_mismatch_deletes_partial() -> Result<(), FileIoError> {
+        let dir = tempfile::tempdir()?;
+        let mut partial = PartialFile::open(dir.path(), "k", ALG)?;
+        partial.write_all(b"short")?;
+        let path = partial.path().to_owned();
+        let err = partial
+            .finish(hash_bytes(b"short", ALG), 6)
+            .expect_err("mismatch");
+        assert!(matches!(
+            err,
+            FileIoError::SizeMismatch {
+                expected: 6,
+                actual: 5
+            }
+        ));
         assert!(!path.exists());
         Ok(())
     }
@@ -480,7 +499,7 @@ mod tests {
         fs::write(&target, b"user data")?;
         let mut partial = PartialFile::open(dir.path(), "k", ALG)?;
         partial.write_all(b"download")?;
-        let done = partial.finish(None, None)?;
+        let done = partial.finish(hash_bytes(b"download", ALG), 8)?;
         let err = done.persist_new(&target, None).expect_err("target exists");
         assert!(matches!(err, FileIoError::Io(e) if e.kind() == io::ErrorKind::AlreadyExists));
         assert_eq!(fs::read(&target)?, b"user data");
@@ -498,7 +517,7 @@ mod tests {
         fs::write(&target, b"v1 edited by user")?;
         let mut partial = PartialFile::open(dir.path(), "k", ALG)?;
         partial.write_all(b"v2 from remote")?;
-        let done = partial.finish(None, None)?;
+        let done = partial.finish(hash_bytes(b"v2 from remote", ALG), 14)?;
         let tmp_path = done.path().to_owned();
         let err = done
             .persist_over(&target, &planned, None)
@@ -512,7 +531,7 @@ mod tests {
         let mut partial = PartialFile::open(dir.path(), "k2", ALG)?;
         partial.write_all(b"v2 from remote")?;
         partial
-            .finish(None, None)?
+            .finish(hash_bytes(b"v2 from remote", ALG), 14)?
             .persist_over(&target, &current, None)?;
         assert_eq!(fs::read(&target)?, b"v2 from remote");
         Ok(())
