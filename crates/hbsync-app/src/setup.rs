@@ -9,14 +9,13 @@ use std::time::Duration;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, HomebaseError, app};
-use hbsync_local::STATE_DIR;
 use hbsync_remote::Remote;
 
 use hbsync_types::Role;
 
-use crate::control;
 use crate::paths::home;
 use crate::{Config, CredentialStore, Identity, Location, Paths, autostart};
+use crate::{control, folders};
 
 /// How long the owner has to approve in the browser.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -118,72 +117,6 @@ pub fn role_folder(role: Role) -> control::Result<PathBuf> {
         .ok_or_else(|| format!("this computer has no {} folder", role.name()).into())
 }
 
-/// Why `folder` (absolute) must not be synced, if it mustn't: the home folder itself or a folder
-/// above it, the top of a disk, or a system folder. Syncing those would take in (and on
-/// another device, put down) files that aren't the user's to sync.
-///
-/// It compares the paths as given: pass them through [`resolve`] first, so a symlink or `..`
-/// can't hide what a folder really is.
-pub fn refuse_folder(folder: &Path, home: Option<&Path>) -> Option<String> {
-    if folder.parent().is_none() {
-        return Some(format!("{} is the top of a disk", folder.display()));
-    }
-    if let Some(home) = home
-        && within(home, folder)
-    {
-        return Some(format!(
-            "{} holds your whole home folder: choose a folder inside it",
-            folder.display()
-        ));
-    }
-    const SYSTEM: &[&str] = &[
-        "/bin",
-        "/boot",
-        "/dev",
-        "/etc",
-        "/lib",
-        "/opt",
-        "/proc",
-        "/sbin",
-        "/sys",
-        "/usr",
-        "/Applications",
-        "/Library",
-        "/System",
-        "C:\\Windows",
-        "C:\\Program Files",
-        "C:\\Program Files (x86)",
-        "C:\\ProgramData",
-    ];
-    SYSTEM
-        .iter()
-        .find(|s| within(folder, Path::new(s)))
-        .map(|s| format!("{} is in a system folder ({s})", folder.display()))
-}
-
-/// Why `folder` must not be set up for syncing, if another app syncs it (OneDrive, iCloud): two
-/// apps syncing one folder fight over every change. A folder synced already stays so.
-pub(crate) fn other_app(folder: &Path) -> Option<String> {
-    hbsync_platform::user_dirs::owner(folder).map(|owner| {
-        format!(
-            "{} syncs {} already: two apps syncing one folder fight over every change",
-            owner.name(),
-            folder.display()
-        )
-    })
-}
-
-/// Whether `path` is `folder` or inside it; ignoring case where the file system usually does
-/// (Windows, macOS).
-fn within(path: &Path, folder: &Path) -> bool {
-    if cfg!(any(windows, target_os = "macos")) {
-        let lower = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
-        lower(path).starts_with(lower(folder))
-    } else {
-        path.starts_with(folder)
-    }
-}
-
 /// `canonicalize`, without the `\\?\` it puts on Windows paths: kept in the config and shown
 /// to people, they must be paths the shell and file managers take.
 fn canonical(path: &Path) -> std::io::Result<PathBuf> {
@@ -212,56 +145,6 @@ pub fn resolve(path: &Path) -> PathBuf {
         return out;
     }
     path
-}
-
-/// What a folder holds, as far as setting it up goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FolderState {
-    /// Missing or empty.
-    Fresh,
-    /// Synced with this identity before: setting it up picks up where it was.
-    Ours,
-    /// Has files: they would be uploaded and merged with the drive.
-    HasFiles,
-}
-
-/// What `folder` (resolved) holds for `identity`: refused if another folder or identity is
-/// set up, or the folder is another identity's.
-fn folder_state(
-    config: &Config,
-    identity: &Identity,
-    folder: &Path,
-) -> Result<FolderState, String> {
-    if let Some(root) = config.root().map_err(|e| e.to_string())?
-        && (root.identity != *identity || root.folder != folder)
-    {
-        return Err(format!(
-            "already set up to sync {} with {}: unlink it first",
-            root.folder.display(),
-            root.identity
-        ));
-    }
-    // Its marker says whose it is. Without one (an older Filesync's folder, or one half set
-    // up) it is set up again, its files merged: identical ones are adopted, not copied.
-    match SyncRoot::check(folder, identity) {
-        Ok(_) => return Ok(FolderState::Ours),
-        Err(e @ RootError::OtherIdentity { .. }) => return Err(e.to_string()),
-        Err(_) => {}
-    }
-    match has_files(folder) {
-        Ok(true) => Ok(FolderState::HasFiles),
-        Ok(false) => Ok(FolderState::Fresh),
-        Err(e) => Err(format!("{}: {e}", folder.display())),
-    }
-}
-
-/// Whether `folder` holds anything besides its `.hbsync` (a missing one holds nothing).
-fn has_files(folder: &Path) -> std::io::Result<bool> {
-    match std::fs::read_dir(folder) {
-        Ok(entries) => Ok(entries.flatten().any(|e| e.file_name() != STATE_DIR)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e),
-    }
 }
 
 /// `anna.example.com`, `frodo.dotyou.cloud:8443`: letters, digits, dots, hyphens, a port.
@@ -299,9 +182,9 @@ impl std::fmt::Display for Refusal {
 impl std::error::Error for Refusal {}
 
 /// Checks what to set up, changing nothing: the address as `typed` (normalised; it must look
-/// like a domain), and the folder, resolved (symlinks, `..`) so it is judged as it really is:
-/// never the home folder or one above it, a disk's top or a system folder; not another
-/// identity's, nor a second folder; with files in it only when `merge`.
+/// like a domain), and the folder, resolved (symlinks, `..`) so it is judged as it really is,
+/// by the rules every folder goes by ([`crate::folders::check`]); with files in it only when
+/// `merge`.
 pub fn plan(
     config: &Config,
     typed: &str,
@@ -316,17 +199,16 @@ pub fn plan(
         )));
     }
     let folder = resolve(folder);
-    if let Some(why) = refuse_folder(&folder, home.map(resolve).as_deref()) {
-        return Err(Refusal::No(why));
-    }
-    let state = folder_state(config, &identity, &folder).map_err(Refusal::No)?;
-    if state != FolderState::Ours
-        && let Some(why) = other_app(&folder)
-    {
-        return Err(Refusal::No(why));
-    }
-    match state {
-        FolderState::HasFiles if !merge => Err(Refusal::NeedsMerge(folder)),
+    let home = home.map(resolve);
+    let ours =
+        folders::check(config, &identity, &folder, None, home.as_deref()).map_err(Refusal::No)?;
+    // Synced with this identity before, it picks up where it was; with files in it, they
+    // are uploaded and merged with the drive.
+    let has_files = !ours
+        && folders::has_files(&folder)
+            .map_err(|e| Refusal::No(format!("{}: {e}", folder.display())))?;
+    match has_files {
+        true if !merge => Err(Refusal::NeedsMerge(folder)),
         _ => Ok(SetUp {
             identity,
             folder,
@@ -419,7 +301,7 @@ pub fn set_up(
     // The folder in the account's state DB, and its marker: kept if set up before. Checked
     // here, set up by the daemon (or here, when it isn't running).
     let db = paths.account_db(identity);
-    let has_files = has_files(&folder)?;
+    let has_files = folders::has_files(&folder)?;
     let running = control::running(paths)?;
     if !running && db.exists() {
         // Nothing else writes it: brought up to date here, for the checks (which only look).
@@ -509,21 +391,6 @@ mod tests {
     type R = control::Result<()>;
 
     #[test]
-    fn some_folders_are_refused() {
-        let home = Path::new("/home/anna");
-        let refused = |f: &str| refuse_folder(Path::new(f), Some(home));
-        assert!(refused("/").is_some());
-        assert!(refused("/home").is_some(), "above home");
-        assert!(refused("/home/anna").is_some(), "home itself");
-        assert!(refused("/usr/share/docs").is_some());
-        assert_eq!(refused("/home/anna/Homebase"), None);
-        assert_eq!(refused("/media/disk/Homebase"), None);
-        if cfg!(any(windows, target_os = "macos")) {
-            assert!(refused("/library/Stuff").is_some(), "in any case");
-        }
-    }
-
-    #[test]
     fn folders_are_resolved_before_they_are_judged() -> control::Result<()> {
         let dir = tempfile::tempdir()?;
         let home = canonical(dir.path())?.join("anna");
@@ -539,7 +406,7 @@ mod tests {
             let link = home.join("Docs/everything");
             std::os::unix::fs::symlink(&home, &link)?;
             assert_eq!(resolve(&link), home);
-            assert!(refuse_folder(&resolve(&link), Some(&home)).is_some());
+            assert!(folders::refuse_folder(&resolve(&link), Some(&home)).is_some());
             assert_eq!(resolve(&link.join("Homebase")), home.join("Homebase"));
         }
         Ok(())

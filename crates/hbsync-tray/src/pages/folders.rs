@@ -33,6 +33,7 @@ impl Server {
             return "<h1>Folders</h1><p>Log in to Homebase first.</p>".into();
         };
         let identity = &main.identity;
+        let home = folders::home();
         let count_until = Instant::now() + COUNT_FOR;
         let rows: String = Role::ALL
             .into_iter()
@@ -49,7 +50,14 @@ impl Server {
                             format!("<p class=small>{}</p>", escape(&e.to_string())),
                         ),
                         Ok(path) => {
-                            let refused = folders::refusal(&config, identity, &path, Some(role));
+                            let refused = folders::check(
+                                &config,
+                                identity,
+                                &path,
+                                Some(role),
+                                home.as_deref(),
+                            )
+                            .err();
                             let action = match refused {
                                 Some(why) => format!("<p class=small>{}</p>", escape(&why)),
                                 None => self.button("folders/add", role, "Sync", false),
