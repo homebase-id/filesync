@@ -592,7 +592,7 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
 }
 
 /// A tombstone in the feed, written at `at` (the server's time): the file is deleted for good,
-/// and the tombstone itself goes hard once old enough ([`crate::deleted::purge`]).
+/// and the tombstone itself goes hard once old enough ([`crate::deleted::AccountOps::purge`]).
 fn tombstone(s: &Store<'_>, tombstone: RemoteRef, at: Option<i64>) -> Result<(), StateError> {
     if let Some(at) = at {
         s.put_tombstone(tombstone, at)?;

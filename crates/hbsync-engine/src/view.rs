@@ -15,13 +15,13 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
 use hbsync_local::Filter;
+use hbsync_local::layout::parked_name;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
-use crate::exec::parked_name;
-use crate::plan::Listed;
+use crate::plan::Coverage;
 use crate::reconcile::{BaseExtra, Input, Removed};
 use crate::scope::Scope;
 
@@ -133,7 +133,7 @@ pub fn build_input(
 }
 
 /// [`build_input`] with only the children the rules may need, except in the folders in `full`
-/// ([`Input::listed`]): planning a change in a large folder reads a few rows, not the folder.
+/// ([`Input::coverage`]): planning a change in a large folder reads a few rows, not the folder.
 /// A plan that needs more says so ([`crate::plan::Plan::unlisted`]).
 pub(crate) fn build_narrow(
     s: &Store<'_>,
@@ -172,17 +172,17 @@ fn build(
     for &node in dirty {
         b.load(node)?;
     }
-    let mut listed = Listed::default();
+    let mut coverage = Coverage::default();
     match full {
         None => {
             // Every child of every folder involved, and of the root.
-            listed.full.insert(NodeId::ROOT);
+            coverage.full.insert(NodeId::ROOT);
             for &node in dirty {
                 for tree in [&b.input.base, &b.input.remote, &b.input.local] {
                     if let Some(state) = tree.get(node) {
-                        listed.full.insert(state.parent);
+                        coverage.full.insert(state.parent);
                         if state.kind == NodeKind::Folder {
-                            listed.full.insert(node);
+                            coverage.full.insert(node);
                         }
                     }
                 }
@@ -191,13 +191,13 @@ fn build(
         Some(full) => {
             // In each folder a dirty node is in, what may clash with its names; all of a dirty
             // folder that may go (gone on a side, hidden, or in a folder gone remotely).
-            listed.full.extend(full);
+            coverage.full.extend(full);
             let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
             for &node in dirty {
                 let mut folder = false;
                 for tree in [&b.input.base, &b.input.remote, &b.input.local] {
                     if let Some(state) = tree.get(node) {
-                        listed
+                        coverage
                             .named
                             .entry(state.parent)
                             .or_default()
@@ -212,10 +212,10 @@ fn build(
                     && b.input.remote.path(node).is_some()
                     && !hidden.contains(&node);
                 if folder && !stays {
-                    listed.full.insert(node);
+                    coverage.full.insert(node);
                 }
             }
-            let Listed { full, named } = &mut listed;
+            let Coverage { full, named } = &mut coverage;
             named.retain(|folder, keys| {
                 if keys.len() > NAMED_MAX {
                     full.insert(*folder);
@@ -226,19 +226,19 @@ fn build(
             // isn't: those in the folders read by name come along (there are hardly ever any).
             for node in s.all_parked()? {
                 if s.local_parent(node)?
-                    .is_some_and(|p| listed.named.contains_key(&p))
+                    .is_some_and(|p| coverage.named.contains_key(&p))
                 {
                     b.load(node)?;
                 }
             }
         }
     }
-    let mut folders: Vec<NodeId> = listed.full.iter().copied().collect();
+    let mut folders: Vec<NodeId> = coverage.full.iter().copied().collect();
     folders.sort();
     for folder in folders {
         b.load_children(folder)?;
     }
-    let mut named: Vec<(NodeId, Vec<i32>)> = listed
+    let mut named: Vec<(NodeId, Vec<i32>)> = coverage
         .named
         .iter()
         .map(|(folder, keys)| {
@@ -285,8 +285,8 @@ fn build(
             {
                 continue;
             }
-            if listed.full.insert(folder) {
-                listed.named.remove(&folder);
+            if coverage.full.insert(folder) {
+                coverage.named.remove(&folder);
             }
             b.load_children(folder)?;
             folders.extend(b.input.remote.children(folder));
@@ -329,12 +329,12 @@ fn build(
                     .collect();
                 let own = BTreeSet::from([hbsync_namemap::sibling_hash(RECOVERED_NAME)]);
                 for (folder, keys) in [(NodeId::RECOVERED, coming), (NodeId::ROOT, own)] {
-                    if listed.full.contains(&folder) {
+                    if coverage.full.contains(&folder) {
                         continue;
                     }
                     let keys: Vec<i32> = keys
                         .into_iter()
-                        .filter(|k| listed.named.entry(folder).or_default().insert(*k))
+                        .filter(|k| coverage.named.entry(folder).or_default().insert(*k))
                         .collect();
                     b.load_named(folder, &keys)?;
                 }
@@ -361,7 +361,7 @@ fn build(
         }
     }
     if full.is_some() {
-        b.input.listed = Some(listed);
+        b.input.coverage = Some(coverage);
     }
     Ok(b.input)
 }

@@ -16,7 +16,7 @@ use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Role};
 
 use crate::deleted;
-use crate::engine::EngineError;
+use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
 use crate::root::{RootError, SyncRoot};
 
@@ -190,6 +190,18 @@ impl Drive {
 
     fn account(&self) -> MutexGuard<'_, StateDb> {
         self.account.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Runs `op`, one of Recently deleted's operations on the account's DB and the drive; the
+    /// account is behind if the drive refused a write for its state or an answer was lost.
+    fn with_ops<T>(
+        &self,
+        op: impl FnOnce(&mut deleted::AccountOps<'_>) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let mut ops = deleted::AccountOps::new(&self.account, self.remote());
+        let done = op(&mut ops);
+        self.behind_if(ops.behind, &done);
+        done
     }
 
     /// Reads the feed until it has no more rows, into the mirror. One pull at a time: a caller
@@ -367,34 +379,27 @@ impl Drive {
     /// behind.
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.pull(None)?;
-        let (mut restored, mut moved) = (0, false);
-        let done = nodes.iter().try_for_each(|&node| {
-            restored += deleted::restore(&self.account, self.remote(), node, &mut moved)?;
-            Ok::<_, EngineError>(())
+        let restored = self.with_ops(|ops| {
+            nodes
+                .iter()
+                .try_fold(0, |n, &node| Ok(n + ops.restore(node)?))
         });
-        self.behind_if(moved, &done);
         self.wake_all();
-        done.map(|()| restored)
+        restored
     }
 
     /// Deletes these items of Recently deleted for good as `listed` showed them, each with
-    /// what was in it then ([`deleted::empty`]).
+    /// what was in it then ([`deleted::AccountOps::empty`]).
     pub fn empty(&self, nodes: &[NodeId], listed: &deleted::Listed) -> Result<usize, EngineError> {
         self.catch_up(None)?;
-        let mut moved = false;
-        let gone = deleted::empty(&self.account, self.remote(), nodes, listed, &mut moved);
-        self.behind_if(moved, &gone);
-        gone
+        self.with_ops(|ops| ops.empty(nodes, listed))
     }
 
-    /// Deletes for good what a listing of Recently deleted saw ([`deleted::empty_listed`]),
-    /// nothing recorded since.
+    /// Deletes for good what a listing of Recently deleted saw
+    /// ([`deleted::AccountOps::empty_listed`]), nothing recorded since.
     pub fn empty_listed(&self, listed: &deleted::Listed) -> Result<usize, EngineError> {
         self.catch_up(None)?;
-        let mut moved = false;
-        let gone = deleted::empty_listed(&self.account, self.remote(), listed, &mut moved);
-        self.behind_if(moved, &gone);
-        gone
+        self.with_ops(|ops| ops.empty_listed(listed))
     }
 
     /// Deletes for good what was deleted `keep_ms` ago or more: Recently deleted, by the
@@ -403,10 +408,7 @@ impl Drive {
     pub fn purge(&self, keep_ms: i64) -> Result<usize, EngineError> {
         self.pull(None)?;
         let now = self.server_time.load(Ordering::SeqCst);
-        let mut moved = false;
-        let gone = deleted::purge(&self.account, self.remote(), keep_ms, now, &mut moved);
-        self.behind_if(moved, &gone);
-        gone
+        self.with_ops(|ops| ops.purge(keep_ms, now))
     }
 
     /// Once a day: deletes for good what Recently deleted has kept `keep_days`, never less

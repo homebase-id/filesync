@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
-use hbsync_remote::{Remote, RemoteError};
+use hbsync_remote::Remote;
 use hbsync_state::{DirtyCursor, StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
@@ -15,8 +15,9 @@ use hbsync_types::activity::Synced;
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
 use crate::drive::Drive;
+use crate::error::EngineError;
 use crate::exec::{ExecConfig, Executor, Stopped, record_dirs, recover, recover_placements};
-use crate::feed::{FeedError, FeedReport};
+use crate::feed::FeedReport;
 use crate::reconcile::{Conflict, Op, Options, Plan, reconcile_with_known};
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
@@ -68,34 +69,6 @@ impl EngineConfig {
             #[cfg(feature = "testkit")]
             check_narrow: false,
         }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum EngineError {
-    #[error(transparent)]
-    State(#[from] StateError),
-    #[error(transparent)]
-    Feed(#[from] FeedError),
-    #[error("{0} panicked")]
-    Panic(&'static str),
-    /// The executor stopped early: access denied, or the remote unreachable.
-    #[error(transparent)]
-    Stopped(#[from] Stopped),
-    /// A remote call outside a sync (Recently deleted) failed.
-    #[error(transparent)]
-    Remote(#[from] RemoteError),
-}
-
-impl EngineError {
-    /// The remote refused access (a sync, a feed read): retrying won't help.
-    pub fn is_denied(&self) -> bool {
-        matches!(
-            self,
-            EngineError::Stopped(Stopped::Denied(_))
-                | EngineError::Feed(FeedError::Remote(RemoteError::Denied(_)))
-                | EngineError::Remote(RemoteError::Denied(_))
-        )
     }
 }
 

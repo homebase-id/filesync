@@ -118,8 +118,8 @@ pub enum Action {
     /// The user empties one item of Recently deleted as last listed (a pick of its rows; nothing
     /// without a listing): it and all of Recently deleted in it ([`deleted::inside`]: what was
     /// deleted from it before too), at their listed versions, as the engine selects them
-    /// ([`deleted::empty`] with the listing: nothing recorded since). An item holding nothing
-    /// live and nothing written since the listing goes.
+    /// ([`deleted::AccountOps::empty`] with the listing: nothing recorded since). An item holding
+    /// nothing live and nothing written since the listing goes.
     EmptyItem {
         pick: usize,
     },
@@ -303,11 +303,11 @@ impl Server {
         .collect()
     }
 
-    /// The engine's purge (`deleted::purge`), its clock moved on [`PURGE_EVERY`], first part:
-    /// what the deletes of the items removed [`TRACE`] before now (each deleted on its own)
+    /// The engine's purge (`deleted::AccountOps::purge`), its clock moved on [`PURGE_EVERY`], first
+    /// part: what the deletes of the items removed [`TRACE`] before now (each deleted on its own)
     /// took along and left live, top-down, as the engine picks it
-    /// ([`hbsync_engine::along::taken_levels`]; the purging device knows every version here),
-    /// for [`Sim::remove_live`]. Then [`Server::due`].
+    /// ([`hbsync_engine::along::taken_levels`]; the purging device knows every version here), for
+    /// [`Sim::remove_live`]. Then [`Server::due`].
     fn purge(&mut self) -> Vec<NodeId> {
         self.next += PURGE_EVERY as u128;
         let folders: HashMap<NodeId, i64> = self

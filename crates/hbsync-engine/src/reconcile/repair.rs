@@ -235,16 +235,16 @@ impl Reconciler<'_> {
             let listed_as = self.listed_as(parent);
             let input = self.input;
             let part = input
-                .listed
+                .coverage
                 .as_ref()
-                .filter(|l| !l.full.contains(&listed_as));
-            let mut unlisted = part.is_some_and(|listed| {
+                .filter(|c| !c.full.contains(&listed_as));
+            let mut unlisted = part.is_some_and(|coverage| {
                 self.merged.children(parent).any(|c| {
                     self.scope.contains(&c)
                         && self
                             .merged
                             .get(c)
-                            .is_some_and(|s| !listed.holds(listed_as, &s.name))
+                            .is_some_and(|s| !coverage.holds(listed_as, &s.name))
                 })
             });
             // Names held remotely by nodes this device doesn't sync (§10) are taken: their
