@@ -149,6 +149,7 @@ impl Executor<'_> {
             file_id: mirror.file_id,
             expected,
             size: file.size,
+            // No date reads as 0, as in `MirrorRow::state`.
             mtime_ms: file.mtime_ms.unwrap_or(0),
             executable: (self.folder.os != Os::Windows).then_some(file.executable),
             tmp_dir: layout::tmp_dir(&self.folder.root),

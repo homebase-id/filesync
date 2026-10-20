@@ -133,18 +133,20 @@ impl NodeContent {
     /// [`keys_from_str`]): the unknown ones, the creation time and the tags; and a folder's
     /// `mtime`, `size` and `x`, which only files use (another writer's: written back as read).
     pub fn carried_json(&self, kind: NodeKind) -> Option<String> {
-        let mut keys = self.unknown.clone();
-        if kind == NodeKind::Folder {
-            if let Some(mtime) = self.mtime {
-                keys.insert("mtime".into(), mtime.into());
+        let mut keys = match kind {
+            // A map of JSON values can't fail to serialize.
+            NodeKind::File => {
+                return (!self.unknown.is_empty())
+                    .then(|| serde_json::to_string(&self.unknown).unwrap_or_default());
             }
-            if let Some(size) = self.size {
-                keys.insert("size".into(), size.into());
-            }
-            if self.x {
-                keys.insert("x".into(), true.into());
-            }
-        }
+            // As it serializes: the unknown keys and the file keys it has (`x` only when true).
+            NodeKind::Folder => match serde_json::to_value(self) {
+                Ok(Value::Object(keys)) => keys,
+                _ => return None,
+            },
+        };
+        keys.remove("v");
+        keys.remove("name");
         (!keys.is_empty()).then(|| Value::Object(keys).to_string())
     }
 
