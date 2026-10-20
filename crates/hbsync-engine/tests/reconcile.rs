@@ -569,18 +569,18 @@ fn names_judged_in_part_of_a_folder_ask_for_all_of_it() {
     w.synced(docs, folder(ROOT, "Docs"));
     w.local(low, Some(file(docs, "x.txt", "local")));
     w.input.coverage = Some(named(&["x.txt"]));
-    assert!(w.plan().unlisted.is_empty());
+    assert!(w.plan().uncovered.is_empty());
     // A clash: the loser's numbered name is judged against the whole folder.
     w.remote(high, Some(file(docs, "X.TXT", "remote")));
     let plan = w.plan();
     assert_eq!(plan.conflicts, [Conflict::NameClash { node: high }]);
-    assert_eq!(plan.unlisted, [docs].into());
+    assert_eq!(plan.uncovered, [docs].into());
     // Covered whole: the plan stands.
     w.input.coverage = Some(Coverage {
         full: [docs].into(),
         ..Coverage::default()
     });
-    assert!(w.plan().unlisted.is_empty());
+    assert!(w.plan().uncovered.is_empty());
     // An orphan the server kept goes into Recovered files, made at the root: neither was read.
     let mut w = World::default();
     w.remote(orphan, Some(file(gone, "kept.txt", "data")));
@@ -588,7 +588,7 @@ fn names_judged_in_part_of_a_folder_ask_for_all_of_it() {
     w.input.coverage = Some(Coverage::default());
     let plan = w.plan();
     assert_eq!(plan.conflicts, [Conflict::Orphan { node: orphan }]);
-    assert_eq!(plan.unlisted, [ROOT, NodeId::RECOVERED].into());
+    assert_eq!(plan.uncovered, [ROOT, NodeId::RECOVERED].into());
 }
 
 #[test]

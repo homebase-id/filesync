@@ -154,9 +154,9 @@ pub struct Recorded {
 
 impl RemovedRow {
     /// The removal's time for comparing: an open one is the newest
-    /// ([`hbsync_types::activity::removal_time`]).
+    /// ([`hbsync_types::removal_time`]).
     pub fn time(&self) -> i64 {
-        hbsync_types::activity::removal_time(self.removed_at)
+        hbsync_types::removal_time(self.removed_at)
     }
 }
 

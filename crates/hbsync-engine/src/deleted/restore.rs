@@ -21,8 +21,8 @@ impl AccountOps<'_> {
     /// Restores `node` with what was deleted with it, and the folders it was in that are in
     /// Recently deleted too (just those, not their other contents). Returns how many items came
     /// back; 0 when `node` isn't in Recently deleted (any more).
-    /// Sets [`AccountOps::behind`] when the drive refused a write for its state (changed or
-    /// deleted for good meanwhile), or a write may have landed unanswered.
+    /// Leaves the account behind ([`AccountOps::run`]) when the drive refused a write for its
+    /// state (changed or deleted for good meanwhile), or a write may have landed unanswered.
     pub fn restore(&mut self, node: NodeId) -> Result<usize, EngineError> {
         let Some(plan) = locked(self.account).read(|s| plan_restore(s, node))? else {
             return Ok(0);

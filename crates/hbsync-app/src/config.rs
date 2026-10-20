@@ -64,7 +64,7 @@ pub struct KeepDays(u32);
 
 impl KeepDays {
     /// What every client keeps (node schema, The purge): a device may keep longer only.
-    pub const MIN: u32 = hbsync_engine::deleted::MIN_KEEP_DAYS;
+    pub const MIN: u32 = hbsync_engine::time::MIN_KEEP_DAYS;
 
     /// The days kept, at least [`KeepDays::MIN`].
     pub fn days(self) -> u32 {

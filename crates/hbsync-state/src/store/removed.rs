@@ -236,7 +236,7 @@ impl ReadTx<'_> {
     }
 
     /// Recently deleted, newest first: NULL (an open time) first, as
-    /// [`hbsync_types::activity::removal_time`] has it.
+    /// [`hbsync_types::removal_time`] has it.
     pub fn list_removed(&self, limit: usize) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
             &format!(

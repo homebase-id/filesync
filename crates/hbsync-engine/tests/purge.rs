@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use common::{Client, server};
 use hbsync_engine::deleted;
-use hbsync_engine::feed::{self, TRACE_MS};
+use hbsync_engine::feed;
+use hbsync_engine::time::TRACE_MS;
 use hbsync_local::layout;
 use hbsync_remote::RemoteError;
 use hbsync_remote::fake::{FakeRemote, FakeServer};
@@ -937,9 +938,8 @@ fn purge(
     now: i64,
     behind: &mut bool,
 ) -> Result<usize, hbsync_engine::EngineError> {
-    let mut ops = deleted::AccountOps::new(account, remote);
-    let gone = ops.purge(keep_ms, now);
-    *behind |= ops.behind;
+    let (gone, was) = deleted::AccountOps::run(account, remote, |ops| ops.purge(keep_ms, now));
+    *behind |= was;
     gone
 }
 

@@ -15,6 +15,8 @@ use std::sync::{Mutex, MutexGuard};
 use hbsync_remote::Remote;
 use hbsync_state::StateDb;
 
+use crate::error::EngineError;
+
 mod listing;
 mod purge;
 mod restore;
@@ -24,10 +26,6 @@ mod tests;
 
 pub use listing::{DeletedSummary, Listed, deletes, listed_here, listed_now};
 pub use rules::{Chosen, Holdings, before_folders_go, inside, passes};
-
-/// The fewest days Recently deleted keeps an item: the purge is the whole account's, and every
-/// client keeps 30 (node schema, The purge). A device may keep longer, never shorter.
-pub const MIN_KEEP_DAYS: u32 = 30;
 
 /// The account's DB, held only while it is read or written: never while the server answers.
 fn locked(account: &Mutex<StateDb>) -> MutexGuard<'_, StateDb> {
@@ -41,7 +39,8 @@ pub struct AccountOps<'a> {
     remote: &'a dyn Remote,
     /// The drive refused a write for its state (changed, restored, or deleted for good
     /// meanwhile), or a write may have landed unanswered: the account's picture lacks that.
-    pub behind: bool,
+    /// [`AccountOps::run`] returns it.
+    behind: bool,
 }
 
 impl std::fmt::Debug for AccountOps<'_> {
@@ -53,7 +52,21 @@ impl std::fmt::Debug for AccountOps<'_> {
 }
 
 impl<'a> AccountOps<'a> {
-    pub fn new(account: &'a Mutex<StateDb>, remote: &'a dyn Remote) -> AccountOps<'a> {
+    /// Runs `op`, operations on the account's DB and `remote`: its result, and whether the
+    /// account is behind after it (the drive refused a write for its state, or an answer was
+    /// lost), which the caller must take in.
+    #[must_use = "whether the account fell behind must be taken in"]
+    pub fn run<T>(
+        account: &'a Mutex<StateDb>,
+        remote: &'a dyn Remote,
+        op: impl FnOnce(&mut AccountOps<'a>) -> Result<T, EngineError>,
+    ) -> (Result<T, EngineError>, bool) {
+        let mut ops = AccountOps::new(account, remote);
+        let done = op(&mut ops);
+        (done, ops.behind)
+    }
+
+    fn new(account: &'a Mutex<StateDb>, remote: &'a dyn Remote) -> AccountOps<'a> {
         AccountOps {
             account,
             remote,

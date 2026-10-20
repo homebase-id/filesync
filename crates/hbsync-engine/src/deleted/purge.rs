@@ -10,8 +10,8 @@ use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError, keys};
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::feed::TRACE_MS;
 use crate::mirror::{self, gone_for_good};
+use crate::time::TRACE_MS;
 use crate::trash::empty_trash;
 use hbsync_local::layout;
 
@@ -41,8 +41,8 @@ impl AccountOps<'_> {
     ///
     /// Each part runs whatever became of the others (the trash only once the items went); the
     /// first error is returned at the end.
-    /// Returns how many items went. Sets [`AccountOps::behind`] when the drive refused a delete
-    /// for its state (written since, restored, gone already).
+    /// Returns how many items went. Leaves the account behind ([`AccountOps::run`]) when the
+    /// drive refused a delete for its state (written since, restored, gone already).
     pub fn purge(&mut self, keep_ms: i64, now_ms: i64) -> Result<usize, EngineError> {
         let traced = now_ms.saturating_sub(TRACE_MS);
         let before = now_ms.saturating_sub(keep_ms);
@@ -183,9 +183,9 @@ impl AccountOps<'_> {
     /// holds a live node, and those are put back, with the ones above them it removed
     /// ([`Self::put_back`]).
     ///
-    /// Returns how many it removed (and didn't put back). A refused or unanswered one sets
-    /// [`AccountOps::behind`]; a request that fails stops it with its error, after putting back
-    /// what needs it; another error is returned once the rest is done.
+    /// Returns how many it removed (and didn't put back). A refused or unanswered one leaves
+    /// the account behind ([`AccountOps::run`]); a request that fails stops it with its error,
+    /// after putting back what needs it; another error is returned once the rest is done.
     pub(super) fn remove_taken_along(&mut self, before: i64) -> Result<usize, EngineError> {
         let Stuck { folders, live } = self.db().read(|s| stuck_below(s, before))?;
         let removed_at: HashMap<NodeId, i64> = folders
@@ -293,7 +293,7 @@ impl AccountOps<'_> {
     /// with its depth) that the drive says hold a live node, asked once its queries show what was
     /// written up to `last` (the last removal), and the folders above them among `made`: top-down,
     /// each at the version written, as a restore does. One that doesn't come back (written since)
-    /// sets [`AccountOps::behind`]. Returns how many came back.
+    /// leaves the account behind ([`AccountOps::run`]). Returns how many came back.
     fn put_back(
         &mut self,
         made: Vec<(MirrorRow, usize)>,
@@ -368,9 +368,9 @@ impl AccountOps<'_> {
     /// still to go, and goes first. A node removed before `hard_before` (Unix ms, the
     /// server's) goes without a trace; any other leaves a tombstone (`None`: every one does),
     /// recorded with its time; both in batches, many files a request. Returns how many went. One
-    /// written since, or not found, sets [`AccountOps::behind`]; one not found is recorded gone
-    /// once its header says so too. A request that fails stops it with its error: what it didn't
-    /// answer stays, for the next purge.
+    /// written since, or not found, leaves the account behind ([`AccountOps::run`]); one not
+    /// found is recorded gone once its header says so too. A request that fails stops it with its
+    /// error: what it didn't answer stays, for the next purge.
     fn delete_for_good(
         &mut self,
         passes: &[Vec<RemovedRow>],

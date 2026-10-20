@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
@@ -39,12 +39,42 @@ pub struct Drive {
     asked: AtomicU64,
     /// Held while pulling: how many of the asks the last finished pull answered.
     answered: Mutex<u64>,
-    /// Folders to wake when the drive changed: each one's call, false once it is gone.
-    wakes: Mutex<Vec<(i64, Wake)>>,
+    /// Folders to wake when the drive changed.
+    wakes: Wakes,
     /// Feed rows the client can't read, whoever pulled them, until taken.
     skipped: Mutex<Vec<String>>,
     /// The drive refused an upload, out of storage: until when uploads are held.
     full: Mutex<Option<Instant>>,
+    /// Whether the account's picture is current.
+    freshness: Freshness,
+    /// The server's clock at the last page of the feed read, Unix ms (0: none yet).
+    server_time: AtomicI64,
+    /// A re-read of the whole feed on its way, between pulls ([`feed::Reread`]).
+    reread: Mutex<Option<feed::Reread>>,
+}
+
+/// Wakes a folder's engine ([`Drive::subscribe_with`]).
+type Wake = Box<dyn Fn() -> bool + Send>;
+
+/// The folders to wake when the drive changed: each one's call, false once it is gone.
+#[derive(Default)]
+struct Wakes(Mutex<Vec<(i64, Wake)>>);
+
+impl Wakes {
+    fn add(&self, folder: i64, wake: Wake) {
+        lock(&self.0).push((folder, wake));
+    }
+
+    /// Wakes the folders `wanted` takes; those gone are forgotten.
+    fn wake_where(&self, wanted: impl Fn(i64) -> bool) {
+        lock(&self.0).retain(|(folder, wake)| !wanted(*folder) || wake());
+    }
+}
+
+/// Whether the account's picture of the drive is current: the notifications announce the
+/// drive's changes, and nothing put it in doubt since the last read that worked.
+#[derive(Debug, Default)]
+struct Freshness {
     /// The identity announces the drive's changes: the notifications are connected, and the
     /// read that followed their connecting worked.
     announcing: AtomicBool,
@@ -57,17 +87,54 @@ pub struct Drive {
     /// ahead: a read clears only the doubts from before it started.
     doubts: AtomicU64,
     answered_doubts: AtomicU64,
-    /// The server's clock at the last page of the feed read, Unix ms (0: none yet).
-    server_time: AtomicI64,
-    /// A re-read of the whole feed on its way, between pulls ([`feed::Reread`]).
-    reread: Mutex<Option<feed::Reread>>,
 }
 
-/// Wakes a folder's engine ([`Drive::subscribe_with`]).
-type Wake = Box<dyn Fn() -> bool + Send>;
+impl Freshness {
+    /// The mark of the notifications' current connection ([`Self::announcing_from`]).
+    fn connection(&self) -> u64 {
+        self.connections.load(Ordering::SeqCst)
+    }
 
-/// How long uploads are held after the drive said it is full: then one is tried again.
-const FULL_HOLD: Duration = Duration::from_secs(600);
+    /// The read asked for at `connection` worked: unless it was lost since, the drive's
+    /// changes are announced from now on.
+    fn announcing_from(&self, connection: u64) {
+        if self.connections.load(Ordering::SeqCst) == connection {
+            self.announcing.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The notifications are lost or refused: changes go unannounced, and what was announced
+    /// meanwhile may not have been taken.
+    fn not_announcing(&self) {
+        self.connections.fetch_add(1, Ordering::SeqCst);
+        self.announcing.store(false, Ordering::SeqCst);
+        self.doubt();
+    }
+
+    /// The picture may lack something.
+    fn doubt(&self) {
+        self.doubts.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The doubts so far: what a read starting now answers once it worked ([`Self::answered`]).
+    fn doubts(&self) -> u64 {
+        self.doubts.load(Ordering::SeqCst)
+    }
+
+    /// A read that worked answered the doubts there were when it started.
+    fn answered(&self, doubts: u64) {
+        self.answered_doubts.fetch_max(doubts, Ordering::SeqCst);
+    }
+
+    fn current(&self) -> bool {
+        self.announcing.load(Ordering::SeqCst)
+            && self.answered_doubts.load(Ordering::SeqCst) >= self.doubts.load(Ordering::SeqCst)
+    }
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 impl std::fmt::Debug for Drive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,13 +160,10 @@ impl Drive {
             remote,
             asked: AtomicU64::new(0),
             answered: Mutex::new(0),
-            wakes: Mutex::default(),
+            wakes: Wakes::default(),
             skipped: Mutex::default(),
             full: Mutex::default(),
-            announcing: AtomicBool::new(false),
-            connections: AtomicU64::new(0),
-            doubts: AtomicU64::new(0),
-            answered_doubts: AtomicU64::new(0),
+            freshness: Freshness::default(),
             server_time: AtomicI64::new(0),
             reread: Mutex::default(),
         })
@@ -108,28 +172,24 @@ impl Drive {
     /// The notifications connected: the mark of this connection, for
     /// [`Drive::announcing_from`] once the read that follows worked.
     pub fn connection(&self) -> u64 {
-        self.connections.load(Ordering::SeqCst)
+        self.freshness.connection()
     }
 
     /// The read asked for when the notifications connected (`connection`) worked: unless that
     /// connection was lost since, the drive's changes are announced from now on.
     pub fn announcing_from(&self, connection: u64) {
-        if self.connections.load(Ordering::SeqCst) == connection {
-            self.announcing.store(true, Ordering::SeqCst);
-        }
+        self.freshness.announcing_from(connection);
     }
 
     /// The notifications are lost or refused: changes go unannounced, and what was announced
     /// meanwhile may not have been taken, so the account is behind.
     pub fn not_announcing(&self) {
-        self.connections.fetch_add(1, Ordering::SeqCst);
-        self.announcing.store(false, Ordering::SeqCst);
-        self.set_behind();
+        self.freshness.not_announcing();
     }
 
     /// The account's picture may lack something: the next sync reads the feed.
     pub fn set_behind(&self) {
-        self.doubts.fetch_add(1, Ordering::SeqCst);
+        self.freshness.doubt();
     }
 
     /// Behind after deleting for good when the drive refused something for its state
@@ -140,15 +200,11 @@ impl Drive {
         }
     }
 
-    fn behind(&self) -> bool {
-        self.answered_doubts.load(Ordering::SeqCst) < self.doubts.load(Ordering::SeqCst)
-    }
-
     /// Whether the account's picture of the drive is as current as the announcements make it:
     /// they are connected and the last pull worked. Then nothing needs reading the feed to
     /// sync (this device's own writes are recorded from their answers); else a sync reads it.
     pub fn current(&self) -> bool {
-        self.announcing.load(Ordering::SeqCst) && !self.behind()
+        self.freshness.current()
     }
 
     /// Reads the feed ([`Drive::pull`]) unless the picture is [`Drive::current`].
@@ -161,18 +217,18 @@ impl Drive {
 
     /// Whether uploads are held: the drive said it is full lately.
     pub(crate) fn full(&self) -> bool {
-        let full = self.full.lock().unwrap_or_else(|e| e.into_inner());
+        let full = lock(&self.full);
         full.is_some_and(|until| Instant::now() < until)
     }
 
     /// Tries uploads again at once (the user asked for a sync: they may have made room).
     pub fn clear_full(&self) {
-        *self.full.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *lock(&self.full) = None;
     }
 
     /// The drive refused an upload, out of storage: hold uploads for a while, in every folder.
     pub(crate) fn set_full(&self) {
-        *self.full.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + FULL_HOLD);
+        *lock(&self.full) = Some(Instant::now() + crate::time::FULL_HOLD);
     }
 
     fn remote(&self) -> &dyn Remote {
@@ -189,7 +245,7 @@ impl Drive {
     }
 
     fn account(&self) -> MutexGuard<'_, StateDb> {
-        self.account.lock().unwrap_or_else(|e| e.into_inner())
+        lock(&self.account)
     }
 
     /// Runs `op`, one of Recently deleted's operations on the account's DB and the drive; the
@@ -198,9 +254,8 @@ impl Drive {
         &self,
         op: impl FnOnce(&mut deleted::AccountOps<'_>) -> Result<T, EngineError>,
     ) -> Result<T, EngineError> {
-        let mut ops = deleted::AccountOps::new(&self.account, self.remote());
-        let done = op(&mut ops);
-        self.behind_if(ops.behind, &done);
+        let (done, behind) = deleted::AccountOps::run(&self.account, self.remote(), op);
+        self.behind_if(behind, &done);
         done
     }
 
@@ -211,21 +266,21 @@ impl Drive {
     /// The account's connection is free for others while a page is on its way.
     pub fn pull(&self, from: Option<i64>) -> Result<FeedReport, FeedError> {
         let ticket = self.asked.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut answered = self.answered.lock().unwrap_or_else(|e| e.into_inner());
+        let mut answered = lock(&self.answered);
         if *answered >= ticket {
             return Ok(FeedReport::default());
         }
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
-        let doubts = self.doubts.load(Ordering::SeqCst);
+        let doubts = self.freshness.doubts();
         let pulled = {
-            let mut reread = self.reread.lock().unwrap_or_else(|e| e.into_inner());
+            let mut reread = lock(&self.reread);
             feed::pull(|| self.account(), self.remote(), FEED_PAGES, &mut reread)
         };
         match &pulled {
             // What was in doubt when it started is answered; a doubt since isn't.
             Ok(report) => {
-                self.answered_doubts.fetch_max(doubts, Ordering::SeqCst);
+                self.freshness.answered(doubts);
                 *answered = covers;
                 if let Some(now) = report.server_time {
                     self.server_time.store(now, Ordering::SeqCst);
@@ -238,7 +293,7 @@ impl Drive {
         self.wake_touched(&mut self.account(), from);
         drop(answered);
         let mut report = pulled?;
-        let mut skipped = self.skipped.lock().unwrap_or_else(|e| e.into_inner());
+        let mut skipped = lock(&self.skipped);
         let room = MAX_SKIPPED.saturating_sub(skipped.len());
         skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));
         Ok(report)
@@ -253,7 +308,7 @@ impl Drive {
         if refs.is_empty() {
             return Ok(true);
         }
-        let _one_at_a_time = self.answered.lock().unwrap_or_else(|e| e.into_inner());
+        let _one_at_a_time = lock(&self.answered);
         let mut db = self.account();
         let all = db.write(|s| feed::announced(s.account(), refs))?;
         self.wake_touched(&mut db, None);
@@ -263,7 +318,7 @@ impl Drive {
     /// The feed rows the client couldn't read (not encrypted, another key, not a sync node)
     /// since the last call, each with why; a thousand at most.
     pub fn take_skipped(&self) -> Vec<String> {
-        std::mem::take(&mut *self.skipped.lock().unwrap_or_else(|e| e.into_inner()))
+        std::mem::take(&mut *lock(&self.skipped))
     }
 
     /// A channel woken when the drive changed for `folder`'s engine (another engine's pull, or
@@ -277,29 +332,20 @@ impl Drive {
     /// Calls `wake` when the drive changed for `folder`'s engine, as [`Drive::subscribe`]
     /// does, until it returns false (its folder is gone).
     pub fn subscribe_with(&self, folder: i64, wake: impl Fn() -> bool + Send + 'static) {
-        self.wakes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((folder, Box::new(wake)));
+        self.wakes.add(folder, Box::new(wake));
     }
 
     /// Wakes every folder's engine: the drive changed. Folders gone are forgotten.
     pub fn wake_all(&self) {
-        self.wake_where(|_| true);
+        self.wakes.wake_where(|_| true);
     }
 
     /// Wakes the engines of the folders the writes through `db` marked nodes dirty in
     /// ([`StateDb::take_touched`]), but `except`'s.
     pub(crate) fn wake_touched(&self, db: &mut StateDb, except: Option<i64>) {
         let folders = db.take_touched();
-        self.wake_where(|folder| Some(folder) != except && folders.contains(&folder));
-    }
-
-    fn wake_where(&self, wanted: impl Fn(i64) -> bool) {
         self.wakes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|(folder, wake)| !wanted(*folder) || wake());
+            .wake_where(|folder| Some(folder) != except && folders.contains(&folder));
     }
 
     /// Makes sure the drive has `role`'s folder, just pulled: kept if it is there, back from
@@ -402,20 +448,19 @@ impl Drive {
     }
 
     /// Once a day: deletes for good what Recently deleted has kept `keep_days`, never less
-    /// than [`deleted::MIN_KEEP_DAYS`] (and the trash of the same age). A failure waits for the
+    /// than [`crate::time::MIN_KEEP_DAYS`] (and the trash of the same age). A failure waits for the
     /// next day's try... or the next call: it is only recorded as done when it worked.
     pub fn purge_when_due(&self, keep_days: u32) -> Result<Option<usize>, EngineError> {
-        let keep_days = keep_days.max(deleted::MIN_KEEP_DAYS);
-        const DAY: u64 = 24 * 60 * 60;
+        let keep_days = keep_days.max(crate::time::MIN_KEEP_DAYS);
         let now = hbsync_types::unix_now();
         let last = self
             .account()
             .read(|s| s.account_kv(keys::PURGED_AT))?
             .and_then(|v| v.parse::<u64>().ok());
-        if last.is_some_and(|last| now < last + DAY) {
+        if last.is_some_and(|last| now < last + crate::time::DAY_S) {
             return Ok(None);
         }
-        let gone = self.purge(i64::from(keep_days) * DAY as i64 * 1000)?;
+        let gone = self.purge(i64::from(keep_days) * crate::time::DAY_MS)?;
         self.account().write(|s| {
             s.account()
                 .set_account_kv(keys::PURGED_AT, &now.to_string())

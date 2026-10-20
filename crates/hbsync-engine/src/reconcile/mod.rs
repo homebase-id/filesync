@@ -69,7 +69,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
     // judged with all of the folder's children.
     if let Some(coverage) = &input.coverage {
-        plan.unlisted.extend(
+        plan.uncovered.extend(
             masks
                 .masked
                 .iter()

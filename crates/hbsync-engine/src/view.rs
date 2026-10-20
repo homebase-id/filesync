@@ -128,7 +128,7 @@ pub fn build_input(s: &ReadTx<'_>, dirty: &[NodeId], ctx: &FolderCtx) -> Result<
 
 /// [`build_input`] with only the children the rules may need, except in the folders in `full`
 /// ([`Input::coverage`]): planning a change in a large folder reads a few rows, not the folder.
-/// A plan that needs more says so ([`crate::plan::Plan::unlisted`]).
+/// A plan that needs more says so ([`crate::plan::Plan::uncovered`]).
 pub(crate) fn build_narrow(
     s: &ReadTx<'_>,
     dirty: &[NodeId],
@@ -305,7 +305,7 @@ fn build(
     // puts into Recovered files: where that is (live, removed or synced here before; loaded
     // after the role folders held nothing of are dropped: one holding it masks it), and what
     // may clash with the names coming, in it and, for its own, at the top (the plan asks for
-    // the rest: `Plan::unlisted`).
+    // the rest: `Plan::uncovered`).
     let missing = looked_up_removed(&b.input.remote, scope.top);
     if missing.contains(&NodeId::RECOVERED) {
         b.load(NodeId::RECOVERED)?;
@@ -387,7 +387,7 @@ pub(crate) fn gone_on_drive(
     if scope.outside.contains(&coords.from_drive(folder)) {
         return Ok(false);
     }
-    let removed = hbsync_types::activity::removal_time(at);
+    let removed = hbsync_types::removal_time(at);
     Ok(row.changed_at.is_none_or(|c| c <= removed))
 }
 
