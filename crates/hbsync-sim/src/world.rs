@@ -122,9 +122,9 @@ impl Sim {
     }
 
     /// What [`Action::IntoFile`] picks from: the drive's live nodes and files outside the role
-    /// folder (its delete, the phone's, would take a node in a file along before any computer
-    /// moved it out, which Recently deleted doesn't model: a node in a removed file is no item
-    /// of the file's), the fixed folders left out.
+    /// folder, the fixed folders left out. The role folder's delete (the phone's) and restore
+    /// would take a node in a file along and leave it: Recently deleted has no rule for what is
+    /// in a file (a question for the purge's rules, not modelled).
     fn file_move_candidates(&self) -> (Vec<NodeId>, Vec<NodeId>) {
         let server = &self.server;
         let free = |n: &NodeId| {
@@ -783,7 +783,10 @@ impl Sim {
                 .map(|(n, _)| n.state.parent)
                 .collect();
             for n in pass {
-                if holding.contains(&n) {
+                // Only a pass's folders are asked about, as the engine asks (a file another
+                // writer put something in holds nothing: what is in it is its own item).
+                let folder = self.server.removed[&n].state.kind == NodeKind::Folder;
+                if folder && holding.contains(&n) {
                     continue;
                 }
                 let was_chosen = self
@@ -791,12 +794,13 @@ impl Sim {
                     .removed
                     .get_key_value(&n)
                     .is_some_and(|row| chosen.contains(&Server::at(row)));
+                // A folder never goes holding what isn't going; a file holds nothing.
                 let held = self
                     .server
                     .live
                     .iter()
                     .chain(&self.server.removed)
-                    .find(|(c, s)| s.state.parent == n && !pending.contains(*c))
+                    .find(|(c, s)| folder && s.state.parent == n && !pending.contains(*c))
                     .map(|(c, _)| *c);
                 let wrong = !was_chosen || held.is_some();
                 self.ledger
