@@ -3831,3 +3831,35 @@ fn regression_a_sent_add_stays_with_its_node_after_a_lost_delete_and_a_crash() {
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// The phone deletes a file, and a plan here trashes it; before the trash runs, the user
+/// restores it on the drive. The trash acted on the removal: the file comes back here, and
+/// stays on the drive. A base the trash left behind read as this device deleting it: the plan
+/// after removed it again, and the purge, 30 days on, for good.
+#[test]
+fn regression_a_restore_while_the_trash_runs_stands() {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let act = |client, action| Event::Act { client, action };
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    assert!(sim.quiesce(30), "no convergence");
+    let file = sim.item(0, "a").expect("a");
+    let node = sim.pick(1, file, false).expect("a");
+    sim.run(&[
+        act(1, Delete { node }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        // Client 0 plans the trash; the user restores the file before it runs.
+        Event::Plan { client: 0 },
+    ]);
+    assert_eq!(sim.planned(0), ["LocalTrash"]);
+    let restore = sim.removed_pick(file).expect("in Recently deleted");
+    sim.run(&[act(0, Restore { node: restore }), Event::Step { client: 0 }]);
+    assert!(sim.item(0, "a").is_none(), "trashed");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(sim.server_paths(), ["a"], "the restore stands");
+    assert!(sim.item(0, "a").is_some(), "back here");
+}

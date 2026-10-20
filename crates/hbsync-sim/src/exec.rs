@@ -1047,22 +1047,13 @@ impl Sim {
                 }
                 rekey_client(client, node, new_node);
                 // Not synced here any more; see the executor.
-                client.base.remove(node);
-                client.extra.remove(&node);
+                client.drop_base(node);
                 self.retrack(c, node, new_node);
                 Done
             }
             Op::Forget { node, subtree } => {
                 if !subtree.is_empty() {
-                    let outcome = self.trash(c, node, &subtree);
-                    if outcome == Done {
-                        let client = &mut self.clients[c];
-                        for n in &subtree {
-                            client.base.remove(*n);
-                            client.extra.remove(n);
-                        }
-                    }
-                    return outcome;
+                    return self.trash(c, node, &subtree); // the bases go with it
                 }
                 let client = &mut self.clients[c];
                 // Still here, or its children's bases first, unless they are forgotten in this
@@ -1077,16 +1068,15 @@ impl Sim {
                 {
                     return Skip;
                 }
-                client.base.remove(node);
-                client.extra.remove(&node);
+                client.drop_base(node);
                 Done
             }
         }
     }
 
     /// Moves `node` and everything below it to the trash, as the executor does: only if the
-    /// visible part is `expected` and unchanged since planning. Junk goes along; ignored items
-    /// stay, and so do the folders they sit in, released (§10).
+    /// visible part is `expected` and unchanged since planning, with the bases of all of it.
+    /// Junk goes along; ignored items stay, and so do the folders they sit in, released (§10).
     fn trash(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
         use Outcome::{Done, Skip};
         let unchanged = |client: &Client, node: NodeId| {
@@ -1167,6 +1157,14 @@ impl Sim {
             client.parked.remove(&n);
             // Tag changes made here went to the trash with the item, but for an add sent up.
             self.tag_changes_left(c, n);
+        }
+        // What went isn't synced here any more: its bases go with it, whatever the drive holds
+        // by now (the executor's; one left behind would read as a local delete once the node
+        // is back in view). Of what it had rows of: what isn't filtered (an ignored item kept
+        // here keeps its base).
+        let client = &mut self.clients[c];
+        for n in &shown {
+            client.drop_base(*n);
         }
         for r in released {
             let new = self.ids.fresh();
@@ -1322,8 +1320,7 @@ impl Sim {
         };
         match (local, remote) {
             (None, _) if server.is_none() => {
-                client.base.remove(node);
-                client.extra.remove(&node);
+                client.drop_base(node);
                 None
             }
             // The base moved otherwise: only the tags settle.

@@ -123,6 +123,12 @@ impl Client {
         }
     }
 
+    /// `node` isn't synced here any more: its base goes.
+    pub(crate) fn drop_base(&mut self, node: NodeId) {
+        self.base.remove(node);
+        self.extra.remove(&node);
+    }
+
     /// The part of the drive the client's folder syncs.
     pub(crate) fn scope(&self) -> Scope {
         Scope::of(self.coords.top)

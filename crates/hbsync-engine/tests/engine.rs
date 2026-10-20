@@ -3778,10 +3778,7 @@ fn a_restore_takes_the_bytes_from_the_trash() -> R {
     a.sync()?;
     b.sync()?;
     assert!(b.read_text("run/x.txt").is_err(), "deleted on b");
-    let entry = fs::read_dir(b.root.join(".hbsync/trash"))?
-        .next()
-        .ok_or("no trash entry")??
-        .path();
+    let entry = trash_entry(&b)?;
     // Changed in the trash, its size kept: not the drive's bytes.
     let changed = "Z".repeat(3000);
     fs::write(entry.join("run/z.txt"), &changed)?;
@@ -3852,5 +3849,149 @@ fn a_crash_while_taking_from_the_trash_loses_nothing() -> R {
             }
         }
     }
+    Ok(())
+}
+
+/// b's trash of a file a deleted is cut short by a crash after the move to the trash, before
+/// its commit; with `restored`, a restores the file before b runs again. Returns b's tree and
+/// the drive's live names once both synced.
+#[allow(clippy::type_complexity)]
+fn crash_after_a_trash(
+    restored: bool,
+) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.allow_mass_delete = true;
+        c.exec.hooks.crash_at = Some(CrashPoint::AfterTrash)
+    })?;
+    a.write("x", "x")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("x"))?;
+    a.sync()?;
+    assert!(b.sync().is_err(), "b stops right after the trash move");
+    assert!(!b.root.join("x").exists(), "in the trash");
+    if restored {
+        let x = a
+            .recently_deleted(10)?
+            .into_iter()
+            .find(|i| i.path == "x")
+            .ok_or("x")?;
+        assert_eq!(a.engine.drive().restore(&[x.node])?, 1);
+    }
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
+    names.sort();
+    Ok((b.tree_text(""), names))
+}
+
+/// A crash between a trash's move and its commit loses no delete: the file stays deleted.
+#[test]
+fn crash_right_after_a_trash_keeps_the_delete() -> R {
+    let (tree, names) = crash_after_a_trash(false)?;
+    assert!(tree.is_empty() && names.is_empty(), "{tree:?} {names:?}");
+    Ok(())
+}
+
+/// Nor should a restore made before the next run: the file should come back. It doesn't yet:
+/// the scan reads the missing item against the base the lost commit would have dropped, as a
+/// local delete, and the plan removes the file again. Follow-up (C1): a write-ahead record of
+/// the run's trashes, finished at the next start.
+#[test]
+#[ignore = "follow-up C1: a trash's lost commit undoes a restore made before the next run"]
+fn crash_right_after_a_trash_keeps_a_restore() -> R {
+    let (tree, names) = crash_after_a_trash(true)?;
+    assert_eq!(tree, ["x = x"]);
+    assert_eq!(names, ["x"]);
+    Ok(())
+}
+
+/// A file b trashed because a deleted it, which the user moves back out of b's trash by hand:
+/// no base holds it (the trash dropped it), so it is a new file here, sent up as one. The
+/// deleted node stays deleted; nothing fights over it.
+#[test]
+fn a_trashed_file_moved_back_by_hand_is_a_new_file() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+    a.write("x", "x")?;
+    a.sync()?;
+    b.sync()?;
+    let x = hbsync_platform::RelPath::new("x")?;
+    let node = |a: &mut Client| -> Result<_, Box<dyn std::error::Error>> {
+        Ok(a.engine.db().read(|s| s.get_local(&x))?.ok_or("x")?.node)
+    };
+    let old = node(&mut a)?;
+    fs::remove_file(a.root.join("x"))?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(trash_entry(&b)?.join("x"), b.root.join("x"))?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["x = x"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_ne!(node(&mut a)?, old, "a new node");
+    assert!(
+        a.recently_deleted(10)?.iter().any(|i| i.node == old),
+        "the deleted one stays deleted"
+    );
+    Ok(())
+}
+
+/// The first entry of `c`'s trash.
+fn trash_entry(c: &Client) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    Ok(fs::read_dir(c.root.join(".hbsync/trash"))?
+        .next()
+        .ok_or("no trash entry")??
+        .path())
+}
+
+/// b keeps what it ignores in a folder a deleted, so its trash moves the rest one item at a
+/// time; one of them can't move (its folder is read-only). What did move left its base with
+/// it: a restore made meanwhile won't read as b deleting it.
+#[cfg(unix)]
+#[test]
+fn a_trash_that_stops_half_way_drops_the_bases_of_what_went() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        ignoring("*.log\n")(c);
+        c.allow_mass_delete = true;
+    })?;
+    a.write("proj/0.txt", "0")?;
+    a.write("proj/sub/b.txt", "b")?;
+    a.sync()?;
+    b.sync()?;
+    b.write("proj/sub/k.log", "kept")?;
+    let path = hbsync_platform::RelPath::new("proj/0.txt")?;
+    let moved = b
+        .engine
+        .db()
+        .read(|s| s.get_local(&path))?
+        .ok_or("0.txt")?
+        .node;
+    fs::remove_dir_all(a.root.join("proj"))?;
+    a.sync()?;
+    let sub = b.root.join("proj/sub");
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o555))?;
+    let _ = b.sync();
+    fs::set_permissions(&sub, fs::Permissions::from_mode(0o755))?;
+    assert!(!b.root.join("proj/0.txt").exists(), "moved to the trash");
+    assert!(b.root.join("proj/sub/b.txt").exists(), "couldn't move");
+    assert!(
+        b.engine.db().read(|s| s.get_base(moved))?.is_none(),
+        "its base stayed"
+    );
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(""),
+        ["proj/", "proj/sub/", "proj/sub/k.log = kept"]
+    );
     Ok(())
 }
