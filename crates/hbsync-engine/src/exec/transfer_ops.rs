@@ -321,11 +321,7 @@ impl Executor<'_> {
                     Err(e) => Ok(remote_outcome(e)),
                 }
             }
-            (_, _, JobResult::Failed(e)) => Ok(match e {
-                JobError::Remote(r) => remote_outcome(r),
-                // Local file errors (locked, changed mid-read, short) are worth another try.
-                e => Outcome::Retry(e.to_string()),
-            }),
+            (_, _, JobResult::Failed(e)) => Ok(Outcome::of(e.class(), e.to_string())),
             (Ctx::Download(d), _, JobResult::Downloaded { file, local_hash }) => {
                 self.place_download(*d, file, local_hash)
             }

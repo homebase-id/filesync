@@ -8,8 +8,8 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
+use hbsync_homebase::Client;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::{Client, HomebaseError};
 use hbsync_types::unix_now;
 
 use super::parts::AccountParts;
@@ -18,7 +18,7 @@ use super::{Account, Msg, Request};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
 use crate::protocol::{AccountStatus, Hints, Pause, State};
-use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError};
+use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, shown};
 use crate::sync::{lock, wait_for};
 use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
 
@@ -266,7 +266,7 @@ impl Account {
                             };
                         }
                         Some(Err(e)) => result = Err(e.into()),
-                        None => r.life = Life::Waiting(now + r.backoff.after(State::Failing)),
+                        None => r.life = Life::Waiting(now + r.backoff.next()),
                     }
                 }
                 for (root, new) in ready.into_iter().zip(started) {
@@ -384,7 +384,7 @@ impl Account {
                     )));
                 }
                 Err(CredentialError::Keychain(why)) => {
-                    let wait_for = backoff.after(State::Failing);
+                    let wait_for = backoff.next();
                     tracing::warn!("can't read the keychain ({why}); trying again in {wait_for:?}");
                     self.show_waiting(State::Failing, format!("can't read the keychain: {why}"));
                     if self.wait(wait_for, stop, rx, early) {
@@ -416,17 +416,13 @@ impl Account {
             match HomebaseRemote::connect(client.clone()) {
                 Ok(r) => return Some(Arc::new(r)),
                 Err(e) => {
-                    let state = match &e {
-                        HomebaseError::Denied(_) => State::Denied,
-                        HomebaseError::Network(_) => State::Offline,
-                        _ => State::Failing,
-                    };
-                    let wait_for = backoff.after(state);
+                    let class = e.class();
+                    let wait_for = backoff.after(class);
                     tracing::warn!(
                         "can't connect to {} ({e}); trying again in {wait_for:?}",
                         self.identity
                     );
-                    self.show_waiting(state, e.to_string());
+                    self.show_waiting(shown(class), e.to_string());
                     if self.wait(wait_for, stop, rx, early) {
                         return None;
                     }

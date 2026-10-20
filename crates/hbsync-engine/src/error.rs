@@ -1,7 +1,7 @@
 //! The engine's errors: a folder's sync, and the account's operations on its drive (Recently
 //! deleted, the purge, a role's folder).
 
-use hbsync_remote::RemoteError;
+use hbsync_remote::{ErrorClass, RemoteError};
 use hbsync_state::StateError;
 
 use crate::exec::Stopped;
@@ -24,13 +24,14 @@ pub enum EngineError {
 }
 
 impl EngineError {
-    /// The remote refused access (a sync, a feed read): retrying won't help.
-    pub fn is_denied(&self) -> bool {
-        matches!(
-            self,
-            EngineError::Stopped(Stopped::Denied(_))
-                | EngineError::Feed(FeedError::Remote(RemoteError::Denied(_)))
-                | EngineError::Remote(RemoteError::Denied(_))
-        )
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            EngineError::State(e) => e.class(),
+            EngineError::Feed(e) => e.class(),
+            EngineError::Panic(_) => ErrorClass::Bug,
+            EngineError::Stopped(e) => e.class(),
+            EngineError::Remote(e) => e.class(),
+        }
     }
 }

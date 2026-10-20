@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    Answers, ChangesPage, Deletes, ForGood, Holds, NodeMeta, Paced, RefsPage, Remote, RemoteBody,
-    RemoteError, RemoteHeader, Result, Upload,
+    Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, Paced, RefsPage, Remote,
+    RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
@@ -26,7 +26,7 @@ use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
 use crate::multipart::{Multipart, Part, SourceEnded};
-use crate::{HomebaseError, app};
+use crate::{ApiError, HomebaseError, app};
 
 pub mod sealed;
 pub mod wire;
@@ -732,32 +732,53 @@ fn remote_error(e: HomebaseError) -> RemoteError {
     match e {
         HomebaseError::Network(why) => RemoteError::Transient(why),
         HomebaseError::Denied(why) => RemoteError::Denied(why),
-        // A source that ended early changed since it was hashed.
-        HomebaseError::Io(e) if e.get_ref().is_some_and(|e| e.is::<SourceEnded>()) => {
-            RemoteError::HashMismatch
-        }
+        HomebaseError::Io(e) if source_ended(&e) => RemoteError::HashMismatch,
         HomebaseError::Io(e) => RemoteError::Io(e),
-        HomebaseError::Api { what, error } => {
-            let why = || format!("{what}: {error}");
-            let mapped = match error.code.as_deref().and_then(code_error) {
-                Some(mapped) => mapped,
-                None => match error.status {
-                    404 | 410 => RemoteError::NotFound,
-                    416 => RemoteError::StaleRange(why()),
-                    507 => RemoteError::Full(why()),
-                    408 | 429 | 499 | 500..=599 => RemoteError::Transient(why()),
-                    _ => RemoteError::Fatal(why()),
-                },
-            };
-            // "Not there" deletes here and is remembered for good: believed only from the
-            // identity itself, never from a proxy or a page in front of it (`ApiError::read`).
-            if matches!(mapped, RemoteError::NotFound) && !error.from_identity {
-                return RemoteError::Transient(format!("{} (not from the identity)", why()));
-            }
-            mapped
-        }
+        HomebaseError::Api { what, error } => api_error(&what, &error),
         e @ (HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_)) => {
             RemoteError::Fatal(e.to_string())
+        }
+    }
+}
+
+/// A source that ended early: it changed since it was hashed.
+fn source_ended(e: &std::io::Error) -> bool {
+    e.get_ref().is_some_and(|e| e.is::<SourceEnded>())
+}
+
+/// The trait's error for an error answer.
+fn api_error(what: &str, error: &ApiError) -> RemoteError {
+    let why = || format!("{what}: {error}");
+    let mapped = match error.code.as_deref().and_then(code_error) {
+        Some(mapped) => mapped,
+        None => match error.status {
+            404 | 410 => RemoteError::NotFound,
+            416 => RemoteError::StaleRange(why()),
+            507 => RemoteError::Full(why()),
+            408 | 429 | 499 | 500..=599 => RemoteError::Transient(why()),
+            _ => RemoteError::Fatal(why()),
+        },
+    };
+    // "Not there" deletes here and is remembered for good: believed only from the identity
+    // itself, never from a proxy or a page in front of it (`ApiError::read`).
+    if matches!(mapped, RemoteError::NotFound) && !error.from_identity {
+        return RemoteError::Transient(format!("{} (not from the identity)", why()));
+    }
+    mapped
+}
+
+impl HomebaseError {
+    /// What it means ([`ErrorClass`]): as the drive's error for it would say.
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            HomebaseError::Network(_) => ErrorClass::Transient,
+            HomebaseError::Denied(_) => ErrorClass::Denied,
+            HomebaseError::Io(e) if source_ended(e) => ErrorClass::Stale,
+            HomebaseError::Io(_) => ErrorClass::LocalFault,
+            HomebaseError::Api { what, error } => api_error(what, error).class(),
+            HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_) => {
+                ErrorClass::Refused
+            }
         }
     }
 }
@@ -765,7 +786,6 @@ fn remote_error(e: HomebaseError) -> RemoteError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ApiError;
 
     /// An error answer of the identity itself.
     fn api(status: u16, code: Option<&str>) -> HomebaseError {
@@ -778,6 +798,39 @@ mod tests {
                 from_identity: true,
             },
         }
+    }
+
+    /// An error's class is the class of the drive's error for it, so the account's connect
+    /// and the folders' syncs judge an answer alike: a server in trouble, or a "not found"
+    /// from a page in front of the identity, is offline.
+    #[test]
+    fn an_errors_class_is_its_drive_errors() {
+        let mut proxy = api(404, None);
+        if let HomebaseError::Api { error, .. } = &mut proxy {
+            error.from_identity = false;
+        }
+        let errors = || {
+            [
+                HomebaseError::Network("cut".into()),
+                HomebaseError::Denied("401".into()),
+                api(503, None),
+                api(429, None),
+                api(404, None),
+                api(400, Some("versionTagMismatch")),
+                api(400, None),
+                api(507, None),
+                HomebaseError::Protocol("odd".into()),
+                HomebaseError::Io(std::io::Error::other(SourceEnded { missing: 1 })),
+                HomebaseError::Io(std::io::Error::other("disk")),
+            ]
+        };
+        for e in errors() {
+            let class = e.class();
+            assert_eq!(class, remote_error(e).class());
+        }
+        assert_eq!(api(503, None).class(), ErrorClass::Transient);
+        assert_eq!(proxy.class(), ErrorClass::Transient);
+        assert_eq!(api(404, None).class(), ErrorClass::Gone);
     }
 
     /// A batch that fails after others went keeps their answers and stops there: the files

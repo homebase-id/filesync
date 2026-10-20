@@ -4,6 +4,9 @@
 
 use std::time::{Duration, Instant};
 
+use hbsync_engine::policy::{Shown, policy};
+use hbsync_remote::ErrorClass;
+
 use crate::protocol::{Pause, State};
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
@@ -19,16 +22,31 @@ impl Backoff {
         Backoff(FIRST_BACKOFF)
     }
 
-    /// The wait after a failure that left `state`. A refusal won't change until this device is
-    /// authorized again: ask rarely.
-    pub(crate) fn after(&mut self, state: State) -> Duration {
-        let wait = if state == State::Denied {
+    /// The wait after a failure of `class`: the longest at once where only the user changes
+    /// what it found ([`Policy::rarely`](hbsync_engine::policy::Policy::rarely)).
+    pub(crate) fn after(&mut self, class: ErrorClass) -> Duration {
+        let wait = self.next();
+        if policy(class).rarely {
             MAX_BACKOFF
         } else {
-            self.0
-        };
+            wait
+        }
+    }
+
+    /// The next wait of the ladder.
+    pub(crate) fn next(&mut self) -> Duration {
+        let wait = self.0;
         self.0 = (self.0 * 2).min(MAX_BACKOFF);
         wait
+    }
+}
+
+/// What a folder or an account shows while it fails with an error of `class`.
+pub(crate) fn shown(class: ErrorClass) -> State {
+    match policy(class).shown {
+        Shown::Offline => State::Offline,
+        Shown::Denied => State::Denied,
+        Shown::Failing => State::Failing,
     }
 }
 
@@ -177,7 +195,7 @@ impl Schedule {
                 if progressed {
                     self.retry_backoff = Backoff::new();
                 }
-                self.retry = Some(now + self.retry_backoff.after(State::Failing));
+                self.retry = Some(now + self.retry_backoff.next());
             }
         }
     }
@@ -198,9 +216,9 @@ impl Schedule {
         [look, pause_end, sync].into_iter().flatten().min()
     }
 
-    /// A sync failed, leaving `state`: tried again after a backoff. Returns the wait.
-    pub(crate) fn failed(&mut self, now: Instant, state: State) -> Duration {
-        let wait = self.backoff.after(state);
+    /// A sync failed with an error of `class`: tried again after a backoff. Returns the wait.
+    pub(crate) fn failed(&mut self, now: Instant, class: ErrorClass) -> Duration {
+        let wait = self.backoff.after(class);
         self.not_before = now + wait;
         wait
     }
@@ -281,7 +299,7 @@ mod tests {
         s.online(t0 + ms(1));
         assert!(s.due(t0 + ms(1)), "unfinished work");
         s.synced(t0, Synced::Done);
-        s.failed(t0, State::Offline);
+        s.failed(t0, ErrorClass::Transient);
         s.online(t0 + ms(2));
         assert!(s.due(t0 + ms(2)), "a failure's backoff");
     }
@@ -300,22 +318,22 @@ mod tests {
     fn failures_back_off_doubling_and_waking_forgets_it() {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, None);
-        assert_eq!(s.failed(t0, State::Offline), Duration::from_secs(5));
+        assert_eq!(s.failed(t0, ErrorClass::Transient), Duration::from_secs(5));
         assert!(!s.due(t0 + Duration::from_secs(4)));
         assert!(s.due(t0 + Duration::from_secs(5)));
-        assert_eq!(s.failed(t0, State::Offline), Duration::from_secs(10));
+        assert_eq!(s.failed(t0, ErrorClass::Transient), Duration::from_secs(10));
         assert_eq!(
-            s.failed(t0, State::Denied),
+            s.failed(t0, ErrorClass::Denied),
             MAX_BACKOFF,
             "a refusal is asked rarely"
         );
         s.woke(t0);
         assert!(s.due(t0));
-        assert_eq!(s.failed(t0, State::Failing), FIRST_BACKOFF);
+        assert_eq!(s.failed(t0, ErrorClass::Bug), FIRST_BACKOFF);
         // A sync now doesn't wait out the backoff, nor forget it.
         s.asked(t0);
         assert!(s.due(t0));
-        assert_eq!(s.failed(t0, State::Failing), Duration::from_secs(10));
+        assert_eq!(s.failed(t0, ErrorClass::Bug), Duration::from_secs(10));
     }
 
     #[test]
@@ -355,7 +373,7 @@ mod tests {
         }
 
         // A failure's backoff: a change waits for its end.
-        let wait = s.failed(t0, State::Offline);
+        let wait = s.failed(t0, ErrorClass::Transient);
         assert_eq!(s.next_wake(t0, 0, false), None, "nothing wanted");
         s.want();
         assert_eq!(s.next_wake(t0, 0, false), Some(t0 + wait));
@@ -393,6 +411,31 @@ mod tests {
         assert!(s.due(t0));
     }
 
+    /// A sync that fails shows offline when the drive can't be reached, whatever reported it,
+    /// and never for a fault of this computer's own.
+    #[test]
+    fn offline_is_the_drive_out_of_reach() {
+        use hbsync_engine::EngineError;
+        use hbsync_engine::exec::Stopped;
+        use hbsync_engine::feed::FeedError;
+        use hbsync_remote::RemoteError;
+        let transient = || RemoteError::Transient("cut".into());
+        let offline = [
+            EngineError::Stopped(Stopped::Unreachable("cut".into())),
+            EngineError::Feed(FeedError::Remote(transient())),
+            EngineError::Remote(transient()),
+        ];
+        for e in offline {
+            assert_eq!(shown(e.class()), State::Offline, "{e}");
+        }
+        let disk = EngineError::Feed(FeedError::Remote(RemoteError::Io(std::io::Error::other(
+            "disk",
+        ))));
+        assert_eq!(shown(disk.class()), State::Failing);
+        let denied = EngineError::Remote(RemoteError::Denied("401".into()));
+        assert_eq!(shown(denied.class()), State::Denied);
+    }
+
     /// A sync asked for reads the feed first; one that failed leaves that for the next try,
     /// one that ended doesn't.
     #[test]
@@ -402,7 +445,7 @@ mod tests {
         assert!(!s.read(), "a start reads anyway");
         s.asked(t0);
         assert!(s.read());
-        s.failed(t0, State::Failing);
+        s.failed(t0, ErrorClass::Bug);
         assert!(s.read(), "the failed sync may not have read");
         s.synced(t0, Synced::Done);
         assert!(!s.read());

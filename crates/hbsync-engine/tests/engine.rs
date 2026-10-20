@@ -258,7 +258,7 @@ fn a_denied_remote_stops_the_sync_and_loses_nothing() -> R {
         .sync_once("2026-10-09")
         .err()
         .ok_or("sync went through")?;
-    assert!(err.is_denied(), "{err}");
+    assert_eq!(err.class(), hbsync_remote::ErrorClass::Denied, "{err}");
     let requests = a.remote.faults().requests - before;
     assert!(
         requests <= 2,
@@ -275,7 +275,7 @@ fn a_denied_remote_stops_the_sync_and_loses_nothing() -> R {
         .sync_once("2026-10-09")
         .err()
         .ok_or("sync went through")?;
-    assert!(err.is_denied(), "{err}");
+    assert_eq!(err.class(), hbsync_remote::ErrorClass::Denied, "{err}");
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
 
     // Authorized again: the pending work goes through.

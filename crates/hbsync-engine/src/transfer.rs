@@ -20,8 +20,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
-use hbsync_remote::{Answers, NodeMeta, Pace, Remote, RemoteError, Upload};
+use hbsync_remote::{Answers, ErrorClass, NodeMeta, Pace, Remote, RemoteError, Upload};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target};
+
+use crate::policy::{InRun, policy};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TransferConfig {
@@ -243,13 +245,11 @@ pub enum JobError {
 }
 
 impl JobError {
-    /// Worth trying again soon.
-    pub fn is_transient(&self) -> bool {
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
         match self {
-            JobError::Remote(e) => e.is_transient() || matches!(e, RemoteError::Io(_)),
-            // Local trouble (locked, changing) passes; a download that didn't verify was
-            // deleted, so a fresh try may succeed.
-            JobError::File(_) | JobError::Io(_) => true,
+            JobError::Remote(e) => e.class(),
+            JobError::File(_) | JobError::Io(_) => ErrorClass::LocalFault,
         }
     }
 }
@@ -336,11 +336,10 @@ pub(crate) fn run_jobs_while(
                         }
                         Task::Removals(jobs) => remove(remote, jobs),
                     };
+                    // The next would fail the same way.
                     if results.iter().any(|(_, result)| {
-                        matches!(
-                            result,
-                            JobResult::Failed(JobError::Remote(RemoteError::Transient(_)))
-                        )
+                        matches!(result, JobResult::Failed(e)
+                            if policy(e.class()).in_run == InRun::Backoff)
                     }) {
                         out.store(true, Ordering::Relaxed);
                     }

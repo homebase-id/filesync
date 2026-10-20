@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use hbsync_fileio::FileIoError;
 use hbsync_platform::name::name_key;
-use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
-use hbsync_remote::{NodeMeta, Remote, RemoteError};
+use hbsync_platform::{EntryKind, Os, RelPath, ops, tags};
+use hbsync_remote::{ErrorClass, NodeMeta, Remote, RemoteError};
 use hbsync_state::{
     BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, StateDb, StateError, Store,
 };
@@ -36,6 +36,7 @@ use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target};
 use crate::activity::{self, Counters};
 use crate::folder::FolderCtx;
 use crate::plan::{DriveVersion, TagWrite, not_reached};
+use crate::policy::{InRun, policy};
 use crate::reconcile::{Op, Requirement};
 use crate::settle::{
     Placed, Settle, mark_children, settle, settle_placement, spell, tags_recorded,
@@ -140,6 +141,18 @@ enum Outcome {
 }
 
 impl Outcome {
+    /// What the run does about an error of `class` ([`policy`]); `why`: the error.
+    fn of(class: ErrorClass, why: String) -> Outcome {
+        match policy(class).in_run {
+            InRun::Backoff => Outcome::Backoff(why),
+            InRun::Retry => Outcome::Retry(why),
+            InRun::Stop => Outcome::Stop(why),
+            InRun::HoldUploads => Outcome::Full,
+            InRun::Stale => Outcome::Skip(Skip::Stale(why)),
+            InRun::Unsyncable => Outcome::Skip(Skip::Unsyncable(why)),
+        }
+    }
+
     fn stale(why: impl Into<String>) -> Outcome {
         Outcome::Skip(Skip::Stale(why.into()))
     }
@@ -167,6 +180,18 @@ pub enum Skip {
     Unsyncable(String),
 }
 
+impl Stopped {
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Stopped::Denied(_) => ErrorClass::Denied,
+            Stopped::Unreachable(_) => ErrorClass::Transient,
+            // Not an error: a run stopped on request ends well.
+            Stopped::Requested => ErrorClass::Bug,
+        }
+    }
+}
+
 impl Skip {
     pub fn as_str(&self) -> &str {
         match self {
@@ -175,10 +200,10 @@ impl Skip {
     }
 }
 
-/// A DB error inside an operation is retried like any transient failure.
+/// A DB error inside an operation.
 impl From<StateError> for Outcome {
     fn from(e: StateError) -> Self {
-        Outcome::Retry(e.to_string())
+        Outcome::of(e.class(), e.to_string())
     }
 }
 
@@ -1187,34 +1212,15 @@ fn rescan(report: &mut ExecReport, path: &RelPath) -> Outcome {
 }
 
 fn io_outcome(e: io::Error) -> Outcome {
-    match classify(&e) {
-        IoClass::Locked | IoClass::DiskFull | IoClass::Other => Outcome::Retry(e.to_string()),
-        IoClass::Raced => Outcome::Retry(format!("raced: {e}")),
-        IoClass::Denied | IoClass::TooLong => Outcome::unsyncable(e.to_string()),
-    }
+    let why = match hbsync_platform::classify(&e) {
+        hbsync_platform::IoClass::Raced => format!("raced: {e}"),
+        _ => e.to_string(),
+    };
+    Outcome::of(ErrorClass::of_io(&e), why)
 }
 
 fn remote_outcome(e: RemoteError) -> Outcome {
-    match e {
-        RemoteError::Transient(_) => Outcome::Backoff(e.to_string()),
-        // The local source or sink failed: worth another try, but no reason to pause.
-        RemoteError::Io(_) => Outcome::Retry(e.to_string()),
-        RemoteError::Denied(_) => Outcome::Stop(e.to_string()),
-        RemoteError::Full(_) => Outcome::Full,
-        // The drive won't take it as it is: retrying the same won't help.
-        RemoteError::Fatal(_) | RemoteError::InvalidHash | RemoteError::HashRequired => {
-            Outcome::unsyncable(e.to_string())
-        }
-        // The remote moved on, or rejected the bytes (changed mid-upload), or the file grew
-        // shorter than its header said (a read past its end): plan again, from what the feed
-        // says it is now.
-        RemoteError::AlreadyExists
-        | RemoteError::VersionMismatch
-        | RemoteError::NotFound
-        | RemoteError::Deleted
-        | RemoteError::StaleRange(_)
-        | RemoteError::HashMismatch => Outcome::stale(e.to_string()),
-    }
+    Outcome::of(e.class(), e.to_string())
 }
 
 /// A rename changes ctime on most systems: the row of a file renamed from `old` to `path`,

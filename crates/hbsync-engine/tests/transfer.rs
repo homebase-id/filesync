@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use hbsync_engine::transfer::{Download, Job, JobResult, TransferConfig, run_jobs};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-use hbsync_remote::{NodeMeta, Remote, Upload};
+use hbsync_remote::{ErrorClass, NodeMeta, Remote, Upload};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind};
 
@@ -184,7 +184,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
     let mut first = None;
     run_jobs(&remote, cfg, vec![job.clone()], |_, r| first = Some(r));
     assert!(
-        matches!(first, Some(JobResult::Failed(ref e)) if e.is_transient()),
+        matches!(first, Some(JobResult::Failed(ref e)) if e.class() == ErrorClass::Transient),
         "{first:?}"
     );
 

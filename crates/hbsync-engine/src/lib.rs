@@ -15,6 +15,7 @@ mod id;
 pub mod mask;
 pub mod mirror;
 pub mod plan;
+pub mod policy;
 pub mod reconcile;
 pub mod root;
 pub mod scope;
