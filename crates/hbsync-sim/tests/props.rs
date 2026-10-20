@@ -131,10 +131,17 @@ fn run_settled(
     Ok(())
 }
 
+/// 2000 cases, unless `PROPTEST_CASES` says otherwise (a set `cases` would override it).
+fn cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000)
+}
+
 proptest! {
-    // 2000 cases, unless `PROPTEST_CASES` says otherwise (a set `cases` would override it).
     #![proptest_config(ProptestConfig {
-        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(2000),
+        cases: cases(),
         ..ProptestConfig::default()
     })]
 
@@ -254,6 +261,69 @@ proptest! {
         events in proptest::collection::vec(crashing_event(3), 0..120),
     ) {
         run_with(3, None, Sim::with_split_downloads, &events)?;
+    }
+}
+
+/// A simulation's setup, and the mass-delete guard's minimum if it is on.
+type Setup = (fn(Sim) -> Sim, Option<usize>);
+
+/// The setups [`a_run_replays_the_same`] picks from, each with the mass-delete guard (its
+/// minimum) or not: every kind of run a property makes.
+const SETUPS: &[Setup] = &[
+    (Sim::with_split_downloads, None),
+    (Sim::with_refusals, None),
+    (Sim::with_wrong_not_theres, None),
+    (Sim::with_role_device, None),
+    (Sim::with_new_role_devices, Some(1)),
+    (|sim| sim, Some(2)),
+];
+
+/// Events of every kind the properties make: the users' actions, deletes another device stops
+/// half way, folders another app deletes outright, confirmations and crashes.
+fn any_event(clients: usize) -> impl Strategy<Value = Event> {
+    let actions = prop_oneof![
+        1 => stopped_delete_action(),
+        1 => orphaning_action(),
+    ];
+    let c = move || 0..clients;
+    prop_oneof![
+        8 => events_of(clients, actions),
+        1 => c().prop_map(|client| Event::Confirm { client }),
+        1 => c().prop_map(|client| Event::Crash { client }),
+    ]
+}
+
+proptest! {
+    // A twentieth of the cases, at least one: each runs twice with the trace on.
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 20).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// A run is the same every time: the same events make the same trace and leave the same
+    /// drive, whatever the setup (the ids are counted, and nothing hangs on the order a hash
+    /// map holds things in), so a saved seed replays the run it was saved for.
+    #[test]
+    fn a_run_replays_the_same(
+        setup in 0..SETUPS.len(),
+        events in proptest::collection::vec(any_event(5), 0..120),
+    ) {
+        let replay = || {
+            let (prepare, guard) = SETUPS[setup];
+            let mut sim = prepare(Sim::new(3));
+            sim.guard = guard;
+            sim.verbose = true;
+            sim.run(&events);
+            let settled = sim.quiesce(30);
+            let paths = sim.server_paths();
+            (settled, sim.trace, paths)
+        };
+        let ((settled, trace, paths), (again, retrace, repaths)) = (replay(), replay());
+        // Where the two runs part, not both traces whole.
+        if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i)) {
+            prop_assert!(false, "the runs part at trace line {at}:\n{:?}\n{:?}", trace.get(at), retrace.get(at));
+        }
+        prop_assert_eq!((settled, paths), (again, repaths));
     }
 }
 
