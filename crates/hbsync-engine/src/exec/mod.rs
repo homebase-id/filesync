@@ -97,8 +97,8 @@ pub(crate) struct ExecReport {
     /// Why the run stopped early, leaving the rest dirty for a later sync.
     pub stopped: Option<Stopped>,
     /// The drive refused an upload, out of storage: the run's uploads from then on were held
-    /// (left dirty).
-    pub full: bool,
+    /// (left dirty), and are held on the account this long.
+    pub full: Option<Duration>,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
     /// A remote write was refused for the drive's state, an earlier try of it had landed
@@ -116,6 +116,9 @@ pub enum Stopped {
     /// Transient remote errors kept coming: the network or the server is down.
     #[error("remote unreachable: {0}")]
     Unreachable(String),
+    /// The server is busy or paused, and said when to ask again.
+    #[error("the server asks to come back in {secs}s: {0}", secs = .1.as_secs())]
+    Later(String, Duration),
     /// The caller asked the run to stop (pause, shutdown).
     #[error("stopped on request")]
     Requested,
@@ -132,22 +135,35 @@ enum Outcome {
     Backoff(String),
     /// Left for the next plan.
     Skip(Skip),
-    /// The remote refused access: stop the run.
-    Stop(String),
-    /// The drive is out of storage: hold this and every later upload of the run.
-    Full,
+    /// Stop the run: the remote refused access, or is busy and said when to ask again.
+    Stop(Stopped),
+    /// The drive is out of storage: hold this and every later upload of the run (and on the
+    /// account: for the time the drive said, if it did).
+    Full(Option<Duration>),
     /// The state DB failed (a placement's commit, say): the run stops, as at a crash.
     Fatal(StateError),
 }
 
 impl Outcome {
-    /// What the run does about an error of `class` ([`policy`]); `why`: the error.
-    fn of(class: ErrorClass, why: String) -> Outcome {
+    /// What the run does about an error of `class` ([`policy`]); `why`: the error; `after`:
+    /// when the server said to ask again.
+    fn of(class: ErrorClass, why: String, after: Option<Duration>) -> Outcome {
         match policy(class).in_run {
-            InRun::Backoff => Outcome::Backoff(why),
+            // A server that said when to ask again isn't asked before: the run stops.
+            InRun::Backoff => match after {
+                Some(after) => Outcome::Stop(Stopped::Later(why, after)),
+                None => Outcome::Backoff(why),
+            },
             InRun::Retry => Outcome::Retry(why),
-            InRun::Stop => Outcome::Stop(why),
-            InRun::HoldUploads => Outcome::Full,
+            InRun::Stop => Outcome::Stop(Stopped::Denied(why)),
+            InRun::HoldUploads => Outcome::Full(after),
+            // Only the state DB's errors end a run, and they come as themselves
+            // (`From<StateError>`).
+            InRun::End => {
+                debug_assert!(false, "{class:?} ends a run: {why}");
+                Outcome::Retry(why)
+            }
+            // Told only once it keeps coming back (the runner's stalled skips).
             InRun::Stale => Outcome::Skip(Skip::Stale(why)),
             InRun::Unsyncable => Outcome::Skip(Skip::Unsyncable(why)),
         }
@@ -186,6 +202,7 @@ impl Stopped {
         match self {
             Stopped::Denied(_) => ErrorClass::Denied,
             Stopped::Unreachable(_) => ErrorClass::Transient,
+            Stopped::Later(..) => ErrorClass::RateLimited,
             // Not an error: a run stopped on request ends well.
             Stopped::Requested => ErrorClass::Bug,
         }
@@ -200,10 +217,11 @@ impl Skip {
     }
 }
 
-/// A DB error inside an operation.
+/// A DB error inside an operation ends the run, as one in a placement's commit does: tried
+/// again, it would most likely fail the same way (a busy DB after its timeout, a broken one).
 impl From<StateError> for Outcome {
     fn from(e: StateError) -> Self {
-        Outcome::of(e.class(), e.to_string())
+        Outcome::Fatal(e)
     }
 }
 
@@ -722,7 +740,7 @@ impl<'a> Executor<'a> {
             Op::RemoteTags { .. } | Op::RemoteUpdate { .. } | Op::RemoteCreate { .. }
         ) && matches!(
             outcome,
-            Outcome::Skip(Skip::Unsyncable(_)) | Outcome::Stop(_)
+            Outcome::Skip(Skip::Unsyncable(_)) | Outcome::Stop(Stopped::Denied(_))
         ) {
             self.tags_refused.insert(op.node());
         }
@@ -749,16 +767,21 @@ impl<'a> Executor<'a> {
                 self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.report.skipped.push((op, why));
             }
-            Outcome::Stop(why) => {
+            Outcome::Stop(stopped) => {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
-                self.report.stopped.get_or_insert(Stopped::Denied(why));
+                // A write the server answered busy may have landed before (a 5xx): planned
+                // again from the feed, read first.
+                if matches!(stopped, Stopped::Later(..)) && op.writes_remote() {
+                    self.report.drive_moved = true;
+                }
+                self.report.stopped.get_or_insert(stopped);
             }
-            Outcome::Full => {
+            Outcome::Full(after) => {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.full = true;
-                self.report.full = true;
+                self.report.full = Some(crate::time::full_hold(after));
             }
             Outcome::Fatal(e) => return Err(e),
         }
@@ -776,10 +799,14 @@ impl<'a> Executor<'a> {
         match self.schedule.retry(op, attempts, transient) {
             Retried::Queued => {}
             Retried::Failed(op) => self.report.failed.push((op, why)),
-            Retried::Replan(op) => {
+            Retried::Replan { op, stop } => {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.report.drive_moved = true;
+                if stop {
+                    let stopped = Stopped::Unreachable(why.clone());
+                    self.report.stopped.get_or_insert(stopped);
+                }
                 self.report.skipped.push((op, Skip::Waiting(why)));
             }
             Retried::Unreachable => {
@@ -1216,11 +1243,11 @@ fn io_outcome(e: io::Error) -> Outcome {
         hbsync_platform::IoClass::Raced => format!("raced: {e}"),
         _ => e.to_string(),
     };
-    Outcome::of(ErrorClass::of_io(&e), why)
+    Outcome::of(ErrorClass::of_io(&e), why, None)
 }
 
 fn remote_outcome(e: RemoteError) -> Outcome {
-    Outcome::of(e.class(), e.to_string())
+    Outcome::of(e.class(), e.to_string(), e.retry_after())
 }
 
 /// A rename changes ctime on most systems: the row of a file renamed from `old` to `path`,

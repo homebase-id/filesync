@@ -90,10 +90,11 @@ impl StateError {
         match self {
             StateError::Sqlite(rusqlite::Error::SqliteFailure(e, _)) => match e.code {
                 Code::DatabaseBusy | Code::DatabaseLocked => ErrorClass::StateBusy,
-                Code::DiskFull => ErrorClass::LocalFull,
-                Code::SystemIoFailure | Code::CannotOpen => ErrorClass::LocalFault,
-                // The whole DB, not one item: the user's to fix.
-                Code::PermissionDenied
+                // The whole DB can't be used: the user's to fix (room on the disk, access).
+                Code::DiskFull
+                | Code::SystemIoFailure
+                | Code::CannotOpen
+                | Code::PermissionDenied
                 | Code::ReadOnly
                 | Code::DatabaseCorrupt
                 | Code::NotADatabase => ErrorClass::NeedsUser,
@@ -619,6 +620,25 @@ fn read_in<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A busy DB is waited out; one that can't be used is the user's to fix.
+    #[test]
+    fn state_errors_have_their_class() {
+        let sqlite = |code| {
+            StateError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        assert_eq!(sqlite(5).class(), ErrorClass::StateBusy); // SQLITE_BUSY
+        assert_eq!(sqlite(13).class(), ErrorClass::NeedsUser); // SQLITE_FULL
+        assert_eq!(sqlite(11).class(), ErrorClass::NeedsUser); // SQLITE_CORRUPT
+        let too_new = StateError::TooNew {
+            found: 99,
+            supported: 1,
+        };
+        assert_eq!(too_new.class(), ErrorClass::NeedsUser);
+    }
 
     fn flushes(db: &mut StateDb) -> Result<Option<String>> {
         db.read(|s| s.account_kv(keys::FLUSHES))

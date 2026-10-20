@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use hbsync_platform::{Fingerprint, LocalMeta, ops};
 
 use crate::hash::{Hasher, feed};
-use hbsync_types::{ContentHash, HashAlgorithm};
+use hbsync_types::{ContentHash, ErrorClass, HashAlgorithm};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileIoError {
@@ -35,6 +35,21 @@ pub enum FileIoError {
     /// The file is in place, but reading it back there failed.
     #[error("put in place, but not read back: {0}")]
     PlacedUnread(io::Error),
+}
+
+impl FileIoError {
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            FileIoError::Io(e) => ErrorClass::of_io(e),
+            FileIoError::ChangedWhileReading | FileIoError::TargetChanged => ErrorClass::LocalRaced,
+            // The partial file was deleted: a fresh try may get other bytes.
+            FileIoError::HashMismatch { .. } | FileIoError::SizeMismatch { .. } => {
+                ErrorClass::LocalFault
+            }
+            FileIoError::PlacedUnread(e) => ErrorClass::of_io(e),
+        }
+    }
 }
 
 /// A file's hash plus the metadata it was taken under.

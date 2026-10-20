@@ -209,7 +209,10 @@ impl FakeServer {
                         .map(|b| b.len() as u64)
                         .sum();
                     if held + bytes.len() as u64 > quota {
-                        return Err(RemoteError::Full(format!("{quota} bytes at most")));
+                        return Err(RemoteError::Full {
+                            why: format!("{quota} bytes at most"),
+                            retry_after: None,
+                        });
                     }
                 }
                 let info = PayloadInfo {

@@ -16,6 +16,8 @@ pub enum InRun {
     Stop,
     /// This and every later upload of the run are held.
     HoldUploads,
+    /// The run ends, as at a crash: the state DB failed.
+    End,
     /// Left for the next plan: the world moved on since this one.
     Stale,
     /// Left for the next plan: this device can't do it as planned.
@@ -47,16 +49,20 @@ pub const fn policy(class: ErrorClass) -> Policy {
     use ErrorClass as C;
     let (in_run, shown) = match class {
         C::Transient => (InRun::Backoff, Shown::Offline),
+        // As transient, but the run stops at once: the server said when to ask again.
+        C::RateLimited => (InRun::Backoff, Shown::Offline),
         C::Denied => (InRun::Stop, Shown::Denied),
         C::Full => (InRun::HoldUploads, Shown::Failing),
-        C::Stale | C::Gone => (InRun::Stale, Shown::Failing),
+        // A lock another program holds, or a full disk, doesn't go away within microseconds:
+        // left for a later sync, which the runner paces, as one that went stale.
+        C::Stale | C::Gone | C::LocalBusy | C::LocalFull => (InRun::Stale, Shown::Failing),
         C::Refused | C::LocalDenied => (InRun::Unsyncable, Shown::Failing),
-        C::LocalBusy | C::LocalFull | C::LocalFault => (InRun::Retry, Shown::Failing),
-        C::StateBusy | C::NeedsUser | C::Bug => (InRun::Retry, Shown::Failing),
+        C::LocalRaced | C::LocalFault => (InRun::Retry, Shown::Failing),
+        C::StateBusy | C::NeedsUser | C::Bug => (InRun::End, Shown::Failing),
     };
     Policy {
         in_run,
         shown,
-        rarely: matches!(class, C::Denied),
+        rarely: matches!(class, C::Denied | C::NeedsUser),
     }
 }

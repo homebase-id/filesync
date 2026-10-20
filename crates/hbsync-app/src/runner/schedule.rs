@@ -12,6 +12,8 @@ use crate::protocol::{Pause, State};
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+/// The longest wait a server's `Retry-After` gets.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 
 /// How long to wait after each failure in a row.
 #[derive(Debug, Clone, Copy)]
@@ -23,14 +25,16 @@ impl Backoff {
     }
 
     /// The wait after a failure of `class`: the longest at once where only the user changes
-    /// what it found ([`Policy::rarely`](hbsync_engine::policy::Policy::rarely)).
-    pub(crate) fn after(&mut self, class: ErrorClass) -> Duration {
+    /// what it found ([`Policy::rarely`](hbsync_engine::policy::Policy::rarely)), and not less
+    /// than the server said (`retry_after`, up to [`MAX_RETRY_AFTER`]).
+    pub(crate) fn after(&mut self, class: ErrorClass, retry_after: Option<Duration>) -> Duration {
         let wait = self.next();
-        if policy(class).rarely {
+        let wait = if policy(class).rarely {
             MAX_BACKOFF
         } else {
             wait
-        }
+        };
+        retry_after.map_or(wait, |asked| wait.max(asked.min(MAX_RETRY_AFTER)))
     }
 
     /// The next wait of the ladder.
@@ -216,9 +220,15 @@ impl Schedule {
         [look, pause_end, sync].into_iter().flatten().min()
     }
 
-    /// A sync failed with an error of `class`: tried again after a backoff. Returns the wait.
-    pub(crate) fn failed(&mut self, now: Instant, class: ErrorClass) -> Duration {
-        let wait = self.backoff.after(class);
+    /// A sync failed with an error of `class`: tried again after a backoff, and not before the
+    /// server said (`retry_after`, up to an hour). Returns the wait.
+    pub(crate) fn failed(
+        &mut self,
+        now: Instant,
+        class: ErrorClass,
+        retry_after: Option<Duration>,
+    ) -> Duration {
+        let wait = self.backoff.after(class, retry_after);
         self.not_before = now + wait;
         wait
     }
@@ -299,7 +309,7 @@ mod tests {
         s.online(t0 + ms(1));
         assert!(s.due(t0 + ms(1)), "unfinished work");
         s.synced(t0, Synced::Done);
-        s.failed(t0, ErrorClass::Transient);
+        s.failed(t0, ErrorClass::Transient, None);
         s.online(t0 + ms(2));
         assert!(s.due(t0 + ms(2)), "a failure's backoff");
     }
@@ -318,22 +328,28 @@ mod tests {
     fn failures_back_off_doubling_and_waking_forgets_it() {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, None);
-        assert_eq!(s.failed(t0, ErrorClass::Transient), Duration::from_secs(5));
+        assert_eq!(
+            s.failed(t0, ErrorClass::Transient, None),
+            Duration::from_secs(5)
+        );
         assert!(!s.due(t0 + Duration::from_secs(4)));
         assert!(s.due(t0 + Duration::from_secs(5)));
-        assert_eq!(s.failed(t0, ErrorClass::Transient), Duration::from_secs(10));
         assert_eq!(
-            s.failed(t0, ErrorClass::Denied),
+            s.failed(t0, ErrorClass::Transient, None),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            s.failed(t0, ErrorClass::Denied, None),
             MAX_BACKOFF,
             "a refusal is asked rarely"
         );
         s.woke(t0);
         assert!(s.due(t0));
-        assert_eq!(s.failed(t0, ErrorClass::Bug), FIRST_BACKOFF);
+        assert_eq!(s.failed(t0, ErrorClass::Bug, None), FIRST_BACKOFF);
         // A sync now doesn't wait out the backoff, nor forget it.
         s.asked(t0);
         assert!(s.due(t0));
-        assert_eq!(s.failed(t0, ErrorClass::Bug), Duration::from_secs(10));
+        assert_eq!(s.failed(t0, ErrorClass::Bug, None), Duration::from_secs(10));
     }
 
     #[test]
@@ -373,7 +389,7 @@ mod tests {
         }
 
         // A failure's backoff: a change waits for its end.
-        let wait = s.failed(t0, ErrorClass::Transient);
+        let wait = s.failed(t0, ErrorClass::Transient, None);
         assert_eq!(s.next_wake(t0, 0, false), None, "nothing wanted");
         s.want();
         assert_eq!(s.next_wake(t0, 0, false), Some(t0 + wait));
@@ -411,6 +427,23 @@ mod tests {
         assert!(s.due(t0));
     }
 
+    /// A server that says when to ask again isn't asked before then (up to an hour), however
+    /// short the backoff.
+    #[test]
+    fn a_failure_waits_for_the_servers_retry_after() {
+        let t0 = Instant::now();
+        let mut s = Schedule::new(t0, LOOK, None);
+        let asked = Duration::from_secs(600);
+        assert_eq!(s.failed(t0, ErrorClass::RateLimited, Some(asked)), asked);
+        assert!(!s.due(t0 + asked - ms(1)));
+        assert!(s.due(t0 + asked));
+        let day = Duration::from_secs(24 * 3600);
+        assert_eq!(
+            s.failed(t0, ErrorClass::RateLimited, Some(day)),
+            MAX_RETRY_AFTER
+        );
+    }
+
     /// A sync that fails shows offline when the drive can't be reached, whatever reported it,
     /// and never for a fault of this computer's own.
     #[test]
@@ -445,7 +478,7 @@ mod tests {
         assert!(!s.read(), "a start reads anyway");
         s.asked(t0);
         assert!(s.read());
-        s.failed(t0, ErrorClass::Bug);
+        s.failed(t0, ErrorClass::Bug, None);
         assert!(s.read(), "the failed sync may not have read");
         s.synced(t0, Synced::Done);
         assert!(!s.read());

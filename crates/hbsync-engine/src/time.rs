@@ -23,3 +23,11 @@ pub const MIN_KEEP_DAYS: u32 = 30;
 
 /// How long uploads are held after the drive said it is full: then one is tried again.
 pub(crate) const FULL_HOLD: Duration = Duration::from_secs(600);
+/// The bounds of a hold the drive asked for (its 507's `Retry-After`).
+const FULL_HOLD_MIN: Duration = Duration::from_secs(30);
+const FULL_HOLD_MAX: Duration = Duration::from_secs(24 * 3600);
+
+/// How long uploads are held after a 507 that said to try again `after` (if it said).
+pub(crate) fn full_hold(after: Option<Duration>) -> Duration {
+    after.map_or(FULL_HOLD, |after| after.clamp(FULL_HOLD_MIN, FULL_HOLD_MAX))
+}

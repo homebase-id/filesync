@@ -24,6 +24,11 @@ pub struct ApiError {
     pub title: String,
     /// The identity itself answered ([`ApiError::read`]), not something in front of it.
     pub from_identity: bool,
+    /// When to ask again (`Retry-After`, in seconds): odin-core sends it with a refusal the
+    /// caller can wait out (`OdinRetryLaterException`: out of quota, 507) and for a paused
+    /// identity (503). Only the identity's own is taken (its header came with it): a box in
+    /// front of it that is down for a moment isn't waited for an hour.
+    pub retry_after: Option<std::time::Duration>,
 }
 
 /// What an error answer's headers say about who sent it (the module's doc).
@@ -33,6 +38,8 @@ pub struct Sender {
     pub odin: bool,
     /// `X-SSE: 1`: sealed under the shared secret, by a route the identity matched.
     pub sealed: bool,
+    /// `Retry-After`, in seconds ([`ApiError::retry_after`]).
+    pub retry_after: Option<std::time::Duration>,
 }
 
 /// The `OdinClientErrorCode`s the client acts on (`OdinClientErrorCode.cs`).
@@ -73,6 +80,7 @@ impl ApiError {
                 code: None,
                 title: String::new(),
                 from_identity: sender.odin,
+                retry_after: sender.retry_after.filter(|_| sender.odin),
             };
         }
         match serde_json::from_slice::<ProblemDetails>(body) {
@@ -81,6 +89,7 @@ impl ApiError {
                 code: p.error_code.and_then(code_name),
                 title: p.title.unwrap_or_default(),
                 from_identity: sender.odin && p.status == Some(status),
+                retry_after: sender.retry_after.filter(|_| sender.odin),
             },
             Err(_) => ApiError {
                 status,
@@ -89,6 +98,7 @@ impl ApiError {
                     .trim()
                     .to_owned(),
                 from_identity: false,
+                retry_after: sender.retry_after.filter(|_| sender.odin),
             },
         }
     }
@@ -163,15 +173,30 @@ mod tests {
 
     /// Only odin-core's header with a route's answer (sealed, or ProblemDetails of the same
     /// status) is the identity's: a proxy's page, an unrouted 404 and a bare one aren't.
+    /// A `Retry-After` counts only from the identity: a box in front of it that is down for a
+    /// moment isn't waited for an hour.
+    #[test]
+    fn retry_after_counts_from_the_identity_only() {
+        let wait = Some(std::time::Duration::from_secs(600));
+        let from = |odin| Sender {
+            odin,
+            retry_after: wait,
+            ..Sender::default()
+        };
+        assert_eq!(ApiError::read(503, b"paused", from(true)).retry_after, wait);
+        assert_eq!(ApiError::read(503, b"down", from(false)).retry_after, None);
+    }
+
     #[test]
     fn the_identity_answered_only_with_its_header_and_a_route() {
         let odin = Sender {
             odin: true,
-            sealed: false,
+            ..Sender::default()
         };
         let sealed = Sender {
             odin: true,
             sealed: true,
+            ..Sender::default()
         };
         let problem = br#"{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.5","title":"Not Found","status":404,"traceId":"00-ab"}"#;
         let cases: [(u16, &[u8], Sender, bool); 9] = [

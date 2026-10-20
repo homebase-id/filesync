@@ -554,8 +554,8 @@ impl Engine {
         .with_progress(Arc::clone(&self.progress))
         .with_full(self.drive.full())
         .run(plan.ops)?;
-        if exec.full {
-            self.drive.set_full();
+        if let Some(hold) = exec.full {
+            self.drive.set_full(hold);
         }
         if exec.drive_moved {
             self.drive.set_behind();

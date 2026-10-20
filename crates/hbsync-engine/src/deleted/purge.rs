@@ -214,7 +214,12 @@ impl AccountOps<'_> {
                     removed.insert(f.row.node);
                 }
                 Ok(_) | Err(RemoteError::NotFound | RemoteError::Deleted) => self.behind = true,
-                Err(e) if e.is_transient() => return Err(EngineError::Remote(e)),
+                // Down for now, or busy and saying when to ask again: the purge stops.
+                Err(e)
+                    if crate::policy::policy(e.class()).in_run == crate::policy::InRun::Backoff =>
+                {
+                    return Err(EngineError::Remote(e));
+                }
                 Err(e) => {
                     failed.get_or_insert(e);
                 }

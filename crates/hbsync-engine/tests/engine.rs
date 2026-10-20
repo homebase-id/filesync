@@ -1407,7 +1407,14 @@ fn a_folder_that_isnt_removed_keeps_what_is_in_it() -> R {
     // The folder's removal keeps failing during this sync.
     a.remote.faults().fail_writes_named = Some("Photos".into());
     let report = a.sync()?;
-    assert!(!report.failed.is_empty(), "{report:?}");
+    // What is in it waits for the next plan: not given up as failed.
+    assert!(report.failed.is_empty(), "{report:?}");
+    let waiting = report
+        .skipped
+        .iter()
+        .filter(|(_, why)| why.as_str() == "its folder wasn't removed")
+        .count();
+    assert_eq!(waiting, 3, "{report:?}");
     assert_eq!(
         server.lock().map_err(|_| "poisoned")?.removed().count(),
         0,
@@ -3038,6 +3045,28 @@ fn a_role_folder_moved_into_a_folder_keeps_it_alive() -> R {
     assert_eq!(a.tree_text(""), ["Archive/", "readme.txt = r"]);
     let names = server.lock().map_err(|_| "poisoned")?.live_names();
     assert_eq!(names, ["Archive", "Documents", "cv.txt", "readme.txt"]);
+    Ok(())
+}
+
+/// Once the drive said it is full, the uploads queued behind the refused one don't send their
+/// bytes only to hear so too.
+#[test]
+fn a_full_drive_stops_the_queued_uploads() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.exec.transfer.workers = 1)?;
+    server.lock().map_err(|_| "poisoned")?.set_quota(Some(1000));
+    for i in 0..10 {
+        a.write(&format!("f{i}.txt"), vec![b'x'; 600])?;
+    }
+    a.remote.faults().uploads = 0;
+    let report = a.sync()?;
+    assert!(report.full, "{report:?}");
+    assert_eq!(
+        a.remote.faults().uploads,
+        2,
+        "one landed, one refused, none after"
+    );
+    assert_eq!(report.pending, 9, "{report:?}");
     Ok(())
 }
 

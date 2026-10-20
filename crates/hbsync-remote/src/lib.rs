@@ -318,12 +318,23 @@ pub enum RemoteError {
     /// Network trouble, timeouts, 5xx: retry with backoff.
     #[error("transient: {0}")]
     Transient(String),
+    /// The server is busy or paused, and said when to ask again (429, 503 and the like, with
+    /// `Retry-After`).
+    #[error("asked to come back in {}s: {why}", retry_after.as_secs())]
+    Later {
+        why: String,
+        retry_after: std::time::Duration,
+    },
     /// Reading the local upload source or writing the download sink failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// The identity is out of storage (HTTP 507): nothing more goes up until there is room.
-    #[error("out of storage: {0}")]
-    Full(String),
+    /// The identity is out of storage (HTTP 507): nothing more goes up until there is room
+    /// (the server may say when to try again).
+    #[error("out of storage: {why}")]
+    Full {
+        why: String,
+        retry_after: Option<std::time::Duration>,
+    },
     /// Anything that won't get better by retrying (auth, bad request).
     #[error("fatal: {0}")]
     Fatal(String),
@@ -446,8 +457,9 @@ impl RemoteError {
     pub fn class(&self) -> ErrorClass {
         match self {
             RemoteError::Transient(_) => ErrorClass::Transient,
+            RemoteError::Later { .. } => ErrorClass::RateLimited,
             RemoteError::Denied(_) => ErrorClass::Denied,
-            RemoteError::Full(_) => ErrorClass::Full,
+            RemoteError::Full { .. } => ErrorClass::Full,
             // The remote moved on, or rejected the bytes (changed mid-upload), or the file grew
             // shorter than its header said (a read past its end).
             RemoteError::AlreadyExists
@@ -460,13 +472,22 @@ impl RemoteError {
                 ErrorClass::Refused
             }
             // The local source or sink failed.
-            RemoteError::Io(_) => ErrorClass::LocalFault,
+            RemoteError::Io(e) => ErrorClass::of_io(e),
         }
     }
 
     /// Whether it is [`ErrorClass::Transient`].
     pub fn is_transient(&self) -> bool {
         self.class() == ErrorClass::Transient
+    }
+
+    /// When the server said to ask again (`Retry-After`).
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            RemoteError::Later { retry_after, .. } => Some(*retry_after),
+            RemoteError::Full { retry_after, .. } => *retry_after,
+            _ => None,
+        }
     }
 
     /// The same error once more, for another file of a request it ended.
@@ -483,7 +504,14 @@ impl RemoteError {
             RemoteError::HashRequired => RemoteError::HashRequired,
             RemoteError::Transient(why) => RemoteError::Transient(why.clone()),
             RemoteError::Io(e) => RemoteError::Io(std::io::Error::new(e.kind(), e.to_string())),
-            RemoteError::Full(why) => RemoteError::Full(why.clone()),
+            RemoteError::Later { why, retry_after } => RemoteError::Later {
+                why: why.clone(),
+                retry_after: *retry_after,
+            },
+            RemoteError::Full { why, retry_after } => RemoteError::Full {
+                why: why.clone(),
+                retry_after: *retry_after,
+            },
             RemoteError::Fatal(why) => RemoteError::Fatal(why.clone()),
         }
     }
