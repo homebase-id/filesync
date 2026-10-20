@@ -8,10 +8,17 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
-hbsync-fileio.workspace = true
+hbsync-fileio = { workspace = true, optional = true }
 hbsync-types.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
+
+[features]
+# The in-memory fake remote and the contract every `Remote` passes, for tests (`testkit`).
+testkit = ["dep:hbsync-fileio", "dep:serde_json"]
+
+[dev-dependencies]
+hbsync-remote = { path = ".", features = ["testkit"] }
 
 [lints]
 workspace = true

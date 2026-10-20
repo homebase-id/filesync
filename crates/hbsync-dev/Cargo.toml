@@ -14,15 +14,15 @@ hbsync-homebase = { workspace = true, features = ["dev"] }
 hbsync-local.workspace = true
 hbsync-platform.workspace = true
 hbsync-remote.workspace = true
-hbsync-state.workspace = true
 hbsync-types.workspace = true
-serde_json.workspace = true
 tracing-subscriber = "0.3.23"
-uuid.workspace = true
 
 [dev-dependencies]
 hbsync-engine = { workspace = true, features = ["testkit"] }
 hbsync-fileio.workspace = true
+hbsync-remote = { workspace = true, features = ["testkit"] }
+hbsync-state.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 
 [lints]

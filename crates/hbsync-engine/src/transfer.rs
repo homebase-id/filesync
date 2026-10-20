@@ -4,9 +4,8 @@
 //! places files in the sync root happens on the caller's thread, before ([`Job`] preparation)
 //! and after (the `commit` callback), so the DB keeps a single writer.
 //!
-//! Order: removals first (they move no bytes; a request takes a thousand), then jobs marked
-//! urgent (a file the user is waiting for), then smallest first, so many small files aren't
-//! stuck behind one large one.
+//! Order: removals first (they move no bytes; a request takes a thousand), then smallest
+//! first, so many small files aren't stuck behind one large one.
 //!
 //! Small files wait on round trips, so many run at once. Large ones wait on bandwidth, so only
 //! a few do: more wouldn't move bytes faster, each would just finish later (and an upload cut
@@ -255,13 +254,13 @@ impl JobError {
     }
 }
 
-/// Runs `jobs` on a worker pool: removals together, then `urgent` jobs, then smaller ones. `commit` is called
+/// Runs `jobs` on a worker pool: removals together, then smaller jobs first. `commit` is called
 /// on this thread for every finished job, in completion order. A small download's file isn't
 /// durable yet: `hbsync_fileio::sync_completed` before putting it in place.
 pub fn run_jobs(
     remote: &dyn Remote,
     cfg: TransferConfig,
-    jobs: Vec<(bool, Job)>,
+    jobs: Vec<Job>,
     mut commit: impl FnMut(Job, JobResult),
 ) {
     run_jobs_while(remote, cfg, None, None, jobs, |ran| {
@@ -284,19 +283,21 @@ pub fn run_jobs_while(
     cfg: TransferConfig,
     moved: Option<&AtomicU64>,
     halt: Option<&AtomicBool>,
-    mut jobs: Vec<(bool, Job)>,
+    jobs: Vec<Job>,
     mut commit: impl FnMut(Vec<(Job, JobResult)>) -> bool,
 ) {
-    jobs.sort_by_key(|(urgent, job)| (!*urgent, job.size()));
-    let (mut removals, jobs): (Vec<Job>, Vec<Job>) = jobs
-        .into_iter()
-        .map(|(_, j)| j)
-        .partition(|j| j.removal().is_some());
+    let (removals, mut jobs): (Vec<Job>, Vec<Job>) =
+        jobs.into_iter().partition(|j| j.removal().is_some());
+    jobs.sort_by_key(Job::size);
     // Removals first, a request for each thousand: they move no bytes.
     let mut tasks = VecDeque::new();
-    while !removals.is_empty() {
-        let rest = removals.split_off(removals.len().min(REMOVALS_AT_ONCE));
-        tasks.push_back(Task::Removals(std::mem::replace(&mut removals, rest)));
+    let mut removals = removals.into_iter();
+    loop {
+        let batch: Vec<Job> = removals.by_ref().take(REMOVALS_AT_ONCE).collect();
+        if batch.is_empty() {
+            break;
+        }
+        tasks.push_back(Task::Removals(batch));
     }
     tasks.extend(jobs.into_iter().map(|j| Task::One(Box::new(j))));
     let workers = cfg.workers.min(tasks.len()).max(1);
@@ -363,7 +364,9 @@ pub fn run_jobs_while(
     });
 }
 
-/// Jobs not started yet, and how many large ones are running.
+/// Jobs not started yet, and how many large ones are running. `jobs` are the removals, then
+/// the rest smallest first, as [`run_jobs_while`] queues them; none are added later
+/// ([`Queue::take`] relies on it).
 struct Queue {
     jobs: VecDeque<Task>,
     large: usize,
@@ -376,20 +379,19 @@ impl Queue {
         job.size() >= self.large_from
     }
 
-    /// The first job that may start: a small one, or a large one while a slot is free. `None`
-    /// when only large ones are left and their slots are all taken: the workers holding the
-    /// slots take them on, so the one asking can end.
+    /// The next job, unless it is large and the large ones' slots are all taken. Jobs go
+    /// smallest first, so then only large ones are left: the workers holding the slots take
+    /// them on, so the one asking can end.
     fn take(&mut self) -> Option<Task> {
-        let free = self.large < self.large_at_once;
-        let i = self.jobs.iter().position(|t| match t {
-            Task::One(j) => free || !self.is_large(j),
-            Task::Removals(_) => true,
-        })?;
-        let task = self.jobs.remove(i)?;
-        if let Task::One(job) = &task {
-            self.large += usize::from(self.is_large(job));
+        if let Some(Task::One(job)) = self.jobs.front()
+            && self.is_large(job)
+        {
+            if self.large >= self.large_at_once {
+                return None;
+            }
+            self.large += 1;
         }
-        Some(task)
+        self.jobs.pop_front()
     }
 
     fn finished(&mut self, job: &Job) {

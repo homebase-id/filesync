@@ -500,59 +500,23 @@ mod mirror {
         Ok(())
     }
 
-    /// A version the mirror has already, again, changes nothing; the feed's refresh takes its
-    /// token (an earlier login's may not open), and nothing needs reconciling.
+    /// A version the mirror has already isn't written again, nor marked to reconcile (the
+    /// feed's echo of it takes only its token and time: `feed`'s tests).
     #[test]
-    fn a_known_version_takes_only_a_refresh() -> R {
-        use hbsync_state::RemovedRow;
+    fn a_known_version_is_not_written_again() -> R {
         let mut db = StateDb::open_in_memory()?;
-        let with_token = row(NodeId::new(), NodeId::ROOT, "d", None);
-        let without = MirrorRow {
-            token: None,
-            ..with_token.clone()
-        };
-        let node = with_token.node;
+        let known = row(NodeId::new(), NodeId::ROOT, "d", None);
+        let node = known.node;
         db.write(|s| {
-            s.put_mirror(&without)?;
+            s.put_mirror(&known)?;
             s.clear_dirty(node)
         })?;
         let renamed = MirrorRow {
             name: "other".into(),
-            ..with_token.clone()
+            ..known.clone()
         };
         db.write(|s| s.put_mirror(&renamed))?;
-        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(without.clone()));
-        db.write(|s| s.refresh(&with_token, false))?;
-        assert_eq!(
-            db.read(|s| s.get_mirror(node))?,
-            Some(with_token.clone()),
-            "the token only"
-        );
-        assert!(!db.read(|s| s.is_dirty(node))?);
-        // An earlier login's is replaced; none keeps the one there.
-        let other = MirrorRow {
-            token: Some(FileToken(vec![0xEE; 16].into())),
-            ..with_token.clone()
-        };
-        db.write(|s| s.refresh(&other, false))?;
-        db.write(|s| s.refresh(&without, false))?;
-        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(other.clone()));
-
-        // In Recently deleted, the same.
-        db.write(|s| {
-            s.delete_mirror(with_token.file_id)?;
-            s.put_removed(&RemovedRow {
-                row: without.clone(),
-                removed_at: Some(5),
-            })?;
-            s.clear_dirty(node)
-        })?;
-        db.write(|s| s.refresh(&with_token, true))?;
-        let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
-        assert_eq!(
-            (back.row.token, back.removed_at),
-            (with_token.token, Some(5))
-        );
+        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(known));
         assert!(!db.read(|s| s.is_dirty(node))?);
         Ok(())
     }
@@ -622,47 +586,6 @@ mod mirror {
         db.write(|s| s.confirm_removed(at, 10))?;
         let back = db.read(|s| s.removed_by_node(own.node))?.expect("removed");
         assert_eq!(back.removed_at, Some(9), "confirmed once");
-        Ok(())
-    }
-
-    /// This device's own write has no server time until the feed brings it back, and the echo
-    /// records it only where it decides something: in a folder in Recently deleted.
-    #[test]
-    fn an_own_writes_time_is_kept_in_a_removed_folder_only() -> R {
-        use hbsync_state::RemovedRow;
-        let mut db = StateDb::open_in_memory()?;
-        let folder = row(NodeId::new(), NodeId::ROOT, "f", None);
-        let inner = row(NodeId::new(), folder.node, "g", None);
-        let file = row(NodeId::new(), inner.node, "x", None);
-        db.write(|s| {
-            s.put_mirror(&folder)?;
-            s.put_mirror(&inner)?;
-            s.put_mirror(&file)
-        })?;
-        let echo = MirrorRow {
-            changed_at: Some(7),
-            ..file.clone()
-        };
-        let time = |db: &mut StateDb| -> hbsync_state::Result<Option<i64>> {
-            Ok(db
-                .read(|s| s.get_mirror(file.node))?
-                .and_then(|m| m.changed_at))
-        };
-        db.write(|s| s.refresh(&echo, false))?;
-        assert_eq!(time(&mut db)?, None, "nothing it decides");
-        db.write(|s| {
-            s.delete_mirror(folder.file_id)?;
-            s.put_removed(&RemovedRow {
-                row: folder.clone(),
-                removed_at: Some(5),
-            })
-        })?;
-        db.write(|s| s.refresh(&echo, false))?;
-        assert_eq!(
-            time(&mut db)?,
-            Some(7),
-            "in a removed folder, two levels up"
-        );
         Ok(())
     }
 

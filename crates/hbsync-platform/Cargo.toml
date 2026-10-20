@@ -13,13 +13,16 @@ workspace = true
 [dependencies]
 caseless = "0.2.2"
 filetime = "0.2.29"
-plist = { version = "1.7", default-features = false }
 tempfile.workspace = true
 thiserror.workspace = true
 unicode-normalization = "0.1.25"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Finder's tags attribute.
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = { version = "1.7", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -34,4 +37,6 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+# Finder's tags attribute, its codec tested on every OS.
+plist = { version = "1.7", default-features = false }
 proptest.workspace = true

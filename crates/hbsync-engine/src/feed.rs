@@ -860,18 +860,8 @@ mod tests {
         let mut db = StateDb::open_in_memory()?;
         let node = NodeId::new();
         let header = |version: u128, removed_at: Option<i64>| RemoteHeader {
-            file_id: RemoteFileId(Uuid::from_u128(1)),
-            version: VersionTag(Uuid::from_u128(version)),
-            parent: NodeId::ROOT,
-            kind: NodeKind::Folder,
-            body: RemoteBody::Live {
-                node,
-                content: NodeContent::folder("d"),
-                payload: None,
-            },
             removed_at,
-            changed_at: None,
-            token: None,
+            ..folder(1, version, node, NodeId::ROOT)
         };
         let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
             db.write(|s| {
@@ -897,18 +887,9 @@ mod tests {
         let mut db = StateDb::open_in_memory()?;
         let node = NodeId::new();
         let live = |removed_at: Option<i64>| RemoteHeader {
-            file_id: RemoteFileId(Uuid::from_u128(1)),
             version: VersionTag(Uuid::new_v4()),
-            parent: NodeId::ROOT,
-            kind: NodeKind::Folder,
-            body: RemoteBody::Live {
-                node,
-                content: NodeContent::folder("d"),
-                payload: None,
-            },
             removed_at,
-            changed_at: None,
-            token: None,
+            ..folder(1, 0, node, NodeId::ROOT)
         };
         assert!(db.write(|s| apply(s, &live(None)))?);
         assert!(!db.write(|s| apply(s, &live(Some(9))))?);
@@ -923,5 +904,109 @@ mod tests {
             assert!(s.get_mirror(node)?.is_some() && s.removed_by_node(node)?.is_none());
             Ok(())
         })
+    }
+
+    /// A folder's header at `version` (no token, no time): edit the fields a test needs.
+    fn folder(file_id: u128, version: u128, node: NodeId, parent: NodeId) -> RemoteHeader {
+        RemoteHeader {
+            file_id: RemoteFileId(Uuid::from_u128(file_id)),
+            version: VersionTag(Uuid::from_u128(version)),
+            parent,
+            kind: NodeKind::Folder,
+            body: RemoteBody::Live {
+                node,
+                content: NodeContent::folder("d"),
+                payload: None,
+            },
+            removed_at: None,
+            changed_at: None,
+            token: None,
+        }
+    }
+
+    /// A version the mirror has already, again, changes nothing; its echo takes the token (an
+    /// earlier login's may not open), and nothing needs reconciling. In Recently deleted too.
+    #[test]
+    fn a_known_version_takes_only_its_token() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let node = NodeId::new();
+        let without = folder(1, 1, node, NodeId::ROOT);
+        let token = |b: u8| Some(FileToken(vec![b; 16].into()));
+        let with = |b: u8| RemoteHeader {
+            token: token(b),
+            ..without.clone()
+        };
+        db.write(|s| {
+            apply(s, &without)?;
+            s.clear_dirty(node)
+        })?;
+        let held =
+            |db: &mut StateDb| db.read(|s| s.get_mirror(node).map(|m| m.and_then(|m| m.token)));
+        db.write(|s| apply(s, &with(0xAA)))?;
+        assert_eq!(held(&mut db)?, token(0xAA), "the token taken");
+        assert!(!db.read(|s| s.is_dirty(node))?);
+        // An earlier login's is replaced; none keeps the one there.
+        db.write(|s| apply(s, &with(0xEE)))?;
+        db.write(|s| apply(s, &without))?;
+        assert_eq!(held(&mut db)?, token(0xEE));
+
+        // In Recently deleted, the same; its time stays the one it has.
+        let removed = RemoteHeader {
+            version: VersionTag(Uuid::from_u128(2)),
+            removed_at: Some(5),
+            ..without.clone()
+        };
+        db.write(|s| {
+            apply(s, &removed)?;
+            s.clear_dirty(node)
+        })?;
+        let again = RemoteHeader {
+            removed_at: Some(9),
+            token: token(0xAA),
+            ..removed
+        };
+        db.write(|s| apply(s, &again))?;
+        let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
+        assert_eq!((back.row.token, back.removed_at), (token(0xAA), Some(5)));
+        assert!(!db.read(|s| s.is_dirty(node))?);
+        Ok(())
+    }
+
+    /// This device's own write has no server time until the feed brings it back, and the echo
+    /// records it only where it decides something: in a folder in Recently deleted.
+    #[test]
+    fn an_own_writes_time_is_kept_in_a_removed_folder_only() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let top = folder(1, 1, NodeId::new(), NodeId::ROOT);
+        let inner = folder(2, 2, NodeId::new(), top.node().expect("live"));
+        let leaf = folder(3, 3, NodeId::new(), inner.node().expect("live"));
+        let node = leaf.node().expect("live");
+        db.write(|s| {
+            [&top, &inner, &leaf]
+                .into_iter()
+                .try_for_each(|h| apply(s, h).map(drop))
+        })?;
+        let echo = RemoteHeader {
+            changed_at: Some(7),
+            ..leaf.clone()
+        };
+        let time = |db: &mut StateDb| {
+            db.read(|s| s.get_mirror(node).map(|m| m.and_then(|m| m.changed_at)))
+        };
+        db.write(|s| apply(s, &echo))?;
+        assert_eq!(time(&mut db)?, None, "nothing it decides");
+        let removed = RemoteHeader {
+            version: VersionTag(Uuid::from_u128(4)),
+            removed_at: Some(5),
+            ..top
+        };
+        db.write(|s| apply(s, &removed))?;
+        db.write(|s| apply(s, &echo))?;
+        assert_eq!(
+            time(&mut db)?,
+            Some(7),
+            "in a removed folder, two levels up"
+        );
+        Ok(())
     }
 }

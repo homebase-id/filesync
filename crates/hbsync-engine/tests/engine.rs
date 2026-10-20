@@ -187,7 +187,7 @@ fn downloads_wait_for_their_bytes_to_be_durable() -> R {
     let mut a = Client::new(&server, "a")?;
     let failing = Arc::clone(&faults);
     let mut b = Client::with_config(&server, "b", move |c| {
-        c.exec.faults = Arc::clone(&failing);
+        c.exec.hooks.faults = Arc::clone(&failing);
     })?;
     for i in 0..20 {
         a.write(&format!("d/f{i}"), format!("{i}"))?;
@@ -805,7 +805,7 @@ fn a_placement_whose_commit_failed_is_kept(
     let failing = Arc::clone(&faults);
     let mut b = Client::with_config(&server, "b", move |c| {
         c.batch = 1;
-        c.exec.faults = Arc::clone(&failing);
+        c.exec.hooks.faults = Arc::clone(&failing);
     })?;
     setup(&a)?;
     a.sync()?;
@@ -894,7 +894,7 @@ fn crash_right_after_parking_leaks_no_temporary_name() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::with_config(&server, "b", |c| {
-        c.exec.crash_at = Some(CrashPoint::AfterParkRename)
+        c.exec.hooks.crash_at = Some(CrashPoint::AfterParkRename)
     })?;
     a.write("x", "old file")?;
     a.sync()?;
@@ -914,7 +914,7 @@ fn crash_right_after_parking_leaks_no_temporary_name() -> R {
         "the crash left a parked file behind"
     );
     let remote = Box::new(b.remote.clone());
-    b.restart_with(remote, |c| c.exec.crash_at = None)?;
+    b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
     b.sync()?;
     a.sync()?;
     assert_eq!(b.read_text("x/inside")?, "new");
@@ -934,7 +934,7 @@ fn crash_right_after_a_fork_rename_survives_a_folder_rename() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::with_config(&server, "b", |c| {
-        c.exec.crash_at = Some(CrashPoint::AfterForkRename)
+        c.exec.hooks.crash_at = Some(CrashPoint::AfterForkRename)
     })?;
     a.write("docs/notes.txt", "base")?;
     a.sync()?;
@@ -946,7 +946,7 @@ fn crash_right_after_a_fork_rename_survives_a_folder_rename() -> R {
     // The user renames the folder before b runs again.
     fs::rename(b.root.join("docs"), b.root.join("papers"))?;
     let remote = Box::new(b.remote.clone());
-    b.restart_with(remote, |c| c.exec.crash_at = None)?;
+    b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
     b.sync()?;
     a.sync()?;
     assert_eq!(a.tree_text(""), b.tree_text(""));

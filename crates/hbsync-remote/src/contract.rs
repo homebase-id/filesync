@@ -281,16 +281,9 @@ impl<'a> Bench<'a> {
     }
 }
 
-/// `data` as an upload with its BLAKE3 hash.
-/// The cursor at the end of the feed, read on from `from` (`None`: the beginning) in slim pages.
-pub fn feed_end(remote: &dyn Remote, from: Option<&str>) -> Result<String, RemoteError> {
-    let mut page = remote.change_refs(from, 1000)?;
-    while page.has_more {
-        page = remote.change_refs(Some(&page.cursor), 1000)?;
-    }
-    Ok(page.cursor)
-}
+pub use crate::feed_end;
 
+/// `data` as an upload with its BLAKE3 hash.
 pub fn upload<'a>(reader: &'a mut Cursor<&[u8]>) -> Upload<'a> {
     let data: &[u8] = reader.get_ref();
     Upload {

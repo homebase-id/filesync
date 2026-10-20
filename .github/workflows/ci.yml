@@ -36,5 +36,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The shipped crates as a release builds them: without the tests' `testkit` features.
+      - run: cargo clippy -p hbsync -p hbsync-tray
       - run: cargo clippy --workspace --all-targets
       - run: cargo test --workspace

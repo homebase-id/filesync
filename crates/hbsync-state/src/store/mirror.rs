@@ -130,24 +130,6 @@ impl Store<'_> {
         self.fan_out(row.node, row.parent)
     }
 
-    /// A version the store has already, as the feed brings it back: its token (one kept from
-    /// an earlier login may not open with this one's shared secret), and the server's time of
-    /// this device's own write where it decides something: in a folder in Recently deleted,
-    /// whether the node went with it (node schema, Recently deleted). Elsewhere it stays
-    /// unknown, which counts as before any removal the feed brings later. Written only where
-    /// something differs; no change of the node, so nothing to reconcile.
-    pub fn refresh(&self, row: &MirrorRow, removed: bool) -> Result<()> {
-        if let Some(token) = &row.token {
-            self.set_token(row.file_id, removed, token)?;
-        }
-        if let Some(at) = row.changed_at
-            && !removed
-        {
-            self.refresh_time(row.file_id, row.parent, at)?;
-        }
-        Ok(())
-    }
-
     /// Keeps `token` for file `file_id` (in Recently deleted if `removed`), if it differs.
     pub fn set_token(&self, file_id: RemoteFileId, removed: bool, token: &FileToken) -> Result<()> {
         let table = if removed { "removed" } else { "remote" };

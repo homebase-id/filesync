@@ -39,6 +39,7 @@ pub struct EngineConfig {
     pub allow_mass_delete: bool,
     /// Tests: every plan from a narrow view ([`view::build_narrow`]) is checked against one
     /// from whole folders ([`view::build_input`]).
+    #[cfg(feature = "testkit")]
     pub check_narrow: bool,
 }
 
@@ -56,8 +57,7 @@ impl EngineConfig {
                 filter: Default::default(),
                 tags_kept: Default::default(),
                 scope: Arc::new(Scope::main()),
-                crash_at: None,
-                faults: Arc::default(),
+                hooks: Default::default(),
             },
             device: device.to_owned(),
             max_rounds: 8,
@@ -65,6 +65,7 @@ impl EngineConfig {
             mass_delete_min: 50,
             mass_delete_fraction: 0.25,
             allow_mass_delete: false,
+            #[cfg(feature = "testkit")]
             check_narrow: false,
         }
     }
@@ -166,8 +167,6 @@ pub struct Engine {
     remote: Arc<dyn Remote>,
     cfg: EngineConfig,
     scan_opts: ScanOptions,
-    /// Nodes whose transfers go first (a file the user just opened).
-    urgent: std::collections::HashSet<hbsync_types::NodeId>,
     /// Where the sweep over the dirty set stopped when the last sync hit its round limit.
     sweep_after: Option<DirtyCursor>,
     /// Set by the caller to stop a sync between operations.
@@ -225,7 +224,6 @@ impl Engine {
             remote,
             cfg,
             scan_opts,
-            urgent: Default::default(),
             sweep_after: None,
             stop: Arc::default(),
             confirmed: Default::default(),
@@ -255,11 +253,6 @@ impl Engine {
     /// one the user didn't see is never let through by a confirmation.
     pub fn confirm_deletes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
         self.confirmed.extend(nodes);
-    }
-
-    /// Transfers of these nodes go before all others in the next syncs.
-    pub fn set_urgent(&mut self, nodes: impl IntoIterator<Item = hbsync_types::NodeId>) {
-        self.urgent = nodes.into_iter().collect();
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
@@ -556,6 +549,7 @@ impl Engine {
             if full.len() > listed {
                 continue;
             }
+            #[cfg(feature = "testkit")]
             if self.cfg.check_narrow {
                 let input = db.read(|s| view::build_input(s, dirty, os, filter, scope))?;
                 assert_eq!(
@@ -598,7 +592,6 @@ impl Engine {
             return Ok(plan.held);
         }
         let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
-            .with_urgent(self.urgent.clone())
             .with_stop(Arc::clone(&self.stop))
             .with_progress(Arc::clone(&self.progress))
             .with_full(self.drive.full())

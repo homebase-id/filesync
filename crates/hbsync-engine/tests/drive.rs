@@ -847,10 +847,7 @@ fn a_new_login_forgets_the_tokens() -> R {
     assert_eq!(token()?, None);
     let header = remote.header(made.at.file_id)?;
     let mut db2 = StateDb::open_account(&dir.path().join("state.db"))?;
-    db2.write(|s| {
-        let row = hbsync_engine::feed::mirror_row(&header).expect("a folder's row");
-        s.refresh(&row, false)
-    })?;
+    db2.write(|s| hbsync_engine::feed::apply(s, &header).map(drop))?;
     assert!(token()?.is_some());
     assert!(!drive.tokens_sealed_by("one")?, "the same login");
     assert!(token()?.is_some());

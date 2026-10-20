@@ -410,7 +410,7 @@ fn a_folder_made_before_its_tags_keeps_them_on_the_drive() -> R {
         // Synced before (made again after a delete here lost): it gets a record.
         s.put_base(&BaseRow::new(node, state.clone(), at))
     })?;
-    h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+    h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     let crashed = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -584,7 +584,7 @@ fn no_placement_takes_tags_off_the_drive_where_none_are_kept() -> R {
                 },
             };
             if crash {
-                h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+                h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
                 assert!(h.run(vec![op]).is_err(), "the crash point wasn't reached");
                 // A folder claims nothing written. (A download claims what reads back: on
                 // Windows nothing, the volume unsupported; this test's volume keeps tags.)
@@ -686,7 +686,7 @@ fn record_of_a_crashed_download(
         tags: placed.clone(),
         ..NodeState::file(NodeId::ROOT, "f", h.content(b"A"))
     };
-    h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+    h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     let crashed = h.run(vec![Op::LocalDownload {
         node,
         parent: NodeId::ROOT,
@@ -760,7 +760,7 @@ fn base_after_a_download(crash: bool) -> Result<Option<BaseRow>, Box<dyn std::er
         })),
     };
     if crash {
-        h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+        h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     }
     let ran = h.run(vec![Op::Settle { node }, download]);
     assert_eq!(ran.is_err(), crash, "{ran:?}");
@@ -802,7 +802,7 @@ fn a_first_download_records_the_local_spelling() -> R {
             h.cfg.os = os;
             let (node, at) = h.seed(name, b"A")?;
             if crash {
-                h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+                h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
             }
             let ran = h.run(vec![Op::LocalDownload {
                 node,
@@ -938,7 +938,7 @@ fn an_untagged_folder_claims_no_tags() -> R {
     let at = some_version();
     let state = NodeState::folder(NodeId::ROOT, "d");
     h.db.write(|s| s.put_base(&BaseRow::new(node, state.clone(), at)))?;
-    h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+    h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     let crashed = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -1600,10 +1600,10 @@ fn a_folder_a_round_left_is_taken_by_the_next() -> R {
             base_at: Some(at.version),
         })),
     };
-    h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+    h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     assert!(h.run(vec![mkdir()]).is_err());
     assert_eq!(h.records()?.len(), 1);
-    h.cfg.crash_at = None;
+    h.cfg.hooks.crash_at = None;
     // The next round.
     recover_placements(&mut h.db, &h.cfg)?;
     assert_eq!(h.records()?, []);
@@ -1862,7 +1862,7 @@ fn a_placement_whose_commit_fails_is_settled_by_recovery() -> R {
             })),
         },
     ];
-    h.cfg.faults.fail(FailPoint::PlacedRead, 2);
+    h.cfg.hooks.faults.fail(FailPoint::PlacedRead, 2);
     let report = h.run(ops)?;
     assert_eq!(report.done, 2, "{report:?}");
     assert!(
@@ -1944,7 +1944,7 @@ fn files_go_into_a_folder_whose_commit_failed() -> R {
             })),
         });
     }
-    h.cfg.faults.fail(FailPoint::PlacedRead, 1);
+    h.cfg.hooks.faults.fail(FailPoint::PlacedRead, 1);
     let report = h.run(ops)?;
     assert!(report.failed.is_empty(), "{report:?}");
     assert_eq!(report.done, 3, "{report:?}");
@@ -2012,7 +2012,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
             })),
         },
     ];
-    h.cfg.faults.fail(FailPoint::PlacedRead, 1);
+    h.cfg.hooks.faults.fail(FailPoint::PlacedRead, 1);
     h.run(ops)?;
     assert_eq!(fs::read(h.cfg.root.join("b"))?, b"user's edit");
     assert!(h.base(a)?.is_some(), "a isn't settled");
@@ -2025,7 +2025,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
 fn a_new_folder_whose_commit_failed_is_taken_by_its_retry() -> R {
     let mut h = Harness::new()?;
     let node = NodeId::new();
-    h.cfg.faults.fail(FailPoint::PlacedRead, 1);
+    h.cfg.hooks.faults.fail(FailPoint::PlacedRead, 1);
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -2435,9 +2435,9 @@ fn a_failed_tag_write_removes_nothing(folder: bool, unread: bool) -> R {
         });
     }
     let count = ops.len();
-    h.cfg.faults.fail(FailPoint::TagWrite, 1);
+    h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
     if unread {
-        h.cfg.faults.fail(FailPoint::TagRead, 1);
+        h.cfg.hooks.faults.fail(FailPoint::TagRead, 1);
     }
     let report = h.run(ops)?;
     assert_eq!(report.done, count, "{report:?}");
@@ -2559,7 +2559,7 @@ fn trash_harnesses() -> Result<Vec<Harness>, Box<dyn std::error::Error>> {
 fn an_old_version_comes_back_when_the_new_one_fails() -> R {
     for mut h in trash_harnesses()? {
         let (node, op) = a_download_from_another_folder(&mut h)?;
-        h.cfg.faults.fail(FailPoint::AfterTrash, 1);
+        h.cfg.hooks.faults.fail(FailPoint::AfterTrash, 1);
         h.run(vec![op])?;
         assert_eq!(fs::read(h.at("p1/f")?)?, b"A");
         assert_eq!(trash_entries(&h), Vec::<String>::new());
@@ -2578,8 +2578,8 @@ fn an_old_version_comes_back_when_the_new_one_fails() -> R {
 fn an_old_version_that_cant_come_back_stays_in_the_trash() -> R {
     let mut h = Harness::new()?;
     let (node, op) = a_download_from_another_folder(&mut h)?;
-    h.cfg.faults.fail(FailPoint::AfterTrash, 1);
-    h.cfg.faults.fail(FailPoint::Restore, 1);
+    h.cfg.hooks.faults.fail(FailPoint::AfterTrash, 1);
+    h.cfg.hooks.faults.fail(FailPoint::Restore, 1);
     h.run(vec![op])?;
     assert!(!h.at("p1/f")?.exists());
     assert_eq!(trash_entries(&h).len(), 1);
@@ -2643,7 +2643,7 @@ fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
                 base_at: planned,
             })),
         };
-        h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+        h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
         assert!(h.run(vec![Op::Settle { node }, download]).is_err());
         // The drive deletes it: gone, or in Recently deleted.
         h.db.write(|s| {
@@ -2725,7 +2725,7 @@ fn a_record_doesnt_bring_back_a_node_taken_along() -> R {
             base_at: planned,
         })),
     };
-    h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+    h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     assert!(h.run(vec![Op::Settle { node }, download]).is_err());
     // The folder goes to Recently deleted, after the file's version; the file is still live.
     h.db.write(|s| {
@@ -2866,7 +2866,7 @@ fn a_download_after_the_runs_own_tag_write(
         plan.ops
     );
     if crash {
-        h.cfg.crash_at = Some(CrashPoint::AfterPlaced);
+        h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     }
     let ran = h.run(plan.ops);
     if crash {
@@ -3101,9 +3101,9 @@ fn a_failed_tag_write_keeps_what_the_item_holds(unread: bool) -> R {
     })?;
     let both = Tags::new(vec![Tag::new("Blue", 0), Tag::new("Work", 0)]);
     let scanned = h.db.read(|s| s.local_by_node(node))?.ok_or("no row")?;
-    h.cfg.faults.fail(FailPoint::TagWrite, 1);
+    h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
     if unread {
-        h.cfg.faults.fail(FailPoint::TagRead, 1);
+        h.cfg.hooks.faults.fail(FailPoint::TagRead, 1);
     }
     h.run(vec![Op::LocalTags {
         node,
@@ -3157,8 +3157,8 @@ fn a_folder_made_whose_tags_cant_be_read_back_holds_none() -> R {
         return Ok(()); // nothing to tag with here
     }
     let node = NodeId::new();
-    h.cfg.faults.fail(FailPoint::TagWrite, 1);
-    h.cfg.faults.fail(FailPoint::TagRead, 1);
+    h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
+    h.cfg.hooks.faults.fail(FailPoint::TagRead, 1);
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -3234,7 +3234,7 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
                 Some(b.hash),
             ))
         })?;
-        h.cfg.faults.fail(FailPoint::TagWrite, 10);
+        h.cfg.hooks.faults.fail(FailPoint::TagWrite, 10);
         h.run(vec![Op::LocalDownload {
             node,
             parent: NodeId::ROOT,
@@ -3300,7 +3300,7 @@ fn a_restored_folder_made_here_settles_as_a_placement() -> R {
             removed_at: Some(1),
         })
     })?;
-    h.cfg.faults.fail(FailPoint::TagWrite, 1);
+    h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
@@ -3339,7 +3339,7 @@ fn a_download_doesnt_wait_for_a_tag_the_drive_refused() -> R {
         })
     })?;
     h.remote.faults().refuse_writes = true;
-    h.cfg.faults.fail(FailPoint::TagWrite, 10);
+    h.cfg.hooks.faults.fail(FailPoint::TagWrite, 10);
     h.run(vec![
         Op::RemoteTags {
             node,
@@ -3510,7 +3510,7 @@ fn a_download_takes_the_bytes_from_the_trash_unless_its_tags_fail() -> R {
         fs::write(&trashed, b"data")?;
         ops::set_mtime(&trashed, mtime_ms * 1_000_000)?;
         if tags_fail {
-            h.cfg.faults.fail(FailPoint::TagWrite, 1);
+            h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
         }
         let served = h.remote.faults().served;
         h.run(vec![Op::LocalDownload {

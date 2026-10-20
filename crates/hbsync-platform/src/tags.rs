@@ -192,6 +192,7 @@ pub const XDG_ATTR: &str = "user.xdg.tags";
 
 /// Parses Finder's attribute. A suffix after the last newline that isn't a colour is part of
 /// the name.
+#[cfg(any(target_os = "macos", test))]
 pub fn decode_finder(bytes: &[u8]) -> Option<Tags> {
     let plist::Value::Array(items) = plist::Value::from_reader(io::Cursor::new(bytes)).ok()? else {
         return None;
@@ -210,6 +211,7 @@ pub fn decode_finder(bytes: &[u8]) -> Option<Tags> {
 }
 
 /// Finder's attribute for `tags`, of those it can hold.
+#[cfg(any(target_os = "macos", test))]
 pub fn encode_finder(tags: &Tags) -> Vec<u8> {
     let items = tags
         .held_by(Os::MacOs)

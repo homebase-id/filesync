@@ -6,7 +6,7 @@
 //! credentials. Its thread blocks on one channel ([`Msg`]) until the next thing that is due.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SendError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -959,7 +959,7 @@ pub struct Puller {
     thread: Arc<Mutex<Option<JoinHandle<()>>>>,
     drive: Arc<Drive>,
     /// Rounds done (taken and read), for tests.
-    rounds: Arc<AtomicUsize>,
+    rounds: crate::TestCount,
 }
 
 /// What the puller is asked: changes announced, whether to read the feed (asked to, or for
@@ -991,7 +991,7 @@ struct Round {
 
 impl Puller {
     pub fn spawn(drive: Arc<Drive>) -> Puller {
-        let rounds = Arc::new(AtomicUsize::new(0));
+        let rounds = crate::TestCount::default();
         let (asks, thread) = match start(&drive, &rounds) {
             Ok((asks, thread)) => (asks, Some(thread)),
             Err(e) => {
@@ -1029,14 +1029,14 @@ impl Puller {
     }
 
     /// Rounds the puller's thread has done.
-    #[doc(hidden)]
-    pub fn rounds(&self) -> usize {
-        self.rounds.load(Ordering::SeqCst)
+    #[cfg(feature = "testkit")]
+    pub fn rounds(&self) -> u64 {
+        self.rounds.get()
     }
 
     /// Ends the puller's thread, as a panic in it would (tests: it is started again).
-    #[doc(hidden)]
-    pub fn end_thread(&self) {
+    #[cfg(test)]
+    fn end_thread(&self) {
         *lock(&self.asks) = channel().0;
     }
 
@@ -1065,10 +1065,10 @@ impl Puller {
 /// time, until every sender is gone (what it gathered taken first).
 fn start(
     drive: &Arc<Drive>,
-    rounds: &Arc<AtomicUsize>,
+    rounds: &crate::TestCount,
 ) -> std::io::Result<(Sender<Asked>, JoinHandle<()>)> {
     let (asks, rx) = channel::<Asked>();
-    let (mine, done) = (Arc::clone(drive), Arc::clone(rounds));
+    let (mine, done) = (Arc::clone(drive), rounds.clone());
     let thread = std::thread::Builder::new()
         .name("hbsync-pull".into())
         .spawn(move || {
@@ -1105,7 +1105,7 @@ fn start(
                     false => (held_wait * 2).min(HELD_RETRY_MAX),
                 };
                 held = r.held;
-                done.fetch_add(1, Ordering::SeqCst);
+                done.add();
             }
         })?;
     Ok((asks, thread))
