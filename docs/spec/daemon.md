@@ -101,13 +101,16 @@ says so when it couldn't reach the keychain to remove the credentials there.
 3. Answers on the control socket from now on.
 4. Starts each account (identity) of the config on a thread of its own
    (`hbsync-app/src/daemon/account/`), which:
-   1. reads the credentials, waiting (backoff 5 s doubling to 5 min) while the keychain can't
-      be read. None: it says so and the daemon exits;
-   2. connects to the identity, retrying with the same backoff while it can't be reached
-      (`offline`); a refusal (the device revoked) shows as `denied` and is asked again every
-      5 min. Meanwhile `pause` and `resume` work (kept in the config); other requests are
-      refused;
-   3. opens the account's `Drive` and the notification socket, and runs a sync loop
+   1. opens its state DB, before any request: one only the user can set right (corrupt, from
+      another version, another identity's) is shown on its folders (`failing`, with why) and
+      looked at again hourly or at a wake-up, asking nothing; the other accounts sync on;
+   2. reads the credentials, waiting (backoff 5 s doubling to 5 min) while the keychain can't
+      be read. None: it says so and the account ends;
+   3. connects to the identity, retrying with the same backoff while it can't be reached
+      (`offline`, at least as long as its `Retry-After` says); a refusal (the device revoked)
+      shows as `denied` and is asked again hourly (new credentials start it over at once). Meanwhile `pause` and `resume` work
+      (kept in the config); other requests are refused;
+   4. opens the account's `Drive` and the notification socket, and runs a sync loop
       (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the
       notifications on to every folder's loop, reconnects the socket after a sleep, and has
       Recently deleted's requests and its daily purge (not while paused) run on a thread of
@@ -116,11 +119,23 @@ says so when it couldn't reach the keychain to remove the credentials there.
 
    One folder's loop failing is started again after a pause (from 5 s, doubling up to 5 min,
    reset after an hour without failing), the folder showing `failing` with its error
-   meanwhile; the account's other folders sync on. A loop that can't start stops its account, and an account
-   failing stops the daemon (it is restarted whole).
+   meanwhile; the account's other folders sync on. A loop that can't start stops its account.
 
-Exit status: 0 when stopped or when there is nothing to do (not set up, already running), 1 on
-a failure (service managers restart it then).
+   **Refused (401, 403).** Once the identity refuses this computer (a sync, a read of the
+   feed, or the notifications' upgrade), the account is latched (`Drive::deny`): its folders
+   show `denied` and ask nothing but one sync an hour each (a 403 for one write needn't hold
+   the account for good), its puller reads nothing and wakes no folder, the daily purge waits. The notifications ask again
+   after 5 min, doubling up to an hour: once they connect (the credentials work again), or the
+   user asks (Sync now, resume), or new credentials start the account over, it syncs as before.
+
+An account stopped by what only the user can fix ends alone; one failing otherwise stops the
+daemon (it is restarted whole).
+
+Exit status: 0 when stopped, when there is nothing to do (not set up, already running), and on
+an error only the user can fix (a state DB that is corrupt or from another version, a config
+that doesn't parse, credentials that don't parse): a service manager starting it again every
+few seconds can't help; 1 on any other failure, a full disk or a volume not mounted yet
+included (service managers restart it then).
 
 ### The sync loop
 
@@ -264,7 +279,8 @@ a failure (service managers restart it then).
   when to ask again (429 or 503 with `Retry-After`: a paused identity says 10 min) stops the
   sync, and the folder or the account doesn't ask before then (up to an hour). A state DB
   error ends the sync, as a crash would: busy, the folder backs off; one only the user can fix
-  (corrupt, from another version, the disk full or read-only) is tried again every 5 min. A row on the drive the
+  (corrupt, from another version) is tried again every 5 min; the disk full, read-only or
+  failing, after a pause from 5 s doubling to 5 min. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too. An operation the
   drive refused for good is noted once, and not sent again while it is the same (sync semantics
   §8a, refused): a change of the item, Sync now, or an hour sends it once more.

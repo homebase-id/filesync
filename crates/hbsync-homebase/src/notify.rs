@@ -63,8 +63,11 @@ const PING_EVERY: Duration = Duration::from_secs(30);
 const SILENCE: Duration = Duration::from_secs(75);
 const HANDSHAKE: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-/// A refused subscription isn't asked again sooner (the sync's own refusals wait as long).
+/// A refused subscription isn't asked again sooner, doubling while it stays refused up to
+/// [`REFUSED_MAX`]: the account asks the drive nothing meanwhile (its folders wait for a
+/// login), so this is what finds out the credentials work again.
 const REFUSED_PAUSE: Duration = Duration::from_secs(300);
+const REFUSED_MAX: Duration = Duration::from_secs(3600);
 
 /// Whether the subscription hears of the drive writes this client makes itself (measurements:
 /// the `dev` feature).
@@ -247,6 +250,7 @@ fn run(
 ) {
     const FIRST: Duration = Duration::from_secs(1);
     let mut backoff = FIRST;
+    let mut refused_wait = REFUSED_PAUSE;
     while !control.stopping() {
         let (mut connected, mut refused) = (false, false);
         let result = session(
@@ -261,6 +265,7 @@ fn run(
         control.release();
         if connected {
             backoff = FIRST;
+            refused_wait = REFUSED_PAUSE;
         }
         let Err(why) = result else {
             return; // stopped, or nobody listens any more
@@ -279,7 +284,9 @@ fn run(
         // refusal above its floor.
         let jitter = random::<1>().map_or(0, |b| b[0]) as f64 / 255.0;
         let wait = if refused {
-            backoff.max(REFUSED_PAUSE).mul_f64(1.0 + 0.2 * jitter)
+            let wait = refused_wait.mul_f64(1.0 + 0.2 * jitter);
+            refused_wait = (refused_wait * 2).min(REFUSED_MAX);
+            wait
         } else {
             backoff.mul_f64(0.8 + 0.4 * jitter)
         };
@@ -304,7 +311,16 @@ fn session(
     connected: &mut bool,
     refused: &mut bool,
 ) -> Result<(), String> {
-    let mut socket = connect(client, control)?;
+    let mut socket = match connect(client, control) {
+        Ok(socket) => socket,
+        Err(Unopened::Lost(why)) => return Err(why),
+        // The upgrade answered 401 or 403: the identity refused the credentials.
+        Err(Unopened::Refused(why)) => {
+            let _ = events.send(Event::Refused(why.clone()));
+            *refused = true;
+            return Err(why);
+        }
+    };
     send(
         &mut socket,
         client,
@@ -397,7 +413,21 @@ fn next_check(
     at.saturating_duration_since(now).clamp(MIN_WAIT, MAX_WAIT)
 }
 
-fn connect(client: &Client, control: &Control) -> Result<Socket, String> {
+/// Why no connection was opened.
+enum Unopened {
+    /// Not reached, or it broke: tried again soon.
+    Lost(String),
+    /// The identity refused the credentials at the upgrade (401, 403).
+    Refused(String),
+}
+
+impl From<String> for Unopened {
+    fn from(why: String) -> Self {
+        Unopened::Lost(why)
+    }
+}
+
+fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
     let host = client.identity();
     // Every address in turn, as the HTTP client does (an IPv6 address may be unreachable).
     let mut failure = format!("{host} has no address");
@@ -416,7 +446,7 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, String> {
     }
     let tcp = connected.ok_or(failure)?;
     if !control.hold(&tcp) {
-        return Err("told before connecting".into());
+        return Err(Unopened::Lost("told before connecting".into()));
     }
     tcp.set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| e.to_string())?;
@@ -441,10 +471,25 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, String> {
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", protocols);
     let (socket, _) = tungstenite::client(request, stream).map_err(|e| match e {
-        tungstenite::HandshakeError::Failure(e) => e.to_string(),
-        tungstenite::HandshakeError::Interrupted(_) => "handshake timed out".to_owned(),
+        tungstenite::HandshakeError::Failure(e) => match refused_upgrade(&e) {
+            Some(status) => Unopened::Refused(format!("{host}: HTTP {status}")),
+            None => Unopened::Lost(e.to_string()),
+        },
+        tungstenite::HandshakeError::Interrupted(_) => {
+            Unopened::Lost("handshake timed out".to_owned())
+        }
     })?;
     Ok(socket)
+}
+
+/// The status of an upgrade the identity refused for the credentials (401, 403).
+fn refused_upgrade(e: &tungstenite::Error) -> Option<u16> {
+    match e {
+        tungstenite::Error::Http(answer) => {
+            Some(answer.status().as_u16()).filter(|s| matches!(s, 401 | 403))
+        }
+        _ => None,
+    }
 }
 
 /// TLS with ring and the webpki roots, as ureq uses them.
@@ -740,6 +785,23 @@ mod tests {
         assert_eq!(event(100), Notification::Other);
         assert!(matches!(event(7102), Notification::Changed(Some(_))));
         assert!(matches!(event(7101), Notification::Changed(Some(_))));
+    }
+
+    /// An upgrade refused for the credentials is a refusal (the account waits for a login);
+    /// any other failure is a connection lost.
+    #[test]
+    fn a_refused_upgrade_is_a_refusal() -> Result<(), Box<dyn std::error::Error>> {
+        let answer = |status: u16| -> Result<tungstenite::Error, Box<dyn std::error::Error>> {
+            let response = tungstenite::http::Response::builder()
+                .status(status)
+                .body(None)?;
+            Ok(tungstenite::Error::Http(Box::new(response)))
+        };
+        assert_eq!(refused_upgrade(&answer(401)?), Some(401));
+        assert_eq!(refused_upgrade(&answer(403)?), Some(403));
+        assert_eq!(refused_upgrade(&answer(502)?), None);
+        assert_eq!(refused_upgrade(&tungstenite::Error::ConnectionClosed), None);
+        Ok(())
     }
 
     #[test]

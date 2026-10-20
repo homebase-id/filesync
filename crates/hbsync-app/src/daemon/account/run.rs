@@ -8,8 +8,10 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
+use hbsync_engine::root::SyncRoot;
 use hbsync_homebase::Client;
 use hbsync_homebase::drive::HomebaseRemote;
+use hbsync_remote::ErrorClass;
 use hbsync_types::unix_now;
 
 use super::parts::AccountParts;
@@ -21,6 +23,9 @@ use crate::protocol::{AccountStatus, Hints, Pause, State};
 use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, shown};
 use crate::sync::{lock, wait_for};
 use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
+
+/// While what only the user can fix keeps an account from starting, how often it looks again.
+const NEEDS_USER_AGAIN: Duration = Duration::from_secs(3600);
 
 /// How often the purge of Recently deleted is looked at (it runs once a day).
 const PURGE_LOOK: Duration = Duration::from_secs(600);
@@ -80,6 +85,19 @@ impl Account {
     ) -> Result<(), DaemonError> {
         // What came while waiting for the credentials and the identity.
         let mut msgs = Vec::new();
+        // Its state DB first, before any request: one only the user can set right (corrupt,
+        // from another version) is shown and waited out, asking nothing, the daemon and the
+        // other accounts going on.
+        while let Err(e) = SyncRoot::upgrade(&self.db, self.identity.as_str()) {
+            if e.class() != ErrorClass::NeedsUser {
+                return Err(RunnerError::Folder(e).into());
+            }
+            tracing::error!("{e}: {} waits for it to be set right", self.identity);
+            self.show_waiting(State::Failing, e.to_string());
+            if self.wait(NEEDS_USER_AGAIN, stop, requests, &mut msgs) {
+                return Ok(());
+            }
+        }
         let Some(creds) = self.credentials(paths, stop, requests, &mut msgs)? else {
             return Ok(());
         };
@@ -417,7 +435,12 @@ impl Account {
                 Ok(r) => return Some(Arc::new(r)),
                 Err(e) => {
                     let class = e.class();
-                    let wait_for = backoff.after(class, e.retry_after());
+                    // Refused: the credentials won't work sooner; a login starts it over.
+                    let asked = match class {
+                        ErrorClass::Denied => Some(NEEDS_USER_AGAIN),
+                        _ => e.retry_after(),
+                    };
+                    let wait_for = backoff.after(class, asked);
                     tracing::warn!(
                         "can't connect to {} ({e}); trying again in {wait_for:?}",
                         self.identity

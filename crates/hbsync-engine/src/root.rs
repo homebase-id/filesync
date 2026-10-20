@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use hbsync_local::{Marker, layout};
+use hbsync_remote::ErrorClass;
 use hbsync_state::{FolderRow, Reader, StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
@@ -32,6 +33,22 @@ pub enum RootError {
     State(#[from] StateError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+impl RootError {
+    /// What it means ([`ErrorClass`]): a folder or a state that only the user can set right,
+    /// or its DB's or disk's error.
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            RootError::State(e) => e.class(),
+            RootError::Io(e) => ErrorClass::of_io(e),
+            // A volume not mounted yet may come back.
+            RootError::NoMarker(_) => ErrorClass::LocalFault,
+            RootError::OtherIdentity { .. } | RootError::Unknown(_) | RootError::OtherTop(_) => {
+                ErrorClass::NeedsUser
+            }
+        }
+    }
 }
 
 /// A folder synced with an account, found through its marker.

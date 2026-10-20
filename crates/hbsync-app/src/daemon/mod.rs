@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use hbsync_homebase::HomebaseError;
+use hbsync_remote::ErrorClass;
 use hbsync_types::unix_now;
 
 use crate::config::ConfigLock;
@@ -47,6 +48,30 @@ pub enum DaemonError {
     Ipc(std::io::Error),
 }
 
+impl DaemonError {
+    /// What it means ([`ErrorClass`]): a daemon that ends with one only the user can fix
+    /// (`NeedsUser`) isn't started again by the service manager.
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            DaemonError::Lock(LockError::Io(e)) | DaemonError::Config(ConfigError::Io(_, e)) => {
+                ErrorClass::of_io(e)
+            }
+            DaemonError::Credentials(CredentialError::Keychain(_)) => ErrorClass::LocalFault,
+            // A credentials file that can't be read now; one that doesn't parse is the user's.
+            DaemonError::Credentials(CredentialError::File(HomebaseError::Io(e))) => {
+                ErrorClass::of_io(e)
+            }
+            DaemonError::NotSetUp(_)
+            | DaemonError::Lock(LockError::Held { .. })
+            | DaemonError::Config(_)
+            | DaemonError::Credentials(_) => ErrorClass::NeedsUser,
+            DaemonError::Homebase(e) => e.class(),
+            DaemonError::Runner(e) => e.class(),
+            DaemonError::Ipc(e) => ErrorClass::of_io(e),
+        }
+    }
+}
+
 /// Stops the daemon from another thread (a signal handler's).
 #[derive(Debug, Clone, Default)]
 pub struct Stop {
@@ -66,7 +91,8 @@ impl Stop {
 }
 
 /// Runs the daemon until a stop request, or until `stop` (a signal). It ends when its last
-/// account has (one failing stops them all: the daemon is restarted whole).
+/// account has; one stopped by what only the user can fix ends alone, the others sync on, and
+/// one failing otherwise stops them all (the daemon is restarted whole).
 pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
     let (_lock, config, listener) = {
         let held = ConfigLock::take(&paths.config_file())?;
@@ -120,13 +146,22 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
             .spawn(move || ipc::serve(listener, move |r| answer::answer(r, &daemon), watch))
             .map_err(DaemonError::Ipc)?;
     }
-    let mut result = Ok(());
+    let mut result: Result<(), DaemonError> = Ok(());
     let (mut rung, mut stopping) = (0, false);
     loop {
         let (ended, left) = daemon.reap();
+        // What only the user can fix ends that account alone: the others sync on, and the
+        // daemon ends with the last. Any other failure stops them all: the daemon is started
+        // again whole.
         if let Err(e) = ended {
-            daemon.stop.stop();
-            if result.is_ok() {
+            tracing::error!("an account stopped: {e}");
+            let fault = e.class() != ErrorClass::NeedsUser;
+            if fault {
+                daemon.stop.stop();
+            }
+            // The exit tells a fault rather than what only the user can fix.
+            let told_fault = matches!(&result, Err(f) if f.class() != ErrorClass::NeedsUser);
+            if result.is_ok() || (fault && !told_fault) {
                 result = Err(e);
             }
         }
@@ -306,7 +341,32 @@ pub(crate) fn join_finished<T, E: From<RunnerError>>(
 
 #[cfg(test)]
 mod tests {
+    use hbsync_engine::root::RootError;
+    use hbsync_state::StateError;
+
     use super::*;
+
+    /// What only the user can fix ends the daemon as no failure: the service manager doesn't
+    /// start it again every few seconds. A fault of its own does.
+    #[test]
+    fn what_only_the_user_can_fix_isnt_a_failure() {
+        let folder = |e| DaemonError::Runner(RunnerError::Folder(RootError::State(e)));
+        let too_new = folder(StateError::TooNew {
+            found: 99,
+            supported: 1,
+        });
+        assert_eq!(too_new.class(), ErrorClass::NeedsUser);
+        let corrupt = folder(StateError::Corrupt("x".into()));
+        assert_eq!(corrupt.class(), ErrorClass::NeedsUser);
+        assert_eq!(
+            DaemonError::NotSetUp("x".into()).class(),
+            ErrorClass::NeedsUser
+        );
+        assert_eq!(
+            DaemonError::Runner(RunnerError::Panicked).class(),
+            ErrorClass::Bug
+        );
+    }
 
     /// A daemon starting with nothing to sync lets its lock go while it still holds the
     /// config's: a program waiting for that lock finds no daemon running, and writes the

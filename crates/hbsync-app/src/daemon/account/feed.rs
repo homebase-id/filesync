@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::notify::Event;
-use hbsync_remote::ChangeRef;
+use hbsync_remote::{ChangeRef, ErrorClass};
 
 use crate::protocol::Hints;
 use crate::sync::lock;
@@ -63,6 +63,8 @@ impl Notifications {
     pub fn event(&mut self, event: Event, now: Instant, paused: bool) -> Option<Hints> {
         match event {
             Event::Connected => {
+                // The credentials work: what waited for a login asks the drive again.
+                self.puller.drive.allow();
                 // Changes made while not connected weren't announced: the feed is read, now or
                 // at the resume, and it brings what was gathered too. Only once that read
                 // worked are the drive's changes taken as announced ([`Drive::current`]).
@@ -106,6 +108,8 @@ impl Notifications {
             }
             Event::Refused(why) => {
                 tracing::warn!("notifications refused ({why}); asking again later");
+                // The identity refused the credentials: the folders and the puller don't ask.
+                self.puller.drive.deny(&why);
                 self.disconnected(now);
                 Some(Hints::Refused(why))
             }
@@ -157,10 +161,16 @@ impl Notifications {
         if self.announced.due(now) {
             self.take();
         }
-        if self.connected.is_none() && now >= self.next_read {
+        if self.reads_on_a_timer() && now >= self.next_read {
             self.next_read = now + UNANNOUNCED_READ;
             self.puller.ask();
         }
+    }
+
+    /// Whether the drive is read every [`UNANNOUNCED_READ`]: while not connected. (Refused, a
+    /// read asks nothing: [`Drive::deny`].)
+    fn reads_on_a_timer(&self) -> bool {
+        self.connected.is_none()
     }
 
     /// When [`Notifications::tick`] has something to do (`paused`: never), `now` being now.
@@ -168,7 +178,7 @@ impl Notifications {
         if paused {
             return None;
         }
-        let unannounced = self.connected.is_none().then_some(self.next_read);
+        let unannounced = self.reads_on_a_timer().then_some(self.next_read);
         [
             self.connect_read.then_some(now),
             self.announced.deadline(),
@@ -365,7 +375,18 @@ fn start(
                     changes,
                     read,
                     |c| mine.announced(c).map_err(|e| e.to_string()),
-                    || mine.pull(None).map(drop).map_err(|e| e.to_string()),
+                    || {
+                        // Refused: the drive isn't asked (nor the folders woken to ask it)
+                        // until the user acts or the notifications connect.
+                        if mine.is_denied() {
+                            return Ok(false);
+                        }
+                        match mine.pull(None) {
+                            Ok(_) => Ok(true),
+                            Err(e) if e.class() == ErrorClass::Denied => Ok(false),
+                            Err(e) => Err(e.to_string()),
+                        }
+                    },
                     || mine.wake_all(),
                 );
                 if r.read
@@ -449,7 +470,7 @@ fn round(
     changes: Vec<ChangeRef>,
     mut pull: bool,
     mut announced: impl FnMut(&[ChangeRef]) -> Result<bool, String>,
-    read: impl FnOnce() -> Result<(), String>,
+    read: impl FnOnce() -> Result<bool, String>,
     wake_all: impl FnOnce(),
 ) -> Round {
     let mut round = Round::default();
@@ -474,7 +495,7 @@ fn round(
         return round;
     }
     match read() {
-        Ok(()) => round.read = true,
+        Ok(read) => round.read = read,
         Err(e) => {
             tracing::info!("pulling the drive's changes failed ({e}); the folders' syncs will");
             wake_all();
@@ -803,13 +824,29 @@ mod tests {
             },
             || {
                 reads.set(reads.get() + 1);
-                Ok(())
+                Ok(true)
             },
             || {},
         );
         assert_eq!(*calls.borrow(), vec![vec![gone], vec![live]]);
         assert!(left.held.is_empty(), "the hard delete was taken");
         assert_eq!(reads.get(), 1, "the live change is read instead");
+    }
+
+    /// A read the identity refused wakes no folder (each would be refused alike) and reads as
+    /// not done.
+    #[test]
+    fn a_refused_read_wakes_no_folder() {
+        let woken = std::cell::Cell::new(false);
+        let left = round(
+            Vec::new(),
+            true,
+            |_| Ok(true),
+            || Ok(false),
+            || woken.set(true),
+        );
+        assert!(!woken.get());
+        assert!(!left.read);
     }
 
     /// A take and a plain ask in one round: the changes are taken and the feed is read, once.
@@ -833,7 +870,7 @@ mod tests {
         let reads = std::cell::Cell::new(0);
         let read = || {
             reads.set(reads.get() + 1);
-            Ok(())
+            Ok(true)
         };
         let left = round(
             vec![gone, live],

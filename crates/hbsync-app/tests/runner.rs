@@ -827,3 +827,38 @@ fn progress_shows_while_a_transfer_runs() -> R {
     handle.send(Command::Stop);
     Ok(())
 }
+
+/// A computer the identity refuses (401) asks it nothing more: not on a change here, not on a
+/// timer, not the account's puller, until the user acts (Sync now) or the notifications
+/// connect again; then it syncs as before.
+#[test]
+fn a_refused_computer_asks_nothing_until_the_user_acts() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.wait_idle()?;
+    a.remote.faults().denied = true;
+    a.write("one.txt", "1")?;
+    wait_until("refused", || a.status().state == State::Denied)?;
+    assert!(a.drive.denied().is_some(), "the account latched");
+    let asked = a.remote.faults().requests;
+    a.write("two.txt", "2")?;
+    let puller = a.puller();
+    puller.ask();
+    // The machine woke up: a sync at once, but not one that asks a refusing identity.
+    a.handle.send(Command::Woke);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        a.remote.faults().requests,
+        asked,
+        "nothing asked while refused"
+    );
+    assert_eq!(a.status().state, State::Denied);
+    // Let in again, and the user asks.
+    a.remote.faults().denied = false;
+    a.handle.send(Command::SyncNow);
+    wait_until("synced again", || {
+        on_server(&server, "one.txt") && on_server(&server, "two.txt")
+    })?;
+    assert!(a.drive.denied().is_none());
+    Ok(())
+}
