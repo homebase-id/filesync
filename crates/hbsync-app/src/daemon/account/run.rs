@@ -18,8 +18,8 @@ use super::runners::{Life, Running, shown};
 use super::{Account, Msg, Phase, Request};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
-use crate::protocol::{AccountStatus, Hints, State, Until};
-use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, pause_end};
+use crate::protocol::{AccountStatus, Hints, Pause, State};
+use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError};
 use crate::sync::{lock, wait_for};
 use crate::{Config, CredentialError, CredentialStore, Location, Paths};
 
@@ -156,11 +156,14 @@ impl Account {
                     r.handle.send(Command::Stop);
                 }
             }
-            if pause_ran_out(&mut lock(&self.paused), unix_now()) {
+            let (ran_out, paused) = {
+                let mut pause = lock(&self.paused);
+                (pause_ran_out(&mut pause, unix_now()), pause.is_some())
+            };
+            if ran_out {
                 tracing::info!("the pause is over");
                 self.changed.raise();
             }
-            let paused = lock(&self.paused).is_some();
             let mut changed = false;
             for msg in msgs.drain(..) {
                 match msg {
@@ -272,7 +275,7 @@ impl Account {
             let now = Instant::now();
             let pause = *lock(&self.paused);
             let paused = pause.is_some();
-            let pause_end = pause.and_then(|until| pause_end(until, now, unix_now()));
+            let pause_end = pause.and_then(|p| p.end_at(now, unix_now()));
             let restarts = runners.iter().filter_map(|r| match r.life {
                 Life::Waiting(at) => Some(at),
                 _ => None,
@@ -405,31 +408,27 @@ impl Account {
     }
 }
 
-/// Whether the account's timed pause (`paused`) ran out at `unix` (seconds): then it is
-/// over, as each folder's is ([`crate::runner`]).
-fn pause_ran_out(paused: &mut Option<Until>, unix: u64) -> bool {
-    if matches!(*paused, Some(Some(until)) if unix >= until) {
-        *paused = None;
-        return true;
-    }
-    false
+/// Whether the account's timed pause ran out at `unix` (Unix seconds), as each folder's does
+/// ([`Pause::ran_out`]): then it is over.
+fn pause_ran_out(pause: &mut Option<Pause>, unix: u64) -> bool {
+    pause.take_if(|p| p.ran_out(unix)).is_some()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The account's timed pause runs out as each folder's does; one without an end doesn't.
+    /// The account's timed pause runs out as each folder's does; one until resumed doesn't.
     #[test]
     fn the_accounts_timed_pause_runs_out() {
-        let mut paused: Option<Until> = Some(Some(100));
-        assert!(!pause_ran_out(&mut paused, 99));
-        assert_eq!(paused, Some(Some(100)));
-        assert!(pause_ran_out(&mut paused, 100));
-        assert_eq!(paused, None);
-        let mut for_good: Option<Until> = Some(None);
+        let mut timed = Some(Pause::ending_at(100));
+        assert!(!pause_ran_out(&mut timed, 99));
+        assert_eq!(timed, Some(Pause::ending_at(100)));
+        assert!(pause_ran_out(&mut timed, 100));
+        assert_eq!(timed, None);
+        let mut for_good = Some(Pause::UNTIL_RESUMED);
         assert!(!pause_ran_out(&mut for_good, u64::MAX));
-        assert_eq!(for_good, Some(None));
+        assert_eq!(for_good, Some(Pause::UNTIL_RESUMED));
         assert!(!pause_ran_out(&mut None, 100));
     }
 }

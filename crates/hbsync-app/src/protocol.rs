@@ -7,6 +7,7 @@
 //! one folder (its held deletes).
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use hbsync_types::NodeId;
 use hbsync_types::Role;
@@ -94,8 +95,35 @@ pub enum Reply {
     Refused(String),
 }
 
-/// How long a pause lasts: until then (Unix seconds), or until resumed (`None`).
-pub(crate) type Until = Option<u64>;
+/// A pause of syncing: until then (Unix seconds), or until resumed (`until: None`). The
+/// config keeps it, and the account and each folder hold it while paused; when it runs out is
+/// decided here alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pause {
+    pub until: Option<u64>,
+}
+
+impl Pause {
+    /// Paused until resumed.
+    pub const UNTIL_RESUMED: Pause = Pause { until: None };
+
+    /// Paused until `unix` (Unix seconds).
+    pub const fn ending_at(unix: u64) -> Pause {
+        Pause { until: Some(unix) }
+    }
+
+    /// Whether the pause is over at `unix` (Unix seconds): a timed one whose time has come.
+    pub fn ran_out(self, unix: u64) -> bool {
+        self.until.is_some_and(|t| unix >= t)
+    }
+
+    /// When it runs out, `unix` being the Unix time at `now`; `None` for one until resumed (or
+    /// one too far ahead for an instant).
+    pub fn end_at(self, now: Instant, unix: u64) -> Option<Instant> {
+        self.until
+            .and_then(|t| now.checked_add(Duration::from_secs(t.saturating_sub(unix))))
+    }
+}
 
 /// A request to change what the daemon does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,10 +148,8 @@ pub enum Control {
 pub enum DaemonControl {
     /// Sync now, without waiting out a backoff.
     SyncNow,
-    /// Pause until then (Unix seconds), or until resumed (`None`).
-    Pause {
-        until: Until,
-    },
+    /// Pause syncing.
+    Pause(Pause),
     Resume,
 }
 
@@ -393,4 +419,25 @@ pub struct Note {
     /// Unix seconds.
     pub at: u64,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A timed pause runs out when its time comes (the account and each folder go by this);
+    /// one until resumed never does.
+    #[test]
+    fn a_timed_pause_runs_out_when_its_time_comes() {
+        let timed = Pause::ending_at(100);
+        assert!(!timed.ran_out(99));
+        assert!(timed.ran_out(100));
+        assert!(!Pause::UNTIL_RESUMED.ran_out(u64::MAX));
+        let now = Instant::now();
+        assert_eq!(timed.end_at(now, 90), Some(now + Duration::from_secs(10)));
+        assert_eq!(timed.end_at(now, 200), Some(now), "already over");
+        assert_eq!(Pause::UNTIL_RESUMED.end_at(now, 0), None);
+        let far = Pause::ending_at(u64::MAX);
+        assert_eq!(far.end_at(now, 0), None, "too far ahead for an instant");
+    }
 }

@@ -37,13 +37,13 @@ use hbsync_types::NodeId;
 use hbsync_types::unix_now;
 
 use crate::MassDelete;
-use crate::protocol::{FolderStatus, State, Until};
+use crate::protocol::{FolderStatus, Pause, State};
 use crate::sync::{OnDrop, Wakeup, lock, wait_for};
 
 mod report;
 mod schedule;
 
-pub(crate) use schedule::{Backoff, pause_end};
+pub(crate) use schedule::Backoff;
 use schedule::{Schedule, Synced};
 
 /// The ignore rules are read this long after their file was last touched: not half written.
@@ -76,8 +76,8 @@ pub struct RunnerConfig {
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
-    /// Start paused: until then, or until resumed (`Some(None)`).
-    pub paused: Option<Until>,
+    /// Start paused, with this pause.
+    pub paused: Option<Pause>,
     /// How often what is local is looked at: the ignore rules, whether a folder that is gone
     /// is back, a rescan of a folder without a watcher.
     pub look: Duration,
@@ -115,10 +115,8 @@ pub enum Command {
     /// The drive can be reached again (the notifications connected): a sync waiting for a
     /// backoff or to try unfinished work again goes now.
     Online,
-    /// Pause until then (Unix seconds), or until resumed (`None`).
-    Pause {
-        until: Until,
-    },
+    /// Pause syncing.
+    Pause(Pause),
     Resume,
     /// Let the held deletes the user was shown through: `token` is
     /// [`crate::protocol::HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
@@ -170,7 +168,7 @@ impl Handle {
     /// Passes `control` on. Pause and stop also interrupt a sync in progress. False when the
     /// runner has ended.
     pub fn send(&self, control: Command) -> bool {
-        if matches!(control, Command::Pause { .. } | Command::Stop) {
+        if matches!(control, Command::Pause(_) | Command::Stop) {
             self.stop.store(true, Ordering::Relaxed);
             // Shown as paused at once.
             self.changed.raise();
@@ -265,7 +263,7 @@ impl Runner {
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
         status.role = cfg.role;
-        status.paused_until = cfg.paused.flatten();
+        status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
         let progress = Arc::new(Counters::default());
         let woken = crate::TestCount::default();
@@ -596,10 +594,10 @@ impl Runner {
                 tracing::info!("the machine woke up: syncing now");
                 schedule.woke(Instant::now());
             }
-            Command::Pause { until } => {
-                schedule.pause(until);
-                self.set(|s| s.paused_until = until);
-                match until {
+            Command::Pause(pause) => {
+                schedule.pause(pause);
+                self.set(|s| s.paused_until = pause.until);
+                match pause.until {
                     Some(t) => {
                         tracing::info!("paused for {} min", t.saturating_sub(unix_now()) / 60)
                     }

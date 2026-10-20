@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop};
 use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Taken};
-use hbsync_app::protocol::{DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints};
+use hbsync_app::protocol::{DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Pause};
 use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
@@ -209,12 +209,12 @@ fn run(command: Command) -> Res<ExitCode> {
             println!("Syncing now.");
         }
         Command::Pause { for_: None } => {
-            daemon::daemon(&paths, DaemonControl::Pause { until: None })?;
+            daemon::daemon(&paths, DaemonControl::Pause(Pause::UNTIL_RESUMED))?;
             println!("Paused. `hbsync resume` syncs again.");
         }
         Command::Pause { for_: Some(secs) } => {
             let until = words::now() + secs;
-            daemon::daemon(&paths, DaemonControl::Pause { until: Some(until) })?;
+            daemon::daemon(&paths, DaemonControl::Pause(Pause::ending_at(until)))?;
             println!(
                 "Paused; syncing again {}. `hbsync resume` syncs now.",
                 words::when(until, words::now())

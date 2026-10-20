@@ -20,7 +20,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
-use hbsync_app::protocol::{DaemonControl, RecentItem};
+use hbsync_app::protocol::{DaemonControl, Pause, RecentItem};
 use hbsync_app::{APP_NAME, Paths, autostart, control, shell, words};
 use hbsync_app::{FolderStatus, State};
 use tray_icon::menu::{
@@ -295,10 +295,10 @@ impl App {
             Action::Reveal(path) => {
                 std::thread::spawn(move || os::reveal(&path));
             }
-            Action::PauseFor(secs) => self.send_control(DaemonControl::Pause {
-                until: Some(words::now() + secs),
-            }),
-            Action::Pause => self.send_control(DaemonControl::Pause { until: None }),
+            Action::PauseFor(secs) => {
+                self.send_control(DaemonControl::Pause(Pause::ending_at(words::now() + secs)))
+            }
+            Action::Pause => self.send_control(DaemonControl::Pause(Pause::UNTIL_RESUMED)),
             Action::Resume => self.send_control(DaemonControl::Resume),
             Action::SyncNow => self.send_control(DaemonControl::SyncNow),
             Action::ReviewDeletions => os::open(self.pages.url("deletions")),

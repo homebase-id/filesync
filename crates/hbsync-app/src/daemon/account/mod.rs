@@ -26,8 +26,8 @@ use hbsync_types::activity::Deleted;
 
 use crate::Paths;
 use crate::protocol::{
-    AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, RecentItem, State,
-    Until,
+    AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Pause, RecentItem,
+    State,
 };
 use crate::runner::{Command, Handle};
 use crate::sync::{Wakeup, lock};
@@ -49,7 +49,7 @@ pub(crate) struct Account {
     /// Its folders here, and their runners once it runs.
     phase: Mutex<Phase>,
     /// Paused (kept in the config too): a runner starts paused.
-    paused: Mutex<Option<Until>>,
+    paused: Mutex<Option<Pause>>,
     /// What its thread is told.
     requests: Sender<Msg>,
     /// Told to end (to start over with new credentials).
@@ -101,7 +101,7 @@ impl Account {
         paths: &Paths,
         identity: &str,
         folder: &Path,
-        paused: Option<Until>,
+        paused: Option<Pause>,
         changed: Arc<Wakeup>,
     ) -> (Arc<Account>, Receiver<Msg>) {
         let (requests, rx) = channel();
@@ -175,7 +175,7 @@ impl Account {
                         } else {
                             *state
                         };
-                        folder.paused_until = paused.flatten();
+                        folder.paused_until = paused.and_then(|p| p.until);
                         folder.error.clone_from(error);
                         folder
                     })
@@ -210,12 +210,12 @@ impl Account {
     }
 
     /// Pauses (`Some`) or resumes its folders, also before they run.
-    pub(super) fn pause(&self, pause: Option<Until>) {
+    pub(super) fn pause(&self, pause: Option<Pause>) {
         *lock(&self.paused) = pause;
         self.wake();
         self.changed.raise();
         self.send_all(&match pause {
-            Some(until) => Command::Pause { until },
+            Some(pause) => Command::Pause(pause),
             None => Command::Resume,
         });
     }

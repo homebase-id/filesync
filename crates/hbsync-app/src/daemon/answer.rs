@@ -165,9 +165,9 @@ pub(super) fn status(accounts: &[Arc<Account>]) -> DaemonStatus {
 
 fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Reply {
     match control {
-        Control::Daemon(c @ (DaemonControl::Pause { .. } | DaemonControl::Resume)) => {
+        Control::Daemon(c @ (DaemonControl::Pause(_) | DaemonControl::Resume)) => {
             let pause = match c {
-                DaemonControl::Pause { until } => Some(until),
+                DaemonControl::Pause(pause) => Some(pause),
                 _ => None,
             };
             // Pausing survives a restart, and is kept until the sync starts.
