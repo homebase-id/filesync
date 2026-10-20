@@ -67,23 +67,12 @@ impl Sim {
         self.release_filtered(c);
         let remote = self.server_view(c);
         let client = &self.clients[c];
-        // A parked node is reported at its original place: the temporary name is the
-        // executor's business and must never reach the remote.
-        // A record only counts while the node still sits at its parked name: if the user moved
-        // it since, the user's move is what the reconciler must see.
+        // A parked node is reported at its original place ([`at_place`]): the temporary name
+        // is the executor's business and must never reach the remote.
         let mut local_view = client.local.clone();
-        for (node, (parent, name)) in &client.parked {
-            if let Some(state) = local_view.get(*node).cloned()
-                && state.name == parked_name(*node)
-            {
-                local_view.insert(
-                    *node,
-                    NodeState {
-                        parent: *parent,
-                        name: name.clone(),
-                        ..state
-                    },
-                );
+        for &node in client.parked.keys() {
+            if let Some(state) = client.local.get(node) {
+                local_view.insert(node, at_place(client, node, state));
             }
         }
         // The scanner never reports filtered items (judged by their names on disk).
@@ -697,7 +686,8 @@ impl Sim {
                 }
                 // No base to record what it writes, and none it founds: it waits (the
                 // executor's `tags_recorded`).
-                let founds = |r: &NodeState| Agreement::of(&state, r, false).founds_base(false);
+                let here = at_place(client, node, &state);
+                let founds = |r: &NodeState| Agreement::of(&here, r, false).founds_base(false);
                 if !client.base.contains(node)
                     && !(verdict(client, node).is_sync() && remote.as_ref().is_some_and(founds))
                 {
@@ -1244,13 +1234,14 @@ impl Sim {
             None => server.clone().zip(live),
         };
         let client = &mut self.clients[c];
+        // A parked node is at its original place, as the executor's `local_node` reads it.
         let local = client
             .local
             .get(node)
             .filter(|_| verdict(client, node).is_sync())
             .map(|l| NodeState {
                 tags: held_tags(client, reference.as_ref(), node, &l.tags),
-                ..l.clone()
+                ..at_place(client, node, l)
             });
         // What the write left, as the item reads, and what was there, read alike but for a tag
         // the OS can't hold at all (the item never held that: the write leaves the drive's), as
@@ -1310,6 +1301,20 @@ impl Sim {
             }
             _ => None,
         }
+    }
+}
+
+/// Item `node` of `client` (`state`) at its place: a parked one under its original name, in the
+/// folder it is in (parking never leaves it), while it still sits at its parked name (the
+/// temporary name is the executor's business; a user's move since is the user's), as the
+/// executor's `parked_place` reads it.
+fn at_place(client: &Client, node: NodeId, state: &NodeState) -> NodeState {
+    match client.parked.get(&node) {
+        Some((_, name)) if state.name == parked_name(node) => NodeState {
+            name: name.clone(),
+            ..state.clone()
+        },
+        _ => state.clone(),
     }
 }
 
