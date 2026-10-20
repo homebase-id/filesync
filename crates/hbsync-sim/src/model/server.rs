@@ -104,7 +104,7 @@ impl Server {
             self.live.iter().map(|(n, l)| (*n, l.state.parent)),
             |f| folders.get(&f).copied(),
             |n| self.live.get(&n).map(|l| time(l.remote.version)),
-            |n| n == Role::Documents.node(),
+            |n| Role::of(n).is_some(), // as the engine keeps them
         )
         .into_iter()
         .flatten()
@@ -139,6 +139,13 @@ impl Server {
 
     /// The items of Recently deleted removed before `before` (each deleted on its own), each
     /// with what was deleted with it: removed nodes deleted with their folder, level by level.
+    ///
+    /// A copy of the engine's grouping (`deleted::listing::deletes_before`, `group`), kept: the
+    /// engine's reads rows lazily from its store, memoized and shared with the listing, which a
+    /// closure-driven version would slow on the purge's path; and the rule is the node
+    /// schema's ("deleted with": removed no earlier than its folder), stated here on the
+    /// drive's rows directly. Rows deleted with each other in a cycle (the engine takes the
+    /// smallest as their item) can't happen here: removal times are unique.
     fn items(&self, before: i64) -> Vec<Vec<NodeId>> {
         let time = |n: &NodeId| self.removed_at.get(n).copied().unwrap_or(i64::MAX);
         let tops = self.removed.iter().filter(|(n, r)| {
