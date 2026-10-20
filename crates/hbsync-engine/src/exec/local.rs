@@ -483,7 +483,7 @@ impl Executor<'_> {
         // unless the child is forgotten in this run too (children go first; in a cycle of
         // bases, as a remote cycle leaves them, one must go before the others).
         let children = self.db.read(|s| s.base_children(node))?;
-        if children.iter().any(|c| !self.forgetting.contains(&c.node)) {
+        if children.iter().any(|c| !self.schedule.forgetting(c.node)) {
             return Ok(Outcome::waiting("its children first"));
         }
         self.finish(&[], |s| s.folder().delete_base(node).map(drop))
