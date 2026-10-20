@@ -207,6 +207,11 @@ a failure (service managers restart it then).
   when it changes (`watch`, below). Left on a timer: the notification socket's ping (every
   30 s), the sleep poll below off Linux, the 10 min bounds on a lost wake-up, and the tray's
   minute (relative times).
+- **Idle connections:** an account's HTTPS connections stay open for reuse while calls come;
+  15 s after the last call ends (when they could no longer be reused anyway) they are closed,
+  with their buffers, by a thread that waits without a timeout while nothing is open or calls
+  run. The TLS sessions are kept: the next call resumes one instead of a full handshake
+  (measured on frodo: ~1.3 KB on the wire against ~4 KB).
 - **Pause** stops a running sync between operations and before the next transfer (transfers
   in flight finish); nothing syncs until resume. The watcher keeps recording changes. A pause
   survives a restart (`paused` in the config).

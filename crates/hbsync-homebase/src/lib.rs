@@ -7,6 +7,7 @@
 
 pub mod app;
 pub mod client;
+mod connections;
 pub mod crypto;
 pub mod drive;
 pub mod multipart;
