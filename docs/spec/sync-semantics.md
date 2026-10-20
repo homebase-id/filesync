@@ -500,9 +500,13 @@ rest up); a tag change's row stays as the scan read it, its change time too, so 
 whatever changed since. Recovery still reads an item whose tags it can't read as not known: it
 can't tell that from tags too big to sync, which keep the drive's. A placement whose tag write
 failed claims nothing in its record (not known), and the next plan writes the drive's tags
-again. A download whose failed write would lose a
-tag the file it replaces holds and the drive doesn't (the user's, not sent up yet) isn't put in
-place: it is tried again, the plan sending the tag up meanwhile, unless the drive refused that
+again. A folder synced here before and made back from a removal (for a child written into it,
+its restore to follow) has no record, and keeps its base: but for a tag the failed write didn't
+put on it that the drive's last version holds (in Recently deleted; the base's own where that
+is not known), which would read as the user's removal. One that version lacks stays in the base:
+its absence is the drive's removal, which the restore merges in. A download whose failed write
+would lose a tag the file it replaces holds and the drive doesn't (the user's, not sent up yet)
+isn't put in place: it is tried again, the plan sending the tag up meanwhile, unless the drive refused that
 for good in the run (access, read-only): then it is placed. A node with no
 base gets one when place and content agree, with the tags both sides have: the merge then
 brings each side the other's (a copy proven equal only across hash algorithms can't be proven

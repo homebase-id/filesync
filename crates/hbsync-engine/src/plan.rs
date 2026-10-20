@@ -439,6 +439,20 @@ impl TagWrite<'_> {
     }
 }
 
+/// The base's tags once a folder made back here (no version of the drive live: its restore to
+/// follow) holds `held` after a write of its tags that failed: a tag the base and the drive's
+/// last version (`drive`: the base's own where none is known) hold and the folder lacks never
+/// reached it, and goes. Kept, its absence would read as the user's removal, and remove it on
+/// the drive. One that version lacks stays: its absence is the drive's removal (made before the
+/// delete), which the restore merges in.
+pub fn not_reached(base: &Tags, held: &Tags, drive: &Tags) -> Tags {
+    Tags::new(
+        base.iter()
+            .filter(|t| held.get(&t.name).is_some() || drive.get(&t.name).is_none())
+            .cloned(),
+    )
+}
+
 /// What an operation's base settles against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Against<'a> {

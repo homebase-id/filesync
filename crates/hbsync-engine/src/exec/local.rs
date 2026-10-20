@@ -139,10 +139,10 @@ impl Executor<'_> {
         let tags = left.claimed.clone();
         // Tags written: the record claims what the folder holds now, before its commit. A
         // folder taken over held its own: a failed write left those, not known (none claimed).
-        if kept_tags
-            && (adopt || !none)
-            && let Some(r) = &mut record
-        {
+        let claims = kept_tags && (adopt || !none);
+        // What it holds isn't what it was to hold: the write failed, or read back as nothing.
+        let unknown = claims && tags.is_none();
+        if claims && let Some(r) = &mut record {
             r.placed_tags = tags.clone();
             if kept && tags.is_some() {
                 self.write_durable(|s| s.put_placing(r))?;
@@ -191,12 +191,31 @@ impl Executor<'_> {
                     // any placement does: the base until the restore settles. Without one, a
                     // tag removed on the drive meanwhile read as this device adding it, and
                     // came back.
-                    let removed = match s.get_base(node)?.is_none() {
+                    //
+                    // One synced here before keeps its base, but for a tag its failed write
+                    // didn't put on it that the drive's last version holds: kept, the folder
+                    // without it read as the user removing it, and the plan removed it on the
+                    // drive.
+                    let base = s.get_base(node)?;
+                    let synced = base.is_some();
+                    let removed = match !synced || unknown {
                         true => s
                             .removed_by_node(node)?
                             .and_then(|r| DriveVersion::of(&r.row, None)),
                         false => None,
                     };
+                    if unknown
+                        && let Some(mut b) = base
+                        && let Some(held) = &row.tags
+                    {
+                        let last = removed.as_ref().map_or(&b.state.tags, |d| &d.state.tags);
+                        let tags = not_reached(&b.state.tags, held, last);
+                        if tags != b.state.tags {
+                            b.state.tags = tags;
+                            s.put_base(&b)?;
+                        }
+                    }
+                    let removed = removed.filter(|_| !synced);
                     let at = settle(
                         s,
                         Settle::placed(node, removed.as_ref(), TagWrite::Agreed),

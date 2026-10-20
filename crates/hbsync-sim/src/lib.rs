@@ -31,7 +31,7 @@ use hbsync_engine::Against;
 use hbsync_engine::deleted;
 use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
-use hbsync_engine::plan::TagWrite;
+use hbsync_engine::plan::{TagWrite, not_reached};
 use hbsync_engine::reconcile::{
     Agreement, BaseExtra, DriveVersion, Input, Op, Options, Removed, Requirement,
     reconcile_with_known,
@@ -2129,7 +2129,12 @@ impl Sim {
         let writes_tags = placement || matches!(op, Op::LocalTags { .. });
         if outcome == Outcome::Done && writes_tags && !landed {
             self.writes += 1;
-            tag_failed = self.clients[c].os != Os::Windows
+            let os = self.clients[c].os;
+            // A folder made with none to write holds none, the write failing or not (the
+            // executor's: it claims none).
+            let nothing = matches!(&op, Op::LocalMkdir { tags, .. } if tags.held_by(os).is_empty());
+            tag_failed = os != Os::Windows
+                && !nothing
                 && (std::mem::take(&mut self.fail_tags_next) || self.writes % 13 == 7);
             let recorded = matches!(op, Op::LocalDownload { .. })
                 || matches!(op, Op::LocalMkdir { drive: Some(_), .. }) && synced_before;
@@ -2327,6 +2332,18 @@ impl Sim {
                 }
                 _ => None,
             };
+            // One synced here before, its tag write failed, keeps its base but for a tag that
+            // didn't reach it and the drive's last version holds (the executor's).
+            if let Op::LocalMkdir { drive: None, .. } = &op
+                && tag_failed
+                && self.server_state(c, node).is_none()
+                && let Some(b) = self.clients[c].base.get(node).cloned()
+                && let Some(held) = self.clients[c].local.get(node).map(|l| l.tags.clone())
+            {
+                let last = self.server.removed.get(&node).map(|r| &r.state.tags);
+                let tags = not_reached(&b.tags, &held, last.unwrap_or(&b.tags));
+                self.clients[c].base.insert(node, NodeState { tags, ..b });
+            }
             let against = match &restored {
                 Some(d) => Against::placed(Some(d)),
                 None => against,

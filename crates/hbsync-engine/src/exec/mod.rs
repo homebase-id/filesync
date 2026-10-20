@@ -35,7 +35,7 @@ use hbsync_types::schema::NodeContent;
 use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags, Target};
 
 use crate::activity::{self, Counters};
-use crate::plan::{Against, DriveVersion, TagWrite};
+use crate::plan::{Against, DriveVersion, TagWrite, not_reached};
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::view;

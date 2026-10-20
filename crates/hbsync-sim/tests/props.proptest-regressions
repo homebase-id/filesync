@@ -110,3 +110,4 @@ cc 4e17c897f67f9f447ba287214d88da1fd1972f4292551ac51d74939adc8abb0f # a stale pl
 cc 7561dfb3dd13ff15c467af6bf7a9d7ad285428f61925b768e235a29deb2e0775 # a folder another app deleted outright went for good with the tag its earlier removal held (the simulator kept the removal's tags)
 cc e06eb0c6815ab4b00afb98b33f14576228f14cb7f8e3c8a783d6399c901acccc # a file left with no folder (gone for good) was shown nowhere: now in Recovered files
 cc f25d990945c4b9e2c543f1a6577a634fd5eab18475d06dc49e899ff9c4304576 # the same, after the phone's work in Documents: now in Recovered files
+cc b63b7063a2a017a90242c896a4cc70b865dd62a594c9a332d48f3ffa2c0dc78f # a folder made back whose tag write failed kept the tag in its base: its absence went up as a removal (CI run 39377359513)
