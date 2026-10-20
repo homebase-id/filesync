@@ -23,7 +23,6 @@ use hbsync_types::{
     ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tag, Tags, VersionTag,
 };
 
-use crate::DETACHED;
 use crate::Sim;
 use crate::action::NAMES;
 use crate::model::client::{Client, rekey_client, verdict};
@@ -363,13 +362,7 @@ impl Sim {
                     // The item no longer holds what this client's user added to it: the add
                     // stays with the node (on the drive, or nowhere), not with the item (a
                     // conflict copy made of it later doesn't take it along).
-                    let add = (c, node, name.clone());
-                    if self.tags_added.remove(&add) {
-                        if let Some(sent) = self.tags_sent.remove(&add) {
-                            self.tags_sent.insert((DETACHED, node, name.clone()), sent);
-                        }
-                        self.tags_added.insert((DETACHED, node, name));
-                    }
+                    self.detach_add((c, node, name));
                 }
             }
         }
