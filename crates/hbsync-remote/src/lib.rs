@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 
+pub use hbsync_types::ErrorClass;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
     ContentHash, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -441,8 +442,31 @@ impl<T> Answers<T> {
 }
 
 impl RemoteError {
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            RemoteError::Transient(_) => ErrorClass::Transient,
+            RemoteError::Denied(_) => ErrorClass::Denied,
+            RemoteError::Full(_) => ErrorClass::Full,
+            // The remote moved on, or rejected the bytes (changed mid-upload), or the file grew
+            // shorter than its header said (a read past its end).
+            RemoteError::AlreadyExists
+            | RemoteError::VersionMismatch
+            | RemoteError::StaleRange(_)
+            | RemoteError::HashMismatch => ErrorClass::Stale,
+            RemoteError::NotFound | RemoteError::Deleted => ErrorClass::Gone,
+            // The drive won't take it as it is: retrying the same won't help.
+            RemoteError::Fatal(_) | RemoteError::InvalidHash | RemoteError::HashRequired => {
+                ErrorClass::Refused
+            }
+            // The local source or sink failed.
+            RemoteError::Io(_) => ErrorClass::LocalFault,
+        }
+    }
+
+    /// Whether it is [`ErrorClass::Transient`].
     pub fn is_transient(&self) -> bool {
-        matches!(self, RemoteError::Transient(_))
+        self.class() == ErrorClass::Transient
     }
 
     /// The same error once more, for another file of a request it ended.

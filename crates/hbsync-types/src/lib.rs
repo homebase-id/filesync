@@ -3,12 +3,14 @@
 
 use std::fmt;
 
+pub use class::ErrorClass;
 pub use hash::{ContentHash, HashAlgorithm, HashParseError};
 pub use hbsync_platform::tags::{Tag, Tags};
 pub use role::Role;
 pub use uuid::Uuid;
 
 pub mod activity;
+mod class;
 mod hash;
 mod role;
 pub mod schema;

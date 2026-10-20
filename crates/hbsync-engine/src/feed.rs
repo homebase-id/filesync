@@ -9,7 +9,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 
-use hbsync_remote::{ChangeRef, ChangesPage, RefsPage, Remote, RemoteError, RemoteHeader};
+use hbsync_remote::{
+    ChangeRef, ChangesPage, ErrorClass, RefsPage, Remote, RemoteError, RemoteHeader,
+};
 use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
 use hbsync_types::{RemoteFileId, RemoteRef};
 
@@ -22,6 +24,16 @@ pub enum FeedError {
     Remote(#[from] RemoteError),
     #[error(transparent)]
     State(#[from] StateError),
+}
+
+impl FeedError {
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            FeedError::Remote(e) => e.class(),
+            FeedError::State(e) => e.class(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -281,8 +293,8 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
         match remote.header(file_id) {
             Err(RemoteError::NotFound) => asked.gone.push(file_id),
             Ok(header) => asked.found.push(header),
-            Err(RemoteError::Fatal(why)) => {
-                tracing::warn!("{file_id:?} isn't in the feed and doesn't read: {why}");
+            Err(e) if e.class() == ErrorClass::Refused => {
+                tracing::warn!("{file_id:?} isn't in the feed and doesn't read: {e}");
             }
             Err(e) => {
                 tracing::info!("{file_id:?} isn't in the feed; asked again later: {e}");

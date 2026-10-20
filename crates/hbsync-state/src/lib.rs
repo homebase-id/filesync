@@ -51,6 +51,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+use hbsync_types::ErrorClass;
 use rusqlite::{Connection, TransactionBehavior};
 
 pub use coords::Coords;
@@ -80,6 +81,31 @@ pub enum StateError {
     Behind { found: u32, supported: u32 },
     #[error("conflict: {0}")]
     Conflict(String),
+}
+
+impl StateError {
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
+        use rusqlite::ErrorCode as Code;
+        match self {
+            StateError::Sqlite(rusqlite::Error::SqliteFailure(e, _)) => match e.code {
+                Code::DatabaseBusy | Code::DatabaseLocked => ErrorClass::StateBusy,
+                Code::DiskFull => ErrorClass::LocalFull,
+                Code::SystemIoFailure | Code::CannotOpen => ErrorClass::LocalFault,
+                // The whole DB, not one item: the user's to fix.
+                Code::PermissionDenied
+                | Code::ReadOnly
+                | Code::DatabaseCorrupt
+                | Code::NotADatabase => ErrorClass::NeedsUser,
+                _ => ErrorClass::Bug,
+            },
+            StateError::Sqlite(_) | StateError::Conflict(_) => ErrorClass::Bug,
+            StateError::Corrupt(_)
+            | StateError::TooNew { .. }
+            | StateError::TooOld { .. }
+            | StateError::Behind { .. } => ErrorClass::NeedsUser,
+        }
+    }
 }
 
 pub type Result<T, E = StateError> = std::result::Result<T, E>;

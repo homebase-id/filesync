@@ -7,7 +7,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::Root;
-use crate::protocol::State;
 use crate::runner::{Backoff, Command, Handle, RunnerError};
 
 /// A folder's runner, on the account's thread.
@@ -87,7 +86,7 @@ impl Running {
         if self.started.elapsed() >= RAN_WELL {
             self.backoff = Backoff::new();
         }
-        let pause = self.backoff.after(State::Failing);
+        let pause = self.backoff.next();
         tracing::info!("syncing {} again in {pause:?}", self.root.folder.display());
         self.life = Life::Waiting(Instant::now() + pause);
     }
@@ -100,6 +99,7 @@ mod tests {
     use hbsync_engine::root::SyncRoot;
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
+    use crate::protocol::State;
     use crate::runner::{Runner, RunnerConfig};
 
     /// A runner that fails is to start again after a pause, unless its folder was removed or

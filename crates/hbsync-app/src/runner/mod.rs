@@ -26,12 +26,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hbsync_engine::activity::Counters;
-use hbsync_engine::exec::Stopped;
-use hbsync_engine::feed::FeedError;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
-use hbsync_remote::RemoteError;
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
 use hbsync_types::unix_now;
@@ -43,7 +40,7 @@ use crate::{Identity, MassDelete};
 mod report;
 mod schedule;
 
-pub(crate) use schedule::Backoff;
+pub(crate) use schedule::{Backoff, shown};
 use schedule::{Schedule, Synced};
 
 /// The ignore rules are read this long after their file was last touched: not half written.
@@ -556,14 +553,9 @@ impl Runner {
                     self.record(&mut p.engine, &report, began.elapsed())?;
                 }
                 Err(e) => {
-                    let state = if e.is_denied() {
-                        State::Denied
-                    } else if is_offline(&e) {
-                        State::Offline
-                    } else {
-                        State::Failing
-                    };
-                    let wait = schedule.failed(Instant::now(), state);
+                    let class = e.class();
+                    let state = schedule::shown(class);
+                    let wait = schedule.failed(Instant::now(), class);
                     tracing::warn!("sync failed ({e}); trying again in {wait:?}");
                     self.failing(state, e.to_string(), wait);
                 }
@@ -667,15 +659,5 @@ impl Runner {
         }
         self.set(|s| report::record(s, report, notes, held, took, unix_now()));
         Ok(())
-    }
-}
-
-fn is_offline(e: &EngineError) -> bool {
-    match e {
-        EngineError::Stopped(Stopped::Unreachable(_)) => true,
-        EngineError::Feed(FeedError::Remote(r)) => {
-            r.is_transient() || matches!(r, RemoteError::Io(_))
-        }
-        _ => false,
     }
 }
