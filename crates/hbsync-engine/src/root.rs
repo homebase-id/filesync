@@ -289,7 +289,7 @@ impl AccountReader {
         self.db.read(|s| crate::deleted::listed_here(s, listed))
     }
 
-    /// Items of Recently deleted by node ([`crate::deleted::find`]), and the listing that saw
+    /// Items of Recently deleted by node (`deleted::find`), and the listing that saw
     /// them, which emptying them takes.
     pub fn find_deleted(
         &mut self,
@@ -303,13 +303,13 @@ impl AccountReader {
         })
     }
 
-    /// Every item of Recently deleted ([`crate::deleted::all`]).
+    /// Every item of Recently deleted (`deleted::all`).
     #[cfg(any(test, feature = "testkit"))]
     pub fn all_deleted(&mut self) -> Result<Vec<(Deleted, usize)>, StateError> {
         self.db.read(crate::deleted::all)
     }
 
-    /// The items of Recently deleted named `names` ([`crate::deleted::named`]), and the
+    /// The items of Recently deleted named `names` (`deleted::named`), and the
     /// listing that saw them.
     pub fn named_deleted(
         &mut self,

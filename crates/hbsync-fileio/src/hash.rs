@@ -84,7 +84,6 @@ pub fn hash_bytes(data: &[u8], algorithm: HashAlgorithm) -> ContentHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hbsync_types::HashParseError;
 
     /// The golden-vector input from odin-core: 1025 bytes, byte i = i % 251.
     pub(crate) fn golden_input() -> Vec<u8> {
@@ -116,26 +115,6 @@ mod tests {
             assert_eq!(h, hash_bytes(&data, alg));
             assert_eq!(n, data.len() as u64);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn encodings_round_trip() -> Result<(), HashParseError> {
-        let h = hash_bytes(&golden_input(), HashAlgorithm::Blake3);
-        assert_eq!(
-            h.to_base64(),
-            "0AJ4rkfrJ7NPrs9ntP4mP4LVQSkWwf/ZfIy3+4FLhEQ="
-        );
-        assert_eq!(
-            ContentHash::from_base64(HashAlgorithm::Blake3, &h.to_base64())?,
-            h
-        );
-        assert_eq!(ContentHash::parse_tagged(&h.to_string())?, h);
-        assert_eq!(
-            ContentHash::from_base64(HashAlgorithm::Sha256, "AAAA"),
-            Err(HashParseError::Length(3))
-        );
-        assert!("md5".parse::<HashAlgorithm>().is_err());
         Ok(())
     }
 }

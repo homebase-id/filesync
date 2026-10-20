@@ -89,7 +89,7 @@ pub enum Action {
     /// The daily purge ([`Server::purge`]): the server's clock moves on by [`PURGE_EVERY`];
     /// what the deletes of the items of Recently deleted removed [`TRACE`] before took along
     /// and left live is removed (`along::taken_levels`), and those items go for good, as the
-    /// engine selects them ([`hbsync_engine::deleted::select`]): never a live node, so a folder
+    /// engine selects them (`hbsync_engine::deleted::select`): never a live node, so a folder
     /// holding one stays.
     Purge,
     /// Another device (the phone, or a computer never seen again) deletes a folder of the
@@ -112,7 +112,7 @@ pub enum Action {
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
     /// The user empties Recently deleted as last listed (nothing without a listing): what the
-    /// engine selects of the rows still as listed ([`hbsync_engine::deleted::select`]), in its
+    /// engine selects of the rows still as listed (`hbsync_engine::deleted::select`), in its
     /// order.
     EmptyListed,
     /// The user empties one item of Recently deleted as last listed (a pick of its rows; nothing

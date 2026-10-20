@@ -105,3 +105,26 @@ impl fmt::Debug for ContentHash {
         write!(f, "{}:{}…", self.algorithm, &self.to_hex()[..12])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BLAKE3 of `hbsync-fileio`'s golden input, as hex and base64.
+    const HEX: &str = "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444";
+    const BASE64: &str = "0AJ4rkfrJ7NPrs9ntP4mP4LVQSkWwf/ZfIy3+4FLhEQ=";
+
+    #[test]
+    fn encodings_round_trip() -> Result<(), HashParseError> {
+        let h = ContentHash::from_base64(HashAlgorithm::Blake3, BASE64)?;
+        assert_eq!(h.to_hex(), HEX);
+        assert_eq!(h.to_base64(), BASE64);
+        assert_eq!(ContentHash::parse_tagged(&h.to_string())?, h);
+        assert_eq!(
+            ContentHash::from_base64(HashAlgorithm::Sha256, "AAAA"),
+            Err(HashParseError::Length(3))
+        );
+        assert!("md5".parse::<HashAlgorithm>().is_err());
+        Ok(())
+    }
+}

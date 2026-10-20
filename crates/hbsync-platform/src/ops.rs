@@ -388,7 +388,7 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    pub(super) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         super::check_then_rename(from, to)
     }
 }

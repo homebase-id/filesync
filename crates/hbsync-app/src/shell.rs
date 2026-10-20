@@ -307,14 +307,14 @@ mod os {
         }
     }
 
-    pub(crate) fn icon(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+    pub(super) fn icon(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
         set_icon(folder, Some(icons.png))
     }
 
     /// Finder's sidebar has no public interface.
-    pub(crate) fn shortcut(_folder: &Path) {}
+    pub(super) fn shortcut(_folder: &Path) {}
 
-    pub(crate) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    pub(super) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         set_icon(folder, None)
     }
 }
@@ -399,7 +399,7 @@ mod os {
     /// before (`!first`) may be pinned to Quick access, by an older version or as the fallback
     /// below: it comes off, so it isn't in the pane twice. Where Explorer won't take a root (not
     /// NTFS, a share, inside another provider's root), the first time pins it there instead.
-    pub(crate) fn sync_root(
+    pub(super) fn sync_root(
         paths: &Paths,
         folder: &Path,
         identity: &str,
@@ -420,13 +420,13 @@ mod os {
         }
     }
 
-    pub(crate) fn unregister(folder: &Path, identity: &str) {
+    pub(super) fn unregister(folder: &Path, identity: &str) {
         if let Err(e) = crate::sync_root::unregister(folder, identity) {
             tracing::info!("the folder in Explorer's navigation pane: {e}");
         }
     }
 
-    pub(crate) fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+    pub(super) fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
         let icon = icon_file(paths, icons.ico, "ico")?;
         let ini = folder.join("desktop.ini");
         match std::fs::read_to_string(&ini) {
@@ -446,7 +446,7 @@ mod os {
         Ok(())
     }
 
-    pub(crate) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    pub(super) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let ini = folder.join("desktop.ini");
         let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t.contains(OURS));
         if ours {

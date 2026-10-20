@@ -84,7 +84,7 @@ impl Install {
     }
 
     /// Whether the package lists it among the desktop's applications itself (Linux).
-    pub(crate) fn lists_itself(&self) -> bool {
+    pub fn lists_itself(&self) -> bool {
         matches!(self, Install::LinuxPackage)
     }
 

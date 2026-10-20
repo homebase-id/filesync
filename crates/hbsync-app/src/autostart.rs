@@ -26,11 +26,11 @@ pub const LABEL: &str = "id.homebase.filesync";
 pub const TRAY: &str = "homebase-filesync";
 /// The tray's desktop entry (Linux): in the session's autostart folder to start at logon, and
 /// in the applications folder as its launcher. Named after the app ID, as the package's is.
-pub(crate) const DESKTOP_ENTRY: &str = "id.homebase.filesync.desktop";
+pub const DESKTOP_ENTRY: &str = "id.homebase.filesync.desktop";
 /// The tray's icon name in the icon theme (Linux).
 pub const ICON: &str = "homebase-filesync";
 /// The systemd unit.
-pub(crate) const UNIT: &str = "hbsync.service";
+pub const UNIT: &str = "hbsync.service";
 /// The `Run` value's name.
 pub const RUN_VALUE: &str = "Homebase Filesync";
 
@@ -38,7 +38,7 @@ pub const RUN_VALUE: &str = "Homebase Filesync";
 /// They decide where the daemon keeps its files ([`crate::Paths`]): the daemon must use the
 /// same files as the command line that set it up. (`XDG_RUNTIME_DIR` is the session's own,
 /// set by systemd.)
-pub(crate) fn passed_env() -> Vec<(String, String)> {
+pub fn passed_env() -> Vec<(String, String)> {
     [
         "HBSYNC_HOME",
         "HBSYNC_CREDENTIALS",
@@ -269,7 +269,7 @@ mod os {
         format!("gui/{}", unsafe { libc::getuid() })
     }
 
-    pub(crate) fn installed() -> io::Result<bool> {
+    pub(super) fn installed() -> io::Result<bool> {
         for label in labels() {
             if plist(&label)?.exists() {
                 return Ok(true);
@@ -278,7 +278,7 @@ mod os {
         Ok(false)
     }
 
-    pub(crate) fn install(program: &Program) -> io::Result<()> {
+    pub(super) fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
         let path = plist(&program.label())?;
         hbsync_fileio::write_if_changed(&path, launchd_plist(program, &passed_env()).as_bytes())?;
@@ -296,7 +296,7 @@ mod os {
         })
     }
 
-    pub(crate) fn uninstall() -> io::Result<()> {
+    pub(super) fn uninstall() -> io::Result<()> {
         for label in labels() {
             // The daemon's agent is unloaded too (not loaded is fine); the tray's isn't: that
             // would end the tray that asks.
@@ -309,7 +309,7 @@ mod os {
     }
 
     /// Through launchd only when it starts the daemon (not the tray).
-    pub(crate) fn start() -> io::Result<bool> {
+    pub(super) fn start() -> io::Result<bool> {
         if !plist(LABEL)?.exists() {
             return Ok(false);
         }
@@ -431,7 +431,7 @@ mod os {
         )
     }
 
-    pub(crate) fn installed() -> io::Result<bool> {
+    pub(super) fn installed() -> io::Result<bool> {
         // Unreadable, it counts as off: callers that only consult it (starting the daemon,
         // logging out) mustn't fail on it.
         if msix() {
@@ -460,7 +460,7 @@ mod os {
         }
     }
 
-    pub(crate) fn install(program: &Program) -> io::Result<()> {
+    pub(super) fn install(program: &Program) -> io::Result<()> {
         if msix() {
             return startup_task::enable();
         }
@@ -482,7 +482,7 @@ mod os {
         })
     }
 
-    pub(crate) fn uninstall() -> io::Result<()> {
+    pub(super) fn uninstall() -> io::Result<()> {
         if msix() {
             // Also a Run value an earlier, unpackaged copy left (it would start that one too).
             // The package sees the registry through its own layer: try, but don't depend on it.
@@ -504,7 +504,7 @@ mod os {
     }
 
     /// The Run key only starts programs at logon: the caller starts the daemon itself.
-    pub(crate) fn start() -> io::Result<bool> {
+    pub(super) fn start() -> io::Result<bool> {
         Ok(false)
     }
 
@@ -529,11 +529,11 @@ mod os {
             state == StartupTaskState::Enabled || state == StartupTaskState::EnabledByPolicy
         }
 
-        pub(crate) fn enabled() -> io::Result<bool> {
+        pub(super) fn enabled() -> io::Result<bool> {
             task()?.State().map(on).map_err(err)
         }
 
-        pub(crate) fn enable() -> io::Result<()> {
+        pub(super) fn enable() -> io::Result<()> {
             let state = task()?
                 .RequestEnableAsync()
                 .and_then(|op| op.join())
@@ -550,7 +550,7 @@ mod os {
             }
         }
 
-        pub(crate) fn disable() -> io::Result<()> {
+        pub(super) fn disable() -> io::Result<()> {
             task()?.Disable().map_err(err)
         }
     }

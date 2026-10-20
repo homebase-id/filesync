@@ -49,7 +49,7 @@ pub fn home() -> Option<PathBuf> {
 
 /// An XDG base folder: `$var` when it is absolute (the spec ignores relative ones), else
 /// `default` in the home folder (`XDG_CONFIG_HOME`, `.config`).
-pub(crate) fn xdg_dir(var: &str, default: &str) -> Option<PathBuf> {
+pub fn xdg_dir(var: &str, default: &str) -> Option<PathBuf> {
     std::env::var_os(var)
         .map(PathBuf::from)
         .filter(|p| p.has_root())
