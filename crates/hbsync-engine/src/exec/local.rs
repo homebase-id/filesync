@@ -570,36 +570,3 @@ impl Executor<'_> {
         Ok(back)
     }
 }
-
-/// The folder's trash (`.hbsync/trash`), as a run's downloads look in it
-/// ([`Executor::in_trash`]).
-#[derive(Debug, Default)]
-pub(super) struct Trash {
-    /// Its entries ([`layout::trash_entry`]) by node, newest first.
-    entries: HashMap<NodeId, Vec<PathBuf>>,
-    /// The nodes a file taken from it didn't do for (its tags weren't written): downloaded.
-    pub(super) refused: HashSet<NodeId>,
-}
-
-impl Trash {
-    fn read(dir: &Path) -> Trash {
-        let mut entries: HashMap<NodeId, Vec<(u64, PathBuf)>> = HashMap::new();
-        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-            if let Some((at, node)) = entry
-                .file_name()
-                .to_str()
-                .and_then(layout::parse_trash_entry)
-            {
-                entries.entry(node).or_default().push((at, entry.path()));
-            }
-        }
-        let mut trash = Trash::default();
-        for (node, mut e) in entries {
-            e.sort_by(|a, b| b.cmp(a));
-            trash
-                .entries
-                .insert(node, e.into_iter().map(|(_, p)| p).collect());
-        }
-        trash
-    }
-}

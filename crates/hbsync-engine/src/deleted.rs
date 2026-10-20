@@ -7,7 +7,6 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
@@ -19,8 +18,9 @@ use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::exec::{meta_at, record_removed, remove_all};
+use crate::exec::{meta_at, record_removed};
 use crate::feed::{TRACE_MS, apply_tombstone, gone_after, gone_for_good};
+use crate::trash::empty_trash;
 use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
@@ -1540,20 +1540,6 @@ fn delete_tombstones(
     match failed {
         Some(e) => Err(EngineError::Remote(e)),
         None => Ok(()),
-    }
-}
-
-/// Deletes the trash entries (`<Unix s>-<node>`) that went there from `since` (Unix s) until
-/// before `before_ms`. Best effort: one that can't go now goes at the next purge.
-fn empty_trash(trash: &Path, since: u64, before_ms: i64) {
-    let Ok(entries) = fs::read_dir(trash) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let at = entry.file_name().to_str().and_then(layout::trashed_at);
-        if at.is_some_and(|s| s >= since && (s as i64).saturating_mul(1000) < before_ms) {
-            let _ = remove_all(&entry.path());
-        }
     }
 }
 

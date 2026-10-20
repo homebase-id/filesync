@@ -19,6 +19,7 @@ pub mod scope;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 pub mod transfer;
+mod trash;
 pub mod tree;
 pub mod view;
 pub mod walk;

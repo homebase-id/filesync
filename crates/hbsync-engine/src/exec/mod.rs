@@ -38,6 +38,7 @@ use crate::activity::{self, Counters};
 use crate::plan::{Against, DriveVersion, TagWrite, not_reached};
 use crate::reconcile::{Agreement, Op, Requirement};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
+use crate::trash::Trash;
 use crate::view;
 use hbsync_local::layout;
 
@@ -1298,7 +1299,6 @@ pub use hbsync_local::layout::parked_name;
 #[cfg(feature = "testkit")]
 pub use hooks::Faults;
 pub use hooks::{CrashPoint, FailPoint, Hooks};
-use local::Trash;
 use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
@@ -1334,15 +1334,6 @@ fn rename_ordered(db: &mut StateDb, from: &Path, to: &Path) -> Result<io::Result
         db.emptied(from);
     }
     Ok(renamed)
-}
-
-/// Deletes a file or a folder with everything in it (a link, not what it points to).
-pub(crate) fn remove_all(path: &Path) -> io::Result<()> {
-    if fs::symlink_metadata(path)?.is_dir() {
-        fs::remove_dir_all(path)
-    } else {
-        fs::remove_file(path)
-    }
 }
 
 /// Whether `meta` (from disk) is what `row` recorded: folders by kind and file id, files by
