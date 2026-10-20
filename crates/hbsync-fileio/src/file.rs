@@ -123,14 +123,13 @@ impl PartialFile {
         &self.path
     }
 
-    /// Flushes to disk and verifies size and hash. On a mismatch the partial file is deleted,
-    /// since resuming it would only repeat the error.
+    /// Verifies size and hash, then flushes to disk. On a mismatch the partial file is deleted
+    /// (unflushed: it is no use), since resuming it would only repeat the error.
     pub fn finish(
         self,
         expected_hash: ContentHash,
         expected_size: u64,
     ) -> Result<CompletedFile, FileIoError> {
-        self.file.sync_all()?;
         self.complete(expected_hash, expected_size, true)
     }
 
@@ -155,7 +154,7 @@ impl PartialFile {
         self,
         expected_hash: ContentHash,
         expected_size: u64,
-        synced: bool,
+        flush: bool,
     ) -> Result<CompletedFile, FileIoError> {
         let actual = self.hasher.finalize();
         let fail = |err: FileIoError| {
@@ -174,12 +173,15 @@ impl PartialFile {
                 actual,
             });
         }
+        if flush {
+            self.file.sync_all()?;
+        }
         Ok(CompletedFile {
             path: self.path,
             hash: actual,
             size: self.written,
             adopted: false,
-            synced,
+            synced: flush,
         })
     }
 }

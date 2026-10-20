@@ -119,16 +119,19 @@ pub struct RemoteRef {
     pub version: VersionTag,
 }
 
-/// A file a delete may name (`Remote::delete`, `Remote::delete_for_good`), at its version: one
-/// this device recorded in Recently deleted (`RemovedRow::doomed`) or as a tombstone
-/// (`ReadTx::tombstones_before`), never a live node of the mirror. The engine gets one only
-/// from the store: its `clippy.toml` disallows [`Doomed::unchecked`].
+/// A file a delete may name (`Remote::delete`, `Remote::delete_for_good`), at its version: in
+/// the product, one this device recorded in Recently deleted (`RemovedRow::doomed`) or as a
+/// tombstone (`ReadTx::tombstones_before`). The type marks the rule and lint keeps it: the
+/// engine's and the app's `clippy.toml` disallow [`Doomed::unchecked`], so they get one only
+/// from the store. It is no proof against a `RemovedRow` made by hand, and the server's version
+/// check still guards every delete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Doomed(RemoteRef);
 
 impl Doomed {
-    /// Any file, unchecked: for the store, which makes one from what it recorded, and for tools
-    /// and tests that delete what they wrote themselves (`hbsync-clean`).
+    /// Any file, unchecked, live ones too: for the store, which makes one from what it
+    /// recorded, and for tools and tests that delete what they wrote themselves
+    /// (`hbsync-clean`).
     pub fn unchecked(at: RemoteRef) -> Self {
         Doomed(at)
     }

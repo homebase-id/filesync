@@ -321,8 +321,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
 
 ## Changes
 - 2026-10-20: a reader skips a file whose payload's `bytesWritten` isn't the encrypted size of
-  its `size` (every download of it would fail). Writers already write them so; the node is the
-  same.
+  its `size` (every download of it would fail). This client writes them so (**[verified]** by
+  the live test `nodes_are_stored_encrypted`; other writers inferred, as encryption requires);
+  the node is the same.
 - 2026-10-20: a file whose header is not found is gone for good only once it is not found again
   a minute to an hour on, at the version known; a tombstone (a header that says deleted, a 4002
   answer) is proof at once (before, the first "not found" made it gone). The rule is a

@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use crate::client::{Client, Fetched, UploadMethod};
 use crate::drive::sealed::{
-    CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
+    CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, checked_sealed_len, sealed_len,
 };
 use crate::multipart::{Multipart, Part, SourceEnded};
 use crate::{ApiError, HomebaseError, app};
@@ -219,7 +219,7 @@ impl HomebaseRemote {
         let mut sending = match payload {
             None => None,
             Some(p) => {
-                let size = sealed_len(p.size);
+                let size = checked_sealed_len(p.size).unwrap_or(u64::MAX);
                 if size > MAX_PAYLOAD {
                     return Err(RemoteError::Fatal(format!(
                         "{} bytes is too large for this server (odin-core #1893)",
