@@ -320,10 +320,14 @@ impl Op {
     /// Whether the executor runs it on its worker pool: the transfers, and every write to
     /// the remote.
     pub(crate) fn pooled(&self) -> bool {
+        matches!(self, Op::LocalDownload { .. }) || self.writes_remote()
+    }
+
+    /// Whether it writes to the remote.
+    pub(crate) fn writes_remote(&self) -> bool {
         matches!(
             self,
-            Op::LocalDownload { .. }
-                | Op::RemoteCreate { .. }
+            Op::RemoteCreate { .. }
                 | Op::RemoteUpdate { .. }
                 | Op::RemoteTags { .. }
                 | Op::RemoteDelete { .. }

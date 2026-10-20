@@ -14,13 +14,13 @@
 //! takes each attribute both sides now agree on) are one transaction: the base never falls
 //! behind what was done on disk or remotely.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use hbsync_fileio::FileIoError;
 use hbsync_platform::name::name_key;
@@ -120,10 +120,6 @@ pub enum Stopped {
     Requested,
 }
 
-/// Transient remote errors in a row after which a run gives up (with the pauses between them
-/// doubling from `retry_pause`, 0.5 s by default: about 15 s in all).
-const UNREACHABLE_AFTER: u32 = 6;
-
 #[derive(Debug)]
 enum Outcome {
     /// Done; the node still needs settling.
@@ -194,15 +190,8 @@ pub(crate) struct Executor<'a> {
     remote: &'a dyn Remote,
     folder: &'a FolderCtx,
     cfg: &'a ExecConfig,
-    queue: VecDeque<(Op, u8)>,
-    /// The nodes with a `Forget` still to run in this run.
-    forgetting: HashSet<NodeId>,
-    /// The nodes with a `RemoteDelete` still to run in this run (or to retry).
-    removing: HashSet<NodeId>,
-    /// The nodes whose `RemoteDelete` ended in this run without removing them: what is in them
-    /// waits for the next plan, so nothing is removed before its folder (node schema, Recently
-    /// deleted).
-    unremoved: HashSet<NodeId>,
+    /// The queue, and the retry policy.
+    schedule: Schedule,
     report: ExecReport,
     /// Set when a test's crash point was reached: the run stops.
     crashed: bool,
@@ -216,9 +205,6 @@ pub(crate) struct Executor<'a> {
     /// Where this run's operations settled each node's base: a later operation's compare and
     /// set takes the base there as the one its plan saw.
     settled: HashMap<NodeId, RemoteRef>,
-    /// Transient remote errors in a row, and until when the run waits because of them.
-    streak: u32,
-    resume_at: Option<Instant>,
     /// Set by the caller to stop the run between operations.
     stop: Option<Arc<AtomicBool>>,
     progress: Arc<Counters>,
@@ -335,7 +321,7 @@ enum Ctx {
 impl std::fmt::Debug for Executor<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Executor")
-            .field("queued", &self.queue.len())
+            .field("queued", &self.schedule.len())
             .finish()
     }
 }
@@ -352,17 +338,12 @@ impl<'a> Executor<'a> {
             remote,
             folder,
             cfg,
-            queue: VecDeque::new(),
-            forgetting: HashSet::new(),
-            removing: HashSet::new(),
-            unremoved: HashSet::new(),
+            schedule: Schedule::new(cfg.attempts, cfg.retry_pause),
             report: ExecReport::default(),
             crashed: false,
             records: HashSet::new(),
             tags_refused: HashSet::new(),
             settled: HashMap::new(),
-            streak: 0,
-            resume_at: None,
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
@@ -410,26 +391,18 @@ impl<'a> Executor<'a> {
     }
 
     fn run_ops(&mut self, ops: Vec<Op>) -> Result<(), StateError> {
-        self.forgetting.clear();
-        self.removing.clear();
-        self.unremoved.clear();
-        for op in &ops {
-            if let Some(pending) = self.pending(op) {
-                pending.insert(op.node());
-            }
-        }
         let visible = ops.iter().filter(|op| activity::kind_of(op).is_some());
         self.progress
             .files_total
             .fetch_add(visible.count() as u64, Ordering::Relaxed);
         self.count_bytes(&ops)?;
-        self.queue = ops.into_iter().map(|op| (op, 0)).collect();
+        self.schedule.load(ops);
         let mut batch = Batch::default();
         loop {
             if self.should_stop() {
                 break;
             }
-            let Some((op, attempts)) = self.queue.pop_front() else {
+            let Some((op, attempts)) = self.schedule.next() else {
                 if batch.jobs.is_empty() {
                     break;
                 }
@@ -526,10 +499,9 @@ impl<'a> Executor<'a> {
         const CHUNK: usize = 1000;
         let mut nodes = vec![first];
         while nodes.len() < CHUNK
-            && let Some((Op::Settle { node }, _)) = self.queue.front()
+            && let Some(node) = self.schedule.next_settle()
         {
-            nodes.push(*node);
-            self.queue.pop_front();
+            nodes.push(node);
         }
         let os = self.folder.os;
         let settled = self.db.write(|s| {
@@ -693,33 +665,12 @@ impl<'a> Executor<'a> {
         self.crashed
     }
 
-    /// The nodes with operations like `op` still to run in this run (or to retry), where others
-    /// wait for them: a folder's `Forget` for its children's, a removal for its folder's.
-    fn pending(&mut self, op: &Op) -> Option<&mut HashSet<NodeId>> {
-        match op {
-            Op::Forget { .. } => Some(&mut self.forgetting),
-            Op::RemoteDelete { .. } => Some(&mut self.removing),
-            _ => None,
-        }
-    }
-
     /// The server-side order guards ([`Op::requires`]), checked against the mirror.
     fn ready(&mut self, op: &Op) -> Step<()> {
-        let met = match op.requires() {
-            None => true,
-            Some(Requirement::RemoteFolder(folder)) => {
-                self.db.read(|s| s.get_mirror(folder))?.is_some()
-            }
-            Some(Requirement::FolderFirst(folder)) if self.unremoved.contains(&folder) => {
-                return Err(Outcome::waiting("its folder wasn't removed"));
-            }
-            Some(Requirement::FolderFirst(folder)) => !self.removing.contains(&folder),
-        };
-        if met {
-            Ok(())
-        } else {
-            Err(Outcome::Retry(format!("waiting for {:?}", op.requires())))
-        }
+        let db = &mut *self.db;
+        self.schedule.ready(op, |folder| {
+            Ok(db.read(|s| s.get_mirror(folder))?.is_some())
+        })
     }
 
     /// `gone`: the path of what the operation removed, taken before it ran.
@@ -740,17 +691,7 @@ impl<'a> Executor<'a> {
             let node = op.node();
             self.db.write(|s| s.folder().delete_placing(node))?;
         }
-        if matches!(
-            outcome,
-            Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full
-        ) {
-            self.streak = 0; // the remote answered (or wasn't needed)
-        }
-        if !matches!(outcome, Outcome::Retry(_) | Outcome::Backoff(_))
-            && let Some(pending) = self.pending(&op)
-        {
-            pending.remove(&op.node());
-        }
+        self.schedule.ended(&op, &outcome);
         if matches!(
             op,
             Op::RemoteTags { .. } | Op::RemoteUpdate { .. } | Op::RemoteCreate { .. }
@@ -759,14 +700,6 @@ impl<'a> Executor<'a> {
             Outcome::Skip(Skip::Unsyncable(_)) | Outcome::Stop(_)
         ) {
             self.tags_refused.insert(op.node());
-        }
-        if matches!(op, Op::RemoteDelete { .. })
-            && !matches!(
-                outcome,
-                Outcome::Done | Outcome::Settled | Outcome::Retry(_) | Outcome::Backoff(_)
-            )
-        {
-            self.unremoved.insert(op.node());
         }
         match outcome {
             Outcome::Done => {
@@ -784,36 +717,8 @@ impl<'a> Executor<'a> {
                 self.record(&op, gone)?;
                 self.report.done += 1;
             }
-            Outcome::Backoff(why) => {
-                // Writes failing together on the pool, before the pause, are one failure.
-                if self.resume_at.is_none() {
-                    self.streak += 1;
-                    if self.streak >= UNREACHABLE_AFTER {
-                        self.report.stopped.get_or_insert(Stopped::Unreachable(why));
-                        return Ok(());
-                    }
-                    // One pause for the whole run, longer for each failure in a row.
-                    let pause = self.cfg.retry_pause * (1u32 << (self.streak - 1));
-                    self.resume_at = Some(Instant::now() + pause);
-                }
-                if matches!(
-                    op,
-                    Op::RemoteCreate { .. }
-                        | Op::RemoteUpdate { .. }
-                        | Op::RemoteTags { .. }
-                        | Op::RemoteDelete { .. }
-                ) {
-                    // A write whose answer didn't come may have landed: not sent again blind
-                    // (a large upload twice), but planned again from the feed, read first.
-                    let node = op.node();
-                    self.db.write(|s| s.folder().mark_dirty(node))?;
-                    self.report.drive_moved = true;
-                    self.report.skipped.push((op, Skip::Waiting(why)));
-                    return Ok(());
-                }
-                self.retry_or_fail(op, attempts, why);
-            }
-            Outcome::Retry(why) => self.retry_or_fail(op, attempts, why),
+            Outcome::Backoff(why) => self.retried(op, attempts, true, why)?,
+            Outcome::Retry(why) => self.retried(op, attempts, false, why)?,
             Outcome::Skip(why) => {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
@@ -831,6 +736,30 @@ impl<'a> Executor<'a> {
                 self.report.full = true;
             }
             Outcome::Fatal(e) => return Err(e),
+        }
+        Ok(())
+    }
+
+    /// Takes `op`, which failed for now ([`Schedule::retry`]), with `why`.
+    fn retried(
+        &mut self,
+        op: Op,
+        attempts: u8,
+        transient: bool,
+        why: String,
+    ) -> Result<(), StateError> {
+        match self.schedule.retry(op, attempts, transient) {
+            Retried::Queued => {}
+            Retried::Failed(op) => self.report.failed.push((op, why)),
+            Retried::Replan(op) => {
+                let node = op.node();
+                self.db.write(|s| s.folder().mark_dirty(node))?;
+                self.report.drive_moved = true;
+                self.report.skipped.push((op, Skip::Waiting(why)));
+            }
+            Retried::Unreachable => {
+                self.report.stopped.get_or_insert(Stopped::Unreachable(why));
+            }
         }
         Ok(())
     }
@@ -867,28 +796,6 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    fn retry_or_fail(&mut self, op: Op, attempts: u8, why: String) {
-        if attempts + 1 < self.cfg.attempts {
-            self.queue.push_back((op, attempts + 1));
-        } else {
-            if let Some(pending) = self.pending(&op) {
-                pending.remove(&op.node());
-            }
-            if matches!(op, Op::RemoteDelete { .. }) {
-                self.unremoved.insert(op.node());
-            }
-            self.report.failed.push((op, why));
-        }
-    }
-
-    /// Waits out the pause after a transient remote error, if there is one. Only remote work
-    /// waits; local operations go on meanwhile.
-    fn wait_out_backoff(&mut self) {
-        if let Some(at) = self.resume_at.take() {
-            std::thread::sleep(at.saturating_duration_since(Instant::now()));
-        }
-    }
-
     /// Adds the bytes of every transfer in the plan to `progress`'s total before any starts, so
     /// the total doesn't grow batch by batch. One the guards skip later stays in it.
     fn count_bytes(&mut self, ops: &[Op]) -> Result<(), StateError> {
@@ -919,7 +826,7 @@ impl<'a> Executor<'a> {
 
     /// Runs the collected transfers in parallel and commits each as it finishes.
     fn run_batch(&mut self, batch: &mut Batch) -> Result<(), StateError> {
-        self.wait_out_backoff();
+        self.schedule.wait_out_backoff();
         // In node order: what didn't start goes back to the queue in an order that doesn't
         // change from run to run.
         let mut pending: BTreeMap<NodeId, Prepared> = BTreeMap::new();
@@ -973,7 +880,7 @@ impl<'a> Executor<'a> {
                 if let Err(e) = self.commit_ran(ran, &mut pending) {
                     first_error = Some(e);
                 }
-                first_error.is_none() && !self.should_stop() && self.resume_at.is_none()
+                first_error.is_none() && !self.should_stop() && !self.schedule.backing_off()
             },
         );
         // What never started leaves no record (one that runs later writes its own).
@@ -1000,7 +907,7 @@ impl<'a> Executor<'a> {
         }
         if !self.should_stop() {
             for p in pending.into_values().rev() {
-                self.queue.push_front((p.op, p.attempts));
+                self.schedule.put_back(p.op, p.attempts);
             }
         }
         if self.crashed {
@@ -1210,10 +1117,7 @@ impl<'a> Executor<'a> {
         if Some(occupant.node) == mover {
             return Ok(true);
         }
-        let leaving = self
-            .queue
-            .iter()
-            .any(|(op, _)| op.vacates_local_name() == Some(occupant.node));
+        let leaving = self.schedule.vacating(occupant.node);
         if !leaving || !self.on_disk_unchanged(&occupant) {
             return Ok(false);
         }
@@ -1251,6 +1155,7 @@ mod local;
 mod park;
 mod recover;
 mod remote;
+mod schedule;
 mod transfer_ops;
 
 #[cfg(test)]
@@ -1264,6 +1169,7 @@ use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
+use schedule::{Retried, Schedule};
 pub use transfer_ops::tags_lost;
 
 /// Whether `meta` (from disk) is what `row` recorded: folders by kind and file id, files by
