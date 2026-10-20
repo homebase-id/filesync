@@ -377,11 +377,12 @@ impl Drive {
         done.map(|()| restored)
     }
 
-    /// Deletes these items of Recently deleted for good, each with what was deleted with it.
-    pub fn empty(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+    /// Deletes these items of Recently deleted for good as `listed` showed them, each with
+    /// what was in it then ([`deleted::empty`]).
+    pub fn empty(&self, nodes: &[NodeId], listed: &deleted::Listed) -> Result<usize, EngineError> {
         self.catch_up(None)?;
         let mut moved = false;
-        let gone = deleted::empty(&self.account, self.remote(), nodes, &mut moved);
+        let gone = deleted::empty(&self.account, self.remote(), nodes, listed, &mut moved);
         self.behind_if(moved, &gone);
         gone
     }

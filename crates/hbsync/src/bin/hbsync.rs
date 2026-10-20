@@ -104,7 +104,7 @@ enum Command {
         #[arg(required = true)]
         items: Vec<String>,
     },
-    /// Deletes items of Recently deleted for good (each with what was deleted with it), or
+    /// Deletes items of Recently deleted for good (each with what was in it as shown), or
     /// everything in it.
     EmptyDeleted {
         /// Paths as `hbsync deleted` shows them, or node ids [default: everything].

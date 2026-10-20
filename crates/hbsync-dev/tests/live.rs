@@ -688,7 +688,7 @@ fn echo_run(
                 .map(|d| d.node)
                 .collect();
             assert_eq!(nodes.len(), 1, "{run}/files in Recently deleted");
-            let gone = a.engine.drive().empty(&nodes)?;
+            let gone = a.engine.drive().empty(&nodes, &a.listed()?)?;
             assert_eq!(gone, n + 1, "every file and their folder");
             Ok(())
         })?;
@@ -708,7 +708,7 @@ fn echo_run(
         .filter(|d| d.path == run)
         .map(|d| d.node)
         .collect();
-    a.engine.drive().empty(&top)?;
+    a.engine.drive().empty(&top, &a.listed()?)?;
     result?;
     taken?;
     Ok(rows)

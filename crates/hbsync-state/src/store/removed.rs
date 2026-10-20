@@ -166,6 +166,15 @@ impl Store<'_> {
         )
     }
 
+    /// Recently deleted's rows recorded after `seq`: what a listing that read it didn't see.
+    /// Emptying alone reads it (a scan: `seq` has no index, migration 12).
+    pub fn recorded_after(&self, seq: u64) -> Result<Vec<Recorded>> {
+        self.recorded_rows(
+            &format!("{REMOVED_SELECT} WHERE seq > ?1"),
+            [i64::try_from(seq).unwrap_or(i64::MAX)],
+        )
+    }
+
     fn recorded_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Recorded>> {
         let mut seen = Vec::new();
         for r in self.many(sql, params, recorded_row)? {

@@ -1295,8 +1295,17 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
 /// listed, or the item) knowing only what it listed. `a` holds that removed file, which isn't
 /// going: the drive, asked before `a` goes, says so, and `a` stays with it (a folder goes for
 /// good only with everything removed below it). The file stays restorable, and nothing is lost.
+/// The same when client 0 itself finishes its delete after the listing, and so knows the
+/// removal: emptying the item takes what was in it as listed, nothing recorded since
+/// (`deleted::empty` with the listing, as `empty_listed`; before, the item took all of it).
 #[test]
 fn regression_emptying_spares_a_folder_holding_a_removal_it_didnt_know() {
+    for finisher in [1, 0] {
+        emptying_after_a_removal_since_the_listing(finisher);
+    }
+}
+
+fn emptying_after_a_removal_since_the_listing(finisher: usize) {
     use Action::*;
     let (a, c_txt) = (0, 3); // NAMES: "a", "c.txt"
     let act = |client, action| Event::Act { client, action };
@@ -1334,8 +1343,11 @@ fn regression_emptying_spares_a_folder_holding_a_removal_it_didnt_know() {
             "the folder went first"
         );
         sim.run(&[act(0, ListDeleted)]);
-        sim.run(&sync(1));
-        assert!(sim.is_removed(node_c), "client 1 marked the file removed");
+        sim.run(&sync(finisher));
+        assert!(
+            sim.is_removed(node_c),
+            "client {finisher} marked the file removed"
+        );
         sim.run(&[act(
             0,
             if item {
@@ -1346,15 +1358,15 @@ fn regression_emptying_spares_a_folder_holding_a_removal_it_didnt_know() {
         )]);
         assert!(
             sim.is_removed(node_a),
-            "item {item}: `a` holds the file: it stays"
+            "item {item}, by {finisher}: `a` holds the file: it stays"
         );
         assert!(
             sim.is_removed(node_c),
-            "item {item}: the file wasn't listed"
+            "item {item}, by {finisher}: the file wasn't listed"
         );
         assert!(sim.quiesce(30), "no convergence");
         if let Err(e) = sim.check() {
-            panic!("item {item}: {e}");
+            panic!("item {item}, by {finisher}: {e}");
         }
     }
 }

@@ -240,7 +240,9 @@ impl Account {
         }
         // Answered before it runs: a listing the drive would refuse is refused here, so the
         // refusal reaches whoever asked (the drive checks again as it empties).
-        if let AccountControl::EmptyListed { db, seq } = &control {
+        if let AccountControl::EmptyListed { db, seq }
+        | AccountControl::EmptyDeleted { db, seq, .. } = &control
+        {
             let listed = Listed {
                 db: db.clone(),
                 seq: *seq,
@@ -318,6 +320,7 @@ impl Account {
         let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
             return (Vec::new(), None);
         };
+        let items = self.items(deletes, &summary.listed);
         // Anything to list, though emptying may take nothing (a folder holding a live node).
         let account = (summary.deletes > 0).then(|| DeletedAccount {
             identity: self.identity.clone(),
@@ -327,26 +330,33 @@ impl Account {
             db: summary.listed.db,
             seq: summary.listed.seq,
         });
-        (self.items(deletes), account)
+        (items, account)
     }
 
     /// The items of its Recently deleted that are `nodes`.
     pub fn find_deleted(&self, nodes: &[NodeId]) -> Vec<DeletedItem> {
-        self.items(self.read(|db| db.find_deleted(nodes)).unwrap_or_default())
+        self.read(|db| db.find_deleted(nodes))
+            .map(|(found, listed)| self.items(found, &listed))
+            .unwrap_or_default()
     }
 
     /// The items of its Recently deleted named `names`.
     pub fn named_deleted(&self, names: &[String]) -> Vec<DeletedItem> {
-        self.items(self.read(|db| db.named_deleted(names)).unwrap_or_default())
+        self.read(|db| db.named_deleted(names))
+            .map(|(found, listed)| self.items(found, &listed))
+            .unwrap_or_default()
     }
 
-    fn items(&self, found: Vec<(Deleted, usize)>) -> Vec<DeletedItem> {
+    /// `found`, as the listing `listed` saw them.
+    fn items(&self, found: Vec<(Deleted, usize)>, listed: &Listed) -> Vec<DeletedItem> {
         found
             .into_iter()
             .map(|(deleted, along)| DeletedItem {
                 identity: self.identity.clone(),
                 deleted,
                 along,
+                db: listed.db.clone(),
+                seq: listed.seq,
             })
             .collect()
     }

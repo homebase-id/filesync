@@ -1555,9 +1555,11 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
         (1, 1),
         "x.txt goes, Photos stays"
     );
-    // Another device, which never synced, empties it.
+    // Another device, which never synced, lists it and empties it.
     let mut b = Client::new(&server, "b")?;
-    assert_eq!(b.engine.drive().empty(&[photos.node])?, 1, "x.txt");
+    b.engine.drive().catch_up(None)?;
+    let listed = b.listed()?;
+    assert_eq!(b.engine.drive().empty(&[photos.node], &listed)?, 1, "x.txt");
     assert_eq!(live(&server), 2, "2024 and y.txt stay");
     let left: Vec<String> = b
         .recently_deleted(10)?
@@ -1567,6 +1569,63 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     assert_eq!(left, ["Photos"]);
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
+/// Emptying one item takes only what the user was shown: a removal recorded inside it after the
+/// listing (its delete finished meanwhile, or another device deleted something in it) stays in
+/// Recently deleted, and so does the folder holding it.
+#[test]
+fn emptying_an_item_takes_only_what_was_listed() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    a.write("Photos/a.txt", "a")?;
+    a.write("Photos/x.txt", "x")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder and a.txt go; x.txt's removal fails, and a stops there.
+    a.remote.faults().fail_writes_named = Some("x.txt".into());
+    a.sync()?;
+    let photos = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "Photos")
+        .ok_or("Photos not listed")?;
+    let listed = a.listed()?;
+    // Then x.txt's removal goes through: recorded after the listing.
+    a.remote.faults().fail_writes_named = None;
+    a.sync()?;
+    assert!(
+        a.recently_deleted(10)?
+            .iter()
+            .any(|i| i.path == "Photos/x.txt"),
+        "x.txt is in Recently deleted now"
+    );
+    assert_eq!(
+        a.engine.drive().empty(&[photos.node], &listed)?,
+        1,
+        "a.txt only"
+    );
+    let left: Vec<String> = a
+        .recently_deleted(10)?
+        .into_iter()
+        .map(|i| i.path)
+        .collect();
+    assert_eq!(
+        left,
+        ["Photos/x.txt", "Photos"],
+        "x.txt and its folder stay"
+    );
+    // Listed again, it all goes.
+    let listed = a.listed()?;
+    assert_eq!(a.engine.drive().empty(&[photos.node], &listed)?, 2);
+    assert!(a.recently_deleted(10)?.is_empty());
+    // A listing this DB never gave is refused.
+    let other = hbsync_engine::deleted::Listed {
+        db: "another".into(),
+        seq: listed.seq,
+    };
+    assert!(a.engine.drive().empty(&[photos.node], &other).is_err());
     Ok(())
 }
 
@@ -1605,7 +1664,7 @@ fn emptying_a_folder_takes_what_was_deleted_from_it_before() -> R {
     );
     assert_eq!(summary.items, 6);
     let run = items[0].0.node;
-    assert_eq!(a.engine.drive().empty(&[run])?, 6);
+    assert_eq!(a.engine.drive().empty(&[run], &summary.listed)?, 6);
     assert!(a.recently_deleted(10)?.is_empty());
     let s = server.lock().map_err(|_| "poisoned")?;
     assert_eq!(
@@ -2421,7 +2480,7 @@ fn recently_deleted_lists_deletes_with_counts_and_finds_items() -> R {
         .0
         .node;
     let folder = all.iter().find(|(d, _)| d.path == "d").ok_or("d")?.0.node;
-    let found = reader.find_deleted(&[child, folder])?;
+    let (found, _) = reader.find_deleted(&[child, folder])?;
     let found: Vec<_> = found.iter().map(|(d, n)| (d.path.as_str(), *n)).collect();
     assert_eq!(found, [("d/f7.txt", 0), ("d", 30)]);
     Ok(())
