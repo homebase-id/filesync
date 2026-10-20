@@ -161,6 +161,7 @@ impl AccountTx<'_> {
     /// Forgets folder `id` and every row it has (the account's stay).
     pub fn remove_folder(&self, id: i64) -> Result<bool> {
         self.folders.take();
+        self.coords.take();
         self.places.borrow_mut().clear();
         self.forget_local_ids();
         self.change("DELETE FROM folders WHERE id = ?1", id)
