@@ -143,7 +143,7 @@ impl Executor<'_> {
             base_at: acted.base_at.into(),
             held_ms: None,
         };
-        let from_trash = self.in_trash(node, parent, &record.target)?;
+        let from_trash = self.disk.in_trash(self.db, node, parent, &record.target)?;
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -198,7 +198,7 @@ impl Executor<'_> {
         };
         let mut content = NodeContent::file(name, file.mtime_ms, file.size, file.executable);
         let (hash, size) = (file.hash, file.size);
-        let path = self.abs(&row.path);
+        let path = self.disk.abs(&row.path);
         let removed = match existing {
             None => self.db.read(|s| s.removed_by_node(node))?,
             Some(_) => None,
@@ -345,6 +345,19 @@ impl Executor<'_> {
         }
     }
 
+    /// Brings an old version a download just put in the trash back ([`Disk::restore_from_trash`]),
+    /// where the test fault [`FailPoint::Restore`] lets it.
+    fn restore_from_trash(
+        &mut self,
+        entry: &Path,
+        path: &RelPath,
+    ) -> Result<io::Result<()>, StateError> {
+        if self.fails(FailPoint::Restore) {
+            return Ok(Err(io::Error::other("bringing it back failed (a test)")));
+        }
+        self.disk.restore_from_trash(self.db, entry, path)
+    }
+
     /// Puts a verified download into place: over the old version (if it's still what the plan
     /// saw) or as a new file; an old version at another path goes to the trash first.
     fn place_download(
@@ -392,22 +405,21 @@ impl Executor<'_> {
         }
         // A file taken from the trash holds the tags it had there: written over, or not used.
         if left.failed && done.adopted() {
-            if let Some(trash) = &mut self.trash {
-                trash.refused.insert(node);
-            }
+            self.disk.refuse_from_trash(node);
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }
         if left.claimed != record.placed_tags {
             record.placed_tags = left.claimed.clone();
-            self.write_durable(|s| s.put_placing(&record))?;
+            self.disk
+                .write_durable(self.db, |s| s.put_placing(&record))?;
         }
         // The record claims only what read back; the row holds what the file holds: where the
         // write failed and that can't be read, none, as a temp file made here holds (one an
         // earlier try left holds what it wrote then: claiming less only sends that up).
         let tags = self.held_after(left, Tags::default());
         let placed = match &current {
-            Some(row) if &row.path == target => self.put(target, |at| {
+            Some(row) if &row.path == target => self.disk.put(self.db, target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
             })?,
             Some(row) => {
@@ -415,7 +427,7 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                let entry = match self.move_to_trash(&row.path, node)? {
+                let entry = match self.disk.move_to_trash(self.db, &row.path, node)? {
                     Ok(entry) => entry,
                     Err(e) => {
                         done.keep_for_retry();
@@ -426,7 +438,9 @@ impl Executor<'_> {
                     true => Err(FileIoError::Io(io::Error::other(
                         "not put in place (a test)",
                     ))),
-                    false => self.put(target, |at| done.persist_new(at, created_ms))?,
+                    false => self
+                        .disk
+                        .put(self.db, target, |at| done.persist_new(at, created_ms))?,
                 };
                 // Not put in place: the old version comes back at once, which nothing can have
                 // taken since (left in the trash, the next plan takes its absence for the user
@@ -442,7 +456,8 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("name taken".into()));
                 }
-                self.put(target, |at| done.persist_new(at, created_ms))?
+                self.disk
+                    .put(self.db, target, |at| done.persist_new(at, created_ms))?
             }
         };
         let placed = match placed {

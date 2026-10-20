@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 use hbsync_local::layout;
 use hbsync_types::NodeId;
 
-/// The folder's trash, as a run's downloads look in it ([`crate::exec::Executor`]).
+/// The folder's trash, as a run's downloads look in it (the executor's `Disk`).
 #[derive(Debug, Default)]
 pub(crate) struct Trash {
     /// Its entries ([`layout::trash_entry`]) by node, newest first.
-    pub(crate) entries: HashMap<NodeId, Vec<PathBuf>>,
+    entries: HashMap<NodeId, Vec<PathBuf>>,
     /// The nodes a file taken from it didn't do for (its tags weren't written): downloaded.
-    pub(crate) refused: HashSet<NodeId>,
+    refused: HashSet<NodeId>,
 }
 
 impl Trash {
@@ -40,6 +40,32 @@ impl Trash {
                 .insert(node, e.into_iter().map(|(_, p)| p).collect());
         }
         trash
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The entries of `node`, newest first.
+    pub(crate) fn entries(&self, node: NodeId) -> &[PathBuf] {
+        self.entries.get(&node).map_or(&[], Vec::as_slice)
+    }
+
+    /// `node`'s new entry `dir`, the newest (once).
+    pub(crate) fn add(&mut self, node: NodeId, dir: PathBuf) {
+        let entries = self.entries.entry(node).or_default();
+        if !entries.contains(&dir) {
+            entries.insert(0, dir);
+        }
+    }
+
+    /// A file taken from it didn't do for `node`: none is offered for it any more.
+    pub(crate) fn refuse(&mut self, node: NodeId) {
+        self.refused.insert(node);
+    }
+
+    pub(crate) fn refused(&self, node: NodeId) -> bool {
+        self.refused.contains(&node)
     }
 }
 

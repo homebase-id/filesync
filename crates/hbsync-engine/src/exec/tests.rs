@@ -10,6 +10,7 @@ use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_state::{MirrorFile, PlannedBase, RemovedRow};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{FileContent, NodeState, RemoteRef, Tag};
+use std::path::PathBuf;
 
 type R = Result<(), Box<dyn std::error::Error>>;
 

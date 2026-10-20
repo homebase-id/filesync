@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -39,7 +39,6 @@ use crate::plan::{DriveVersion, TagWrite, not_reached};
 use crate::reconcile::{Op, Requirement};
 use crate::settle::{Placed, Settle, mark_children, settle, settle_placement, spell};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
-use crate::trash::Trash;
 use crate::view;
 use hbsync_local::layout;
 
@@ -225,11 +224,8 @@ pub(crate) struct Executor<'a> {
     counted: HashSet<NodeId>,
     /// The drive is full: uploads are held (from the start, when it was lately).
     full: bool,
-    /// The ids the scan gave new items are durable: before anything goes to the drive, they
-    /// are (a power cut must not make the scan give others to what went out).
-    ids_durable: bool,
-    /// The folder's trash, read when a download first asks this run ([`Executor::in_trash`]).
-    trash: Option<Trash>,
+    /// The sync root, written only through it.
+    disk: Disk<'a>,
 }
 
 /// An operation whose guards passed, its job waiting for a worker.
@@ -369,8 +365,7 @@ impl<'a> Executor<'a> {
             progress: Arc::default(),
             counted: HashSet::new(),
             full: false,
-            ids_durable: false,
-            trash: None,
+            disk: Disk::new(&folder.root),
         }
     }
 
@@ -938,11 +933,12 @@ impl<'a> Executor<'a> {
         // Write-ahead: a download put in place whose commit a crash loses is found there again
         // by its record (`recover_placements`).
         if !records.is_empty() {
-            self.write_durable(|s| records.iter().try_for_each(|r| s.put_placing(r)))?;
+            self.disk.write_durable(self.db, |s| {
+                records.iter().try_for_each(|r| s.put_placing(r))
+            })?;
             self.records.extend(records.iter().map(|r| r.base.node));
-        } else if !self.ids_durable {
-            self.db.flush()?;
-            self.ids_durable = true;
+        } else {
+            self.disk.flush_ids(self.db)?;
         }
         // Counted up front by `count_bytes`; a retried transfer's bytes count once.
         let progress = Arc::clone(&self.progress);
@@ -1125,10 +1121,6 @@ impl<'a> Executor<'a> {
 
     // ---- paths ----
 
-    fn abs(&self, path: &RelPath) -> PathBuf {
-        path.to_native(&self.folder.root)
-    }
-
     /// The local path where (parent, name) lives. Retried while the parent isn't local yet;
     /// skipped if the name can't be spelled on this OS (it stays remote-only and is reported).
     fn target_path(&mut self, parent: NodeId, name: &str) -> Step<RelPath> {
@@ -1146,7 +1138,7 @@ impl<'a> Executor<'a> {
 
     /// Whether the item on disk still matches its row.
     fn on_disk_unchanged(&self, row: &LocalRow) -> bool {
-        hbsync_platform::stat(&self.abs(&row.path)).is_ok_and(|meta| matches_row(row, &meta))
+        hbsync_platform::stat(&self.disk.abs(&row.path)).is_ok_and(|meta| matches_row(row, &meta))
     }
 
     /// Whether everything on disk at `top` is what `rows` recorded (its subtree in the DB, `top`
@@ -1205,36 +1197,11 @@ impl<'a> Executor<'a> {
         occupant(self.db, self.folder.case_insensitive, target)
     }
 
-    // ---- the disk and durable commits (the state DB orders them: its docs on durability) ----
-
-    /// A durable commit (with every commit before): a write-ahead record of what is about to
-    /// happen on disk or on the drive, or a change that must not be lost.
-    fn write_durable(
-        &mut self,
-        f: impl FnOnce(FolderTx<'_>) -> Result<(), StateError>,
-    ) -> Result<(), StateError> {
-        self.db.write_durable(|s| f(s.folder()))?;
-        self.ids_durable = true;
-        Ok(())
-    }
-
-    /// Renames `from` to `to` on disk, never over anything ([`rename_ordered`]).
-    fn rename(&mut self, from: &RelPath, to: &RelPath) -> Result<io::Result<()>, StateError> {
-        let (from, to) = (self.abs(from), self.abs(to));
-        rename_ordered(self.db, &from, &to)
-    }
-
-    /// Puts something at `path` on disk with `put` ([`put_ordered`]).
-    fn put<T>(&mut self, path: &RelPath, put: impl FnOnce(&Path) -> T) -> Result<T, StateError> {
-        let at = self.abs(path);
-        put_ordered(self.db, &at, put)
-    }
-
     /// Frees `target` if a node that the plan is about to move away holds it: that node is
     /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
     /// The mover itself may hold it under another case (a case-only rename).
     fn free_target(&mut self, target: &RelPath, mover: Option<NodeId>) -> Result<bool, StateError> {
-        let on_disk = fs::symlink_metadata(self.abs(target)).is_ok();
+        let on_disk = fs::symlink_metadata(self.disk.abs(target)).is_ok();
         let Some(occupant) = self.occupant(target)? else {
             return Ok(!on_disk);
         };
@@ -1256,8 +1223,9 @@ impl<'a> Executor<'a> {
         // item under its temporary name, and this record maps it back to its real place (a
         // record counts only while the item carries that name), so the temporary name can't
         // reach the remote as a rename.
-        self.write_durable(|s| s.put_parked(occupant.node, &occupant.path))?;
-        if self.rename(&occupant.path, &parked)?.is_err() {
+        self.disk
+            .write_durable(self.db, |s| s.put_parked(occupant.node, &occupant.path))?;
+        if self.disk.rename(self.db, &occupant.path, &parked)?.is_err() {
             self.db.write(|s| s.folder().delete_parked(occupant.node))?;
             return Ok(false);
         }
@@ -1275,6 +1243,7 @@ impl<'a> Executor<'a> {
     }
 }
 
+mod disk;
 mod hooks;
 mod local;
 mod park;
@@ -1285,6 +1254,7 @@ mod transfer_ops;
 #[cfg(test)]
 mod tests;
 
+use disk::Disk;
 /// Re-exported for the simulator, which names what the executor parks.
 pub use hbsync_local::layout::parked_name;
 #[cfg(feature = "testkit")]
@@ -1295,33 +1265,6 @@ use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
 pub use transfer_ops::tags_lost;
-
-// Every change the executor makes to a folder's entries goes through these two, which keep the
-// order the state DB needs with its durable commits (its docs on durability). Tags and times
-// written on an item aren't ordered: one lost reads as a change of those only.
-
-/// Puts something at `at` on disk with `put`: once the place can take it
-/// ([`StateDb::filling`]), its folder noted as changed after.
-fn put_ordered<T>(
-    db: &mut StateDb,
-    at: &Path,
-    put: impl FnOnce(&Path) -> T,
-) -> Result<T, StateError> {
-    db.filling(at)?;
-    let out = put(at);
-    db.changed(at);
-    Ok(out)
-}
-
-/// Renames `from` to `to` on disk, never over anything ([`put_ordered`]); `from` is noted as
-/// emptied.
-fn rename_ordered(db: &mut StateDb, from: &Path, to: &Path) -> Result<io::Result<()>, StateError> {
-    let renamed = put_ordered(db, to, |to| ops::rename_noreplace(from, to))?;
-    if renamed.is_ok() {
-        db.emptied(from);
-    }
-    Ok(renamed)
-}
 
 /// Whether `meta` (from disk) is what `row` recorded: folders by kind and file id, files by
 /// their full fingerprint.

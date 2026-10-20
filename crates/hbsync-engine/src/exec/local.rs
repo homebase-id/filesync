@@ -34,8 +34,9 @@ impl Executor<'_> {
         };
         // Write-ahead: if we crash after the rename, recovery completes the fork instead of a
         // scan mistaking it for the user renaming the original.
-        self.write_durable(|s| s.put_fork(node, new_node, &target))?;
-        if let Err(e) = self.rename(&row.path, &target)? {
+        self.disk
+            .write_durable(self.db, |s| s.put_fork(node, new_node, &target))?;
+        if let Err(e) = self.disk.rename(self.db, &row.path, &target)? {
             self.db.write(|s| s.folder().delete_fork(node))?;
             return Ok(io_outcome(e));
         }
@@ -69,7 +70,7 @@ impl Executor<'_> {
             return Ok(Outcome::stale("an earlier placement isn't settled yet"));
         }
         let target = self.target_path(parent, name)?;
-        let abs = self.abs(&target);
+        let abs = self.disk.abs(&target);
         let (mirror, base_at) = self.db.read(|s| {
             Ok((
                 s.get_mirror(node)?,
@@ -124,10 +125,10 @@ impl Executor<'_> {
                 return Ok(Outcome::Retry("name taken".into()));
             }
             if kept && let Some(r) = &record {
-                self.write_durable(|s| s.put_placing(r))?;
+                self.disk.write_durable(self.db, |s| s.put_placing(r))?;
                 self.records.insert(node);
             }
-            if let Err(e) = self.put(&target, |at| fs::create_dir(at))? {
+            if let Err(e) = self.disk.put(self.db, &target, |at| fs::create_dir(at))? {
                 return Ok(io_outcome(e));
             }
         }
@@ -145,7 +146,7 @@ impl Executor<'_> {
         if claims && let Some(r) = &mut record {
             r.placed_tags = tags.clone();
             if kept && tags.is_some() {
-                self.write_durable(|s| s.put_placing(r))?;
+                self.disk.write_durable(self.db, |s| s.put_placing(r))?;
             }
         }
         // Only shown, never synced on: a file system that won't take it is no failure.
@@ -246,7 +247,7 @@ impl Executor<'_> {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::stale("gone"));
         };
-        let abs = self.abs(&row.path);
+        let abs = self.disk.abs(&row.path);
         // A file's guard takes in the change time a tag write moves; a folder's is its file id
         // only, so its tags must still be what was read.
         let folder_retagged =
@@ -321,7 +322,7 @@ impl Executor<'_> {
         if !self.free_target(&target, Some(node))? {
             return Ok(Outcome::Retry("name taken".into()));
         }
-        if let Err(e) = self.rename(&row.path, &target)? {
+        if let Err(e) = self.disk.rename(self.db, &row.path, &target)? {
             return Ok(io_outcome(e));
         }
         let refreshed = self.renamed(&row, &target);
@@ -337,7 +338,7 @@ impl Executor<'_> {
 
     /// See [`renamed_row`].
     pub(super) fn renamed(&self, old: &LocalRow, path: &RelPath) -> Option<LocalRow> {
-        renamed_row(&self.folder.root, old, path)
+        renamed_row(self.disk.root(), old, path)
     }
 
     /// Moves the local item of `node` to the trash; with `forget`, the bases of `node` and
@@ -362,7 +363,7 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         };
         if holding.is_empty() {
-            if let Err(e) = self.move_to_trash(&row.path, node)? {
+            if let Err(e) = self.disk.move_to_trash(self.db, &row.path, node)? {
                 return Ok(io_outcome(e));
             }
         } else {
@@ -379,7 +380,7 @@ impl Executor<'_> {
                 let in_holder = r.path.parent().is_some_and(|p| holders.contains(&p));
                 if in_holder
                     && !holders.contains(&r.path)
-                    && let Err(e) = self.move_to_trash(&r.path, r.node)?
+                    && let Err(e) = self.disk.move_to_trash(self.db, &r.path, r.node)?
                 {
                     self.report.rescan.push(row.path.clone());
                     return Ok(io_outcome(e));
@@ -397,7 +398,7 @@ impl Executor<'_> {
             for (r, original) in parked {
                 if let Some(to) = release_place(self.db, self.folder, &original, true)? {
                     // Best effort: if it fails, the item keeps its name and the scan finds it there.
-                    let _ = self.rename(&r.path, &to)?;
+                    let _ = self.disk.rename(self.db, &r.path, &to)?;
                 }
             }
             self.report
@@ -440,7 +441,7 @@ impl Executor<'_> {
                 let Some(to) = release_place(self.db, self.folder, &original, is_dir)? else {
                     return Ok(Outcome::unsyncable("no free name to leave the parked one"));
                 };
-                match restore_parked(self.db, &self.folder.root, &row, &to)? {
+                match restore_parked(self.db, &self.disk, &row, &to)? {
                     Ok(row) => row,
                     Err(e) => return Ok(io_outcome(e)),
                 }
@@ -448,7 +449,7 @@ impl Executor<'_> {
         };
         // The new id goes out with the item in this run: durable at once (a power cut must not
         // make the next plan pick another).
-        self.write_durable(|s| {
+        self.disk.write_durable(self.db, |s| {
             let below = s.local_subtree(&row.path)?;
             s.rekey_local(node, new_node)?;
             // The old node isn't synced here any more; a base left behind would read as a
@@ -477,100 +478,5 @@ impl Executor<'_> {
             return Ok(Outcome::waiting("its children first"));
         }
         self.finish(&[], |s| s.folder().delete_base(node).map(drop))
-    }
-
-    /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
-    pub(super) fn move_to_trash(
-        &mut self,
-        path: &RelPath,
-        node: NodeId,
-    ) -> Result<io::Result<PathBuf>, StateError> {
-        let trash = layout::trash_dir(&self.folder.root);
-        // Its own entry folder, named by when and by the node (one name: a native path).
-        let dir = trash.join(layout::trash_entry(hbsync_types::unix_now(), node));
-        // The trash folder too, made with the first item in it.
-        self.db.changed(&trash);
-        if let Err(e) = put_ordered(self.db, &dir, |dir| fs::create_dir_all(dir))? {
-            return Ok(Err(e));
-        }
-        let to = dir.join(path.name().unwrap_or("item"));
-        let moved = rename_ordered(self.db, &self.abs(path), &to)?.map(|()| to);
-        if moved.is_ok()
-            && let Some(trash) = &mut self.trash
-        {
-            let entries = trash.entries.entry(node).or_default();
-            if !entries.contains(&dir) {
-                entries.insert(0, dir);
-            }
-        }
-        Ok(moved)
-    }
-
-    /// Files of the folder's trash that may hold the bytes a download of `node` (in `parent`)
-    /// to `target` wants: where its own entry, or the entry of a folder above it, holds it
-    /// under the names `target` has (a delete taken back); its own entries first, then each
-    /// folder's above it, each newest first. Only candidates: the download takes one only once
-    /// it read exactly the bytes wanted ([`hbsync_fileio::CompletedFile::adopt`]). Nothing to
-    /// look up while the trash is empty, or for a node one was refused for this run.
-    pub(super) fn in_trash(
-        &mut self,
-        node: NodeId,
-        parent: NodeId,
-        target: &RelPath,
-    ) -> Result<Vec<PathBuf>, StateError> {
-        let root = &self.folder.root;
-        let trash = self
-            .trash
-            .get_or_insert_with(|| Trash::read(&layout::trash_dir(root)));
-        if trash.entries.is_empty() || trash.refused.contains(&node) {
-            return Ok(Vec::new());
-        }
-        let names: Vec<&str> = target.components().collect();
-        // The folders above it, as far as `target` names them.
-        let mut left = names.len().saturating_sub(1);
-        let above = self.db.read(|s| {
-            crate::walk::up::<_, StateError>(parent, |at| {
-                if left == 0 {
-                    return Ok(None);
-                }
-                left -= 1;
-                Ok(s.get_mirror(at)?.map(|m| (at, m.parent)))
-            })
-        })?;
-        let mut found = Vec::new();
-        for (i, at) in (0..names.len())
-            .rev()
-            .zip(std::iter::once(node).chain(above.items))
-        {
-            let Some(entries) = trash.entries.get(&at) else {
-                continue;
-            };
-            // Its place in the entry: its name there, and the names below it to the item.
-            let Ok(place) = RelPath::new(&names[i..].join("/")) else {
-                continue;
-            };
-            found.extend(entries.iter().map(|e| place.to_native(e)));
-        }
-        Ok(found)
-    }
-
-    /// Brings an old version a download just put in the trash (at `entry`) back to `path`, and
-    /// removes its entry's folder, empty then (one that can't be removed, not empty after
-    /// all, stays for the daily purge).
-    pub(super) fn restore_from_trash(
-        &mut self,
-        entry: &Path,
-        path: &RelPath,
-    ) -> Result<io::Result<()>, StateError> {
-        if self.fails(FailPoint::Restore) {
-            return Ok(Err(io::Error::other("bringing it back failed (a test)")));
-        }
-        let back = rename_ordered(self.db, entry, &self.abs(path))?;
-        if back.is_ok()
-            && let Some(dir) = entry.parent()
-        {
-            drop(fs::remove_dir(dir));
-        }
-        Ok(back)
     }
 }
