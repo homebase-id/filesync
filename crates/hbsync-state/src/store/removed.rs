@@ -166,16 +166,25 @@ impl Store<'_> {
         )
     }
 
-    /// The nodes of Recently deleted recorded after `seq`: what a listing that read it didn't
-    /// see. Emptying alone reads it (a scan: `seq` has no index, migration 12).
-    pub fn removed_since(&self, seq: u64) -> Result<std::collections::HashSet<NodeId>> {
-        let c = self.coords()?;
-        let nodes = self.many(
-            "SELECT node FROM removed WHERE seq > ?1",
-            [i64::try_from(seq).unwrap_or(i64::MAX)],
-            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
-        )?;
-        Ok(nodes.into_iter().map(|n| c.from_drive(n)).collect())
+    /// The row of Recently deleted that is `node`, with its [`Recorded::seq`]
+    /// ([`Store::removed_by_node`]).
+    pub fn recorded_by_node(&self, node: NodeId) -> Result<Option<Recorded>> {
+        Ok(self
+            .recorded_rows(
+                &format!("{REMOVED_SELECT} WHERE node = ?1"),
+                [node.0.as_bytes()],
+            )?
+            .pop())
+    }
+
+    /// The removed nodes in folder `parent`, with their [`Recorded::seq`]
+    /// ([`Store::removed_children`]).
+    pub fn recorded_children(&self, parent: NodeId) -> Result<Vec<Recorded>> {
+        let parent = self.coords()?.to_drive(parent);
+        self.recorded_rows(
+            &format!("{REMOVED_SELECT} WHERE parent = ?1"),
+            [parent.0.as_bytes()],
+        )
     }
 
     fn recorded_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Recorded>> {

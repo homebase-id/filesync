@@ -852,18 +852,19 @@ pub fn empty(
 ) -> Result<usize, EngineError> {
     let passes = locked(account).read(|s| {
         refuse_unlisted(s, listed)?;
-        // Read only when anything was recorded since (a scan: `seq` has no index).
-        let since = match listed.seq < s.removed_seq()? {
-            true => s.removed_since(listed.seq)?,
-            false => HashSet::new(),
-        };
         let mut chosen = Vec::new();
         for &node in nodes {
-            if let Some(top) = s.removed_by_node(node)? {
+            if let Some(top) = s.recorded_by_node(node)? {
+                // Each row with its `seq`: what the listing saw is up to its counter.
+                let rows = inside(
+                    top,
+                    |r| (r.removed.row.node, r.removed.row.kind == NodeKind::Folder),
+                    |n| s.recorded_children(n),
+                )?;
                 chosen.extend(
-                    inside_of(s, top)?
-                        .into_iter()
-                        .filter(|r| !since.contains(&r.row.node)),
+                    rows.into_iter()
+                        .filter(|r| r.seq <= listed.seq)
+                        .map(|r| r.removed),
                 );
             }
         }
