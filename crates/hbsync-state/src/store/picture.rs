@@ -4,11 +4,11 @@
 
 use super::*;
 
-impl Store<'_> {
+impl AccountTx<'_> {
     // ---- the drive's picture ----
 
     /// A live version of a node: out of Recently deleted (whatever the mirror then takes), into
-    /// the mirror ([`Store::put_mirror`]: a version it has, or a file deleted for good, changes
+    /// the mirror ([`AccountTx::put_mirror`]: a version it has, or a file deleted for good, changes
     /// nothing there).
     pub fn put_live(&self, row: &MirrorRow) -> Result<()> {
         self.delete_removed(row.node)?;
@@ -17,15 +17,15 @@ impl Store<'_> {
 
     /// A node's file moved to Recently deleted, as the feed says: out of the mirror (its node
     /// planned again where it was held, also where the mirror had no row of it), into Recently
-    /// deleted ([`Store::put_removed`]).
+    /// deleted ([`AccountTx::put_removed`]).
     pub fn move_to_removed(&self, removed: &RemovedRow) -> Result<()> {
         self.leave_tree(removed.row.file_id)?;
         self.put_removed(removed)
     }
 
     /// File `file_id` deleted for good, since `at` if known (Unix ms, the server's: the time of
-    /// the tombstone it left; [`Store::prune_gone`] counts from it): never back in the mirror or
-    /// Recently deleted ([`Store::file_gone`]), and out of both now. A file already known gone
+    /// the tombstone it left; [`AccountTx::prune_gone`] counts from it): never back in the mirror or
+    /// Recently deleted ([`ReadTx::file_gone`]), and out of both now. A file already known gone
     /// keeps the time it had.
     pub fn forget_file(&self, file_id: RemoteFileId, at: Option<i64>) -> Result<()> {
         match at {
@@ -36,8 +36,8 @@ impl Store<'_> {
         self.leave_tree(file_id)
     }
 
-    /// A tombstone the feed brought ([`Store::put_tombstone`], if it says when it was written):
-    /// its file is deleted for good ([`Store::forget_file`]).
+    /// A tombstone the feed brought ([`AccountTx::put_tombstone`], if it says when it was written):
+    /// its file is deleted for good ([`AccountTx::forget_file`]).
     pub fn tombstone(&self, tombstone: RemoteRef, at: Option<i64>) -> Result<()> {
         if let Some(at) = at {
             self.put_tombstone(tombstone, at)?;
@@ -46,7 +46,7 @@ impl Store<'_> {
     }
 
     /// The mirror without file `file_id`, its node marked to plan again where it was held: by
-    /// its row ([`Store::delete_mirror`]), or, where the mirror has none, where a base holds the
+    /// its row ([`AccountTx::delete_mirror`]), or, where the mirror has none, where a base holds the
     /// file (a tombstone has no node id: the node is found by file id).
     fn leave_tree(&self, file_id: RemoteFileId) -> Result<()> {
         if self.delete_mirror(file_id)?.is_none()

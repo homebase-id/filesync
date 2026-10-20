@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hbsync_state::{StateError, Store};
+use hbsync_state::{ReadTx, StateError};
 use hbsync_types::activity::{Progress, Synced, SyncedKind};
 use hbsync_types::{NodeId, NodeKind};
 
@@ -68,7 +68,7 @@ pub(crate) fn kind_of(op: &Op) -> Option<SyncedKind> {
 
 /// Where `node` is, for people: its local path, or else the path it had when last synced (a
 /// node deleted here). `None` for a node this device never had.
-pub(crate) fn path_of(s: &Store<'_>, node: NodeId) -> Result<Option<String>, StateError> {
+pub(crate) fn path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, StateError> {
     if let Some(row) = s.local_by_node(node)? {
         return Ok(Some(row.path.as_str().to_owned()));
     }

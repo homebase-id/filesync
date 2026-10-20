@@ -17,7 +17,7 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use hbsync_local::layout::parked_name;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateError};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
 use crate::folder::FolderCtx;
@@ -36,7 +36,7 @@ pub(crate) struct LocalNode {
 /// Reads one node's local state. `remote_tags`: the drive's tags of the node, if it is there
 /// (what this device can't hold of them stands).
 pub(crate) fn local_node(
-    s: &Store<'_>,
+    s: &ReadTx<'_>,
     node: NodeId,
     os: Os,
     remote_tags: Option<&Tags>,
@@ -49,7 +49,7 @@ pub(crate) fn local_node(
 }
 
 fn local_state(
-    s: &Store<'_>,
+    s: &ReadTx<'_>,
     row: &LocalRow,
     os: Os,
     remote_tags: Option<&Tags>,
@@ -110,7 +110,7 @@ pub(crate) fn local_content(row: &LocalRow, base: Option<&BaseRow>) -> Option<Fi
 /// was parked. `None` if it isn't parked: no record, or it no longer carries its temporary
 /// name (the user renamed it, and the record is void). Parking never leaves the folder, so the
 /// place follows the folder (or the item) wherever it is moved meanwhile.
-pub(crate) fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
+pub(crate) fn parked_place(s: &ReadTx<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
     let Some(name) = s.get_parked(row.node)? else {
         return Ok(None);
     };
@@ -122,7 +122,7 @@ pub(crate) fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPa
 
 /// Loads everything the reconciler needs for `dirty`, with every child of each folder involved,
 /// for the sync folder `ctx` (its filter, §10, and its scope, §12).
-pub fn build_input(s: &Store<'_>, dirty: &[NodeId], ctx: &FolderCtx) -> Result<Input, StateError> {
+pub fn build_input(s: &ReadTx<'_>, dirty: &[NodeId], ctx: &FolderCtx) -> Result<Input, StateError> {
     build(s, dirty, ctx, None)
 }
 
@@ -130,7 +130,7 @@ pub fn build_input(s: &Store<'_>, dirty: &[NodeId], ctx: &FolderCtx) -> Result<I
 /// ([`Input::coverage`]): planning a change in a large folder reads a few rows, not the folder.
 /// A plan that needs more says so ([`crate::plan::Plan::unlisted`]).
 pub(crate) fn build_narrow(
-    s: &Store<'_>,
+    s: &ReadTx<'_>,
     dirty: &[NodeId],
     ctx: &FolderCtx,
     full: &HashSet<NodeId>,
@@ -142,7 +142,7 @@ pub(crate) fn build_narrow(
 const NAMED_MAX: usize = 32;
 
 fn build(
-    s: &Store<'_>,
+    s: &ReadTx<'_>,
     dirty: &[NodeId],
     ctx: &FolderCtx,
     full: Option<&HashSet<NodeId>>,
@@ -373,7 +373,7 @@ pub fn looked_up_removed(remote: &crate::tree::Tree, top: NodeId) -> HashSet<Nod
 /// written no later than that folder's removal (the reconciler's `taken_along`; one outside,
 /// as the view leaves it out, isn't this folder's to bring back).
 pub(crate) fn gone_on_drive(
-    s: &Store<'_>,
+    s: &ReadTx<'_>,
     node: NodeId,
     scope: &Scope,
 ) -> Result<bool, StateError> {
@@ -392,7 +392,7 @@ pub(crate) fn gone_on_drive(
 }
 
 struct Builder<'s, 'c> {
-    s: &'s Store<'c>,
+    s: &'s ReadTx<'c>,
     os: Os,
     input: Input,
     base_done: HashSet<NodeId>,

@@ -3,7 +3,7 @@ use std::sync::Mutex;
 
 use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote};
-use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteFileId, Target, Uuid, VersionTag};
 
@@ -22,7 +22,7 @@ impl Db {
 
     fn read<T>(
         &self,
-        f: impl FnOnce(&Store<'_>) -> Result<T, StateError>,
+        f: impl FnOnce(&ReadTx<'_>) -> Result<T, StateError>,
     ) -> Result<T, StateError> {
         locked(&self.0).read(f)
     }
@@ -73,8 +73,8 @@ fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
     let db = Db::new()?;
     let (a, b) = (NodeId::new(), NodeId::new());
     db.write(|s| {
-        s.put_removed(&removed(a, b, 1))?;
-        s.put_removed(&removed(b, a, 1))
+        s.account().put_removed(&removed(a, b, 1))?;
+        s.account().put_removed(&removed(b, a, 1))
     })?;
     let plan = db.read(|s| plan_restore(s, a))?.map(|p| p.rows.len());
     assert_eq!(plan, Some(2));
@@ -133,27 +133,27 @@ fn emptying_takes_what_was_listed_and_nothing_since() -> Result<(), Box<dyn std:
     let db = Db::new()?;
     let [f, with, own, lone, late, later_with] = [(); 6].map(|_| NodeId::new());
     db.write(|s| {
-        s.put_removed(&removed(f, NodeId::ROOT, 10))?;
-        s.put_removed(&removed(with, f, 11))?;
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&removed(f, NodeId::ROOT, 10))?;
+        s.account().put_removed(&removed(with, f, 11))?;
+        s.account().put_removed(&RemovedRow {
             removed_at: None, // this device's own, its server time not back yet
             ..removed(own, NodeId::ROOT, 0)
         })?;
-        s.put_removed(&removed(lone, NodeId::ROOT, 20))
+        s.account().put_removed(&removed(lone, NodeId::ROOT, 20))
     })?;
     let (deletes, summary) = db.read(|s| deletes(s, 10))?;
     assert_eq!((deletes.len(), summary.items), (3, 4));
 
     db.write(|s| {
         // Recorded after the listing, though removed before it on the server.
-        s.put_removed(&removed(late, NodeId::ROOT, 5))?;
-        s.put_removed(&removed(later_with, f, 12))?;
+        s.account().put_removed(&removed(late, NodeId::ROOT, 5))?;
+        s.account().put_removed(&removed(later_with, f, 12))?;
         // Restored, then deleted again.
-        s.delete_removed(lone)?;
-        s.put_removed(&removed(lone, NodeId::ROOT, 30))?;
+        s.account().delete_removed(lone)?;
+        s.account().put_removed(&removed(lone, NodeId::ROOT, 30))?;
         // Its own removal confirmed: the same removal, still listed.
         match s.removed_by_node(own)? {
-            Some(r) => s.confirm_removed(r.row.remote_ref(), 25),
+            Some(r) => s.account().confirm_removed(r.row.remote_ref(), 25),
             None => Err(StateError::Conflict("own isn't listed".into())),
         }
     })?;
@@ -186,13 +186,13 @@ fn a_live_node_is_never_deleted_for_good() -> Result<(), Box<dyn std::error::Err
                 (g, NodeId::ROOT),
                 (h, NodeId::ROOT),
             ] {
-                s.put_removed(&removed(node, parent, 10))?;
+                s.account().put_removed(&removed(node, parent, 10))?;
             }
-            s.put_mirror(&live(taken, f, Some(5)))?;
-            s.put_mirror(&live(taken_deep, taken, Some(6)))?;
-            s.put_mirror(&live(later, f, Some(20)))?;
-            s.put_mirror(&live(unknown, g, None))?;
-            s.put_mirror(&live(h_child, h, Some(10)))
+            s.account().put_mirror(&live(taken, f, Some(5)))?;
+            s.account().put_mirror(&live(taken_deep, taken, Some(6)))?;
+            s.account().put_mirror(&live(later, f, Some(20)))?;
+            s.account().put_mirror(&live(unknown, g, None))?;
+            s.account().put_mirror(&live(h_child, h, Some(10)))
         })?;
         let along: HashMap<NodeId, usize> = db
             .read(all)?
@@ -245,8 +245,8 @@ fn a_folder_stays_when_a_delete_in_it_fails() -> Result<(), Box<dyn std::error::
     )?;
     row.row.file_id = target.at.file_id;
     db.write(|s| {
-        s.put_removed(&removed(f, NodeId::ROOT, 10))?;
-        s.put_removed(&row)
+        s.account().put_removed(&removed(f, NodeId::ROOT, 10))?;
+        s.account().put_removed(&row)
     })?;
     let listing = listed(&db)?;
     assert_eq!(ops(&db, &remote).empty_listed(&listing)?, 0);
@@ -261,7 +261,7 @@ fn emptying_an_unknown_listing_is_refused() -> Result<(), Box<dyn std::error::Er
     let remote = fake();
     let db = Db::new()?;
     let x = NodeId::new();
-    db.write(|s| s.put_removed(&removed(x, NodeId::ROOT, 1)))?;
+    db.write(|s| s.account().put_removed(&removed(x, NodeId::ROOT, 1)))?;
     let listing = listed(&db)?;
     let ahead = Listed {
         seq: listing.seq + 1,
@@ -296,8 +296,8 @@ fn a_cycle_in_recently_deleted_is_emptied() -> Result<(), Box<dyn std::error::Er
         let db = Db::new()?;
         let (a, b) = (NodeId::new(), NodeId::new());
         db.write(|s| {
-            s.put_removed(&removed(a, b, 1))?;
-            s.put_removed(&removed(b, a, 1))
+            s.account().put_removed(&removed(a, b, 1))?;
+            s.account().put_removed(&removed(b, a, 1))
         })?;
         let gone = match purge {
             false => {
@@ -323,7 +323,7 @@ fn a_chain_too_deep_ends_at_the_last_row_walked() -> Result<(), StateError> {
         .collect();
     db.write(|s| {
         for w in chain.windows(2) {
-            s.put_removed(&removed(w[0], w[1], 1))?;
+            s.account().put_removed(&removed(w[0], w[1], 1))?;
         }
         Ok(())
     })?;
@@ -386,11 +386,14 @@ fn items_are_found_by_name() -> Result<(), StateError> {
         ..removed(node, parent, at)
     };
     db.write(|s| {
-        s.put_removed(&named(run, NodeId::ROOT, "run", 10))?;
-        s.put_removed(&named(data, run, "data", 10))?;
-        s.put_removed(&named(file, data, "f.bin", 10))?;
-        s.put_removed(&named(other, NodeId::ROOT, "other", 20))?;
-        s.put_removed(&named(other_data, other, "data", 5))
+        s.account()
+            .put_removed(&named(run, NodeId::ROOT, "run", 10))?;
+        s.account().put_removed(&named(data, run, "data", 10))?;
+        s.account().put_removed(&named(file, data, "f.bin", 10))?;
+        s.account()
+            .put_removed(&named(other, NodeId::ROOT, "other", 20))?;
+        s.account()
+            .put_removed(&named(other_data, other, "data", 5))
     })?;
     let mut found: Vec<(NodeId, NodeId, usize)> = db
         .read(named_items)?
@@ -418,7 +421,7 @@ fn items_are_found_by_name() -> Result<(), StateError> {
     Ok(())
 }
 
-fn named_items(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
+fn named_items(s: &ReadTx<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
     named(s, &["data".to_owned()])
 }
 
@@ -429,10 +432,10 @@ fn what_went_before_its_folder_stays() -> Result<(), StateError> {
     let db = Db::new()?;
     let (f, early, with, deeper) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
     db.write(|s| {
-        s.put_removed(&removed(early, f, 5))?;
-        s.put_removed(&removed(f, NodeId::ROOT, 10))?;
-        s.put_removed(&removed(with, f, 11))?;
-        s.put_removed(&removed(deeper, with, 12))
+        s.account().put_removed(&removed(early, f, 5))?;
+        s.account().put_removed(&removed(f, NodeId::ROOT, 10))?;
+        s.account().put_removed(&removed(with, f, 11))?;
+        s.account().put_removed(&removed(deeper, with, 12))
     })?;
     let plan: Option<Vec<NodeId>> = db
         .read(|s| plan_restore(s, f))?
@@ -523,15 +526,15 @@ fn the_purge_removes_only_what_a_delete_took_along() -> Result<(), Box<dyn std::
     db.write(|s| {
         for (node, r) in &rows {
             match *node {
-                n if [f, back, young].contains(&n) => s.put_removed(&RemovedRow {
+                n if [f, back, young].contains(&n) => s.account().put_removed(&RemovedRow {
                     removed_at: r.changed_at,
                     row: r.clone(),
                 })?,
-                n if n == unknown => s.put_mirror(&MirrorRow {
+                n if n == unknown => s.account().put_mirror(&MirrorRow {
                     changed_at: None,
                     ..r.clone()
                 })?,
-                _ => s.put_mirror(r)?,
+                _ => s.account().put_mirror(r)?,
             }
         }
         Ok(())
@@ -586,7 +589,7 @@ fn a_folder_holding_a_removal_this_device_doesnt_know_stays()
             if node != unknown {
                 let row = MirrorRow::written(w, node, parent, meta.kind, &meta.content, None);
                 db.write(|s| {
-                    s.put_removed(&RemovedRow {
+                    s.account().put_removed(&RemovedRow {
                         row,
                         removed_at: Some(10),
                     })
@@ -666,12 +669,12 @@ fn a_folder_holding_what_this_device_didnt_know_is_put_back()
     db.write(|s| {
         for (node, r) in &rows {
             if *node == f {
-                s.put_removed(&RemovedRow {
+                s.account().put_removed(&RemovedRow {
                     removed_at: Some(removal),
                     row: r.clone(),
                 })?;
             } else {
-                s.put_mirror(r)?;
+                s.account().put_mirror(r)?;
             }
         }
         Ok(())

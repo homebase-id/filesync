@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Store<'_> {
+impl ReadTx<'_> {
     // ---- base ----
 
     pub fn get_base(&self, node: NodeId) -> Result<Option<BaseRow>> {
@@ -51,6 +51,20 @@ impl Store<'_> {
         )
     }
 
+    pub fn base_count(&self) -> Result<u64> {
+        self.count("SELECT COUNT(*) FROM base WHERE folder = $F")
+    }
+
+    /// Number of file (not folder) nodes in the base; the mass-delete guard's denominator.
+    /// A full table scan: callers take it once per sync.
+    pub fn base_file_count(&self) -> Result<u64> {
+        // `+folder`: a scan of the table, not of an index holding the folder that looks every
+        // row up again for its kind (five times slower).
+        self.count("SELECT COUNT(*) FROM base WHERE +folder = $F AND kind = 0")
+    }
+}
+
+impl FolderTx<'_> {
     /// Inserts or replaces the base row of `row.node`.
     pub fn put_base(&self, row: &BaseRow) -> Result<()> {
         let c = row.state.content.as_ref();
@@ -93,17 +107,5 @@ impl Store<'_> {
             &format!("DELETE FROM base WHERE folder = $F AND id = {ID_OF}"),
             node.0.as_bytes(),
         )
-    }
-
-    pub fn base_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM base WHERE folder = $F")
-    }
-
-    /// Number of file (not folder) nodes in the base; the mass-delete guard's denominator.
-    /// A full table scan: callers take it once per sync.
-    pub fn base_file_count(&self) -> Result<u64> {
-        // `+folder`: a scan of the table, not of an index holding the folder that looks every
-        // row up again for its kind (five times slower).
-        self.count("SELECT COUNT(*) FROM base WHERE +folder = $F AND kind = 0")
     }
 }

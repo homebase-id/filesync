@@ -144,7 +144,7 @@ const SCHEMA: &str = r#"
         PRIMARY KEY (id, folder)
     ) WITHOUT ROWID;
 
-    -- Node ids that lost a reference since the last collection (see Store::collect_nodes).
+    -- Node ids that lost a reference since the last collection (see AccountTx::collect_nodes).
     -- Not unique: a trigger's conflict handling yields to the statement that fired it, and a
     -- repeated id costs nothing (the table is emptied at each collection).
     CREATE TABLE gone (id INTEGER NOT NULL);

@@ -16,53 +16,12 @@ fn version_params(at: &RemoteRef, removed: bool) -> [rusqlite::types::Value; 3] 
     ]
 }
 
-/// Versions [`Store::known`] and [`Store::first_unknown`] ask in one query: three or four
+/// Versions [`ReadTx::known`] and [`ReadTx::first_unknown`] ask in one query: three or four
 /// variables each, under SQLite's limit (32,766 in the bundled SQLite, 999 in old ones).
 const KNOWN_CHUNK: usize = 240;
 
-impl Store<'_> {
+impl ReadTx<'_> {
     // ---- Recently deleted ----
-
-    /// Records a removed node (replacing an older record of it), and marks it dirty where that
-    /// concerns ([`Store::fan_out`]); the same version again changes nothing, and keeps its
-    /// [`Recorded::seq`], and so does a file id deleted for good ([`Store::file_gone`]).
-    /// Another version is another removal (a restore, an edit, then a delete again, perhaps
-    /// elsewhere): it gets the next.
-    pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
-        if self.has_version(removed.row.remote_ref(), true)?
-            || self.file_gone(removed.row.file_id)?
-        {
-            return Ok(());
-        }
-        let Some(row) = &self.on_drive(&removed.row)? else {
-            return Ok(());
-        };
-        self.moved_folder(row.node, row.kind);
-        let seq = self.next_removed_seq()?;
-        let f = row.file.as_ref();
-        self.prep(
-            "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, removed_at, token, seq) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-        )?
-        .execute(params![
-            row.node.0.as_bytes(),
-            row.file_id.0.as_bytes(),
-            row.version.0.as_bytes(),
-            row.parent.0.as_bytes(),
-            codec::kind_to(row.kind),
-            row.name,
-            f.map(|f| codec::hash_to(&f.hash)),
-            f.map(|f| f.size as i64),
-            f.map(|f| f.mtime_ms),
-            f.is_some_and(|f| f.executable),
-            row.content_extra,
-            removed.removed_at,
-            row.token.as_ref().map(|t| &t.0[..]),
-            seq,
-        ])?;
-        self.fan_out(row.node, row.parent)
-    }
 
     /// The largest [`Recorded::seq`] given so far (0: none): no row has a larger one, and a row
     /// recorded later gets a larger one.
@@ -83,15 +42,6 @@ impl Store<'_> {
         let next = self.removed_seq()? + 1;
         self.removed_seq.set(Some((next, true)));
         Ok(next as i64)
-    }
-
-    /// What this transaction leaves for its commit: the counter, if it gave a [`Recorded::seq`].
-    pub(crate) fn finish(&self) -> Result<()> {
-        if let Some((seq, true)) = self.removed_seq.get() {
-            self.set_account_kv(crate::keys::REMOVED_SEQ, &seq.to_string())?;
-            self.removed_seq.set(Some((seq, false)));
-        }
-        Ok(())
     }
 
     /// How many nodes folder `parent` holds on the drive: live, or in Recently deleted.
@@ -167,7 +117,7 @@ impl Store<'_> {
     }
 
     /// The row of Recently deleted that is `node`, with its [`Recorded::seq`]
-    /// ([`Store::removed_by_node`]).
+    /// ([`ReadTx::removed_by_node`]).
     pub fn recorded_by_node(&self, node: NodeId) -> Result<Option<Recorded>> {
         Ok(self
             .recorded_rows(
@@ -178,7 +128,7 @@ impl Store<'_> {
     }
 
     /// The removed nodes in folder `parent`, with their [`Recorded::seq`]
-    /// ([`Store::removed_children`]).
+    /// ([`ReadTx::removed_children`]).
     pub fn recorded_children(&self, parent: NodeId) -> Result<Vec<Recorded>> {
         let parent = self.coords()?.to_drive(parent);
         self.recorded_rows(
@@ -198,31 +148,6 @@ impl Store<'_> {
             }
         }
         Ok(seen)
-    }
-
-    /// Records the server's time of a removal this device made, open until now
-    /// ([`RemovedRow::removed_at`]); a time already known stays.
-    pub fn confirm_removed(&self, at: RemoteRef, removed_at: i64) -> Result<()> {
-        self.prep(
-            "UPDATE removed SET removed_at = ?3 \
-             WHERE file_id = ?1 AND version_tag = ?2 AND removed_at IS NULL",
-        )?
-        .execute(params![
-            at.file_id.0.as_bytes(),
-            at.version.0.as_bytes(),
-            removed_at
-        ])?;
-        Ok(())
-    }
-
-    /// Forgets every file's token, in the mirror and Recently deleted: they were sealed under
-    /// a login that is no longer this one's. The next update of each reads its header first.
-    pub fn clear_tokens(&self) -> Result<()> {
-        self.prep("UPDATE remote SET token = NULL WHERE token IS NOT NULL")?
-            .execute([])?;
-        self.prep("UPDATE removed SET token = NULL WHERE token IS NOT NULL")?
-            .execute([])?;
-        Ok(())
     }
 
     /// Whether the store has every one of `versions`, each `(version, removed)` in Recently
@@ -252,7 +177,7 @@ impl Store<'_> {
             .query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
     }
 
-    /// The first of `versions` the store doesn't have ([`Store::known`]), by its index.
+    /// The first of `versions` the store doesn't have ([`ReadTx::known`]), by its index.
     pub fn first_unknown(&self, versions: &[(RemoteRef, bool)]) -> Result<Option<usize>> {
         for (n, chunk) in versions.chunks(KNOWN_CHUNK).enumerate() {
             if let Some(i) = self.first_unknown_in(chunk)? {
@@ -347,20 +272,100 @@ impl Store<'_> {
         )
     }
 
+    pub fn mirror_count(&self) -> Result<u64> {
+        self.count("SELECT COUNT(*) FROM remote")
+    }
+}
+
+impl AccountTx<'_> {
+    /// Records a removed node (replacing an older record of it), and marks it dirty where that
+    /// concerns (`fan_out`); the same version again changes nothing, and keeps its
+    /// [`Recorded::seq`], and so does a file id deleted for good ([`ReadTx::file_gone`]).
+    /// Another version is another removal (a restore, an edit, then a delete again, perhaps
+    /// elsewhere): it gets the next.
+    pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
+        if self.has_version(removed.row.remote_ref(), true)?
+            || self.file_gone(removed.row.file_id)?
+        {
+            return Ok(());
+        }
+        let Some(row) = &self.on_drive(&removed.row)? else {
+            return Ok(());
+        };
+        self.moved_folder(row.node, row.kind);
+        let seq = self.next_removed_seq()?;
+        let f = row.file.as_ref();
+        self.prep(
+            "INSERT OR REPLACE INTO removed (node, file_id, version_tag, parent, kind, name, \
+                 hash, size, mtime_ms, executable, content_extra, removed_at, token, seq) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )?
+        .execute(params![
+            row.node.0.as_bytes(),
+            row.file_id.0.as_bytes(),
+            row.version.0.as_bytes(),
+            row.parent.0.as_bytes(),
+            codec::kind_to(row.kind),
+            row.name,
+            f.map(|f| codec::hash_to(&f.hash)),
+            f.map(|f| f.size as i64),
+            f.map(|f| f.mtime_ms),
+            f.is_some_and(|f| f.executable),
+            row.content_extra,
+            removed.removed_at,
+            row.token.as_ref().map(|t| &t.0[..]),
+            seq,
+        ])?;
+        self.fan_out(row.node, row.parent)
+    }
+
+    /// Records the server's time of a removal this device made, open until now
+    /// ([`RemovedRow::removed_at`]); a time already known stays.
+    pub fn confirm_removed(&self, at: RemoteRef, removed_at: i64) -> Result<()> {
+        self.prep(
+            "UPDATE removed SET removed_at = ?3 \
+             WHERE file_id = ?1 AND version_tag = ?2 AND removed_at IS NULL",
+        )?
+        .execute(params![
+            at.file_id.0.as_bytes(),
+            at.version.0.as_bytes(),
+            removed_at
+        ])?;
+        Ok(())
+    }
+
+    /// Forgets every file's token, in the mirror and Recently deleted: they were sealed under
+    /// a login that is no longer this one's. The next update of each reads its header first.
+    pub fn clear_tokens(&self) -> Result<()> {
+        self.prep("UPDATE remote SET token = NULL WHERE token IS NOT NULL")?
+            .execute([])?;
+        self.prep("UPDATE removed SET token = NULL WHERE token IS NOT NULL")?
+            .execute([])?;
+        Ok(())
+    }
+
     /// Forgets a node's removal (it was restored, or deleted for good); whether it had one.
     pub fn delete_removed(&self, node: NodeId) -> Result<bool> {
         self.change("DELETE FROM removed WHERE node = ?1", node.0.as_bytes())
     }
 
-    /// [`Store::delete_removed`] by file id (a tombstone carries no node id).
+    /// [`AccountTx::delete_removed`] by file id (a tombstone carries no node id).
     pub fn delete_removed_file(&self, file_id: RemoteFileId) -> Result<bool> {
         self.change(
             "DELETE FROM removed WHERE file_id = ?1",
             file_id.0.as_bytes(),
         )
     }
+}
 
-    pub fn mirror_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM remote")
+impl Store<'_> {
+    /// What this transaction leaves for its commit: the counter, if it gave a [`Recorded::seq`].
+    pub(crate) fn finish(&self) -> Result<()> {
+        if let Some((seq, true)) = self.removed_seq.get() {
+            self.account()
+                .set_account_kv(crate::keys::REMOVED_SEQ, &seq.to_string())?;
+            self.removed_seq.set(Some((seq, false)));
+        }
+        Ok(())
     }
 }

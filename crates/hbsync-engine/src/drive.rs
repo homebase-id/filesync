@@ -255,7 +255,7 @@ impl Drive {
         }
         let _one_at_a_time = self.answered.lock().unwrap_or_else(|e| e.into_inner());
         let mut db = self.account();
-        let all = db.write(|s| feed::announced(s, refs))?;
+        let all = db.write(|s| feed::announced(s.account(), refs))?;
         self.wake_touched(&mut db, None);
         Ok(all)
     }
@@ -328,7 +328,7 @@ impl Drive {
                     let row = mirror::written(&meta, None, written);
                     let mut db = self.account();
                     // As the executor records a folder it made.
-                    db.write(|s| mirror::live(s, &row))?;
+                    db.write(|s| mirror::live(s.account(), &row))?;
                     self.wake_touched(&mut db, None);
                 }
                 // Another device made it (or deleted it) meanwhile: read it.
@@ -355,8 +355,8 @@ impl Drive {
         self.account().write(|s| {
             let changed = s.account_kv(keys::TOKENS_SEALED_BY)?.as_deref() != Some(by);
             if changed {
-                mirror::clear_tokens(s)?;
-                s.set_account_kv(keys::TOKENS_SEALED_BY, by)?;
+                mirror::clear_tokens(s.account())?;
+                s.account().set_account_kv(keys::TOKENS_SEALED_BY, by)?;
             }
             Ok(changed)
         })
@@ -416,8 +416,10 @@ impl Drive {
             return Ok(None);
         }
         let gone = self.purge(i64::from(keep_days) * DAY as i64 * 1000)?;
-        self.account()
-            .write(|s| s.set_account_kv(keys::PURGED_AT, &now.to_string()))?;
+        self.account().write(|s| {
+            s.account()
+                .set_account_kv(keys::PURGED_AT, &now.to_string())
+        })?;
         Ok(Some(gone))
     }
 }

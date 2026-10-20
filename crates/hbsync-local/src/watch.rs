@@ -407,7 +407,7 @@ impl LocalObserver {
                 && Instant::now() >= *at
                 && let Some((position, _)) = self.settling.take()
             {
-                db.write(|s| s.set_kv(keys::JOURNAL_CURSOR, &position))?;
+                db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
             }
             return Ok(None);
@@ -437,7 +437,7 @@ impl LocalObserver {
         };
         match position {
             Some(position) if batch.drained => {
-                db.write(|s| s.set_kv(keys::JOURNAL_CURSOR, &position))?;
+                db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
             }
             _ => self.unsaved = true,
@@ -825,7 +825,7 @@ mod tests {
             .read(|s| s.get_local(&path))?
             .map(|r| r.node)
             .ok_or("not scanned")?;
-        db.write(|s| s.clear_dirty(node))?;
+        db.write(|s| s.folder().clear_dirty(node))?;
 
         std::thread::sleep(Duration::from_millis(20)); // past a coarse clock tick
         let red = Tags::new([Tag::new("Red", 6)]);

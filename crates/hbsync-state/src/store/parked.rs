@@ -2,21 +2,8 @@
 
 use super::*;
 
-impl Store<'_> {
+impl ReadTx<'_> {
     // ---- parked items ----
-
-    /// Records that `node`, at `original`, is being parked under a temporary name in the same
-    /// folder. Only the original name is kept: the place follows from the node's row (see the
-    /// engine's `parked_place`).
-    pub fn put_parked(&self, node: NodeId, original: &RelPath) -> Result<()> {
-        let name = original
-            .name()
-            .ok_or_else(|| StateError::Conflict("the root can't be parked".into()))?;
-        let id = self.key_or_insert(node)?;
-        self.prep("INSERT OR REPLACE INTO parked (folder, id, original_name) VALUES ($F, ?1, ?2)")?
-            .execute(params![id, name])?;
-        Ok(())
-    }
 
     /// The name a parked node had.
     pub fn get_parked(&self, node: NodeId) -> Result<Option<String>> {
@@ -36,30 +23,7 @@ impl Store<'_> {
         rows.map(|r| codec::node(&r?)).collect()
     }
 
-    pub fn delete_parked(&self, node: NodeId) -> Result<()> {
-        self.change(
-            &format!("DELETE FROM parked WHERE folder = $F AND id = {ID_OF}"),
-            node.0.as_bytes(),
-        )?;
-        Ok(())
-    }
-
     // ---- forks in progress ----
-
-    /// Records, before the rename, that `node`'s file becomes the conflict copy `new_node`
-    /// under the name of `to`, in the same folder. Only the name is kept, so the record holds
-    /// wherever the folder moves meanwhile.
-    pub fn put_fork(&self, node: NodeId, new_node: NodeId, to: &RelPath) -> Result<()> {
-        let name = to
-            .name()
-            .ok_or_else(|| StateError::Conflict("the root can't be forked".into()))?;
-        let (id, new_id) = (self.key_or_insert(node)?, self.key_or_insert(new_node)?);
-        self.prep(
-            "INSERT OR REPLACE INTO forks (folder, id, new_node, to_name) VALUES ($F, ?1, ?2, ?3)",
-        )?
-        .execute(params![id, new_id, name])?;
-        Ok(())
-    }
 
     /// `(node, new node, conflict-copy name)` of every fork in progress.
     pub fn all_forks(&self) -> Result<Vec<(NodeId, NodeId, String)>> {
@@ -81,6 +45,99 @@ impl Store<'_> {
         .collect()
     }
 
+    // ---- downloads being placed ----
+
+    /// Every download being placed.
+    pub fn all_placing(&self) -> Result<Vec<Placing>> {
+        self.many(PLACING_SELECT, [], placing_row)
+    }
+
+    /// The record of `node`'s download or folder being placed, if any.
+    pub fn get_placing(&self, node: NodeId) -> Result<Option<Placing>> {
+        self.one(
+            &format!("{PLACING_SELECT} AND k.id = {ID_OF}"),
+            node.0.as_bytes(),
+            placing_row,
+        )
+    }
+
+    /// Whether `node` has a download or folder being placed.
+    pub fn is_placing(&self, node: NodeId) -> Result<bool> {
+        Ok(self
+            .prep(&format!(
+                "SELECT 1 FROM placing WHERE folder = $F AND id = {ID_OF}"
+            ))?
+            .query_row([node.0.as_bytes()], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+}
+
+/// The columns of a base row, then the target and the tags put on it.
+const PLACING_SELECT: &str = "SELECT n.uuid, p.uuid, k.name, k.kind, k.hash, k.size, k.mtime_ms, k.executable, \
+             k.remote_file_id, k.version_tag, 0, NULL, NULL, k.tags, k.path, k.placed_tags, \
+             k.base_at, k.prior_tags, k.held_ms \
+             FROM placing k \
+             JOIN nodes n ON n.id = k.id JOIN nodes p ON p.id = k.parent WHERE k.folder = $F";
+
+fn placing_row(r: &Row<'_>) -> Result<Placing> {
+    Ok(Placing {
+        base: base_row(r)?,
+        target: codec::rel_path(&r.get::<_, String>(14)?)?,
+        placed_tags: r
+            .get::<_, Option<String>>(15)?
+            .as_deref()
+            .map(tags_from_str),
+        prior_tags: r
+            .get::<_, Option<String>>(17)?
+            .as_deref()
+            .map(tags_from_str),
+        base_at: match r.get::<_, Option<Vec<u8>>>(16)?.as_deref() {
+            None => PlannedBase::Unchecked,
+            Some([]) => PlannedBase::Absent,
+            Some(v) => PlannedBase::At(codec::version(v)?),
+        },
+        held_ms: r.get::<_, Option<i64>>(18)?,
+    })
+}
+
+impl FolderTx<'_> {
+    /// Records that `node`, at `original`, is being parked under a temporary name in the same
+    /// folder. Only the original name is kept: the place follows from the node's row (see the
+    /// engine's `parked_place`).
+    pub fn put_parked(&self, node: NodeId, original: &RelPath) -> Result<()> {
+        let name = original
+            .name()
+            .ok_or_else(|| StateError::Conflict("the root can't be parked".into()))?;
+        let id = self.key_or_insert(node)?;
+        self.prep("INSERT OR REPLACE INTO parked (folder, id, original_name) VALUES ($F, ?1, ?2)")?
+            .execute(params![id, name])?;
+        Ok(())
+    }
+
+    pub fn delete_parked(&self, node: NodeId) -> Result<()> {
+        self.change(
+            &format!("DELETE FROM parked WHERE folder = $F AND id = {ID_OF}"),
+            node.0.as_bytes(),
+        )?;
+        Ok(())
+    }
+
+    /// Records, before the rename, that `node`'s file becomes the conflict copy `new_node`
+    /// under the name of `to`, in the same folder. Only the name is kept, so the record holds
+    /// wherever the folder moves meanwhile.
+    pub fn put_fork(&self, node: NodeId, new_node: NodeId, to: &RelPath) -> Result<()> {
+        let name = to
+            .name()
+            .ok_or_else(|| StateError::Conflict("the root can't be forked".into()))?;
+        let (id, new_id) = (self.key_or_insert(node)?, self.key_or_insert(new_node)?);
+        self.prep(
+            "INSERT OR REPLACE INTO forks (folder, id, new_node, to_name) VALUES ($F, ?1, ?2, ?3)",
+        )?
+        .execute(params![id, new_id, name])?;
+        Ok(())
+    }
+
     pub fn delete_fork(&self, node: NodeId) -> Result<()> {
         self.change(
             &format!("DELETE FROM forks WHERE folder = $F AND id = {ID_OF}"),
@@ -88,8 +145,6 @@ impl Store<'_> {
         )?;
         Ok(())
     }
-
-    // ---- downloads being placed ----
 
     /// Records, before a batch of downloads runs, the download of `p.base.node`.
     pub fn put_placing(&self, p: &Placing) -> Result<()> {
@@ -130,31 +185,6 @@ impl Store<'_> {
         Ok(())
     }
 
-    /// Every download being placed.
-    pub fn all_placing(&self) -> Result<Vec<Placing>> {
-        self.many(PLACING_SELECT, [], placing_row)
-    }
-
-    /// The record of `node`'s download or folder being placed, if any.
-    pub fn get_placing(&self, node: NodeId) -> Result<Option<Placing>> {
-        self.one(
-            &format!("{PLACING_SELECT} AND k.id = {ID_OF}"),
-            node.0.as_bytes(),
-            placing_row,
-        )
-    }
-
-    /// Whether `node` has a download or folder being placed.
-    pub fn is_placing(&self, node: NodeId) -> Result<bool> {
-        Ok(self
-            .prep(&format!(
-                "SELECT 1 FROM placing WHERE folder = $F AND id = {ID_OF}"
-            ))?
-            .query_row([node.0.as_bytes()], |_| Ok(()))
-            .optional()?
-            .is_some())
-    }
-
     pub fn delete_placing(&self, node: NodeId) -> Result<()> {
         self.change(
             &format!("DELETE FROM placing WHERE folder = $F AND id = {ID_OF}"),
@@ -162,32 +192,4 @@ impl Store<'_> {
         )?;
         Ok(())
     }
-}
-
-/// The columns of a base row, then the target and the tags put on it.
-const PLACING_SELECT: &str = "SELECT n.uuid, p.uuid, k.name, k.kind, k.hash, k.size, k.mtime_ms, k.executable, \
-             k.remote_file_id, k.version_tag, 0, NULL, NULL, k.tags, k.path, k.placed_tags, \
-             k.base_at, k.prior_tags, k.held_ms \
-             FROM placing k \
-             JOIN nodes n ON n.id = k.id JOIN nodes p ON p.id = k.parent WHERE k.folder = $F";
-
-fn placing_row(r: &Row<'_>) -> Result<Placing> {
-    Ok(Placing {
-        base: base_row(r)?,
-        target: codec::rel_path(&r.get::<_, String>(14)?)?,
-        placed_tags: r
-            .get::<_, Option<String>>(15)?
-            .as_deref()
-            .map(tags_from_str),
-        prior_tags: r
-            .get::<_, Option<String>>(17)?
-            .as_deref()
-            .map(tags_from_str),
-        base_at: match r.get::<_, Option<Vec<u8>>>(16)?.as_deref() {
-            None => PlannedBase::Unchecked,
-            Some([]) => PlannedBase::Absent,
-            Some(v) => PlannedBase::At(codec::version(v)?),
-        },
-        held_ms: r.get::<_, Option<i64>>(18)?,
-    })
 }

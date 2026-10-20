@@ -19,7 +19,7 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
 pub(super) fn complete_fork(
-    s: &Store<'_>,
+    s: FolderTx<'_>,
     node: NodeId,
     moved: &LocalRow,
 ) -> Result<(), StateError> {
@@ -38,22 +38,22 @@ pub(super) fn complete_fork(
 pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateError> {
     for (node, new_node, copy_name) in db.read(|s| s.all_forks())? {
         let Some(row) = db.read(|s| s.local_by_node(node))? else {
-            db.write(|s| s.delete_fork(node))?;
+            db.write(|s| s.folder().delete_fork(node))?;
             continue;
         };
         if row.path.name() == Some(copy_name.as_str()) {
             db.write(|s| {
-                s.rekey_local(node, new_node)?;
-                s.delete_parked(node)?;
-                s.delete_fork(node)?;
-                s.mark_dirty(new_node)?;
-                s.mark_dirty(node)
+                s.folder().rekey_local(node, new_node)?;
+                s.folder().delete_parked(node)?;
+                s.folder().delete_fork(node)?;
+                s.folder().mark_dirty(new_node)?;
+                s.folder().mark_dirty(node)
             })?;
         } else if hbsync_platform::stat(&row.path.to_native(root))
             .is_ok_and(|meta| meta.file_id == row.fingerprint.file_id)
         {
             // Still under its own name: the rename never happened.
-            db.write(|s| s.delete_fork(node))?;
+            db.write(|s| s.folder().delete_fork(node))?;
         }
         // Otherwise the scan hasn't caught up with the disk yet: decide next time.
     }
@@ -117,7 +117,7 @@ pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), St
     db.write(|s| {
         judged
             .into_iter()
-            .try_for_each(|(p, judged)| apply(s, &p, judged, folder, now).map(drop))
+            .try_for_each(|(p, judged)| apply(s.folder(), &p, judged, folder, now).map(drop))
     })
 }
 
@@ -177,7 +177,7 @@ pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>) -> Judged {
 /// another node's row is at the target, the record stays instead. One kept is held from now,
 /// if it wasn't already.
 pub(super) fn apply(
-    s: &Store<'_>,
+    s: FolderTx<'_>,
     p: &Placing,
     judged: Judged,
     folder: &FolderCtx,
@@ -225,7 +225,7 @@ pub(super) fn apply(
 
 /// Holds record `p` as of `now`: from now, if it wasn't held yet; dropped once held for
 /// [`UNHASHED_HOLD`].
-fn hold(s: &Store<'_>, p: &Placing, now: i64) -> Result<Applied, StateError> {
+fn hold(s: FolderTx<'_>, p: &Placing, now: i64) -> Result<Applied, StateError> {
     match p.held_ms {
         None => {
             s.put_placing(&Placing {
@@ -285,7 +285,7 @@ pub(super) fn read_row(
 /// The folders to rescan for record `p` before recovery judges it: the one its target is in,
 /// and the one its node's item is in now (an old version a download replaced from another
 /// folder). The rescan only updates rows; what is on disk is judged by [`look`].
-pub fn record_dirs(s: &Store<'_>, p: &Placing) -> Result<Vec<RelPath>, StateError> {
+pub fn record_dirs(s: &ReadTx<'_>, p: &Placing) -> Result<Vec<RelPath>, StateError> {
     let mut dirs = vec![p.target.parent().unwrap_or_default()];
     if let Some(row) = s.local_by_node(p.base.node)? {
         dirs.push(row.path.parent().unwrap_or_default());

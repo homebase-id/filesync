@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Store<'_> {
+impl ReadTx<'_> {
     // ---- remote mirror ----
 
     pub fn get_mirror(&self, node: NodeId) -> Result<Option<MirrorRow>> {
@@ -49,7 +49,7 @@ impl Store<'_> {
     }
 
     /// The children of `parent` whose name has sibling hash `key`, as
-    /// [`Store::base_named`].
+    /// [`ReadTx::base_named`].
     pub fn mirror_named(&self, parent: NodeId, key: i32) -> Result<Vec<MirrorRow>> {
         self.mirror_in(parent, Some(key))
     }
@@ -82,77 +82,6 @@ impl Store<'_> {
             seen.push(outside_row());
         }
         Ok(seen)
-    }
-
-    /// Records a live remote node, and marks it dirty in the folders the change concerns
-    /// ([`Store::fan_out`]). A row for the same node under an older file id (the node was
-    /// deleted and re-created) is replaced. A version the mirror has already (this device's own
-    /// write coming back through the feed, or a page applied again) changes nothing, and so does
-    /// a file id deleted for good ([`Store::file_gone`]: a page fetched before, or a write
-    /// committed after, can't bring it back).
-    pub fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
-        if self.has_version(row.remote_ref(), false)? || self.file_gone(row.file_id)? {
-            return Ok(());
-        }
-        let Some(row) = &self.on_drive(row)? else {
-            return Ok(());
-        };
-        self.moved_folder(row.node, row.kind);
-        let (id, parent) = (
-            self.key_or_insert(row.node)?,
-            self.key_or_insert(row.parent)?,
-        );
-        let f = row.file.as_ref();
-        self.prep(
-            "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, token, changed_at, name_key) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
-                 ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
-                 kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
-                 content_extra = ?11, token = ?12, changed_at = ?13, name_key = ?14",
-        )?
-        .execute(params![
-            id,
-            row.file_id.0.as_bytes(),
-            row.version.0.as_bytes(),
-            parent,
-            codec::kind_to(row.kind),
-            row.name,
-            f.map(|f| codec::hash_to(&f.hash)),
-            f.map(|f| f.size as i64),
-            f.map(|f| f.mtime_ms),
-            f.is_some_and(|f| f.executable),
-            row.content_extra,
-            row.token.as_ref().map(|t| &t.0[..]),
-            row.changed_at,
-            sibling_hash(&row.name),
-        ])?;
-        self.fan_out(row.node, row.parent)
-    }
-
-    /// Keeps `token` for file `file_id` (in Recently deleted if `removed`), if it differs.
-    pub fn set_token(&self, file_id: RemoteFileId, removed: bool, token: &FileToken) -> Result<()> {
-        let table = if removed { "removed" } else { "remote" };
-        self.prep(&format!(
-            "UPDATE {table} SET token = ?2 WHERE file_id = ?1 AND token IS NOT ?2"
-        ))?
-        .execute(params![file_id.0.as_bytes(), &token.0[..]])?;
-        Ok(())
-    }
-
-    /// Records the server's time of the version the mirror has as `file_id` in `parent` (drive
-    /// coordinates), where it matters: a node in a removed folder whose time isn't known yet.
-    pub fn refresh_time(&self, file_id: RemoteFileId, parent: NodeId, at: i64) -> Result<()> {
-        let unknown = self
-            .prep("SELECT 1 FROM remote WHERE file_id = ?1 AND changed_at IS NULL")?
-            .exists([file_id.0.as_bytes()])?;
-        if unknown && self.removed_above(parent, NodeId::ROOT)?.is_some() {
-            self.prep(
-                "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NULL",
-            )?
-            .execute(params![file_id.0.as_bytes(), at])?;
-        }
-        Ok(())
     }
 
     /// The folder in Recently deleted that the drive's folder `folder` is, or is in through the
@@ -188,45 +117,18 @@ impl Store<'_> {
         Ok(None)
     }
 
-    /// Records file `file_id` as deleted for good: Homebase never gives a file id back.
-    pub fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
-        self.prep("INSERT OR IGNORE INTO gone_files (file_id) VALUES (?1)")?
-            .execute([file_id.0.as_bytes()])?;
-        Ok(())
-    }
-
-    /// Whether file `file_id` was deleted for good ([`Store::mark_file_gone`]).
+    /// Whether file `file_id` was deleted for good ([`AccountTx::mark_file_gone`]).
     pub fn file_gone(&self, file_id: RemoteFileId) -> Result<bool> {
         Ok(self
             .prep("SELECT 1 FROM gone_files WHERE file_id = ?1")?
             .exists([file_id.0.as_bytes()])?)
     }
 
-    /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
-    /// ([`Store::fan_out`]), and returns the row.
-    pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
-        let Some(row) = self.one(
-            &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
-            file_id.0.as_bytes(),
-            mirror_row,
-        )?
-        else {
-            return Ok(None);
-        };
-        self.fan_out(row.node, row.parent)?;
-        self.moved_folder(row.node, row.kind);
-        self.change(
-            "DELETE FROM remote WHERE file_id = ?1",
-            file_id.0.as_bytes(),
-        )?;
-        self.seen(row)
-    }
-
     /// Marks `node` dirty in the folders a change of it, now in the drive's folder `place`,
     /// concerns: those holding a base or local row of it, and the one whose part of the drive
     /// `place` is in (the folder with the nearest top above it). Every folder when `place`
     /// doesn't reach the drive's top through the mirror (a gap or a cycle): none is left out.
-    pub fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
+    pub(super) fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
         let folders = self.folder_list()?;
         let id = self.key_or_insert(node)?;
         let marked: std::collections::BTreeSet<i64> = match &*folders {
@@ -261,14 +163,9 @@ impl Store<'_> {
         Ok(())
     }
 
-    /// The folders [`Store::fan_out`] marked a node dirty in, so far.
-    pub(crate) fn take_touched(&self) -> std::collections::BTreeSet<i64> {
-        self.touched.take()
-    }
-
     /// The place of the drive's folder `place` (the folder with the nearest top above it);
     /// `None` if the mirror doesn't connect it to the top. Remembered for every folder on the
-    /// way, until one of them changes ([`Store::moved_folder`]).
+    /// way, until one of them changes ([`ReadTx::moved_folder`]).
     pub(super) fn place_of(&self, place: NodeId, folders: &[FolderRow]) -> Result<Option<Place>> {
         let mut parent = self.prep(MIRROR_PARENT)?;
         let mut chain = Vec::new();
@@ -325,5 +222,112 @@ fn outside_row() -> MirrorRow {
         content_extra: None,
         token: None,
         changed_at: None,
+    }
+}
+
+impl AccountTx<'_> {
+    /// Records a live remote node, and marks it dirty in the folders the change concerns
+    /// (`fan_out`). A row for the same node under an older file id (the node was
+    /// deleted and re-created) is replaced. A version the mirror has already (this device's own
+    /// write coming back through the feed, or a page applied again) changes nothing, and so does
+    /// a file id deleted for good ([`ReadTx::file_gone`]: a page fetched before, or a write
+    /// committed after, can't bring it back).
+    pub fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
+        if self.has_version(row.remote_ref(), false)? || self.file_gone(row.file_id)? {
+            return Ok(());
+        }
+        let Some(row) = &self.on_drive(row)? else {
+            return Ok(());
+        };
+        self.moved_folder(row.node, row.kind);
+        let (id, parent) = (
+            self.key_or_insert(row.node)?,
+            self.key_or_insert(row.parent)?,
+        );
+        let f = row.file.as_ref();
+        self.prep(
+            "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
+                 hash, size, mtime_ms, executable, content_extra, token, changed_at, name_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
+                 kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
+                 content_extra = ?11, token = ?12, changed_at = ?13, name_key = ?14",
+        )?
+        .execute(params![
+            id,
+            row.file_id.0.as_bytes(),
+            row.version.0.as_bytes(),
+            parent,
+            codec::kind_to(row.kind),
+            row.name,
+            f.map(|f| codec::hash_to(&f.hash)),
+            f.map(|f| f.size as i64),
+            f.map(|f| f.mtime_ms),
+            f.is_some_and(|f| f.executable),
+            row.content_extra,
+            row.token.as_ref().map(|t| &t.0[..]),
+            row.changed_at,
+            sibling_hash(&row.name),
+        ])?;
+        self.fan_out(row.node, row.parent)
+    }
+
+    /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
+    /// (`fan_out`), and returns the row.
+    pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
+        let Some(row) = self.one(
+            &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
+            file_id.0.as_bytes(),
+            mirror_row,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.fan_out(row.node, row.parent)?;
+        self.moved_folder(row.node, row.kind);
+        self.change(
+            "DELETE FROM remote WHERE file_id = ?1",
+            file_id.0.as_bytes(),
+        )?;
+        self.seen(row)
+    }
+
+    /// Keeps `token` for file `file_id` (in Recently deleted if `removed`), if it differs.
+    pub fn set_token(&self, file_id: RemoteFileId, removed: bool, token: &FileToken) -> Result<()> {
+        let table = if removed { "removed" } else { "remote" };
+        self.prep(&format!(
+            "UPDATE {table} SET token = ?2 WHERE file_id = ?1 AND token IS NOT ?2"
+        ))?
+        .execute(params![file_id.0.as_bytes(), &token.0[..]])?;
+        Ok(())
+    }
+
+    /// Records the server's time of the version the mirror has as `file_id` in `parent` (drive
+    /// coordinates), where it matters: a node in a removed folder whose time isn't known yet.
+    pub fn refresh_time(&self, file_id: RemoteFileId, parent: NodeId, at: i64) -> Result<()> {
+        let unknown = self
+            .prep("SELECT 1 FROM remote WHERE file_id = ?1 AND changed_at IS NULL")?
+            .exists([file_id.0.as_bytes()])?;
+        if unknown && self.removed_above(parent, NodeId::ROOT)?.is_some() {
+            self.prep(
+                "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NULL",
+            )?
+            .execute(params![file_id.0.as_bytes(), at])?;
+        }
+        Ok(())
+    }
+
+    /// Records file `file_id` as deleted for good: Homebase never gives a file id back.
+    pub fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
+        self.prep("INSERT OR IGNORE INTO gone_files (file_id) VALUES (?1)")?
+            .execute([file_id.0.as_bytes()])?;
+        Ok(())
+    }
+}
+
+impl Store<'_> {
+    /// The folders `fan_out` marked a node dirty in, so far.
+    pub(crate) fn take_touched(&self) -> std::collections::BTreeSet<i64> {
+        self.touched.take()
     }
 }

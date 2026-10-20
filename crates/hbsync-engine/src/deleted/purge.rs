@@ -6,7 +6,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use hbsync_remote::{Answers, Holds, Remote, RemoteError};
-use hbsync_state::{MirrorRow, RemovedRow, StateError, Store, keys};
+use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError, keys};
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
@@ -37,7 +37,7 @@ impl AccountOps<'_> {
     /// - An item holding a removal whose time isn't known yet waits for a purge that knows it.
     /// - Each node goes without a trace (a hard delete) once its own removal is [`TRACE_MS`] old,
     ///   else leaving a tombstone, which goes hard [`TRACE_MS`] after its own time.
-    /// - What is known gone longer than that is forgotten ([`Store::prune_gone`]).
+    /// - What is known gone longer than that is forgotten ([`hbsync_state::AccountTx::prune_gone`]).
     ///
     /// Each part runs whatever became of the others (the trash only once the items went); the
     /// first error is returned at the end.
@@ -53,7 +53,7 @@ impl AccountOps<'_> {
         let tombstones = self.delete_tombstones(traced);
         let pruned = self
             .db()
-            .write(|s| mirror::prune(s, traced, now_ms))
+            .write(|s| mirror::prune(s.account(), traced, now_ms))
             .map(drop)
             .map_err(EngineError::from);
         let trash = match &expired {
@@ -84,7 +84,11 @@ impl AccountOps<'_> {
                     Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
                     None => {
                         let now = hbsync_types::unix_now();
-                        s.set_folder_kv_of(folder.id, keys::TRASH_PURGED_SINCE, &now.to_string())?;
+                        s.account().set_folder_kv_of(
+                            folder.id,
+                            keys::TRASH_PURGED_SINCE,
+                            &now.to_string(),
+                        )?;
                         Ok(now)
                     }
                 }
@@ -267,7 +271,7 @@ impl AccountOps<'_> {
                 );
                 self.db().write(|s| {
                     done.into_iter()
-                        .try_for_each(|m| mirror::removed(s, m.file_id, Some(m)))
+                        .try_for_each(|m| mirror::removed(s.account(), m.file_id, Some(m)))
                 })?;
                 if stop.is_some() {
                     stopped = stop;
@@ -344,7 +348,7 @@ impl AccountOps<'_> {
                 .collect();
             came += rows.len();
             self.db()
-                .write(|s| rows.iter().try_for_each(|m| mirror::live(s, m)))?;
+                .write(|s| rows.iter().try_for_each(|m| mirror::live(s.account(), m)))?;
             if let Some(e) = stopped {
                 return Err(EngineError::Remote(e));
             }
@@ -467,7 +471,7 @@ impl AccountOps<'_> {
             self.db().write(|s| {
                 gone_now
                     .iter()
-                    .try_for_each(|(r, at)| mirror::forget(s, r.row.file_id, *at))
+                    .try_for_each(|(r, at)| mirror::forget(s.account(), r.row.file_id, *at))
             })?;
             gone += gone_now.len();
             if let Some(e) = failed {
@@ -489,7 +493,7 @@ impl AccountOps<'_> {
                 .iter()
                 .zip(answers)
                 .filter(|(_, answer)| matches!(answer, Answer::Deleted(_) | Answer::Missing))
-                .try_for_each(|(t, _)| mirror::tombstone_deleted(s, *t))
+                .try_for_each(|(t, _)| mirror::tombstone_deleted(s.account(), *t))
         })?;
         match failed {
             Some(e) => Err(EngineError::Remote(e)),
@@ -500,7 +504,7 @@ impl AccountOps<'_> {
 
 /// What emptying `chosen` (rows of Recently deleted) deletes for good, in the passes
 /// [`passes`] gives.
-fn going(s: &Store<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<Vec<RemovedRow>>, StateError> {
+fn going(s: &ReadTx<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<Vec<RemovedRow>>, StateError> {
     let picked: Vec<Chosen> = chosen.iter().map(Chosen::of).collect();
     let mut rows: HashMap<NodeId, RemovedRow> =
         chosen.into_iter().map(|r| (r.row.node, r)).collect();
@@ -516,7 +520,7 @@ fn going(s: &Store<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<Vec<RemovedRow>>,
 /// own time in Recently deleted, and so does the item. One whose time isn't known yet waits for
 /// a purge that knows it.
 fn passes_of(
-    s: &Store<'_>,
+    s: &ReadTx<'_>,
     tops: Vec<RemovedRow>,
     before: i64,
 ) -> Result<Vec<Vec<RemovedRow>>, StateError> {
@@ -541,10 +545,10 @@ struct Stuck {
 }
 
 /// The removed folders of the items removed before `before` (Unix ms, the server's) that hold
-/// a live node written no later than their removal ([`Store::removed_holding_taken`]: none,
+/// a live node written no later than their removal ([`ReadTx::removed_holding_taken`]: none,
 /// mostly, at the cost of one query), and the live nodes below them, directly or through live
 /// folders written by then too (one written after takes nothing in it along).
-fn stuck_below(s: &Store<'_>, before: i64) -> Result<Stuck, StateError> {
+fn stuck_below(s: &ReadTx<'_>, before: i64) -> Result<Stuck, StateError> {
     let mut stuck = Stuck::default();
     let mut rows = RemovedRows::new(s, Vec::new());
     let mut known = HashMap::new();

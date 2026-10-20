@@ -127,7 +127,7 @@ pub struct MirrorRow {
     /// When this version was written, the server's time (Unix ms, the feed's header): whether
     /// the node went with a removed folder it is in depends on it (node schema, Recently
     /// deleted). This device's own write has it from the write's answer; `None` where neither
-    /// an answer nor the feed gave it ([`Store::refresh_time`]); a removed node's is its
+    /// an answer nor the feed gave it ([`AccountTx::refresh_time`]); a removed node's is its
     /// removal time.
     pub changed_at: Option<i64>,
 }
@@ -143,8 +143,8 @@ pub struct RemovedRow {
 }
 
 /// A row of Recently deleted as this device recorded it: with its place in this device's order
-/// of recording removals (the account's counter when [`Store::put_removed`] first recorded that
-/// version; [`Store::removed_seq`]). What a listing saw is what has a `seq` up to the counter it
+/// of recording removals (the account's counter when [`AccountTx::put_removed`] first recorded that
+/// version; [`ReadTx::removed_seq`]). What a listing saw is what has a `seq` up to the counter it
 /// read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorded {
@@ -168,7 +168,7 @@ pub struct MirrorFile {
     pub executable: bool,
 }
 
-/// Where a sweep over the dirty set stopped (see [`Store::dirty_page`]).
+/// Where a sweep over the dirty set stopped (see [`ReadTx::dirty_page`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyCursor(i64);
 
@@ -300,26 +300,28 @@ impl MirrorRow {
 
 /// The tables, seen through one open transaction, for one folder: the account's tables (the
 /// mirror, Recently deleted, the account's kv) are shared, the others hold this folder's rows.
+/// It only reads: [`crate::StateDb::read`] and [`crate::Reader`] hand one out, and a write
+/// transaction ([`Store`]) reads through one.
 #[derive(Debug)]
-pub struct Store<'a> {
+pub struct ReadTx<'a> {
     conn: &'a Connection,
     /// `folders.id`, which `$F` in the SQL stands for.
     folder: i64,
-    /// [`Store::folders`], read once per transaction (a change through this store forgets it).
+    /// [`ReadTx::folders`], read once per transaction (a change through this store forgets it).
     folders: std::cell::RefCell<Option<std::rc::Rc<[FolderRow]>>>,
     /// How this folder sees the drive, once known.
     coords: std::cell::Cell<Option<Coords>>,
-    /// [`Store::fan_out`]: the folder whose part of the drive a drive node is in, for the
+    /// `fan_out`: the folder whose part of the drive a drive node is in, for the
     /// nodes walked through in this transaction (not those whose place isn't known).
     places: std::cell::RefCell<HashMap<NodeId, Place>>,
-    /// The folders [`Store::fan_out`] marked a node dirty in.
+    /// The folders `fan_out` marked a node dirty in.
     touched: std::cell::RefCell<std::collections::BTreeSet<i64>>,
     /// The ids of local folders by path, and their paths by id, found in this transaction
-    /// ([`Store::local_id_at`], [`Store::folder_path`]); any local write but
-    /// [`Store::put_local`] forgets them.
+    /// ([`ReadTx::local_id_at`], [`ReadTx::folder_path`]); any local write but
+    /// [`FolderTx::put_local`] forgets them.
     local_ids: std::cell::RefCell<HashMap<String, i64>>,
     local_paths: std::cell::RefCell<HashMap<i64, RelPath>>,
-    /// [`Store::prep`]: each SQL text with this store's folder put in.
+    /// [`ReadTx::prep`]: each SQL text with this store's folder put in.
     sqls: std::cell::RefCell<HashMap<Box<str>, Box<str>>>,
     /// The last [`Recorded::seq`] given in this transaction, once read; written back when it
     /// commits ([`Store::finish`]) if one was given.
@@ -351,7 +353,7 @@ const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, 
      l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name, l.tags";
 /// Columns in [`LOCAL_COLS`].
 const LOCAL_COL_COUNT: usize = 14;
-/// Where a drive node is, for [`Store::fan_out`].
+/// Where a drive node is, for `fan_out`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Place {
     /// In this folder's part of the drive.
@@ -374,9 +376,76 @@ const GONE_LOCALLY: &str = "b.kind = 0 AND b.content_state != 2 \
     AND NOT EXISTS (SELECT 1 FROM local l WHERE l.folder = $F AND l.id = d.id)";
 const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)";
 
+/// A write transaction ([`crate::StateDb::write`]): it reads as a [`ReadTx`], and writes through
+/// the view of the tables' owner: [`Store::folder`] for this folder's tables (base, local,
+/// dirty, the write-ahead records, its settings and what it synced), [`Store::account`] for the
+/// account's (the drive's picture, its settings, its folders and the nodes they share).
+#[derive(Debug)]
+pub struct Store<'a> {
+    tx: ReadTx<'a>,
+}
+
 impl<'a> Store<'a> {
     pub(crate) fn new(conn: &'a Connection, folder: i64) -> Self {
         Store {
+            tx: ReadTx::new(conn, folder),
+        }
+    }
+
+    /// Writes to this folder's tables.
+    pub fn folder(&self) -> FolderTx<'_> {
+        FolderTx(&self.tx)
+    }
+
+    /// Writes to the account's tables.
+    pub fn account(&self) -> AccountTx<'_> {
+        AccountTx(&self.tx)
+    }
+}
+
+impl<'a> std::ops::Deref for Store<'a> {
+    type Target = ReadTx<'a>;
+
+    fn deref(&self) -> &ReadTx<'a> {
+        &self.tx
+    }
+}
+
+/// A write transaction's view of this folder's tables ([`Store::folder`]): it reads as a
+/// [`ReadTx`] and writes base, local, dirty, the write-ahead records (parked, forks, placing),
+/// the folder's settings and what it synced (giving a node its integer id where it has none).
+/// On the account's handle (no folder) its writes fail.
+#[derive(Debug, Clone, Copy)]
+pub struct FolderTx<'a>(&'a ReadTx<'a>);
+
+/// A write transaction's view of the account's tables ([`Store::account`]): it reads as a
+/// [`ReadTx`] and writes the drive's picture (the mirror, Recently deleted, the files deleted for
+/// good and their tombstones), the account's settings, its folders and the nodes they share. A
+/// change of the picture marks its node dirty in every folder it concerns (`fan_out`), and the
+/// purge sets any folder's settings; rows are written in the handle's coordinates (a role
+/// folder's top is its root).
+#[derive(Debug, Clone, Copy)]
+pub struct AccountTx<'a>(&'a ReadTx<'a>);
+
+impl<'a> std::ops::Deref for FolderTx<'a> {
+    type Target = ReadTx<'a>;
+
+    fn deref(&self) -> &ReadTx<'a> {
+        self.0
+    }
+}
+
+impl<'a> std::ops::Deref for AccountTx<'a> {
+    type Target = ReadTx<'a>;
+
+    fn deref(&self) -> &ReadTx<'a> {
+        self.0
+    }
+}
+
+impl<'a> ReadTx<'a> {
+    pub(crate) fn new(conn: &'a Connection, folder: i64) -> Self {
+        ReadTx {
             conn,
             folder,
             folders: Default::default(),

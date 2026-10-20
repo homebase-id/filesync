@@ -100,9 +100,9 @@ fn announced_changes_are_taken_without_reading_what_is_known() -> R {
     let gone_at = remote.update(&made, &removed(&docs), None)?;
     db.write(|s| {
         let mut row = s.mirror_by_file(made.at.file_id)?.expect("in the mirror");
-        s.delete_mirror(made.at.file_id)?;
+        s.account().delete_mirror(made.at.file_id)?;
         row.version = gone_at.at.version;
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&RemovedRow {
             row,
             removed_at: None,
         })
@@ -426,7 +426,7 @@ fn a_row_fetched_before_a_hard_delete_is_refused_after_it() -> R {
     remote.server().hard_delete(v1.at.file_id, v1.at.version)?;
     drive.announced(&[ChangeRef::of(&fetched).tombstone()])?;
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
-    db.write(|s| hbsync_engine::mirror::apply(s, &fetched).map(drop))?;
+    db.write(|s| hbsync_engine::mirror::apply(s.account(), &fetched).map(drop))?;
     assert!(db.read(|s| s.mirror_by_file(v1.at.file_id))?.is_none());
     Ok(())
 }
@@ -537,7 +537,7 @@ fn a_pull_that_fails_partway_wakes_what_it_took() -> R {
         whole: std::sync::atomic::AtomicUsize::new(0),
     });
     let mut account = StateDb::open_account(&dir.path().join("state.db"))?;
-    let main = account.write(|s| s.add_folder(NodeId::ROOT, "/h/Homebase", "m1"))?;
+    let main = account.write(|s| s.account().add_folder(NodeId::ROOT, "/h/Homebase", "m1"))?;
     drop(account);
     let drive = Drive::new(
         StateDb::open_account(&dir.path().join("state.db"))?,
@@ -768,8 +768,8 @@ fn a_change_wakes_the_folders_it_concerns() -> R {
     let docs_top = Role::Documents.node();
     let (main_id, docs_id) = StateDb::open_account(&dir.path().join("state.db"))?.write(|s| {
         Ok((
-            s.add_folder(NodeId::ROOT, "/h/Homebase", "m1")?,
-            s.add_folder(docs_top, "/h/Documents", "m2")?,
+            s.account().add_folder(NodeId::ROOT, "/h/Homebase", "m1")?,
+            s.account().add_folder(docs_top, "/h/Documents", "m2")?,
         ))
     })?;
     let (main, docs) = (drive.subscribe(main_id), drive.subscribe(docs_id));
@@ -805,8 +805,10 @@ fn the_purge_empties_every_folders_trash() -> R {
     let (a, b) = (dir.path().join("a"), dir.path().join("b"));
     let mut account = StateDb::open_account(&dir.path().join("state.db"))?;
     account.write(|s| {
-        s.add_folder(NodeId::ROOT, &a.to_string_lossy(), "ma")?;
-        s.add_folder(NodeId::new(), &b.to_string_lossy(), "mb")
+        s.account()
+            .add_folder(NodeId::ROOT, &a.to_string_lossy(), "ma")?;
+        s.account()
+            .add_folder(NodeId::new(), &b.to_string_lossy(), "mb")
     })?;
     // The first purge starts the clock: what was in the trash before stays.
     drive.purge(0)?;
@@ -846,7 +848,7 @@ fn a_new_login_forgets_the_tokens() -> R {
     assert_eq!(token()?, None);
     let header = remote.header(made.at.file_id)?;
     let mut db2 = StateDb::open_account(&dir.path().join("state.db"))?;
-    db2.write(|s| hbsync_engine::mirror::apply(s, &header).map(drop))?;
+    db2.write(|s| hbsync_engine::mirror::apply(s.account(), &header).map(drop))?;
     assert!(token()?.is_some());
     assert!(!drive.tokens_sealed_by("one")?, "the same login");
     assert!(token()?.is_some());

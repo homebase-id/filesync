@@ -2,11 +2,11 @@
 //! folder's (`folder_kv`, gone with the folder). A key says whose it is, so it can only be
 //! read and written where it belongs.
 
-/// A setting of the account ([`crate::Store::account_kv`]).
+/// A setting of the account ([`crate::ReadTx::account_kv`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccountKey(pub(crate) &'static str);
 
-/// A setting of a folder ([`crate::Store::get_kv`]).
+/// A setting of a folder ([`crate::ReadTx::get_kv`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FolderKey(pub(crate) &'static str);
 
@@ -17,7 +17,7 @@ pub const REMOTE_CURSOR: AccountKey = AccountKey("remote.cursor");
 /// Until when the feed was read to its end, at the latest (Unix ms, the server's clock; kept
 /// a day at a time): with the cursor's time, how long this device was away.
 pub const READ_AT: AccountKey = AccountKey("remote.read_at");
-/// The whole feed is being read again ([`crate::Store::start_reread`]).
+/// The whole feed is being read again ([`crate::AccountTx::start_reread`]).
 pub(crate) const REREADING: AccountKey = AccountKey("remote.rereading");
 /// When Recently deleted was last purged (Unix s).
 pub const PURGED_AT: AccountKey = AccountKey("deleted.purged_at");

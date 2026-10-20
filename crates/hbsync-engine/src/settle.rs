@@ -4,7 +4,7 @@
 use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::NameIssue;
 use hbsync_platform::{Os, RelPath, tags};
-use hbsync_state::{BaseRow, MirrorRow, Placing, PlannedBase, StateError, Store};
+use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, StateError};
 use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags};
 
 use crate::folder::FolderCtx;
@@ -74,7 +74,7 @@ impl<'a> Settle<'a> {
 /// recovery can't know that), so they settle the same record the same way; one kept from before
 /// records said which is settled against the base as it is.
 pub(crate) fn settle_placement(
-    s: &Store<'_>,
+    s: FolderTx<'_>,
     record: &Placing,
     folder: &FolderCtx,
 ) -> Result<Placed, StateError> {
@@ -85,8 +85,8 @@ pub(crate) fn settle_placement(
     // Against a base that moved meanwhile, the item read as an edit, which won over the delete
     // and brought the node back. Only an item that reads as the node (its name one the drive
     // takes): the record stays otherwise.
-    let gone = view::gone_on_drive(s, node, &folder.scope)?;
-    if gone && !view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some()) {
+    let gone = view::gone_on_drive(&s, node, &folder.scope)?;
+    if gone && !view::local_node(&s, node, os, None)?.is_some_and(|l| l.state.is_some()) {
         return Ok(Placed::Kept);
     }
     let planned = if gone {
@@ -138,7 +138,7 @@ impl Placed {
 }
 
 /// Marks what is in folder `node` on the drive dirty.
-pub(crate) fn mark_children(s: &Store<'_>, node: NodeId) -> Result<(), StateError> {
+pub(crate) fn mark_children(s: FolderTx<'_>, node: NodeId) -> Result<(), StateError> {
     s.mirror_children(node)?
         .iter()
         .try_for_each(|child| s.mark_dirty(child.node))
@@ -162,7 +162,7 @@ pub(crate) fn mark_children(s: &Store<'_>, node: NodeId) -> Result<(), StateErro
 /// stays dirty, for the next plan to decide (an operation may come for a node that wasn't
 /// dirty). Returns the version it put the base at, if it did.
 pub(crate) fn settle(
-    s: &Store<'_>,
+    s: FolderTx<'_>,
     how: Settle<'_>,
     os: Os,
 ) -> Result<Option<RemoteRef>, StateError> {
@@ -195,7 +195,7 @@ pub(crate) fn settle(
         Some(d) => Some(d.state.tags.clone()),
         None => mirror.as_ref().map(|m| m.tags()),
     };
-    let Some(local) = view::local_node(s, node, os, reference.as_ref())? else {
+    let Some(local) = view::local_node(&s, node, os, reference.as_ref())? else {
         match mirror {
             None => {
                 s.delete_base(node)?;
@@ -347,8 +347,7 @@ mod tests {
     use super::*;
     use hbsync_fileio::HashAlgorithm;
     use hbsync_platform::{FileId, Fingerprint};
-    use hbsync_state::MirrorFile;
-    use hbsync_state::{LocalRow, StateDb};
+    use hbsync_state::{LocalRow, MirrorFile, StateDb, Store};
     use hbsync_types::{FileContent, RemoteFileId, RemoteRef, Uuid, VersionTag};
 
     fn content(data: &str) -> FileContent {
@@ -378,7 +377,7 @@ mod tests {
         mirror: Option<(FileContent, RemoteRef)>,
     ) -> Result<(), StateError> {
         if let Some((c, at)) = mirror {
-            s.put_mirror(&MirrorRow {
+            s.account().put_mirror(&MirrorRow {
                 file_id: at.file_id,
                 version: at.version,
                 node,
@@ -396,7 +395,7 @@ mod tests {
                 changed_at: None,
             })?;
         }
-        s.put_local(&LocalRow {
+        s.folder().put_local(&LocalRow {
             path: RelPath::new("f").expect("a path"),
             node,
             kind: NodeKind::File,
@@ -430,7 +429,7 @@ mod tests {
                 same_bytes: true,
                 ..Settle::placed(node, Some(&acted), TagWrite::Nothing)
             };
-            settle(s, how, Os::Linux)?;
+            settle(s.folder(), how, Os::Linux)?;
             s.get_base(node)
         })
     }
@@ -468,7 +467,7 @@ mod tests {
     /// The local item of `node` holds `tags`, as the scan read them.
     fn holds(s: &Store<'_>, node: NodeId, tags: Tags) -> Result<(), StateError> {
         let row = s.local_by_node(node)?.expect("a local row");
-        s.put_local(&LocalRow {
+        s.folder().put_local(&LocalRow {
             tags: Some(tags),
             ..row
         })
@@ -493,7 +492,7 @@ mod tests {
                 local_hash: Some(c.hash),
                 ..BaseRow::new(node, file.clone(), newer)
             };
-            s.put_base(&base)?;
+            s.folder().put_base(&base)?;
             let acted = DriveVersion {
                 state: NodeState {
                     tags: tags(&["Work"]),
@@ -512,7 +511,7 @@ mod tests {
                 ours: Some(newer),
                 ..Settle::acted(node, Some(&acted), wrote)
             };
-            assert_eq!(settle(s, how, Os::Linux)?, None);
+            assert_eq!(settle(s.folder(), how, Os::Linux)?, None);
             let want = BaseRow {
                 state: NodeState {
                     tags: tags(&["Work"]),
@@ -551,7 +550,7 @@ mod tests {
                     other,
                 )
             };
-            s.put_base(&base)?;
+            s.folder().put_base(&base)?;
             // What the item and the drive agree on: here, these bytes.
             let acted = DriveVersion {
                 state: NodeState {
@@ -573,7 +572,7 @@ mod tests {
                     },
                 )
             };
-            assert_eq!(settle(s, how, Os::Linux)?, None);
+            assert_eq!(settle(s.folder(), how, Os::Linux)?, None);
             let want = BaseRow {
                 state: NodeState {
                     tags: tags(&["Work"]),
@@ -600,7 +599,7 @@ mod tests {
             rows(s, node, c, Some((c, at)))?;
             holds(s, node, Tags::default())?;
             let file = NodeState::file(NodeId::ROOT, "f", c);
-            s.put_base(&BaseRow {
+            s.folder().put_base(&BaseRow {
                 local_hash: Some(c.hash),
                 ..BaseRow::new(node, file.clone(), at)
             })?;
@@ -621,7 +620,7 @@ mod tests {
                 same_bytes: true,
                 ..Settle::placed(node, Some(&acted), wrote)
             };
-            settle(s, how, Os::Linux)?;
+            settle(s.folder(), how, Os::Linux)?;
             let base = s.get_base(node)?.map(|b| b.state.tags);
             assert_eq!(base, Some(tags(&["a,b"])));
             Ok(())

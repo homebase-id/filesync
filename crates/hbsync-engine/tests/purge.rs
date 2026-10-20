@@ -540,7 +540,7 @@ fn known_rows_before_a_new_one_are_read_slim() -> common::Res<()> {
         }
     }
     let new = seed(&server, "new.txt")?;
-    db.borrow_mut().write(|s| s.start_reread())?;
+    db.borrow_mut().write(|s| s.account().start_reread())?;
     let (whole_before, headers_before) = {
         let faults = remote.faults();
         (faults.full_pages, faults.headers)
@@ -639,7 +639,7 @@ fn a_reread_asks_again_what_the_server_couldnt_tell_about() -> common::Res<()> {
     let y = seed(&server, "y.txt")?;
     let remote = FakeRemote::new(server.clone());
     let db = pulled(&remote)?;
-    db.borrow_mut().write(|s| s.start_reread())?;
+    db.borrow_mut().write(|s| s.account().start_reread())?;
     server.lock().map_err(|_| "poisoned")?.unlist(y);
     // The page reads; y's header doesn't.
     remote.faults().script = [false, true].into();
@@ -680,7 +680,7 @@ fn a_reread_taken_up_after_long_starts_over() -> common::Res<()> {
     seed(&server, "z.txt")?;
     let remote = FakeRemote::new(server.clone());
     let db = pulled(&remote)?;
-    db.borrow_mut().write(|s| s.start_reread())?;
+    db.borrow_mut().write(|s| s.account().start_reread())?;
     // The first page (x) reads, the next doesn't.
     remote.faults().script = [false, true, true, true, true].into();
     let mut reread = None;
@@ -1205,7 +1205,7 @@ fn a_page_read_before_a_soft_delete_doesnt_bring_it_back() -> common::Res<()> {
         "a tombstone"
     );
     let mut account = account.lock().map_err(|_| "poisoned")?;
-    account.write(|s| hbsync_engine::mirror::apply(s, &before).map(drop))?;
+    account.write(|s| hbsync_engine::mirror::apply(s.account(), &before).map(drop))?;
     assert!(account.read(|s| s.list_removed(10))?.is_empty(), "not back");
     Ok(())
 }
@@ -1239,7 +1239,8 @@ fn the_trash_waits_for_the_items() -> common::Res<()> {
     let folder = dir.path().join("a");
     let account = Arc::new(Mutex::new(StateDb::open_in_memory()?));
     account.lock().map_err(|_| "poisoned")?.write(|s| {
-        s.add_folder(NodeId::new(), &folder.to_string_lossy(), "ma")
+        s.account()
+            .add_folder(NodeId::new(), &folder.to_string_lossy(), "ma")
             .map(drop)
     })?;
     let mut remote = Watched::new(&server, &account, Duration::ZERO);

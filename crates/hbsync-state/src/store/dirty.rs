@@ -2,49 +2,13 @@
 
 use super::*;
 
-impl Store<'_> {
+impl ReadTx<'_> {
     // ---- dirty set ----
-
-    pub fn mark_dirty(&self, node: NodeId) -> Result<()> {
-        self.mark_dirty_in(self.folder, self.key_or_insert(node)?)
-    }
 
     /// Marks the node with integer id `id` dirty in folder `folder`.
     pub(super) fn mark_dirty_in(&self, folder: i64, id: i64) -> Result<()> {
         self.prep("INSERT OR IGNORE INTO dirty (folder, id) VALUES (?1, ?2)")?
             .execute([folder, id])?;
-        Ok(())
-    }
-
-    /// Marks every node with a base or a remote row dirty: all of them are planned again.
-    /// Marks every node of this folder dirty: its base rows, and the mirror's nodes in its part
-    /// of the drive (below its top; the whole drive for the main folder).
-    pub fn mark_synced_dirty(&self) -> Result<()> {
-        let top = self.coords()?.top;
-        self.prep(
-            "INSERT OR IGNORE INTO dirty (folder, id) SELECT $F, id FROM base WHERE folder = $F",
-        )?
-        .execute([])?;
-        if top.is_root() {
-            self.prep("INSERT OR IGNORE INTO dirty (folder, id) SELECT $F, id FROM remote")?
-                .execute([])?;
-        } else {
-            self.prep(&format!(
-                "WITH RECURSIVE sub(id) AS (SELECT id FROM nodes WHERE uuid = ?1 \
-                 UNION SELECT r.id FROM remote r JOIN sub ON r.parent = sub.id) \
-                 INSERT OR IGNORE INTO dirty (folder, id) \
-                 SELECT $F, id FROM sub WHERE id != {ID_OF}"
-            ))?
-            .execute([top.0.as_bytes()])?;
-        }
-        Ok(())
-    }
-
-    pub fn clear_dirty(&self, node: NodeId) -> Result<()> {
-        self.change(
-            &format!("DELETE FROM dirty WHERE folder = $F AND id = {ID_OF}"),
-            node.0.as_bytes(),
-        )?;
         Ok(())
     }
 
@@ -164,5 +128,42 @@ impl Store<'_> {
 
     pub fn dirty_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM dirty WHERE folder = $F")
+    }
+}
+
+impl FolderTx<'_> {
+    pub fn mark_dirty(&self, node: NodeId) -> Result<()> {
+        self.mark_dirty_in(self.folder, self.key_or_insert(node)?)
+    }
+
+    /// Marks every node of this folder dirty: its base rows, and the mirror's nodes in its part
+    /// of the drive (below its top; the whole drive for the main folder).
+    pub fn mark_synced_dirty(&self) -> Result<()> {
+        let top = self.coords()?.top;
+        self.prep(
+            "INSERT OR IGNORE INTO dirty (folder, id) SELECT $F, id FROM base WHERE folder = $F",
+        )?
+        .execute([])?;
+        if top.is_root() {
+            self.prep("INSERT OR IGNORE INTO dirty (folder, id) SELECT $F, id FROM remote")?
+                .execute([])?;
+        } else {
+            self.prep(&format!(
+                "WITH RECURSIVE sub(id) AS (SELECT id FROM nodes WHERE uuid = ?1 \
+                 UNION SELECT r.id FROM remote r JOIN sub ON r.parent = sub.id) \
+                 INSERT OR IGNORE INTO dirty (folder, id) \
+                 SELECT $F, id FROM sub WHERE id != {ID_OF}"
+            ))?
+            .execute([top.0.as_bytes()])?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_dirty(&self, node: NodeId) -> Result<()> {
+        self.change(
+            &format!("DELETE FROM dirty WHERE folder = $F AND id = {ID_OF}"),
+            node.0.as_bytes(),
+        )?;
+        Ok(())
     }
 }

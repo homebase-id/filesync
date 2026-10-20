@@ -69,8 +69,8 @@ fn base_round_trip() -> R {
     file.local_name = Some("a\u{F022}.txt".into());
     file.local_hash = Some(content(b"local").hash);
     db.write(|s| {
-        s.put_base(&folder)?;
-        s.put_base(&file)
+        s.folder().put_base(&folder)?;
+        s.folder().put_base(&file)
     })?;
     db.read(|s| {
         assert_eq!(s.get_base(folder.node)?, Some(folder.clone()));
@@ -84,7 +84,7 @@ fn base_round_trip() -> R {
         assert_eq!((s.base_count()?, s.base_file_count()?), (2, 1));
         Ok(())
     })?;
-    db.write(|s| s.delete_base(file.node))?;
+    db.write(|s| s.folder().delete_base(file.node))?;
     db.read(|s| s.get_base(file.node))?
         .map_or(Ok(()), |_| panic!("deleted"))
 }
@@ -109,7 +109,7 @@ fn local_rows_and_walk_order() -> R {
         local("a/b/c", NodeKind::File, 6),
         local("a\u{1}x", NodeKind::File, 7),
     ];
-    db.write(|s| rows.iter().try_for_each(|r| s.put_local(r)))?;
+    db.write(|s| rows.iter().try_for_each(|r| s.folder().put_local(r)))?;
 
     db.read(|s| {
         let all: Vec<String> = s
@@ -146,19 +146,19 @@ fn local_rows_and_walk_order() -> R {
 fn local_node_can_only_be_in_one_place() -> R {
     let mut db = StateDb::open_in_memory()?;
     let row = local("x", NodeKind::File, 1);
-    db.write(|s| s.put_local(&row))?;
+    db.write(|s| s.folder().put_local(&row))?;
     let moved = LocalRow {
         path: path("y"),
         ..row.clone()
     };
     let err = db
-        .write(|s| s.put_local(&moved))
+        .write(|s| s.folder().put_local(&moved))
         .expect_err("node already at x");
     assert!(matches!(err, StateError::Conflict(_)));
     // Moving is delete + put in one transaction (or move_local_subtree).
     db.write(|s| {
-        s.delete_local(row.node)?;
-        s.put_local(&moved)
+        s.folder().delete_local(row.node)?;
+        s.folder().put_local(&moved)
     })?;
     assert_eq!(
         db.read(|s| s.local_by_node(row.node))?.map(|r| r.path),
@@ -172,8 +172,8 @@ fn failed_write_rolls_back() -> R {
     let mut db = StateDb::open_in_memory()?;
     let node = NodeId::new();
     let result: Result<(), StateError> = db.write(|s| {
-        s.mark_dirty(node)?;
-        s.set_kv(keys::JOURNAL_CURSOR, "abc")?;
+        s.folder().mark_dirty(node)?;
+        s.folder().set_kv(keys::JOURNAL_CURSOR, "abc")?;
         Err(StateError::Conflict("abort".into()))
     });
     assert!(result.is_err());
@@ -189,18 +189,18 @@ fn dirty_and_kv() -> R {
     let mut db = StateDb::open_in_memory()?;
     let (a, b) = (NodeId::new(), NodeId::new());
     db.write(|s| {
-        s.mark_dirty(a)?;
-        s.mark_dirty(a)?;
-        s.mark_dirty(b)?;
-        s.set_kv(keys::FILTER, "v1")?;
-        s.set_kv(keys::FILTER, "v2")
+        s.folder().mark_dirty(a)?;
+        s.folder().mark_dirty(a)?;
+        s.folder().mark_dirty(b)?;
+        s.folder().set_kv(keys::FILTER, "v1")?;
+        s.folder().set_kv(keys::FILTER, "v2")
     })?;
     db.read(|s| {
         assert_eq!(s.dirty_count()?, 2);
         assert_eq!(s.get_kv(keys::FILTER)?.as_deref(), Some("v2"));
         Ok(())
     })?;
-    db.write(|s| s.clear_dirty(a))?;
+    db.write(|s| s.folder().clear_dirty(a))?;
     assert_eq!(db.read(|s| s.dirty_nodes(10))?, vec![b]);
     Ok(())
 }
@@ -209,7 +209,7 @@ fn dirty_and_kv() -> R {
 fn dirty_pages_visit_every_node_once() -> R {
     let mut db = StateDb::open_in_memory()?;
     let nodes: Vec<NodeId> = (0..23).map(|_| NodeId::new()).collect();
-    db.write(|s| nodes.iter().try_for_each(|n| s.mark_dirty(*n)))?;
+    db.write(|s| nodes.iter().try_for_each(|n| s.folder().mark_dirty(*n)))?;
     let mut seen: Vec<NodeId> = Vec::new();
     let mut after = None;
     loop {
@@ -225,8 +225,8 @@ fn dirty_pages_visit_every_node_once() -> R {
     // A cursor whose node went clean, and was forgotten entirely, still works.
     let (_, at_10) = db.read(|s| s.dirty_page(None, 11))?;
     db.write(|s| {
-        s.clear_dirty(nodes[10])?;
-        s.collect_nodes()
+        s.folder().clear_dirty(nodes[10])?;
+        s.account().collect_nodes()
     })?;
     assert_eq!(db.read(|s| s.dirty_page(at_10, 2))?.0, nodes[11..13]);
     Ok(())
@@ -239,7 +239,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     let folder = base(NodeState::folder(NodeId::ROOT, "Kept"));
     {
         let mut db = StateDb::open(&db_path)?;
-        db.write(|s| s.put_base(&folder))?;
+        db.write(|s| s.folder().put_base(&folder))?;
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
@@ -277,8 +277,8 @@ fn a_placement_record_keeps_the_base_its_plan_saw() -> R {
     );
     let mut db = StateDb::open(&db_path)?;
     db.write(|s| {
-        s.put_placing(&absent)?;
-        s.put_placing(&at)
+        s.folder().put_placing(&absent)?;
+        s.folder().put_placing(&at)
     })?;
     let mut read = db.read(|s| s.all_placing())?;
     read.sort_by_key(|p| p.base.node);
@@ -345,16 +345,19 @@ mod mirror {
         let (upper, lower, other) = (NodeId::new(), NodeId::new(), NodeId::new());
         let mut escaped = local("Docs/a\u{F022}b", NodeKind::File, 7);
         db.write(|s| {
-            s.put_base(&docs)?;
-            s.put_local(&local("Docs", NodeKind::Folder, 1))?;
-            s.put_base(&BaseRow {
+            s.folder().put_base(&docs)?;
+            s.folder().put_local(&local("Docs", NodeKind::Folder, 1))?;
+            s.folder().put_base(&BaseRow {
                 node: upper,
                 ..base(NodeState::file(docs.node, "Report.TXT", content(b"r")))
             })?;
-            s.put_mirror(&row(lower, docs.node, "report.txt", None))?;
-            s.put_mirror(&row(other, docs.node, "other.txt", None))?;
-            s.put_local(&local("Docs/REPORT.txt", NodeKind::File, 5))?;
-            s.put_local(&escaped)
+            s.account()
+                .put_mirror(&row(lower, docs.node, "report.txt", None))?;
+            s.account()
+                .put_mirror(&row(other, docs.node, "other.txt", None))?;
+            s.folder()
+                .put_local(&local("Docs/REPORT.txt", NodeKind::File, 5))?;
+            s.folder().put_local(&escaped)
         })?;
         db.read(|s| {
             let key = named("report.txt");
@@ -381,7 +384,10 @@ mod mirror {
             Ok(())
         })?;
         // Renamed: found by the new name only.
-        db.write(|s| s.move_local_subtree(&escaped.path, &path("Docs/c.txt")))?;
+        db.write(|s| {
+            s.folder()
+                .move_local_subtree(&escaped.path, &path("Docs/c.txt"))
+        })?;
         escaped.path = path("Docs/c.txt");
         db.read(|s| {
             assert!(s.local_named(&path("Docs"), named("a:b"))?.is_empty());
@@ -422,10 +428,10 @@ mod mirror {
             row(NodeId::new(), NodeId::ROOT, "b", None),
         );
         db.write(|s| {
-            s.put_mirror(&shown)?;
-            s.put_mirror(&unshown)?;
-            s.set_account_kv(keys::REMOTE_CURSOR, "c")?;
-            s.start_reread()
+            s.account().put_mirror(&shown)?;
+            s.account().put_mirror(&unshown)?;
+            s.account().set_account_kv(keys::REMOTE_CURSOR, "c")?;
+            s.account().start_reread()
         })?;
         assert!(db.read(|s| s.rereading())?);
         assert_eq!(db.read(|s| s.account_kv(keys::REMOTE_CURSOR))?, None);
@@ -434,16 +440,16 @@ mod mirror {
         let mut both = vec![shown.file_id, unshown.file_id];
         both.sort_by_key(|f| f.0);
         assert_eq!(files, both);
-        db.write(|s| s.end_reread())?;
+        db.write(|s| s.account().end_reread())?;
         assert!(!db.read(|s| s.rereading())?);
 
         let (old, young) = (shown.remote_ref(), unshown.remote_ref());
         db.write(|s| {
-            s.put_tombstone(old, 10)?;
-            s.put_tombstone(young, 20)
+            s.account().put_tombstone(old, 10)?;
+            s.account().put_tombstone(young, 20)
         })?;
         assert_eq!(db.read(|s| s.tombstones_before(15))?, [old]);
-        db.write(|s| s.delete_tombstone_at(old).map(drop))?;
+        db.write(|s| s.account().delete_tombstone_at(old).map(drop))?;
         assert!(db.read(|s| s.tombstones_before(15))?.is_empty());
         assert!(db.read(|s| s.file_gone(old.file_id))?, "still gone");
         // Announced deleted hard elsewhere: only at the version held.
@@ -451,23 +457,27 @@ mod mirror {
             file_id: RemoteFileId(Uuid::now_v7()),
             version: VersionTag(Uuid::now_v7()),
         };
-        db.write(|s| s.put_tombstone(other, 12))?;
+        db.write(|s| s.account().put_tombstone(other, 12))?;
         let newer = RemoteRef {
             version: VersionTag(Uuid::now_v7()),
             ..other
         };
-        assert!(!db.write(|s| s.delete_tombstone_at(newer))?);
-        assert!(db.write(|s| s.delete_tombstone_at(other))?);
+        assert!(!db.write(|s| s.account().delete_tombstone_at(newer))?);
+        assert!(db.write(|s| s.account().delete_tombstone_at(other))?);
         assert!(db.read(|s| s.tombstones_before(15))?.is_empty());
 
         // Known gone from the next prune on, forgotten once that is older than the cut-off; a
         // tombstone still on the drive stays, however old.
         let announced = RemoteFileId(Uuid::now_v7());
-        db.write(|s| s.mark_file_gone(announced))?;
-        assert_eq!(db.write(|s| s.prune_gone(0, 100))?, 0);
-        assert_eq!(db.write(|s| s.prune_gone(100, 200))?, 0, "not before 100");
+        db.write(|s| s.account().mark_file_gone(announced))?;
+        assert_eq!(db.write(|s| s.account().prune_gone(0, 100))?, 0);
         assert_eq!(
-            db.write(|s| s.prune_gone(101, 200))?,
+            db.write(|s| s.account().prune_gone(100, 200))?,
+            0,
+            "not before 100"
+        );
+        assert_eq!(
+            db.write(|s| s.account().prune_gone(101, 200))?,
             3,
             "old, other and announced"
         );
@@ -481,12 +491,16 @@ mod mirror {
         // cut-off; one known gone already stays as it was.
         let (own, known) = (RemoteFileId(Uuid::now_v7()), young.file_id);
         db.write(|s| {
-            s.mark_file_gone_at(own, 300)?;
-            s.mark_file_gone_at(known, 300)
+            s.account().mark_file_gone_at(own, 300)?;
+            s.account().mark_file_gone_at(known, 300)
         })?;
         assert!(db.read(|s| s.file_gone(own))?);
-        assert_eq!(db.write(|s| s.prune_gone(300, 1000))?, 0, "not before 300");
-        assert_eq!(db.write(|s| s.prune_gone(301, 1000))?, 1, "own");
+        assert_eq!(
+            db.write(|s| s.account().prune_gone(300, 1000))?,
+            0,
+            "not before 300"
+        );
+        assert_eq!(db.write(|s| s.account().prune_gone(301, 1000))?, 1, "own");
         assert!(!db.read(|s| s.file_gone(own))?);
         assert_eq!(db.read(|s| s.tombstones_before(15))?.len(), 0);
         assert!(
@@ -494,9 +508,13 @@ mod mirror {
             "the feed's tombstone stays"
         );
         // Its tombstone deleted hard: the id kept from then on, whatever its time before.
-        db.write(|s| s.delete_tombstone_at(young).map(drop))?;
-        assert_eq!(db.write(|s| s.prune_gone(301, 1000))?, 0, "kept from 1000");
-        assert_eq!(db.write(|s| s.prune_gone(1001, 2000))?, 1);
+        db.write(|s| s.account().delete_tombstone_at(young).map(drop))?;
+        assert_eq!(
+            db.write(|s| s.account().prune_gone(301, 1000))?,
+            0,
+            "kept from 1000"
+        );
+        assert_eq!(db.write(|s| s.account().prune_gone(1001, 2000))?, 1);
         Ok(())
     }
 
@@ -508,14 +526,14 @@ mod mirror {
         let known = row(NodeId::new(), NodeId::ROOT, "d", None);
         let node = known.node;
         db.write(|s| {
-            s.put_mirror(&known)?;
-            s.clear_dirty(node)
+            s.account().put_mirror(&known)?;
+            s.folder().clear_dirty(node)
         })?;
         let renamed = MirrorRow {
             name: "other".into(),
             ..known.clone()
         };
-        db.write(|s| s.put_mirror(&renamed))?;
+        db.write(|s| s.account().put_mirror(&renamed))?;
         assert_eq!(db.read(|s| s.get_mirror(node))?, Some(known));
         assert!(!db.read(|s| s.is_dirty(node))?);
         Ok(())
@@ -533,10 +551,10 @@ mod mirror {
             removed_at: Some(1),
         };
         db.write(|s| {
-            s.mark_file_gone(live.file_id)?;
-            s.mark_file_gone(removed.row.file_id)?;
-            s.put_mirror(&live)?;
-            s.put_removed(&removed)
+            s.account().mark_file_gone(live.file_id)?;
+            s.account().mark_file_gone(removed.row.file_id)?;
+            s.account().put_mirror(&live)?;
+            s.account().put_removed(&removed)
         })?;
         db.read(|s| {
             assert!(
@@ -573,21 +591,25 @@ mod mirror {
                 ))
             })
         };
-        db.write(|s| s.put_live(&live))?;
+        db.write(|s| s.account().put_live(&live))?;
         assert_eq!(both(&mut db)?, (true, false));
-        db.write(|s| s.move_to_removed(&removed))?;
+        db.write(|s| s.account().move_to_removed(&removed))?;
         assert_eq!(both(&mut db)?, (false, true), "removed");
         let back = MirrorRow {
             version: VersionTag(Uuid::now_v7()),
             ..live.clone()
         };
-        db.write(|s| s.put_live(&back))?;
+        db.write(|s| s.account().put_live(&back))?;
         assert_eq!(both(&mut db)?, (true, false), "restored");
         // Deleted for good, live or removed: out of both, and gone since the time given.
-        db.write(|s| s.forget_file(live.file_id, Some(7)))?;
+        db.write(|s| s.account().forget_file(live.file_id, Some(7)))?;
         assert_eq!(both(&mut db)?, (false, false));
         assert!(db.read(|s| s.file_gone(live.file_id))?);
-        assert_eq!(db.write(|s| s.prune_gone(8, 100))?, 1, "gone since 7");
+        assert_eq!(
+            db.write(|s| s.account().prune_gone(8, 100))?,
+            1,
+            "gone since 7"
+        );
         Ok(())
     }
 
@@ -606,11 +628,11 @@ mod mirror {
             removed_at: Some(5),
         };
         db.write(|s| {
-            s.put_base(&held)?;
-            s.put_removed(&removed)?;
-            s.clear_dirty(held.node)
+            s.folder().put_base(&held)?;
+            s.account().put_removed(&removed)?;
+            s.folder().clear_dirty(held.node)
         })?;
-        db.write(|s| s.forget_file(held.remote.file_id, Some(7)))?;
+        db.write(|s| s.account().forget_file(held.remote.file_id, Some(7)))?;
         db.read(|s| {
             assert!(s.removed_by_node(held.node)?.is_none());
             assert!(s.is_dirty(held.node)?, "planned again");
@@ -628,11 +650,11 @@ mod mirror {
         let own = row(NodeId::new(), NodeId::ROOT, "own", None);
         let at = own.remote_ref();
         db.write(|s| {
-            s.put_removed(&RemovedRow {
+            s.account().put_removed(&RemovedRow {
                 row: earlier.clone(),
                 removed_at: Some(5),
             })?;
-            s.put_removed(&RemovedRow {
+            s.account().put_removed(&RemovedRow {
                 row: own.clone(),
                 removed_at: None,
             })
@@ -649,8 +671,8 @@ mod mirror {
         assert!(db.read(|s| s.known(&[(at, true), (earlier.remote_ref(), true)]))?);
         assert!(!db.read(|s| s.known(&[(at, true), (other, true)]))?);
         assert!(!db.read(|s| s.known(&[(at, false)]))?, "not in the mirror");
-        db.write(|s| s.confirm_removed(at, 9))?;
-        db.write(|s| s.confirm_removed(at, 10))?;
+        db.write(|s| s.account().confirm_removed(at, 9))?;
+        db.write(|s| s.account().confirm_removed(at, 10))?;
         let back = db.read(|s| s.removed_by_node(own.node))?.expect("removed");
         assert_eq!(back.removed_at, Some(9), "confirmed once");
         Ok(())
@@ -673,8 +695,8 @@ mod mirror {
             }),
         );
         db.write(|s| {
-            s.put_mirror(&folder)?;
-            s.put_mirror(&file)
+            s.account().put_mirror(&folder)?;
+            s.account().put_mirror(&file)
         })?;
         db.read(|s| {
             assert_eq!(s.get_mirror(file.node)?, Some(file.clone()));
@@ -691,7 +713,7 @@ mod mirror {
         let red = Tags::new([Tag::new("Red", 6)]);
         assert_eq!(tagged.state().map(|st| st.tags), Some(red));
         assert_eq!(folder.state().map(|st| st.tags), Some(Tags::default()));
-        let removed = db.write(|s| s.delete_mirror(file.file_id))?;
+        let removed = db.write(|s| s.account().delete_mirror(file.file_id))?;
         assert_eq!(removed, Some(file.clone()));
         assert_eq!(db.read(|s| s.get_mirror(file.node))?, None);
         Ok(())
@@ -726,9 +748,9 @@ mod mirror {
             with(&alone, Some(20)),
         );
         db.write(|s| {
-            s.put_removed(&rf)?;
-            s.put_removed(&rd)?;
-            s.put_removed(&ra)
+            s.account().put_removed(&rf)?;
+            s.account().put_removed(&rd)?;
+            s.account().put_removed(&ra)
         })?;
         db.read(|s| {
             assert_eq!(s.removed_by_node(file.node)?, Some(rf.clone()));
@@ -762,13 +784,13 @@ mod mirror {
         // The version recorded again keeps its place (and changes nothing); another version is
         // another removal, the next place; so is a restore then a delete again.
         db.write(|s| {
-            s.put_removed(&rd)?;
-            s.delete_removed(alone.node)?;
-            s.put_removed(&with(&alone, Some(30)))
+            s.account().put_removed(&rd)?;
+            s.account().delete_removed(alone.node)?;
+            s.account().put_removed(&with(&alone, Some(30)))
         })?;
         let mut again = with(&folder, Some(10));
         again.row.version = VersionTag(Uuid::new_v4());
-        db.write(|s| s.put_removed(&again))?;
+        db.write(|s| s.account().put_removed(&again))?;
         let seq = |db: &mut StateDb, node| -> hbsync_state::Result<Option<u64>> {
             db.read(|s| {
                 Ok(s.recorded_upto(u64::MAX)?
@@ -781,13 +803,13 @@ mod mirror {
         assert_eq!(seq(&mut db, alone.node)?, Some(4));
         assert_eq!(db.read(|s| s.removed_seq())?, 5, "written once per commit");
         db.write(|s| {
-            s.delete_removed(alone.node)?;
-            s.put_removed(&ra).map(drop)
+            s.account().delete_removed(alone.node)?;
+            s.account().put_removed(&ra).map(drop)
         })?;
         db.write(|s| {
-            assert!(s.delete_removed(alone.node)?);
-            assert!(s.delete_removed_file(file.file_id)?);
-            assert!(!s.delete_removed(file.node)?);
+            assert!(s.account().delete_removed(alone.node)?);
+            assert!(s.account().delete_removed_file(file.file_id)?);
+            assert!(!s.account().delete_removed(file.node)?);
             Ok(())
         })?;
         assert_eq!(db.read(|s| s.list_removed(10))?, [again]);
@@ -818,17 +840,17 @@ mod mirror {
                     .collect())
             })
         };
-        db.write(|s| s.put_removed(&open))?;
+        db.write(|s| s.account().put_removed(&open))?;
         // Its own removal confirmed, and the feed's row of it: the same removal.
         db.write(|s| {
-            s.confirm_removed(x.remote_ref(), 30)?;
-            s.put_removed(&RemovedRow {
+            s.account().confirm_removed(x.remote_ref(), 30)?;
+            s.account().put_removed(&RemovedRow {
                 removed_at: Some(30),
                 ..open.clone()
             })
         })?;
         assert_eq!(seqs(&mut db)?, [(Some(30), 1)]);
-        db.write(|s| s.put_removed(&again))?;
+        db.write(|s| s.account().put_removed(&again))?;
         assert_eq!(seqs(&mut db)?, [(Some(40), 2)]);
         Ok(())
     }
@@ -840,8 +862,8 @@ mod mirror {
         let old = row(node, NodeId::ROOT, "n", None);
         let new = row(node, NodeId::ROOT, "n", None);
         db.write(|s| {
-            s.put_mirror(&old)?;
-            s.put_mirror(&new)
+            s.account().put_mirror(&old)?;
+            s.account().put_mirror(&new)
         })?;
         db.read(|s| {
             assert_eq!(s.mirror_by_file(old.file_id)?, None);
@@ -862,7 +884,7 @@ fn children_subtree_moves_and_parking() -> R {
         local("a-b", NodeKind::File, 5),
         local("top", NodeKind::File, 6),
     ];
-    db.write(|s| rows.iter().try_for_each(|r| s.put_local(r)))?;
+    db.write(|s| rows.iter().try_for_each(|r| s.folder().put_local(r)))?;
     let names = |rows: Vec<LocalRow>| {
         rows.into_iter()
             .map(|r| r.path.as_str().to_owned())
@@ -878,7 +900,7 @@ fn children_subtree_moves_and_parking() -> R {
     );
 
     // Move folder "a" to "moved".
-    db.write(|s| s.move_local_subtree(&path("a"), &path("moved")))?;
+    db.write(|s| s.folder().move_local_subtree(&path("a"), &path("moved")))?;
     assert_eq!(
         names(db.read(|s| s.local_children(&RelPath::root()))?),
         ["a-b", "moved", "top"]
@@ -893,22 +915,22 @@ fn children_subtree_moves_and_parking() -> R {
     );
     // Moving onto an occupied path fails and changes nothing.
     assert!(
-        db.write(|s| s.move_local_subtree(&path("moved"), &path("top")))
+        db.write(|s| s.folder().move_local_subtree(&path("moved"), &path("top")))
             .is_err()
     );
     assert_eq!(db.read(|s| s.local_count())?, 6);
 
-    let gone = db.write(|s| s.delete_local_subtree(&path("moved")))?;
+    let gone = db.write(|s| s.folder().delete_local_subtree(&path("moved")))?;
     assert_eq!(gone.len(), 4);
     assert_eq!(db.read(|s| s.local_count())?, 2);
 
-    db.write(|s| s.put_parked(rows[5].node, &path("top")))?;
+    db.write(|s| s.folder().put_parked(rows[5].node, &path("top")))?;
     assert_eq!(db.read(|s| s.all_parked())?, vec![rows[5].node]);
     assert_eq!(
         db.read(|s| s.get_parked(rows[5].node))?.as_deref(),
         Some("top")
     );
-    db.write(|s| s.delete_parked(rows[5].node))?;
+    db.write(|s| s.folder().delete_parked(rows[5].node))?;
     assert!(db.read(|s| s.all_parked())?.is_empty());
     Ok(())
 }
@@ -921,24 +943,26 @@ fn local_tree_keeps_rows_connected() -> R {
         local("d/f", NodeKind::File, 2),
     );
     // A row needs its folder's row.
-    let orphan = db.write(|s| s.put_local(&file)).expect_err("no folder yet");
+    let orphan = db
+        .write(|s| s.folder().put_local(&file))
+        .expect_err("no folder yet");
     assert!(matches!(orphan, StateError::Conflict(_)));
     db.write(|s| {
-        s.put_local(&dir)?;
-        s.put_local(&file)
+        s.folder().put_local(&dir)?;
+        s.folder().put_local(&file)
     })?;
     // Another node can't take a recorded path.
     let taken = LocalRow {
         node: NodeId::new(),
         ..file.clone()
     };
-    assert!(db.write(|s| s.put_local(&taken)).is_err());
+    assert!(db.write(|s| s.folder().put_local(&taken)).is_err());
     // A folder goes after its contents.
-    assert!(db.write(|s| s.delete_local(dir.node)).is_err());
+    assert!(db.write(|s| s.folder().delete_local(dir.node)).is_err());
 
     // Adoption: the folder becomes another node, its contents stay inside it.
     let adopted = NodeId::new();
-    db.write(|s| s.rekey_local(dir.node, adopted))?;
+    db.write(|s| s.folder().rekey_local(dir.node, adopted))?;
     db.read(|s| {
         assert_eq!(s.local_by_node(dir.node)?, None);
         assert_eq!(s.local_node_at(&path("d"))?, Some(adopted));
@@ -950,15 +974,15 @@ fn local_tree_keeps_rows_connected() -> R {
     })?;
 
     // Ids still referenced stay; ids of nodes gone everywhere are forgotten.
-    db.write(|s| s.delete_local(file.node))?;
-    db.write(|s| s.collect_nodes())?;
+    db.write(|s| s.folder().delete_local(file.node))?;
+    db.write(|s| s.account().collect_nodes())?;
     assert_eq!(
         db.read(|s| s.local_node_at(&path("d")))?,
         Some(adopted),
         "the folder and the root are still referenced"
     );
-    db.write(|s| s.delete_local(adopted))?;
-    db.write(|s| s.collect_nodes())?;
+    db.write(|s| s.folder().delete_local(adopted))?;
+    db.write(|s| s.account().collect_nodes())?;
     assert_eq!(db.read(|s| s.node_count())?, 0);
     Ok(())
 }
@@ -980,9 +1004,9 @@ fn synced_keeps_the_newest() -> R {
         bytes: i,
     };
     let first: Vec<_> = (0..4).map(entry).collect();
-    db.write(|s| s.add_synced(&first, 5))?;
+    db.write(|s| s.folder().add_synced(&first, 5))?;
     let second: Vec<_> = (4..7).map(entry).collect();
-    db.write(|s| s.add_synced(&second, 5))?;
+    db.write(|s| s.folder().add_synced(&second, 5))?;
     let recent = db.read(|s| s.recent_synced(10))?;
     // Newest first, the oldest two gone.
     assert_eq!(recent, (2..7).rev().map(entry).collect::<Vec<_>>());
@@ -1022,7 +1046,7 @@ fn folders_keep_their_own_rows() -> R {
     let db_path = dir.path().join("state.db");
     let mut main = StateDb::open(&db_path)?;
     let docs_top = NodeId::new();
-    let docs = main.write(|s| s.add_folder(docs_top, "/home/a/Documents", "m2"))?;
+    let docs = main.write(|s| s.account().add_folder(docs_top, "/home/a/Documents", "m2"))?;
     let mut docs_db = StateDb::open_folder(&db_path, docs)?;
     assert_eq!(
         (main.folder(), docs_db.folder()),
@@ -1035,38 +1059,39 @@ fn folders_keep_their_own_rows() -> R {
     seen.node = row.node;
     for db in [&mut main, &mut docs_db] {
         db.write(|s| {
-            s.put_base(&row)?;
-            s.put_local(&seen)?;
-            s.mark_dirty(row.node)?;
-            s.set_kv(keys::FILTER, "f")
+            s.folder().put_base(&row)?;
+            s.folder().put_local(&seen)?;
+            s.folder().mark_dirty(row.node)?;
+            s.folder().set_kv(keys::FILTER, "f")
         })?;
     }
     // A name is taken per folder only.
     let mut other = local("Shared", NodeKind::Folder, 8);
     assert!(matches!(
-        main.write(|s| s.put_local(&other)),
+        main.write(|s| s.folder().put_local(&other)),
         Err(StateError::Conflict(_))
     ));
     other.path = path("Only in docs");
-    docs_db.write(|s| s.put_local(&other))?;
+    docs_db.write(|s| s.folder().put_local(&other))?;
     assert_eq!(main.read(|s| s.local_count())?, 1);
     assert_eq!(docs_db.read(|s| s.local_count())?, 2);
     // The account's settings are shared; a folder's are its own.
-    main.write(|s| s.set_account_kv(keys::REMOTE_CURSOR, "c1"))?;
+    main.write(|s| s.account().set_account_kv(keys::REMOTE_CURSOR, "c1"))?;
     assert_eq!(
         docs_db
             .read(|s| s.account_kv(keys::REMOTE_CURSOR))?
             .as_deref(),
         Some("c1")
     );
-    docs_db.write(|s| s.delete_kv(keys::FILTER))?;
+    docs_db.write(|s| s.folder().delete_kv(keys::FILTER))?;
     assert_eq!(main.read(|s| s.get_kv(keys::FILTER))?.as_deref(), Some("f"));
 
     // Forgetting docs takes its rows; main's keep the node's id.
-    assert!(main.write(|s| s.remove_folder(docs))?);
+    assert!(main.write(|s| s.account().remove_folder(docs))?);
     drop(docs_db);
     assert!(StateDb::open_folder(&db_path, docs).is_err());
-    let (ids_before, collected) = main.write(|s| Ok((s.node_count()?, s.collect_nodes()?)))?;
+    let (ids_before, collected) =
+        main.write(|s| Ok((s.node_count()?, s.account().collect_nodes()?)))?;
     assert_eq!(collected, 1, "only docs' own node goes, of {ids_before}");
     main.read(|s| {
         assert_eq!(s.get_base(row.node)?, Some(row.clone()));
@@ -1087,8 +1112,8 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
     let (docs_top, pics_top) = (NodeId::new(), NodeId::new());
     let (docs, pics) = main.write(|s| {
         Ok((
-            s.add_folder(docs_top, "/d", "m2")?,
-            s.add_folder(pics_top, "/p", "m3")?,
+            s.account().add_folder(docs_top, "/d", "m2")?,
+            s.account().add_folder(pics_top, "/p", "m3")?,
         ))
     })?;
     let mut docs_db = StateDb::open_folder(&db_path, docs)?;
@@ -1109,35 +1134,40 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
     // The role folders' tops, then a folder inside Documents: only docs is concerned.
     let inside = NodeId::new();
     main.write(|s| {
-        s.put_mirror(&folder(docs_top, NodeId::ROOT, "Documents"))?;
-        s.put_mirror(&folder(pics_top, NodeId::ROOT, "Pictures"))?;
-        s.put_mirror(&folder(inside, docs_top, "Work"))
+        s.account()
+            .put_mirror(&folder(docs_top, NodeId::ROOT, "Documents"))?;
+        s.account()
+            .put_mirror(&folder(pics_top, NodeId::ROOT, "Pictures"))?;
+        s.account().put_mirror(&folder(inside, docs_top, "Work"))
     })?;
     assert!(dirty(&mut docs_db, inside)?);
     assert!(!dirty(&mut main, inside)? && !dirty(&mut pics_db, inside)?);
     // Pictures holds it (moved from there): pics is concerned too, the main folder isn't.
     let held = base(NodeState::folder(pics_top, "Work"));
     pics_db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             node: inside,
             ..held
         })?;
-        s.clear_dirty(inside)
+        s.folder().clear_dirty(inside)
     })?;
-    docs_db.write(|s| s.clear_dirty(inside))?;
-    main.write(|s| s.put_mirror(&folder(inside, docs_top, "Work (2)")))?;
+    docs_db.write(|s| s.folder().clear_dirty(inside))?;
+    main.write(|s| {
+        s.account()
+            .put_mirror(&folder(inside, docs_top, "Work (2)"))
+    })?;
     assert!(dirty(&mut docs_db, inside)? && dirty(&mut pics_db, inside)?);
     assert!(!dirty(&mut main, inside)?);
     // The same version again changes nothing.
-    pics_db.write(|s| s.clear_dirty(inside))?;
+    pics_db.write(|s| s.folder().clear_dirty(inside))?;
     let again = main
         .read(|s| s.get_mirror(inside))?
         .ok_or(StateError::Corrupt("gone".into()))?;
-    main.write(|s| s.put_mirror(&again))?;
+    main.write(|s| s.account().put_mirror(&again))?;
     assert!(!dirty(&mut pics_db, inside)?);
     // A place the mirror doesn't connect to the top: every folder looks.
     let lost = NodeId::new();
-    main.write(|s| s.put_mirror(&folder(lost, NodeId::new(), "Lost")))?;
+    main.write(|s| s.account().put_mirror(&folder(lost, NodeId::new(), "Lost")))?;
     for db in [&mut main, &mut docs_db, &mut pics_db] {
         assert!(dirty(db, lost)?);
     }
@@ -1154,7 +1184,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
     let db_path = dir.path().join("state.db");
     let mut main = StateDb::open(&db_path)?;
     let top = NodeId::new();
-    let docs = main.write(|s| s.add_folder(top, "/d", "m2"))?;
+    let docs = main.write(|s| s.account().add_folder(top, "/d", "m2"))?;
     let mut docs_db = StateDb::open_folder(&db_path, docs)?;
     let row = |node, parent, name: &str| MirrorRow {
         file_id: RemoteFileId(Uuid::new_v4()),
@@ -1170,9 +1200,11 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
     };
     let (inside, elsewhere) = (NodeId::new(), NodeId::new());
     main.write(|s| {
-        s.put_mirror(&row(top, NodeId::ROOT, "Documents"))?;
-        s.put_mirror(&row(inside, top, "Work"))?;
-        s.put_mirror(&row(elsewhere, NodeId::ROOT, "Music stuff"))
+        s.account()
+            .put_mirror(&row(top, NodeId::ROOT, "Documents"))?;
+        s.account().put_mirror(&row(inside, top, "Work"))?;
+        s.account()
+            .put_mirror(&row(elsewhere, NodeId::ROOT, "Music stuff"))
     })?;
     docs_db.read(|s| {
         assert_eq!(s.get_mirror(top)?, None, "its top is its root");
@@ -1211,14 +1243,16 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
     })?;
     // Written at its root, it is at its top on the drive; OUTSIDE is never written.
     let new = NodeId::new();
-    docs_db.write(|s| s.put_mirror(&row(new, NodeId::ROOT, "New")))?;
+    docs_db.write(|s| s.account().put_mirror(&row(new, NodeId::ROOT, "New")))?;
     assert_eq!(
         main.read(|s| s.get_mirror(new))?.map(|r| r.parent),
         Some(top)
     );
     assert!(
         docs_db
-            .write(|s| s.put_mirror(&row(NodeId::OUTSIDE, NodeId::ROOT, "x")))
+            .write(|s| s
+                .account()
+                .put_mirror(&row(NodeId::OUTSIDE, NodeId::ROOT, "x")))
             .is_err()
     );
     // Recently deleted too.
@@ -1226,8 +1260,8 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
         .read(|s| s.get_mirror(new))?
         .ok_or(StateError::Corrupt("no".into()))?;
     docs_db.write(|s| {
-        s.delete_mirror(gone.file_id)?;
-        s.put_removed(&RemovedRow {
+        s.account().delete_mirror(gone.file_id)?;
+        s.account().put_removed(&RemovedRow {
             row: MirrorRow {
                 parent: NodeId::ROOT,
                 ..gone.clone()
@@ -1250,51 +1284,59 @@ fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
     let mut db = StateDb::open_in_memory()?;
     db.write(|s| {
         let a = local("a", NodeKind::Folder, 1);
-        s.put_local(&a)?;
+        s.folder().put_local(&a)?;
         let x = local("a/x", NodeKind::File, 2);
-        s.put_local(&x)?;
+        s.folder().put_local(&x)?;
         // Both ways in: a's id by its path, and its path by its id.
         assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("a/x")));
-        s.move_local_subtree(&path("a"), &path("b"))?;
+        s.folder().move_local_subtree(&path("a"), &path("b"))?;
         assert_eq!(s.local_by_node(x.node)?.map(|r| r.path), Some(path("b/x")));
-        s.put_local(&local("b/y", NodeKind::File, 3))?;
+        s.folder().put_local(&local("b/y", NodeKind::File, 3))?;
         assert!(
-            s.put_local(&local("a/z", NodeKind::File, 4)).is_err(),
+            s.folder()
+                .put_local(&local("a/z", NodeKind::File, 4))
+                .is_err(),
             "a went"
         );
 
         let renewed = NodeId::new();
-        s.rekey_local(a.node, renewed)?;
+        s.folder().rekey_local(a.node, renewed)?;
         let y = s
             .get_local(&path("b/y"))?
             .ok_or_else(|| StateError::Corrupt("b/y missing".into()))?;
         assert_eq!(s.local_parent(y.node)?, Some(renewed));
-        s.delete_local_subtree(&path("b"))?;
+        s.folder().delete_local_subtree(&path("b"))?;
         assert!(
-            s.put_local(&local("b/w", NodeKind::File, 5)).is_err(),
+            s.folder()
+                .put_local(&local("b/w", NodeKind::File, 5))
+                .is_err(),
             "b went"
         );
 
         let c = local("c", NodeKind::Folder, 6);
-        s.put_local(&c)?;
+        s.folder().put_local(&c)?;
         assert!(s.local_children(&path("c"))?.is_empty());
-        assert!(s.delete_local(c.node)?);
+        assert!(s.folder().delete_local(c.node)?);
         assert!(
-            s.put_local(&local("c/v", NodeKind::File, 7)).is_err(),
+            s.folder()
+                .put_local(&local("c/v", NodeKind::File, 7))
+                .is_err(),
             "c went"
         );
 
         // A folder that became a file, then went.
         let d = local("d", NodeKind::Folder, 8);
-        s.put_local(&d)?;
+        s.folder().put_local(&d)?;
         let d = LocalRow {
             kind: NodeKind::File,
             ..d
         };
-        s.put_local(&d)?;
-        assert!(s.delete_local(d.node)?);
+        s.folder().put_local(&d)?;
+        assert!(s.folder().delete_local(d.node)?);
         assert!(
-            s.put_local(&local("d/u", NodeKind::File, 9)).is_err(),
+            s.folder()
+                .put_local(&local("d/u", NodeKind::File, 9))
+                .is_err(),
             "d went"
         );
         Ok(())

@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hbsync_state::{RemovedRow, StateError, Store};
+use hbsync_state::{ReadTx, RemovedRow, StateError};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, Role};
 
@@ -28,7 +28,7 @@ pub struct DeletedSummary {
     pub listed: Listed,
 }
 
-/// What a listing of Recently deleted saw: the rows of this DB (its [`Store::db_id`]) recorded
+/// What a listing of Recently deleted saw: the rows of this DB (its [`ReadTx::db_id`]) recorded
 /// up to the counter it read ([`hbsync_state::Recorded::seq`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Listed {
@@ -39,7 +39,7 @@ pub struct Listed {
 /// The drive's newest `limit` deletes of Recently deleted, newest first, each with how many
 /// items are in it ([`inside`]), and the summary of all of it.
 pub fn deletes(
-    s: &Store<'_>,
+    s: &ReadTx<'_>,
     limit: usize,
 ) -> Result<(Vec<(Deleted, usize)>, DeletedSummary), StateError> {
     let mut listing = Listing::read(s)?;
@@ -63,7 +63,7 @@ pub fn deletes(
 
 /// What a listing of Recently deleted that reads it now sees ([`Listed`]): to read in the
 /// transaction that reads the items shown.
-pub fn listed_now(s: &Store<'_>) -> Result<Listed, StateError> {
+pub fn listed_now(s: &ReadTx<'_>) -> Result<Listed, StateError> {
     Ok(Listed {
         db: s.db_id()?,
         seq: s.removed_seq()?,
@@ -72,7 +72,7 @@ pub fn listed_now(s: &Store<'_>) -> Result<Listed, StateError> {
 
 /// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, each
 /// with how many items are in it: only those rows are read, and walked up and down from.
-pub(super) fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, StateError> {
+pub(super) fn find(s: &ReadTx<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::lazy(s)?;
     let mut found = Vec::new();
     for &node in nodes {
@@ -86,7 +86,7 @@ pub(super) fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usiz
 /// The items of Recently deleted named `names` (deletes, or items a delete took along), each
 /// with how many items are in it: to pick by their places, which end in those names. Only
 /// those rows are read whole, and walked up from.
-pub(super) fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
+pub(super) fn named(s: &ReadTx<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
     let names: HashSet<&str> = names.iter().map(String::as_str).collect();
     let names: Vec<&str> = names.into_iter().collect();
     find(s, &s.removed_named(&names)?)
@@ -94,7 +94,10 @@ pub(super) fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usi
 
 /// The items of Recently deleted removed before `before_ms` (Unix ms, the server's): those
 /// deleted on their own, as listed.
-pub(super) fn deletes_before(s: &Store<'_>, before_ms: i64) -> Result<Vec<RemovedRow>, StateError> {
+pub(super) fn deletes_before(
+    s: &ReadTx<'_>,
+    before_ms: i64,
+) -> Result<Vec<RemovedRow>, StateError> {
     let before = s.removed_before(before_ms)?;
     let count = before.len();
     let mut rows = RemovedRows::new(s, before);
@@ -112,7 +115,7 @@ pub(super) fn deletes_before(s: &Store<'_>, before_ms: i64) -> Result<Vec<Remove
 /// Every item of Recently deleted, newest first, each with how many items are in it: listed
 /// whole (tests).
 #[cfg(any(test, feature = "testkit"))]
-pub(super) fn all(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
+pub(super) fn all(s: &ReadTx<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::read(s)?;
     let picked = (0..listing.roots.len()).collect();
     listing.with_along(picked)
@@ -136,7 +139,7 @@ struct Listing<'a, 's> {
 
 impl<'a, 's> Listing<'a, 's> {
     /// Nothing read yet: rows come as [`Listing::describe_node`] asks for them.
-    fn lazy(s: &'a Store<'s>) -> Result<Self, StateError> {
+    fn lazy(s: &'a ReadTx<'s>) -> Result<Self, StateError> {
         let folders: HashMap<NodeId, String> =
             s.folders()?.into_iter().map(|f| (f.top, f.path)).collect();
         let tops = folders
@@ -156,7 +159,7 @@ impl<'a, 's> Listing<'a, 's> {
     }
 
     /// Every row, each with its item.
-    fn read(s: &'a Store<'s>) -> Result<Self, StateError> {
+    fn read(s: &'a ReadTx<'s>) -> Result<Self, StateError> {
         let mut listing = Listing::lazy(s)?;
         let listed = s.list_removed(usize::MAX)?;
         let count = listed.len();
@@ -247,13 +250,13 @@ impl<'a, 's> Listing<'a, 's> {
 
 /// Rows of Recently deleted by node: the ones read already, else from the store, each once.
 pub(super) struct RemovedRows<'a, 's> {
-    s: &'a Store<'s>,
+    s: &'a ReadTx<'s>,
     rows: Vec<RemovedRow>,
     index: HashMap<NodeId, Option<usize>>,
 }
 
 impl<'a, 's> RemovedRows<'a, 's> {
-    pub(super) fn new(s: &'a Store<'s>, rows: Vec<RemovedRow>) -> Self {
+    pub(super) fn new(s: &'a ReadTx<'s>, rows: Vec<RemovedRow>) -> Self {
         let index = rows
             .iter()
             .enumerate()
@@ -373,7 +376,7 @@ fn place(
 }
 
 /// Recovered files' name on the drive, or the one it gets when made.
-fn recovered_name(s: &Store<'_>) -> Result<String, StateError> {
+fn recovered_name(s: &ReadTx<'_>) -> Result<String, StateError> {
     Ok(s.get_mirror(NodeId::RECOVERED)?
         .map_or_else(|| hbsync_types::RECOVERED_NAME.to_owned(), |m| m.name))
 }
@@ -389,7 +392,7 @@ fn join(folder: &str, name: &str) -> String {
 /// `top` and what was deleted with it below it, level by level: the removed items in it
 /// deleted with their folder ([`deleted_with`]). What was deleted from it before stays out, and
 /// so do the live nodes its delete took along ([`crate::along`]): what restoring it restores.
-pub(super) fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
+pub(super) fn group(s: &ReadTx<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
     // Each node once: removed rows may form a cycle (left by a remote one).
     let mut seen = HashSet::from([top.row.node]);
     let mut rows = vec![top];
@@ -410,7 +413,7 @@ pub(super) fn group(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, S
 }
 
 /// [`inside`] `top`, from the store.
-fn inside_of(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
+fn inside_of(s: &ReadTx<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
     inside(
         top,
         |r| (r.row.node, r.row.kind == NodeKind::Folder),
@@ -419,7 +422,7 @@ fn inside_of(s: &Store<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateErr
 }
 
 /// Refuses `listed` unless this DB gave it ([`listed_here`]).
-pub(super) fn refuse_unlisted(s: &Store<'_>, listed: &Listed) -> Result<(), StateError> {
+pub(super) fn refuse_unlisted(s: &ReadTx<'_>, listed: &Listed) -> Result<(), StateError> {
     match listed_here(s, listed)? {
         true => Ok(()),
         false => Err(StateError::Conflict(
@@ -429,12 +432,12 @@ pub(super) fn refuse_unlisted(s: &Store<'_>, listed: &Listed) -> Result<(), Stat
 }
 
 /// Whether this DB gave `listed`: its own, up to a counter it reached.
-pub fn listed_here(s: &Store<'_>, listed: &Listed) -> Result<bool, StateError> {
+pub fn listed_here(s: &ReadTx<'_>, listed: &Listed) -> Result<bool, StateError> {
     Ok(!listed.db.is_empty() && listed.db == s.db_id()? && listed.seq <= s.removed_seq()?)
 }
 
 /// What the folders of Recently deleted hold on the drive, read once (two queries).
-pub(super) fn holdings(s: &Store<'_>) -> Result<Holdings, StateError> {
+pub(super) fn holdings(s: &ReadTx<'_>) -> Result<Holdings, StateError> {
     Ok(Holdings {
         live: s.removed_holding_live()?,
         removed: s.removed_per_folder()?,

@@ -57,7 +57,8 @@ impl SyncRoot {
         };
         let text = path.to_string_lossy();
         if recorded != text {
-            Self::open_account(db, identity)?.write(|s| s.set_folder_path(root.folder, &text))?;
+            Self::open_account(db, identity)?
+                .write(|s| s.account().set_folder_path(root.folder, &text))?;
         }
         Ok(root)
     }
@@ -111,9 +112,9 @@ impl SyncRoot {
         // Durable before the marker exists: a marker the DB lost would be refused as foreign.
         let folder = account.write_durable(|s| {
             for old in s.folders()?.into_iter().filter(|f| f.top == top) {
-                s.remove_folder(old.id)?;
+                s.account().remove_folder(old.id)?;
             }
-            s.add_folder(top, &text, &marker.id)
+            s.account().add_folder(top, &text, &marker.id)
         })?;
         std::fs::create_dir_all(layout::state_dir(path))?;
         marker.write(path)?;
@@ -189,7 +190,7 @@ impl SyncRoot {
         // Read first: a DB that has its identity is opened without writing.
         let theirs = account.read(|s| s.account_kv(keys::IDENTITY))?;
         if theirs.is_none() {
-            account.write(|s| s.set_account_kv(keys::IDENTITY, identity))?;
+            account.write(|s| s.account().set_account_kv(keys::IDENTITY, identity))?;
         }
         refuse_other(db, theirs, identity)?;
         Ok(account)
