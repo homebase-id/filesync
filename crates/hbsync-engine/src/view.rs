@@ -159,6 +159,8 @@ fn build(
     b.input.dirty = dirty.iter().copied().collect();
     // The feed is drained before every plan, and every loaded node brings its ancestors.
     b.input.remote_complete = true;
+    // Mostly none: one query.
+    b.input.unreadable = s.unreadable_nodes()?;
 
     for &node in dirty {
         b.load(node)?;

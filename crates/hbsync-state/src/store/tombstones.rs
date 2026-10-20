@@ -29,10 +29,12 @@ impl ReadTx<'_> {
         Ok(self.account_kv(crate::keys::REREADING)?.is_some())
     }
 
-    /// Every file of the drive the store has, in the mirror or Recently deleted.
+    /// Every file of the drive the store has, in the mirror or Recently deleted, or as a row it
+    /// can't read.
     pub fn drive_file_ids(&self) -> Result<Vec<RemoteFileId>> {
         self.many(
-            "SELECT file_id FROM remote UNION SELECT file_id FROM removed",
+            "SELECT file_id FROM remote UNION SELECT file_id FROM removed \
+             UNION SELECT file_id FROM unreadable",
             [],
             |r| Ok(RemoteFileId(codec::uuid_from(&r.get::<_, Vec<u8>>(0)?)?)),
         )
@@ -50,6 +52,7 @@ impl AccountTx<'_> {
              ON CONFLICT (file_id) DO NOTHING",
         )?
         .execute(params![file_id.0.as_bytes(), at])?;
+        self.clear_unreadable(file_id)?;
         self.clear_gone_suspect(file_id)
     }
 

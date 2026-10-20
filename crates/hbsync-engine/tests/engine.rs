@@ -2919,6 +2919,95 @@ fn a_rename_keeps_what_another_writer_wrote() -> R {
     Ok(())
 }
 
+// ---- rows this device can't read ----
+
+/// A folder this device can't read (a newer writer's) still holds what is in it: its files,
+/// which read, wait for it, on every computer; none is moved into Recovered files.
+#[test]
+fn what_is_in_a_folder_that_doesnt_read_stays_in_it() -> R {
+    let server = server();
+    let (folder, file) = {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let meta = hbsync_remote::contract::folder("newer", hbsync_types::NodeId::ROOT);
+        let folder = srv.create(&meta, None)?;
+        let (_, file) = srv.seed_file(
+            meta.node,
+            "inside.txt",
+            b"inside",
+            hbsync_fileio::HashAlgorithm::Blake3,
+        )?;
+        srv.set_unreadable(folder.file_id, true);
+        (folder, file)
+    };
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
+    // It waits: nothing done, now or later.
+    let again = b.engine.sync_once("2026-10-08")?;
+    assert_eq!((again.ops_done, again.unfinished), (0, false), "{again:?}");
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let folder = srv
+        .live()
+        .find(|h| h.file_id == folder.file_id)
+        .and_then(|h| h.node())
+        .ok_or("live")?;
+    assert_eq!(srv.header(file.file_id)?.parent, folder, "still in it");
+    Ok(())
+}
+
+/// A file whose newer version this device can't read is held: an edit here goes up as a new
+/// node, once; the drive's version stays as it is, and nothing is sent again.
+#[test]
+fn an_edit_of_a_file_whose_newer_version_doesnt_read_forks() -> R {
+    let server = server();
+    let mut b = Client::new(&server, "b")?;
+    b.write("f.txt", "one")?;
+    b.sync()?;
+    let mut c = Client::new(&server, "c")?;
+    c.sync()?;
+    c.write("f.txt", "two, by a newer client")?;
+    c.sync()?;
+    let file = {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let file = srv
+            .live()
+            .find(|h| h.node().is_some() && h.kind == hbsync_types::NodeKind::File)
+            .ok_or("on the drive")?
+            .file_id;
+        srv.set_unreadable(file, true);
+        file
+    };
+    b.sync()?;
+    assert_eq!(b.read_text("f.txt")?, "one", "held as it was");
+    b.write("f.txt", "one, edited here")?;
+    b.sync()?;
+    let again = b.engine.sync_once("2026-10-08")?;
+    assert_eq!((again.ops_done, again.unfinished), (0, false), "{again:?}");
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let files: Vec<_> = srv
+        .live()
+        .filter(|h| h.kind == hbsync_types::NodeKind::File)
+        .collect();
+    assert_eq!(files.len(), 2, "the drive's version and the fork");
+    // The fork takes a free name: the drive's version holds the old one.
+    assert_eq!(b.tree_text(""), ["f (conflict 1).txt = one, edited here"]);
+    assert!(files.iter().any(|h| h.file_id == file));
+    drop(srv);
+    // Its next version reads: the file is held no more, and comes down.
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .set_unreadable(file, false);
+    c.write("f.txt", "three")?;
+    c.sync()?;
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(""),
+        ["f (conflict 1).txt = one, edited here", "f.txt = three"]
+    );
+    Ok(())
+}
+
 // ---- §12 scopes ----
 
 /// The role folder `role` on the drive, made by another device, with one file in it.

@@ -7,11 +7,13 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use hbsync_remote::{ChangeRef, NodeMeta, PayloadInfo, RemoteBody, RemoteHeader};
+use hbsync_remote::{ChangeRef, NodeMeta, PayloadInfo, RemoteBody, RemoteHeader, Skipped};
 use hbsync_types::schema::{
     ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY,
 };
-use hbsync_types::{ContentHash, HashAlgorithm, NodeId, NodeKind, RemoteFileId, VersionTag};
+use hbsync_types::{
+    ContentHash, HashAlgorithm, NodeId, NodeKind, RemoteFileId, RemoteRef, VersionTag,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -110,6 +112,55 @@ pub fn file_id_of(row: &str) -> Option<Uuid> {
         file_id: Uuid,
     }
     serde_json::from_str::<Id>(row).ok().map(|id| id.file_id)
+}
+
+/// What of a feed row that isn't a usable node ([`to_remote`] said why) still reads: its file
+/// and version, `uniqueId` and `groupId`, for a sync node's file type; nothing for another
+/// app's file.
+pub(crate) fn skipped_row(row: &str, why: String) -> Skipped {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        file_id: Uuid,
+        file_metadata: Meta,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Meta {
+        version_tag: Uuid,
+        #[serde(default, deserialize_with = "lenient")]
+        app_data: Option<Ids>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Ids {
+        #[serde(default, deserialize_with = "lenient")]
+        unique_id: Option<Uuid>,
+        #[serde(default, deserialize_with = "lenient")]
+        group_id: Option<Uuid>,
+        #[serde(default, deserialize_with = "lenient")]
+        file_type: Option<i32>,
+    }
+    let Ok(row) = serde_json::from_str::<Row>(row) else {
+        return Skipped::why(why);
+    };
+    let ids = row.file_metadata.app_data;
+    let node_type = ids
+        .as_ref()
+        .and_then(|i| i.file_type)
+        .is_some_and(|t| t == FILE_TYPE_FOLDER || t == FILE_TYPE_FILE);
+    if !node_type {
+        return Skipped::why(why);
+    }
+    Skipped {
+        at: Some(RemoteRef {
+            file_id: RemoteFileId(row.file_id),
+            version: VersionTag(row.file_metadata.version_tag),
+        }),
+        node: ids.as_ref().and_then(|i| i.unique_id).map(NodeId),
+        parent: ids.as_ref().and_then(|i| i.group_id).map(NodeId),
+        why,
+    }
 }
 
 /// The time of the last change a feed cursor stands after: `cursorState` is odin-core's

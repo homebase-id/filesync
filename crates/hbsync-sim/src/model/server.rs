@@ -29,6 +29,9 @@ pub(crate) struct Server {
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     pub(crate) ever: BTreeSet<NodeId>,
+    /// Nodes no client reads (a newer writer's), with what was put in each: they are on the
+    /// drive, and what is in them stays there.
+    pub(crate) unreadable: BTreeMap<NodeId, BTreeSet<NodeId>>,
 }
 
 /// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed

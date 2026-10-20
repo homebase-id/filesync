@@ -47,7 +47,7 @@ impl Sim {
             .server
             .live
             .get(&node)
-            .filter(|_| !coords.hides(node))?;
+            .filter(|_| !coords.hides(node) && !self.server.unreadable.contains_key(&node))?;
         Some(NodeState {
             parent: coords.from_drive(n.state.parent),
             ..n.state.clone()
@@ -157,8 +157,17 @@ impl Sim {
     /// in a file (a question for the purge's rules, not modelled).
     fn file_move_candidates(&self) -> (Vec<NodeId>, Vec<NodeId>) {
         let server = &self.server;
+        let newer = |n: &NodeId| {
+            server
+                .unreadable
+                .iter()
+                .any(|(f, kids)| f == n || kids.contains(n))
+        };
         let free = |n: &NodeId| {
-            *n != NodeId::RECOVERED && Role::of(*n).is_none() && !server.in_role_folder(*n)
+            *n != NodeId::RECOVERED
+                && Role::of(*n).is_none()
+                && !server.in_role_folder(*n)
+                && !newer(n)
         };
         let nodes = server.live.keys().filter(|n| free(n)).copied().collect();
         let files = server
@@ -175,6 +184,26 @@ impl Sim {
         let (nodes, files) = self.file_move_candidates();
         let at = |list: &[NodeId], n: NodeId| list.iter().position(|m| *m == n);
         Some((at(&nodes, node)?, at(&files, file)?))
+    }
+
+    /// [`Action::NewerFolder`].
+    fn newer_folder(&mut self, name: usize) {
+        let name = NAMES[name % NAMES.len()];
+        if self
+            .server
+            .tree()
+            .child_named(NodeId::ROOT, name, None)
+            .is_some()
+        {
+            return;
+        }
+        let folder = self.ids.fresh();
+        self.server
+            .put(folder, NodeState::folder(NodeId::ROOT, name));
+        let file = self.ids.fresh();
+        let state = NodeState::file(folder, NAMES[0], self.new_blob());
+        self.server.put(file, state);
+        self.server.unreadable.insert(folder, [file].into());
     }
 
     /// [`Action::IntoFile`].
@@ -369,6 +398,7 @@ impl Sim {
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::IntoFile { pick, file } => self.move_into_file(pick, file),
+            Action::NewerFolder { name } => self.newer_folder(name),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;

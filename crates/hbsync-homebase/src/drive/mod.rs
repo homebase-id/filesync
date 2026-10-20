@@ -456,7 +456,7 @@ impl Remote for HomebaseRemote {
                 .and_then(|h| wire::to_remote(h, self.client.key()))
             {
                 Ok(header) => entries.push(header),
-                Err(why) => skipped.push(why),
+                Err(why) => skipped.push(wire::skipped_row(row.get(), why)),
             }
         }
         Ok(ChangesPage {

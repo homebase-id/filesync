@@ -37,7 +37,7 @@ use hbsync_types::{
 
 use crate::{
     Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, Holds, NodeMeta, PayloadInfo,
-    RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
+    RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Skipped, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -98,6 +98,9 @@ pub struct FakeServer {
     /// Files the feed leaves out though they exist (odin-core leaves out a row with a later
     /// `modified` than its holdback, or one the caller may not see), for tests.
     unlisted: std::collections::HashSet<RemoteFileId>,
+    /// Files whose rows don't read as nodes (another writer's newer version, say): the feed
+    /// skips them ([`ChangesPage::skipped`]) and their header doesn't read, for tests.
+    unreadable: std::collections::HashSet<RemoteFileId>,
     next_row: u64,
     /// Deterministic id source.
     next_id: u64,
@@ -115,6 +118,7 @@ impl FakeServer {
             // A server's clock: removal times are compared with the purge's cut-off.
             clock_ms: hbsync_types::unix_now_ms(),
             unlisted: Default::default(),
+            unreadable: Default::default(),
             next_row: 1,
             next_id: 1,
             subscribers: Vec::new(),
@@ -448,12 +452,27 @@ impl FakeServer {
         self.unlisted.insert(file_id);
     }
 
+    /// Makes `file_id`'s rows unreadable from now on, or readable again
+    /// ([`FakeServer::unreadable`]).
+    pub fn set_unreadable(&mut self, file_id: RemoteFileId, unreadable: bool) {
+        if unreadable {
+            self.unreadable.insert(file_id);
+        } else {
+            self.unreadable.remove(&file_id);
+        }
+    }
+
     /// Puts `file_id` back in the feed ([`FakeServer::unlist`]).
     pub fn relist(&mut self, file_id: RemoteFileId) {
         self.unlisted.remove(&file_id);
     }
 
     pub fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
+        if self.unreadable.contains(&file_id) {
+            return Err(RemoteError::Fatal(format!(
+                "{file_id:?}: unreadable (test)"
+            )));
+        }
         self.files
             .get(&file_id)
             .map(|f| f.header.clone())
@@ -511,16 +530,27 @@ impl FakeServer {
         // A file the feed leaves out (unlisted) isn't in it.
         .filter(|(_, file_id)| !self.unlisted.contains(*file_id));
         let mut entries = Vec::new();
+        let mut skipped = Vec::new();
         let mut last = after;
         let mut has_more = false;
         for (key, file_id) in rows {
             // A row of the current millisecond is held back, with more rows to come (the
             // feed is in time order: so is everything after it).
-            if entries.len() == limit || key.0 >= self.clock_ms {
+            if entries.len() + skipped.len() == limit || key.0 >= self.clock_ms {
                 has_more = true;
                 break;
             }
-            entries.push(self.files[file_id].header.clone());
+            let header = &self.files[file_id].header;
+            if self.unreadable.contains(file_id) && !header.is_deleted() {
+                skipped.push(Skipped {
+                    at: Some(header.at()),
+                    node: header.node(),
+                    parent: Some(header.parent),
+                    why: format!("{file_id:?}: unreadable (test)"),
+                });
+            } else {
+                entries.push(header.clone());
+            }
             last = Some(*key);
         }
         let cursor = match last {
@@ -531,7 +561,7 @@ impl FakeServer {
             entries,
             cursor,
             has_more,
-            skipped: Vec::new(),
+            skipped,
             server_time: self.clock_ms,
         })
     }

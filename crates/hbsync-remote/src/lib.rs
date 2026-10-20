@@ -138,12 +138,37 @@ pub struct ChangesPage {
     /// Opaque; persist it after the page is applied.
     pub cursor: String,
     pub has_more: bool,
-    /// Rows left out because they can't be read as nodes (another app's file, one that doesn't
-    /// decrypt), each with why.
-    pub skipped: Vec<String>,
+    /// Rows left out because they can't be read as nodes (one that doesn't decrypt, a newer
+    /// writer's), each with what of it could be read and why.
+    pub skipped: Vec<Skipped>,
     /// The remote's clock when it answered, Unix ms (Homebase's `queryTime`): the times of
     /// [`RemoteHeader`] are this clock's.
     pub server_time: i64,
+}
+
+/// A feed row a remote couldn't read as a node ([`ChangesPage::skipped`]): what of it it could
+/// read, and why it isn't one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// The file at the version the row has, if they read; `None` for a row that isn't a sync
+    /// node's at all (its file type another app's).
+    pub at: Option<RemoteRef>,
+    /// Its `uniqueId` and `groupId`, if they read.
+    pub node: Option<NodeId>,
+    pub parent: Option<NodeId>,
+    pub why: String,
+}
+
+impl Skipped {
+    /// A row nothing of which is used: only why.
+    pub fn why(why: impl Into<String>) -> Skipped {
+        Skipped {
+            at: None,
+            node: None,
+            parent: None,
+            why: why.into(),
+        }
+    }
 }
 
 /// One row of the change feed as a slim page carries it: which version of which file changed,
@@ -211,7 +236,23 @@ impl RefsPage {
     /// A whole page as refs: for a remote that has only whole pages (a test double).
     pub fn of(page: &ChangesPage) -> RefsPage {
         RefsPage {
-            refs: page.entries.iter().map(ChangeRef::of).collect(),
+            // A row it couldn't read is a change too (its version, as a minimal row has it).
+            refs: page
+                .entries
+                .iter()
+                .map(ChangeRef::of)
+                .chain(page.skipped.iter().filter_map(|r| {
+                    let at = r.at?;
+                    Some(ChangeRef {
+                        file_id: at.file_id,
+                        version: at.version,
+                        deleted: false,
+                        parent: r.parent,
+                        removed_at: None,
+                        changed_at: None,
+                    })
+                }))
+                .collect(),
             cursor: page.cursor.clone(),
             has_more: page.has_more,
             server_time: page.server_time,

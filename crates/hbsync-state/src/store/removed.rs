@@ -2,10 +2,12 @@
 
 use super::*;
 
-/// Whether the version `q.(f, v)` (removed: `q.r`) isn't in the store.
+/// Whether the version `q.(f, v)` (removed: `q.r`) isn't in the store, nor recorded as one this
+/// client can't read.
 const UNKNOWN: &str = "CASE WHEN q.r THEN NOT EXISTS (SELECT 1 FROM removed \
      WHERE file_id = q.f AND version_tag = q.v) \
-     ELSE NOT EXISTS (SELECT 1 FROM remote WHERE file_id = q.f AND version_tag = q.v) END";
+     ELSE NOT EXISTS (SELECT 1 FROM remote WHERE file_id = q.f AND version_tag = q.v) END \
+     AND NOT EXISTS (SELECT 1 FROM unreadable WHERE file_id = q.f AND version_tag = q.v)";
 
 /// A version's query variables: file id, version tag, removed.
 fn version_params(at: &RemoteRef, removed: bool) -> [rusqlite::types::Value; 3] {
@@ -291,6 +293,7 @@ impl AccountTx<'_> {
         }
         // A new row of it: it is there, whatever the identity said once.
         self.clear_gone_suspect(removed.row.file_id)?;
+        self.clear_unreadable(removed.row.file_id)?;
         let Some(row) = &self.on_drive(&removed.row)? else {
             return Ok(());
         };

@@ -7,12 +7,21 @@
 //! renames and removals are recorded as they always were ([`updated`], [`removed`]): a pull
 //! may have recorded a newer state of the node meanwhile, which they must not undo.
 
-use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
+use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Skipped};
 use hbsync_state::{AccountTx, MirrorRow, RemovedRow, StateError};
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target};
 use hbsync_types::{Role, removal_time};
 
 // ---- facts the feed brings ----
+
+/// A feed row the remote couldn't read as a node: recorded as there all the same, where its
+/// file and version read ([`AccountTx::put_unreadable`]).
+pub(crate) fn unreadable(s: AccountTx<'_>, row: &Skipped) -> Result<(), StateError> {
+    match row.at {
+        Some(at) => s.put_unreadable(at, row.node, row.parent),
+        None => Ok(()),
+    }
+}
 
 /// What [`apply`] made of a header.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,8 +30,8 @@ pub enum Applied {
     Live,
     /// One that left it: deleted, or removed to Recently deleted.
     Left,
-    /// Not a node this client takes (a fixed id out of place, [`misplaced`]), with why: left
-    /// out, as a row it can't read.
+    /// Not a node this client takes (a fixed id out of place, [`misplaced`]; a change of kind),
+    /// with why: recorded as a row it can't read ([`AccountTx::put_unreadable`]).
     Refused(String),
 }
 
@@ -33,6 +42,8 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
         return Ok(Applied::Left);
     }
     if let Some(why) = misplaced(header) {
+        // There all the same; its ids are none this device takes.
+        s.put_unreadable(header.at(), None, None)?;
         return Ok(Applied::Refused(why));
     }
     // A live file without its payload changes nothing: it must never read as a delete.
@@ -43,6 +54,19 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
     let removed_at = header.removed_at;
     if s.has_version(row.remote_ref(), removed_at.is_some())? {
         return apply_known(s, &ChangeRef::of(header), header.token.as_ref());
+    }
+    // A node is one folder or one file for its life (node schema, Identity and tombstones).
+    // Taken as a delete and a create, a change of kind would trash this device's copy on
+    // another writer's mistake: left out, the drive keeps every byte, and the node is held as
+    // this device had it (its writes fork; what is in it waits).
+    if let Some(had) = s.known_kind(row.node)?
+        && had != row.kind
+    {
+        let (file, node, kind) = (row.file_id, row.node, row.kind);
+        s.put_unreadable(row.remote_ref(), Some(node), Some(row.parent))?;
+        return Ok(Applied::Refused(format!(
+            "{file:?}: node {node:?} was a {had:?}, now a {kind:?}"
+        )));
     }
     if let Some(removed_at) = removed_at {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
@@ -553,7 +577,7 @@ mod tests {
     /// The fixed ids out of place are left out as unreadable rows: nothing is recorded, and
     /// nothing is marked to plan.
     #[test]
-    fn fixed_ids_out_of_place_are_refused() -> Result<(), StateError> {
+    fn fixed_ids_out_of_place_and_kind_changes_are_refused() -> Result<(), StateError> {
         let mut db = StateDb::open_in_memory()?;
         let file = |file_id: u128, version: u128, node: NodeId| RemoteHeader {
             kind: NodeKind::File,
@@ -590,7 +614,47 @@ mod tests {
         ] {
             assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
         }
+        // Each is there all the same: a slim page holding it again needs no whole read.
+        let at = |f: u128, v: u128| hbsync_types::RemoteRef {
+            file_id: RemoteFileId(Uuid::from_u128(f)),
+            version: VersionTag(Uuid::from_u128(v)),
+        };
+        assert!(db.read(|s| s.known(&[(at(1, 1), false), (at(4, 4), false)]))?);
 
+        // A file that becomes a folder, live or in Recently deleted, is held at the version it
+        // had: what it is now doesn't read.
+        let node = NodeId::new();
+        db.write(|s| {
+            apply(s.account(), &file(8, 8, node))?;
+            s.folder().clear_dirty(node)
+        })?;
+        assert!(matches!(
+            db.write(|s| apply(s.account(), &folder(8, 9, node, NodeId::ROOT)))?,
+            Applied::Refused(_)
+        ));
+        let kept = db
+            .read(|s| s.get_mirror(node))?
+            .map(|m| (m.kind, m.version));
+        assert_eq!(kept, Some((NodeKind::File, VersionTag(Uuid::from_u128(8)))));
+        assert!(db.read(|s| s.is_held(RemoteFileId(Uuid::from_u128(8))))?);
+        assert!(db.read(|s| s.unreadable_nodes())?.contains(&node));
+        let removed = RemoteHeader {
+            removed_at: Some(5),
+            ..file(8, 10, node)
+        };
+        db.write(|s| apply(s.account(), &removed).map(drop))?;
+        assert!(
+            !db.read(|s| s.is_held(RemoteFileId(Uuid::from_u128(8))))?,
+            "read again"
+        );
+        let back = RemoteHeader {
+            removed_at: Some(5),
+            ..folder(8, 11, node, NodeId::ROOT)
+        };
+        assert!(matches!(
+            db.write(|s| apply(s.account(), &back))?,
+            Applied::Refused(_)
+        ));
         Ok(())
     }
 

@@ -43,6 +43,7 @@ fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
         6 => action(),
         1 => (0usize..16).prop_map(|pick| Action::DeleteOutright { pick }),
         1 => (0usize..16, 0usize..16).prop_map(|(pick, file)| Action::IntoFile { pick, file }),
+        1 => (0usize..16).prop_map(|name| Action::NewerFolder { name }),
     ]
 }
 
