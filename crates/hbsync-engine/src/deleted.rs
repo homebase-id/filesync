@@ -18,7 +18,7 @@ use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
-use crate::engine::EngineError;
+use crate::error::EngineError;
 use crate::exec::{meta_at, record_removed, remove_all, trashed_at};
 use crate::feed::{TRACE_MS, apply_tombstone, gone_after, gone_for_good};
 use crate::tree::restored_names;

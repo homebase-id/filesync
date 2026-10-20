@@ -7,6 +7,7 @@ pub mod along;
 pub mod deleted;
 pub mod drive;
 mod engine;
+mod error;
 pub mod exec;
 pub mod feed;
 mod id;
@@ -23,9 +24,10 @@ pub mod view;
 pub mod walk;
 
 pub use drive::Drive;
-pub use engine::{Engine, EngineConfig, EngineError, StartupReport, SyncReport};
+pub use engine::{Engine, EngineConfig, StartupReport, SyncReport};
+pub use error::EngineError;
 pub use plan::{
-    Against, Agreement, BaseExtra, Conflict, DriveVersion, Input, Coverage, Op, Options, Plan,
+    Against, Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Op, Options, Plan,
     Requirement,
 };
 pub use reconcile::reconcile;

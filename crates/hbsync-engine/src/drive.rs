@@ -16,7 +16,7 @@ use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Role};
 
 use crate::deleted;
-use crate::engine::EngineError;
+use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
 use crate::root::{RootError, SyncRoot};
 
