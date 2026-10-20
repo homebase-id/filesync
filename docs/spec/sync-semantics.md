@@ -178,7 +178,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    - A device that filters Recovered files (§10), and a role folder (a node written into a
      removed folder it filters), puts the orphan at its top instead.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
-   top-down; here it trashes the topmost folder (its base goes after its children's).
+   top-down; here it trashes the topmost folder, its bases and its children's in one step.
 
 ## 7. Delete safety
 
@@ -227,9 +227,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
 ## 8. Operations
 
-Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `tags`, `trash`,
+Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `tags`, `trash`
+(what goes takes its bases along, whatever the drive holds by then: a base left behind would read
+as a local delete once the node is back in view, and undo a restore made while it ran),
 `rename-for-conflict`, and for filters (section 10) `detach` (a new node id in place) and
-`forget` (trash plus dropping the base). Remote: `create-folder`, `upload` (create by node id),
+`forget` (trash plus dropping the base, also where nothing of it is here). Remote: `create-folder`, `upload` (create by node id),
 `update-content`, `move`, `tags`, `remove` (to Recently deleted; a create of a removed node
 restores it). Outside plans: `restore` and `purge` (Recently deleted). Every op that writes a
 node (create, upload, move, download, mkdir) writes its merged tags too; `tags` is for a change

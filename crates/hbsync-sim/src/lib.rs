@@ -306,6 +306,15 @@ impl Sim {
         named.next().filter(|_| named.next().is_none())
     }
 
+    /// For scripted tests: the kinds of the operations client `c` has still to run.
+    pub fn planned(&self, c: usize) -> Vec<&'static str> {
+        self.clients[c]
+            .plan
+            .iter()
+            .map(|(op, _)| op.kind())
+            .collect()
+    }
+
     /// For scripted tests: the tags (`name:colour`) of `node` in Recently deleted.
     pub fn removed_tags(&self, node: NodeId) -> Vec<String> {
         self.server

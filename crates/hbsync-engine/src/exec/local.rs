@@ -350,14 +350,16 @@ impl Executor<'_> {
         renamed_row(self.disk.root(), old, path)
     }
 
-    /// Moves the local item of `node` to the trash; with `forget`, the bases of `node` and
-    /// `expected` go too (§10).
+    /// Moves the local item of `node` to the trash, with the bases of what goes; with `forget`
+    /// (§10), `node`'s base goes also where nothing of it is here.
     pub(super) fn trash(&mut self, node: NodeId, expected: &[NodeId], forget: bool) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             if forget {
                 return self.forget_base(node);
             }
-            return Ok(Outcome::Done); // already gone
+            // Already gone: a trash earlier in this run took it along with its folder (and its
+            // base, [`trashed`]); the executor holds the DB while it runs, so no scan did.
+            return Ok(Outcome::Done);
         };
         let rows = self.db.read(|s| s.local_subtree(&row.path))?;
         let mut nodes: Vec<NodeId> = rows.iter().map(|r| r.node).collect();
@@ -385,15 +387,21 @@ impl Executor<'_> {
                         .take_while(|p| p.starts_with(&row.path))
                 })
                 .collect();
+            let mut moved: Vec<&RelPath> = Vec::new();
             for r in &rows {
                 let in_holder = r.path.parent().is_some_and(|p| holders.contains(&p));
-                if in_holder
-                    && !holders.contains(&r.path)
-                    && let Err(e) = self.disk.move_to_trash(self.db, &r.path, r.node)?
-                {
+                if !in_holder || holders.contains(&r.path) {
+                    continue;
+                }
+                if let Err(e) = self.disk.move_to_trash(self.db, &r.path, r.node)? {
                     self.report.rescan.push(row.path.clone());
+                    // What did go is in the trash: its rows and bases go now, as below.
+                    self.finish(&[], |s| {
+                        moved.iter().try_for_each(|path| trashed(s, path, node))
+                    })?;
                     return Ok(io_outcome(e));
                 }
+                moved.push(&r.path);
             }
             // A released folder can't keep a temporary name (it carries the old id): it gets
             // a real one. Deepest first, so the paths above stay valid.
@@ -414,18 +422,12 @@ impl Executor<'_> {
                 .rescan
                 .push(row.path.parent().unwrap_or_default());
         }
-        self.finish(&[Settle::node(node)], |s| {
-            for r in s.folder().delete_local_subtree(&row.path)? {
-                s.folder().delete_parked(r.node)?;
-                if r.node != node {
-                    s.folder().mark_dirty(r.node)?;
-                }
-                if forget {
-                    s.folder().delete_base(r.node)?;
-                }
-            }
-            Ok(())
-        })
+        if self.crash_here(CrashPoint::AfterTrash) {
+            return Ok(Outcome::Retry("crash point reached".into()));
+        }
+        // Nothing to settle: what went has neither base nor item here now ([`trashed`]), and the
+        // folders released stay for the scan to find as new ones.
+        self.finish(&[], |s| trashed(s, &row.path, node))
     }
 
     /// Makes the local item of `node` the new node `new_node`, in place (§10). Everything
@@ -488,4 +490,20 @@ impl Executor<'_> {
         }
         self.finish(&[], |s| s.folder().delete_base(node).map(drop))
     }
+}
+
+/// The item at `path` went to the trash, `node`'s trash: its rows go, and so do their bases,
+/// whatever the mirror holds by now. What went isn't synced here any more, and a base left
+/// behind would read as a local delete once the node is back in view: a restore (or another
+/// engine's pull of it) made meanwhile, or the folder that took it along brought back, would be
+/// removed again from here. What is in it that the drive still holds elsewhere is planned again.
+fn trashed(s: &Store<'_>, path: &RelPath, node: NodeId) -> Result<(), StateError> {
+    for r in s.folder().delete_local_subtree(path)? {
+        s.folder().delete_parked(r.node)?;
+        if r.node != node && s.get_mirror(r.node)?.is_some() {
+            s.folder().mark_dirty(r.node)?;
+        }
+        s.folder().delete_base(r.node)?;
+    }
+    Ok(())
 }

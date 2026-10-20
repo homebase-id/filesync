@@ -182,9 +182,9 @@ pub enum Op {
         tags: Tags,
         drive: Option<Box<DriveVersion>>,
     },
-    /// Move the local item and everything below it to the sync root's trash. `subtree` is
-    /// every node the plan expects there (sorted, `node` included): if the folder holds
-    /// anything else by the time this runs, it is not trashed.
+    /// Move the local item and everything below it to the sync root's trash, with their bases.
+    /// `subtree` is every node the plan expects there (sorted, `node` included): if the folder
+    /// holds anything else by the time this runs, it is not trashed.
     LocalTrash { node: NodeId, subtree: Vec<NodeId> },
     /// Create the node remotely; files upload the local bytes.
     RemoteCreate {
@@ -226,10 +226,10 @@ pub enum Op {
     /// below it): `node` moved remotely to where this device doesn't sync, and the item holds
     /// what must stay here (§10). A later op creates it remotely.
     LocalDetach { node: NodeId, new_node: NodeId },
-    /// This device no longer syncs `node` (§10): its local item goes to the trash, like
-    /// [`Op::LocalTrash`] with `subtree` (empty if nothing of it is here), and the bases of
-    /// `node` and `subtree` go with it, in one step. A base left behind would read as a local
-    /// delete once the node is back in view.
+    /// This device no longer syncs `node` (§10): its local item goes to the trash, as with
+    /// [`Op::LocalTrash`] with `subtree` (empty if nothing of it is here), with its bases; where
+    /// nothing of it is here, `node`'s base goes all the same. A base left behind would read as
+    /// a local delete once the node is back in view.
     Forget { node: NodeId, subtree: Vec<NodeId> },
 }
 

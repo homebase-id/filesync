@@ -3745,3 +3745,50 @@ fn errors_go_through_the_policy() {
     });
     assert!(matches!(full, Outcome::Full(Some(_))));
 }
+
+/// The drive removes a file and a plan here trashes it; before the trash runs, the drive brings
+/// it back (a restore, the same file at a new version) and another engine's pull puts that in
+/// the mirror. The trash acted on the removal: the next plan brings the file back here, and
+/// never deletes it again (the user's restore stands).
+#[test]
+fn a_restore_while_the_trash_runs_stands() -> R {
+    let mut h = Harness::new()?;
+    let node = NodeId::new();
+    let removed = some_version();
+    let back = RemoteRef {
+        version: some_version().version,
+        ..removed
+    };
+    let file = NodeState::file(NodeId::ROOT, "a", h.content(b"A"));
+    h.local_file("a", node, b"A")?;
+    h.db.write(|s| {
+        s.folder().put_base(&BaseRow {
+            local_hash: Some(h_content_hash(b"A")),
+            ..BaseRow::new(node, file, removed)
+        })
+    })?;
+    // The pull: back in the mirror, at its new version.
+    h.mirror(node, "a", back, b"A")?;
+    h.run(vec![Op::LocalTrash {
+        node,
+        subtree: vec![node],
+    }])?;
+    assert!(!h.folder.root.join("a").exists(), "trashed");
+    let plan = plan_of(&mut h, &[node])?;
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteDelete { .. })),
+        "the restore is undone: {:?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { node: n, .. } if *n == node)),
+        "the file comes back here: {:?}",
+        plan.ops
+    );
+    Ok(())
+}

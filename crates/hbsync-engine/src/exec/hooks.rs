@@ -97,4 +97,6 @@ pub enum CrashPoint {
     /// After a download is moved into place, or a folder made in place (before its tags are
     /// written), before its commit.
     AfterPlaced,
+    /// After an item is moved to the trash, before its rows and bases follow.
+    AfterTrash,
 }
