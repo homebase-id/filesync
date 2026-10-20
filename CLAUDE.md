@@ -61,7 +61,7 @@ writes, network bytes and requests, and the cost of sitting idle all count. Sacr
 convenience are acceptable for it; data safety is not. Weigh every design and review finding by
 its cost as well as its correctness, measure before and after a change that affects performance,
 prefer the cheaper of two sound designs, and name a trade-off ("this costs X per file") rather
-than accepting extra cost silently.
+than accepting extra cost silently. Parked: grouping SQLite commits (`docs/grouped-commits.md`).
 
 Ground rules:
 - Never lose data. The reconciler is a pure function; all OS and network work sits behind traits.
