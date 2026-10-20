@@ -1,5 +1,7 @@
 //! Reviewing held deletes, and Recently deleted: its items, restoring and emptying them.
 
+use hbsync_app::protocol::{DeletedAccount, DeletedList};
+
 use super::*;
 
 /// At most this many items of Recently deleted on its page.
@@ -144,7 +146,7 @@ impl Server {
     /// Empties Recently deleted of everything it held when the page listed it, in the accounts
     /// that held anything.
     pub(super) fn empty(&self, form: &HashMap<String, String>) -> String {
-        let listed = control::listed_from_field(form.get("listed").map_or("", String::as_str));
+        let listed = listed_from_field(form.get("listed").map_or("", String::as_str));
         if listed.is_empty() {
             return "Nothing was deleted.".into();
         }
@@ -215,7 +217,7 @@ impl Server {
 /// The button that empties Recently deleted as listed (`url`): all it held now, nothing deleted
 /// after this look. When emptying would take nothing (every folder in it still holds a live
 /// item), it says so instead.
-fn empty_offer(list: &hbsync_app::protocol::DeletedList, url: &str) -> String {
+fn empty_offer(list: &DeletedList, url: &str) -> String {
     if list.total() == 0 {
         return "<p class=small>Nothing in it can be emptied yet: the folders in it still hold \
                 items that aren't deleted. You can restore them.</p>"
@@ -229,14 +231,42 @@ fn empty_offer(list: &hbsync_app::protocol::DeletedList, url: &str) -> String {
          <button class=secondary>Empty now…</button></form>",
         count = list.total(),
         stays = list.staying(),
-        listed = escape(&control::listed_field(&list.accounts)),
+        listed = escape(&listed_field(&list.accounts)),
     )
+}
+
+/// `accounts` as a form field (what emptying all of them takes): `identity/db/seq`,
+/// comma-separated.
+fn listed_field(accounts: &[DeletedAccount]) -> String {
+    let parts: Vec<String> = accounts
+        .iter()
+        .map(|a| format!("{}/{}/{}", a.identity, a.db, a.seq))
+        .collect();
+    parts.join(",")
+}
+
+/// [`listed_field`] read back (without the counts); what doesn't read is left out.
+fn listed_from_field(field: &str) -> Vec<DeletedAccount> {
+    field
+        .split(',')
+        .filter_map(|part| {
+            let (rest, seq) = part.rsplit_once('/')?;
+            let (identity, db) = rest.rsplit_once('/')?;
+            Some(DeletedAccount {
+                identity: identity.to_owned(),
+                deletes: 0,
+                items: 0,
+                stays: 0,
+                db: db.to_owned(),
+                seq: seq.parse().ok()?,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hbsync_app::protocol::{DeletedAccount, DeletedList};
 
     /// Empty is offered only when emptying takes something; else the page says why not.
     #[test]
@@ -259,5 +289,21 @@ mod tests {
             !none.contains("<form") && none.contains("can be emptied yet"),
             "{none}"
         );
+    }
+
+    /// What emptying everything takes goes through the tray's form field and back.
+    #[test]
+    fn the_listed_accounts_go_through_a_form_field() {
+        let a = |identity: &str, seq| DeletedAccount {
+            identity: identity.into(),
+            deletes: 0,
+            items: 0,
+            stays: 0,
+            db: "d1".into(),
+            seq,
+        };
+        let accounts = [a("a.example", 9), a("b/c.example", 4)];
+        assert_eq!(listed_from_field(&listed_field(&accounts)), accounts);
+        assert_eq!(listed_from_field(""), []);
     }
 }
