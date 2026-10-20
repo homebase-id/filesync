@@ -13,7 +13,7 @@ use hbsync_platform::Os;
 use hbsync_platform::tags::express;
 use hbsync_state::Coords;
 use hbsync_types::{
-    FileContent, NodeId, NodeKind, NodeState, RemoteRef, Role, Tag, Tags, Uuid, VersionTag,
+    FileContent, NodeId, NodeKind, NodeState, RemoteRef, Role, Tag, Tags, VersionTag,
 };
 
 use crate::action::{Action, JUNK, NAMES, TAGS};
@@ -160,7 +160,7 @@ impl Sim {
                 let name = NAMES[pick % NAMES.len()];
                 if free(docs, name) {
                     let state = NodeState::file(docs, name, self.new_blob());
-                    self.server.put(NodeId::new(), state);
+                    self.server.put(self.ids.fresh(), state);
                 }
             }
             (1, Some(file)) => {
@@ -315,7 +315,7 @@ impl Sim {
                 self.clients[c].local.remove(node);
                 // The other folder's scan finds an item it never had: a new id. Its tags went
                 // along.
-                let new = self.release_id();
+                let new = self.ids.fresh();
                 self.clients[to].local.insert(
                     new,
                     NodeState {
@@ -387,7 +387,7 @@ impl Sim {
                 let parent = folders[parent % folders.len()];
                 if name_free(local, parent, JUNK, None) {
                     let state = NodeState::file(parent, JUNK, self.new_blob());
-                    self.clients[c].local.insert(NodeId::new(), state);
+                    self.clients[c].local.insert(self.ids.fresh(), state);
                 }
             }
             Action::CreateFile { parent, name } | Action::CreateFolder { parent, name } => {
@@ -401,7 +401,7 @@ impl Sim {
                 } else {
                     NodeState::folder(parent, name)
                 };
-                self.clients[c].local.insert(NodeId::new(), state);
+                self.clients[c].local.insert(self.ids.fresh(), state);
             }
             Action::Edit { file } => {
                 if files.is_empty() {
@@ -763,16 +763,6 @@ impl Sim {
                 }
             }
         }
-    }
-
-    /// The id the scanner gives an item it stopped tracking: any new one (counted, to keep
-    /// runs repeatable).
-    pub(crate) fn release_id(&mut self) -> NodeId {
-        self.released += 1;
-        let hash = hash_bytes(&self.released.to_le_bytes(), HashAlgorithm::Sha256);
-        let mut bytes = [0u8; 16];
-        bytes.copy_from_slice(&hash.bytes[..16]);
-        NodeId(Uuid::from_bytes(bytes))
     }
 
     /// Item `node` of client `c` is `new` from now on: the tags added to it there go along.

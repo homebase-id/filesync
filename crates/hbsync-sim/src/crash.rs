@@ -209,7 +209,7 @@ impl Sim {
                 // An item new to this client (a first download, a folder made again after a
                 // local delete) moved or changed since it was put in place: the scan found it
                 // as a new item, and recovery doesn't take it for the node.
-                let new = self.release_id();
+                let new = self.ids.fresh();
                 rekey_client(&mut self.clients[c], node, new);
                 self.retrack(c, node, new);
             }
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn a_folder_made_back_without_a_record_is_no_longer_deleted() {
         let mut sim = Sim::new(1);
-        let node = NodeId::new();
+        let node = sim.ids.fresh();
         sim.server.put(node, NodeState::folder(NodeId::ROOT, "d"));
         sim.deleted.insert(node);
         sim.clients[0].plan.push_back((
@@ -353,7 +353,7 @@ mod tests {
     #[test]
     fn a_folder_crash_records_only_what_the_engine_would() {
         let mut sim = Sim::new(1);
-        let node = NodeId::new();
+        let node = sim.ids.fresh();
         let folder = NodeState::folder(NodeId::ROOT, "d");
         sim.clients[0].base.insert(node, folder.clone());
         // On the drive, but not in the client's mirror.
@@ -376,7 +376,7 @@ mod tests {
         );
         // Never synced: made in place, without a record.
         let mut sim = Sim::new(1);
-        let node = NodeId::new();
+        let node = sim.ids.fresh();
         sim.clients[0].plan.push_back((
             Op::LocalMkdir {
                 node,

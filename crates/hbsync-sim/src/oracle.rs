@@ -265,7 +265,7 @@ impl Sim {
         // A computer holds a node in one of its folders at most.
         for &(a, b) in &self.computers {
             let (a, b) = (&self.clients[a].local, &self.clients[b].local);
-            if let Some(both) = a.ids().find(|n| b.contains(*n)) {
+            if let Some(both) = a.ids().filter(|n| b.contains(*n)).min() {
                 return Err(format!("{both:?} is in both folders of one computer"));
             }
         }
@@ -279,7 +279,8 @@ impl Sim {
         }
         if let Some((_, bad)) = server
             .iter()
-            .find(|(_, s)| check_remote_name(&s.name).is_err() || s.name.starts_with(".hbsync-"))
+            .filter(|(_, s)| check_remote_name(&s.name).is_err() || s.name.starts_with(".hbsync-"))
+            .min_by_key(|(n, _)| *n)
         {
             return Err(format!("server: invalid name {:?}", bad.name));
         }

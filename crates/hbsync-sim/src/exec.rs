@@ -294,7 +294,7 @@ impl Sim {
             .collect();
         tracked.sort();
         for n in tracked {
-            let new = self.release_id();
+            let new = self.ids.fresh();
             let client = &mut self.clients[c];
             client.parked.remove(&n);
             rekey_client(client, n, new);
@@ -880,7 +880,7 @@ impl Sim {
                     if !client.local.contains(node) || !unchanged(client, node) {
                         return Skip;
                     }
-                    let new_node = NodeId::new();
+                    let new_node = self.ids.fresh();
                     return self.execute(c, &Op::LocalDetach { node, new_node });
                 }
                 let client = &self.clients[c];
@@ -946,7 +946,7 @@ impl Sim {
                     if !client.local.contains(node) || !unchanged(client, node) {
                         return Skip;
                     }
-                    let new_node = NodeId::new();
+                    let new_node = self.ids.fresh();
                     return self.execute(c, &Op::LocalDetach { node, new_node });
                 }
                 let version = VersionTag(self.server.uuid());
@@ -1169,7 +1169,7 @@ impl Sim {
             self.tag_changes_left(c, n);
         }
         for r in released {
-            let new = self.release_id();
+            let new = self.ids.fresh();
             let client = &mut self.clients[c];
             client.parked.remove(&r);
             rekey_client(client, r, new);

@@ -47,8 +47,9 @@ impl Sim {
         if !self.plans_heard.is_multiple_of(LIE_EVERY) {
             return;
         }
-        // A live file the client holds, said of once only.
-        let held: Vec<NodeId> = self.clients[c]
+        // A live file the client holds, said of once only (picked in id order: the base's
+        // order is a hash map's).
+        let mut held: Vec<NodeId> = self.clients[c]
             .base
             .iter()
             .filter(|(n, s)| {
@@ -58,6 +59,7 @@ impl Sim {
             })
             .map(|(n, _)| n)
             .collect();
+        held.sort();
         if held.is_empty() {
             return;
         }

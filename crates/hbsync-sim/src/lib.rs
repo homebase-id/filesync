@@ -25,12 +25,14 @@
 //!
 //! The modules: `action` (what happens), `model` (the server and the clients), `world` (what
 //! users, other devices and the server do), `exec` (what mirrors the engine), `crash` (a lost
-//! commit and its recovery), `oracle` (the ledger and the check) and `trace`.
+//! commit and its recovery), `gone` (the identity's "not there"), `oracle` (the ledger and the
+//! check), `ids` (counted node ids: a run replays the same from its events) and `trace`.
 
 mod action;
 mod crash;
 mod exec;
 mod gone;
+mod ids;
 mod model;
 mod oracle;
 mod trace;
@@ -50,6 +52,7 @@ use hbsync_types::{NodeId, NodeKind, NodeState, Role, Uuid};
 
 use crate::action::NAMES;
 use crate::exec::extra;
+use crate::ids::Ids;
 use crate::model::client::{Client, ignoring_d};
 use crate::model::server::Server;
 use crate::oracle::{Ledger, tag_names, view_with};
@@ -68,8 +71,8 @@ pub struct Sim {
     ledger: Ledger,
     pub ops_executed: usize,
     pub conflicts: usize,
-    /// Items that stopped being tracked so far (each gets a new id).
-    released: u64,
+    /// Where new items' ids come from.
+    ids: Ids,
     /// Crashes so far ([`Event::Crash`]).
     crashes: u64,
     /// Local placements and tag writes so far: now and then a tag write fails (a volume
@@ -146,7 +149,7 @@ impl Sim {
             ledger: Ledger::default(),
             ops_executed: 0,
             conflicts: 0,
-            released: 0,
+            ids: Ids::default(),
             crashes: 0,
             writes: 0,
             fail_commit_next: false,
@@ -293,12 +296,14 @@ impl Sim {
     }
 
     /// For scripted tests: an item on client `c` whose name ends with `suffix`.
+    /// `None` if several are.
     pub fn item_named(&self, c: usize, suffix: &str) -> Option<NodeId> {
-        self.clients[c]
+        let mut named = self.clients[c]
             .local
             .iter()
-            .find(|(_, s)| s.name.ends_with(suffix))
-            .map(|(id, _)| id)
+            .filter(|(_, s)| s.name.ends_with(suffix))
+            .map(|(id, _)| id);
+        named.next().filter(|_| named.next().is_none())
     }
 
     /// For scripted tests: the tags (`name:colour`) of `node` in Recently deleted.
