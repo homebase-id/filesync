@@ -15,12 +15,12 @@
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
 use hbsync_local::Filter;
+use hbsync_local::layout::parked_name;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
-use crate::exec::parked_name;
 use crate::plan::Coverage;
 use crate::reconcile::{BaseExtra, Input, Removed};
 use crate::scope::Scope;

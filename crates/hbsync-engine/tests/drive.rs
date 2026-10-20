@@ -812,9 +812,8 @@ fn the_purge_empties_every_folders_trash() -> R {
     drive.purge(0)?;
     let now = hbsync_types::unix_now();
     let entry = |folder: &std::path::Path, at: u64| {
-        let path = folder
-            .join(".hbsync/trash")
-            .join(format!("{at}-{}", NodeId::new().0))
+        let path = hbsync_local::layout::trash_dir(folder)
+            .join(hbsync_local::layout::trash_entry(at, NodeId::new()))
             .join("f.txt");
         std::fs::create_dir_all(path.parent().expect("parent"))?;
         std::fs::write(&path, "x")?;

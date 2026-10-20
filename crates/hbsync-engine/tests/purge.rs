@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use common::{Client, server};
 use hbsync_engine::deleted;
 use hbsync_engine::feed::{self, TRACE_MS};
+use hbsync_local::layout;
 use hbsync_remote::RemoteError;
 use hbsync_remote::fake::{FakeRemote, FakeServer};
 use hbsync_state::StateDb;
@@ -1239,12 +1240,10 @@ fn the_trash_waits_for_the_items() -> common::Res<()> {
     // The first purge starts the trash's clock.
     let now = pull_into(&account, &remote)?;
     deleted::purge(&account, &remote, 0, now, &mut false)?;
-    let entry = folder
-        .join(".hbsync/trash")
-        .join(format!(
-            "{}-{}",
+    let entry = layout::trash_dir(&folder)
+        .join(layout::trash_entry(
             hbsync_types::unix_now() + 1,
-            NodeId::new().0
+            NodeId::new(),
         ))
         .join("f.txt");
     fs::create_dir_all(entry.parent().ok_or("parent")?)?;

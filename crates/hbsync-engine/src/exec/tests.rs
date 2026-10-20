@@ -3622,11 +3622,9 @@ fn a_download_takes_the_bytes_from_the_trash_unless_its_tags_fail() -> R {
                 Some(content.hash),
             ))
         })?;
-        let entry = hbsync_local::layout::trash_dir(&h.cfg.root).join(format!(
-            "{}-{}",
-            hbsync_types::unix_now(),
-            node.0.simple()
-        ));
+        let entry = hbsync_local::layout::trash_dir(&h.cfg.root).join(
+            hbsync_local::layout::trash_entry(hbsync_types::unix_now(), node),
+        );
         fs::create_dir_all(&entry)?;
         let trashed = entry.join("f");
         fs::write(&trashed, b"data")?;

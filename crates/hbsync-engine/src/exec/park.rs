@@ -94,11 +94,6 @@ pub(super) fn restore_parked(
     })))
 }
 
-/// The temporary name a node is parked under (see [`Executor`]).
-pub fn parked_name(node: NodeId) -> String {
-    format!(".hbsync-move-{}", node.0.simple())
-}
-
 /// Puts parked items back where they came from when that is possible, and drops records that
 /// no longer apply (the item was renamed, by us or by the user). Run before each plan.
 /// An original name this device now filters (§10) may be held by an item it doesn't track, which

@@ -759,7 +759,7 @@ fn parked_item_from_a_crash_is_put_back() -> R {
         })?
         .ok_or("row")?
         .node;
-    let parked = format!(".hbsync-move-{}", node.0.simple());
+    let parked = hbsync_local::layout::parked_name(node);
     fs::rename(a.root.join("doc.txt"), a.root.join(&parked))?;
     let (from, to) = (
         hbsync_platform::RelPath::new("doc.txt")?,
@@ -978,7 +978,8 @@ fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
         .read(|s| s.get_local(&from))?
         .ok_or("row")?
         .node;
-    let to = hbsync_platform::RelPath::new(&format!("A/.hbsync-move-{}", node.0.simple()))?;
+    let to =
+        hbsync_platform::RelPath::new(&format!("A/{}", hbsync_local::layout::parked_name(node)))?;
     fs::rename(from.to_native(&a.root), to.to_native(&a.root))?;
     a.engine.db().write(|s| {
         s.move_local_subtree(&from, &to)?;
@@ -2278,7 +2279,7 @@ fn a_parked_file_whose_name_became_ignored_and_taken_moves_to_a_numbered_one() -
         .read(|s| s.get_local(&from))?
         .ok_or("row")?
         .node;
-    let to = hbsync_platform::RelPath::new(&format!(".hbsync-move-{}", node.0.simple()))?;
+    let to = hbsync_platform::RelPath::new(&hbsync_local::layout::parked_name(node))?;
     fs::rename(from.to_native(&a.root), to.to_native(&a.root))?;
     a.engine.db().write(|s| {
         s.move_local_subtree(&from, &to)?;

@@ -19,7 +19,7 @@ use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::exec::{meta_at, record_removed, remove_all, trashed_at};
+use crate::exec::{meta_at, record_removed, remove_all};
 use crate::feed::{TRACE_MS, apply_tombstone, gone_after, gone_for_good};
 use crate::tree::restored_names;
 use crate::walk::End;
@@ -1550,7 +1550,7 @@ fn empty_trash(trash: &Path, since: u64, before_ms: i64) {
         return;
     };
     for entry in entries.flatten() {
-        let at = entry.file_name().to_str().and_then(trashed_at);
+        let at = entry.file_name().to_str().and_then(layout::trashed_at);
         if at.is_some_and(|s| s >= since && (s as i64).saturating_mul(1000) < before_ms) {
             let _ = remove_all(&entry.path());
         }
