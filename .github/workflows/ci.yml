@@ -4,6 +4,9 @@ on:
   push:
     branches: [main, "ci/**"]
   pull_request:
+  # Daily on main: advisories published since (the `fmt` job only).
+  schedule:
+    - cron: "17 5 * * *"
 
 permissions:
   contents: read
@@ -13,16 +16,45 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  # Also cargo-deny (deny.toml): licences that fit the AGPL-3.0, wildcards and sources block,
+  # duplicate crates are shown. Known advisories block a change to the dependencies and the
+  # daily run; elsewhere they are shown, so one published meanwhile doesn't turn an unrelated
+  # change red.
   fmt:
+    name: fmt and cargo-deny
     runs-on: ubuntu-latest
+    env:
+      DENY_VERSION: "0.20.2"
+      DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The change's parent: whether it touches the dependencies.
+          fetch-depth: 2
       - run: rustup toolchain install
       - run: cargo fmt --all --check
+        if: github.event_name != 'schedule'
+      - name: Install cargo-deny
+        if: ${{ !cancelled() }}
+        run: |
+          name="cargo-deny-$DENY_VERSION-x86_64-unknown-linux-musl"
+          curl -sSfL -o "$RUNNER_TEMP/deny.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/$DENY_VERSION/$name.tar.gz"
+          echo "$DENY_SHA256  $RUNNER_TEMP/deny.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/deny.tar.gz" --strip-components=1 -C "$HOME/.cargo/bin" "$name/cargo-deny"
+      - run: cargo deny --locked check --hide-inclusion-graph bans licenses sources
+        if: ${{ !cancelled() && github.event_name != 'schedule' }}
+      - name: cargo deny --locked check advisories
+        if: ${{ !cancelled() }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = schedule ] || ! git diff --quiet HEAD^1 -- Cargo.lock deny.toml; then
+            cargo deny --locked check advisories
+          else
+            cargo deny --locked check advisories || echo "::warning::known advisories in dependencies this change doesn't touch (above)"
+          fi
 
   test:
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
