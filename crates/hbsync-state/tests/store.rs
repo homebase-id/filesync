@@ -551,6 +551,73 @@ mod mirror {
         })
     }
 
+    /// The drive's picture keeps a node live or in Recently deleted, never both, and a file
+    /// deleted for good in neither: whichever of them records it, the one before goes.
+    #[test]
+    fn a_node_is_live_or_removed_or_gone_never_two() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let live = row(NodeId::new(), NodeId::ROOT, "a", None);
+        let node = live.node;
+        let removed = RemovedRow {
+            row: MirrorRow {
+                version: VersionTag(Uuid::now_v7()),
+                ..live.clone()
+            },
+            removed_at: Some(5),
+        };
+        let both = |db: &mut StateDb| {
+            db.read(|s| {
+                Ok((
+                    s.get_mirror(node)?.is_some(),
+                    s.removed_by_node(node)?.is_some(),
+                ))
+            })
+        };
+        db.write(|s| s.put_live(&live))?;
+        assert_eq!(both(&mut db)?, (true, false));
+        db.write(|s| s.move_to_removed(&removed))?;
+        assert_eq!(both(&mut db)?, (false, true), "removed");
+        let back = MirrorRow {
+            version: VersionTag(Uuid::now_v7()),
+            ..live.clone()
+        };
+        db.write(|s| s.put_live(&back))?;
+        assert_eq!(both(&mut db)?, (true, false), "restored");
+        // Deleted for good, live or removed: out of both, and gone since the time given.
+        db.write(|s| s.forget_file(live.file_id, Some(7)))?;
+        assert_eq!(both(&mut db)?, (false, false));
+        assert!(db.read(|s| s.file_gone(live.file_id))?);
+        assert_eq!(db.write(|s| s.prune_gone(8, 100))?, 1, "gone since 7");
+        Ok(())
+    }
+
+    /// A file deleted for good that the mirror doesn't have (in Recently deleted, say) is
+    /// planned again where a base still holds it: its node is found by file id.
+    #[test]
+    fn a_file_forgotten_is_planned_where_a_base_holds_it() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        let held = base(NodeState::file(NodeId::ROOT, "f", content(b"f")));
+        let removed = RemovedRow {
+            row: MirrorRow {
+                file_id: held.remote.file_id,
+                version: held.remote.version,
+                ..row(held.node, NodeId::ROOT, "f", None)
+            },
+            removed_at: Some(5),
+        };
+        db.write(|s| {
+            s.put_base(&held)?;
+            s.put_removed(&removed)?;
+            s.clear_dirty(held.node)
+        })?;
+        db.write(|s| s.forget_file(held.remote.file_id, Some(7)))?;
+        db.read(|s| {
+            assert!(s.removed_by_node(held.node)?.is_none());
+            assert!(s.is_dirty(held.node)?, "planned again");
+            Ok(())
+        })
+    }
+
     /// This device's own removal is in Recently deleted at once, its time open: listed first,
     /// never purged, known as that version; the feed's echo confirms the server's time once.
     #[test]

@@ -188,8 +188,6 @@ impl Store<'_> {
         Ok(None)
     }
 
-    /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
-    /// ([`Store::fan_out`]), and returns the row.
     /// Records file `file_id` as deleted for good: Homebase never gives a file id back.
     pub fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
         self.prep("INSERT OR IGNORE INTO gone_files (file_id) VALUES (?1)")?
@@ -204,6 +202,8 @@ impl Store<'_> {
             .exists([file_id.0.as_bytes()])?)
     }
 
+    /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
+    /// ([`Store::fan_out`]), and returns the row.
     pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let Some(row) = self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),

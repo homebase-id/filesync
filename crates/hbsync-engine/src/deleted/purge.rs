@@ -10,8 +10,8 @@ use hbsync_state::{MirrorRow, RemovedRow, StateError, Store, keys};
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::exec::record_removed;
-use crate::feed::{TRACE_MS, gone_for_good};
+use crate::feed::TRACE_MS;
+use crate::mirror::{self, gone_for_good};
 use crate::trash::empty_trash;
 use hbsync_local::layout;
 
@@ -53,7 +53,7 @@ impl AccountOps<'_> {
         let tombstones = self.delete_tombstones(traced);
         let pruned = self
             .db()
-            .write(|s| s.prune_gone(traced, now_ms))
+            .write(|s| mirror::prune(s, traced, now_ms))
             .map(drop)
             .map_err(EngineError::from);
         let trash = match &expired {
@@ -267,7 +267,7 @@ impl AccountOps<'_> {
                 );
                 self.db().write(|s| {
                     done.into_iter()
-                        .try_for_each(|m| record_removed(s, m.file_id, Some(m)))
+                        .try_for_each(|m| mirror::removed(s, m.file_id, Some(m)))
                 })?;
                 if stop.is_some() {
                     stopped = stop;
@@ -343,12 +343,8 @@ impl AccountOps<'_> {
                 })
                 .collect();
             came += rows.len();
-            self.db().write(|s| {
-                rows.iter().try_for_each(|m| {
-                    s.delete_removed(m.node)?;
-                    s.put_mirror(m)
-                })
-            })?;
+            self.db()
+                .write(|s| rows.iter().try_for_each(|m| mirror::live(s, m)))?;
             if let Some(e) = stopped {
                 return Err(EngineError::Remote(e));
             }
@@ -467,18 +463,11 @@ impl AccountOps<'_> {
                     }
                 }
             }
+            // Its id never comes back, nor its row from a page read before.
             self.db().write(|s| {
-                for (r, tombstone) in &gone_now {
-                    s.delete_removed(r.row.node)?;
-                    // Its id never comes back, nor its row from a page read before: gone since its
-                    // tombstone's time, if the answer gave it (the tombstone itself, at its
-                    // version, comes with the feed's row).
-                    match tombstone {
-                        Some(at) => s.mark_file_gone_at(r.row.file_id, *at)?,
-                        None => s.mark_file_gone(r.row.file_id)?,
-                    }
-                }
-                Ok(())
+                gone_now
+                    .iter()
+                    .try_for_each(|(r, at)| mirror::forget(s, r.row.file_id, *at))
             })?;
             gone += gone_now.len();
             if let Some(e) = failed {
@@ -500,7 +489,7 @@ impl AccountOps<'_> {
                 .iter()
                 .zip(answers)
                 .filter(|(_, answer)| matches!(answer, Answer::Deleted(_) | Answer::Missing))
-                .try_for_each(|(t, _)| s.delete_tombstone_at(*t).map(drop))
+                .try_for_each(|(t, _)| mirror::tombstone_deleted(s, *t))
         })?;
         match failed {
             Some(e) => Err(EngineError::Remote(e)),

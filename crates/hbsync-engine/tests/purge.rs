@@ -1205,7 +1205,7 @@ fn a_page_read_before_a_soft_delete_doesnt_bring_it_back() -> common::Res<()> {
         "a tombstone"
     );
     let mut account = account.lock().map_err(|_| "poisoned")?;
-    account.write(|s| feed::apply(s, &before).map(drop))?;
+    account.write(|s| hbsync_engine::mirror::apply(s, &before).map(drop))?;
     assert!(account.read(|s| s.list_removed(10))?.is_empty(), "not back");
     Ok(())
 }

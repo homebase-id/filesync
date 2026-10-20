@@ -426,7 +426,7 @@ fn a_row_fetched_before_a_hard_delete_is_refused_after_it() -> R {
     remote.server().hard_delete(v1.at.file_id, v1.at.version)?;
     drive.announced(&[ChangeRef::of(&fetched).tombstone()])?;
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
-    db.write(|s| hbsync_engine::feed::apply(s, &fetched).map(drop))?;
+    db.write(|s| hbsync_engine::mirror::apply(s, &fetched).map(drop))?;
     assert!(db.read(|s| s.mirror_by_file(v1.at.file_id))?.is_none());
     Ok(())
 }
@@ -846,7 +846,7 @@ fn a_new_login_forgets_the_tokens() -> R {
     assert_eq!(token()?, None);
     let header = remote.header(made.at.file_id)?;
     let mut db2 = StateDb::open_account(&dir.path().join("state.db"))?;
-    db2.write(|s| hbsync_engine::feed::apply(s, &header).map(drop))?;
+    db2.write(|s| hbsync_engine::mirror::apply(s, &header).map(drop))?;
     assert!(token()?.is_some());
     assert!(!drive.tokens_sealed_by("one")?, "the same login");
     assert!(token()?.is_some());

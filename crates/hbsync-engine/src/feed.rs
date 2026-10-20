@@ -9,12 +9,11 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 
-use hbsync_remote::{
-    ChangeRef, ChangesPage, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader,
-};
-use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store, keys};
-use hbsync_types::activity::removal_time;
-use hbsync_types::{FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef};
+use hbsync_remote::{ChangeRef, ChangesPage, RefsPage, Remote, RemoteError, RemoteHeader};
+use hbsync_state::{StateDb, StateError, Store, keys};
+use hbsync_types::{RemoteFileId, RemoteRef};
+
+use crate::mirror::{self, apply};
 
 /// How long the feed keeps a trace of a delete for good, Unix ms: what was removed (or became
 /// a tombstone) this long ago may be deleted hard (node schema, Recently deleted), and a device
@@ -322,7 +321,7 @@ fn settle<G: DerefMut<Target = StateDb>>(
     });
     db().write(|s| {
         for &file_id in &asked.gone {
-            apply_tombstone(s, file_id)?;
+            mirror::forget(s, file_id, None)?;
         }
         for header in &asked.found {
             apply(s, header)?;
@@ -453,13 +452,9 @@ pub(crate) fn announced(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, State
     for r in refs.iter().filter(|r| r.deleted) {
         match r.changed_at {
             // A tombstone on the drive (a soft delete), recorded as the feed's would be.
-            Some(at) => tombstone(s, r.at(), Some(at))?,
-            // Deleted for good, nothing left (a hard delete names only the file as it was): a
-            // tombstone this device holds at that version has nothing left to delete.
-            None => {
-                s.delete_tombstone_at(r.at())?;
-                apply_tombstone(s, r.file_id)?;
-            }
+            Some(at) => mirror::tombstone(s, r.at(), Some(at))?,
+            // Deleted for good, nothing left (a hard delete names only the file as it was).
+            None => mirror::hard_deleted(s, r.at())?,
         }
     }
     if !sure || !known(s, &refs)? {
@@ -506,36 +501,10 @@ fn latest(refs: &[ChangeRef]) -> (Vec<ChangeRef>, bool) {
 /// better, its times. Returns `true` for a node in the tree.
 fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
     if r.deleted {
-        tombstone(s, r.at(), r.changed_at)?;
+        mirror::tombstone(s, r.at(), r.changed_at)?;
         return Ok(false);
     }
-    apply_known(s, r, None)
-}
-
-/// A version the store has already (this device's own write coming back, or a page applied
-/// again) changes nothing but what the server says better: the file's `token` where the
-/// header gives one (an earlier login's may not open), a removal's time, and the time of a
-/// version in a removed folder, where it decides whether it went with it (node schema,
-/// Recently deleted). No change of the node, so nothing to reconcile. Returns `true` for a node
-/// in the tree.
-fn apply_known(
-    s: &Store<'_>,
-    r: &ChangeRef,
-    token: Option<&FileToken>,
-) -> Result<bool, StateError> {
-    if let Some(token) = token {
-        s.set_token(r.file_id, r.removed_at.is_some(), token)?;
-    }
-    if let Some(removed_at) = r.removed_at {
-        if let Some(at) = known_time(removed_at) {
-            s.confirm_removed(r.at(), at)?;
-        }
-        return Ok(false);
-    }
-    if let (Some(changed_at), Some(parent)) = (r.changed_at, r.parent) {
-        s.refresh_time(r.file_id, parent, changed_at)?;
-    }
-    Ok(true)
+    mirror::apply_known(s, r, None)
 }
 
 /// Retries transient errors a few times with exponential backoff (50, 100, 200 ms).
@@ -555,134 +524,12 @@ pub(crate) fn with_retries<T>(
     f()
 }
 
-/// A removal's time, unless the remote didn't say ([`removal_time`]`(None)`: the newest, open
-/// in the store until a version that says).
-fn known_time(removed_at: i64) -> Option<i64> {
-    (removed_at != removal_time(None)).then_some(removed_at)
-}
-
-/// Applies one header to the mirror. Returns `true` for a node in the tree, `false` for one
-/// that left it (deleted, or removed to Recently deleted).
-pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
-    if header.is_deleted() {
-        tombstone(s, header.at(), header.changed_at)?;
-        return Ok(false);
-    }
-    // A live file without its payload changes nothing: it must never read as a delete.
-    let Some(row) = mirror_row(header) else {
-        return Ok(true);
-    };
-    // The store marks the nodes that changed dirty where that concerns.
-    let removed_at = header.removed_at;
-    if s.has_version(row.remote_ref(), removed_at.is_some())? {
-        return apply_known(s, &ChangeRef::of(header), header.token.as_ref());
-    }
-    if let Some(removed_at) = removed_at {
-        // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
-        gone(s, header.file_id)?;
-        s.put_removed(&RemovedRow {
-            row,
-            removed_at: known_time(removed_at),
-        })?;
-        return Ok(false);
-    }
-    s.delete_removed(row.node)?;
-    s.put_mirror(&row)?;
-    Ok(true)
-}
-
-/// A tombstone in the feed, written at `at` (the server's time): the file is deleted for good,
-/// and the tombstone itself goes hard once old enough ([`crate::deleted::AccountOps::purge`]).
-fn tombstone(s: &Store<'_>, tombstone: RemoteRef, at: Option<i64>) -> Result<(), StateError> {
-    if let Some(at) = at {
-        s.put_tombstone(tombstone, at)?;
-    }
-    apply_tombstone(s, tombstone.file_id)
-}
-
-/// Whether a file a write was refused with `e` (not found, or a tombstone) is deleted for good:
-/// a tombstone's answer says so, else its header is read ([`gone_for_good`]).
-pub(crate) fn gone_after(
-    remote: &dyn Remote,
-    e: &RemoteError,
-    file_id: RemoteFileId,
-) -> Result<bool, RemoteError> {
-    match e {
-        RemoteError::Deleted => Ok(true),
-        _ => gone_for_good(remote, file_id),
-    }
-}
-
-/// Whether the drive has file `file_id` no more (not found, or only its tombstone), by its
-/// header: a write or read answered not found may have other reasons.
-pub(crate) fn gone_for_good(
-    remote: &dyn Remote,
-    file_id: RemoteFileId,
-) -> Result<bool, RemoteError> {
-    match remote.header(file_id) {
-        Ok(header) => Ok(header.is_deleted()),
-        Err(RemoteError::NotFound) => Ok(true),
-        Err(e) => Err(e),
-    }
-}
-
-/// A file deleted for good: out of Recently deleted and the mirror, and never back in them
-/// ([`Store::mark_file_gone`]).
-pub(crate) fn apply_tombstone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
-    s.mark_file_gone(file_id)?;
-    s.delete_removed_file(file_id)?;
-    gone(s, file_id)
-}
-
-/// The mirror without file `file_id`, its node marked to plan again where it was
-/// held. A tombstone has no node id: the node is found by file id.
-fn gone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
-    if s.delete_mirror(file_id)?.is_none()
-        && let Some(node) = s.node_of_file(file_id)?
-    {
-        // Its place went with its row: the folders holding it are the ones concerned.
-        s.fan_out(node, NodeId::ROOT)?;
-    }
-    Ok(())
-}
-
-/// The mirror row of a live header (removed or not); `None` for tombstones and for files
-/// without a payload.
-pub(crate) fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
-    let RemoteBody::Live {
-        node,
-        content,
-        payload,
-    } = &header.body
-    else {
-        return None;
-    };
-    let payload = match header.kind {
-        NodeKind::Folder => None,
-        // `Remote`s refuse such rows.
-        NodeKind::File => Some(payload.as_ref()?),
-    };
-    let at = header.at();
-    let hash = payload.map(|p| p.hash);
-    let mut row = MirrorRow {
-        token: header.token.clone(),
-        changed_at: header.changed_at,
-        ..MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash)
-    };
-    // A content without its size (another client's) has the payload's.
-    if let (Some(file), Some(p), None) = (&mut row.file, payload, content.size) {
-        file.size = p.bytes;
-    }
-    Some(row)
-}
-
 #[cfg(test)]
 mod tests {
-    use hbsync_fileio::{HashAlgorithm, hash_bytes};
-    use hbsync_remote::PayloadInfo;
+    use hbsync_remote::RemoteBody;
     use hbsync_types::Uuid;
     use hbsync_types::schema::NodeContent;
-    use hbsync_types::{NodeId, RemoteFileId, VersionTag};
+    use hbsync_types::{NodeId, NodeKind, RemoteFileId, VersionTag};
 
     use super::*;
 
@@ -794,221 +641,6 @@ mod tests {
         remote.faults().unread_refs = true;
         pull(lock, &remote, 3, &mut None)?;
         assert_eq!(reads(&remote), (3, 6), "an unread row: whole");
-        Ok(())
-    }
-
-    #[test]
-    fn a_live_file_without_its_payload_is_no_delete() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let mut header = RemoteHeader {
-            file_id: RemoteFileId(Uuid::new_v4()),
-            version: VersionTag(Uuid::new_v4()),
-            parent: NodeId::ROOT,
-            kind: NodeKind::File,
-            body: RemoteBody::Live {
-                node: NodeId::new(),
-                content: NodeContent::file("f", 0, 1, false),
-                payload: Some(PayloadInfo {
-                    hash: hash_bytes(b"x", HashAlgorithm::Blake3),
-                    bytes: 1,
-                }),
-            },
-            removed_at: None,
-            changed_at: None,
-            token: None,
-        };
-        assert!(db.write(|s| apply(s, &header))?);
-        if let RemoteBody::Live { payload, .. } = &mut header.body {
-            *payload = None;
-        }
-        assert!(db.write(|s| apply(s, &header))?);
-        assert_eq!(
-            db.read(|s| s.mirror_count())?,
-            1,
-            "the mirror keeps the file"
-        );
-        Ok(())
-    }
-
-    /// Another client's file without `size` in its content has its payload's.
-    #[test]
-    fn a_file_without_a_size_has_its_payloads() {
-        let mut content = NodeContent::file("f", 0, 1, false);
-        content.size = None;
-        let header = RemoteHeader {
-            file_id: RemoteFileId(Uuid::new_v4()),
-            version: VersionTag(Uuid::new_v4()),
-            parent: NodeId::ROOT,
-            kind: NodeKind::File,
-            body: RemoteBody::Live {
-                node: NodeId::new(),
-                content,
-                payload: Some(PayloadInfo {
-                    hash: hash_bytes(b"xyz", HashAlgorithm::Blake3),
-                    bytes: 3,
-                }),
-            },
-            removed_at: None,
-            changed_at: None,
-            token: None,
-        };
-        let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
-        assert_eq!(size, Some(3));
-    }
-
-    /// The feed brings this device's own writes back: a version the mirror has is no change.
-    #[test]
-    fn a_known_version_marks_nothing() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let node = NodeId::new();
-        let header = |version: u128, removed_at: Option<i64>| RemoteHeader {
-            removed_at,
-            ..folder(1, version, node, NodeId::ROOT)
-        };
-        let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
-            db.write(|s| {
-                s.clear_dirty(node)?;
-                apply(s, h)?;
-                s.dirty_count()
-            })
-        };
-        for (version, removed_at) in [(1, None), (2, Some(9))] {
-            let h = header(version, removed_at);
-            assert_eq!(dirty_after(&mut db, &h)?, 1, "version {version} is news");
-            assert_eq!(
-                dirty_after(&mut db, &h)?,
-                0,
-                "version {version} again isn't"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn a_removal_leaves_the_tree_and_a_restore_returns() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let node = NodeId::new();
-        let live = |removed_at: Option<i64>| RemoteHeader {
-            version: VersionTag(Uuid::new_v4()),
-            removed_at,
-            ..folder(1, 0, node, NodeId::ROOT)
-        };
-        assert!(db.write(|s| apply(s, &live(None)))?);
-        assert!(!db.write(|s| apply(s, &live(Some(9))))?);
-        db.read(|s| {
-            assert_eq!(s.get_mirror(node)?, None);
-            let at = s.removed_by_node(node)?.and_then(|r| r.removed_at);
-            assert_eq!(at, Some(9));
-            Ok(())
-        })?;
-        assert!(db.write(|s| apply(s, &live(None)))?);
-        db.read(|s| {
-            assert!(s.get_mirror(node)?.is_some() && s.removed_by_node(node)?.is_none());
-            Ok(())
-        })
-    }
-
-    /// A folder's header at `version` (no token, no time): edit the fields a test needs.
-    fn folder(file_id: u128, version: u128, node: NodeId, parent: NodeId) -> RemoteHeader {
-        RemoteHeader {
-            file_id: RemoteFileId(Uuid::from_u128(file_id)),
-            version: VersionTag(Uuid::from_u128(version)),
-            parent,
-            kind: NodeKind::Folder,
-            body: RemoteBody::Live {
-                node,
-                content: NodeContent::folder("d"),
-                payload: None,
-            },
-            removed_at: None,
-            changed_at: None,
-            token: None,
-        }
-    }
-
-    /// A version the mirror has already, again, changes nothing; its echo takes the token (an
-    /// earlier login's may not open), and nothing needs reconciling. In Recently deleted too.
-    #[test]
-    fn a_known_version_takes_only_its_token() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let node = NodeId::new();
-        let without = folder(1, 1, node, NodeId::ROOT);
-        let token = |b: u8| Some(FileToken(vec![b; 16].into()));
-        let with = |b: u8| RemoteHeader {
-            token: token(b),
-            ..without.clone()
-        };
-        db.write(|s| {
-            apply(s, &without)?;
-            s.clear_dirty(node)
-        })?;
-        let held =
-            |db: &mut StateDb| db.read(|s| s.get_mirror(node).map(|m| m.and_then(|m| m.token)));
-        db.write(|s| apply(s, &with(0xAA)))?;
-        assert_eq!(held(&mut db)?, token(0xAA), "the token taken");
-        assert!(!db.read(|s| s.is_dirty(node))?);
-        // An earlier login's is replaced; none keeps the one there.
-        db.write(|s| apply(s, &with(0xEE)))?;
-        db.write(|s| apply(s, &without))?;
-        assert_eq!(held(&mut db)?, token(0xEE));
-
-        // In Recently deleted, the same; its time stays the one it has.
-        let removed = RemoteHeader {
-            version: VersionTag(Uuid::from_u128(2)),
-            removed_at: Some(5),
-            ..without.clone()
-        };
-        db.write(|s| {
-            apply(s, &removed)?;
-            s.clear_dirty(node)
-        })?;
-        let again = RemoteHeader {
-            removed_at: Some(9),
-            token: token(0xAA),
-            ..removed
-        };
-        db.write(|s| apply(s, &again))?;
-        let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
-        assert_eq!((back.row.token, back.removed_at), (token(0xAA), Some(5)));
-        assert!(!db.read(|s| s.is_dirty(node))?);
-        Ok(())
-    }
-
-    /// This device's own write has no server time until the feed brings it back, and the echo
-    /// records it only where it decides something: in a folder in Recently deleted.
-    #[test]
-    fn an_own_writes_time_is_kept_in_a_removed_folder_only() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let top = folder(1, 1, NodeId::new(), NodeId::ROOT);
-        let inner = folder(2, 2, NodeId::new(), top.node().expect("live"));
-        let leaf = folder(3, 3, NodeId::new(), inner.node().expect("live"));
-        let node = leaf.node().expect("live");
-        db.write(|s| {
-            [&top, &inner, &leaf]
-                .into_iter()
-                .try_for_each(|h| apply(s, h).map(drop))
-        })?;
-        let echo = RemoteHeader {
-            changed_at: Some(7),
-            ..leaf.clone()
-        };
-        let time = |db: &mut StateDb| {
-            db.read(|s| s.get_mirror(node).map(|m| m.and_then(|m| m.changed_at)))
-        };
-        db.write(|s| apply(s, &echo))?;
-        assert_eq!(time(&mut db)?, None, "nothing it decides");
-        let removed = RemoteHeader {
-            version: VersionTag(Uuid::from_u128(4)),
-            removed_at: Some(5),
-            ..top
-        };
-        db.write(|s| apply(s, &removed))?;
-        db.write(|s| apply(s, &echo))?;
-        assert_eq!(
-            time(&mut db)?,
-            Some(7),
-            "in a removed folder, two levels up"
-        );
         Ok(())
     }
 }

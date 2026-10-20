@@ -2,6 +2,7 @@
 //! what the remote writes of `remote.rs` did).
 
 use super::*;
+use crate::mirror;
 
 impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
@@ -300,7 +301,7 @@ impl Executor<'_> {
                     e @ (RemoteError::NotFound | RemoteError::Deleted),
                 )),
             ) if let Some(file_id) = job.file_id() => {
-                match crate::feed::gone_after(self.remote, &e, file_id) {
+                match mirror::gone_after(self.remote, &e, file_id) {
                     Ok(true) => match (ctx, job) {
                         (
                             Ctx::Meta {
@@ -311,8 +312,7 @@ impl Executor<'_> {
                             Job::Meta { meta, .. },
                         ) => self.commit_meta(meta, hash, after, None),
                         _ => {
-                            self.db
-                                .write(|s| crate::feed::apply_tombstone(s, file_id))?;
+                            self.db.write(|s| mirror::forget(s, file_id, None))?;
                             Ok(Outcome::stale("deleted for good remotely"))
                         }
                     },
@@ -330,23 +330,13 @@ impl Executor<'_> {
             }
             (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
                 let node = meta.node;
-                let row = MirrorRow::written(
-                    written,
-                    meta.node,
-                    meta.parent,
-                    meta.kind,
-                    &meta.content,
-                    Some(hash),
-                );
+                let row = mirror::written(&meta, Some(hash), written);
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 let how = Settle {
                     same_bytes: true,
                     ..Settle::node(node)
                 };
-                self.finish(&[how], |s| {
-                    s.delete_removed(node)?;
-                    s.put_mirror(&row)
-                })
+                self.finish(&[how], |s| mirror::live(s, &row))
             }
             _ => Ok(Outcome::unsyncable(
                 "a transfer result for another operation (a fault of this client)",
