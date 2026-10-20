@@ -432,7 +432,7 @@ there is gone for good only once it is not there again a minute on (sync semanti
   **[tried]** on frodo at fe067124b for a create, a new version, a removal and a restore by
   PATCH, the archival-status batch and a delete: `write_answers_carry_the_feeds_time`). The
   client records a version's and a removal's time from it (`drive::HomebaseRemote`'s
-  `Target::changed_at`) and reads no feed after its writes. A soft delete's gives the
+  `Written::changed_at`) and reads no feed after its writes. A soft delete's gives the
   tombstone's time, which the client records as the time the file went; the tombstone's
   version still comes with the feed's row (`soft-delete-batch`, above). Before #1971 the answers had no time (`payloads[].lastModified` is
   the payload's, not the header's `updated`).

@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
 use hbsync_remote::{Answers, ErrorClass, NodeMeta, Pace, Remote, RemoteError, Upload};
-use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target};
+use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target, Written};
 
 use crate::policy::{InRun, policy};
 
@@ -231,7 +231,7 @@ pub enum JobResult {
         local_hash: ContentHash,
     },
     /// An upload or a [`Job::Meta`] landed.
-    Written(Target),
+    Written(Written),
     Failed(JobError),
 }
 
@@ -428,7 +428,7 @@ fn write(
     meta: &NodeMeta,
     target: Option<&Target>,
     upload: Option<Upload<'_>>,
-) -> Result<Target, RemoteError> {
+) -> Result<Written, RemoteError> {
     match target {
         None => remote.create(meta, upload),
         Some(t) => remote.update(t, meta, upload),

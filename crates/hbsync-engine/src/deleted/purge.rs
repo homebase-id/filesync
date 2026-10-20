@@ -210,7 +210,7 @@ impl AccountOps<'_> {
         let mut failed = None;
         for f in folders.iter().filter(|f| first.contains(&f.row.node)) {
             match self.remote.header(f.row.file_id) {
-                Ok(h) if h.version == f.row.version && h.removed_at.is_some() => {
+                Ok(h) if h.version == f.row.version && h.removed => {
                     removed.insert(f.row.node);
                 }
                 Ok(_) | Err(RemoteError::NotFound | RemoteError::Deleted) => self.behind = true,
@@ -248,12 +248,7 @@ impl AccountOps<'_> {
                 let mut done = Vec::new();
                 for (m, answer) in part.iter().zip(answers) {
                     match answer {
-                        Ok(w) => done.push(MirrorRow {
-                            version: w.at.version,
-                            token: w.token,
-                            changed_at: w.changed_at,
-                            ..(*m).clone()
-                        }),
+                        Ok(w) => done.push(m.rewritten(w)),
                         // Written since, or gone; or unanswered, so it may have landed: the feed
                         // tells what it is now.
                         Err(_) if stop.is_some() => self.behind = true,
@@ -339,12 +334,7 @@ impl AccountOps<'_> {
                 .iter()
                 .zip(answers)
                 .filter_map(|((m, _), answer)| match answer {
-                    Ok(w) => Some(MirrorRow {
-                        version: w.at.version,
-                        token: w.token,
-                        changed_at: w.changed_at,
-                        ..m.clone()
-                    }),
+                    Ok(w) => Some(m.rewritten(w)),
                     Err(_) => {
                         self.behind = true;
                         None

@@ -144,7 +144,7 @@ fn a_change_on_the_drive_is_announced() -> R {
         let (inside, _) = bench.folder("inside")?;
 
         // Another client's write: announced.
-        let theirs = other.create(&folder("theirs", inside.node), None)?.at;
+        let theirs = other.create(&folder("theirs", inside.node), None)?.at();
         bench.track(theirs.file_id);
         let is = |at: hbsync_types::RemoteRef| move |e: &Event| matches!(e, Event::Changed(Some(r)) if r.at() == at && !r.deleted);
         let took = wait(&quiet_rx, Duration::from_secs(15), &is(theirs))?
@@ -301,11 +301,11 @@ fn throughput() -> R {
                 pace: None,
             }),
         )?;
-        bench.track(at.at.file_id);
+        bench.track(at.at().file_id);
         rate(&format!("upload {mb} MiB"), size, t);
         let t = Instant::now();
         let mut sink = Hashing(Hasher::new(alg));
-        remote.read(at.at.file_id, Some(0..size), &mut sink)?;
+        remote.read(at.at().file_id, Some(0..size), &mut sink)?;
         assert_eq!(sink.0.finalize(), hash);
         rate(&format!("download {mb} MiB"), size, t);
 
@@ -369,12 +369,11 @@ fn a_token_that_doesnt_open_falls_back_to_the_header() -> R {
         let stale = Target {
             at,
             token: Some(FileToken(vec![0x5a; 64].into())),
-            changed_at: None,
         };
         let renamed = with(&meta, NodeContent::file("g.txt", 1, 3, false));
         let written = remote.update(&stale, &renamed, None)?;
         let again = with(&meta, NodeContent::file("h.txt", 1, 3, false));
-        remote.update(&written, &again, None)?;
+        remote.update(&written.target, &again, None)?;
         match remote.header(at.file_id)?.body {
             RemoteBody::Live { content, .. } => assert_eq!(content.name, "h.txt"),
             RemoteBody::Deleted => panic!("deleted"),
@@ -791,7 +790,7 @@ impl Remote for Counted {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.inner.set_removed(files, removed)
     }
 
@@ -799,7 +798,7 @@ impl Remote for Counted {
         &self,
         node: &hbsync_remote::NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.inner.create(node, payload)
     }
 
@@ -808,7 +807,7 @@ impl Remote for Counted {
         target: &hbsync_types::Target,
         meta: &hbsync_remote::NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.inner.update(target, meta, payload)
     }
 
@@ -856,17 +855,17 @@ fn write_answers_carry_the_feeds_time() -> R {
                     name.as_bytes(),
                 ))),
             )?;
-            bench.track(written.at.file_id);
+            bench.track(written.at().file_id);
             Ok((meta, written))
         };
         // (what, file, version, the answer's updated)
         let mut answers = Vec::new();
         let (_, created) = made("created")?;
-        answers.push(("create (POST)", created.at, created.changed_at));
+        answers.push(("create (POST)", created.at(), created.changed_at));
         let (meta, w) = made("edited")?;
         let data = b"a new version";
         let edited = remote.update(
-            &w,
+            &w.target,
             &hbsync_remote::contract::with(
                 &meta,
                 hbsync_types::schema::NodeContent::file("edited", 1, data.len() as u64, false),
@@ -875,19 +874,19 @@ fn write_answers_carry_the_feeds_time() -> R {
                 &data[..],
             ))),
         )?;
-        answers.push(("version (PATCH)", edited.at, edited.changed_at));
+        answers.push(("version (PATCH)", edited.at(), edited.changed_at));
         let (meta, w) = made("removed")?;
-        let gone = remote.update(&w, &removed(&meta), None)?;
-        answers.push(("removal (PATCH)", gone.at, gone.changed_at));
+        let gone = remote.update(&w.target, &removed(&meta), None)?;
+        answers.push(("removal (PATCH)", gone.at(), gone.changed_at));
         let (meta, w) = made("restored")?;
-        let gone = remote.update(&w, &removed(&meta), None)?;
-        let back = remote.update(&gone, &meta, None)?;
-        answers.push(("restore (PATCH)", back.at, back.changed_at));
+        let gone = remote.update(&w.target, &removed(&meta), None)?;
+        let back = remote.update(&gone.target, &meta, None)?;
+        answers.push(("restore (PATCH)", back.at(), back.changed_at));
         let (_, w) = made("archived")?;
         let batch: serde_json::Value = remote.client().post(
             &format!("{}/update-archival-status-batch", remote.files()),
             &serde_json::json!({"archivalStatus": 2, "files": [
-                {"fileId": w.at.file_id.0, "versionTag": w.at.version.0}
+                {"fileId": w.at().file_id.0, "versionTag": w.at().version.0}
             ]}),
         )?;
         let r = &batch["results"][0];
@@ -901,18 +900,18 @@ fn write_answers_carry_the_feeds_time() -> R {
         answers.push((
             "archival-status batch",
             hbsync_types::RemoteRef {
-                file_id: w.at.file_id,
+                file_id: w.at().file_id,
                 version,
             },
             r["updated"].as_i64(),
         ));
         let (_, w) = made("deleted")?;
-        let deleted = remote.delete(&doomed(&[w.at]))?.single()?;
-        let tomb = remote.header(w.at.file_id)?;
+        let deleted = remote.delete(&doomed(&[w.at()]))?.single()?;
+        let tomb = remote.header(w.at().file_id)?;
         answers.push((
             "soft-delete batch",
             hbsync_types::RemoteRef {
-                file_id: w.at.file_id,
+                file_id: w.at().file_id,
                 version: tomb.version,
             },
             deleted,
@@ -1011,12 +1010,12 @@ fn another_clients_write_is_in_the_feed_at_once() -> R {
                 page.refs.is_empty() && !page.has_more
             };
             let w = other.create(&folder(&format!("f{i}"), dir.node), None)?;
-            bench.track(w.at.file_id);
+            bench.track(w.at().file_id);
             let (written, answered_ms) = (Instant::now(), hbsync_types::unix_now_ms());
             let mut misses = Vec::new();
             loop {
                 let page = remote.change_refs(Some(&cursor), 100)?;
-                if let Some(r) = page.refs.iter().find(|r| r.file_id == w.at.file_id) {
+                if let Some(r) = page.refs.iter().find(|r| r.file_id == w.at().file_id) {
                     if !misses.is_empty() {
                         late.push(format!(
                             "round {i} primed={primed}: missing for {:?} ({} reads: {misses:?}); \
@@ -1103,7 +1102,7 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
                 let w = other
                     .create(&folder(&format!("f{i}"), dir.node), None)
                     .map_err(|e| e.to_string())?;
-                bench.track(w.at.file_id);
+                bench.track(w.at().file_id);
                 stop.store(true, Ordering::Relaxed);
                 let _ = reader.join();
                 // Past the hold-back window: a row not shown now is hidden, not held back.
@@ -1119,7 +1118,7 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
                     };
                     let mut p = read(&cursor)?;
                     let seen = |p: &hbsync_remote::RefsPage| {
-                        p.refs.iter().any(|r| r.file_id == w.at.file_id)
+                        p.refs.iter().any(|r| r.file_id == w.at().file_id)
                     };
                     let (first, more) = (seen(&p), p.has_more);
                     let mut found = first;
@@ -1199,7 +1198,9 @@ fn hard_purge() -> R {
             let meta = file(&format!("f{i:05}.txt"), folder.node, data.as_bytes());
             let at = bench.create(&meta, Some(data.as_bytes()))?;
             let gone = remote.update(&bench.target(at), &removed(&meta), None)?;
-            made.lock().unwrap_or_else(|e| e.into_inner()).push(gone.at);
+            made.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(gone.at());
             Ok::<_, hbsync_remote::RemoteError>(())
         })?;
         let made: Vec<RemoteRef> = made.into_inner().unwrap_or_else(|e| e.into_inner());

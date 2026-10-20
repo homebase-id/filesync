@@ -1120,7 +1120,7 @@ impl Remote for ReadHook {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.inner.set_removed(files, removed)
     }
 
@@ -1128,7 +1128,7 @@ impl Remote for ReadHook {
         &self,
         node: &NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<Target> {
+    ) -> hbsync_remote::Result<Written> {
         self.inner.create(node, payload)
     }
 
@@ -1137,7 +1137,7 @@ impl Remote for ReadHook {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<Target> {
+    ) -> hbsync_remote::Result<Written> {
         self.inner.update(target, meta, payload)
     }
 

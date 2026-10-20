@@ -32,7 +32,7 @@ use std::time::Duration;
 use hbsync_fileio::hash_bytes;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    Doomed, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target, Uuid, VersionTag,
+    Doomed, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target, Uuid, VersionTag, Written,
 };
 
 use crate::{
@@ -143,11 +143,6 @@ impl FakeServer {
         Uuid::from_u128(u128::from(self.next_id) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
     }
 
-    /// When a write leaves `meta` removed: now, as Homebase's `updated` is the write's time.
-    fn removed_at(&self, meta: &NodeMeta) -> Option<i64> {
-        meta.removed.then_some(self.clock_ms)
-    }
-
     /// A write of `file_id` by `writer` (`None`: not through a client) landed: its new place
     /// in the feed, and its announcement.
     fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
@@ -231,7 +226,7 @@ impl FakeServer {
     // ---- server operations (the HTTP API) ----
 
     pub fn create(&mut self, node: &NodeMeta, upload: Option<Upload<'_>>) -> Result<RemoteRef> {
-        self.create_by(None, node, upload).map(|w| w.at)
+        self.create_by(None, node, upload).map(|w| w.at())
     }
 
     /// A create by `writer`, answered as Homebase answers it: the file as written, with its
@@ -241,7 +236,7 @@ impl FakeServer {
         writer: Option<ClientId>,
         node: &NodeMeta,
         upload: Option<Upload<'_>>,
-    ) -> Result<Target> {
+    ) -> Result<Written> {
         if self.by_node.contains_key(&node.node) {
             return Err(RemoteError::AlreadyExists);
         }
@@ -260,7 +255,7 @@ impl FakeServer {
                 content: node.content.clone(),
                 payload: payload.as_ref().map(|(_, info)| *info),
             },
-            removed_at: self.removed_at(node),
+            removed: node.removed,
             changed_at: Some(self.clock_ms),
             token: Some(token_of(file_id)),
         };
@@ -288,7 +283,7 @@ impl FakeServer {
         upload: Option<Upload<'_>>,
     ) -> Result<RemoteRef> {
         self.update_by(None, file_id, expected, meta, upload)
-            .map(|w| w.at)
+            .map(|w| w.at())
     }
 
     /// An update by `writer`, answered as [`FakeServer::create_by`] is.
@@ -299,7 +294,7 @@ impl FakeServer {
         expected: VersionTag,
         meta: &NodeMeta,
         upload: Option<Upload<'_>>,
-    ) -> Result<Target> {
+    ) -> Result<Written> {
         let current = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
         // As Homebase (`AssertActiveForUpdate`): a tombstone answers so before the version is
         // looked at.
@@ -323,7 +318,6 @@ impl FakeServer {
                 meta.node, meta.kind
             )));
         }
-        let removed_at = self.removed_at(meta);
         // Without an upload the payload stays.
         let new_payload = match upload {
             Some(upload) => self.receive(kind, Some(upload))?,
@@ -333,7 +327,7 @@ impl FakeServer {
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.parent = meta.parent;
-        f.header.removed_at = removed_at;
+        f.header.removed = meta.removed;
         f.header.changed_at = Some(self.clock_ms);
         let payload = match new_payload {
             Some((bytes, info)) => {
@@ -380,7 +374,7 @@ impl FakeServer {
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
-        f.header.removed_at = None;
+        f.header.removed = false;
         f.header.changed_at = Some(now);
         f.header.token = None;
         f.bytes = None;
@@ -398,7 +392,7 @@ impl FakeServer {
         file_id: RemoteFileId,
         expected: VersionTag,
         removed: bool,
-    ) -> Result<Target> {
+    ) -> Result<Written> {
         let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
         // As Homebase's archival-status batch: a tombstone, whatever the version asked.
         if f.header.body == RemoteBody::Deleted {
@@ -407,13 +401,15 @@ impl FakeServer {
         if f.header.version != expected {
             return Err(RemoteError::VersionMismatch);
         }
-        if f.header.removed_at.is_some() == removed {
-            return Ok(Target {
-                at: RemoteRef {
-                    file_id,
-                    version: expected,
+        if f.header.removed == removed {
+            return Ok(Written {
+                target: Target {
+                    at: RemoteRef {
+                        file_id,
+                        version: expected,
+                    },
+                    token: Some(token_of(file_id)),
                 },
-                token: Some(token_of(file_id)),
                 changed_at: f.header.changed_at,
             });
         }
@@ -421,7 +417,7 @@ impl FakeServer {
         let now = self.clock_ms;
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
-        f.header.removed_at = removed.then_some(now);
+        f.header.removed = removed;
         f.header.changed_at = Some(now);
         self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, now))
@@ -491,9 +487,7 @@ impl FakeServer {
     pub fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> HashSet<NodeId> {
         self.files
             .values()
-            .filter(|f| {
-                !f.header.is_deleted() && holds.counts(f.header.at(), f.header.removed_at.is_some())
-            })
+            .filter(|f| !f.header.is_deleted() && holds.counts(f.header.at(), f.header.removed))
             .map(|f| f.header.parent)
             .filter(|p| folders.contains(p))
             .collect()
@@ -612,15 +606,12 @@ impl FakeServer {
         self.files
             .values()
             .map(|f| &f.header)
-            .filter(|h| !h.is_deleted() && h.removed_at.is_none())
+            .filter(|h| !h.is_deleted() && !h.removed)
     }
 
     /// The files in Recently deleted, for test assertions.
     pub fn removed(&self) -> impl Iterator<Item = &RemoteHeader> {
-        self.files
-            .values()
-            .map(|f| &f.header)
-            .filter(|h| h.removed_at.is_some())
+        self.files.values().map(|f| &f.header).filter(|h| h.removed)
     }
 
     pub fn file_id_of(&self, node: NodeId) -> Option<RemoteFileId> {
@@ -859,10 +850,12 @@ impl FakeRemote {
 }
 
 /// The file written at `at` at server time `changed_at`, with its token.
-fn written(at: RemoteRef, changed_at: i64) -> Target {
-    Target {
-        at,
-        token: Some(token_of(at.file_id)),
+fn written(at: RemoteRef, changed_at: i64) -> Written {
+    Written {
+        target: Target {
+            at,
+            token: Some(token_of(at.file_id)),
+        },
         changed_at: Some(changed_at),
     }
 }
@@ -925,7 +918,7 @@ impl Remote for FakeRemote {
         Ok(self.server().holding(folders, holds))
     }
 
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
         self.gate()?;
         self.gate_name(&node.content.name)?;
         // Receive the bytes before taking the server lock, as a real server handles several
@@ -943,7 +936,7 @@ impl Remote for FakeRemote {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<Target> {
+    ) -> Result<Written> {
         let file_id = target.at.file_id;
         // On Homebase another file's token would write content no one can read.
         match &target.token {
@@ -997,7 +990,7 @@ impl Remote for FakeRemote {
     /// rest), is the request's. A write failure injected for a name
     /// ([`Faults::fail_writes_named`]) fails that file alone, unwritten: a lever of the fake's
     /// (Homebase answers a file only with a client error) to hold one file back.
-    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>> {
         self.gate()?;
         batch_of(files.iter().map(|t| t.at.file_id))?;
         let names: Vec<Option<String>> = {
@@ -1117,7 +1110,7 @@ mod tests {
         let mine = a.create(&folder("mine"), None)?;
         let theirs = b.create(&folder("theirs"), None)?;
         let copied = copy.create(&folder("copied"), None)?;
-        a.delete(&crate::contract::doomed(&[mine.at]))?.single()?;
+        a.delete(&crate::contract::doomed(&[mine.at()]))?.single()?;
         let seeded = server
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1127,16 +1120,16 @@ mod tests {
         };
         assert_eq!(
             heard(&quiet),
-            [theirs.at.file_id, seeded.file_id],
+            [theirs.at().file_id, seeded.file_id],
             "a's and its copy's writes left out"
         );
         assert_eq!(
             heard(&all),
             [
-                mine.at.file_id,
-                theirs.at.file_id,
-                copied.at.file_id,
-                mine.at.file_id,
+                mine.at().file_id,
+                theirs.at().file_id,
+                copied.at().file_id,
+                mine.at().file_id,
                 seeded.file_id
             ]
         );
@@ -1144,7 +1137,7 @@ mod tests {
         let header = server
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .header(mine.at.file_id)?;
+            .header(mine.at().file_id)?;
         assert!(ChangeRef::of(&header).deleted);
         Ok(())
     }

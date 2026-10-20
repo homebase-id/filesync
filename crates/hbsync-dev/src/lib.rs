@@ -406,7 +406,6 @@ mod tests {
                     version: header.version,
                 },
                 token: header.token.clone(),
-                changed_at: None,
             },
             &NodeMeta {
                 removed: true,
@@ -441,18 +440,18 @@ mod tests {
         for name in ["old", "a", "b", "kept", "removed"] {
             made.push(remote.create(&folder(name, NodeId::ROOT), None)?);
         }
-        remote.delete(&doomed(&[made[0].at]))?.into_answers()?;
+        remote.delete(&doomed(&[made[0].at()]))?.into_answers()?;
         let from = feed_end(&remote, None)?;
         remote
-            .delete(&doomed(&[made[1].at, made[2].at]))?
+            .delete(&doomed(&[made[1].at(), made[2].at()]))?
             .into_answers()?;
         remote
-            .set_removed(&[made[4].clone()], true)?
+            .set_removed(&[made[4].target.clone()], true)?
             .into_answers()?;
 
         let found = super::tombstones(&remote, Some(&from))?;
         let ids: HashSet<_> = found.iter().map(|t| t.at().file_id).collect();
-        assert_eq!(ids, made[1..3].iter().map(|t| t.at.file_id).collect());
+        assert_eq!(ids, made[1..3].iter().map(|t| t.at().file_id).collect());
         assert_eq!(
             super::tombstones(&remote, None)?.len(),
             3,

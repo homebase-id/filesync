@@ -31,7 +31,7 @@ use hbsync_state::{
 };
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target};
+use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target, Written};
 
 use crate::activity::{self, Counters};
 use crate::folder::FolderCtx;

@@ -216,7 +216,7 @@ impl FileRef {
             version: VersionTag(self.version_tag),
             deleted: times.deleted,
             parent: self.group_id.map(NodeId).filter(|_| !times.deleted),
-            removed_at: times.removed_at,
+            removed: times.removed,
             changed_at: times.changed_at,
         }
     }
@@ -226,24 +226,24 @@ impl FileRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Times {
     pub deleted: bool,
-    /// In Recently deleted since: the status says whether it's removed, the header's `updated`
-    /// when, the server's time of the last write (odin-core's `record.modified`, **[verified]**
-    /// `FileMetadata.cs`). Nobody writes to a removed node (node schema: also no sharing,
-    /// reactions or local app data, which move it too).
-    pub removed_at: Option<i64>,
-    /// The server's time of this version, a tombstone's too (when it may be deleted hard).
+    /// In Recently deleted: the status says whether it's removed, the header's `updated`
+    /// ([`Times::changed_at`]) when, the server's time of the last write (odin-core's
+    /// `record.modified`, **[verified]** `FileMetadata.cs`). Nobody writes to a removed node
+    /// (node schema: also no sharing, reactions or local app data, which move it too).
+    pub removed: bool,
+    /// The server's time of this version, a tombstone's too (when it may be deleted hard), a
+    /// removed node's removal.
     pub changed_at: Option<i64>,
 }
 
 impl Times {
-    /// A row whose `updated` is unknown has no time: removed, it counts as removed now
-    /// (`removal_time(None)`, the newest: never old enough to go without a trace).
+    /// A row whose `updated` is unknown has no time: removed, its removal's time is unknown (the
+    /// newest when compared: never old enough to go without a trace).
     pub(crate) fn of(file_state: &str, archival_status: i32, updated: Option<i64>) -> Times {
         let deleted = file_state == "deleted";
         Times {
             deleted,
-            removed_at: (!deleted && archival_status == ARCHIVAL_REMOVED)
-                .then(|| updated.unwrap_or(hbsync_types::removal_time(None))),
+            removed: !deleted && archival_status == ARCHIVAL_REMOVED,
             changed_at: updated,
         }
     }
@@ -377,7 +377,7 @@ pub(crate) fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<Remot
         parent,
         kind,
         body,
-        removed_at: times.removed_at,
+        removed: times.removed,
         changed_at: times.changed_at,
         token,
     })
@@ -657,7 +657,7 @@ mod tests {
 
         // An older writer's removal: the time is the header's, its `rm` is dropped.
         let removed = to_remote(as_stored(fixture("removed-node.json"))?, &SS)?;
-        assert_eq!(removed.removed_at, Some(1_759_920_005_000));
+        assert_eq!(removed.removed_at(), Some(1_759_920_005_000));
         assert!(removed.state().is_none());
         let RemoteBody::Live { content, .. } = &removed.body else {
             return Err("not live".into());
@@ -805,12 +805,12 @@ mod tests {
         let mut other = fixture("file-node.json");
         other.file_metadata.app_data.archival_status = ARCHIVAL_REMOVED;
         let header = to_remote(as_stored(other)?, &SS)?;
-        assert_eq!(header.removed_at, Some(1_759_920_001_000));
+        assert_eq!(header.removed_at(), Some(1_759_920_001_000));
         // A restore by a writer that kept `rm`: the status wins.
         let mut restored = fixture("removed-node.json");
         restored.file_metadata.app_data.archival_status = 0;
         let header = to_remote(as_stored(restored)?, &SS)?;
-        assert!(header.removed_at.is_none() && header.state().is_some());
+        assert!(!header.removed && header.state().is_some());
         Ok(())
     }
 
@@ -839,11 +839,11 @@ mod tests {
             .map(|row| serde_json::from_str::<FileRef>(row.get()).map(|r| r.to_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
-            (refs[0].deleted, refs[0].removed_at, refs[0].changed_at),
+            (refs[0].deleted, refs[0].removed_at(), refs[0].changed_at),
             (false, Some(9), Some(9))
         );
         assert_eq!(
-            (refs[1].deleted, refs[1].removed_at, refs[1].changed_at),
+            (refs[1].deleted, refs[1].removed_at(), refs[1].changed_at),
             (true, None, Some(10)),
             "a tombstone's time: when it may go hard"
         );
@@ -853,10 +853,7 @@ mod tests {
                 "archivalStatus": 2, "versionTag": "22222222-2222-2222-2222-222222222222"}"#,
         )?;
         let unknown = unknown.to_ref();
-        assert_eq!(
-            (unknown.removed_at, unknown.changed_at),
-            (Some(i64::MAX), None)
-        );
+        assert_eq!((unknown.removed, unknown.changed_at), (true, None));
         // A server without #1967 answers headers: no refs, not an empty page.
         let old: QueryBatchResponse =
             serde_json::from_str(r#"{"cursorState": "c", "queryTime": 1, "searchResults": []}"#)?;

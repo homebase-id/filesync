@@ -16,7 +16,9 @@ use hbsync_remote::{
     RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
-use hbsync_types::{ContentHash, Doomed, NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
+use hbsync_types::{
+    ContentHash, Doomed, NodeId, RemoteFileId, RemoteRef, Target, VersionTag, Written,
+};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -131,19 +133,21 @@ struct ArchivalSet {
 
 /// One file's answer to a removal or restore of `asked`: the file as written, its token kept
 /// (its key didn't change).
-fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Target> {
+fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Written> {
     if let Some(code) = &answer.error_code {
         return Err(refused("archival status", code));
     }
     let version = answer.new_version_tag.ok_or_else(|| {
         RemoteError::Fatal("update-archival-status-batch answered no version".into())
     })?;
-    Ok(Target {
-        at: RemoteRef {
-            file_id: asked.at.file_id,
-            version: VersionTag(version),
+    Ok(Written {
+        target: Target {
+            at: RemoteRef {
+                file_id: asked.at.file_id,
+                version: VersionTag(version),
+            },
+            token: asked.token.clone(),
         },
-        token: asked.token.clone(),
         changed_at: answer.updated,
     })
 }
@@ -205,7 +209,7 @@ impl HomebaseRemote {
         target: Option<&Target>,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<Target> {
+    ) -> Result<Written> {
         let at = target.map(|t| t.at);
         let look_first = payload.as_ref().is_some_and(|p| p.size >= LOOK_FIRST);
         let key = match target {
@@ -289,12 +293,14 @@ impl HomebaseRemote {
             .client
             .upload(method, &path, Multipart::new(boundary, parts))
             .map_err(remote_error)?;
-        Ok(Target {
-            at: RemoteRef {
-                file_id: RemoteFileId(file_id),
-                version: VersionTag(new_version_tag),
+        Ok(Written {
+            target: Target {
+                at: RemoteRef {
+                    file_id: RemoteFileId(file_id),
+                    version: VersionTag(new_version_tag),
+                },
+                token: Some(key.token(self.client.key())),
             },
-            token: Some(key.token(self.client.key())),
             changed_at: updated,
         })
     }
@@ -554,7 +560,7 @@ impl Remote for HomebaseRemote {
         std::time::Duration::from_millis(1100)
     }
 
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
         self.write(None, node, payload)
     }
 
@@ -563,7 +569,7 @@ impl Remote for HomebaseRemote {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<Target> {
+    ) -> Result<Written> {
         self.write(Some(target), meta, payload)
     }
 
@@ -606,7 +612,7 @@ impl Remote for HomebaseRemote {
     /// One request per [`BATCH_FILES`] files (`update-archival-status-batch`, odin-core
     /// #1964): only `archivalStatus` changes (2 removed, 0 back), each file only at its version,
     /// one after another in the order asked; one file's answer never stops the others.
-    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>> {
         Answers::in_batches(files, BATCH_FILES, |batch| {
             let mut body = versioned(batch.iter().map(|t| t.at));
             body["archivalStatus"] = json!(if removed { ARCHIVAL_REMOVED } else { 0 });
@@ -928,7 +934,6 @@ mod tests {
                     version: VersionTag(Uuid::new_v4()),
                 },
                 token: Some(hbsync_types::FileToken(Box::new([7]))),
-                changed_at: None,
             })
             .collect();
         let new = Uuid::new_v4();
@@ -949,16 +954,16 @@ mod tests {
         )?;
         let shifted = ids(&asked[..3]).into_iter();
         assert!(same_files("batch", &answer.results[1..], |a| a.file_id, shifted).is_err());
-        let got: Vec<Result<Target>> = answer
+        let got: Vec<Result<Written>> = answer
             .results
             .iter()
             .zip(&asked)
             .map(|(a, t)| archival_set(a, t))
             .collect();
         let first = got[0].as_ref().map_err(|e| e.to_string())?;
-        assert_eq!(first.at.version, VersionTag(new));
+        assert_eq!(first.at().version, VersionTag(new));
         assert_eq!(first.changed_at, Some(1_760_000_000_123));
-        assert_eq!(first.token, asked[0].token, "the key stays");
+        assert_eq!(first.target.token, asked[0].token, "the key stays");
         assert!(matches!(got[1], Err(RemoteError::VersionMismatch)));
         assert!(matches!(got[2], Err(RemoteError::Deleted)));
         assert!(matches!(got[3], Err(RemoteError::Fatal(_))));

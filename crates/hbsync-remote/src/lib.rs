@@ -15,7 +15,7 @@ pub use hbsync_types::ErrorClass;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
     ContentHash, Doomed, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId,
-    RemoteRef, Target, VersionTag,
+    RemoteRef, Target, VersionTag, Written,
 };
 
 #[cfg(feature = "testkit")]
@@ -42,9 +42,10 @@ pub struct RemoteHeader {
     /// From `FileType`: kept on tombstones.
     pub kind: NodeKind,
     pub body: RemoteBody,
-    /// A live node in Recently deleted (`archivalStatus` 2 on Homebase): when it went there,
-    /// Unix ms, the server's time of the write that removed it (Homebase's `updated`).
-    pub removed_at: Option<i64>,
+    /// A live node in Recently deleted (`archivalStatus` 2 on Homebase): it went there at
+    /// [`RemoteHeader::changed_at`], the server's time of the write that removed it (nobody
+    /// writes to a removed node), if the remote said.
+    pub removed: bool,
     /// When this version was written, Unix ms, the server's time (Homebase's `updated`): what
     /// decides whether a node in a removed folder went with it (node schema, Recently deleted),
     /// and, for a tombstone, when it may be deleted hard. `None` where the remote doesn't say.
@@ -55,7 +56,7 @@ pub struct RemoteHeader {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemoteBody {
-    /// A node, in the tree or, with [`RemoteHeader::removed_at`], in Recently deleted.
+    /// A node, in the tree or, with [`RemoteHeader::removed`], in Recently deleted.
     Live {
         /// `UniqueId`.
         node: NodeId,
@@ -78,6 +79,11 @@ pub struct PayloadInfo {
 }
 
 impl RemoteHeader {
+    /// When it went to Recently deleted, if it is there and the remote said when.
+    pub fn removed_at(&self) -> Option<i64> {
+        self.changed_at.filter(|_| self.removed)
+    }
+
     /// This file at this version.
     pub fn at(&self) -> RemoteRef {
         RemoteRef {
@@ -105,7 +111,7 @@ impl RemoteHeader {
         else {
             return None;
         };
-        if self.removed_at.is_some() {
+        if self.removed {
             return None;
         }
         let state = match self.kind {
@@ -183,19 +189,24 @@ pub struct ChangeRef {
     /// As in [`RemoteHeader`]; `None` for a tombstone.
     pub parent: Option<NodeId>,
     /// As in [`RemoteHeader`].
-    pub removed_at: Option<i64>,
+    pub removed: bool,
     /// As in [`RemoteHeader`].
     pub changed_at: Option<i64>,
 }
 
 impl ChangeRef {
+    /// As [`RemoteHeader::removed_at`].
+    pub fn removed_at(&self) -> Option<i64> {
+        self.changed_at.filter(|_| self.removed)
+    }
+
     pub fn of(header: &RemoteHeader) -> ChangeRef {
         ChangeRef {
             file_id: header.file_id,
             version: header.version,
             deleted: header.is_deleted(),
             parent: (!header.is_deleted()).then_some(header.parent),
-            removed_at: header.removed_at,
+            removed: header.removed,
             changed_at: header.changed_at,
         }
     }
@@ -205,7 +216,7 @@ impl ChangeRef {
         ChangeRef {
             deleted: true,
             parent: None,
-            removed_at: None,
+            removed: false,
             changed_at: None,
             ..self
         }
@@ -248,7 +259,7 @@ impl RefsPage {
                         version: at.version,
                         deleted: false,
                         parent: r.parent,
-                        removed_at: None,
+                        removed: false,
                         changed_at: None,
                     })
                 }))
@@ -616,7 +627,7 @@ pub trait Remote: Send + Sync {
     /// Creates a node. Fails with [`RemoteError::AlreadyExists`] if a live file already has
     /// this node id (a retry of a create that landed). Returns the file as written, with the
     /// token its header will give for this version.
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target>;
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written>;
 
     /// Rewrites the header (parent, content and removal; node id and kind stay what they are)
     /// and, with a payload, replaces the bytes, if the file is still at `target`'s version. Its
@@ -627,7 +638,7 @@ pub trait Remote: Send + Sync {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<Target>;
+    ) -> Result<Written>;
 
     /// Deletes (tombstones) files, each only if still at its version (a [`Doomed`] file: one
     /// recorded in Recently deleted or as a tombstone): each stays in the feed as
@@ -647,7 +658,7 @@ pub trait Remote: Send + Sync {
     /// file as written (its token kept) with the server's time of the write. A file already so
     /// is left as it is, its version and time too. An outer error stopped it before any file
     /// was answered.
-    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>>;
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>>;
 
     /// Streams the payload (or `start..end` of it) into `sink`. Returns the bytes written: fewer
     /// than asked when the range runs past the payload's end.
@@ -686,7 +697,7 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         (**self).hold_back()
     }
 
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Target> {
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
         (**self).create(node, payload)
     }
 
@@ -695,7 +706,7 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> Result<Target> {
+    ) -> Result<Written> {
         (**self).update(target, meta, payload)
     }
 
@@ -707,7 +718,7 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         (**self).delete_for_good(files)
     }
 
-    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>> {
         (**self).set_removed(files, removed)
     }
 

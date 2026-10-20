@@ -259,16 +259,20 @@ impl Harness {
                 .create(meta, Some(upload(&mut Cursor::new(d))))?,
             None => self.remote(by).create(meta, None)?,
         };
-        self.logged(by, (written.at.file_id, written.at.version), Route::Create);
-        lock(&self.created).push(written.at.file_id);
+        self.logged(
+            by,
+            (written.at().file_id, written.at().version),
+            Route::Create,
+        );
+        lock(&self.created).push(written.at().file_id);
         lock(&self.docs).insert(
             meta.node,
             Doc {
                 meta: meta.clone(),
-                target: written.clone(),
+                target: written.target.clone(),
             },
         );
-        Ok(written)
+        Ok(written.target)
     }
 
     fn doc(&self, node: NodeId) -> Res<Doc> {
@@ -301,15 +305,15 @@ impl Harness {
             };
             match result {
                 Ok(written) => {
-                    self.logged(by, (written.at.file_id, written.at.version), route);
+                    self.logged(by, (written.at().file_id, written.at().version), route);
                     lock(&self.docs).insert(
                         node,
                         Doc {
                             meta: meta.clone(),
-                            target: written.clone(),
+                            target: written.target.clone(),
                         },
                     );
-                    return Ok(written);
+                    return Ok(written.target);
                 }
                 Err(RemoteError::VersionMismatch) if attempt + 1 < TRIES => {
                     self.conflicts.fetch_add(1, Ordering::Relaxed);
@@ -320,7 +324,6 @@ impl Harness {
                             version: header.version,
                         },
                         token: header.token,
-                        changed_at: None,
                     };
                 }
                 Err(e) => return Err(e.into()),
@@ -361,7 +364,6 @@ impl Harness {
                         version: tomb.version,
                     },
                     token: None,
-                    changed_at: None,
                 },
             },
         );

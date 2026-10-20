@@ -149,7 +149,7 @@ impl Executor<'_> {
         meta: NodeMeta,
         hash: Option<hbsync_types::ContentHash>,
         after: After,
-        written: Option<Target>,
+        written: Option<Written>,
     ) -> Step {
         let node = meta.node;
         let row = written.map(|w| mirror::written(&meta, hash, w));
@@ -186,7 +186,7 @@ pub(super) struct Landed {
     pub meta: NodeMeta,
     pub hash: Option<hbsync_types::ContentHash>,
     pub file_id: hbsync_types::RemoteFileId,
-    pub written: Target,
+    pub written: Written,
 }
 
 /// `node` out of the tree (its mirror row `file_id`), into Recently deleted at the server's time

@@ -106,10 +106,8 @@ impl Client {
                 .iter()
                 .map(|r| {
                     format!(
-                        "{:?} deleted={} at={:?}",
-                        r.file_id,
-                        r.deleted,
-                        r.changed_at.or(r.removed_at)
+                        "{:?} deleted={} removed={} at={:?}",
+                        r.file_id, r.deleted, r.removed, r.changed_at
                     )
                 })
                 .collect::<Vec<_>>()

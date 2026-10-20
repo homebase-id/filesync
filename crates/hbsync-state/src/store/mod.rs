@@ -12,7 +12,7 @@ use hbsync_types::schema::{
 };
 use hbsync_types::{
     ContentHash, ContentState, Doomed, FileContent, FileToken, NodeId, NodeKind, NodeState,
-    RemoteFileId, RemoteRef, Tags, Target, VersionTag,
+    RemoteFileId, RemoteRef, Tags, Target, VersionTag, Written,
 };
 use std::collections::HashMap;
 
@@ -188,7 +188,7 @@ impl MirrorRow {
     /// The row of a node this device wrote as `content` (a file of content `hash`), as the
     /// write's answer (`written`) has it: with its token and the server's time of the version.
     pub fn written(
-        written: Target,
+        written: Written,
         node: NodeId,
         parent: NodeId,
         kind: NodeKind,
@@ -196,9 +196,19 @@ impl MirrorRow {
         hash: Option<ContentHash>,
     ) -> MirrorRow {
         MirrorRow {
-            token: written.token,
+            token: written.target.token,
             changed_at: written.changed_at,
-            ..MirrorRow::from_content(written.at, node, parent, kind, content, hash)
+            ..MirrorRow::from_content(written.target.at, node, parent, kind, content, hash)
+        }
+    }
+
+    /// This row as a write that changed only its version (a removal, a restore) answered.
+    pub fn rewritten(&self, written: Written) -> MirrorRow {
+        MirrorRow {
+            version: written.target.at.version,
+            token: written.target.token,
+            changed_at: written.changed_at,
+            ..self.clone()
         }
     }
 
@@ -276,7 +286,6 @@ impl MirrorRow {
                 version,
             },
             token: self.token.clone(),
-            changed_at: None,
         }
     }
 
