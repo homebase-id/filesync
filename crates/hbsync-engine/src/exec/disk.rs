@@ -1,0 +1,220 @@
+//! The sync root's one writer: every change the executor (and recovery) makes to a folder's
+//! entries goes through [`Disk`], in the order the state DB needs with its durable commits (its
+//! docs on durability). Tags and times written on an item aren't ordered: one lost reads as a
+//! change of those only. It also owns the run's durable commits, which order the DB against the
+//! disk and the drive: write-ahead records before what they record, and the scan's new ids
+//! before anything goes to the drive.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use hbsync_local::layout;
+use hbsync_platform::{RelPath, ops};
+use hbsync_state::{FolderTx, StateDb, StateError};
+use hbsync_types::NodeId;
+
+use crate::trash::Trash;
+
+/// The disk of one sync root, as a run (or recovery) writes it.
+#[derive(Debug)]
+pub(super) struct Disk<'a> {
+    root: &'a Path,
+    /// The ids the scan gave new items are durable: before anything goes to the drive, they
+    /// are (a power cut must not make the scan give others to what went out).
+    ids_durable: bool,
+    /// The folder's trash, read when a download first asks this run ([`Disk::in_trash`]).
+    trash: Option<Trash>,
+}
+
+impl<'a> Disk<'a> {
+    pub(super) fn new(root: &'a Path) -> Self {
+        Disk {
+            root,
+            ids_durable: false,
+            trash: None,
+        }
+    }
+
+    pub(super) fn root(&self) -> &'a Path {
+        self.root
+    }
+
+    /// The native path of `path`.
+    pub(super) fn abs(&self, path: &RelPath) -> PathBuf {
+        path.to_native(self.root)
+    }
+
+    // ---- durable commits ----
+
+    /// A durable commit (with every commit before): a write-ahead record of what is about to
+    /// happen on disk or on the drive, or a change that must not be lost.
+    pub(super) fn write_durable(
+        &mut self,
+        db: &mut StateDb,
+        f: impl FnOnce(FolderTx<'_>) -> Result<(), StateError>,
+    ) -> Result<(), StateError> {
+        db.write_durable(|s| f(s.folder()))?;
+        self.ids_durable = true;
+        Ok(())
+    }
+
+    /// Makes the ids the scan gave new items durable, once a run: before anything goes to the
+    /// drive.
+    pub(super) fn flush_ids(&mut self, db: &mut StateDb) -> Result<(), StateError> {
+        if !self.ids_durable {
+            db.flush()?;
+            self.ids_durable = true;
+        }
+        Ok(())
+    }
+
+    // ---- the folder's entries ----
+
+    /// Puts something at `path` on disk with `put` ([`put_ordered`]).
+    pub(super) fn put<T>(
+        &self,
+        db: &mut StateDb,
+        path: &RelPath,
+        put: impl FnOnce(&Path) -> T,
+    ) -> Result<T, StateError> {
+        put_ordered(db, &self.abs(path), put)
+    }
+
+    /// Renames `from` to `to` on disk, never over anything ([`rename_ordered`]).
+    pub(super) fn rename(
+        &self,
+        db: &mut StateDb,
+        from: &RelPath,
+        to: &RelPath,
+    ) -> Result<io::Result<()>, StateError> {
+        rename_ordered(db, &self.abs(from), &self.abs(to))
+    }
+
+    // ---- the folder's trash ----
+
+    /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
+    pub(super) fn move_to_trash(
+        &mut self,
+        db: &mut StateDb,
+        path: &RelPath,
+        node: NodeId,
+    ) -> Result<io::Result<PathBuf>, StateError> {
+        let trash_dir = layout::trash_dir(self.root);
+        // Its own entry folder, named by when and by the node (one name: a native path).
+        let dir = trash_dir.join(layout::trash_entry(hbsync_types::unix_now(), node));
+        // The trash folder too, made with the first item in it.
+        db.changed(&trash_dir);
+        if let Err(e) = put_ordered(db, &dir, |dir| fs::create_dir_all(dir))? {
+            return Ok(Err(e));
+        }
+        let to = dir.join(path.name().unwrap_or("item"));
+        let moved = rename_ordered(db, &self.abs(path), &to)?.map(|()| to);
+        if moved.is_ok()
+            && let Some(trash) = &mut self.trash
+        {
+            trash.add(node, dir);
+        }
+        Ok(moved)
+    }
+
+    /// Files of the folder's trash that may hold the bytes a download of `node` (in `parent`)
+    /// to `target` wants: where its own entry, or the entry of a folder above it, holds it
+    /// under the names `target` has (a delete taken back); its own entries first, then each
+    /// folder's above it, each newest first. Only candidates: the download takes one only once
+    /// it read exactly the bytes wanted ([`hbsync_fileio::CompletedFile::adopt`]). Nothing to
+    /// look up while the trash is empty, or for a node one was refused for this run
+    /// ([`Disk::refuse_from_trash`]).
+    pub(super) fn in_trash(
+        &mut self,
+        db: &mut StateDb,
+        node: NodeId,
+        parent: NodeId,
+        target: &RelPath,
+    ) -> Result<Vec<PathBuf>, StateError> {
+        let root = self.root;
+        let trash = self
+            .trash
+            .get_or_insert_with(|| Trash::read(&layout::trash_dir(root)));
+        if trash.is_empty() || trash.refused(node) {
+            return Ok(Vec::new());
+        }
+        let names: Vec<&str> = target.components().collect();
+        // The folders above it, as far as `target` names them.
+        let mut left = names.len().saturating_sub(1);
+        let above = db.read(|s| {
+            crate::walk::up::<_, StateError>(parent, |at| {
+                if left == 0 {
+                    return Ok(None);
+                }
+                left -= 1;
+                Ok(s.get_mirror(at)?.map(|m| (at, m.parent)))
+            })
+        })?;
+        let mut found = Vec::new();
+        for (i, at) in (0..names.len())
+            .rev()
+            .zip(std::iter::once(node).chain(above.items))
+        {
+            let entries = trash.entries(at);
+            if entries.is_empty() {
+                continue;
+            }
+            // Its place in the entry: its name there, and the names below it to the item.
+            let Ok(place) = RelPath::new(&names[i..].join("/")) else {
+                continue;
+            };
+            found.extend(entries.iter().map(|e| place.to_native(e)));
+        }
+        Ok(found)
+    }
+
+    /// A file taken from the trash didn't do for `node` (its tags weren't written): its
+    /// download fetches the bytes for the rest of the run.
+    pub(super) fn refuse_from_trash(&mut self, node: NodeId) {
+        if let Some(trash) = &mut self.trash {
+            trash.refuse(node);
+        }
+    }
+
+    /// Brings an old version a download just put in the trash (at `entry`) back to `path`, and
+    /// removes its entry's folder, empty then (one that can't be removed, not empty after
+    /// all, stays for the daily purge).
+    pub(super) fn restore_from_trash(
+        &self,
+        db: &mut StateDb,
+        entry: &Path,
+        path: &RelPath,
+    ) -> Result<io::Result<()>, StateError> {
+        let back = rename_ordered(db, entry, &self.abs(path))?;
+        if back.is_ok()
+            && let Some(dir) = entry.parent()
+        {
+            drop(fs::remove_dir(dir));
+        }
+        Ok(back)
+    }
+}
+
+/// Puts something at `at` on disk with `put`: once the place can take it
+/// ([`StateDb::filling`]), its folder noted as changed after.
+fn put_ordered<T>(
+    db: &mut StateDb,
+    at: &Path,
+    put: impl FnOnce(&Path) -> T,
+) -> Result<T, StateError> {
+    db.filling(at)?;
+    let out = put(at);
+    db.changed(at);
+    Ok(out)
+}
+
+/// Renames `from` to `to` on disk, never over anything ([`put_ordered`]); `from` is noted as
+/// emptied.
+fn rename_ordered(db: &mut StateDb, from: &Path, to: &Path) -> Result<io::Result<()>, StateError> {
+    let renamed = put_ordered(db, to, |to| ops::rename_noreplace(from, to))?;
+    if renamed.is_ok() {
+        db.emptied(from);
+    }
+    Ok(renamed)
+}

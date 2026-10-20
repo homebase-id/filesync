@@ -73,14 +73,14 @@ pub(super) fn release_place(
 /// the scan finds it at `to`, which voids the record.
 pub(super) fn restore_parked(
     db: &mut StateDb,
-    root: &Path,
+    disk: &Disk<'_>,
     row: &LocalRow,
     to: &RelPath,
 ) -> Result<io::Result<LocalRow>, StateError> {
-    if let Err(e) = rename_ordered(db, &row.path.to_native(root), &to.to_native(root))? {
+    if let Err(e) = disk.rename(db, &row.path, to)? {
         return Ok(Err(e));
     }
-    let refreshed = renamed_row(root, row, to);
+    let refreshed = renamed_row(disk.root(), row, to);
     db.write(|s| {
         s.folder().move_local_subtree(&row.path, to)?;
         if let Some(r) = &refreshed {
@@ -99,6 +99,7 @@ pub(super) fn restore_parked(
 /// An original name this device now filters (§10) may be held by an item it doesn't track, which
 /// would keep the parked item away for good: it takes the first free numbered name instead.
 pub(super) fn unpark(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
+    let disk = Disk::new(&folder.root);
     for node in db.read(|s| s.all_parked())? {
         let place = db.read(|s| {
             let Some(row) = s.local_by_node(node)? else {
@@ -119,7 +120,7 @@ pub(super) fn unpark(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateEr
         };
         if let Some(to) = to {
             // One that can't move stays parked for the next time.
-            let _ = restore_parked(db, &folder.root, &current, &to)?;
+            let _ = restore_parked(db, &disk, &current, &to)?;
         }
     }
     Ok(())

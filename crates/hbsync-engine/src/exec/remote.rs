@@ -54,7 +54,7 @@ impl Executor<'_> {
                 content.set_tags(&self.merged_with_drive(base.as_ref(), tags, &r.row.tags()));
             }
             None => {
-                content.set_created_ms(ops::created_ms(&self.abs(&row.path)));
+                content.set_created_ms(ops::created_ms(&self.disk.abs(&row.path)));
                 content.set_tags(tags);
             }
         }
@@ -94,7 +94,7 @@ impl Executor<'_> {
         if content.created_ms().is_none()
             && let Some(row) = self.db.read(|s| s.local_by_node(node))?
         {
-            content.set_created_ms(ops::created_ms(&self.abs(&row.path)));
+            content.set_created_ms(ops::created_ms(&self.disk.abs(&row.path)));
         }
         let meta = NodeMeta {
             node,
