@@ -370,6 +370,11 @@ impl Executor<'_> {
         } = placement;
         let (node, target) = (record.base.node, record.target.clone());
         let target = &target;
+        // Its bytes durable before anything is moved for it (`sync_completed` in the commit).
+        if !done.synced() {
+            done.keep_for_retry();
+            return Ok(Outcome::Retry("its bytes aren't on the disk yet".into()));
+        }
         if let Some(row) = &current
             && self.db.read(|s| s.local_by_node(node))?.as_ref() != Some(row)
         {

@@ -91,6 +91,8 @@ pub enum FailPoint {
     AfterTrash,
     /// Bringing that old version back from the trash.
     Restore,
+    /// Making a group of downloads' bytes durable: none of them is put in place.
+    Barrier,
 }
 
 /// Tests only: how many more times each [`FailPoint`] fails.
@@ -1040,8 +1042,9 @@ impl<'a> Executor<'a> {
             .map(|(_, j)| j.size())
             .sum();
         progress.bytes_total.fetch_add(new_bytes, Ordering::Relaxed);
-        // Commit each transfer as soon as it finishes: small files don't wait for a large
-        // one, and a crash loses only transfers still in flight.
+        // Commit transfers as soon as they finish (with the others that finished meanwhile):
+        // small files don't wait for a large one, and a crash loses only transfers still in
+        // flight.
         let remote = self.remote;
         let transfer = self.cfg.transfer;
         let mut first_error = None;
@@ -1096,9 +1099,10 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    /// Records what jobs that ran together did (taking them out of `pending`): the removals
-    /// that landed in one go, in one transaction ([`Executor::commit_removed`]: one commit for
-    /// a request's thousand answers, not one each); every other result on its own.
+    /// Records what jobs that finished together did (taking them out of `pending`): the
+    /// removals that landed in one go, in one transaction ([`Executor::commit_removed`]: one
+    /// commit for their answers, not one each); the downloads' bytes made durable together;
+    /// every other result on its own.
     fn commit_ran(
         &mut self,
         ran: Vec<(Job, JobResult)>,
@@ -1141,6 +1145,26 @@ impl<'a> Executor<'a> {
             for (op, attempts, gone) in ops {
                 let outcome = failed.clone().map_or(Outcome::Settled, Outcome::Retry);
                 self.handle(op, attempts, outcome, gone)?;
+            }
+        }
+        // The bytes of every download among them made durable together, before any is put in
+        // place; one whose bytes didn't get there isn't (it is tried again, from its kept file).
+        let mut files: Vec<&mut hbsync_fileio::CompletedFile> = rest
+            .iter_mut()
+            .filter_map(|r| match &mut r.5 {
+                JobResult::Downloaded { file, .. } => Some(file),
+                _ => None,
+            })
+            .collect();
+        let downloads = !files.is_empty();
+        hbsync_fileio::sync_completed(&mut files);
+        let barrier_fails = downloads && self.fails(FailPoint::Barrier);
+        for r in &mut rest {
+            if matches!(&r.5, JobResult::Downloaded { file, .. } if barrier_fails || !file.synced())
+            {
+                r.5 = JobResult::Failed(JobError::Io(io::Error::other(
+                    "its bytes couldn't be made durable",
+                )));
             }
         }
         for (op, attempts, gone, ctx, job, result) in rest {

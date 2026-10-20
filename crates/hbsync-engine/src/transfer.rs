@@ -256,7 +256,8 @@ impl JobError {
 }
 
 /// Runs `jobs` on a worker pool: removals together, then `urgent` jobs, then smaller ones. `commit` is called
-/// on this thread for every finished job, in completion order.
+/// on this thread for every finished job, in completion order. A small download's file isn't
+/// durable yet: `hbsync_fileio::sync_completed` before putting it in place.
 pub fn run_jobs(
     remote: &dyn Remote,
     cfg: TransferConfig,
@@ -273,9 +274,11 @@ pub fn run_jobs(
 
 /// [`run_jobs`], until `commit` returns `false`, `halt` is set, or the remote is out (a job
 /// failed with [`RemoteError::Transient`]: the next would too). Jobs not started by then are
-/// dropped; jobs already running finish and are committed. `commit` is given the jobs that ran
-/// together, each with its result: a job on its own, or removals one request answered (to
-/// record in one go). The bytes moved are added to `moved`.
+/// dropped; jobs already running finish and are committed. `commit` is given every job that
+/// finished since the last call, each with its result (removals answered by one request
+/// together, to record in one go). A small download's file may not be durable yet: the
+/// caller makes it so before putting it in place (`hbsync_fileio::sync_completed`). The bytes
+/// moved are added to `moved`.
 pub fn run_jobs_while(
     remote: &dyn Remote,
     cfg: TransferConfig,
@@ -347,7 +350,10 @@ pub fn run_jobs_while(
             });
         }
         drop(tx);
-        for ran in rx {
+        // Everything that finished meanwhile, committed together (downloads share one
+        // barrier for their bytes).
+        while let Ok(mut ran) = rx.recv() {
+            ran.extend(rx.try_iter().flatten());
             if !commit(ran)
                 && let Ok(mut q) = queue.lock()
             {
@@ -489,7 +495,9 @@ fn fetch(remote: &dyn Remote, d: &Download, meter: &Meter<'_>) -> Result<Complet
         remote.read(d.file_id, range, &mut sink)?;
         file.flush()?;
     }
-    Ok(partial.finish(Some(d.expected), Some(d.size))?)
+    // Made durable with the others that finished meanwhile, before any is put in place
+    // (`sync_completed`, in the commit).
+    Ok(partial.finish_in_group(Some(d.expected), Some(d.size))?)
 }
 
 /// The first of `d`'s trash files that holds exactly the bytes it wants, taken for it where it
