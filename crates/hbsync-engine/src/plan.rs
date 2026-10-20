@@ -520,11 +520,16 @@ impl Agreement {
         }
     }
 
+    /// Whether a node without a base gets one ([`Agreement::settle`]): both sides agree on
+    /// place and content (bytes proven equal across hash algorithms can't be proven again), or
+    /// on content where a local write put the item in place from the drive's version
+    /// (`placed`): that version is what both sides came from.
+    pub fn founds_base(self, placed: bool) -> bool {
+        self.content && (self.place || placed)
+    }
+
     /// The base after settling: the agreed attributes are taken from `remote`, the tags one
-    /// by one ([`Tags::agreed`]). A node without a base gets one when both sides agree on
-    /// place and content (bytes proven equal across hash algorithms can't be proven again),
-    /// or on content where a local write put the item in place from `remote` (`placed`): that
-    /// version is what both sides came from.
+    /// by one ([`Tags::agreed`]). A node without a base gets one where [`Agreement::founds_base`].
     pub fn settle(
         self,
         base: Option<NodeState>,
@@ -533,7 +538,7 @@ impl Agreement {
         placed: bool,
     ) -> Option<NodeState> {
         let Some(mut b) = base else {
-            return (self.content && (self.place || placed)).then(|| NodeState {
+            return self.founds_base(placed).then(|| NodeState {
                 tags: Tags::agreed(&Tags::default(), &local.tags, &remote.tags),
                 ..remote.clone()
             });

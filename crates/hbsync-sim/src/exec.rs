@@ -683,12 +683,24 @@ impl Sim {
                 );
                 Done
             }
-            Op::LocalTags { node, tags, .. } => {
+            Op::LocalTags { node, tags, drive } => {
+                let remote = match drive {
+                    Some(d) => d.base_at.is_none().then_some(d.state),
+                    None => self.server_state(c, node),
+                };
                 let client = &mut self.clients[c];
                 let Some(state) = client.local.get(node).cloned() else {
                     return Skip;
                 };
                 if !unchanged(client, node) {
+                    return Skip;
+                }
+                // No base to record what it writes, and none it founds: it waits (the
+                // executor's `tags_recorded`).
+                let founds = |r: &NodeState| Agreement::of(&state, r, false).founds_base(false);
+                if !client.base.contains(node)
+                    && !(verdict(client, node).is_sync() && remote.as_ref().is_some_and(founds))
+                {
                     return Skip;
                 }
                 let tags = tags.held_by(client.os);

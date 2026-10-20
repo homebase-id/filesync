@@ -37,7 +37,9 @@ use crate::activity::{self, Counters};
 use crate::folder::FolderCtx;
 use crate::plan::{DriveVersion, TagWrite, not_reached};
 use crate::reconcile::{Op, Requirement};
-use crate::settle::{Placed, Settle, mark_children, settle, settle_placement, spell};
+use crate::settle::{
+    Placed, Settle, mark_children, settle, settle_placement, spell, tags_recorded,
+};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::view;
 use hbsync_local::layout;
