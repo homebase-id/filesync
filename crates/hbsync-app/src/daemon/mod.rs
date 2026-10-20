@@ -25,7 +25,7 @@ use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
 use crate::runner::{Command, RunnerError};
 use crate::sync::{OnDrop, WAIT_AT_MOST, Wakeup, lock};
-use crate::{Config, ConfigError, CredentialError, Paths};
+use crate::{Config, ConfigError, CredentialError, Identity, Paths};
 use account::Account;
 
 #[derive(Debug, thiserror::Error)]
@@ -173,11 +173,11 @@ impl Daemon {
 
     /// Syncs the folder at `path` (set up, in the config) with `identity`: in its account, or
     /// in a new one. Under one lock: two requests for a new identity start one account.
-    fn add_folder(&self, identity: &str, path: &Path) -> Result<(), DaemonError> {
+    fn add_folder(&self, identity: &Identity, path: &Path) -> Result<(), DaemonError> {
         let mut accounts = lock(&self.accounts);
         if let Some((account, _)) = accounts
             .iter()
-            .find(|(a, thread)| a.identity == identity && !thread.is_finished())
+            .find(|(a, thread)| a.identity == *identity && !thread.is_finished())
         {
             account.add_folder(path);
             return Ok(());
@@ -213,10 +213,10 @@ impl Daemon {
 
     /// Starts the account `identity` over (its credentials changed): it stops its folders
     /// between operations, then syncs them again with the new credentials.
-    fn start_over(&self, identity: &str) -> Result<(), DaemonError> {
+    fn start_over(&self, identity: &Identity) -> Result<(), DaemonError> {
         let found = {
             let mut accounts = lock(&self.accounts);
-            let at = accounts.iter().position(|(a, _)| a.identity == identity);
+            let at = accounts.iter().position(|(a, _)| a.identity == *identity);
             at.map(|at| accounts.remove(at))
         };
         let Some((account, thread)) = found else {

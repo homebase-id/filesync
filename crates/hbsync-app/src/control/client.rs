@@ -4,6 +4,7 @@
 use hbsync_types::NodeId;
 
 use super::Result;
+use crate::Identity;
 use crate::Paths;
 use crate::ipc::{self, IpcError};
 use crate::protocol::{
@@ -202,21 +203,21 @@ pub fn empty_listed(paths: &Paths, accounts: &[DeletedAccount]) -> Result<()> {
 }
 
 /// Has the account `identity` start over: its credentials changed.
-pub fn start_over(paths: &Paths, identity: &str) -> Result<()> {
+pub fn start_over(paths: &Paths, identity: &Identity) -> Result<()> {
     done(ask(
         paths,
         Ask::StartOver {
-            identity: identity.to_owned(),
+            identity: identity.clone(),
         },
     ))
 }
 
 /// Sends `control` to the account `identity` (its Recently deleted).
-pub fn account(paths: &Paths, identity: &str, control: AccountControl) -> Result<()> {
+pub fn account(paths: &Paths, identity: &Identity, control: AccountControl) -> Result<()> {
     self::control(
         paths,
         Control::Account {
-            identity: identity.to_owned(),
+            identity: identity.clone(),
             control,
         },
     )
@@ -225,14 +226,14 @@ pub fn account(paths: &Paths, identity: &str, control: AccountControl) -> Result
 /// Has the daemon set the folder at `path` up for `identity` and sync it.
 pub fn add_folder(
     paths: &Paths,
-    identity: &str,
+    identity: &Identity,
     path: &std::path::Path,
     role: Option<hbsync_types::Role>,
 ) -> Result<()> {
     done(ask(
         paths,
         Ask::AddFolder {
-            identity: identity.to_owned(),
+            identity: identity.clone(),
             path: path.to_path_buf(),
             role,
         },

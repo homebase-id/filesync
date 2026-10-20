@@ -533,7 +533,7 @@ fn print_folder(s: &FolderStatus) {
     println!("Homebase Filesync: {}", words::status_line(s, words::now()));
     let who = match s.role {
         Some(role) => format!("{}'s {}", s.identity, role.name()),
-        None => s.identity.clone(),
+        None => s.identity.to_string(),
     };
     println!("  {who} <-> {}", s.path.display());
     // The status line has the progress, the pause, the next try and a failure's problem.

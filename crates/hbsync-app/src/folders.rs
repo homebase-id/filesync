@@ -7,7 +7,7 @@ use std::path::Path;
 use hbsync_engine::root::SyncRoot;
 use hbsync_types::{NodeId, Role};
 
-use crate::{Config, Paths, Root};
+use crate::{Config, Identity, Paths, Root};
 
 pub use crate::control::Error;
 
@@ -16,7 +16,12 @@ pub use crate::control::Error;
 /// system folder); another app syncs it (unless this identity syncs it already); the identity
 /// syncs that folder elsewhere already (one main folder, one of each role); or it holds, or sits
 /// in, another synced folder.
-pub fn refusal(config: &Config, identity: &str, path: &Path, role: Option<Role>) -> Option<String> {
+pub fn refusal(
+    config: &Config,
+    identity: &Identity,
+    path: &Path,
+    role: Option<Role>,
+) -> Option<String> {
     let home = crate::paths::home().map(|h| crate::setup::resolve(&h));
     if let Some(why) = crate::setup::refuse_folder(path, home.as_deref()) {
         return Some(why);
@@ -24,12 +29,12 @@ pub fn refusal(config: &Config, identity: &str, path: &Path, role: Option<Role>)
     let ours = hbsync_local::Marker::read(path)
         .ok()
         .flatten()
-        .is_some_and(|m| m.identity == identity);
+        .is_some_and(|m| m.identity == identity.as_str());
     if !ours && let Some(why) = crate::setup::other_app(path) {
         return Some(why);
     }
     for other in config.roots.iter().filter(|r| r.folder != path) {
-        if other.identity == identity && other.role == role {
+        if other.identity == *identity && other.role == role {
             let what = role.map_or("its main folder", |r| r.name());
             return Some(format!(
                 "{identity} syncs {what} with {} already: remove it first",
@@ -53,7 +58,12 @@ pub fn refusal(config: &Config, identity: &str, path: &Path, role: Option<Role>)
 /// asked). With `role`, it syncs that role folder of the drive (joined if the drive has it,
 /// back from Recently deleted, or made when the folder first syncs). The daemon's half: see
 /// [`add_synced`].
-pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Result<(), Error> {
+pub fn add(
+    paths: &Paths,
+    identity: &Identity,
+    path: &Path,
+    role: Option<Role>,
+) -> Result<(), Error> {
     // One at a time in this process (the tray's pages serve each request on a thread): two
     // set-ups of one folder would each make it anew, the second undoing the first.
     static ADDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -88,7 +98,7 @@ pub enum Taken {
 /// the daemon's start when none runs.
 pub fn add_synced(
     paths: &Paths,
-    identity: &str,
+    identity: &Identity,
     path: &Path,
     role: Option<Role>,
 ) -> Result<Taken, Error> {
@@ -132,33 +142,33 @@ mod tests {
         let paths = Paths::under(home.path());
         let folder = home.path().join("Homebase");
         std::fs::create_dir_all(&folder)?;
-        add(&paths, "a.example", &folder, None)?;
+        add(&paths, &"a.example".into(), &folder, None)?;
         let marker = hbsync_local::Marker::read(&folder)?;
-        add(&paths, "a.example", &folder, None)?;
+        add(&paths, &"a.example".into(), &folder, None)?;
         assert_eq!(hbsync_local::Marker::read(&folder)?, marker, "kept");
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
-        assert_eq!(config.roots, [Root::main("a.example", &folder)]);
+        assert_eq!(config.roots, [Root::main(&"a.example".into(), &folder)]);
         assert!(
-            add(&paths, "a.example", &folder, Some(Role::Documents)).is_err(),
+            add(&paths, &"a.example".into(), &folder, Some(Role::Documents)).is_err(),
             "set up as the main folder"
         );
         let other = home.path().join("Other");
         std::fs::create_dir_all(&other)?;
         assert!(
-            add(&paths, "a.example", &other, None).is_err(),
+            add(&paths, &"a.example".into(), &other, None).is_err(),
             "one main folder per identity"
         );
 
         let inside = folder.join("Documents");
         std::fs::create_dir_all(&inside)?;
         assert!(
-            add(&paths, "b.example", &inside, None).is_err(),
+            add(&paths, &"b.example".into(), &inside, None).is_err(),
             "not inside another synced folder"
         );
 
         assert_eq!(
             remove(&paths, &folder)?,
-            Some(Root::main("a.example", &folder))
+            Some(Root::main(&"a.example".into(), &folder))
         );
         assert_eq!(remove(&paths, &folder)?, None);
         assert!(
@@ -180,14 +190,14 @@ mod tests {
         for f in [&main, &docs, &more] {
             std::fs::create_dir_all(f)?;
         }
-        add(&paths, "a.example", &main, None)?;
-        add(&paths, "a.example", &docs, Some(Role::Documents))?;
-        add(&paths, "a.example", &docs, Some(Role::Documents))?;
+        add(&paths, &"a.example".into(), &main, None)?;
+        add(&paths, &"a.example".into(), &docs, Some(Role::Documents))?;
+        add(&paths, &"a.example".into(), &docs, Some(Role::Documents))?;
         assert!(
-            add(&paths, "a.example", &more, Some(Role::Documents)).is_err(),
+            add(&paths, &"a.example".into(), &more, Some(Role::Documents)).is_err(),
             "one Documents per identity"
         );
-        add(&paths, "b.example", &more, Some(Role::Documents))?;
+        add(&paths, &"b.example".into(), &more, Some(Role::Documents))?;
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
         let roles: Vec<_> = config
             .roots
@@ -204,7 +214,7 @@ mod tests {
         );
         // Its DB knows it as the role folder: set up as another, it is refused.
         remove(&paths, &docs)?;
-        assert!(add(&paths, "a.example", &docs, Some(Role::Pictures)).is_err());
+        assert!(add(&paths, &"a.example".into(), &docs, Some(Role::Pictures)).is_err());
         Ok(())
     }
 }

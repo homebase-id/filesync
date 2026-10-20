@@ -19,7 +19,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use hbsync_app::daemon::AccountParts;
-use hbsync_app::{Runner, RunnerConfig, State};
+use hbsync_app::{Identity, Runner, RunnerConfig, State};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_local::{IGNORE_FILE, STATE_DIR};
 
@@ -44,6 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
+    let identity = &Identity::new(identity);
     let as_client = hbsync_dev::option(&args, "--as");
     let client = hbsync_dev::saved_client_as(identity, as_client.as_deref())?;
     let remote = Arc::new(HomebaseRemote::connect(client)?);

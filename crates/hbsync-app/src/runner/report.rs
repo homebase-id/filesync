@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn the_status_keeps_the_newest_notes_and_counts_them_all() {
-        let mut s = FolderStatus::new("a.example", Path::new("/home/a/Homebase"));
+        let mut s = FolderStatus::new(&"a.example".into(), Path::new("/home/a/Homebase"));
         s.state = State::Syncing;
         s.error = Some("earlier".into());
         let report = SyncReport {

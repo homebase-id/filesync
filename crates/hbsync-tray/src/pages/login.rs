@@ -77,7 +77,7 @@ impl Server {
             Ok(request) => request,
             Err(refused) => {
                 let mut s = lock(&self.pages.shared);
-                s.identity = setup::normalize_identity(typed);
+                s.identity = hbsync_app::Identity::new(typed).to_string();
                 s.error = Some(match refused {
                     Refusal::NeedsMerge(_) => {
                         s.merge_asked = true;
@@ -98,7 +98,7 @@ impl Server {
                 return Some(self.pages.url("setup/done"));
             }
             s.clear_form();
-            s.identity.clone_from(&request.identity);
+            s.identity = request.identity.to_string();
             s.phase = Phase::Connecting;
             let cancel = Arc::new(AtomicBool::new(false));
             s.cancel = Some(Arc::clone(&cancel));

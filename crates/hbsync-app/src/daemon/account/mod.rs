@@ -24,13 +24,13 @@ use hbsync_state::StateError;
 use hbsync_types::NodeId;
 use hbsync_types::activity::Deleted;
 
-use crate::Paths;
 use crate::protocol::{
     AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Pause, RecentItem,
     State,
 };
 use crate::runner::{Command, Handle};
 use crate::sync::{Wakeup, lock};
+use crate::{Identity, Paths};
 
 mod feed;
 mod parts;
@@ -42,7 +42,7 @@ pub use parts::AccountParts;
 
 /// An account of the daemon, shared with the control socket's thread.
 pub(crate) struct Account {
-    pub identity: String,
+    pub identity: Identity,
     /// Its state DB.
     db: PathBuf,
     status: Mutex<AccountStatus>,
@@ -99,14 +99,14 @@ impl Account {
     /// with the returned receiver ([`Account::run`]).
     pub(super) fn new(
         paths: &Paths,
-        identity: &str,
+        identity: &Identity,
         folder: &Path,
         paused: Option<Pause>,
         changed: Arc<Wakeup>,
     ) -> (Arc<Account>, Receiver<Msg>) {
         let (requests, rx) = channel();
         let account = Account {
-            identity: identity.to_owned(),
+            identity: identity.clone(),
             db: paths.account_db(identity),
             status: Mutex::new(AccountStatus::new(identity)),
             phase: Mutex::new(Phase::Waiting {
@@ -410,9 +410,10 @@ mod tests {
         let home = tempfile::tempdir()?;
         let paths = Paths::under(home.path());
         let folder = home.path().join("Homebase");
-        let (account, _requests) = Account::new(&paths, "a.example", &folder, None, Arc::default());
+        let (account, _requests) =
+            Account::new(&paths, &"a.example".into(), &folder, None, Arc::default());
         // Its DB, from the drive; its runners running (none needed here).
-        let db = paths.account_db("a.example");
+        let db = paths.account_db(&"a.example".into());
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         Drive::open(
             &db,
@@ -444,12 +445,12 @@ mod tests {
         let paths = Paths::under(home.path());
         let (account, _requests) = Account::new(
             &paths,
-            "a.example",
+            &"a.example".into(),
             &home.path().join("Homebase"),
             None,
             Arc::default(),
         );
-        let db = paths.account_db("a.example");
+        let db = paths.account_db(&"a.example".into());
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         Drive::open(
             &db,

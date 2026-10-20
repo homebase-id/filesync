@@ -32,6 +32,7 @@ pub fn credentials_path_as(identity: &str, client: Option<&str>) -> Result<PathB
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .ok_or("no config folder (HOME unset)")?;
+    let identity = hbsync_app::Identity::new(identity).file_key();
     let file = match client {
         None => format!("{identity}.json"),
         Some(c) => format!("{identity}.{c}.json"),

@@ -43,7 +43,7 @@ impl Device {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
-        let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", name);
+        let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), name);
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
         let remote = FakeRemote::new(server.clone());
         let drive = Drive::open(&cfg.db, &cfg.identity, Arc::new(remote.clone()))?;
@@ -570,7 +570,7 @@ fn spawn_at(
     root: &Path,
 ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
     spawn(
-        RunnerConfig::new(root, &db_of(root), "test.example", "a"),
+        RunnerConfig::new(root, &db_of(root), &"test.example".into(), "a"),
         server,
     )
 }
@@ -608,7 +608,7 @@ fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
     let disk = parent.path().join("disk");
     rename_with_retries(&root, &disk)?;
     std::fs::create_dir(&root)?;
-    let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
+    let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
     // Looks for the folder again this often.
     cfg.look = Duration::from_millis(300);
     let (handle, thread) = spawn(cfg, &server)?;
@@ -738,7 +738,7 @@ fn progress_shows_during_the_first_sync() -> R {
     let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
     // There before the daemon starts: uploaded by start-up's first sync.
     std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
-    let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
+    let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
     let (handle, _thread) = spawn(cfg, &server)?;
     let mut seen = None;
@@ -759,7 +759,7 @@ fn progress_shows_while_a_transfer_runs() -> R {
     let server = server();
     let dir = tempfile::tempdir()?;
     let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
-    let mut cfg = RunnerConfig::new(&root, &db_of(&root), "test.example", "a");
+    let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
     // 600 kB at 300 kB/s: two seconds to watch.
     cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
     let (handle, _thread) = spawn(cfg, &server)?;

@@ -336,7 +336,7 @@ mod tests {
         std::fs::create_dir_all(&paths.config)?;
         Config::update(&paths.config_file(), |c| {
             c.roots.push(hbsync_app::Root::main(
-                "anna.example.com",
+                &"anna.example.com".into(),
                 &dir.path().join("Homebase"),
             ))
         })?;

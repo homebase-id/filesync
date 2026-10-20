@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::Paths;
+use crate::{Identity, Paths};
 
 /// The Filesync icon, as each OS wants it.
 #[derive(Debug, Clone, Copy)]
@@ -63,7 +63,7 @@ fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf>
 }
 
 /// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already has them.
-pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) {
+pub fn decorate(paths: &Paths, folder: &Path, identity: &Identity, icons: Icons<'_>) {
     // Not for a folder no longer set up: a late call that lost the race with Log out.
     let configured = crate::Config::load(&paths.config_file())
         .ok()
@@ -71,7 +71,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
         .is_some_and(|c| {
             c.roots
                 .iter()
-                .any(|r| r.folder == folder && r.identity == identity)
+                .any(|r| r.folder == folder && r.identity == *identity)
         });
     if !configured {
         return;
@@ -104,7 +104,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
 }
 
 /// Takes the icon and shortcut off `folder` (synced with `identity`) again (unlinking it).
-pub fn undecorate(paths: &Paths, folder: &Path, identity: &str) {
+pub fn undecorate(paths: &Paths, folder: &Path, identity: &Identity) {
     #[cfg(windows)]
     os::unregister(folder, identity);
     #[cfg(not(windows))]

@@ -302,7 +302,7 @@ mod tests {
 
         let id = Uuid::from_u128(2).to_string();
         let found = find_deleted(by_node, every, &picks(&[&id]), broken).expect("found");
-        assert_eq!(found[0].identity, "bob.example");
+        assert_eq!(found[0].identity.as_str(), "bob.example");
         assert_eq!(
             everything.get(),
             0,

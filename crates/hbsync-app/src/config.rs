@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use hbsync_types::Role;
 use serde::{Deserialize, Serialize};
 
+use crate::Identity;
 use crate::protocol::Pause;
 
 #[derive(Debug, thiserror::Error)]
@@ -82,7 +83,7 @@ impl Default for KeepDays {
 #[serde(deny_unknown_fields)]
 pub struct Root {
     /// The identity's domain, e.g. `anna.example.com`.
-    pub identity: String,
+    pub identity: Identity,
     pub folder: PathBuf,
     /// The role folder it is (sync semantics §12); none for the main folder, which holds the
     /// drive's root.
@@ -92,9 +93,9 @@ pub struct Root {
 
 impl Root {
     /// The main folder at `folder`, synced with `identity`.
-    pub fn main(identity: &str, folder: &Path) -> Root {
+    pub fn main(identity: &Identity, folder: &Path) -> Root {
         Root {
-            identity: identity.to_owned(),
+            identity: identity.clone(),
             folder: folder.to_path_buf(),
             role: None,
         }
@@ -168,20 +169,20 @@ impl Config {
     }
 
     /// The folder `identity` syncs as `role` (`None`: its main folder), if it does.
-    pub fn folder(&self, identity: &str, role: Option<Role>) -> Option<&Root> {
+    pub fn folder(&self, identity: &Identity, role: Option<Role>) -> Option<&Root> {
         self.roots
             .iter()
-            .find(|r| r.identity == identity && r.role == role)
+            .find(|r| r.identity == *identity && r.role == role)
     }
 
     /// The identity a command is for: `given` if it is set up here, else the only one set up.
-    pub fn identity(&self, given: Option<&str>) -> Result<String, String> {
-        let mut set_up: Vec<&str> = self.roots.iter().map(|r| r.identity.as_str()).collect();
+    pub fn identity(&self, given: Option<&str>) -> Result<Identity, String> {
+        let mut set_up: Vec<&Identity> = self.roots.iter().map(|r| &r.identity).collect();
         set_up.sort_unstable();
         set_up.dedup();
         if let Some(given) = given {
-            let identity = crate::setup::normalize_identity(given);
-            return match set_up.contains(&identity.as_str()) {
+            let identity = Identity::new(given);
+            return match set_up.contains(&&identity) {
                 true => Ok(identity),
                 false => Err(format!(
                     "{identity} isn't set up here: `hbsync setup {identity}` first"
@@ -189,11 +190,15 @@ impl Config {
             };
         }
         match set_up[..] {
-            [one] => Ok(one.to_owned()),
+            [one] => Ok(one.clone()),
             [] => Err("not set up: `hbsync setup <identity>` first".into()),
             _ => Err(format!(
                 "set up with {}: pick one with --identity",
-                set_up.join(", ")
+                set_up
+                    .iter()
+                    .map(|i| i.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }
@@ -251,10 +256,13 @@ mod tests {
             },
             keep_deleted_days: KeepDays(45),
             roots: vec![
-                Root::main("anna.example.com", Path::new("/home/anna/Homebase")),
+                Root::main(&"anna.example.com".into(), Path::new("/home/anna/Homebase")),
                 Root {
                     role: Some(Role::Documents),
-                    ..Root::main("anna.example.com", Path::new("/home/anna/Documents"))
+                    ..Root::main(
+                        &"anna.example.com".into(),
+                        Path::new("/home/anna/Documents"),
+                    )
                 },
             ],
         };

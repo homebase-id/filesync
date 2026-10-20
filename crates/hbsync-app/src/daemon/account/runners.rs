@@ -119,7 +119,7 @@ mod tests {
             Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
         )?;
         let failed = |removed: bool, ending: bool| -> Result<Running, Box<dyn std::error::Error>> {
-            let cfg = RunnerConfig::new(&folder, &db, "a.example", "pc");
+            let cfg = RunnerConfig::new(&folder, &db, &"a.example".into(), "pc");
             let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
             let mut r = Running {
                 path: folder.clone(),

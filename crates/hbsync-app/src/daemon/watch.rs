@@ -168,7 +168,7 @@ mod tests {
     use crate::protocol::FolderStatus;
 
     fn status(pending: u64, state: State) -> DaemonStatus {
-        let mut folder = FolderStatus::new("a.example", Path::new("/home/a/Homebase"));
+        let mut folder = FolderStatus::new(&"a.example".into(), Path::new("/home/a/Homebase"));
         (folder.state, folder.pending) = (state, pending);
         DaemonStatus {
             version: crate::VERSION.into(),
