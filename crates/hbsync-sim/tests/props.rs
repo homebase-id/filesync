@@ -3312,3 +3312,125 @@ fn regression_two_computers_recover_the_same_orphan_at_once() {
         );
     }
 }
+
+/// Client 1 makes folder c.txt tagged red, and it is synced. Client 2 deletes it as client 1
+/// writes a file into it; client 0 deletes it too. Client 0's next plan makes it again for that
+/// file (its RemoteCreate to follow), and its tag write fails: it holds no red. Its base kept
+/// red, so the next plan read the folder without it as the user's removal, and removed red on
+/// the drive for everyone. The failed write settles as not known: against the base, as no
+/// version of the drive is there, red goes, and the next plan writes it here again
+/// (`cc b63b7063…`, CI run 39377359513).
+#[test]
+fn regression_a_folder_made_back_whose_tag_write_fails_keeps_its_tag() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Edit, Move, Tag, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        act(
+            1,
+            Move {
+                node: 0,
+                parent: 13,
+                name: 3,
+            },
+        ),
+        act(1, Tag { node: 0, tag: 8 }),
+        act(1, CreateFolder { parent: 7, name: 9 }),
+        act(1, CreateFile { parent: 1, name: 0 }),
+        plan(1),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        step(1),
+        plan(2),
+        step(2),
+        act(2, Delete { node: 0 }),
+        plan(0),
+        step(1),
+        step(0),
+        act(0, ToggleIgnore),
+        step(1),
+        act(0, Edit { file: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(2),
+        step(2),
+        step(2),
+        act(1, CreateFile { parent: 3, name: 0 }),
+        plan(0),
+        plan(1),
+        step(0),
+        step(0),
+        step(2),
+        step(0),
+        act(0, Delete { node: 12 }),
+        step(0),
+        step(1),
+    ];
+    run_with(3, None, Sim::with_role_folder, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The other side of the regression above: c0 (macOS) syncs folder a tagged Work. c1 removes
+/// Work and then deletes a, while c2, which never saw either, writes a file into it. c0 deleted
+/// a too, and makes it again for c2's file, its tag write failing: it holds no Work. The drive's
+/// last version lacks Work, so c0's base keeps it, and the restore that follows merges c1's
+/// removal in. Settled against c0's base alone, Work read as added there, and came back.
+#[test]
+fn regression_a_folder_made_back_whose_tag_write_fails_keeps_a_removal() {
+    use Action::{CreateFile, CreateFolder, Delete, Tag};
+    let (a, work) = (0, 1); // NAMES: "a"; TAGS: "Work"
+    let mut sim = Sim::new(3);
+    let sync = |sim: &mut Sim, client| {
+        sim.run(&[Event::Plan { client }]);
+        for _ in 0..8 {
+            sim.run(&[Event::Step { client }]);
+        }
+    };
+    let act = |sim: &mut Sim, client, action| sim.run(&[Event::Act { client, action }]);
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    act(
+        &mut sim,
+        0,
+        CreateFolder {
+            parent: root,
+            name: a,
+        },
+    );
+    let folder = sim.item(0, "a").expect("a");
+    let node = sim.pick(0, folder, false).expect("a");
+    act(&mut sim, 0, Tag { node, tag: work });
+    for c in 0..3 {
+        sync(&mut sim, c);
+    }
+    assert_eq!(sim.server_tags("a"), Some(vec!["Work:0".to_owned()]));
+    // c2 writes into a, planned before the delete reaches the drive.
+    let parent = sim.pick(2, folder, true).expect("a on c2");
+    act(&mut sim, 2, CreateFile { parent, name: a });
+    sim.run(&[Event::Plan { client: 2 }]);
+    let node = sim.pick(1, folder, false).expect("a on c1");
+    act(&mut sim, 1, Tag { node, tag: work });
+    sync(&mut sim, 1);
+    let node = sim.pick(1, folder, false).expect("a on c1");
+    act(&mut sim, 1, Delete { node });
+    sync(&mut sim, 1);
+    let node = sim.pick(0, folder, false).expect("a on c0");
+    act(&mut sim, 0, Delete { node });
+    for _ in 0..8 {
+        sim.run(&[Event::Step { client: 2 }]);
+    }
+    assert!(!sim.server_paths().iter().any(|p| p == "a"), "a is deleted");
+    sim.fail_next_tag_write();
+    sync(&mut sim, 0);
+    assert_eq!(sim.local_tags(0, "a"), Some(vec![]), "the write failed");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(
+        sim.server_tags("a"),
+        Some(vec![]),
+        "{:?}",
+        sim.server_paths()
+    );
+}

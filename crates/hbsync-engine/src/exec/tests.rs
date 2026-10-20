@@ -2963,6 +2963,128 @@ fn a_restored_folder_made_here_keeps_a_removal_from_the_drive() -> R {
     Ok(())
 }
 
+/// A folder synced here tagged Work, deleted here and on the drive (its last version there
+/// tagged `last`), made again here as it comes back for a child another device wrote into it
+/// (its RemoteCreate to follow), whose tag write fails: it holds none. Returns its base after,
+/// and the plan once the drive has it back as `restored`.
+fn a_folder_made_back_whose_tag_write_fails(
+    last: &Tags,
+    restored: &Tags,
+) -> Result<Option<(Tags, crate::plan::Plan)>, Box<dyn std::error::Error>> {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.cfg.root) {
+        return Ok(None); // nothing to tag with here
+    }
+    let node = NodeId::new();
+    let work = Tags::new(vec![Tag::new("Work", 0)]);
+    let content = |tags: &Tags| {
+        let mut c = NodeContent::folder("a");
+        c.set_tags(tags);
+        c
+    };
+    let at = some_version();
+    h.db.write(|s| {
+        s.put_base(&BaseRow::new(
+            node,
+            NodeState {
+                tags: work.clone(),
+                ..NodeState::folder(NodeId::ROOT, "a")
+            },
+            at,
+        ))?;
+        s.put_removed(&RemovedRow {
+            row: MirrorRow::from_content(
+                at,
+                node,
+                NodeId::ROOT,
+                NodeKind::Folder,
+                &content(last),
+                None,
+            ),
+            removed_at: Some(1),
+        })
+    })?;
+    h.cfg.faults.fail(FailPoint::TagWrite, 1);
+    let report = h.run(vec![Op::LocalMkdir {
+        node,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        tags: work,
+        drive: None,
+    }])?;
+    assert_eq!(report.done, 1, "{report:?}");
+    let row = h.db.read(|s| s.local_by_node(node))?.expect("its row");
+    assert_eq!(row.tags, Some(Tags::default()));
+    let base = h.base(node)?.expect("its base").state.tags;
+    h.db.write(|s| {
+        s.delete_removed(node)?;
+        s.put_mirror(&MirrorRow::from_content(
+            RemoteRef {
+                file_id: at.file_id,
+                version: some_version().version,
+            },
+            node,
+            NodeId::ROOT,
+            NodeKind::Folder,
+            &content(restored),
+            None,
+        ))
+    })?;
+    Ok(Some((base, plan_of(&mut h, &[node])?)))
+}
+
+/// Its last version on the drive tagged Work: the base can't claim Work, which the folder never
+/// got. Once the folder is back with Work, the next plan writes Work here again. With the base
+/// claiming it, the folder without it read as the user removing it, and the plan removed it on
+/// the drive.
+#[test]
+fn a_folder_made_back_whose_tag_write_fails_keeps_its_tags_on_the_drive() -> R {
+    let work = Tags::new(vec![Tag::new("Work", 0)]);
+    let Some((base, plan)) = a_folder_made_back_whose_tag_write_fails(&work, &work)? else {
+        return Ok(());
+    };
+    assert_eq!(base, Tags::default());
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteTags { .. } | Op::RemoteUpdate { .. })),
+        "Work is removed on the drive: {:?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTags { tags, .. } if *tags == work)),
+        "{:?}",
+        plan.ops
+    );
+    Ok(())
+}
+
+/// Its last version on the drive without Work (another device removed it, then deleted the
+/// folder): the base keeps Work, so the restore that follows merges the drive's removal in
+/// rather than reading Work, the plan's, as added here.
+#[test]
+fn a_folder_made_back_whose_tag_write_fails_keeps_a_removal_from_the_drive() -> R {
+    let none = Tags::default();
+    let Some((base, plan)) = a_folder_made_back_whose_tag_write_fails(&none, &none)? else {
+        return Ok(());
+    };
+    assert_eq!(base, Tags::new(vec![Tag::new("Work", 0)]));
+    assert!(
+        !plan.ops.iter().any(|op| match op {
+            Op::RemoteTags { tags, .. }
+            | Op::RemoteUpdate { tags, .. }
+            | Op::LocalTags { tags, .. } => tags.get("Work").is_some(),
+            _ => false,
+        }),
+        "Work comes back: {:?}",
+        plan.ops
+    );
+    Ok(())
+}
+
 /// A folder synced before made again here as the drive had it when the plan was made (`a`),
 /// its base moved since (`b`), and the drive deleted it meanwhile: the commit settles it at
 /// the version it acted on, as recovery does, so the delete reaches it and the next plan puts
