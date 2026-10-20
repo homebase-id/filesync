@@ -10,12 +10,14 @@ mod engine;
 mod error;
 pub mod exec;
 pub mod feed;
+mod folder;
 mod id;
 pub mod mask;
 pub mod plan;
 pub mod reconcile;
 pub mod root;
 pub mod scope;
+mod settle;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 pub mod transfer;
@@ -27,9 +29,10 @@ pub mod walk;
 pub use drive::Drive;
 pub use engine::{Engine, EngineConfig, StartupReport, SyncReport};
 pub use error::EngineError;
+pub use folder::FolderCtx;
 pub use plan::{
-    Against, Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Op, Options, Plan,
-    Requirement,
+    Against, Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Masking, Op, Options,
+    Plan, Requirement,
 };
 pub use reconcile::reconcile;
 pub use tree::{Tree, Violation, conflict_copy_name, numbered_conflict_name};

@@ -55,7 +55,7 @@ impl Reconciler<'_> {
         // Never into itself: Recovered files moved by the user into what is now the orphan.
         let inside = |at: NodeId| at == node || self.merged.ancestors(at).contains(&node);
         if node == NodeId::RECOVERED
-            || !self.opts.scope.top.is_root()
+            || !self.masking.scope.top.is_root()
             || self.masks.masked.contains(&NodeId::RECOVERED)
             || inside(NodeId::RECOVERED)
             || self
@@ -67,7 +67,7 @@ impl Reconciler<'_> {
         if !self.merged.exists(NodeId::RECOVERED) && self.known_state(NodeId::RECOVERED).is_none() {
             // Made here: under the name it gets, if this device syncs that.
             if !self
-                .opts
+                .masking
                 .filter
                 .in_folder("", RECOVERED_NAME, true)
                 .is_sync()
@@ -116,7 +116,7 @@ impl Reconciler<'_> {
                 }
                 None if self.input.remote_complete
                     && (self.input.remote.contains(node)
-                        || (self.opts.scope.top.is_root()
+                        || (self.masking.scope.top.is_root()
                             && self.input.removed.contains_key(&node)))
                     && !withdrawn.contains(&parent) =>
                 {

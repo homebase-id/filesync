@@ -236,9 +236,9 @@ impl Parts {
     /// Whether the ignore rules on disk differ from the ones in use (or don't parse): their
     /// fingerprints differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
-        let exec = &self.engine.config().exec;
-        Filter::load(root, exec.case_insensitive)
-            .map_or(true, |f| f.fingerprint() != exec.filter.fingerprint())
+        let folder = &self.engine.config().folder;
+        Filter::load(root, folder.case_insensitive)
+            .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
     }
 }
 
@@ -332,11 +332,11 @@ impl Runner {
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.mass_delete_min = self.cfg.mass_delete.min_files;
         cfg.mass_delete_fraction = self.cfg.mass_delete.fraction;
-        cfg.exec.filter = Arc::new(Filter::load(root, cfg.exec.case_insensitive)?);
+        cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
-        let rules = cfg.exec.filter.rule_count();
+        let rules = cfg.folder.filter.rule_count();
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
         let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;

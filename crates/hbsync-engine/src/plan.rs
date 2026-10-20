@@ -26,6 +26,15 @@ pub struct BaseExtra {
     pub version: Option<VersionTag>,
 }
 
+/// What a folder leaves out of the drive, which the reconciler masks: this device's filter
+/// (§10) and the part of the drive outside the folder's scope (§12). The folder's own
+/// ([`crate::FolderCtx::masking`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Masking<'a> {
+    pub filter: &'a Filter,
+    pub scope: &'a Scope,
+}
+
 /// Settings that affect decisions.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -49,10 +58,6 @@ pub struct Options {
     /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
     /// totals too, so a large delete split over several batches is still held.
     pub pending_deletes: (usize, usize),
-    /// What this device never syncs: remote nodes it matches are masked (§10).
-    pub filter: Arc<Filter>,
-    /// The part of the drive this engine syncs: what is outside it is masked (§12).
-    pub scope: Arc<Scope>,
     /// Ids a detach must not give: already known here (an earlier detach of the same node).
     pub taken: Arc<HashSet<NodeId>>,
 }
@@ -69,8 +74,6 @@ impl Default for Options {
             allow_mass_delete: false,
             confirmed: Arc::default(),
             pending_deletes: (0, 0),
-            filter: Arc::default(),
-            scope: Arc::new(Scope::main()),
             taken: Arc::default(),
         }
     }

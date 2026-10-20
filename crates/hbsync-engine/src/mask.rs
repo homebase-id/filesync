@@ -38,6 +38,7 @@ use hbsync_platform::name::name_key;
 use hbsync_types::{NodeId, NodeKind};
 
 use crate::id::derived_id;
+use crate::plan::Masking;
 use crate::reconcile::Input;
 use crate::scope::Scope;
 use crate::tree::Tree;
@@ -66,11 +67,11 @@ pub(crate) struct Masks {
 impl Masks {
     pub(crate) fn of(
         input: &Input,
-        filter: &Filter,
-        scope: &Scope,
+        masking: Masking<'_>,
         computer: &str,
         taken: &HashSet<NodeId>,
     ) -> Masks {
+        let Masking { filter, scope } = masking;
         // Where a node is: through the folders in Recently deleted too (a node in one is where
         // that folder was).
         let with_removed;

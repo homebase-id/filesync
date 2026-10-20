@@ -17,17 +17,17 @@ use std::path::Path;
 
 use hbsync_fileio::hash_file;
 use hbsync_namemap::to_remote;
-use hbsync_platform::Os;
 use hbsync_platform::name::name_key;
 use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError, Store};
 use hbsync_types::{ContentHash, NodeId, NodeKind};
 
-use crate::exec::spells;
-use crate::scope::Scope;
+use crate::folder::FolderCtx;
+use crate::settle::{Settle, settle, spells};
 
 /// Adopts what it can among the dirty nodes, never as a folder the scope leaves out (§12: a
 /// plain local `Documents` isn't the role folder). Returns the number of adoptions.
-pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usize, StateError> {
+pub fn adopt(db: &mut StateDb, folder: &FolderCtx) -> Result<usize, StateError> {
+    let (os, scope) = (folder.os, &folder.scope);
     // Local-only candidates: dirty, no base, no mirror row.
     let mut candidates = db.read(|s| s.unpaired_local())?;
     // Grouped by folder, parents before children.
@@ -68,8 +68,7 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usi
         let mut claimed: HashSet<NodeId> = HashSet::new();
         let mut matches: Vec<(&LocalRow, NodeId, bool)> = Vec::new();
         for row in group {
-            if let Some((remote_node, agreed)) = find_match(db, root, os, row, &siblings, &claimed)?
-            {
+            if let Some((remote_node, agreed)) = find_match(db, folder, row, &siblings, &claimed)? {
                 claimed.insert(remote_node);
                 matches.push((row, remote_node, agreed));
             }
@@ -82,11 +81,11 @@ pub fn adopt(db: &mut StateDb, root: &Path, os: Os, scope: &Scope) -> Result<usi
                 // different algorithms), or at this device's spelling of a drive name the name
                 // map doesn't give back (it reads that as another name).
                 if *agreed {
-                    let how = crate::exec::Settle {
+                    let how = Settle {
                         same_bytes: true,
-                        ..crate::exec::Settle::node(*remote_node)
+                        ..Settle::node(*remote_node)
                     };
-                    crate::exec::settle(s, how, os)?;
+                    settle(s, how, os)?;
                 }
             }
             Ok(())
@@ -124,12 +123,12 @@ pub(crate) fn same_bytes(root: &Path, row: &LocalRow, hash: &ContentHash, size: 
 /// [`name_key`].
 fn find_match(
     db: &mut StateDb,
-    root: &Path,
-    os: Os,
+    folder: &FolderCtx,
     row: &LocalRow,
     siblings: &HashMap<String, Vec<MirrorRow>>,
     claimed: &HashSet<NodeId>,
 ) -> Result<Option<(NodeId, bool)>, StateError> {
+    let os = folder.os;
     let Some(local_name) = row.path.name() else {
         return Ok(None);
     };
@@ -162,7 +161,7 @@ fn find_match(
         if cross && remote.name != name && !spelled {
             continue;
         }
-        if same_bytes(root, row, &file.hash, file.size) {
+        if same_bytes(&folder.root, row, &file.hash, file.size) {
             return Ok(Some((remote.node, cross || spelled)));
         }
     }

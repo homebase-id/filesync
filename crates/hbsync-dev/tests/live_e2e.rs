@@ -48,11 +48,12 @@ impl Client {
         let configure = move |cfg: &mut EngineConfig| -> Res<()> {
             cfg.allow_mass_delete = true; // the test deletes its whole folder at the end
             // Before the first start; a restart keeps the rules a scenario set.
-            let ignore = hbsync_local::layout::ignore_file(&cfg.exec.root);
+            let ignore = hbsync_local::layout::ignore_file(&cfg.folder.root);
             if !ignore.exists() {
                 fs::write(&ignore, &rules)?;
             }
-            cfg.exec.filter = Arc::new(Filter::load(&cfg.exec.root, cfg.exec.case_insensitive)?);
+            cfg.folder.filter =
+                Arc::new(Filter::load(&cfg.folder.root, cfg.folder.case_insensitive)?);
             Ok(())
         };
         Ok(Client(

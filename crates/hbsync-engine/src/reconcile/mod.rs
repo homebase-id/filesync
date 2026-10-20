@@ -31,8 +31,8 @@ mod merge;
 mod repair;
 
 pub use crate::plan::{
-    Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Op, Options, Plan, Removed,
-    Requirement,
+    Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Masking, Op, Options, Plan,
+    Removed, Requirement,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,16 +62,10 @@ enum Origin {
     Base,
 }
 
-pub fn reconcile(input: &Input, opts: &Options) -> Plan {
-    let masks = Masks::of(
-        input,
-        &opts.filter,
-        &opts.scope,
-        &opts.computer,
-        &opts.taken,
-    );
+pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
+    let masks = Masks::of(input, masking, &opts.computer, &opts.taken);
     let view = masks.input.as_ref().unwrap_or(input);
-    let mut plan = Reconciler::new(view, opts, &masks).run();
+    let mut plan = Reconciler::new(view, opts, masking, &masks).run();
     // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
     // judged with all of the folder's children.
     if let Some(coverage) = &input.coverage {
@@ -95,6 +89,8 @@ struct Reconciler<'a> {
     /// The input with the masks applied.
     input: &'a Input,
     opts: &'a Options,
+    /// What the folder leaves out ([`Masking`]): the masks come from it; Recovered files reads it.
+    masking: Masking<'a>,
     masks: &'a Masks,
     /// The merged tree: context plus targets.
     merged: Tree,
@@ -114,10 +110,11 @@ struct Reconciler<'a> {
 }
 
 impl<'a> Reconciler<'a> {
-    fn new(input: &'a Input, opts: &'a Options, masks: &'a Masks) -> Self {
+    fn new(input: &'a Input, opts: &'a Options, masking: Masking<'a>, masks: &'a Masks) -> Self {
         Reconciler {
             input,
             opts,
+            masking,
             masks,
             merged: Tree::new(),
             scope: BTreeSet::new(),
@@ -200,9 +197,10 @@ fn content_changed(c: Change) -> bool {
 pub fn reconcile_with_known(
     input: &Input,
     opts: &Options,
+    masking: Masking<'_>,
     mut known: impl FnMut(NodeId) -> bool,
 ) -> Plan {
-    let mut plan = reconcile(input, opts);
+    let mut plan = reconcile(input, opts, masking);
     let mut opts = opts.clone();
     // Bounded: each round takes at least one more id.
     for _ in 0..8 {
@@ -221,7 +219,7 @@ pub fn reconcile_with_known(
         let mut all = (*opts.taken).clone();
         all.extend(taken);
         opts.taken = Arc::new(all);
-        plan = reconcile(input, &opts);
+        plan = reconcile(input, &opts, masking);
     }
     plan
 }

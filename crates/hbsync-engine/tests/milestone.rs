@@ -392,8 +392,9 @@ fn windows_illegal_names_are_mapped_locally_only() -> R {
     )?;
 
     // A client applying the Windows rules (works on any disk: the escaped names are legal).
-    let mut win =
-        Client::with_config(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
+    let mut win = Client::with_config(&server, "win", |c| {
+        c.folder.os = hbsync_platform::Os::Windows
+    })?;
     assert_clean(&win.sync()?);
     let names: BTreeSet<String> = win.entries("").into_iter().map(|(p, _)| p).collect();
     assert_eq!(
@@ -420,8 +421,9 @@ fn windows_illegal_names_are_mapped_locally_only() -> R {
     // A client with Unix rules round-trips the original names (NTFS can't hold them).
     #[cfg(not(windows))]
     {
-        let mut unix =
-            Client::with_config(&server, "unix", |c| c.exec.os = hbsync_platform::Os::Linux)?;
+        let mut unix = Client::with_config(&server, "unix", |c| {
+            c.folder.os = hbsync_platform::Os::Linux
+        })?;
         assert_clean(&unix.sync()?);
         assert_eq!(fs::read(unix.root.join("what?.txt"))?, b"edited on windows");
         unix.write("new:name.txt", b"from unix")?;
@@ -456,8 +458,9 @@ fn a_name_windows_cannot_hold_is_skipped_not_retried() -> R {
         srv.seed_file(NodeId::ROOT, &device, b"d", Blake3)?;
         srv.seed_file(NodeId::ROOT, "fine.txt", b"f", Blake3)?;
     }
-    let mut win =
-        Client::with_config(&server, "win", |c| c.exec.os = hbsync_platform::Os::Windows)?;
+    let mut win = Client::with_config(&server, "win", |c| {
+        c.folder.os = hbsync_platform::Os::Windows
+    })?;
     let report = win.sync()?;
     assert_clean(&report);
     assert!(
@@ -503,7 +506,7 @@ fn a_downloaded_name_the_map_wont_give_back_reads_as_the_drives() -> R {
                 srv.seed_file(NodeId::ROOT, &gone, b"v1", Blake3)?.0,
             )
         };
-        let mut c = Client::with_config(&server, "c", move |cfg| cfg.exec.os = os)?;
+        let mut c = Client::with_config(&server, "c", move |cfg| cfg.folder.os = os)?;
         assert_clean(&c.sync()?);
         // An edit here goes up to the same node, under the drive's name.
         c.write(&edited, b"v2")?;
@@ -541,7 +544,7 @@ fn a_rename_on_the_drive_to_a_name_the_map_wont_give_back_settles() -> R {
         let node = (server.lock().map_err(|_| "poisoned")?)
             .seed_file(NodeId::ROOT, &from, b"v1", Blake3)?
             .0;
-        let mut c = Client::with_config(&server, "c", move |cfg| cfg.exec.os = os)?;
+        let mut c = Client::with_config(&server, "c", move |cfg| cfg.folder.os = os)?;
         assert_clean(&c.sync()?);
         {
             let mut srv = server.lock().map_err(|_| "poisoned")?;
@@ -596,7 +599,7 @@ fn a_copy_at_a_decomposed_drive_name_is_adopted() -> R {
                 b"same",
                 algorithm,
             )?;
-            let mut c = Client::with_config(&server, "c", move |cfg| cfg.exec.os = os)?;
+            let mut c = Client::with_config(&server, "c", move |cfg| cfg.folder.os = os)?;
             c.write(name, b"same")?;
             let report = c.sync()?;
             assert_clean(&report);

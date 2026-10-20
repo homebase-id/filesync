@@ -22,51 +22,47 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hbsync_fileio::{FileIoError, HashAlgorithm};
-use hbsync_namemap::{to_local, to_remote};
-use hbsync_platform::name::{NameIssue, name_key};
+use hbsync_fileio::FileIoError;
+use hbsync_platform::name::name_key;
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{
-    BaseRow, LocalRow, MirrorRow, Placing, PlannedBase, RemovedRow, StateDb, StateError, Store,
-};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags, Target};
+use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target};
 
 use crate::activity::{self, Counters};
-use crate::plan::{Against, DriveVersion, TagWrite, not_reached};
-use crate::reconcile::{Agreement, Op, Requirement};
+use crate::folder::FolderCtx;
+use crate::plan::{DriveVersion, TagWrite, not_reached};
+use crate::reconcile::{Op, Requirement};
+use crate::settle::{Placed, Settle, mark_children, settle, settle_placement, spell};
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::trash::Trash;
 use crate::view;
 use hbsync_local::layout;
 
-/// Where the executor works.
+/// How the executor runs a plan (the folder it works in is a [`FolderCtx`]).
 #[derive(Debug, Clone)]
 pub struct ExecConfig {
-    pub root: PathBuf,
-    pub os: Os,
-    /// The hash this client writes and keeps in its `local` rows.
-    pub algorithm: HashAlgorithm,
     /// Attempts per operation within one run (ordering blocks and transient errors).
     pub attempts: u8,
     /// The pause after a transient remote error, doubled for each one in a row. The whole run
     /// waits: the next request would most likely fail the same way.
     pub retry_pause: Duration,
     pub transfer: TransferConfig,
-    /// Names that differ only in case (or Unicode normalization) are the same file here
-    /// (Windows, default macOS). Probe with [`probe_case_insensitive`].
-    pub case_insensitive: bool,
-    /// What this device never syncs (sync semantics §10).
-    pub filter: std::sync::Arc<hbsync_local::Filter>,
-    /// Whether the root's volume keeps tags, learned at the first tag write on it: a
-    /// download's record claims the tags it is to write only where it does.
-    pub tags_kept: Arc<std::sync::OnceLock<bool>>,
-    /// The part of the drive this engine syncs (§12).
-    pub scope: Arc<crate::scope::Scope>,
     /// Tests only: where the run fails or stops as if it crashed (none without `testkit`).
     pub hooks: Hooks,
+}
+
+impl Default for ExecConfig {
+    fn default() -> Self {
+        ExecConfig {
+            attempts: 4,
+            retry_pause: Duration::from_millis(500),
+            transfer: TransferConfig::default(),
+            hooks: Hooks::default(),
+        }
+    }
 }
 
 /// What a tag write left on an item ([`Executor::write_tags`]).
@@ -82,27 +78,6 @@ struct TagsLeft {
     /// them.
     held: Option<Tags>,
     failed: bool,
-}
-
-/// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
-/// (a leading dot hides it elsewhere). Done at every start, so folders from before are hidden
-/// too.
-pub(crate) fn ensure_state_dir(root: &Path) -> PathBuf {
-    let dir = layout::state_dir(root);
-    let _ = fs::create_dir_all(&dir);
-    // Only looks: a folder that can't be hidden still works.
-    let _ = hbsync_platform::ops::set_hidden(&dir);
-    dir
-}
-
-/// Probes the volume of the sync root, inside the client's own state folder so nothing shows
-/// up in the user's tree. Falls back to the OS default.
-pub(crate) fn probe_case_insensitive(root: &Path) -> bool {
-    let dir = ensure_state_dir(root);
-    match hbsync_platform::fskind::probe_case_sensitive(&dir) {
-        Ok(sensitive) => !sensitive,
-        Err(_) => cfg!(any(windows, target_os = "macos")),
-    }
 }
 
 /// What a run did.
@@ -214,6 +189,7 @@ type Step<T = Outcome> = Result<T, Outcome>;
 pub(crate) struct Executor<'a> {
     db: &'a mut StateDb,
     remote: &'a dyn Remote,
+    folder: &'a FolderCtx,
     cfg: &'a ExecConfig,
     queue: VecDeque<(Op, u8)>,
     /// The nodes with a `Forget` still to run in this run.
@@ -365,10 +341,16 @@ impl std::fmt::Debug for Executor<'_> {
 }
 
 impl<'a> Executor<'a> {
-    pub(crate) fn new(db: &'a mut StateDb, remote: &'a dyn Remote, cfg: &'a ExecConfig) -> Self {
+    pub(crate) fn new(
+        db: &'a mut StateDb,
+        remote: &'a dyn Remote,
+        folder: &'a FolderCtx,
+        cfg: &'a ExecConfig,
+    ) -> Self {
         Executor {
             db,
             remote,
+            folder,
             cfg,
             queue: VecDeque::new(),
             forgetting: HashSet::new(),
@@ -550,7 +532,7 @@ impl<'a> Executor<'a> {
             nodes.push(*node);
             self.queue.pop_front();
         }
-        let os = self.cfg.os;
+        let os = self.folder.os;
         let settled = self.db.write(|s| {
             nodes
                 .iter()
@@ -569,7 +551,7 @@ impl<'a> Executor<'a> {
         nodes: &[Settle<'_>],
         f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
     ) -> Step {
-        let os = self.cfg.os;
+        let os = self.folder.os;
         let nodes: Vec<Settle<'_>> = nodes.iter().map(|how| self.ours(*how)).collect();
         let settled = self.db.write(|s| {
             f(s)?;
@@ -603,20 +585,17 @@ impl<'a> Executor<'a> {
         let Some(record) = self.db.read(|s| s.get_placing(node))? else {
             return Ok(Outcome::stale("put in place, its record gone"));
         };
-        let (root, now) = (&self.cfg.root, hbsync_types::unix_now_ms());
+        let (root, now) = (&self.folder.root, hbsync_types::unix_now_ms());
         let judged = match look(root, &record.target) {
             OnDisk::Absent => Judged::Drop,
             OnDisk::Unreadable => Judged::Keep,
             OnDisk::There(meta) => {
-                let row = read_row(root, &record.target, node, &meta, self.cfg.algorithm);
+                let row = read_row(root, &record.target, node, &meta, self.folder.algorithm);
                 judge(root, &record, Some(row))
             }
         };
-        let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
-        match self
-            .db
-            .write(|s| apply(s, &record, judged, &scope, os, now))?
-        {
+        let folder = self.folder;
+        match self.db.write(|s| apply(s, &record, judged, folder, now))? {
             Applied::Settled(at) => {
                 self.note([(node, at)]);
                 Ok(Outcome::Settled)
@@ -651,7 +630,7 @@ impl<'a> Executor<'a> {
     /// Whether the root's volume keeps tags, as far as known (this OS keeps some, and no tag
     /// write found it doesn't).
     fn tags_kept(&self) -> bool {
-        tags::CAN_TAG && self.cfg.tags_kept.get() != Some(&false)
+        tags::CAN_TAG && self.folder.tags_kept.get() != Some(&false)
     }
 
     /// Writes `tags` on the item at `path` ([`tags::write_on`]), noting whether the volume
@@ -663,7 +642,7 @@ impl<'a> Executor<'a> {
         };
         match written {
             Ok(tags::Written::Unsupported) => {
-                let _ = self.cfg.tags_kept.set(false);
+                let _ = self.folder.tags_kept.set(false);
                 TagsLeft {
                     claimed: None,
                     held: None,
@@ -671,7 +650,7 @@ impl<'a> Executor<'a> {
                 }
             }
             Ok(tags::Written::Done(read)) => {
-                let _ = self.cfg.tags_kept.set(true);
+                let _ = self.folder.tags_kept.set(true);
                 TagsLeft {
                     claimed: read.clone(),
                     held: read,
@@ -791,7 +770,7 @@ impl<'a> Executor<'a> {
             Outcome::Done => {
                 self.record(&op, gone)?;
                 self.report.done += 1;
-                let os = self.cfg.os;
+                let os = self.folder.os;
                 let how = self.ours(Settle {
                     same_bytes: op.is_transfer(),
                     ..Settle::node(op.node())
@@ -1140,7 +1119,7 @@ impl<'a> Executor<'a> {
     // ---- paths ----
 
     fn abs(&self, path: &RelPath) -> PathBuf {
-        path.to_native(&self.cfg.root)
+        path.to_native(&self.folder.root)
     }
 
     /// The local path where (parent, name) lives. Retried while the parent isn't local yet;
@@ -1154,7 +1133,7 @@ impl<'a> Executor<'a> {
                 _ => return Err(Outcome::Retry("parent not local yet".into())),
             }
         };
-        spell(&parent_path, name, self.cfg.os)
+        spell(&parent_path, name, self.folder.os)
             .map_err(|e| Outcome::unsyncable(format!("name can't be used here: {e}")))
     }
 
@@ -1178,8 +1157,12 @@ impl<'a> Executor<'a> {
             .collect();
         let mut holding = Vec::new();
         if top.kind == NodeKind::Folder {
-            let walk =
-                hbsync_local::Walker::at(&self.cfg.root, top.path.clone(), &self.cfg.filter, None);
+            let walk = hbsync_local::Walker::at(
+                &self.folder.root,
+                top.path.clone(),
+                &self.folder.filter,
+                None,
+            );
             for event in walk {
                 match event {
                     hbsync_local::WalkEvent::Entry { path, meta } => {
@@ -1212,7 +1195,7 @@ impl<'a> Executor<'a> {
 
     /// See [`occupant`].
     fn occupant(&mut self, target: &RelPath) -> Result<Option<LocalRow>, StateError> {
-        occupant(self.db, self.cfg.case_insensitive, target)
+        occupant(self.db, self.folder.case_insensitive, target)
     }
 
     // ---- the disk and durable commits (the state DB orders them: its docs on durability) ----
@@ -1288,7 +1271,6 @@ mod local;
 mod park;
 mod recover;
 mod remote;
-mod settle;
 mod transfer_ops;
 
 #[cfg(test)]
@@ -1303,10 +1285,7 @@ use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
-pub(crate) use settle::spells;
-use settle::{Placed, mark_children, settle_placement};
-pub use settle::{Settle, settle};
-pub(crate) use settle::{meta, meta_at, record_removed};
+pub(crate) use remote::{meta_at, record_removed};
 pub use transfer_ops::tags_lost;
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the
@@ -1348,11 +1327,6 @@ fn matches_row(row: &LocalRow, meta: &hbsync_platform::LocalMeta) -> bool {
 fn rescan(report: &mut ExecReport, path: &RelPath) -> Outcome {
     report.rescan.push(path.parent().unwrap_or_default());
     Outcome::stale(format!("{path} changed on disk"))
-}
-
-/// `name` in `parent` as this OS spells it.
-fn spell(parent: &RelPath, name: &str, os: Os) -> Result<RelPath, NameIssue> {
-    parent.join(&to_local(name, os)?.name)
 }
 
 fn io_outcome(e: io::Error) -> Outcome {

@@ -13,7 +13,7 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let parent = row.path.parent().unwrap_or_default();
-        let target = spell(&parent, name, self.cfg.os).map_err(|e| {
+        let target = spell(&parent, name, self.folder.os).map_err(|e| {
             Outcome::unsyncable(format!("the conflict copy's name can't be used here: {e}"))
         })?;
         // Its id is fixed by the node, the bytes, the base version and this computer: the next
@@ -27,7 +27,7 @@ impl Executor<'_> {
         let target = if self.free_target(&target, None)? {
             target
         } else {
-            match numbered_place(self.db, self.cfg, &target, false)? {
+            match numbered_place(self.db, self.folder, &target, false)? {
                 Some(t) => t,
                 None => return Ok(Outcome::Retry("conflict name taken".into())),
             }
@@ -109,7 +109,7 @@ impl Executor<'_> {
         // Where the volume keeps no tags (this OS none), what it holds of them is never known:
         // it claims none, as a download does.
         let kept_tags = self.tags_kept();
-        let none = tags.held_by(self.cfg.os).is_empty();
+        let none = tags.held_by(self.folder.os).is_empty();
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
             target: target.clone(),
@@ -176,7 +176,7 @@ impl Executor<'_> {
             hash: None,
             tags: self.held_after(left, held_before),
         };
-        let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
+        let (os, folder) = (self.folder.os, self.folder);
         let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {
@@ -184,7 +184,7 @@ impl Executor<'_> {
             }
             s.put_local(&row)?;
             match &record {
-                Some(r) => settle_placement(s, r, &scope, os).map(Placed::at),
+                Some(r) => settle_placement(s, r, folder).map(Placed::at),
                 None => {
                     // Made from Recently deleted (its folder restored, its RemoteCreate to
                     // follow): it settles against the version there, what it was made of, as
@@ -333,7 +333,7 @@ impl Executor<'_> {
 
     /// See [`renamed_row`].
     pub(super) fn renamed(&self, old: &LocalRow, path: &RelPath) -> Option<LocalRow> {
-        renamed_row(&self.cfg.root, old, path)
+        renamed_row(&self.folder.root, old, path)
     }
 
     /// Moves the local item of `node` to the trash; with `forget`, the bases of `node` and
@@ -391,7 +391,7 @@ impl Executor<'_> {
             }
             parked.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.depth()));
             for (r, original) in parked {
-                if let Some(to) = release_place(self.db, self.cfg, &original, true)? {
+                if let Some(to) = release_place(self.db, self.folder, &original, true)? {
                     // Best effort: if it fails, the item keeps its name and the scan finds it there.
                     let _ = self.rename(&r.path, &to)?;
                 }
@@ -433,10 +433,10 @@ impl Executor<'_> {
                     return Ok(rescan(&mut self.report, &row.path));
                 }
                 let is_dir = row.kind == NodeKind::Folder;
-                let Some(to) = release_place(self.db, self.cfg, &original, is_dir)? else {
+                let Some(to) = release_place(self.db, self.folder, &original, is_dir)? else {
                     return Ok(Outcome::unsyncable("no free name to leave the parked one"));
                 };
-                match restore_parked(self.db, &self.cfg.root, &row, &to)? {
+                match restore_parked(self.db, &self.folder.root, &row, &to)? {
                     Ok(row) => row,
                     Err(e) => return Ok(io_outcome(e)),
                 }
@@ -481,7 +481,7 @@ impl Executor<'_> {
         path: &RelPath,
         node: NodeId,
     ) -> Result<io::Result<PathBuf>, StateError> {
-        let trash = layout::trash_dir(&self.cfg.root);
+        let trash = layout::trash_dir(&self.folder.root);
         // Its own entry folder, named by when and by the node (one name: a native path).
         let dir = trash.join(layout::trash_entry(hbsync_types::unix_now(), node));
         // The trash folder too, made with the first item in it.
@@ -514,7 +514,7 @@ impl Executor<'_> {
         parent: NodeId,
         target: &RelPath,
     ) -> Result<Vec<PathBuf>, StateError> {
-        let root = &self.cfg.root;
+        let root = &self.folder.root;
         let trash = self
             .trash
             .get_or_insert_with(|| Trash::read(&layout::trash_dir(root)));

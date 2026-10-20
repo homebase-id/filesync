@@ -14,13 +14,13 @@
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
-use hbsync_local::Filter;
 use hbsync_local::layout::parked_name;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, StateError, Store};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
+use crate::folder::FolderCtx;
 use crate::plan::Coverage;
 use crate::reconcile::{BaseExtra, Input, Removed};
 use crate::scope::Scope;
@@ -120,16 +120,10 @@ pub(crate) fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPa
     Ok(row.path.parent().unwrap_or_default().join(&name).ok())
 }
 
-/// Loads everything the reconciler needs for `dirty`, with every child of each folder involved;
-/// `filter` is this device's (§10), `scope` the engine's (§12).
-pub fn build_input(
-    s: &Store<'_>,
-    dirty: &[NodeId],
-    os: Os,
-    filter: &Filter,
-    scope: &Scope,
-) -> Result<Input, StateError> {
-    build(s, dirty, os, filter, scope, None)
+/// Loads everything the reconciler needs for `dirty`, with every child of each folder involved,
+/// for the sync folder `ctx` (its filter, §10, and its scope, §12).
+pub fn build_input(s: &Store<'_>, dirty: &[NodeId], ctx: &FolderCtx) -> Result<Input, StateError> {
+    build(s, dirty, ctx, None)
 }
 
 /// [`build_input`] with only the children the rules may need, except in the folders in `full`
@@ -138,12 +132,10 @@ pub fn build_input(
 pub(crate) fn build_narrow(
     s: &Store<'_>,
     dirty: &[NodeId],
-    os: Os,
-    filter: &Filter,
-    scope: &Scope,
+    ctx: &FolderCtx,
     full: &HashSet<NodeId>,
 ) -> Result<Input, StateError> {
-    build(s, dirty, os, filter, scope, Some(full))
+    build(s, dirty, ctx, Some(full))
 }
 
 /// Past this many names to look up in one folder, it is listed whole: one query instead.
@@ -152,14 +144,13 @@ const NAMED_MAX: usize = 32;
 fn build(
     s: &Store<'_>,
     dirty: &[NodeId],
-    os: Os,
-    filter: &Filter,
-    scope: &Scope,
+    ctx: &FolderCtx,
     full: Option<&HashSet<NodeId>>,
 ) -> Result<Input, StateError> {
+    let (filter, scope) = (&*ctx.filter, &*ctx.scope);
     let mut b = Builder {
         s,
-        os,
+        os: ctx.os,
         input: Input::default(),
         base_done: HashSet::new(),
         mirror_done: HashSet::new(),
