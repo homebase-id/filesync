@@ -2,6 +2,16 @@
 //! (verified in odin-core `ExceptionHandlingMiddleware`, which sits outside the shared-secret
 //! middleware). `errorCode` is the camelCase name of `OdinClientErrorCode`; older servers and
 //! other clients also use the number, so both are read.
+//!
+//! Who sent an error matters for a "not there": only the identity's own 404 means a file is
+//! gone (a proxy's, a load balancer's or a maintenance page's must not delete anything). odin-core
+//! sets `X-Odin-Version` on every answer before anything else runs (`OdinVersionNumberMiddleware`,
+//! first after logging in `Startup.Configure`; odin-core itself tells a peer that is an Odin
+//! server by it, `PeerDriveQueryService`), and a route it matched answers either sealed
+//! (`X-SSE: 1`: `SharedSecretEncryptionMiddleware` seals only a matched endpoint's answer) or, on
+//! a route that isn't sealed, with ProblemDetails (`[ApiController]` turns `NotFound()` and
+//! `StatusCode(410)` into one; `ExceptionHandlingMiddleware` writes one for an exception). All
+//! **[verified]** in odin-core's code. A 404 for a route it has no endpoint for has neither.
 
 use serde::Deserialize;
 
@@ -12,6 +22,17 @@ pub struct ApiError {
     /// The `errorCode` as its camelCase name (numbers of known codes are translated).
     pub code: Option<String>,
     pub title: String,
+    /// The identity itself answered ([`Sender::is_identity`]), not something in front of it.
+    pub from_identity: bool,
+}
+
+/// What an error answer's headers say about who sent it (the module's doc).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sender {
+    /// `X-Odin-Version`: odin-core sets it on every answer.
+    pub odin: bool,
+    /// `X-SSE: 1`: sealed under the shared secret, by a route the identity matched.
+    pub sealed: bool,
 }
 
 /// The `OdinClientErrorCode`s the client acts on (`OdinClientErrorCode.cs`).
@@ -31,17 +52,35 @@ const KNOWN_CODES: &[(u32, &str)] = &[
 #[serde(rename_all = "camelCase")]
 struct ProblemDetails {
     title: Option<String>,
+    status: Option<u16>,
     error_code: Option<serde_json::Value>,
 }
 
 impl ApiError {
-    /// Reads an error answer's body; anything that isn't ProblemDetails keeps its text.
+    /// Reads an error answer's body, of a sender not known; anything that isn't ProblemDetails
+    /// keeps its text.
     pub fn parse(status: u16, body: &[u8]) -> Self {
+        Self::read(status, body, Sender::default())
+    }
+
+    /// Reads an error answer's body, sent by `sender`. The identity sent it when odin-core's
+    /// header came with it, and a route answered: sealed, or with ProblemDetails of its status.
+    pub fn read(status: u16, body: &[u8], sender: Sender) -> Self {
+        if sender.sealed {
+            // Ciphertext: nothing in it to show.
+            return ApiError {
+                status,
+                code: None,
+                title: String::new(),
+                from_identity: sender.odin,
+            };
+        }
         match serde_json::from_slice::<ProblemDetails>(body) {
             Ok(p) => ApiError {
                 status,
                 code: p.error_code.and_then(code_name),
                 title: p.title.unwrap_or_default(),
+                from_identity: sender.odin && p.status == Some(status),
             },
             Err(_) => ApiError {
                 status,
@@ -49,6 +88,7 @@ impl ApiError {
                 title: String::from_utf8_lossy(&body[..body.len().min(500)])
                     .trim()
                     .to_owned(),
+                from_identity: false,
             },
         }
     }
@@ -119,5 +159,52 @@ mod tests {
         );
         let empty = ApiError::parse(401, b"");
         assert_eq!(empty.to_string(), "HTTP 401");
+    }
+
+    /// Only odin-core's header with a route's answer (sealed, or ProblemDetails of the same
+    /// status) is the identity's: a proxy's page, an unrouted 404 and a bare one aren't.
+    #[test]
+    fn the_identity_answered_only_with_its_header_and_a_route() {
+        let odin = Sender {
+            odin: true,
+            sealed: false,
+        };
+        let sealed = Sender {
+            odin: true,
+            sealed: true,
+        };
+        let problem = br#"{"type":"https://tools.ietf.org/html/rfc9110#section-15.5.5","title":"Not Found","status":404,"traceId":"00-ab"}"#;
+        let cases: [(u16, &[u8], Sender, bool); 9] = [
+            // The header route's NotFound(), sealed.
+            (404, br#"{"iv":"AAAA","data":"BBBB"}"#, sealed, true),
+            // The payload route's NotFound(), and a payload missing (410).
+            (404, problem, odin, true),
+            (410, br#"{"status":410,"traceId":"00-ab"}"#, odin, true),
+            (
+                400,
+                br#"{"title":"x","status":400,"errorCode":"fileNotFound"}"#,
+                odin,
+                true,
+            ),
+            // A route odin-core has no endpoint for: its header, no body.
+            (404, b"", odin, false),
+            // ProblemDetails of another status, or of no status.
+            (404, br#"{"title":"Not Found","status":400}"#, odin, false),
+            (404, br#"{"title":"Not Found"}"#, odin, false),
+            // Something in front of the identity: no odin-core header.
+            (404, problem, Sender::default(), false),
+            (404, b"<html>404 Not Found</html>", Sender::default(), false),
+        ];
+        for (status, body, sender, identity) in cases {
+            let error = ApiError::read(status, body, sender);
+            assert_eq!(
+                error.from_identity,
+                identity,
+                "{status} {} {sender:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+        let sealed_404 = ApiError::read(404, br#"{"iv":"AAAA","data":"BBBB"}"#, sealed);
+        assert_eq!(sealed_404.to_string(), "HTTP 404", "no ciphertext shown");
     }
 }

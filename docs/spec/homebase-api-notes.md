@@ -333,7 +333,20 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
 enveloped) `{title, status, correlationId, errorCode}`. `errorCode` is the camelCase enum name
 (`versionTagMismatch`); accept numbers too. `OdinClientException` → 400,
 `OdinSecurityException` → 403, a bad or missing token → 401 with an empty body. A `NotFound()`
-on an enveloped route comes back as 404 with an encrypted empty body: check the status first.
+on an enveloped route comes back as 404 with an encrypted body (`X-SSE: 1`): check the status first.
+
+**Who sent a 404** **[verified]** in odin-core's code: `OdinVersionNumberMiddleware` sets
+`X-Odin-Version` on every answer, first after logging (`Startup.Configure`; odin-core tells a
+peer that is an Odin server by it, `PeerDriveQueryService`). A route odin-core matched answers a
+missing file sealed (`X-SSE: 1`, the header read: `SharedSecretEncryptionMiddleware` seals only
+a matched endpoint's answer) or, unsealed, with ProblemDetails of the same `status` (the payload
+read: `NotFound()`, or 410 for a payload whose bytes are missing, through `[ApiController]`'s
+client-error mapping, which odin-core leaves at its default; an exception through
+`ExceptionHandlingMiddleware`). A path with no endpoint answers 404 with the header and no body;
+a proxy's or load balancer's own 404 has no header. The client takes a 404 or 410 (and
+`fileNotFound`) as "not there" only with the header and one of the two; anything else is passing
+(`ApiError::read`). Live: frodo's header and payload reads of a missing file are both "not there"
+(`hbsync-dev` live test `a_missing_file_is_not_found`).
 
 | Code | Name |
 |---|---|

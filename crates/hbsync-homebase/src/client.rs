@@ -21,7 +21,7 @@ use crate::HomebaseError;
 use crate::connections::{Call, Connections, REUSED_WITHIN, SharedConnector};
 use crate::crypto::{Envelope, Key};
 use crate::multipart::Multipart;
-use crate::problem::ApiError;
+use crate::problem::{ApiError, Sender};
 use crate::youauth::Credentials;
 
 /// The largest JSON answer read (a page of the change feed is far below it).
@@ -477,13 +477,18 @@ fn checked(
     if status < 400 {
         return Ok(response);
     }
+    let headers = response.headers();
+    let sender = Sender {
+        odin: headers.contains_key("X-Odin-Version"),
+        sealed: headers.get("X-SSE").is_some_and(|v| v.as_bytes() == b"1"),
+    };
     let body = response
         .body_mut()
         .with_config()
         .limit(64 * 1024)
         .read_to_vec()
         .unwrap_or_default();
-    let error = ApiError::parse(status, &body);
+    let error = ApiError::read(status, &body, sender);
     Err(match status {
         401 | 403 => HomebaseError::Denied(format!("{what}: {error}")),
         _ => HomebaseError::Api {

@@ -738,16 +738,25 @@ fn remote_error(e: HomebaseError) -> RemoteError {
         }
         HomebaseError::Io(e) => RemoteError::Io(e),
         HomebaseError::Api { what, error } => {
-            if let Some(mapped) = error.code.as_deref().and_then(code_error) {
-                return mapped;
-            }
             let why = format!("{what}: {error}");
-            match error.status {
-                404 | 410 => RemoteError::NotFound,
-                416 => RemoteError::StaleRange(why),
-                507 => RemoteError::Full(why),
-                408 | 429 | 499 | 500..=599 => RemoteError::Transient(why),
-                _ => RemoteError::Fatal(why),
+            let mapped = error
+                .code
+                .as_deref()
+                .and_then(code_error)
+                .unwrap_or_else(|| match error.status {
+                    404 | 410 => RemoteError::NotFound,
+                    416 => RemoteError::StaleRange(why.clone()),
+                    507 => RemoteError::Full(why.clone()),
+                    408 | 429 | 499 | 500..=599 => RemoteError::Transient(why.clone()),
+                    _ => RemoteError::Fatal(why.clone()),
+                });
+            // "Not there" deletes here and is remembered for good: believed only from the
+            // identity itself, never from a proxy or a page in front of it (`ApiError::read`).
+            match mapped {
+                RemoteError::NotFound if !error.from_identity => {
+                    RemoteError::Transient(format!("{why} (not from the identity)"))
+                }
+                mapped => mapped,
             }
         }
         e @ (HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_)) => {
@@ -761,6 +770,7 @@ mod tests {
     use super::*;
     use crate::ApiError;
 
+    /// An error answer of the identity itself.
     fn api(status: u16, code: Option<&str>) -> HomebaseError {
         HomebaseError::Api {
             what: "test".into(),
@@ -768,6 +778,7 @@ mod tests {
                 status,
                 code: code.map(str::to_owned),
                 title: String::new(),
+                from_identity: true,
             },
         }
     }
@@ -906,6 +917,48 @@ mod tests {
         ];
         for (error, expected) in cases {
             let mapped = format!("{:?}", remote_error(error));
+            assert!(mapped.starts_with(expected), "{mapped} isn't {expected}");
+        }
+    }
+
+    /// A "not there" that the identity itself didn't send (a proxy's 404, a maintenance page, a
+    /// route the server doesn't have) is passing, never a file gone: it would delete here.
+    #[test]
+    fn not_found_only_from_the_identity() {
+        let read = |status: u16, body: &[u8], odin: bool, sealed: bool| {
+            let error = ApiError::read(status, body, crate::problem::Sender { odin, sealed });
+            format!(
+                "{:?}",
+                remote_error(HomebaseError::Api {
+                    what: "test".into(),
+                    error
+                })
+            )
+        };
+        let problem = br#"{"title":"Not Found","status":404,"traceId":"00-ab"}"#;
+        let gone = br#"{"status":410,"traceId":"00-ab"}"#;
+        let code = br#"{"title":"x","status":400,"errorCode":"fileNotFound"}"#;
+        let envelope = br#"{"iv":"AAAA","data":"BBBB"}"#;
+        let cases: [(String, &str); 10] = [
+            (read(404, envelope, true, true), "NotFound"),
+            (read(404, problem, true, false), "NotFound"),
+            (read(410, gone, true, false), "NotFound"),
+            (read(400, code, true, false), "NotFound"),
+            (read(404, b"", true, false), "Transient"),
+            (read(404, problem, false, false), "Transient"),
+            (read(410, gone, false, false), "Transient"),
+            (read(400, code, false, false), "Transient"),
+            (
+                read(404, b"<html>Not Found</html>", false, false),
+                "Transient",
+            ),
+            // Not a "not there": as before, whoever sent it.
+            (
+                read(400, br#"{"errorCode":"versionTagMismatch"}"#, false, false),
+                "VersionMismatch",
+            ),
+        ];
+        for (mapped, expected) in cases {
             assert!(mapped.starts_with(expected), "{mapped} isn't {expected}");
         }
     }
