@@ -2,7 +2,6 @@
 //! the account up (the notifications, the [`Drive`], the puller, Recently deleted's keeper),
 //! starts its folders' runners, and serves its channel ([`Msg`]) until it ends.
 
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -14,14 +13,14 @@ use hbsync_homebase::{Client, HomebaseError};
 use hbsync_types::unix_now;
 
 use super::parts::AccountParts;
-use super::runners::{Life, Running, shown};
-use super::{Account, Msg, Phase, Request};
+use super::runners::{Life, Running};
+use super::{Account, Msg, Request};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
 use crate::protocol::{AccountStatus, Hints, Pause, State};
 use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError};
 use crate::sync::{lock, wait_for};
-use crate::{Config, CredentialError, CredentialStore, Location, Paths};
+use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
 
 /// How often the purge of Recently deleted is looked at (it runs once a day).
 const PURGE_LOOK: Duration = Duration::from_secs(600);
@@ -29,17 +28,18 @@ const PURGE_LOOK: Duration = Duration::from_secs(600);
 const CONFIG_AGAIN: Duration = Duration::from_secs(1);
 
 impl Account {
-    fn waiting(&self, to: State, why: String) {
-        if let Phase::Waiting { state, error, .. } = &mut *lock(&self.phase) {
-            *state = to;
-            *error = Some(why);
+    /// Shows that it waits in `to`, for `why`.
+    fn show_waiting(&self, to: State, why: String) {
+        if let Some(waiting) = &mut lock(&self.shown).waiting {
+            waiting.state = to;
+            waiting.error = Some(why);
         }
         self.changed.raise();
     }
 
     /// Changes its status.
     fn set_status(&self, f: impl FnOnce(&mut AccountStatus)) {
-        f(&mut lock(&self.status));
+        f(&mut lock(&self.shown).status);
         self.changed.raise();
     }
 
@@ -121,44 +121,37 @@ impl Account {
             }
         };
         let mut keeper = Keeper::spawn(Arc::clone(&drive));
-        let mut runners: Vec<Running> = Vec::new();
         // A runner that couldn't start: the account stops its runners and ends with it, the
         // daemon with it (restarted whole). One that ended with an error is started again after a
         // pause, its folder showing why meanwhile; the others sync on.
         let mut result: Result<(), DaemonError> = Ok(());
         {
-            // Under the lock: no pause or folder gets lost between the two phases.
-            let mut phase = lock(&self.phase);
-            let folders = match &*phase {
-                Phase::Waiting { folders, .. } => folders.clone(),
-                Phase::Running(_) => Vec::new(),
-            };
-            for folder in folders {
-                match self.start(&drive, config, &folder) {
-                    Ok(r) => runners.push(r),
+            // Under the lock: no pause or folder gets lost between waiting and running.
+            let mut shown = lock(&self.shown);
+            let roots = shown.waiting.take().map(|w| w.roots).unwrap_or_default();
+            for root in roots {
+                match self.start(&drive, config, &root, shown.paused) {
+                    Ok(r) => shown.runners.push(r),
                     Err(e) => {
                         result = Err(e.into());
                         break;
                     }
                 }
             }
-            *phase = Phase::Running(shown(&runners));
-            self.changed.raise();
         }
+        self.changed.raise();
 
         // Folders to start once no runner of theirs is left.
-        let mut adding: Vec<PathBuf> = Vec::new();
+        let mut adding: Vec<Root> = Vec::new();
         let keep_days = config.keep_deleted_days.days();
         let mut next_purge = Instant::now();
         loop {
-            if self.stopping(stop) || result.is_err() {
-                for r in &runners {
-                    r.handle.send(Command::Stop);
-                }
-            }
             let (ran_out, paused) = {
-                let mut pause = lock(&self.paused);
-                (pause_ran_out(&mut pause, unix_now()), pause.is_some())
+                let mut shown = lock(&self.shown);
+                (
+                    pause_ran_out(&mut shown.paused, unix_now()),
+                    shown.paused.is_some(),
+                )
             };
             if ran_out {
                 tracing::info!("the pause is over");
@@ -171,34 +164,35 @@ impl Account {
                         let Some(hints) = notifications.event(event, Instant::now(), paused) else {
                             continue;
                         };
+                        let mut shown = lock(&self.shown);
                         // Connected again: what waits for the drive goes now.
                         if hints == Hints::Connected {
-                            for r in &runners {
-                                r.handle.send(Command::Online);
-                            }
+                            let _ = shown.send(&self.identity, &Command::Online);
                         }
-                        self.set_status(|s| s.hints = hints);
+                        shown.status.hints = hints;
+                        changed = true;
                     }
                     Msg::Woke => {
                         if let Some(n) = &notifier {
                             n.reconnect();
                         }
-                        for r in &runners {
-                            r.handle.send(Command::Woke);
-                        }
+                        let _ = lock(&self.shown).send(&self.identity, &Command::Woke);
                     }
                     Msg::Request(Request::Deleted(control)) => keeper.request(control),
                     // Started below, once no runner of the folder is left (one removed a moment
                     // ago may still be finishing an operation).
-                    Msg::Request(Request::AddFolder(folder)) => {
-                        let synced = runners.iter().any(|r| r.path == folder && r.shows());
-                        if !synced && !adding.contains(&folder) {
-                            adding.push(folder);
+                    Msg::Request(Request::AddFolder(root)) => {
+                        let synced = lock(&self.shown)
+                            .shown()
+                            .any(|r| r.root.folder == root.folder);
+                        if !synced && !adding.iter().any(|a| a.folder == root.folder) {
+                            adding.push(root);
                         }
                     }
                     Msg::Request(Request::RemoveFolder(folder)) => {
-                        adding.retain(|f| *f != folder);
-                        for r in runners.iter_mut().filter(|r| r.path == folder) {
+                        adding.retain(|a| a.folder != folder);
+                        let mut shown = lock(&self.shown);
+                        for r in shown.runners.iter_mut().filter(|r| r.root.folder == folder) {
                             r.stop_for_good();
                         }
                         changed = true;
@@ -216,77 +210,102 @@ impl Account {
                 keeper.purge(keep_days);
             }
             // A runner that ended takes its folder out, unless it failed: then it starts again
-            // after a pause. The account ends with the last.
-            let before = runners.len();
+            // after a pause. The account ends with the last. Joined under the lock: a runner's
+            // thread is done ([`Running::ended`]) only once it has nothing left to do.
             let ending = self.stopping(stop) || result.is_err();
-            runners.iter_mut().for_each(|r| r.ended(ending));
             if ending {
                 adding.clear();
             }
-            runners.retain(|r| !matches!(r.life, Life::Gone));
             let now = Instant::now();
-            let due = runners.iter().any(|r| r.due(now));
-            let ready: Vec<PathBuf> = adding
-                .extract_if(.., |f| !runners.iter().any(|r| r.path == *f))
-                .collect();
-            // The config as it is now (its settings may have changed meanwhile); while it can't
-            // be read, restarts wait a while and new folders wait a moment.
-            let config = (due || !ready.is_empty())
-                .then(|| Self::config(paths))
-                .flatten();
+            let (due, ready) = {
+                let mut shown = lock(&self.shown);
+                if ending {
+                    for r in &shown.runners {
+                        r.handle.send(Command::Stop);
+                    }
+                }
+                let before = shown.runners.len();
+                shown.runners.iter_mut().for_each(|r| r.ended(ending));
+                shown.runners.retain(|r| !matches!(r.life, Life::Gone));
+                changed |= shown.runners.len() != before;
+                let due: Vec<Root> = shown
+                    .runners
+                    .iter()
+                    .filter(|r| r.due(now))
+                    .map(|r| r.root.clone())
+                    .collect();
+                let ready: Vec<Root> = adding
+                    .extract_if(.., |a| {
+                        !shown.runners.iter().any(|r| r.root.folder == a.folder)
+                    })
+                    .collect();
+                (due, ready)
+            };
             // While the config can't be read: when to read it again for folders to start.
             let mut config_again = None;
-            for r in runners.iter_mut().filter(|r| r.due(now)) {
-                match config.as_ref().map(|c| self.start(&drive, c, &r.path)) {
-                    Some(Ok(new)) => {
-                        *r = Running {
-                            backoff: r.backoff,
-                            ..new
-                        };
-                        changed = true;
-                    }
-                    Some(Err(e)) => result = Err(e.into()),
-                    None => r.life = Life::Waiting(now + r.backoff.after(State::Failing)),
-                }
-            }
-            for folder in ready {
-                let Some(config) = &config else {
-                    adding.push(folder);
-                    config_again = Some(now + CONFIG_AGAIN);
-                    continue;
+            if !due.is_empty() || !ready.is_empty() {
+                // Started without the lock (only this thread changes the runners), with the
+                // config as it is now (its settings may have changed meanwhile); while it
+                // can't be read, restarts wait a while and new folders wait a moment.
+                let config = Self::config(paths);
+                let paused = lock(&self.shown).paused;
+                let start = |root: &Root| {
+                    let config = config.as_ref()?;
+                    Some(self.start(&drive, config, root, paused))
                 };
-                match self.start(&drive, config, &folder) {
-                    Ok(r) => runners.push(r),
-                    Err(e) => result = Err(e.into()),
+                let restarted: Vec<_> = due.iter().map(start).collect();
+                let started: Vec<_> = ready.iter().map(start).collect();
+                let mut shown = lock(&self.shown);
+                let restarting = shown.runners.iter_mut().filter(|r| r.due(now));
+                for (r, again) in restarting.zip(restarted) {
+                    match again {
+                        Some(Ok(new)) => {
+                            *r = Running {
+                                backoff: r.backoff,
+                                ..new
+                            };
+                        }
+                        Some(Err(e)) => result = Err(e.into()),
+                        None => r.life = Life::Waiting(now + r.backoff.after(State::Failing)),
+                    }
+                }
+                for (root, new) in ready.into_iter().zip(started) {
+                    match new {
+                        Some(Ok(r)) => shown.runners.push(r),
+                        Some(Err(e)) => result = Err(e.into()),
+                        None => {
+                            adding.push(root);
+                            config_again = Some(now + CONFIG_AGAIN);
+                        }
+                    }
                 }
                 changed = true;
             }
-            if changed || runners.len() != before {
-                *lock(&self.phase) = Phase::Running(shown(&runners));
+            if changed {
                 self.changed.raise();
             }
-            if runners.is_empty() {
-                notifications.finish();
-                keeper.finish();
-                return result;
-            }
-
             // Until a message, or the next thing that is due.
+            let (pause, restart) = {
+                let shown = lock(&self.shown);
+                if shown.runners.is_empty() {
+                    drop(shown);
+                    notifications.finish();
+                    keeper.finish();
+                    return result;
+                }
+                let restart = shown.runners.iter().filter_map(Running::restart_at).min();
+                (shown.paused, restart)
+            };
             let now = Instant::now();
-            let pause = *lock(&self.paused);
             let paused = pause.is_some();
-            let pause_end = pause.and_then(|p| p.end_at(now, unix_now()));
-            let restarts = runners.iter().filter_map(|r| match r.life {
-                Life::Waiting(at) => Some(at),
-                _ => None,
-            });
             let deadlines = [
                 notifications.deadline(now, paused),
                 (!paused).then_some(next_purge),
-                pause_end,
+                pause.and_then(|p| p.end_at(now, unix_now())),
                 config_again,
+                restart,
             ];
-            let wait = wait_for(now, deadlines.into_iter().flatten().chain(restarts));
+            let wait = wait_for(now, deadlines.into_iter().flatten());
             msgs.extend(requests.recv_timeout(wait).ok());
             msgs.extend(requests.try_iter());
         }
@@ -304,21 +323,27 @@ impl Account {
         }
     }
 
-    /// Starts syncing `folder` (as `config` lists it) on the account's `drive`.
+    /// Starts syncing the folder `root` on the account's `drive`, with `config`'s settings,
+    /// paused when `paused`.
     fn start(
         &self,
         drive: &Arc<Drive>,
         config: &Config,
-        folder: &Path,
+        root: &Root,
+        paused: Option<Pause>,
     ) -> Result<Running, RunnerError> {
-        let mut cfg = RunnerConfig::new(folder, &self.db, &self.identity, &config.device_name());
+        let mut cfg = RunnerConfig::new(
+            &root.folder,
+            &self.db,
+            &self.identity,
+            &config.device_name(),
+        );
         cfg.mass_delete = config.mass_delete;
-        cfg.role = config
-            .roots
-            .iter()
-            .find(|r| r.folder == folder)
-            .and_then(|r| r.role);
-        cfg.paused = *lock(&self.paused);
+        // The config's entry has the say, as when it was read for the account's start.
+        let listed = config.roots.iter().find(|r| r.folder == root.folder);
+        let role = listed.map_or(root.role, |r| r.role);
+        cfg.role = role;
+        cfg.paused = paused;
         cfg.changed = Arc::clone(&self.changed);
         let done = Arc::new(AtomicBool::new(false));
         let (ending, tell) = (Arc::clone(&done), self.requests.clone());
@@ -327,7 +352,10 @@ impl Account {
             let _ = tell.send(Msg::Wake);
         })?;
         Ok(Running {
-            path: folder.to_path_buf(),
+            root: Root {
+                role,
+                ..root.clone()
+            },
             handle,
             life: Life::Syncing(thread),
             done,
@@ -358,7 +386,7 @@ impl Account {
                 Err(CredentialError::Keychain(why)) => {
                     let wait_for = backoff.after(State::Failing);
                     tracing::warn!("can't read the keychain ({why}); trying again in {wait_for:?}");
-                    self.waiting(State::Failing, format!("can't read the keychain: {why}"));
+                    self.show_waiting(State::Failing, format!("can't read the keychain: {why}"));
                     if self.wait(wait_for, stop, rx, early) {
                         return Ok(None);
                     }
@@ -398,7 +426,7 @@ impl Account {
                         "can't connect to {} ({e}); trying again in {wait_for:?}",
                         self.identity
                     );
-                    self.waiting(state, e.to_string());
+                    self.show_waiting(state, e.to_string());
                     if self.wait(wait_for, stop, rx, early) {
                         return None;
                     }

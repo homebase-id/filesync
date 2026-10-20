@@ -13,7 +13,6 @@ mod watch;
 
 pub use account::{AccountParts, Notifications, Puller, UNANNOUNCED_READ};
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -25,7 +24,7 @@ use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
 use crate::runner::{Command, RunnerError};
 use crate::sync::{OnDrop, WAIT_AT_MOST, Wakeup, lock};
-use crate::{Config, ConfigError, CredentialError, Identity, Paths};
+use crate::{Config, ConfigError, CredentialError, Identity, Paths, Root};
 use account::Account;
 
 #[derive(Debug, thiserror::Error)]
@@ -98,7 +97,7 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
             .map_err(DaemonError::Ipc)?;
     }
     for root in &config.roots {
-        daemon.add_folder(&root.identity, &root.folder)?;
+        daemon.add_folder(root)?;
         tracing::info!(
             "daemon {} started for {} at {}",
             crate::VERSION,
@@ -171,23 +170,23 @@ impl Daemon {
             .collect()
     }
 
-    /// Syncs the folder at `path` (set up, in the config) with `identity`: in its account, or
-    /// in a new one. Under one lock: two requests for a new identity start one account.
-    fn add_folder(&self, identity: &Identity, path: &Path) -> Result<(), DaemonError> {
+    /// Syncs the folder `root` (set up, in the config): in its identity's account, or in a new
+    /// one. Under one lock: two requests for a new identity start one account.
+    fn add_folder(&self, root: &Root) -> Result<(), DaemonError> {
+        let identity = &root.identity;
         let mut accounts = lock(&self.accounts);
         if let Some((account, _)) = accounts
             .iter()
             .find(|(a, thread)| a.identity == *identity && !thread.is_finished())
         {
-            account.add_folder(path);
+            account.add_folder(root);
             return Ok(());
         }
         // A pause that ended while the daemon wasn't running is over.
         let config = Config::load(&self.paths.config_file())?.unwrap_or_default();
         let (account, requests) = Account::new(
             &self.paths,
-            identity,
-            path,
+            root,
             config.pause(unix_now()),
             Arc::clone(&self.changed),
         );
@@ -229,9 +228,7 @@ impl Daemon {
         let ended = thread
             .join()
             .unwrap_or(Err(DaemonError::Runner(RunnerError::Panicked)));
-        let again = folders
-            .iter()
-            .try_for_each(|folder| self.add_folder(identity, folder));
+        let again = folders.iter().try_for_each(|root| self.add_folder(root));
         self.starting_over.fetch_sub(1, Ordering::SeqCst);
         self.stop.wakeup.raise();
         ended.and(again)
@@ -240,7 +237,8 @@ impl Daemon {
     /// Stops every account (the stop flag set): their runners stop between operations.
     fn stop_all(&self) {
         for a in self.accounts() {
-            a.send_all(&Command::Stop);
+            // One not running yet stops as it is woken.
+            let _ = a.send_all(&Command::Stop);
             a.wake();
         }
     }

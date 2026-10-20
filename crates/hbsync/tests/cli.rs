@@ -220,3 +220,83 @@ fn a_role_folder_is_added_for_an_identity_set_up_only() -> R {
     assert!(text(&out).contains("isn't set up"), "{}", text(&out));
     Ok(())
 }
+
+/// The daemon's status, as `hbsync status --json` says it.
+fn status(home: &Home) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let out = home.hbsync(&["status", "--json"])?;
+    assert!(out.status.success(), "{}", text(&out));
+    Ok(serde_json::from_slice(&out.stdout)?)
+}
+
+/// Waits until the daemon's status shows `want`: its folders' paths and roles, in order.
+fn wait_for_folders(home: &Home, want: &[(&Path, Option<&str>)]) -> R {
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = status(home)?;
+        let shown: Vec<(PathBuf, Option<String>)> = status["folders"]
+            .as_array()
+            .ok_or("no folders")?
+            .iter()
+            .map(|f| {
+                let path = PathBuf::from(f["path"].as_str().unwrap_or_default());
+                (path, f["role"].as_str().map(str::to_owned))
+            })
+            .collect();
+        let wanted: Vec<(PathBuf, Option<String>)> = want
+            .iter()
+            .map(|(p, r)| (p.to_path_buf(), r.map(str::to_owned)))
+            .collect();
+        if shown == wanted {
+            return Ok(());
+        }
+        if Instant::now() > until {
+            return Err(format!("shown {shown:?}, wanted {wanted:?}: {status}").into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// While its account waits for the identity, the daemon shows each folder with its role; it
+/// keeps them through the account starting over (new credentials), a pause, a folder taken
+/// away, and a restart of the daemon.
+#[test]
+fn the_daemon_keeps_its_folders_through_start_over_and_restart() -> R {
+    let home = Home::new()?;
+    let main = home.set_up()?;
+    let docs = home.path().join("Docs");
+    std::fs::create_dir_all(&docs)?;
+    let docs = hbsync_platform::winpath::plain(&docs.canonicalize()?);
+    home.ok(&["start"])?;
+    let said = home.ok(&["add", "documents", "--folder", &docs.to_string_lossy()])?;
+    assert!(
+        !said.contains("hbsync start"),
+        "taken by the daemon: {said}"
+    );
+    let both = [(main.as_path(), None), (docs.as_path(), Some("documents"))];
+    wait_for_folders(&home, &both)?;
+
+    // New credentials: the account starts over with its folders.
+    let paths = hbsync_app::Paths::under(home.path());
+    hbsync_app::control::start_over(&paths, &IDENTITY.into()).map_err(|e| e.to_string())?;
+    wait_for_folders(&home, &both)?;
+
+    home.ok(&["pause"])?;
+    let paused = status(&home)?;
+    let states: Vec<_> = paused["folders"]
+        .as_array()
+        .ok_or("no folders")?
+        .iter()
+        .map(|f| f["state"].clone())
+        .collect();
+    assert!(states.iter().all(|s| s == "paused"), "{paused}");
+    home.ok(&["resume"])?;
+
+    home.ok(&["remove", "documents"])?;
+    wait_for_folders(&home, &[(main.as_path(), None)])?;
+
+    home.ok(&["stop"])?;
+    home.ok(&["start"])?;
+    wait_for_folders(&home, &[(main.as_path(), None)])?;
+    home.ok(&["stop"])?;
+    Ok(())
+}
