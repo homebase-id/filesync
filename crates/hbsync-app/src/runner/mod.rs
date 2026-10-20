@@ -223,6 +223,9 @@ impl std::fmt::Debug for Runner {
 /// The engine and the local observer, rebuilt when the ignore rules change.
 struct Parts {
     engine: Engine,
+    /// The folder's marker when it was opened: another one means it was set up again (a new
+    /// folder in the DB, the engine's gone).
+    marker: String,
     observer: LocalObserver,
     /// Set when the drive changed for the folder ([`Drive::subscribe_with`], which wakes the
     /// runner while this lives).
@@ -324,7 +327,7 @@ impl Runner {
 
     /// The engine and observer for the folder, which must have been set up (its marker names
     /// it): an unmounted disk's empty mount point must not become a new sync folder.
-    fn open(&self) -> Result<Parts, RunnerError> {
+    fn open(&self, marker: String) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.mass_delete_min = self.cfg.mass_delete.min_files;
@@ -362,6 +365,7 @@ impl Runner {
         });
         Ok(Parts {
             engine,
+            marker,
             observer,
             drive_changed,
         })
@@ -498,8 +502,8 @@ impl Runner {
             if !schedule.due(now) {
                 continue;
             }
-            match SyncRoot::check(&self.cfg.folder, &self.cfg.identity) {
-                Ok(_) => {}
+            let marker = match SyncRoot::check(&self.cfg.folder, &self.cfg.identity) {
+                Ok(marker) => marker.id,
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
                 Err(RootError::NoMarker(_) | RootError::Io(_)) => {
@@ -512,10 +516,16 @@ impl Runner {
                     continue;
                 }
                 Err(e) => return Err(e.into()),
+            };
+            // Set up again meanwhile (a new folder in the DB, the open one removed): the
+            // engine would only fail now. Start over with the new one.
+            if parts.as_ref().is_some_and(|p| p.marker != marker) {
+                tracing::info!("the folder was set up again: starting over");
+                parts = None;
             }
             let p = match &mut parts {
                 Some(p) => p,
-                None => match self.open() {
+                None => match self.open(marker) {
                     Ok(p) => {
                         started = false;
                         parts.insert(p)

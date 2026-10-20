@@ -164,22 +164,26 @@ impl Engine {
                 root.path().display()
             ))));
         }
-        Ok(Engine::new(db, drive, cfg))
+        Ok(Engine::new(db, drive, cfg)?)
     }
 
     /// The engine of the folder `db` sees, on the account's `drive`. The folder's top (the
     /// state DB's) decides which part of the drive it syncs: `cfg`'s scope is kept only when
-    /// it has that top.
-    pub fn new(mut db: StateDb, drive: Arc<Drive>, mut cfg: EngineConfig) -> Self {
-        let top = db
-            .read(|s| Ok(s.coords()?.top))
-            .unwrap_or(hbsync_types::NodeId::ROOT);
+    /// it has that top. A top that can't be read fails the open: no other part of the drive
+    /// stands in for it (a role folder run as the main folder would see its files gone from
+    /// the drive, and the main folder's coming into it).
+    pub fn new(
+        mut db: StateDb,
+        drive: Arc<Drive>,
+        mut cfg: EngineConfig,
+    ) -> Result<Self, StateError> {
+        let top = db.read(|s| Ok(s.coords()?.top))?;
         if cfg.folder.scope.top != top {
             cfg.folder.scope = Arc::new(Scope::of(top));
         }
         let scan_opts = cfg.folder.scan_options();
         let remote = cfg.folder.scope.remote(drive.shared_remote());
-        Engine {
+        Ok(Engine {
             db,
             drive,
             remote,
@@ -190,7 +194,7 @@ impl Engine {
             confirmed: Default::default(),
             progress: Arc::default(),
             rescanned: Default::default(),
-        }
+        })
     }
 
     /// How far the current sync is (started over at each sync), to show while it runs.

@@ -7,16 +7,23 @@ impl ReadTx<'_> {
 
     /// How this store's folder sees the drive's rows (the mirror, Recently deleted): its top
     /// as the root, the rest of the drive as [`NodeId::OUTSIDE`]. The account (no folder) sees
-    /// them as they are.
+    /// them as they are. A folder the DB doesn't have (removed meanwhile) is an error, never
+    /// the main folder: a role folder seeing the whole drive would sync the wrong part of it.
     pub fn coords(&self) -> Result<Coords> {
         if let Some(c) = self.coords.get() {
             return Ok(c);
         }
-        let c = self
-            .folders()?
-            .into_iter()
-            .find(|f| f.id == self.folder)
-            .map_or(Coords::MAIN, |f| Coords { top: f.top });
+        let c = if self.folder == crate::NO_FOLDER {
+            Coords::MAIN
+        } else {
+            self.folder_list()?
+                .iter()
+                .find(|f| f.id == self.folder)
+                .map(|f| Coords { top: f.top })
+                .ok_or_else(|| {
+                    StateError::Conflict(format!("no folder {} in this DB", self.folder))
+                })?
+        };
         self.coords.set(Some(c));
         Ok(c)
     }
@@ -154,6 +161,7 @@ impl AccountTx<'_> {
     /// Forgets folder `id` and every row it has (the account's stay).
     pub fn remove_folder(&self, id: i64) -> Result<bool> {
         self.folders.take();
+        self.coords.take();
         self.places.borrow_mut().clear();
         self.forget_local_ids();
         self.change("DELETE FROM folders WHERE id = ?1", id)

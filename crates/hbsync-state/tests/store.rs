@@ -1087,7 +1087,18 @@ fn folders_keep_their_own_rows() -> R {
     assert_eq!(main.read(|s| s.get_kv(keys::FILTER))?.as_deref(), Some("f"));
 
     // Forgetting docs takes its rows; main's keep the node's id.
-    assert!(main.write(|s| s.account().remove_folder(docs))?);
+    // A handle seeing docs doesn't take the drive's top for its own once docs is gone: not
+    // in the transaction that removes it, nor later.
+    assert!(docs_db.write(|s| {
+        assert_eq!(s.coords()?.top, docs_top);
+        let removed = s.account().remove_folder(docs)?;
+        assert!(matches!(s.coords(), Err(StateError::Conflict(_))));
+        Ok(removed)
+    })?);
+    assert!(matches!(
+        docs_db.read(|s| s.coords()),
+        Err(StateError::Conflict(_))
+    ));
     drop(docs_db);
     assert!(StateDb::open_folder(&db_path, docs).is_err());
     let (ids_before, collected) =

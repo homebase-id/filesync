@@ -684,6 +684,57 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
     Ok(())
 }
 
+/// A folder whose row in the DB can't be read isn't opened: its runner fails with nothing
+/// synced (its account starts it again later), and a runner started once the read works syncs.
+#[test]
+fn a_folder_whose_row_cant_be_read_syncs_once_it_can() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
+    std::fs::write(root.join("a.txt"), "a")?;
+    let cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
+    let drive = drive(&cfg, &server)?;
+    let folder = SyncRoot::find(&cfg.db, &cfg.identity, &root)?.folder();
+    let raw = rusqlite::Connection::open(&cfg.db)?;
+    let set_top = |top: &[u8]| {
+        raw.execute(
+            "UPDATE folders SET top = ?1 WHERE id = ?2",
+            rusqlite::params![top, folder],
+        )
+    };
+    set_top(&[0])?;
+    let (handle, thread) = Runner::spawn(cfg.clone(), Arc::clone(&drive))?;
+    assert!(thread.join().map_err(|_| "panicked")?.is_err());
+    assert_eq!(handle.status().state, State::Failing);
+    assert!(live_names(&server).is_empty(), "nothing was uploaded");
+
+    set_top(hbsync_types::NodeId::ROOT.0.as_bytes())?;
+    let (handle, thread) = Runner::spawn(cfg, drive)?;
+    wait_until("a.txt is on the drive", || on_server(&server, "a.txt"))?;
+    assert!(handle.send(Command::Stop));
+    thread.join().map_err(|_| "panicked")??;
+    Ok(())
+}
+
+/// A folder set up again while its runner runs (a new folder in the DB, the open one removed)
+/// is opened again at the next sync: its old engine, whose folder is gone, would only fail.
+#[test]
+fn a_folder_set_up_again_while_it_runs_is_opened_again() -> R {
+    let server = server();
+    let mut a = Device::start(&server, "a")?;
+    a.write("a.txt", "a")?;
+    wait_until("a.txt is on the drive", || on_server(&server, "a.txt"))?;
+    a.wait_idle()?;
+    SyncRoot::create(&db_of(&a.root), "test.example", &a.root)?;
+    assert!(a.handle.send(Command::SyncNow));
+    // The new folder's start-up adopts what is in it.
+    wait_until("the folder is opened again", || {
+        a.status().last_sync.is_some_and(|s| s.adopted == 1)
+    })?;
+    assert_eq!(a.status().error, None);
+    a.stop()
+}
+
 #[test]
 fn a_timed_pause_ends_by_itself() -> R {
     let server = server();
