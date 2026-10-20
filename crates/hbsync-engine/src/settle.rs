@@ -4,7 +4,7 @@
 use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::NameIssue;
 use hbsync_platform::{Os, RelPath, tags};
-use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, StateError};
+use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, ReadTx, StateError};
 use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags};
 
 use crate::folder::FolderCtx;
@@ -293,13 +293,7 @@ fn settled(
     os: Os,
 ) -> Option<BaseRow> {
     let l = local.state.as_ref()?;
-    let mut agreed = Agreement::of(l, remote, how.same_bytes);
-    // An item at this device's spelling of the drive's name is at that name, though the name
-    // map wouldn't give it back (decomposed, an escape's own code point): the spelling is
-    // recorded below. Else it reads as renamed from the first placement on.
-    agreed.place |= l.parent == remote.parent
-        && l.name != remote.name
-        && spells(&local.row.path, &remote.name, os);
+    let agreed = agreement(local, l, remote, how.same_bytes, os);
     let prior = base
         .as_ref()
         .map(|b| b.state.tags.clone())
@@ -321,6 +315,54 @@ fn settled(
         row.local_hash = l.content.map(|c| c.hash);
     }
     Some(row)
+}
+
+/// Where the item `local` (read as `l`) and the drive's `remote` agree, as settling takes it:
+/// an item at this device's spelling of the drive's name is at that name, though the name map
+/// wouldn't give it back (decomposed, an escape's own code point): [`settled`] records the
+/// spelling. Else it reads as renamed from the first placement on.
+fn agreement(
+    local: &view::LocalNode,
+    l: &NodeState,
+    remote: &NodeState,
+    same_bytes: bool,
+    os: Os,
+) -> Agreement {
+    let mut agreed = Agreement::of(l, remote, same_bytes);
+    agreed.place |= l.parent == remote.parent
+        && l.name != remote.name
+        && spells(&local.row.path, &remote.name, os);
+    agreed
+}
+
+/// Whether a tag write on `node` that acted on `drive` (the mirror's version without one), not
+/// putting the item in place, finds a base to record what it wrote in, as [`settle`] would: one
+/// there, or one it founds ([`Agreement::founds_base`]) against a version it settles against
+/// (not one whose plan saw a base since gone). Without one, the drive's tags it wrote read as
+/// this device adding them, and a tag the drive removed meanwhile came back (§11).
+pub(crate) fn tags_recorded(
+    s: &ReadTx<'_>,
+    node: NodeId,
+    drive: Option<&DriveVersion>,
+    os: Os,
+) -> Result<bool, StateError> {
+    if s.get_base(node)?.is_some() {
+        return Ok(true);
+    }
+    let remote = match drive {
+        Some(d) => d.base_at.is_none().then(|| d.state.clone()),
+        None => s.get_mirror(node)?.and_then(|m| m.state()),
+    };
+    let Some(remote) = remote else {
+        return Ok(false);
+    };
+    let Some(local) = view::local_node(s, node, os, Some(&remote.tags))? else {
+        return Ok(false);
+    };
+    Ok(local
+        .state
+        .as_ref()
+        .is_some_and(|l| agreement(&local, l, &remote, false, os).founds_base(false)))
 }
 
 /// `name` in `parent` as this OS spells it.

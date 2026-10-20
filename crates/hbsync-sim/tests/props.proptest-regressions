@@ -113,3 +113,5 @@ cc f25d990945c4b9e2c543f1a6577a634fd5eab18475d06dc49e899ff9c4304576 # the same, 
 cc b63b7063a2a017a90242c896a4cc70b865dd62a594c9a332d48f3ffa2c0dc78f # a folder made back whose tag write failed kept the tag in its base: its absence went up as a removal (CI run 39377359513)
 cc 35f5b92eeb3d8b97434a318a845696fd8f8b986cbaaefaf119a04b0e2578af96 # an add sent up outlives its own delete that lost: another client's removal before it doesn't win
 cc 547261dd60a394e104f0dfa8132f69144c8a1b6a2e60f46bf257f2c3ffeb4972 # an add sent again after a removal (a conflict copy with no base yet) is a new add: not the removal lost
+cc cfaf6f6d7130ee39a261810c8a75c3333b1e9bf86f3f30db91649c777dc5d75b # a tag written onto a folder with no base (its commit lost to a crash) read as this device adding it, and a removal came back
+cc ab37e2a64aafec7a98f186cc4e21ba85401207587723b31b43cac147206e8fb0 # the same, the device that wrote the tag renaming the folder: its rename took the removed tag back up

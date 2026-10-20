@@ -3507,3 +3507,88 @@ fn regression_an_add_sent_up_outlives_its_own_delete_that_lost() {
         assert_eq!(sim.local_tags(c, "a"), Some(vec!["Work:0".to_owned()]));
     }
 }
+
+/// c0 makes folder b tagged Red; c2 a file b, so the folder is "b (conflict 1)" on the drive.
+/// c1 (Linux) plans to make it under that name, and dies once it is made, before its commit:
+/// the folder has no base. Its next plan renames it on the drive and writes the drive's Red
+/// here; the rename loses to c0's own, and c0 removes Red. The folder still had no base (its
+/// name and the version the write acted on, still b, disagreed), so the Red written here read
+/// as c1 adding it, and went back up. Now a tag write waits for a base: the drive's tags come
+/// down once one is settled (`cc cfaf6f6d…`).
+#[test]
+fn regression_a_tag_written_before_a_base_isnt_an_add() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Edit, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let crash = |client| Event::Crash { client };
+    let events = [
+        act(2, CreateFile { parent: 0, name: 2 }),
+        act(2, CreateFile { parent: 0, name: 1 }),
+        act(0, CreateFolder { parent: 0, name: 1 }),
+        act(0, Edit { file: 0 }),
+        act(0, Tag { node: 0, tag: 12 }),
+        plan(2),
+        act(1, Edit { file: 0 }),
+        plan(0),
+        step(0),
+        step(2),
+        step(2),
+        plan(0),
+        plan(1),
+        crash(1),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        step(0),
+        plan(1),
+        step(1),
+        step(0),
+        step(1),
+        step(1),
+        act(0, Tag { node: 0, tag: 0 }),
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The same as the regression above, from the other side: c1's folder a, tagged Red, clashes
+/// with c0's file a, and c0 (macOS) makes it as "a (conflict 1)", dying before its commit. c1
+/// removes Red. c0's next plan wrote the drive's Red on its folder with no base to record it,
+/// and its rename took Red back up (`cc ab37e2a6…`).
+#[test]
+fn regression_a_tag_written_before_a_base_isnt_an_add_on_the_renaming_side() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let crash = |client| Event::Crash { client };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 8 }),
+        act(1, CreateFolder { parent: 0, name: 8 }),
+        act(1, Tag { node: 0, tag: 12 }),
+        act(0, CreateFile { parent: 0, name: 1 }),
+        act(0, CreateFile { parent: 0, name: 3 }),
+        plan(1),
+        act(1, CreateFile { parent: 0, name: 3 }),
+        step(1),
+        act(1, CreateFolder { parent: 0, name: 6 }),
+        plan(0),
+        act(1, Tag { node: 15, tag: 4 }),
+        plan(1),
+        crash(0),
+        plan(0),
+        step(0),
+        step(0),
+        step(0),
+        step(1),
+        plan(0),
+        step(0),
+        step(1),
+        step(1),
+        step(0),
+        step(0),
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}

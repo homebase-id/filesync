@@ -244,7 +244,13 @@ impl Executor<'_> {
         tags: &Tags,
         drive: Option<&DriveVersion>,
     ) -> Step {
-        let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
+        // No base to record what it writes (the plan's move or remote write founds one): the
+        // drive's tags would read as this device adding them. They wait for it.
+        let os = self.folder.os;
+        let (row, recorded) = self
+            .db
+            .read(|s| Ok((s.local_by_node(node)?, tags_recorded(s, node, drive, os)?)))?;
+        let Some(row) = row else {
             return Ok(Outcome::stale("gone"));
         };
         let abs = self.disk.abs(&row.path);
@@ -254,6 +260,9 @@ impl Executor<'_> {
             row.kind == NodeKind::Folder && row.tags.is_some() && tags::read(&abs) != row.tags;
         if !self.on_disk_unchanged(&row) || folder_retagged {
             return Ok(rescan(&mut self.report, &row.path));
+        }
+        if !recorded {
+            return Ok(Outcome::waiting("no base to record the tags in yet"));
         }
         // A failed write leaves the item what it held: read so, not as not known (which reads
         // as the drive's tags, and a tag only the item has would never go up).

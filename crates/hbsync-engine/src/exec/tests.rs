@@ -3648,3 +3648,66 @@ fn a_download_takes_the_bytes_from_the_trash_unless_its_tags_fail() -> R {
     }
     Ok(())
 }
+
+/// A folder with no base here at "b (conflict 1)" (a file has b), the drive's at b tagged Red:
+/// the plan renames it on the drive and writes Red here. The rename loses to another device's,
+/// which removes Red too, and the tag write runs first (as after a move put back for a name
+/// taken): no base records what it writes, so it waits, and the next plan sends no Red up.
+/// Written, Red read as this device's add, and went back up.
+#[test]
+fn a_tag_written_where_no_base_settles_is_not_an_add() -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.folder.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    // The higher id: the file keeps the name b (§6.1).
+    let node = NodeId(hbsync_types::Uuid::max());
+    let red = Tags::new(vec![Tag::new("Red", 6)]);
+    h.local_folder("b (conflict 1)", node)?;
+    h.scanned_with("b (conflict 1)", Tags::default())?;
+    let folder = |name: &str, tags: &Tags, at| {
+        let mut c = NodeContent::folder(name);
+        c.set_tags(tags);
+        MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::Folder, &c, None)
+    };
+    let (file, _) = h.seed("b", b"B")?;
+    let v1 = some_version();
+    h.db.write(|s| s.account().put_mirror(&folder("b", &red, v1)))?;
+    let ops = plan_of(&mut h, &[node, file])?.ops;
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Op::RemoteUpdate { tags, .. } if *tags == red)),
+        "{ops:?}"
+    );
+    let here: Vec<Op> = ops
+        .into_iter()
+        .filter(|op| matches!(op, Op::LocalTags { .. }))
+        .collect();
+    assert_eq!(here.len(), 1);
+    let report = h.run(here)?;
+    assert!(
+        matches!(report.skipped.as_slice(), [(_, Skip::Waiting(_))]),
+        "it waits: {report:?}"
+    );
+    assert_eq!(tags::read(&h.at("b (conflict 1)")?), Some(Tags::default()));
+    let v2 = RemoteRef {
+        version: some_version().version,
+        ..v1
+    };
+    h.db.write(|s| {
+        s.account()
+            .put_mirror(&folder("b (conflict 1)", &Tags::default(), v2))
+    })?;
+    let ops = plan_of(&mut h, &[node])?.ops;
+    let sends_red = ops.iter().any(|op| match op {
+        Op::RemoteTags { tags, .. } | Op::RemoteUpdate { tags, .. } => tags.get("Red").is_some(),
+        _ => false,
+    });
+    assert!(!sends_red, "Red went back up: {ops:?}");
+    let report = h.run(ops)?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    let base = h.base(node)?.expect("settled");
+    assert_eq!(base.state.tags, Tags::default());
+    assert_eq!(base.state.name, "b (conflict 1)");
+    Ok(())
+}

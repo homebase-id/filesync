@@ -510,7 +510,11 @@ isn't put in place: it is tried again, the plan sending the tag up meanwhile, un
 for good in the run (access, read-only): then it is placed. A node with no
 base gets one when place and content agree, with the tags both sides have: the merge then
 brings each side the other's (a copy proven equal only across hash algorithms can't be proven
-again later).
+again later). A tag write needs a base to record what it wrote: the item's own, or one it
+founds (place and content agree with the drive's version it acted on). Without one it waits,
+the node left for the next plan: the drive's tags it wrote would read as this device adding
+them, and a tag removed on the drive meanwhile came back. The plan's move or remote write
+founds the base; where it runs first, the tags come down in the same run.
 
 **Limits.** Tag changes are seen through the change time: on a volume that keeps attributes
 elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go unnoticed until
