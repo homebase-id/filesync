@@ -121,7 +121,7 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   (`ExistingFileWithUniqueId`) means an earlier attempt already succeeded.
 
 ## Recently deleted
-filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs`; the mini-app follows them exactly.
+filesync's own rules are in its node schema ("Recently deleted") and the engine's `deleted/` module (its pure rules in `deleted/rules.rs`); the mini-app follows them exactly.
 - **Removed:** `archivalStatus` 2, at the header's `updated` (the server's time of the removal). Any other
   status is live. An `rm` in the content (from before 2026-10-15) means nothing; leave it out when writing.
 - **Deleted with its folder:** a removed node whose folder is removed too, removed no earlier than the folder.
