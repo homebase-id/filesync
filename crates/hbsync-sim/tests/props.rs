@@ -3592,3 +3592,42 @@ fn regression_a_tag_written_before_a_base_isnt_an_add_on_the_renaming_side() {
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// c1 makes folder a, which clashes with the role folder a: its plan parks it under a temporary
+/// name to rename it. The user tags it Work; another device deletes the role folder outright,
+/// so the next plan creates c1's folder on the drive as a, with Work, while it is still parked.
+/// c0 removes Work. The executor reads a parked node at its original place, so the create
+/// settles a base with Work and the removal comes down. The simulator settled it at its parked
+/// name: no base, and c1 sent Work up again as its add (`cc b961b04c…`).
+#[test]
+fn regression_a_parked_folder_created_on_the_drive_settles_its_base() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, DeleteOutright, Tag, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(2, CreateFolder { parent: 0, name: 2 }),
+        plan(2),
+        act(1, CreateFolder { parent: 0, name: 8 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        step(2),
+        plan(1),
+        step(1),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        act(1, Tag { node: 1, tag: 5 }),
+        act(0, DeleteOutright { pick: 0 }),
+        plan(1),
+        act(0, DeleteOutright { pick: 0 }),
+        step(1),
+        plan(0),
+        act(0, DeleteOutright { pick: 0 }),
+        plan(1),
+        act(0, ToggleIgnore),
+        step(1),
+        step(0),
+        act(0, Tag { node: 14, tag: 13 }),
+    ];
+    run_with(3, None, Sim::with_role_device, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
