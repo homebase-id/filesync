@@ -43,9 +43,13 @@ impl AccountOps<'_> {
         // In waves, each after the folders it comes back into ([`restore_wave`]). One that was to
         // come back into a folder that didn't stays in Recently deleted.
         while r.failed.is_none() {
-            let Some(RestoreWave { asked, rest, later }) =
-                restore_wave(left, &r.live, &r.in_plan, &mut r.taken)
-            else {
+            let Some(RestoreWave { asked, rest, later }) = restore_wave(
+                left,
+                |row| (row.parent, &row.name),
+                &r.live,
+                &r.in_plan,
+                &mut r.taken,
+            ) else {
                 break;
             };
             left = later;

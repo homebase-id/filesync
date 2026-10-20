@@ -759,7 +759,7 @@ fn a_restore_comes_back_folder_first_and_by_free_names() {
     let mut taken = HashMap::from([(NodeId::ROOT, HashSet::from([name_key("taken")]))]);
     let left = vec![&inside, &folder, &orphan, &twin, &clash];
 
-    let wave = restore_wave(left, &live, &in_plan, &mut taken);
+    let wave = restore_wave(left, |r| (r.parent, &r.name), &live, &in_plan, &mut taken);
     assert_eq!(
         wave,
         Some(RestoreWave {
@@ -772,7 +772,13 @@ fn a_restore_comes_back_folder_first_and_by_free_names() {
     assert!(!taken.contains_key(&gone));
     // Nothing can come back while its folder isn't.
     assert_eq!(
-        restore_wave(vec![&inside], &live, &in_plan, &mut taken),
+        restore_wave(
+            vec![&inside],
+            |r| (r.parent, &r.name),
+            &live,
+            &in_plan,
+            &mut taken
+        ),
         None
     );
 }

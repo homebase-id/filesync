@@ -25,7 +25,7 @@ mod rules;
 mod tests;
 
 pub use listing::{DeletedSummary, Listed, deletes, listed_here, listed_now};
-pub use rules::{Chosen, Holdings, before_folders_go, inside, passes};
+pub use rules::{Chosen, Holdings, RestoreWave, before_folders_go, inside, passes, restore_wave};
 
 /// The account's DB, held only while it is read or written: never while the server answers.
 fn locked(account: &Mutex<StateDb>) -> MutexGuard<'_, StateDb> {
