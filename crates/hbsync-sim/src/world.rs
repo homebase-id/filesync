@@ -1,6 +1,6 @@
 //! What the users, other devices and the server do, and how each folder sees the drive.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 
 use hbsync_engine::deleted;
@@ -18,7 +18,8 @@ use hbsync_types::{
 
 use crate::action::{Action, JUNK, NAMES, TAGS};
 use crate::model::client::ignoring_d;
-use crate::model::server::Server;
+use crate::model::server::{Server, ServerNode};
+use crate::oracle::Seen;
 use crate::{DETACHED, Sim};
 
 impl Sim {
@@ -80,18 +81,47 @@ impl Sim {
         // The folder first, then what is in it, top-down (node schema, Recently deleted).
         let tree = self.server.tree();
         below.sort_by_key(|n| tree.ancestors(*n).len());
-        self.remove_live([docs].into_iter().chain(below));
+        self.remove_live([docs].into_iter().chain(below), true);
     }
 
-    /// Moves `nodes`, in order, from the tree to Recently deleted, on the server at once. A tag
-    /// change loses to a delete (§11).
-    fn remove_live(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+    /// Moves `nodes`, in order, from the tree to Recently deleted, on the server at once;
+    /// `rightly`: as a user deleted them ([`Sim::remove_on_drive`]). A tag change loses to a
+    /// delete (§11).
+    fn remove_live(&mut self, nodes: impl IntoIterator<Item = NodeId>, rightly: bool) {
         for node in nodes {
             if let Some(n) = self.server.live.remove(&node) {
-                self.server.remove(node, n);
+                self.remove_on_drive(node, n, rightly);
                 self.deleted_now(node);
             }
         }
+    }
+
+    /// Puts `node`, just taken out of the drive's tree as `n`, in Recently deleted: a write, at
+    /// its time. For the oracle: what is in it then (its removal takes that
+    /// along), and whether it goes `rightly`: a user deleted it (here, on a device, or in
+    /// another app), or a delete took it along (only then may its blob go for good).
+    pub(crate) fn remove_on_drive(&mut self, node: NodeId, n: ServerNode, rightly: bool) {
+        // A file too may hold nodes (another app moved them into it: `Action::IntoFile`): its
+        // removal takes them along as a folder's does, by the same rule.
+        if rightly {
+            // What is in it, through live folders (`node` is out of the tree already).
+            let mut kids: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+            for (child, c) in &self.server.live {
+                kids.entry(c.state.parent).or_default().push(*child);
+            }
+            let mut below = BTreeMap::new();
+            let mut folders = vec![node];
+            while let Some(f) = folders.pop() {
+                for child in kids.get(&f).into_iter().flatten() {
+                    below.insert(*child, self.server.live[child].remote.version);
+                    folders.push(*child);
+                }
+            }
+            self.ledger.folder_removed(node, below);
+        }
+        self.server.remove(node, n);
+        let version = self.server.removed[&node].remote.version;
+        self.ledger.row_removed((node, version), rightly);
     }
 
     /// The folders [`Action::DeleteStopped`] picks from: the drive's, the role folder too.
@@ -179,7 +209,7 @@ impl Sim {
             .collect();
         below.sort_by_cached_key(|n| (tree.ancestors(*n).len(), *n));
         below.truncate(done % (below.len() + 1));
-        self.remove_live([folder].into_iter().chain(below));
+        self.remove_live([folder].into_iter().chain(below), true);
     }
 
     /// Another device (the phone) changes a file in the role folder: `op` picks adding, editing,
@@ -219,7 +249,7 @@ impl Sim {
             }
             (2, Some(file)) => {
                 if let Some(n) = self.server.live.remove(&file) {
-                    self.server.remove(file, n);
+                    self.remove_on_drive(file, n, true);
                     // A tag change loses to a delete (§11), the phone's too.
                     self.deleted_now(file);
                 }
@@ -359,6 +389,7 @@ impl Sim {
                     return;
                 }
                 self.clients[c].local.remove(node);
+                self.user_removed(c, node);
                 // The other folder's scan finds an item it never had: a new id. Its tags went
                 // along.
                 let new = self.ids.fresh();
@@ -389,7 +420,6 @@ impl Sim {
             Action::EmptyItem { pick } => self.empty_item(pick),
             Action::EditTaken { pick } => {
                 let taken: Vec<NodeId> = self
-                    .server
                     .taken_along()
                     .into_iter()
                     .filter(|n| self.server.live[n].state.kind == NodeKind::File)
@@ -407,8 +437,14 @@ impl Sim {
                 }
             }
             Action::Purge => {
+                // The engine's pick, judged by what happened now (one taken along whose folder
+                // is back isn't any more): one no delete took along is removed wrongly, which
+                // the check reports.
                 let taken = self.server.purge();
-                self.remove_live(taken);
+                let truly = self.taken_along();
+                for n in taken {
+                    self.remove_live([n], truly.contains(&n));
+                }
                 let due = self.server.due();
                 // What was removed since the cut-off may not have reached the purging device.
                 let before = self.server.purge_before();
@@ -564,6 +600,28 @@ impl Sim {
         self.restored_on_drive(node);
     }
 
+    /// The user of client `c` took its item `node` out of what it syncs (a delete, a move to
+    /// another folder, a filter rule): as they saw it, as the client's base has it.
+    pub(crate) fn user_removed(&mut self, c: usize, node: NodeId) {
+        let client = &self.clients[c];
+        if let Some(b) = client.base.get(node) {
+            let seen = (
+                client.coords.to_drive(b.parent),
+                b.name.clone(),
+                b.content.map(|c| c.hash),
+            );
+            self.ledger.user_deleted(c, node, seen);
+        }
+    }
+
+    /// Live `node` as the drive has it, but for its tags ([`Seen`]).
+    ///
+    /// [`Seen`]: crate::oracle::Seen
+    pub(crate) fn on_drive(&self, node: NodeId) -> Option<Seen> {
+        let n = &self.server.live.get(&node)?.state;
+        Some((n.parent, n.name.clone(), n.content.map(|c| c.hash)))
+    }
+
     /// `node` left the drive (a delete won): it settles the tag removals made before it.
     pub(crate) fn deleted_now(&mut self, node: NodeId) {
         self.deleted.insert(node);
@@ -575,6 +633,7 @@ impl Sim {
     /// changes stand until the delete wins.
     fn deleted_here(&mut self, c: usize, node: NodeId) {
         self.deleted.insert(node);
+        self.user_removed(c, node);
         self.tag_changes_left(c, node);
     }
 
@@ -668,7 +727,8 @@ impl Sim {
     /// still counts. One the drive doesn't have (a folder made here to restore it, its
     /// RemoteCreate to follow) is back once the drive has it again ([`Sim::restored_on_drive`]):
     /// a delete that won settles the tags then.
-    pub(crate) fn placed_back(&mut self, node: NodeId) {
+    pub(crate) fn placed_back(&mut self, c: usize, node: NodeId) {
+        self.ledger.back(c, node);
         if self.server.live.contains_key(&node) {
             self.deleted.remove(&node);
         }
@@ -809,7 +869,11 @@ impl Sim {
                 self.server.tags_at_removal.remove(&n);
                 if let Some(gone) = self.server.removed.remove(&n) {
                     self.deleted_now(n);
-                    self.ledger.blob_superseded(gone.state.content);
+                    // Not owed any more only if a user's delete or a true take-along put it
+                    // there: one put there wrongly was lost.
+                    if self.ledger.removed_rightly(&(n, gone.remote.version)) {
+                        self.ledger.blob_superseded(gone.state.content);
+                    }
                 }
             }
         }
