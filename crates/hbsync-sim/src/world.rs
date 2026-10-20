@@ -121,6 +121,51 @@ impl Sim {
         }
     }
 
+    /// What [`Action::IntoFile`] picks from: the drive's live nodes and files outside the role
+    /// folder, the fixed folders left out. The role folder's delete (the phone's) and restore
+    /// would take a node in a file along and leave it: Recently deleted has no rule for what is
+    /// in a file (a question for the purge's rules, not modelled).
+    fn file_move_candidates(&self) -> (Vec<NodeId>, Vec<NodeId>) {
+        let server = &self.server;
+        let free = |n: &NodeId| {
+            *n != NodeId::RECOVERED && Role::of(*n).is_none() && !server.in_role_folder(*n)
+        };
+        let nodes = server.live.keys().filter(|n| free(n)).copied().collect();
+        let files = server
+            .live
+            .iter()
+            .filter(|(n, s)| s.state.kind == NodeKind::File && free(n))
+            .map(|(n, _)| *n)
+            .collect();
+        (nodes, files)
+    }
+
+    /// For scripted tests: the picks of [`Action::IntoFile`] that move `node` into `file`.
+    pub fn file_move_picks(&self, node: NodeId, file: NodeId) -> Option<(usize, usize)> {
+        let (nodes, files) = self.file_move_candidates();
+        let at = |list: &[NodeId], n: NodeId| list.iter().position(|m| *m == n);
+        Some((at(&nodes, node)?, at(&files, file)?))
+    }
+
+    /// [`Action::IntoFile`].
+    fn move_into_file(&mut self, pick: usize, file: usize) {
+        let (nodes, files) = self.file_move_candidates();
+        let (Some(&node), Some(&into)) = (
+            nodes.get(pick % nodes.len().max(1)),
+            files.get(file % files.len().max(1)),
+        ) else {
+            return;
+        };
+        if node == into {
+            return;
+        }
+        let version = VersionTag(self.server.uuid());
+        if let Some(n) = self.server.live.get_mut(&node) {
+            n.state.parent = into;
+            n.remote.version = version;
+        }
+    }
+
     /// [`Action::DeleteStopped`].
     fn delete_stopped(&mut self, pick: usize, done: usize) {
         let Some(folder) = self.pick_folder(pick) else {
@@ -293,6 +338,7 @@ impl Sim {
             Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::DeleteOutright { pick } => self.delete_outright(pick),
+            Action::IntoFile { pick, file } => self.move_into_file(pick, file),
             Action::MoveAcross { file } => {
                 let Some(&(a, b)) = self.computers.iter().find(|(a, b)| *a == c || *b == c) else {
                     return;
@@ -737,7 +783,10 @@ impl Sim {
                 .map(|(n, _)| n.state.parent)
                 .collect();
             for n in pass {
-                if holding.contains(&n) {
+                // Only a pass's folders are asked about, as the engine asks (a file another
+                // writer put something in holds nothing: what is in it is its own item).
+                let folder = self.server.removed[&n].state.kind == NodeKind::Folder;
+                if folder && holding.contains(&n) {
                     continue;
                 }
                 let was_chosen = self
@@ -745,12 +794,13 @@ impl Sim {
                     .removed
                     .get_key_value(&n)
                     .is_some_and(|row| chosen.contains(&Server::at(row)));
+                // A folder never goes holding what isn't going; a file holds nothing.
                 let held = self
                     .server
                     .live
                     .iter()
                     .chain(&self.server.removed)
-                    .find(|(c, s)| s.state.parent == n && !pending.contains(*c))
+                    .find(|(c, s)| folder && s.state.parent == n && !pending.contains(*c))
                     .map(|(c, _)| *c);
                 let wrong = !was_chosen || held.is_some();
                 self.ledger

@@ -15,7 +15,7 @@ use hbsync_remote::{
 use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
 use hbsync_types::{RemoteFileId, RemoteRef};
 
-use crate::mirror::{self, Said, apply};
+use crate::mirror::{self, Applied, Said, apply};
 use crate::time::{DAY_MS, REREAD_MS};
 
 #[derive(Debug, thiserror::Error)]
@@ -88,7 +88,9 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
     let mut report = read_pages(&db, remote, pages.into(), reread)?;
     // A re-read open: what is left of it asked about (once nothing is, it ends).
     if let Some(asking) = reread.as_ref().map(Reread::to_ask) {
-        report.deleted += settle(&db, reread, ask(remote, &asking))?;
+        let (gone, mut skipped) = settle(&db, reread, ask(remote, &asking))?;
+        report.deleted += gone;
+        report.skipped.append(&mut skipped);
     }
     Ok(report)
 }
@@ -319,13 +321,13 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
 /// (one that isn't a node this client reads stays as it is; one deleted for good since stays
 /// gone, [`AccountTx::mark_file_gone`]). Each file answered is the re-read's no more once that is
 /// written (a write that fails leaves them to ask again): once none is left, it ends. Returns
-/// how many went.
+/// how many went, and why each it left out was ([`Applied::Refused`]).
 fn settle<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     reread: &mut Option<Reread>,
     mut asked: Asked,
-) -> Result<usize, FeedError> {
-    let confirmed = db().write(|s| {
+) -> Result<(usize, Vec<String>), FeedError> {
+    let (confirmed, refused) = db().write(|s| {
         let mut confirmed = Vec::new();
         for &file_id in &asked.not_there {
             if mirror::heard(s.account(), file_id, Said::NotThere)? {
@@ -335,13 +337,16 @@ fn settle<G: DerefMut<Target = StateDb>>(
         for &file_id in &asked.gone {
             mirror::forget(s.account(), file_id, None)?;
         }
+        let mut refused = Vec::new();
         for header in &asked.found {
-            apply(s.account(), header)?;
+            if let Applied::Refused(why) = apply(s.account(), header)? {
+                refused.push(why);
+            }
         }
         if answers_all(reread, asked.answered.iter().chain(&confirmed)) {
             s.account().end_reread()?;
         }
-        Ok(confirmed)
+        Ok((confirmed, refused))
     })?;
     asked.answered.extend(&confirmed);
     asked.gone.extend(confirmed);
@@ -354,7 +359,7 @@ fn settle<G: DerefMut<Target = StateDb>>(
     if done {
         *reread = None;
     }
-    Ok(asked.gone.len())
+    Ok((asked.gone.len(), refused))
 }
 
 /// Whether `answered` is every file the re-read has left.
@@ -435,11 +440,11 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
 }
 
 impl FeedReport {
-    fn count(&mut self, live: bool) {
-        if live {
-            self.live += 1;
-        } else {
-            self.deleted += 1;
+    fn count(&mut self, applied: Applied) {
+        match applied {
+            Applied::Live => self.live += 1,
+            Applied::Left => self.deleted += 1,
+            Applied::Refused(why) => self.skipped.push(why),
         }
     }
 }
@@ -529,11 +534,11 @@ fn latest(refs: &[ChangeRef]) -> (Vec<ChangeRef>, bool) {
 }
 
 /// Applies a known ref ([`known`]) as [`apply`] would its header: only what the server says
-/// better, its times. Returns `true` for a node in the tree.
-fn apply_ref(s: AccountTx<'_>, r: &ChangeRef) -> Result<bool, StateError> {
+/// better, its times.
+fn apply_ref(s: AccountTx<'_>, r: &ChangeRef) -> Result<Applied, StateError> {
     if r.deleted {
         mirror::tombstone(s, r.at(), r.changed_at)?;
-        return Ok(false);
+        return Ok(Applied::Left);
     }
     mirror::apply_known(s, r, None)
 }

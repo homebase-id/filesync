@@ -42,6 +42,7 @@ fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
     prop_oneof![
         6 => action(),
         1 => (0usize..16).prop_map(|pick| Action::DeleteOutright { pick }),
+        1 => (0usize..16, 0usize..16).prop_map(|(pick, file)| Action::IntoFile { pick, file }),
     ]
 }
 
@@ -240,10 +241,10 @@ proptest! {
         run_with(3, None, Sim::with_role_device, &events)?;
     }
 
-    /// Another app deletes folders outright, leaving what is in them with no folder, while the
-    /// users work (in the role folder too) and the purge runs: the main folders put what is
-    /// left into Recovered files, made by the first and joined by the others, and the clients
-    /// converge without loss.
+    /// Another app deletes folders outright, leaving what is in them with no folder, or moves a
+    /// node into a file, while the users work (in the role folder too) and the purge runs: the
+    /// main folders put what is left, and what is in a file, into Recovered files, made by the
+    /// first and joined by the others, and the clients converge without loss.
     #[test]
     fn orphans_are_recovered_without_loss(
         events in proptest::collection::vec(events_of(4, orphaning_action()), 0..120)
@@ -3862,4 +3863,85 @@ fn regression_a_restore_while_the_trash_runs_stands() {
     }
     assert_eq!(sim.server_paths(), ["a"], "the restore stands");
     assert!(sim.item(0, "a").is_some(), "back here");
+}
+
+/// Another app moved c.txt into the file d, which every main client ignores (c0 since just
+/// now, d synced before): d isn't leaving the drive while it holds c.txt (a file is judged as
+/// a folder is), and c.txt stays in d, where no client syncs it (`cc` of
+/// `orphans_are_recovered_without_loss`).
+#[test]
+fn regression_a_node_in_an_ignored_file_stays_with_it() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, Phone { op: 3, pick: 0 }),
+        act(
+            3,
+            CreateFile {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        act(0, Restore { node: 0 }),
+        act(2, ToggleIgnore),
+        act(0, Edit { file: 0 }),
+        act(3, MoveAcross { file: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(0, IntoFile { pick: 1, file: 6 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, ToggleIgnore),
+        act(0, CreateFile { parent: 0, name: 0 }),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
+        panic!("{e}");
+    }
+}
+
+/// Another app moves the folder b into the file c.txt: every main client moves it into
+/// Recovered files on the drive, with what is in it, and they converge.
+#[test]
+fn regression_a_folder_moved_into_a_file_is_recovered() {
+    use Action::*;
+    let mut sim = Sim::new(3);
+    let act = |client, action| Event::Act { client, action };
+    let (b, c, d) = (1, 3, 5); // NAMES: "b", "c.txt", "d"
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: root,
+            name: b,
+        },
+    )]);
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFile {
+            parent: root,
+            name: c,
+        },
+    )]);
+    let folder = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, folder, true).expect("b");
+    sim.run(&[act(0, CreateFile { parent, name: d })]);
+    assert!(sim.quiesce(30), "no convergence");
+    let file = sim.item(0, "c.txt").expect("c.txt");
+    let (pick, file) = sim.file_move_picks(folder, file).expect("on the drive");
+    sim.run(&[act(1, IntoFile { pick, file })]);
+    assert!(
+        sim.server_paths().iter().any(|p| p == "c.txt/b"),
+        "{:?}",
+        sim.server_paths()
+    );
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    let paths = sim.server_paths();
+    assert!(
+        paths.iter().any(|p| p == "Recovered files/b/d"),
+        "{paths:?}"
+    );
 }

@@ -29,11 +29,21 @@ pub const ARCHIVAL_REMOVED: i32 = 2;
 pub struct NodeContent {
     pub v: u32,
     pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Read leniently: a JavaScript or Kotlin writer's fractional ms count is rounded.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_ms"
+    )]
     pub mtime: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Read leniently: `1` and `0` are `true` and `false`.
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "lenient_bool"
+    )]
     pub x: bool,
     /// Keys from newer writers, kept so a rewrite doesn't drop them.
     #[serde(flatten)]
@@ -86,13 +96,7 @@ impl NodeContent {
 
     /// [`NodeContent::created_ms`] of the unknown keys alone (as a client stores them).
     pub fn created_ms_in(unknown: &Map<String, Value>) -> Option<i64> {
-        let ct = unknown.get(CREATED)?;
-        // An integer, or a JavaScript-style fractional ms count.
-        ct.as_i64().or_else(|| {
-            ct.as_f64()
-                .filter(|f| f.is_finite())
-                .map(|f| f.round() as i64)
-        })
+        ms_of(unknown.get(CREATED)?)
     }
 
     pub fn set_created_ms(&mut self, created_ms: Option<i64>) {
@@ -129,6 +133,34 @@ impl NodeContent {
     /// A reader that finds a newer version treats the node as read-only.
     pub fn is_writable(&self) -> bool {
         self.v <= VERSION
+    }
+}
+
+/// A Unix ms count: an integer, or a JavaScript-style fractional one rounded.
+fn ms_of(v: &Value) -> Option<i64> {
+    v.as_i64().or_else(|| {
+        v.as_f64()
+            .filter(|f| f.is_finite())
+            .map(|f| f.round() as i64)
+    })
+}
+
+/// [`ms_of`] for a known key: `null` is none, anything but a number isn't one.
+fn lenient_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    Option::<Value>::deserialize(d)?
+        .map(|v| ms_of(&v).ok_or_else(|| serde::de::Error::custom(format!("not a time: {v}"))))
+        .transpose()
+}
+
+/// A flag: `true` or `false`, or `1` or `0` (a writer without booleans).
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    match Value::deserialize(d)? {
+        Value::Bool(b) => Ok(b),
+        v => match v.as_u64() {
+            Some(1) => Ok(true),
+            Some(0) => Ok(false),
+            _ => Err(serde::de::Error::custom(format!("not a flag: {v}"))),
+        },
     }
 }
 
@@ -233,6 +265,31 @@ mod tests {
         let odd = NodeContent::from_json(r#"{"v":1,"name":"a","ct":"yesterday"}"#)?;
         assert_eq!(odd.created_ms(), None);
         assert!(odd.to_json().contains(r#""ct":"yesterday""#));
+        Ok(())
+    }
+
+    #[test]
+    fn a_js_or_kotlin_writers_mtime_and_flag_read() -> Result<(), serde_json::Error> {
+        let c =
+            NodeContent::from_json(r#"{"v":1,"name":"a","mtime":1759920000123.6,"size":3,"x":1}"#)?;
+        assert_eq!(
+            (c.mtime, c.size, c.x),
+            (Some(1_759_920_000_124), Some(3), true)
+        );
+        let c = NodeContent::from_json(r#"{"v":1,"name":"a","mtime":null,"x":0}"#)?;
+        assert_eq!((c.mtime, c.x), (None, false));
+        // Written back as this client writes them.
+        assert_eq!(c.to_json(), r#"{"v":1,"name":"a"}"#);
+        // A size or version that isn't a whole number, a time or flag that isn't one: unreadable.
+        for bad in [
+            r#"{"v":1,"name":"a","size":3.5}"#,
+            r#"{"v":1.5,"name":"a"}"#,
+            r#"{"v":1,"name":"a","mtime":"yesterday"}"#,
+            r#"{"v":1,"name":"a","x":2}"#,
+            r#"{"v":1,"name":"a","x":"yes"}"#,
+        ] {
+            assert!(NodeContent::from_json(bad).is_err(), "{bad}");
+        }
         Ok(())
     }
 

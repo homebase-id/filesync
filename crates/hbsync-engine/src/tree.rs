@@ -141,11 +141,16 @@ impl Tree {
         Some(names)
     }
 
-    /// `node` and everything below it, parents before children.
+    /// `node` and everything below it, parents before children; round a cycle (another
+    /// writer's moves) each node once.
     pub fn subtree(&self, node: NodeId) -> Vec<NodeId> {
         let mut out = Vec::new();
+        let mut seen = HashSet::new();
         let mut stack = vec![node];
         while let Some(n) = stack.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
             if !n.is_root() {
                 out.push(n);
             }
@@ -319,6 +324,21 @@ mod tests {
         let mut v: Vec<NodeId> = (0..n).map(|_| NodeId::new()).collect();
         v.sort();
         v
+    }
+
+    /// Another writer's moves can make a cycle: what is below a node in it is each node once.
+    #[test]
+    fn a_subtree_round_a_cycle_ends() {
+        let [a, b, c] = ids(3)[..] else {
+            unreachable!()
+        };
+        let mut t = Tree::new();
+        t.insert(a, folder(b, "a"));
+        t.insert(b, folder(a, "b"));
+        t.insert(c, folder(b, "c"));
+        let mut below = t.subtree(a);
+        below.sort();
+        assert_eq!(below, [a, b, c]);
     }
 
     #[test]

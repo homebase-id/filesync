@@ -73,6 +73,11 @@ a restore brought back something whose folder went for good).
 - Skip any row that won't decrypt, isn't encrypted or has a different file type; a name that
   breaks the name rules under "Uploading"; a file without `size` or without a hashed
   `sync_data` payload; and one whose payload's `bytesWritten` isn't `(size / 16 + 1) · 16`.
+  Read a fractional `mtime` (round it) and `x` as `1` or `0`.
+- A file never holds anything: a node whose `groupId` is a file is an orphan, which the
+  computers move into Recovered files (not one that every computer filters: it stays, unseen
+  by them; don't list it). Never change a node's file type, and never move a node into a
+  file.
 - odin-core has no index on `groupId` yet, so on a big drive each listing scans the whole drive
   (to fix in odin-core).
 
@@ -101,8 +106,9 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   - `contentHash` over the plaintext, encrypted as above;
   - Write BLAKE3. SHA-256 is accepted, but it costs Filesync an extra pass per download and can
     cause needless conflict copies. A file without both hashes is ignored by Filesync.
-- Content: `v`, `name`, and for a file `mtime` and `size`. Send `ct` only when the platform knows
-  the real creation time (a photo's capture date), never the upload time.
+- Content: `v`, `name`, and for a file `mtime` and `size`, whole numbers (`x` a boolean). Send `ct`
+  only when the platform knows the real creation time (a photo's capture date), never the upload
+  time.
 - Names: Unicode NFC, at most 255 UTF-8 bytes, no `/` or NUL, not `.` or `..`.
   - Unique within the folder, ignoring case and Unicode form (as on macOS and Windows): add
     `(1)`, `(2)` and so on if needed.

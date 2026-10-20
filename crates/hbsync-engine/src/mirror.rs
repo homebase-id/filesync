@@ -9,21 +9,35 @@
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{AccountTx, MirrorRow, RemovedRow, StateError};
-use hbsync_types::removal_time;
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target};
+use hbsync_types::{Role, removal_time};
 
 // ---- facts the feed brings ----
 
-/// Applies one header to the mirror. Returns `true` for a node in the tree, `false` for one
-/// that left it (deleted, or removed to Recently deleted).
-pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
+/// What [`apply`] made of a header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Applied {
+    /// A node in the tree.
+    Live,
+    /// One that left it: deleted, or removed to Recently deleted.
+    Left,
+    /// Not a node this client takes (a fixed id out of place, [`misplaced`]), with why: left
+    /// out, as a row it can't read.
+    Refused(String),
+}
+
+/// Applies one header to the mirror ([`Applied`]).
+pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateError> {
     if header.is_deleted() {
         tombstone(s, header.at(), header.changed_at)?;
-        return Ok(false);
+        return Ok(Applied::Left);
+    }
+    if let Some(why) = misplaced(header) {
+        return Ok(Applied::Refused(why));
     }
     // A live file without its payload changes nothing: it must never read as a delete.
     let Some(row) = mirror_row(header) else {
-        return Ok(true);
+        return Ok(Applied::Live);
     };
     // The store marks the nodes that changed dirty where that concerns.
     let removed_at = header.removed_at;
@@ -37,23 +51,45 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<bool, StateError
             removed_at: known_time(removed_at),
         };
         s.move_to_removed(&removed)?;
-        return Ok(false);
+        return Ok(Applied::Left);
     }
     s.put_live(&row)?;
-    Ok(true)
+    Ok(Applied::Live)
+}
+
+/// Why the live (or removed) node `header` brings uses a fixed id out of place, if it does:
+/// the root's or the rest of the drive's, which are never nodes, or a role folder's or
+/// Recovered files' on a file. Such a version is left out, as a row this client can't read.
+fn misplaced(header: &RemoteHeader) -> Option<String> {
+    let node = header.node()?;
+    let (kind, file) = (header.kind, header.file_id);
+    let folder_only = node == NodeId::RECOVERED || Role::of(node).is_some();
+    if node.is_root() || node == NodeId::OUTSIDE {
+        Some(format!("{file:?}: node id {node:?} is never a node"))
+    } else if header.parent == NodeId::OUTSIDE {
+        Some(format!(
+            "{file:?}: folder {:?} is never a node",
+            header.parent
+        ))
+    } else if folder_only && kind != NodeKind::Folder {
+        Some(format!(
+            "{file:?}: a {kind:?} with the fixed folder id {node:?}"
+        ))
+    } else {
+        None
+    }
 }
 
 /// A version the store has already (this device's own write coming back, or a page applied
 /// again) changes nothing but what the server says better: the file's `token` where the
 /// header gives one (an earlier login's may not open), a removal's time, and the time of a
 /// version in a removed folder, where it decides whether it went with it (node schema,
-/// Recently deleted). No change of the node, so nothing to reconcile. Returns `true` for a node
-/// in the tree.
+/// Recently deleted). No change of the node, so nothing to reconcile.
 pub(crate) fn apply_known(
     s: AccountTx<'_>,
     r: &ChangeRef,
     token: Option<&FileToken>,
-) -> Result<bool, StateError> {
+) -> Result<Applied, StateError> {
     if let Some(token) = token {
         s.set_token(r.file_id, r.removed_at.is_some(), token)?;
     }
@@ -61,12 +97,12 @@ pub(crate) fn apply_known(
         if let Some(at) = known_time(removed_at) {
             s.confirm_removed(r.at(), at)?;
         }
-        return Ok(false);
+        return Ok(Applied::Left);
     }
     if let (Some(changed_at), Some(parent)) = (r.changed_at, r.parent) {
         s.refresh_time(r.file_id, parent, changed_at)?;
     }
-    Ok(true)
+    Ok(Applied::Live)
 }
 
 /// The mirror row of a live header (removed or not); `None` for tombstones and for files
@@ -328,11 +364,11 @@ mod tests {
             changed_at: None,
             token: None,
         };
-        assert!(db.write(|s| apply(s.account(), &header))?);
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
         if let RemoteBody::Live { payload, .. } = &mut header.body {
             *payload = None;
         }
-        assert!(db.write(|s| apply(s.account(), &header))?);
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
         assert_eq!(
             db.read(|s| s.mirror_count())?,
             1,
@@ -404,15 +440,24 @@ mod tests {
             removed_at,
             ..folder(1, 0, node, NodeId::ROOT)
         };
-        assert!(db.write(|s| apply(s.account(), &live(None)))?);
-        assert!(!db.write(|s| apply(s.account(), &live(Some(9))))?);
+        assert_eq!(
+            db.write(|s| apply(s.account(), &live(None)))?,
+            Applied::Live
+        );
+        assert_eq!(
+            db.write(|s| apply(s.account(), &live(Some(9))))?,
+            Applied::Left
+        );
         db.read(|s| {
             assert_eq!(s.get_mirror(node)?, None);
             let at = s.removed_by_node(node)?.and_then(|r| r.removed_at);
             assert_eq!(at, Some(9));
             Ok(())
         })?;
-        assert!(db.write(|s| apply(s.account(), &live(None)))?);
+        assert_eq!(
+            db.write(|s| apply(s.account(), &live(None)))?,
+            Applied::Live
+        );
         db.read(|s| {
             assert!(s.get_mirror(node)?.is_some() && s.removed_by_node(node)?.is_none());
             Ok(())
@@ -502,6 +547,50 @@ mod tests {
             Some(7),
             "in a removed folder, two levels up"
         );
+        Ok(())
+    }
+
+    /// The fixed ids out of place are left out as unreadable rows: nothing is recorded, and
+    /// nothing is marked to plan.
+    #[test]
+    fn fixed_ids_out_of_place_are_refused() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let file = |file_id: u128, version: u128, node: NodeId| RemoteHeader {
+            kind: NodeKind::File,
+            body: RemoteBody::Live {
+                node,
+                content: NodeContent::file("f", 0, 1, false),
+                payload: Some(PayloadInfo {
+                    hash: hash_bytes(b"x", HashAlgorithm::Blake3),
+                    bytes: 1,
+                }),
+            },
+            ..folder(file_id, version, node, NodeId::ROOT)
+        };
+        let refused = |db: &mut StateDb, h: &RemoteHeader| -> Result<bool, StateError> {
+            let dirty = db.read(|s| s.dirty_count())?;
+            let applied = db.write(|s| apply(s.account(), h))?;
+            Ok(matches!(applied, Applied::Refused(_)) && db.read(|s| s.dirty_count())? == dirty)
+        };
+        let docs = Role::Documents.node();
+        for header in [
+            folder(1, 1, NodeId::ROOT, NodeId::ROOT),
+            folder(2, 2, NodeId::OUTSIDE, NodeId::ROOT),
+            folder(3, 3, NodeId::new(), NodeId::OUTSIDE),
+            file(4, 4, docs),
+            file(5, 5, NodeId::RECOVERED),
+        ] {
+            assert!(refused(&mut db, &header)?, "{header:?}");
+        }
+        assert_eq!(db.read(|s| s.mirror_count())?, 0);
+        // As folders, at the top or anywhere, they are nodes.
+        for header in [
+            folder(6, 6, docs, NodeId::new()),
+            folder(7, 7, NodeId::RECOVERED, NodeId::ROOT),
+        ] {
+            assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
+        }
+
         Ok(())
     }
 

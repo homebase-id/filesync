@@ -249,11 +249,12 @@ pub(crate) fn hidden(remote: &Tree, filter: &Filter, scope: &Scope) -> HashSet<N
 }
 
 /// `leaving` without the folders that hold anything else remotely (another device added it):
-/// those stay, and only what this device synced in them leaves.
+/// those stay, and only what this device synced in them leaves. A file another writer put
+/// something in (§6.3) is judged alike.
 fn only_whole_folders(remote: &Tree, mut leaving: HashSet<NodeId>) -> HashSet<NodeId> {
     let mut folders: Vec<(usize, NodeId)> = leaving
         .iter()
-        .filter(|n| remote.get(**n).is_some_and(|s| s.kind == NodeKind::Folder))
+        .filter(|n| remote.children(**n).next().is_some())
         .map(|n| (remote.ancestors(*n).len(), *n))
         .collect();
     // Deepest first: a folder's children are decided before it.

@@ -141,6 +141,8 @@ impl Sim {
         let mut kept_here: BTreeSet<u64> = BTreeSet::new();
         // Items the drive refuses as they are (with the name it refuses), with what is in them.
         let mut refused_here: BTreeSet<NodeId> = BTreeSet::new();
+        // What some client syncs: a node in a file no client syncs is left there by all.
+        let mut synced_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
             let mut server = self.server_view(c);
             for n in &taken {
@@ -164,6 +166,7 @@ impl Sim {
             for n in client.scope().out_of_scope(&server) {
                 synced.remove(n);
             }
+            synced_somewhere.extend(synced.ids());
             // The tags as the client sees them.
             see_held_tags(client, &mut visible, &server);
             // What the client holds back for a refusal: each operation refused itself is one
@@ -236,6 +239,10 @@ impl Sim {
             .into_iter()
             .filter(|v| !matches!(v, Violation::DuplicateName { .. }))
             .filter(|v| !matches!(v, Violation::Orphan { node, .. } if refused_here.contains(node)))
+            .filter(|v| {
+                !matches!(v, Violation::ParentNotFolder { node, .. }
+                    if !synced_somewhere.contains(node))
+            })
             // A cycle whose repair (a move out of it) the drive refused stays one.
             .filter(|v| {
                 !matches!(v, Violation::Cycle { node }
