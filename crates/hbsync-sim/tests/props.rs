@@ -3631,3 +3631,107 @@ fn regression_a_parked_folder_created_on_the_drive_settles_its_base() {
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// c1 (Linux) tags its new folder "x\ny" and sends it up; then deletes the folder, which c2
+/// renames meanwhile, so the delete loses and c1 makes the folder again. c1 dies before its
+/// commit, and the user renames the folder: recovery takes it for a new item (a new id).
+/// The add was on the drive's node, and stays there; the new item doesn't hold the tag. The
+/// oracle moved the add to the new id all the same, and reported the tag lost there
+/// (`cc 67c5f487…`).
+#[test]
+fn regression_a_sent_add_stays_with_its_node_when_the_item_gets_a_new_id() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Move, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let crash = |client| Event::Crash { client };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 6 }),
+        act(
+            1,
+            CreateFile {
+                parent: 1,
+                name: 10,
+            },
+        ),
+        act(1, Tag { node: 0, tag: 3 }),
+        plan(1),
+        step(1),
+        act(1, Delete { node: 6 }),
+        plan(2),
+        act(1, CreateFile { parent: 0, name: 3 }),
+        step(2),
+        act(
+            2,
+            Move {
+                node: 0,
+                parent: 5,
+                name: 2,
+            },
+        ),
+        plan(2),
+        act(1, Delete { node: 0 }),
+        step(2),
+        plan(1),
+        crash(1),
+        act(
+            1,
+            Move {
+                node: 2,
+                parent: 5,
+                name: 6,
+            },
+        ),
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// The same as the regression above with a file's rename: c0 tags its new folder c.txt Red and
+/// sends it up; c2 renames a file to c.txt, so the folder becomes "c (conflict 1).txt", and c0's
+/// delete of the folder loses. c0 makes it again, dies before its commit, and the user moves
+/// it: recovery takes it for a new item. The add stayed with the node; the oracle moved it to
+/// the new id, which holds no Red (`cc c229b7e4…`).
+#[test]
+fn regression_a_sent_add_stays_with_its_node_after_a_lost_delete_and_a_crash() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Move, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let crash = |client| Event::Crash { client };
+    let events = [
+        act(2, CreateFile { parent: 0, name: 0 }),
+        act(
+            2,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 11,
+            },
+        ),
+        act(0, CreateFolder { parent: 0, name: 3 }),
+        act(0, Tag { node: 0, tag: 0 }),
+        plan(0),
+        step(0),
+        plan(2),
+        step(2),
+        act(0, Delete { node: 0 }),
+        step(2),
+        step(2),
+        plan(0),
+        crash(0),
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 1,
+                name: 0,
+            },
+        ),
+        act(0, CreateFile { parent: 0, name: 0 }),
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}

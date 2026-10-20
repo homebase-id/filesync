@@ -116,3 +116,5 @@ cc 547261dd60a394e104f0dfa8132f69144c8a1b6a2e60f46bf257f2c3ffeb4972 # an add sen
 cc cfaf6f6d7130ee39a261810c8a75c3333b1e9bf86f3f30db91649c777dc5d75b # a tag written onto a folder with no base (its commit lost to a crash) read as this device adding it, and a removal came back
 cc ab37e2a64aafec7a98f186cc4e21ba85401207587723b31b43cac147206e8fb0 # the same, the device that wrote the tag renaming the folder: its rename took the removed tag back up
 cc b961b04ced43c1f272486e5b7b61101a3f635a81d6c3d639d633a13d120dcc98 # a folder created on the drive while parked here settled at its parked name, no base: its tag went back up over a removal
+cc 67c5f4877887d2c25c8c27e7d66e0aab6188dcf63d0232f014182a96eb795f85 # an add sent up stays with its node when its item gets a new id holding no such tag
+cc c229b7e488f7d5ab6ea6eb7588553813b2c8aba9bcf480e54c0c6817454d8b90 # the same: an add sent up stayed with its node, not the item made again here and renamed

@@ -533,14 +533,47 @@ impl Sim {
     }
 
     /// Client `c`'s item `node` left it (deleted or trashed there): the tag changes made there
-    /// went with it, but for an add sent up, which stands (where a delete loses, the drive's
-    /// version comes back with it).
+    /// went with it, but for an add sent up, which stands with the node ([`Sim::detach_add`]:
+    /// where a delete loses, the drive's version comes back with it). An item made of the node
+    /// here again later is not the one the user tagged, and doesn't take it along.
     pub(crate) fn tag_changes_left(&mut self, c: usize, node: NodeId) {
         self.tags_cleared
             .retain(|(by, n, _), _| (*by, *n) != (c, node));
-        let sent = &self.tags_sent;
-        self.tags_added
-            .retain(|add| (add.0, add.1) != (c, node) || sent.contains_key(add));
+        let adds: Vec<_> = self
+            .tags_added
+            .iter()
+            .filter(|(at, n, _)| (*at, *n) == (c, node))
+            .cloned()
+            .collect();
+        for add in adds {
+            if self.tags_sent.contains_key(&add) {
+                self.detach_add(add);
+            } else {
+                self.tags_added.remove(&add);
+            }
+        }
+    }
+
+    /// Client `c`'s add `add` no longer belongs to an item of its: it stays with the node (on the
+    /// drive, or nowhere), so an item made of the node later doesn't take it along. Its send
+    /// time goes along: merged with a detached add of the tag there, the last one, but not sent
+    /// where either isn't (one not sent excuses every removal).
+    pub(crate) fn detach_add(&mut self, add: (usize, NodeId, String)) {
+        if !self.tags_added.remove(&add) {
+            return;
+        }
+        let sent = self.tags_sent.remove(&add);
+        let detached = (DETACHED, add.1, add.2);
+        let merged = match self.tags_added.insert(detached.clone()) {
+            true => sent,
+            false => sent
+                .zip(self.tags_sent.get(&detached).copied())
+                .map(|(a, b)| a.max(b)),
+        };
+        match merged {
+            Some(t) => self.tags_sent.insert(detached, t),
+            None => self.tags_sent.remove(&detached),
+        };
     }
 
     /// `node` is back on the drive (from Recently deleted, or made again after the purge).
@@ -810,7 +843,10 @@ mod tests {
         assert!(sim.item(0, "a").is_some(), "the delete lost");
         assert!(sim.tags_cleared.contains_key(&(1, file, "Red".into())));
         assert!(sim.tags_added.contains(&(1, file, "Work".into())));
-        assert!(sim.tags_added.contains(&(0, file, "Red".into())), "sent up");
+        assert!(
+            sim.tags_added.contains(&(DETACHED, file, "Red".into())),
+            "sent up, it stays with the node"
+        );
         sim.check().unwrap_or_else(|e| panic!("{e}"));
         // Red back everywhere, as an engine that kept it over the removal would leave it.
         assert_eq!(sim.server_tags("a"), Some(vec!["Work:0".to_owned()]));
