@@ -172,7 +172,7 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
     }
     let status = view.daemon.status();
     if let Some(s) = status {
-        items.push(Item::Label(s.identity.clone()));
+        items.push(Item::Label(s.identity.to_string()));
     }
     items.push(Item::Label(status_line(view)));
     items.push(Item::Separator);
@@ -336,7 +336,7 @@ mod tests {
     const NOW: u64 = 1_800_000_000;
 
     fn status(state: State) -> FolderStatus {
-        let mut s = FolderStatus::new("anna.example.com", Path::new("/home/anna/Homebase"));
+        let mut s = FolderStatus::new(&"anna.example.com".into(), Path::new("/home/anna/Homebase"));
         s.state = state;
         s
     }
@@ -375,7 +375,8 @@ mod tests {
 
     #[test]
     fn a_role_folders_held_deletes_are_reviewed_from_the_menu() {
-        let mut pictures = FolderStatus::new("anna.example.com", Path::new("/home/anna/Pictures"));
+        let mut pictures =
+            FolderStatus::new(&"anna.example.com".into(), Path::new("/home/anna/Pictures"));
         pictures.role = Some(hbsync_types::Role::Pictures);
         pictures.held_deletes = Some(HeldDeletes {
             here: 0,

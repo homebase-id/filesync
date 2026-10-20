@@ -7,6 +7,7 @@ mod config;
 pub mod control;
 pub mod daemon;
 pub mod folders;
+mod identity;
 pub mod install;
 mod ipc;
 pub mod local_http;
@@ -28,6 +29,7 @@ pub mod words;
 
 pub use config::{Config, ConfigError, MassDelete, Root};
 pub use hbsync_homebase::app::{APP_NAME, files_online};
+pub use identity::Identity;
 pub use paths::{NoHome, Paths};
 pub use protocol::{Control, DaemonStatus, FolderStatus, State};
 pub use runner::{Command, Handle, Runner, RunnerConfig};

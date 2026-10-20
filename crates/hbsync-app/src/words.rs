@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn status_lines() {
         let mut s = FolderStatus::new(
-            "anna.example.com",
+            &"anna.example.com".into(),
             std::path::Path::new("/home/anna/Homebase"),
         );
         s.state = State::Idle;

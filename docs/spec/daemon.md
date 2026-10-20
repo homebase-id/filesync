@@ -56,7 +56,9 @@ folder = "/home/anna/Homebase"
 # role = "documents"            # a role folder (sync semantics §12); none for the main folder
 ```
 
-Unknown keys are an error. Writes replace the file in one step. The daemon writes it as it
+Unknown keys are an error. An identity is read as the client keeps it, here and on the
+control socket: in lower case, without a trailing `/` (`Anna.Example.com/` is
+`anna.example.com`). Writes replace the file in one step. The daemon writes it as it
 adds and removes folders (and keeps a pause in it); `hbsync setup` writes it only when no
 daemon runs.
 
@@ -76,7 +78,9 @@ JSON (identity, client auth token, shared secret):
   keeping an item on one computer: a copied keyring carries it.
 
 When no keychain answers (a Linux without a Secret Service, say), the credentials go to
-`<config>/credentials/<identity>.json`, mode 0600 in a 0700 folder (on Windows the profile
+`<config>/credentials/<identity>.json` (named as the state DB's folder: a port's `:` as `_`,
+which Windows refuses; a file of an earlier version named with the `:` is read and moved),
+mode 0600 in a 0700 folder (on Windows the profile
 folder is the user's only), and `hbsync status` says so. Credentials found in the file while the
 keychain works are moved into it. `HBSYNC_CREDENTIALS=file` uses the file only. The file is
 replaced in one step (a crash leaves the old one or the new one).

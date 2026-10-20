@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use hbsync_platform::Os;
 
+use crate::Identity;
+
 /// The folder name on macOS and Windows.
 const APP_FOLDER: &str = "Homebase Filesync";
 /// The folder name on Linux.
@@ -131,11 +133,13 @@ impl Paths {
         self.config.join("config.toml")
     }
 
-    /// The state DB of `identity`'s account: `<state>/accounts/<identity in lower case, : as
-    /// _>/state.db` ([`hbsync_engine::root::SyncRoot`]).
-    pub fn account_db(&self, identity: &str) -> PathBuf {
-        let key = identity.to_lowercase().replace(':', "_");
-        self.state.join("accounts").join(key).join("state.db")
+    /// The state DB of `identity`'s account: `<state>/accounts/<its file key>/state.db`
+    /// ([`Identity::file_key`], [`hbsync_engine::root::SyncRoot`]).
+    pub fn account_db(&self, identity: &Identity) -> PathBuf {
+        self.state
+            .join("accounts")
+            .join(identity.file_key())
+            .join("state.db")
     }
 }
 
@@ -148,7 +152,7 @@ mod tests {
         let paths = Paths::under(Path::new("/h"));
         assert!(
             paths
-                .account_db("Anna.Example.com:8443")
+                .account_db(&"Anna.Example.com:8443".into())
                 .ends_with("accounts/anna.example.com_8443/state.db")
         );
     }

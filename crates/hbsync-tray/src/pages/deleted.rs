@@ -169,7 +169,7 @@ impl Server {
         control: AccountControl,
         done: &str,
     ) -> String {
-        match control::account(&self.paths, identity, control) {
+        match control::account(&self.paths, &identity.into(), control) {
             Ok(()) => {
                 (self.send)(Event::Wake);
                 done.into()
@@ -253,7 +253,7 @@ fn listed_from_field(field: &str) -> Vec<DeletedAccount> {
             let (rest, seq) = part.rsplit_once('/')?;
             let (identity, db) = rest.rsplit_once('/')?;
             Some(DeletedAccount {
-                identity: identity.to_owned(),
+                identity: identity.into(),
                 deletes: 0,
                 items: 0,
                 stays: 0,

@@ -36,9 +36,9 @@ use hbsync_state::StateError;
 use hbsync_types::NodeId;
 use hbsync_types::unix_now;
 
-use crate::MassDelete;
 use crate::protocol::{FolderStatus, Pause, State};
 use crate::sync::{OnDrop, Wakeup, lock, wait_for};
+use crate::{Identity, MassDelete};
 
 mod report;
 mod schedule;
@@ -70,7 +70,7 @@ pub struct RunnerConfig {
     pub folder: PathBuf,
     /// The account's state DB ([`crate::Paths::account_db`]).
     pub db: PathBuf,
-    pub identity: String,
+    pub identity: Identity,
     /// The role folder it is; `None` for the main folder.
     pub role: Option<hbsync_types::Role>,
     /// Shown in conflict-copy names.
@@ -90,11 +90,11 @@ pub struct RunnerConfig {
 }
 
 impl RunnerConfig {
-    pub fn new(folder: &Path, db: &Path, identity: &str, device: &str) -> Self {
+    pub fn new(folder: &Path, db: &Path, identity: &Identity, device: &str) -> Self {
         RunnerConfig {
             folder: folder.to_path_buf(),
             db: db.to_path_buf(),
-            identity: identity.to_owned(),
+            identity: identity.clone(),
             role: None,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),

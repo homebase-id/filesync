@@ -16,7 +16,7 @@ use hbsync_types::Role;
 
 use crate::control;
 use crate::paths::home;
-use crate::{Config, CredentialStore, Location, Paths, autostart};
+use crate::{Config, CredentialStore, Identity, Location, Paths, autostart};
 
 /// How long the owner has to approve in the browser.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -102,11 +102,6 @@ pub fn open_browser(
         "xdg-open"
     });
     Command::new(opener).arg(url).spawn().map(drop)
-}
-
-/// An identity as typed (`Anna.Example.com/`) as the client keeps it (`anna.example.com`).
-pub fn normalize_identity(typed: &str) -> String {
-    typed.trim().trim_end_matches('/').to_lowercase()
 }
 
 /// The folder synced when none is chosen: `Homebase` in the home folder.
@@ -232,9 +227,13 @@ enum FolderState {
 
 /// What `folder` (resolved) holds for `identity`: refused if another folder or identity is
 /// set up, or the folder is another identity's.
-fn folder_state(config: &Config, identity: &str, folder: &Path) -> Result<FolderState, String> {
+fn folder_state(
+    config: &Config,
+    identity: &Identity,
+    folder: &Path,
+) -> Result<FolderState, String> {
     if let Some(root) = config.root().map_err(|e| e.to_string())?
-        && (root.identity != identity || root.folder != folder)
+        && (root.identity != *identity || root.folder != folder)
     {
         return Err(format!(
             "already set up to sync {} with {}: unlink it first",
@@ -310,7 +309,7 @@ pub fn plan(
     merge: bool,
     home: Option<&Path>,
 ) -> Result<SetUp, Refusal> {
-    let identity = normalize_identity(typed);
+    let identity = Identity::new(typed);
     if !looks_like_a_domain(&identity) {
         return Err(Refusal::No(format!(
             "{identity:?} doesn't look like a Homebase address (like anna.example.com)"
@@ -341,8 +340,7 @@ pub fn plan(
 /// What to set up, as [`plan`] makes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetUp {
-    /// As [`normalize_identity`] leaves it.
-    pub identity: String,
+    pub identity: Identity,
     /// Resolved ([`resolve`]); created if missing.
     pub folder: PathBuf,
     /// Merge the files of a folder that has some with the drive.
@@ -373,7 +371,7 @@ pub fn set_up(
         request.existing,
         home().as_deref(),
     )?;
-    let identity = checked.identity.as_str();
+    let identity = &checked.identity;
     std::fs::create_dir_all(&checked.folder)?;
     let folder = canonical(&checked.folder)?;
 
@@ -548,14 +546,6 @@ mod tests {
     }
 
     #[test]
-    fn identities_are_kept_lowercase_without_a_slash() {
-        assert_eq!(
-            normalize_identity(" Anna.Example.com/ "),
-            "anna.example.com"
-        );
-    }
-
-    #[test]
     fn plans_are_checked() -> R {
         let dir = tempfile::tempdir()?;
         let home = canonical(dir.path())?.join("anna");
@@ -619,7 +609,7 @@ mod tests {
         );
         // Another folder or identity already set up.
         let set = Config {
-            roots: vec![crate::Root::main("a.example", &fresh)],
+            roots: vec![crate::Root::main(&"a.example".into(), &fresh)],
             ..Config::default()
         };
         assert!(plan("a.example", &fresh, false, &set).is_ok());

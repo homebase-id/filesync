@@ -359,12 +359,12 @@ mod tests {
     }
 
     fn status() -> DaemonStatus {
-        let mut folder = FolderStatus::new("a.example", Path::new("/home/a/Homebase"));
+        let mut folder = FolderStatus::new(&"a.example".into(), Path::new("/home/a/Homebase"));
         folder.state = State::Idle;
         folder.pending = 3;
         DaemonStatus {
             version: crate::VERSION.into(),
-            accounts: vec![AccountStatus::new("a.example")],
+            accounts: vec![AccountStatus::new(&"a.example".into())],
             folders: vec![folder],
         }
     }

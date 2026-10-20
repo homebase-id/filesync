@@ -10,7 +10,7 @@ use std::sync::Arc;
 use hbsync_homebase::{Credentials, HomebaseError};
 use keyring_core::{CredentialStore as Keychain, Error as KeychainError};
 
-use crate::Paths;
+use crate::{Identity, Paths};
 
 /// The keychain entries' service name; the account is the identity.
 const SERVICE: &str = "Homebase Filesync";
@@ -87,16 +87,26 @@ impl CredentialStore {
         self.keychain.as_ref().map(|_| ()).map_err(String::as_str)
     }
 
-    /// The file the credentials for `identity` are kept in without a keychain.
-    pub(crate) fn file(&self, identity: &str) -> PathBuf {
-        self.dir.join(format!("{identity}.json"))
+    /// The file the credentials for `identity` are kept in without a keychain:
+    /// `<its file key>.json` ([`Identity::file_key`]).
+    pub(crate) fn file(&self, identity: &Identity) -> PathBuf {
+        self.dir.join(format!("{}.json", identity.file_key()))
+    }
+
+    /// Where versions before 0.8 kept that file, if elsewhere: named after the identity as is,
+    /// a port's `:` too (a name Windows refuses). Moved to its name now when found there.
+    fn earlier_file(&self, identity: &Identity) -> Option<PathBuf> {
+        identity
+            .contains(':')
+            .then(|| self.dir.join(format!("{identity}.json")))
     }
 
     /// Saves `creds`: in the keychain if it takes them, else in the file. A copy left in the
     /// file is removed once the keychain has them.
     pub(crate) fn save(&self, creds: &Credentials) -> Result<Location, CredentialError> {
-        let file = self.file(&creds.identity);
-        let why = match self.keychain_entry(&creds.identity) {
+        let identity = Identity::new(&creds.identity);
+        let file = self.file(&identity);
+        let why = match self.keychain_entry(&identity) {
             Ok(entry) => {
                 let json = serde_json::to_string(creds).map_err(HomebaseError::from)?;
                 match entry.set_password(&json) {
@@ -118,7 +128,7 @@ impl CredentialStore {
     /// is an error, not "not set up".
     pub(crate) fn load(
         &self,
-        identity: &str,
+        identity: &Identity,
     ) -> Result<Option<(Credentials, Location)>, CredentialError> {
         // Why the file is read: no keychain on this system (`Ok`), or one that failed (`Err`);
         // `None` when the keychain works and has no entry.
@@ -141,7 +151,7 @@ impl CredentialStore {
             },
         };
         let path = self.file(identity);
-        let Some(creds) = Credentials::load(&path)? else {
+        let Some(creds) = self.load_file(identity, &path)? else {
             return match why {
                 Some(Err(failed)) => Err(CredentialError::Keychain(failed)),
                 _ => Ok(None),
@@ -155,10 +165,37 @@ impl CredentialStore {
         Ok(Some((creds, location)))
     }
 
+    /// The credentials in the file at `path` ([`CredentialStore::file`]), moved there first
+    /// from the file an earlier version kept them in, if that is where they are. Only the
+    /// file at `path` counts when that one can't be read or moved (on Windows the earlier name
+    /// is a stream of another file, or no name at all).
+    fn load_file(
+        &self,
+        identity: &Identity,
+        path: &Path,
+    ) -> Result<Option<Credentials>, CredentialError> {
+        if let Some(earlier) = self.earlier_file(identity)
+            && !path.exists()
+            && let Ok(Some(_)) = Credentials::load(&earlier)
+        {
+            match std::fs::rename(&earlier, path) {
+                Ok(()) => tracing::info!("credentials moved to {}", path.display()),
+                Err(e) => tracing::warn!("can't move {} ({e})", earlier.display()),
+            }
+        }
+        Ok(Credentials::load(path)?)
+    }
+
     /// Forgets the credentials for `identity`, wherever they are. Returns why the keychain
     /// couldn't be looked at, if it couldn't (it may still hold them: say so).
-    pub(crate) fn delete(&self, identity: &str) -> Result<Option<String>, CredentialError> {
+    pub(crate) fn delete(&self, identity: &Identity) -> Result<Option<String>, CredentialError> {
         remove(&self.file(identity))?;
+        if let Some(earlier) = self.earlier_file(identity) {
+            // Never there on Windows (no such name): looked for only to be removed.
+            if let Err(e) = remove(&earlier) {
+                tracing::warn!("can't remove {}: {e}", earlier.display());
+            }
+        }
         match &self.keychain {
             Err(_) if self.files_only => Ok(None),
             Err(why) => Ok(Some(why.clone())),
@@ -174,7 +211,7 @@ impl CredentialStore {
         }
     }
 
-    fn keychain_entry(&self, identity: &str) -> Result<keyring_core::Entry, String> {
+    fn keychain_entry(&self, identity: &Identity) -> Result<keyring_core::Entry, String> {
         let keychain = self.keychain.as_ref().map_err(Clone::clone)?;
         let modifiers: std::collections::HashMap<&str, &str> = MODIFIERS.iter().copied().collect();
         keychain
@@ -243,11 +280,11 @@ mod tests {
         let dir = tempfile::tempdir().map_err(HomebaseError::from)?;
         let store = CredentialStore::files_in(&dir.path().join("credentials"));
         assert!(store.keychain().is_err());
-        assert!(store.load("a.example")?.is_none());
+        assert!(store.load(&"a.example".into())?.is_none());
 
         let creds = sample("a.example");
         let location = store.save(&creds)?;
-        let path = store.file("a.example");
+        let path = store.file(&"a.example".into());
         assert_eq!(
             location,
             Location::File {
@@ -255,7 +292,7 @@ mod tests {
                 why: "files only".into()
             }
         );
-        let (back, at) = store.load("a.example")?.expect("saved");
+        let (back, at) = store.load(&"a.example".into())?.expect("saved");
         assert!(same(&back, &creds));
         assert_eq!(at, location);
         #[cfg(unix)]
@@ -269,9 +306,37 @@ mod tests {
             );
         }
 
-        assert_eq!(store.delete("a.example")?, None);
-        assert_eq!(store.delete("a.example")?, None);
-        assert!(store.load("a.example")?.is_none());
+        assert_eq!(store.delete(&"a.example".into())?, None);
+        assert_eq!(store.delete(&"a.example".into())?, None);
+        assert!(store.load(&"a.example".into())?.is_none());
+        Ok(())
+    }
+
+    /// The file of an identity with a port is named without its `:` (Windows refuses it); one
+    /// an earlier version named with it is read and moved. Unix only: Windows can't name it so.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_named_with_a_colon_moves() -> Result<(), CredentialError> {
+        let dir = tempfile::tempdir().map_err(HomebaseError::from)?;
+        let store = CredentialStore::files_in(&dir.path().join("credentials"));
+        let identity = Identity::new("a.example:8443");
+        let (earlier, now) = (
+            dir.path().join("credentials/a.example:8443.json"),
+            dir.path().join("credentials/a.example_8443.json"),
+        );
+        assert_eq!(store.file(&identity), now);
+        let creds = sample("a.example:8443");
+        save_private(&creds, &earlier)?;
+        let (back, _) = store
+            .load(&identity)?
+            .expect("found under its earlier name");
+        assert!(same(&back, &creds));
+        assert!(now.exists() && !earlier.exists(), "moved");
+        // Forgotten under either name.
+        save_private(&creds, &earlier)?;
+        store.delete(&identity)?;
+        assert!(!now.exists() && !earlier.exists());
+        assert!(store.load(&identity)?.is_none());
         Ok(())
     }
 
@@ -284,7 +349,7 @@ mod tests {
         }
         let dir = tempfile::tempdir().map_err(HomebaseError::from)?;
         let store = CredentialStore::open(&Paths::under(dir.path()));
-        let identity = format!("hbsync-test-{}.example", std::process::id());
+        let identity = Identity::new(&format!("hbsync-test-{}.example", std::process::id()));
         let creds = sample(&identity);
         let location = store.save(&creds)?;
         if cfg!(any(windows, target_os = "macos")) {

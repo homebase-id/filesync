@@ -14,6 +14,8 @@ use hbsync_types::Role;
 use hbsync_types::activity::{Deleted, Synced};
 use serde::{Deserialize, Serialize};
 
+use crate::Identity;
+
 pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
@@ -62,7 +64,7 @@ pub enum Ask {
     },
     /// Set the folder at `path` up for `identity` and sync it (`hbsync setup` has checked it).
     AddFolder {
-        identity: String,
+        identity: Identity,
         path: PathBuf,
         role: Option<Role>,
     },
@@ -73,7 +75,7 @@ pub enum Ask {
     /// The credentials of `identity` changed (logged in again): its account starts over with
     /// them.
     StartOver {
-        identity: String,
+        identity: Identity,
     },
 }
 
@@ -133,7 +135,7 @@ pub enum Control {
     Daemon(DaemonControl),
     /// For an account: its Recently deleted.
     Account {
-        identity: String,
+        identity: Identity,
         control: AccountControl,
     },
     /// For one folder, by its path.
@@ -214,7 +216,7 @@ impl DeletedList {
 /// An account's Recently deleted as a whole, when listed: what emptying all of it takes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeletedAccount {
-    pub identity: String,
+    pub identity: Identity,
     /// The items deleted on their own.
     pub deletes: usize,
     /// What emptying all of it deletes for good: removed nodes only, every item and the ones its
@@ -233,7 +235,7 @@ pub struct DeletedAccount {
 /// An item of an account's Recently deleted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeletedItem {
-    pub identity: String,
+    pub identity: Identity,
     #[serde(flatten)]
     pub deleted: Deleted,
     /// How many items are in it: all of Recently deleted below it (through removed folders),
@@ -275,16 +277,16 @@ impl DaemonStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountStatus {
-    pub identity: String,
+    pub identity: Identity,
     pub hints: Hints,
     /// Why the credentials aren't in the keychain.
     pub credentials_warning: Option<String>,
 }
 
 impl AccountStatus {
-    pub fn new(identity: &str) -> AccountStatus {
+    pub fn new(identity: &Identity) -> AccountStatus {
         AccountStatus {
-            identity: identity.to_owned(),
+            identity: identity.clone(),
             hints: Hints::Off,
             credentials_warning: None,
         }
@@ -325,7 +327,7 @@ pub enum State {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FolderStatus {
     /// The account the folder syncs with.
-    pub identity: String,
+    pub identity: Identity,
     pub path: PathBuf,
     /// The role folder it is; `None` for the main folder (the drive's root).
     pub role: Option<Role>,
@@ -359,9 +361,9 @@ pub struct FolderStatus {
 
 impl FolderStatus {
     /// Starting to sync the main folder at `path` with `identity`.
-    pub fn new(identity: &str, path: &Path) -> FolderStatus {
+    pub fn new(identity: &Identity, path: &Path) -> FolderStatus {
         FolderStatus {
-            identity: identity.to_owned(),
+            identity: identity.clone(),
             path: path.to_path_buf(),
             role: None,
             state: State::Starting,

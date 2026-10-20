@@ -21,7 +21,11 @@ impl Home {
         // As the config keeps it: without `\\?\` on Windows.
         let folder = hbsync_platform::winpath::plain(&folder.canonicalize()?);
         let paths = hbsync_app::Paths::under(self.path());
-        hbsync_engine::root::SyncRoot::create(&paths.account_db(IDENTITY), IDENTITY, &folder)?;
+        hbsync_engine::root::SyncRoot::create(
+            &paths.account_db(&IDENTITY.into()),
+            IDENTITY,
+            &folder,
+        )?;
         std::fs::write(
             self.path().join("config.toml"),
             format!(
