@@ -100,9 +100,9 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 |---|---|---|---|
 | `v` | int | yes | schema version, `1` |
 | `name` | string | yes | original name, Unicode NFC. Never contains `/` or NUL, never `.` or `..`, not empty |
-| `mtime` | int | files | local modification time, Unix ms |
+| `mtime` | int | files | local modification time, Unix ms. Readers round a fractional value |
 | `size` | int | files | plaintext size in bytes |
-| `x` | bool | no | executable bit; omitted when false |
+| `x` | bool | no | executable bit; omitted when false. Readers take `1` and `0` as `true` and `false` |
 | `rm` | object | no longer written | from before 2026-10-15: `{"at": <Unix ms>, "root": "<node id>"}` on a removed node. Readers ignore it (the header says what is removed and when, see Recently deleted); the next write of the content drops it (a removal or restore through the archival-status batch keeps the content, and so it) |
 | `ct` | int | no | creation time, Unix ms (files and folders): the item's own when the node is created, then never changed. Shown and applied (Windows, macOS; Linux can't set one), never a reason to sync, like `mtime`. Readers round a fractional value and take anything else as none (and keep it) |
 | `tags` | array | no | Finder tags (files and folders): `[{"n": <name>, "c": <colour>}, …]`. `n` is the tag's name (NFC, not empty, one entry per name); `c` is Finder's colour, `1` grey, `2` green, `3` purple, `4` blue, `5` yellow, `6` red, `7` orange, left out when none. Order doesn't matter (this client sorts by name). No key means no tags. Synced: adding or removing a tag, or changing its colour, reaches every device (sync-semantics §11). Readers skip an entry without a string `n` and read any other `c` as none |
@@ -152,6 +152,10 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
   `fileId → node id` themselves.
 - Tombstoned UniqueIds are free again (the duplicate check skips tombstones **[verified]**), so
   a deleted node can be re-created under the same node id; it gets a new `fileId`.
+- A node whose `uniqueId` is the root id isn't read, nor is a file whose `uniqueId` is a role
+  folder's or Recovered files' (the client reports the row).
+- A node whose `groupId` is a file's node id is moved into Recovered files by the computers,
+  as an orphan is.
 
 ## Recently deleted
 - A delete removes: one metadata-only update that sets `archivalStatus` to `2`, keeping the
@@ -320,6 +324,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-20: readers take a fractional `mtime` (rounded) and `x` as `1` or `0`, which
+  JavaScript and Kotlin writers may send (before, such a node was unreadable). A node with the
+  root's id, or a file with a folder's fixed id, isn't read. A node whose `groupId` is a file
+  moves into Recovered files, as an orphan does. Writers write as before; the node is the same.
 - 2026-10-20: a reader skips a file whose payload's `bytesWritten` isn't the encrypted size of
   its `size` (every download of it would fail). This client writes them so (**[verified]** by
   the live test `nodes_are_stored_encrypted`; other writers inferred, as encryption requires);

@@ -703,6 +703,26 @@ fn file_moved_into_remotely_deleted_folder_keeps_the_folder() {
     }
 }
 
+/// Another writer moved a node into a file (§6.3): it is repaired as an orphan is, into
+/// Recovered files on the drive, whatever the mirror's completeness.
+#[test]
+fn a_node_whose_folder_is_a_file_is_recovered() {
+    let [f, child] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(f, file(ROOT, "f", "x"));
+    w.synced(child, folder(ROOT, "d"));
+    w.remote(child, Some(folder(f, "d")));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == child && *parent == NodeId::RECOVERED)),
+        "{:#?}",
+        plan.ops
+    );
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: child }]);
+}
+
 #[test]
 fn orphan_with_unknown_parent_is_recovered_when_mirror_is_complete() {
     let [gone, child] = ids(2)[..] else {

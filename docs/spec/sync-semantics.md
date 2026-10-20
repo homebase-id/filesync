@@ -164,7 +164,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    past the rows the server holds back) or kept current by the notifications, so a folder not
    in the mirror isn't on the drive. A folder merely not read yet never counts: a node whose
    folder the picture lacks waits while the picture isn't whole. An orphan in Recently deleted
-   stays there, an item of its own; only what is live, or brought back, moves.
+   stays there, an item of its own; only what is live, or brought back, moves. A live node
+   whose folder is a file (another writer set its `groupId` to a file's node id) is moved the
+   same way, whether the picture is whole or not.
    - The main folder adopts: a node whose place isn't known is never a role folder's (§12).
    - Recovered files is made when an orphan first needs it, with its fixed id, so devices
      adopting at once make one folder (a create that finds it made joins it). One in Recently
@@ -320,7 +322,10 @@ expected fingerprint is treated as done.
   name key; a node may take its own name in another case.
 - **Orphans.** With a fully drained feed, a remote node whose parent is unknown everywhere (a
   child created while another client deleted its folder for good) is moved into Recovered
-  files (§6.3), made first where it isn't there.
+  files (§6.3), made first where it isn't there. So is one whose parent is a file.
+- **Rows that aren't nodes.** A version that uses a fixed id out of place (the root's, or a
+  role folder's or Recovered files' on a file) is left out like a row that doesn't decrypt,
+  and reported (node schema, Identity and tombstones).
 - **Crash recovery** needs no operation log: every operation is idempotent or detectable
   (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
   feed, and parked items come back from their records. A download (or a folder synced before,
@@ -465,7 +470,8 @@ An item inside a filtered folder is filtered too.
 2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
    never downloaded, and never deleted by this device, with one exception: a node this device
    synced at a place it now filters (a rule was added) is leaving per rule 1, and is deleted
-   remotely unless the remote changed it since: its place, bytes or tags (a folder: unless it holds anything that isn't
+   remotely unless the remote changed it since: its place, bytes or tags (a folder, or a file
+   another writer put something in: unless it holds anything that isn't
    leaving, such as another device's new file; then only its base is dropped, once the bases
    below it are gone or go in the same run). If the user brings the local item back into view first (moves it out of
    the ignored place), it syncs as usual, and its local place wins over a remote move (the

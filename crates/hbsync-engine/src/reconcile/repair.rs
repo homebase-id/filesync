@@ -3,6 +3,17 @@
 use super::*;
 use hbsync_types::RECOVERED_NAME;
 
+/// What becomes of a node whose folder isn't in the merged tree as a folder
+/// ([`Reconciler::fix_orphans`]).
+enum Parent {
+    /// Its folder comes back.
+    Folder(NodeState),
+    /// It moves into Recovered files.
+    Recover,
+    /// It waits for more information.
+    Wait,
+}
+
 impl Reconciler<'_> {
     // ---- 3: invariants on the merged tree ----
 
@@ -82,6 +93,20 @@ impl Reconciler<'_> {
         NodeId::RECOVERED
     }
 
+    /// A node whose folder is nowhere, or a file: moved into Recovered files if it is on the
+    /// drive (live, or a folder in Recently deleted that a node brings back), to keep it
+    /// visible; else it waits.
+    fn recover_or_wait(&self, node: NodeId) -> Parent {
+        let i = self.input;
+        let on_drive = i.remote.contains(node)
+            || (self.masking.scope.top.is_root() && i.removed.contains_key(&node));
+        if on_drive {
+            Parent::Recover
+        } else {
+            Parent::Wait
+        }
+    }
+
     pub(super) fn fix_orphans(&mut self) {
         let mut queue: Vec<NodeId> = self.merged.ids().collect();
         queue.sort();
@@ -91,16 +116,24 @@ impl Reconciler<'_> {
             let Some(parent) = self.merged.get(node).map(|s| s.parent) else {
                 continue;
             };
-            if self.merged.exists(parent) {
-                continue;
-            }
-            let parent_state = if withdrawn.contains(&parent) {
-                None
-            } else {
-                self.known_state(parent)
+            let decided = match self.merged.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => continue,
+                // A file: another writer put the node in it (§6.3).
+                Some(_) => self.recover_or_wait(node),
+                None if parent.is_root() => continue,
+                None if withdrawn.contains(&parent) => Parent::Wait,
+                None => match self.known_state(parent) {
+                    Some(state) if state.kind == NodeKind::Folder => Parent::Folder(state),
+                    // Nowhere, or known as a file only before (another writer's), though the
+                    // drive's picture is whole: the server kept a child of a folder deleted for
+                    // good (a create racing the delete, another app), live or brought back from
+                    // Recently deleted by what is in it.
+                    _ if self.input.remote_complete => self.recover_or_wait(node),
+                    _ => Parent::Wait,
+                },
             };
-            match parent_state {
-                Some(state) if state.kind == NodeKind::Folder => {
+            match decided {
+                Parent::Folder(state) => {
                     // A live child keeps its folder alive (§6.3), one in Recently deleted too.
                     // One a folder's removal took along is merged after all, as if no removal
                     // had: its own changes count (a tag, which the merge doesn't call one).
@@ -114,16 +147,7 @@ impl Reconciler<'_> {
                     self.retarget(parent, state);
                     queue.push(parent);
                 }
-                None if self.input.remote_complete
-                    && (self.input.remote.contains(node)
-                        || (self.masking.scope.top.is_root()
-                            && self.input.removed.contains_key(&node)))
-                    && !withdrawn.contains(&parent) =>
-                {
-                    // Nobody knows the parent, though the drive's picture is whole: the server
-                    // kept a child of a folder deleted for good (a create racing the delete,
-                    // another app), live or brought back from Recently deleted by what is in
-                    // it. Keep the data visible: it moves into Recovered files on the drive.
+                Parent::Recover => {
                     if let Some(mut state) = self.merged.get(node).cloned() {
                         state.parent = self.recovered_files(node);
                         self.retarget(node, state);
@@ -133,7 +157,7 @@ impl Reconciler<'_> {
                         queue.push(node);
                     }
                 }
-                _ => {
+                Parent::Wait => {
                     // The parent is unknown (or not a folder, or itself waiting): wait for more
                     // information. Children already checked against this node are re-checked.
                     queue.extend(self.merged.children(node).collect::<Vec<_>>());

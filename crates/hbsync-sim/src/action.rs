@@ -65,6 +65,13 @@ pub enum Action {
     DeleteOutright {
         pick: usize,
     },
+    /// Another app moves a live node of the drive into a live file (its `groupId` a file's node
+    /// id): the main folders move it into Recovered files, as an orphan. Any node but the fixed
+    /// folders; nothing when the drive holds no file, or only that node.
+    IntoFile {
+        pick: usize,
+        file: usize,
+    },
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
