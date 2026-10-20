@@ -1,27 +1,36 @@
-//! Settling a node: recording what both sides agree on as its base.
+//! Settling a node: recording what both sides agree on as its base. The executor settles each
+//! operation's nodes, recovery the placements a crash left, adoption what it proved agreed.
 
-use super::*;
+use hbsync_namemap::{to_local, to_remote};
+use hbsync_platform::name::NameIssue;
+use hbsync_platform::{Os, RelPath, tags};
+use hbsync_state::{BaseRow, MirrorRow, Placing, PlannedBase, StateError, Store};
+use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags};
+
+use crate::plan::{Against, DriveVersion, TagWrite};
+use crate::reconcile::Agreement;
 use crate::scope::Scope;
+use crate::view;
 
 /// A node to settle after an operation, and what against.
 #[derive(Debug, Clone, Copy)]
-pub struct Settle<'a> {
-    pub node: NodeId,
+pub(crate) struct Settle<'a> {
+    pub(crate) node: NodeId,
     /// The operation just made the local and remote bytes equal (a transfer), even if their
     /// hashes use other algorithms.
-    pub same_bytes: bool,
-    pub against: Against<'a>,
+    pub(crate) same_bytes: bool,
+    pub(crate) against: Against<'a>,
     /// What the operation did to the item's tags: the base records that ([`TagWrite`]).
-    pub tags: TagWrite<'a>,
+    pub(crate) tags: TagWrite<'a>,
     /// Where this run's own operations settled the node's base: a local write's compare and set
     /// takes the base there as unmoved (the plan's next operation on a node follows its earlier
     /// one; only another engine, the feed or recovery moves it otherwise).
-    pub ours: Option<RemoteRef>,
+    pub(crate) ours: Option<RemoteRef>,
 }
 
 impl<'a> Settle<'a> {
     /// `node`, against the mirror.
-    pub fn node(node: NodeId) -> Self {
+    pub(crate) fn node(node: NodeId) -> Self {
         Settle {
             node,
             same_bytes: false,
@@ -33,7 +42,7 @@ impl<'a> Settle<'a> {
 
     /// `node` after a local write that acted on `drive` without putting the item in place, and
     /// did `tags` to its tags.
-    pub fn acted(node: NodeId, drive: Option<&'a DriveVersion>, tags: TagWrite<'a>) -> Self {
+    pub(crate) fn acted(node: NodeId, drive: Option<&'a DriveVersion>, tags: TagWrite<'a>) -> Self {
         Settle {
             against: Against::acted(drive),
             tags,
@@ -43,7 +52,11 @@ impl<'a> Settle<'a> {
 
     /// `node` after a local write that put the item in place from `drive`, and did `tags` to
     /// its tags.
-    pub fn placed(node: NodeId, drive: Option<&'a DriveVersion>, tags: TagWrite<'a>) -> Self {
+    pub(crate) fn placed(
+        node: NodeId,
+        drive: Option<&'a DriveVersion>,
+        tags: TagWrite<'a>,
+    ) -> Self {
         Settle {
             against: Against::placed(drive),
             tags,
@@ -60,7 +73,7 @@ impl<'a> Settle<'a> {
 /// at the version the record's plan saw, and nothing else (not what the run settled it at:
 /// recovery can't know that), so they settle the same record the same way; one kept from before
 /// records said which is settled against the base as it is.
-pub(super) fn settle_placement(
+pub(crate) fn settle_placement(
     s: &Store<'_>,
     record: &Placing,
     scope: &Scope,
@@ -107,7 +120,7 @@ pub(super) fn settle_placement(
 }
 
 /// What [`settle_placement`] did.
-pub(super) enum Placed {
+pub(crate) enum Placed {
     /// Settled: where it put the base, if it did (the record goes then).
     Settled(Option<RemoteRef>),
     /// Its node gone on the drive, its item not one the drive takes: the record stays.
@@ -116,7 +129,7 @@ pub(super) enum Placed {
 
 impl Placed {
     /// Where it put the base, if it did.
-    pub(super) fn at(self) -> Option<RemoteRef> {
+    pub(crate) fn at(self) -> Option<RemoteRef> {
         match self {
             Placed::Settled(at) => at,
             Placed::Kept => None,
@@ -125,7 +138,7 @@ impl Placed {
 }
 
 /// Marks what is in folder `node` on the drive dirty.
-pub(super) fn mark_children(s: &Store<'_>, node: NodeId) -> Result<(), StateError> {
+pub(crate) fn mark_children(s: &Store<'_>, node: NodeId) -> Result<(), StateError> {
     s.mirror_children(node)?
         .iter()
         .try_for_each(|child| s.mark_dirty(child.node))
@@ -148,7 +161,11 @@ pub(super) fn mark_children(s: &Store<'_>, node: NodeId) -> Result<(), StateErro
 /// where the drive moved on from the version they settle against (or they don't), the node
 /// stays dirty, for the next plan to decide (an operation may come for a node that wasn't
 /// dirty). Returns the version it put the base at, if it did.
-pub fn settle(s: &Store<'_>, how: Settle<'_>, os: Os) -> Result<Option<RemoteRef>, StateError> {
+pub(crate) fn settle(
+    s: &Store<'_>,
+    how: Settle<'_>,
+    os: Os,
+) -> Result<Option<RemoteRef>, StateError> {
     let node = how.node;
     let mirror = s.get_mirror(node)?;
     let base = s.get_base(node)?;
@@ -306,6 +323,11 @@ fn settled(
     Some(row)
 }
 
+/// `name` in `parent` as this OS spells it.
+pub(crate) fn spell(parent: &RelPath, name: &str, os: Os) -> Result<RelPath, NameIssue> {
+    parent.join(&to_local(name, os)?.name)
+}
+
 /// Whether `path` is where this device spells the drive's `name` in its folder (where the
 /// executor puts it), whether or not the name map gives `name` back from it.
 pub(crate) fn spells(path: &RelPath, name: &str, os: Os) -> bool {
@@ -314,67 +336,19 @@ pub(crate) fn spells(path: &RelPath, name: &str, os: Os) -> bool {
 
 /// The local spelling of `path`'s name, recorded in the base when the name map wouldn't give it
 /// back from the remote `name`.
-pub(super) fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String> {
+fn recorded_name(path: &RelPath, name: &str, os: Os) -> Option<String> {
     path.name()
         .filter(|ln| to_remote(ln, os).as_deref() != Ok(name))
         .map(str::to_owned)
 }
 
-/// A mirror row's node as written back: at `parent` under `name`, removed or not.
-pub(crate) fn meta_at(row: &MirrorRow, parent: NodeId, name: &str, removed: bool) -> NodeMeta {
-    NodeMeta {
-        node: row.node,
-        parent,
-        kind: row.kind,
-        content: row.content(name),
-        removed,
-    }
-}
-
-/// [`meta_at`] where and as the row has it.
-pub(crate) fn meta(row: &MirrorRow, removed: bool) -> NodeMeta {
-    meta_at(row, row.parent, &row.name, removed)
-}
-
-/// A removal written (`row`, its answer; `None`: the drive no longer had the file): out of the
-/// mirror, into Recently deleted at the answer's time (open if it gave none, until the feed
-/// brings it).
-pub(crate) fn record_removed(
-    s: &Store<'_>,
-    file_id: hbsync_types::RemoteFileId,
-    row: Option<MirrorRow>,
-) -> Result<(), StateError> {
-    s.delete_mirror(file_id)?;
-    match row {
-        Some(row) => s.put_removed(&RemovedRow {
-            removed_at: row.changed_at,
-            row,
-        }),
-        None => Ok(()),
-    }
-}
-
-impl Executor<'_> {
-    /// The tags a write over a drive version sends: `ours` merged with that version's, which may
-    /// hold tags this device never saw (§11): a no-op where the plan merged them already, the
-    /// drive's tags kept where it didn't (a node restored from Recently deleted, or taken along).
-    /// What this device can't hold is that version's ([`Tags::merge_onto`]).
-    pub(super) fn merged_with_drive(
-        &self,
-        base: Option<&BaseRow>,
-        ours: &Tags,
-        drive: &Tags,
-    ) -> Tags {
-        let base = base.map(|b| b.state.tags.clone()).unwrap_or_default();
-        Tags::merge_onto(&base, ours, drive, self.cfg.os)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hbsync_fileio::HashAlgorithm;
     use hbsync_platform::{FileId, Fingerprint};
     use hbsync_state::MirrorFile;
+    use hbsync_state::{LocalRow, StateDb};
     use hbsync_types::{FileContent, RemoteFileId, RemoteRef, Uuid, VersionTag};
 
     fn content(data: &str) -> FileContent {

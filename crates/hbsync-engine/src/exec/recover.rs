@@ -10,11 +10,11 @@ use crate::adopt;
 /// download can use ([`sweep_tmp`]), downloads and folders placed but not recorded
 /// ([`recover_placements`]). In that order: a completed fork drops its parking record, and a
 /// placement is looked for where every item has its own name again.
-pub fn recover(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), StateError> {
-    recover_forks(db, &cfg.root)?;
-    unpark(db, cfg)?;
-    sweep_tmp(db, &cfg.root)?;
-    recover_placements(db, cfg)
+pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
+    recover_forks(db, &folder.root)?;
+    unpark(db, folder)?;
+    sweep_tmp(db, &folder.root)?;
+    recover_placements(db, folder)
 }
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
@@ -69,8 +69,8 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateEr
 /// node is (the next batch writes its own); kept when it can't be told yet (its file not
 /// hashed, its folder unreadable), for a later recovery, for [`UNHASHED_HOLD`] at most from
 /// when it was first found so.
-pub fn recover_placements(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), StateError> {
-    let (root, os, algorithm) = (cfg.root.as_path(), cfg.os, cfg.algorithm);
+pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
+    let (root, os, algorithm) = (folder.root.as_path(), folder.os, folder.algorithm);
     // Each record with the scan's row at its target: the node's own (or a new one), or another
     // node's.
     let found = db.read(|s| {
@@ -117,7 +117,7 @@ pub fn recover_placements(db: &mut StateDb, cfg: &ExecConfig) -> Result<(), Stat
     db.write(|s| {
         judged
             .into_iter()
-            .try_for_each(|(p, judged)| apply(s, &p, judged, &cfg.scope, os, now).map(drop))
+            .try_for_each(|(p, judged)| apply(s, &p, judged, &folder.scope, os, now).map(drop))
     })
 }
 

@@ -1344,12 +1344,7 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
     )?;
     let mut db = cell.into_inner();
     let started = std::time::Instant::now();
-    let adopted = hbsync_engine::adopt::adopt(
-        &mut db,
-        dir.path(),
-        hbsync_platform::Os::current(),
-        &hbsync_engine::scope::Scope::main(),
-    )?;
+    let adopted = hbsync_engine::adopt::adopt(&mut db, &hbsync_engine::FolderCtx::new(dir.path()))?;
     let took = started.elapsed();
     assert_eq!(adopted, N);
     // Matching each file against all its siblings took 50 s here (debug); grouped, under 1 s.
@@ -1948,7 +1943,7 @@ fn photos_restored_without_what_was_deleted_from_it_before() -> R {
 
 fn ignoring(rules: &'static str) -> impl Fn(&mut hbsync_engine::EngineConfig) {
     move |cfg| {
-        cfg.exec.filter = std::sync::Arc::new(
+        cfg.folder.filter = std::sync::Arc::new(
             hbsync_local::Filter::from_rules(rules, false).expect("valid rules"),
         );
     }
@@ -2864,7 +2859,7 @@ fn seed_role(
 }
 
 fn unscoped(cfg: &mut hbsync_engine::EngineConfig) {
-    cfg.exec.scope = Arc::new(hbsync_engine::scope::Scope {
+    cfg.folder.scope = Arc::new(hbsync_engine::scope::Scope {
         top: hbsync_types::NodeId::ROOT,
         outside: Default::default(),
     });

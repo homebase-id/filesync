@@ -133,7 +133,7 @@ impl Executor<'_> {
         let record = Placing {
             base: BaseRow::new(node, acted.state, acted.at),
             target,
-            placed_tags: kept.then(|| tags.held_by(self.cfg.os)),
+            placed_tags: kept.then(|| tags.held_by(self.folder.os)),
             // What the file it replaces held; nothing where there was none.
             prior_tags: match &current {
                 Some(row) => row.tags.clone(),
@@ -149,10 +149,10 @@ impl Executor<'_> {
             expected,
             size: file.size,
             mtime_ms: file.mtime_ms,
-            executable: (self.cfg.os != Os::Windows).then_some(file.executable),
-            tmp_dir: layout::tmp_dir(&self.cfg.root),
+            executable: (self.folder.os != Os::Windows).then_some(file.executable),
+            tmp_dir: layout::tmp_dir(&self.folder.root),
             key: download_key(node, &expected),
-            local_algorithm: self.cfg.algorithm,
+            local_algorithm: self.folder.algorithm,
             from_trash,
         });
         Ok((
@@ -476,7 +476,7 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
         let target = target.clone();
-        let (os, scope) = (self.cfg.os, Arc::clone(&self.cfg.scope));
+        let (os, scope) = (self.folder.os, Arc::clone(&self.folder.scope));
         let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {

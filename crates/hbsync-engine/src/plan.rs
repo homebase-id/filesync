@@ -28,7 +28,7 @@ pub struct BaseExtra {
 
 /// Settings that affect decisions.
 #[derive(Debug, Clone)]
-pub struct Options {
+pub struct Options<'a> {
     /// Device name used in conflict-copy names.
     pub device: String,
     /// This computer's id for the account (its state DB's own id): a conflict copy's id
@@ -49,15 +49,21 @@ pub struct Options {
     /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
     /// totals too, so a large delete split over several batches is still held.
     pub pending_deletes: (usize, usize),
-    /// What this device never syncs: remote nodes it matches are masked (§10).
-    pub filter: Arc<Filter>,
-    /// The part of the drive this engine syncs: what is outside it is masked (§12).
-    pub scope: Arc<Scope>,
+    /// What this device never syncs: remote nodes it matches are masked (§10). The folder's
+    /// ([`crate::FolderCtx::filter`]).
+    pub filter: &'a Filter,
+    /// The part of the drive this engine syncs: what is outside it is masked (§12). The
+    /// folder's ([`crate::FolderCtx::scope`]).
+    pub scope: &'a Scope,
     /// Ids a detach must not give: already known here (an earlier detach of the same node).
     pub taken: Arc<HashSet<NodeId>>,
 }
 
-impl Default for Options {
+/// [`Options::default`]'s filter and scope: the built-in rules only, the main folder's part.
+static NO_RULES: std::sync::LazyLock<Filter> = std::sync::LazyLock::new(Filter::default);
+static MAIN: std::sync::LazyLock<Scope> = std::sync::LazyLock::new(Scope::main);
+
+impl Default for Options<'static> {
     fn default() -> Self {
         Options {
             device: "device".into(),
@@ -69,8 +75,8 @@ impl Default for Options {
             allow_mass_delete: false,
             confirmed: Arc::default(),
             pending_deletes: (0, 0),
-            filter: Arc::default(),
-            scope: Arc::new(Scope::main()),
+            filter: &NO_RULES,
+            scope: &MAIN,
             taken: Arc::default(),
         }
     }

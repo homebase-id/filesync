@@ -598,7 +598,7 @@ fn echo_run(
     let _guard = RunFolder::new(&run)?;
     let mut a = TestClient::new(remote.clone(), "a", |cfg: &mut EngineConfig| {
         cfg.allow_mass_delete = true;
-        cfg.exec.filter = Arc::new(Filter::load(&cfg.exec.root, cfg.exec.case_insensitive)?);
+        cfg.folder.filter = Arc::new(Filter::load(&cfg.folder.root, cfg.folder.case_insensitive)?);
         Ok(())
     })?;
     // Only the run's folder: nothing else on the drive is downloaded.

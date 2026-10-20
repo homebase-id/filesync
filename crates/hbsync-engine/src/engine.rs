@@ -18,6 +18,7 @@ use crate::drive::Drive;
 use crate::error::EngineError;
 use crate::exec::{ExecConfig, Executor, Stopped, record_dirs, recover, recover_placements};
 use crate::feed::FeedReport;
+use crate::folder::FolderCtx;
 use crate::reconcile::{Conflict, Op, Options, Plan, reconcile_with_known};
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
@@ -28,6 +29,8 @@ const FRESH_PULL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// The folder the engine syncs.
+    pub folder: FolderCtx,
     pub exec: ExecConfig,
     /// Shown in conflict-copy names.
     pub device: String,
@@ -47,19 +50,8 @@ pub struct EngineConfig {
 impl EngineConfig {
     pub fn new(root: &Path, device: &str) -> Self {
         EngineConfig {
-            exec: ExecConfig {
-                root: root.to_path_buf(),
-                os: hbsync_platform::Os::current(),
-                algorithm: hbsync_fileio::HashAlgorithm::Blake3,
-                attempts: 4,
-                retry_pause: std::time::Duration::from_millis(500),
-                transfer: crate::transfer::TransferConfig::default(),
-                case_insensitive: crate::exec::probe_case_insensitive(root),
-                filter: Default::default(),
-                tags_kept: Default::default(),
-                scope: Arc::new(Scope::main()),
-                hooks: Default::default(),
-            },
+            folder: FolderCtx::new(root),
+            exec: ExecConfig::default(),
             device: device.to_owned(),
             max_rounds: 8,
             batch: 20_000,
@@ -156,7 +148,7 @@ pub struct Engine {
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
-            .field("root", &self.cfg.exec.root)
+            .field("root", &self.cfg.folder.root)
             .finish()
     }
 }
@@ -182,15 +174,11 @@ impl Engine {
         let top = db
             .read(|s| Ok(s.coords()?.top))
             .unwrap_or(hbsync_types::NodeId::ROOT);
-        if cfg.exec.scope.top != top {
-            cfg.exec.scope = Arc::new(Scope::of(top));
+        if cfg.folder.scope.top != top {
+            cfg.folder.scope = Arc::new(Scope::of(top));
         }
-        let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
-        scan_opts.filter = Arc::clone(&cfg.exec.filter);
-        // Case-sensitive Linux volumes: byte-exact names (macOS folds normalization whatever
-        // its case, and Windows can turn case sensitivity on per folder).
-        scan_opts.exact_names = cfg!(target_os = "linux") && !cfg.exec.case_insensitive;
-        let remote = cfg.exec.scope.remote(drive.shared_remote());
+        let scan_opts = cfg.folder.scan_options();
+        let remote = cfg.folder.scope.remote(drive.shared_remote());
         Engine {
             db,
             drive,
@@ -291,8 +279,8 @@ impl Engine {
     /// every node is planned again. Returns whether the filter changed. In one transaction with
     /// the new fingerprint, so a crash can't skip it.
     pub fn apply_filter_change(&mut self) -> Result<bool, StateError> {
-        let fingerprint = self.cfg.exec.filter.fingerprint();
-        let scope = self.cfg.exec.scope.fingerprint();
+        let fingerprint = self.cfg.folder.filter.fingerprint();
+        let scope = self.cfg.folder.scope.fingerprint();
         self.db.write(|s| {
             // A new scope (§12) changes what is in view remotely only: no walk. The folders it
             // or the last one left out are planned again from their tops, which brings what
@@ -300,7 +288,7 @@ impl Engine {
             let last = s.get_kv(keys::SCOPE)?;
             if last.as_deref() != Some(scope.as_str()) {
                 let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
-                last.union(&self.cfg.exec.scope.outside)
+                last.union(&self.cfg.folder.scope.outside)
                     .try_for_each(|n| s.mark_dirty(*n))?;
                 s.set_kv(keys::SCOPE, &scope)?;
             }
@@ -322,7 +310,7 @@ impl Engine {
 
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
-        Ok(scan(&mut self.db, &self.cfg.exec.root, &self.scan_opts)?)
+        Ok(scan(&mut self.db, &self.cfg.folder.root, &self.scan_opts)?)
     }
 
     /// Pulls remote changes, then plans and executes until nothing is left to do (or the
@@ -357,7 +345,7 @@ impl Engine {
         self.progress.reset();
         self.rescanned.clear();
         self.rescan_records()?;
-        recover(&mut self.db, &self.cfg.exec)?;
+        recover(&mut self.db, &self.cfg.folder)?;
         let folder = Some(self.db.folder());
         report.feed = match pulled {
             Pull::Done(feed) => feed,
@@ -365,15 +353,10 @@ impl Engine {
             Pull::IfBehind => self.drive.catch_up(folder)?,
         };
         // A role folder's top on the drive: joined, restored, or made.
-        if let Some(role) = hbsync_types::Role::of(self.cfg.exec.scope.top) {
+        if let Some(role) = hbsync_types::Role::of(self.cfg.folder.scope.top) {
             self.drive.ensure_role(role)?;
         }
-        report.adopted = adopt(
-            &mut self.db,
-            &self.cfg.exec.root,
-            self.cfg.exec.os,
-            &self.cfg.exec.scope,
-        )?;
+        report.adopted = adopt(&mut self.db, &self.cfg.folder)?;
 
         // The guard must judge the whole delete, even when it is planned in several batches;
         // confirmed deletes don't count. Confirmations of nodes with nothing left to do are
@@ -409,6 +392,11 @@ impl Engine {
             Ok((pending, synced, still, computer))
         })?;
         self.confirmed = confirmed;
+        // The folder's own, borrowed for the sync (the engine is borrowed mutably meanwhile).
+        let (filter, scope) = (
+            Arc::clone(&self.cfg.folder.filter),
+            Arc::clone(&self.cfg.folder.scope),
+        );
         let opts = Options {
             device: self.cfg.device.clone(),
             computer,
@@ -419,8 +407,8 @@ impl Engine {
             allow_mass_delete: self.cfg.allow_mass_delete,
             confirmed: Arc::new(self.confirmed.clone()),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
-            filter: Arc::clone(&self.cfg.exec.filter),
-            scope: Arc::clone(&self.cfg.exec.scope),
+            filter: &filter,
+            scope: &scope,
             taken: Arc::default(),
         };
         // The dirty set is planned page by page in node id order and swept round after
@@ -493,19 +481,15 @@ impl Engine {
             Ok(dirs)
         })?;
         if !dirs.is_empty() {
-            rescan_dirs(&mut self.db, &self.cfg.exec.root, &dirs, &self.scan_opts)?;
+            rescan_dirs(&mut self.db, &self.cfg.folder.root, &dirs, &self.scan_opts)?;
         }
         Ok(())
     }
 
     /// Plans `dirty` from a view of what the rules may need ([`view::build_narrow`]), again
     /// with the folders a plan judged in part listed whole, until a plan needs no more.
-    fn plan(&mut self, dirty: &[NodeId], opts: &Options) -> Result<Plan, EngineError> {
-        let (os, filter, scope) = (
-            self.cfg.exec.os,
-            &self.cfg.exec.filter,
-            &self.cfg.exec.scope,
-        );
+    fn plan(&mut self, dirty: &[NodeId], opts: &Options<'_>) -> Result<Plan, EngineError> {
+        let folder = &self.cfg.folder;
         let db = &mut self.db;
         let reconcile = |input: &crate::reconcile::Input, db: &mut StateDb| {
             reconcile_with_known(input, opts, |id| {
@@ -514,7 +498,7 @@ impl Engine {
         };
         let mut full: HashSet<NodeId> = HashSet::new();
         loop {
-            let input = db.read(|s| view::build_narrow(s, dirty, os, filter, scope, &full))?;
+            let input = db.read(|s| view::build_narrow(s, dirty, folder, &full))?;
             let plan = reconcile(&input, db);
             // Each round lists at least one more folder whole: it ends.
             let listed = full.len();
@@ -524,7 +508,7 @@ impl Engine {
             }
             #[cfg(feature = "testkit")]
             if self.cfg.check_narrow {
-                let input = db.read(|s| view::build_input(s, dirty, os, filter, scope))?;
+                let input = db.read(|s| view::build_input(s, dirty, folder))?;
                 assert_eq!(
                     plan,
                     reconcile(&input, db),
@@ -541,13 +525,13 @@ impl Engine {
     fn plan_and_execute(
         &mut self,
         dirty: &[NodeId],
-        opts: &Options,
+        opts: &Options<'_>,
         report: &mut SyncReport,
     ) -> Result<Vec<Op>, EngineError> {
         // What an earlier round left placed (its operation failed after), as at the start of a
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
-        recover_placements(&mut self.db, &self.cfg.exec)?;
+        recover_placements(&mut self.db, &self.cfg.folder)?;
         let plan = self.plan(dirty, opts)?;
         // A confirmation lasts while its node's plan deletes it: one whose delete was undone
         // (the file back) is forgotten, so a later delete is judged anew.
@@ -564,11 +548,16 @@ impl Engine {
         if plan.ops.is_empty() {
             return Ok(plan.held);
         }
-        let exec = Executor::new(&mut self.db, self.remote.as_ref(), &self.cfg.exec)
-            .with_stop(Arc::clone(&self.stop))
-            .with_progress(Arc::clone(&self.progress))
-            .with_full(self.drive.full())
-            .run(plan.ops)?;
+        let exec = Executor::new(
+            &mut self.db,
+            self.remote.as_ref(),
+            &self.cfg.folder,
+            &self.cfg.exec,
+        )
+        .with_stop(Arc::clone(&self.stop))
+        .with_progress(Arc::clone(&self.progress))
+        .with_full(self.drive.full())
+        .run(plan.ops)?;
         if exec.full {
             self.drive.set_full();
         }
@@ -586,7 +575,7 @@ impl Engine {
         if !exec.rescan.is_empty() {
             rescan_dirs(
                 &mut self.db,
-                &self.cfg.exec.root,
+                &self.cfg.folder.root,
                 &exec.rescan,
                 &self.scan_opts,
             )?;

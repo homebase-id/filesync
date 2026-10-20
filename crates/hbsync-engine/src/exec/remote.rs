@@ -13,6 +13,56 @@ pub(super) enum After {
     Removed { file_id: hbsync_types::RemoteFileId },
 }
 
+/// A mirror row's node as written back: at `parent` under `name`, removed or not.
+pub(crate) fn meta_at(row: &MirrorRow, parent: NodeId, name: &str, removed: bool) -> NodeMeta {
+    NodeMeta {
+        node: row.node,
+        parent,
+        kind: row.kind,
+        content: row.content(name),
+        removed,
+    }
+}
+
+/// [`meta_at`] where and as the row has it.
+pub(crate) fn meta(row: &MirrorRow, removed: bool) -> NodeMeta {
+    meta_at(row, row.parent, &row.name, removed)
+}
+
+/// A removal written (`row`, its answer; `None`: the drive no longer had the file): out of the
+/// mirror, into Recently deleted at the answer's time (open if it gave none, until the feed
+/// brings it).
+pub(crate) fn record_removed(
+    s: &Store<'_>,
+    file_id: hbsync_types::RemoteFileId,
+    row: Option<MirrorRow>,
+) -> Result<(), StateError> {
+    s.delete_mirror(file_id)?;
+    match row {
+        Some(row) => s.put_removed(&RemovedRow {
+            removed_at: row.changed_at,
+            row,
+        }),
+        None => Ok(()),
+    }
+}
+
+impl Executor<'_> {
+    /// The tags a write over a drive version sends: `ours` merged with that version's, which may
+    /// hold tags this device never saw (§11): a no-op where the plan merged them already, the
+    /// drive's tags kept where it didn't (a node restored from Recently deleted, or taken along).
+    /// What this device can't hold is that version's ([`Tags::merge_onto`]).
+    pub(super) fn merged_with_drive(
+        &self,
+        base: Option<&BaseRow>,
+        ours: &Tags,
+        drive: &Tags,
+    ) -> Tags {
+        let base = base.map(|b| b.state.tags.clone()).unwrap_or_default();
+        Tags::merge_onto(&base, ours, drive, self.folder.os)
+    }
+}
+
 impl Executor<'_> {
     // ---- remote operations: guards before the worker pool, the DB after ----
 

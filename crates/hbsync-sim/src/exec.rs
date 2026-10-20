@@ -159,6 +159,7 @@ impl Sim {
             .iter()
             .filter(|(_, s)| s.kind == NodeKind::File)
             .count();
+        let scope = client.scope();
         let opts = Options {
             device: client.name.clone(),
             computer: client.computer.clone(),
@@ -168,8 +169,8 @@ impl Sim {
             mass_delete_fraction: 0.0,
             synced_files,
             confirmed: Arc::clone(&confirmed),
-            filter: Arc::clone(&client.filter),
-            scope: Arc::new(client.scope()),
+            filter: &client.filter,
+            scope: &scope,
             ..Options::default()
         };
         // Ids the client or the server knows are taken, as in the executor's state DB.

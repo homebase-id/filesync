@@ -62,14 +62,8 @@ enum Origin {
     Base,
 }
 
-pub fn reconcile(input: &Input, opts: &Options) -> Plan {
-    let masks = Masks::of(
-        input,
-        &opts.filter,
-        &opts.scope,
-        &opts.computer,
-        &opts.taken,
-    );
+pub fn reconcile(input: &Input, opts: &Options<'_>) -> Plan {
+    let masks = Masks::of(input, opts.filter, opts.scope, &opts.computer, &opts.taken);
     let view = masks.input.as_ref().unwrap_or(input);
     let mut plan = Reconciler::new(view, opts, &masks).run();
     // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
@@ -94,7 +88,7 @@ const MAX_REPAIRS: usize = 64;
 struct Reconciler<'a> {
     /// The input with the masks applied.
     input: &'a Input,
-    opts: &'a Options,
+    opts: &'a Options<'a>,
     masks: &'a Masks,
     /// The merged tree: context plus targets.
     merged: Tree,
@@ -114,7 +108,7 @@ struct Reconciler<'a> {
 }
 
 impl<'a> Reconciler<'a> {
-    fn new(input: &'a Input, opts: &'a Options, masks: &'a Masks) -> Self {
+    fn new(input: &'a Input, opts: &'a Options<'a>, masks: &'a Masks) -> Self {
         Reconciler {
             input,
             opts,
@@ -199,7 +193,7 @@ fn content_changed(c: Change) -> bool {
 /// node detached here before, its first copy still around): each time with that id taken.
 pub fn reconcile_with_known(
     input: &Input,
-    opts: &Options,
+    opts: &Options<'_>,
     mut known: impl FnMut(NodeId) -> bool,
 ) -> Plan {
     let mut plan = reconcile(input, opts);

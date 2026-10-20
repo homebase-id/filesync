@@ -43,7 +43,7 @@ const ROOT: NodeId = NodeId::ROOT;
 #[derive(Default)]
 struct World {
     input: Input,
-    opts: Options,
+    opts: Options<'static>,
 }
 
 impl World {
@@ -922,11 +922,11 @@ fn children_of_a_withdrawn_orphan_are_withdrawn_too() {
 
 // ---- §10 filters ----
 
-fn ignoring(rules: &str) -> Options {
+fn ignoring(rules: &str) -> Options<'static> {
+    // Leaked: a test's options live as long as the test.
+    let filter = hbsync_local::Filter::from_rules(rules, false).expect("valid rules");
     Options {
-        filter: std::sync::Arc::new(
-            hbsync_local::Filter::from_rules(rules, false).expect("valid rules"),
-        ),
+        filter: Box::leak(Box::new(filter)),
         ..Options::default()
     }
 }
