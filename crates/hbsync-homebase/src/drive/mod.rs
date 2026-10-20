@@ -768,9 +768,9 @@ fn api_error(what: &str, error: &ApiError) -> RemoteError {
             _ => RemoteError::Fatal(why()),
         },
     };
-    // "Not there" deletes here and is remembered for good: believed only from the identity
-    // itself, never from a proxy or a page in front of it (`ApiError::read`).
-    if matches!(mapped, RemoteError::NotFound) && !error.from_identity {
+    // "Not there" and "a tombstone" delete here and are remembered for good: believed only from
+    // the identity itself, never from a proxy or a page in front of it (`ApiError::read`).
+    if matches!(mapped, RemoteError::NotFound | RemoteError::Deleted) && !error.from_identity {
         return RemoteError::Transient(format!("{} (not from the identity)", why()));
     }
     mapped
@@ -1025,8 +1025,9 @@ mod tests {
         }
     }
 
-    /// A "not there" that the identity itself didn't send (a proxy's 404, a maintenance page, a
-    /// route the server doesn't have) is passing, never a file gone: it would delete here.
+    /// A "not there" or "a tombstone" that the identity itself didn't send (a proxy's 404, a
+    /// maintenance page, a route the server doesn't have) is passing, never a file gone: it
+    /// would delete here.
     #[test]
     fn not_found_only_from_the_identity() {
         let read = |status: u16, body: &[u8], odin: bool, sealed: bool| {
@@ -1051,7 +1052,10 @@ mod tests {
         let gone = br#"{"status":410,"traceId":"00-ab"}"#;
         let code = br#"{"title":"x","status":400,"errorCode":"fileNotFound"}"#;
         let envelope = br#"{"iv":"AAAA","data":"BBBB"}"#;
-        let cases: [(String, &str); 10] = [
+        let tombstone = br#"{"title":"x","status":400,"errorCode":"cannotUpdateNonActiveFile"}"#;
+        let cases: [(String, &str); 12] = [
+            (read(400, tombstone, true, false), "Deleted"),
+            (read(400, tombstone, false, false), "Transient"),
             (read(404, envelope, true, true), "NotFound"),
             (read(404, problem, true, false), "NotFound"),
             (read(410, gone, true, false), "NotFound"),

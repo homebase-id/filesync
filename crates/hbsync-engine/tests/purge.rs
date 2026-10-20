@@ -100,6 +100,9 @@ fn an_old_removal_goes_hard_at_once() -> common::Res<()> {
     assert!(a.recently_deleted(10)?.is_empty());
 
     b.sync()?;
+    // Not there, said once: gone once said again a minute on (sync semantics §8b).
+    b.a_minute_on()?;
+    b.sync()?;
     assert!(b.recently_deleted(10)?.is_empty(), "b forgot it");
     assert_eq!(live(&server), ["y.txt"]);
     Ok(())
@@ -124,6 +127,13 @@ fn a_device_away_longer_than_the_trace_reads_the_feed_again() -> common::Res<()>
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
     assert_eq!(a.engine.drive().purge(0)?, 1);
 
+    b.sync()?;
+    assert_eq!(
+        b.read_text("d/x.txt")?,
+        "x",
+        "not there once: kept (sync semantics §8b)"
+    );
+    assert_eq!(b.a_minute_on()?, 1);
     b.sync()?;
     assert!(b.read_text("d/x.txt").is_err(), "x went from b");
     assert_eq!(b.read_text("y.txt")?, "y");
@@ -197,6 +207,10 @@ fn a_restore_of_what_went_for_good_forgets_it() -> common::Res<()> {
         .recently_deleted(10)?
         .pop()
         .ok_or("x in Recently deleted")?;
+    // Not there, said once: the restore fails and it stays; a minute on, it is gone.
+    assert!(a.engine.drive().restore(&[item.node]).is_err());
+    assert_eq!(a.recently_deleted(10)?.len(), 1, "kept");
+    a.a_minute_on()?;
     assert_eq!(a.engine.drive().restore(&[item.node])?, 0);
     assert!(a.recently_deleted(10)?.is_empty(), "forgotten");
     Ok(())
@@ -388,10 +402,92 @@ fn an_edit_of_a_file_gone_for_good_puts_it_back_anew() -> common::Res<()> {
         .hard_delete(x.file_id, x.version)?;
     a.write("x.txt", "x, edited")?;
     a.sync()?;
+    assert!(
+        live(&server).is_empty(),
+        "not there once: asked again later"
+    );
+    a.a_minute_on()?;
+    a.sync()?;
     a.sync()?;
     assert_eq!(live(&server), ["x.txt"]);
     let again = header_named(&server, "x.txt");
     assert_ne!(again.file_id, x.file_id, "a new file");
+    Ok(())
+}
+
+/// The identity says a live file isn't there (its own 404, a hiccup), to a write and to the
+/// header read after it, sync after sync within a minute: a suspicion only (sync semantics
+/// §8b). The file stays here and in the mirror, and once the identity answers again the write
+/// goes to the same file. Its first "not there" never makes it gone.
+#[test]
+fn a_wrong_not_there_never_makes_a_live_file_gone() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    b.sync()?;
+    let x = header_named(&server, "x.txt");
+    a.write("x.txt", "x, edited")?;
+    {
+        let mut faults = a.remote.faults();
+        faults.not_found_writes = true;
+        faults.not_found_headers = true;
+    }
+    a.sync()?;
+    a.sync()?;
+    assert_eq!(a.read_text("x.txt")?, "x, edited", "kept here");
+    {
+        let mut faults = a.remote.faults();
+        faults.not_found_writes = false;
+        faults.not_found_headers = false;
+    }
+    a.sync()?;
+    assert_eq!(live(&server), ["x.txt"]);
+    assert_eq!(
+        header_named(&server, "x.txt").file_id,
+        x.file_id,
+        "the same file"
+    );
+    b.sync()?;
+    assert_eq!(b.read_text("x.txt")?, "x, edited");
+    // Answered: the suspicion went with it, a later "not there" is a first one again.
+    assert_eq!(a.a_minute_on()?, 0);
+    Ok(())
+}
+
+/// Said not there once, then a row of the file comes (another device's edit): the suspicion
+/// is dropped, and a "not there" a minute on is a first one again, never proof.
+#[test]
+fn a_row_of_the_file_drops_the_suspicion() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("x.txt", "x, here")?;
+    a.remote.faults().not_found_writes = true;
+    a.remote.faults().not_found_headers = true;
+    a.sync()?;
+    a.remote.faults().not_found_writes = false;
+    a.remote.faults().not_found_headers = false;
+    b.write("x.txt", "x, there")?;
+    b.sync()?;
+    // The feed brings b's edit: a row of x.
+    a.engine.drive().pull(None)?;
+    assert_eq!(a.a_minute_on()?, 0, "no suspicion left");
+    a.remote.faults().not_found_writes = true;
+    a.remote.faults().not_found_headers = true;
+    a.a_minute_on()?;
+    a.sync()?;
+    a.remote.faults().not_found_writes = false;
+    a.remote.faults().not_found_headers = false;
+    a.sync()?;
+    a.sync()?;
+    let names = live(&server);
+    assert_eq!(names.len(), 2, "both edits kept: {names:?}");
+    assert!(a.read_text("x.txt").is_ok());
     Ok(())
 }
 
@@ -438,6 +534,11 @@ fn a_restore_whose_folder_went_for_good_comes_back_in_recovered_files() -> commo
         .map_err(|_| "poisoned")?
         .hard_delete(d.file_id, d.version)?;
     let x = header_named(&server, "x.txt");
+    assert!(
+        a.engine.drive().restore(&[node_of(&x)]).is_err(),
+        "d not there, once"
+    );
+    a.a_minute_on()?;
     assert_eq!(a.engine.drive().restore(&[node_of(&x)])?, 1);
     a.sync()?;
     assert_eq!(a.read_text("Recovered files/x.txt")?, "x");
@@ -658,6 +759,13 @@ fn a_reread_asks_again_what_the_server_couldnt_tell_about() -> common::Res<()> {
         let version = server.header(y)?.version;
         server.hard_delete(y, version)?;
     }
+    // Not there once, then again a minute on (sync semantics §8b).
+    feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    assert!(
+        db.borrow_mut().read(|s| s.mirror_by_file(y))?.is_some(),
+        "once"
+    );
+    hbsync_engine::testkit::a_minute_on(&mut db.borrow_mut())?;
     feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
     assert!(
         db.borrow_mut().read(|s| s.mirror_by_file(y))?.is_none(),
@@ -693,6 +801,8 @@ fn a_reread_taken_up_after_long_starts_over() -> common::Res<()> {
         server.hard_delete(x, version)?;
         server.advance(LATER);
     }
+    feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
+    hbsync_engine::testkit::a_minute_on(&mut db.borrow_mut())?;
     feed::pull(|| db.borrow_mut(), &remote, 1000, &mut reread)?;
     assert!(
         db.borrow_mut().read(|s| s.mirror_by_file(x))?.is_none(),

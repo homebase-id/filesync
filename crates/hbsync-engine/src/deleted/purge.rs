@@ -10,7 +10,7 @@ use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError, keys};
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::mirror::{self, gone_for_good};
+use crate::mirror::{self, look};
 use crate::time::TRACE_MS;
 use crate::trash::empty_trash;
 use hbsync_local::layout;
@@ -460,11 +460,13 @@ impl AccountOps<'_> {
             if !not_found.is_empty() {
                 self.behind = true;
             }
+            // What its header says, taken in the write ([`mirror::heard`]: the identity's "not
+            // there" only the second time, a minute on, sync semantics §8b).
+            let mut heard = Vec::new();
             if failed.is_none() {
                 for r in not_found {
-                    match gone_for_good(self.remote, r.row.file_id) {
-                        Ok(true) => gone_now.push((r, None)),
-                        Ok(false) => {}
+                    match look(self.remote, r.row.file_id) {
+                        Ok(said) => heard.push((r.row.file_id, said)),
                         Err(e) => {
                             failed = Some(e);
                             break;
@@ -473,12 +475,17 @@ impl AccountOps<'_> {
                 }
             }
             // Its id never comes back, nor its row from a page read before.
-            self.db().write(|s| {
+            let confirmed = self.db().write(|s| {
+                let mut confirmed = 0;
+                for &(f, said) in &heard {
+                    confirmed += usize::from(mirror::heard(s.account(), f, said)?);
+                }
                 gone_now
                     .iter()
-                    .try_for_each(|(r, at)| mirror::forget(s.account(), r.row.file_id, *at))
+                    .try_for_each(|(r, at)| mirror::forget(s.account(), r.row.file_id, *at))?;
+                Ok(confirmed)
             })?;
-            gone += gone_now.len();
+            gone += confirmed + gone_now.len();
             if let Some(e) = failed {
                 return Err(EngineError::Remote(e));
             }

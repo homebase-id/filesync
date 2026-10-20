@@ -9,7 +9,7 @@ use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{NodeId, Target};
 
 use crate::error::EngineError;
-use crate::mirror::{self, gone_after, meta_at};
+use crate::mirror::{self, Said, gone_after, meta_at};
 use crate::tree::restored_names;
 use crate::walk::End;
 
@@ -35,7 +35,7 @@ impl AccountOps<'_> {
             taken,
             behind: &mut self.behind,
             back: Vec::new(),
-            gone: Vec::new(),
+            heard: Vec::new(),
             failed: None,
         };
         let mut restored = 0;
@@ -84,15 +84,31 @@ impl AccountOps<'_> {
                 let answer = self.remote.update(&row.target(), &meta, None);
                 r.settle(row, &meta, answer);
             }
-            // What came back, and what was deleted for good meanwhile, in one write. The mirror's
-            // write marks each dirty in the folders it comes back to.
-            let (back, gone) = (std::mem::take(&mut r.back), std::mem::take(&mut r.gone));
-            locked(self.account).write(|s| {
-                gone.iter()
-                    .try_for_each(|f| mirror::forget(s.account(), *f, None))?;
-                back.iter().try_for_each(|m| mirror::live(s.account(), m))
+            // What came back, and what was deleted for good meanwhile (the identity's "not there"
+            // only the second time: sync semantics §8b), in one write. The mirror's write marks
+            // each dirty in the folders it comes back to.
+            let (back, heard) = (std::mem::take(&mut r.back), std::mem::take(&mut r.heard));
+            let gone = locked(self.account).write(|s| {
+                let gone = heard
+                    .iter()
+                    .map(|&(f, _, said)| mirror::heard(s.account(), f, said))
+                    .collect::<Result<Vec<bool>, _>>()?;
+                back.iter().try_for_each(|m| mirror::live(s.account(), m))?;
+                Ok(gone)
             })?;
             restored += back.len();
+            // Gone: what was to come back into it comes back as into any folder gone for good.
+            // Said not there once only: it stays in Recently deleted, and the restore fails, to
+            // try again (a minute on, it is gone).
+            for ((f, node, said), gone) in heard.into_iter().zip(gone) {
+                if gone {
+                    r.in_plan.remove(&node);
+                } else if said == Said::NotThere {
+                    r.failed.get_or_insert(RemoteError::Transient(format!(
+                        "{f:?}: the identity says it isn't there; asked again later"
+                    )));
+                }
+            }
         }
         match r.failed {
             Some(e) => Err(EngineError::Remote(e)),
@@ -110,8 +126,8 @@ struct Restoring<'a> {
     behind: &'a mut bool,
     /// Written back, to record.
     back: Vec<MirrorRow>,
-    /// Deleted for good meanwhile, to forget.
-    gone: Vec<hbsync_types::RemoteFileId>,
+    /// What the drive said of files not found, to take ([`mirror::heard`]).
+    heard: Vec<(hbsync_types::RemoteFileId, NodeId, Said)>,
     /// What stops the restore.
     failed: Option<RemoteError>,
 }
@@ -138,12 +154,9 @@ impl Restoring<'_> {
             // trace in the feed: gone here too, and what was to come back into it comes back as
             // into any folder gone for good.
             RemoteError::NotFound | RemoteError::Deleted => {
+                // Taken with the wave's write: a "not there" is gone the second time only.
                 match gone_after(self.remote, &e, row.file_id) {
-                    Ok(true) => {
-                        self.gone.push(row.file_id);
-                        self.in_plan.remove(&row.node);
-                    }
-                    Ok(false) => {}
+                    Ok(said) => self.heard.push((row.file_id, row.node, said)),
                     Err(e) => {
                         self.failed.get_or_insert(e);
                     }

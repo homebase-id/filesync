@@ -275,6 +275,16 @@ const SCHEMA: &str = r#"
         at          INTEGER,
         gone_at     INTEGER
     ) WITHOUT ROWID;
+
+    -- Files the identity said once aren't there (its own 404), at the version this device knew
+    -- then: gone for good only when it says so again, a minute on at least, at that version
+    -- (sync semantics §8b). Any row of the file, or an answer that it is there, clears it.
+    -- Few rows, if any.
+    CREATE TABLE gone_suspects (
+        file_id     BLOB PRIMARY KEY,
+        version_tag BLOB,                             -- the version this device knew; NULL: none
+        at          INTEGER NOT NULL                  -- Unix ms, this device's clock
+    ) WITHOUT ROWID;
 "#;
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
@@ -308,6 +318,12 @@ const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;
     CREATE TRIGGER refused_gone AFTER DELETE ON refused
         BEGIN INSERT INTO gone VALUES (old.id); END;",
+    // 16: files the identity said once aren't there.
+    "CREATE TABLE gone_suspects (
+        file_id     BLOB PRIMARY KEY,
+        version_tag BLOB,                             -- the version this device knew; NULL: none
+        at          INTEGER NOT NULL                  -- Unix ms, this device's clock
+    ) WITHOUT ROWID;",
 ];
 
 /// The version this client makes and reads.

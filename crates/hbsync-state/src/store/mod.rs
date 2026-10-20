@@ -33,6 +33,8 @@ mod parked;
 mod picture;
 mod refused;
 pub use refused::Refused;
+mod suspects;
+pub use suspects::GoneSuspect;
 mod removed;
 mod tombstones;
 

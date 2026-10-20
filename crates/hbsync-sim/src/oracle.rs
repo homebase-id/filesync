@@ -123,6 +123,9 @@ impl Sim {
         if let Some(plan) = &ledger.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
         }
+        if let Some(gone) = &self.gone_while_there {
+            return Err(gone.clone());
+        }
         // A record recovery keeps holds its node off placements until settled: never for good.
         for (c, client) in self.clients.iter().enumerate() {
             if let Some(node) = client.placing.keys().next() {

@@ -207,30 +207,95 @@ pub(crate) fn clear_tokens(s: AccountTx<'_>) -> Result<(), StateError> {
 
 // ---- asking the drive ----
 
-/// Whether a file a write was refused with `e` (not found, or a tombstone) is deleted for good:
-/// a tombstone's answer says so, else its header is read ([`gone_for_good`]).
+/// What the drive says of a file a request found not there ([`gone_after`], [`look`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Said {
+    /// A tombstone: deleted for good, proof on its own.
+    Gone,
+    /// The identity's own "not there" (a 404): a suspicion until it says so again
+    /// ([`not_there`]).
+    NotThere,
+    /// There after all.
+    There,
+}
+
+/// What the drive says of a file a write was refused for with `e` (not found, or a tombstone):
+/// a tombstone's answer says it, else its header is read ([`look`]).
 pub(crate) fn gone_after(
     remote: &dyn Remote,
     e: &RemoteError,
     file_id: RemoteFileId,
-) -> Result<bool, RemoteError> {
+) -> Result<Said, RemoteError> {
     match e {
-        RemoteError::Deleted => Ok(true),
-        _ => gone_for_good(remote, file_id),
+        RemoteError::Deleted => Ok(Said::Gone),
+        _ => look(remote, file_id),
     }
 }
 
-/// Whether the drive has file `file_id` no more (not found, or only its tombstone), by its
-/// header: a write or read answered not found may have other reasons.
-pub(crate) fn gone_for_good(
-    remote: &dyn Remote,
-    file_id: RemoteFileId,
-) -> Result<bool, RemoteError> {
+/// What the drive says of file `file_id`, by its header: a write or read answered not found
+/// may have other reasons.
+pub(crate) fn look(remote: &dyn Remote, file_id: RemoteFileId) -> Result<Said, RemoteError> {
     match remote.header(file_id) {
-        Ok(header) => Ok(header.is_deleted()),
-        Err(RemoteError::NotFound) => Ok(true),
+        Ok(header) if header.is_deleted() => Ok(Said::Gone),
+        Ok(_) => Ok(Said::There),
+        Err(RemoteError::Deleted) => Ok(Said::Gone),
+        Err(RemoteError::NotFound) => Ok(Said::NotThere),
         Err(e) => Err(e),
     }
+}
+
+/// The identity said file `file_id` isn't there (its own 404), now: whether that makes it
+/// deleted for good ([`crate::gone::judge`]: said twice, a minute apart, at the version known).
+/// Else the suspicion is kept, for the next time.
+pub(crate) fn not_there(s: AccountTx<'_>, file_id: RemoteFileId) -> Result<bool, StateError> {
+    let prior = s.gone_suspect(file_id)?;
+    let version = s.known_version(file_id)?;
+    match crate::gone::judge(prior, version, hbsync_types::unix_now_ms()) {
+        crate::gone::NotThere::Gone => {
+            s.clear_gone_suspect(file_id)?;
+            Ok(true)
+        }
+        crate::gone::NotThere::Suspect(suspect) => {
+            if prior != Some(suspect) {
+                tracing::warn!("{file_id:?}: the identity says it isn't there; asked again later");
+                s.put_gone_suspect(file_id, &suspect)?;
+            }
+            Ok(false)
+        }
+    }
+}
+
+/// File `file_id` is there after all: a "not there" of it is forgotten.
+pub(crate) fn there(s: AccountTx<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
+    s.clear_gone_suspect(file_id)
+}
+
+/// Whether what the drive `said` of file `file_id` ([`look`]) makes it deleted for good: a
+/// tombstone does, the identity's "not there" the second time a minute on ([`not_there`]);
+/// there after all clears the doubt.
+pub(crate) fn judged(
+    s: AccountTx<'_>,
+    file_id: RemoteFileId,
+    said: Said,
+) -> Result<bool, StateError> {
+    match said {
+        Said::Gone => Ok(true),
+        Said::NotThere => not_there(s, file_id),
+        Said::There => there(s, file_id).map(|()| false),
+    }
+}
+
+/// [`judged`], and a file deleted for good is forgotten. Whether it was.
+pub(crate) fn heard(
+    s: AccountTx<'_>,
+    file_id: RemoteFileId,
+    said: Said,
+) -> Result<bool, StateError> {
+    let gone = judged(s, file_id, said)?;
+    if gone {
+        forget(s, file_id, None)?;
+    }
+    Ok(gone)
 }
 
 #[cfg(test)]

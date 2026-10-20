@@ -241,13 +241,17 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      device that reads the feed at least every 30 days learns of every delete. One that hasn't
      read it for 29 days (a day's margin) reads all of it again: what it has that the feed no
      longer shows is asked of the server (the feed leaves out some rows it has, **[verified]**:
-     homebase-api-notes, Change feed) and gone only if the server says not found; one it can't
+     homebase-api-notes, Change feed) and gone only if the server says it is a tombstone, or
+     says not found twice, a minute to an hour apart, at the version known (5.); one it can't
      ask now stays, asked again at its next read (a hundred at a time). A re-read cut short and
      taken up after as long starts over.
   5. **Gone for good:** a hard delete is announced on the notification socket, and a device
      takes it at once. A write at a version the client knows that finds the file not there,
      and its header not found either (or a tombstone; an answer per file that says it is one
-     needs no header read), forgets it: the next sync puts what the
+     needs no header read), forgets it: a tombstone at once, a header not found only once it is
+     not found again a minute to an hour on, at the same version (one wrong 404 never makes a
+     live file gone; a row of the file or a header found meanwhile clears the doubt; a "not
+     found" counts only from the identity itself, homebase-api-notes). The next sync puts what the
      device has up anew. A delete, soft or hard, answered not found for that file (not a failed
      request) is checked the same way. A request that fails leaves the files it didn't answer
      for the next purge, whatever its error. A client keeps the ids of files
@@ -315,6 +319,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-20: a file whose header is not found is gone for good only once it is not found again
+  a minute to an hour on, at the version known; a tombstone (a header that says deleted, a 4002
+  answer) is proof at once (before, the first "not found" made it gone). The rule is a
+  computer's: a client that keeps no record of gone files, as the mobile browser, is unaffected.
 - 2026-10-20: a user emptying an item takes it as it was listed to them: a removal that arrived
   below it since stays in Recently deleted, and so does the folder holding it (before, the
   desktop took everything removed below it when it ran).

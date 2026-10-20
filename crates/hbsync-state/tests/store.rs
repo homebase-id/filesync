@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 15);
+    assert_eq!(db.schema_version()?, 16);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -283,6 +283,53 @@ fn refusals_are_kept_until_forgotten() -> R {
     db.write(|s| s.folder().put_refused(&refused("three", 30)))?;
     db.write(|s| s.folder().delete_refused(node, "RemoteCreate"))?;
     assert!(db.read(|s| s.all_refused())?.is_empty());
+    Ok(())
+}
+
+/// A file the identity said once isn't there is a suspicion, kept across a reopen (a restart
+/// doesn't make the next "not there" a first one), at the version known; a new row of the file,
+/// or its going for good, clears it.
+#[test]
+fn a_gone_suspicion_is_kept_until_a_row_or_gone() -> Result<(), Box<dyn std::error::Error>> {
+    use hbsync_state::{GoneSuspect, MirrorRow};
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("state.db");
+    let row = MirrorRow {
+        file_id: RemoteFileId(Uuid::new_v4()),
+        version: VersionTag(Uuid::new_v4()),
+        node: NodeId::new(),
+        parent: NodeId::ROOT,
+        name: "x".into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+        token: None,
+        changed_at: None,
+    };
+    let f = row.file_id;
+    let mut db = StateDb::open(&path)?;
+    db.write(|s| s.account().put_mirror(&row))?;
+    assert_eq!(db.read(|s| s.known_version(f))?, Some(row.version));
+    let suspect = GoneSuspect {
+        version: Some(row.version),
+        at: 10,
+    };
+    db.write(|s| s.account().put_gone_suspect(f, &suspect))?;
+    drop(db);
+    let mut db = StateDb::open(&path)?;
+    assert_eq!(db.read(|s| s.gone_suspect(f))?, Some(suspect), "kept");
+    // A row it had (a page read again) changes nothing; a new version clears it.
+    db.write(|s| s.account().put_mirror(&row))?;
+    assert_eq!(db.read(|s| s.gone_suspect(f))?, Some(suspect));
+    let newer = MirrorRow {
+        version: VersionTag(Uuid::new_v4()),
+        ..row.clone()
+    };
+    db.write(|s| s.account().put_mirror(&newer))?;
+    assert_eq!(db.read(|s| s.gone_suspect(f))?, None, "a new row clears it");
+    db.write(|s| s.account().put_gone_suspect(f, &suspect))?;
+    db.write(|s| s.account().mark_file_gone(f))?;
+    assert_eq!(db.read(|s| s.gone_suspect(f))?, None, "gone clears it");
     Ok(())
 }
 
@@ -1063,7 +1110,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 15);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 16);
     Ok(())
 }
 

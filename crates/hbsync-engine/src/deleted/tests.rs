@@ -104,8 +104,37 @@ fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
 
 fn fake() -> hbsync_remote::fake::FakeRemote {
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-    // The drive has none of the files: each delete for good finds it gone, which is done.
+    // The drive has none of the files: each delete for good finds it not there, which is done
+    // once the identity said so twice ([`twice`]).
     FakeRemote::new(FakeServer::new(ServerConfig::default()))
+}
+
+/// Runs `empty` (a delete for good of files the drive doesn't have), and again a minute on:
+/// the first "not there" of each is a suspicion only (sync semantics §8b), the second makes it
+/// gone. Returns what the second took.
+fn twice(
+    db: &Db,
+    mut empty: impl FnMut() -> Result<usize, EngineError>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    assert_eq!(empty()?, 0, "once is a suspicion");
+    crate::testkit::a_minute_on(&mut locked(db))?;
+    Ok(empty()?)
+}
+
+/// Runs `empty` a minute apart until it takes nothing more (a folder whose members go first
+/// waits a round for each: each goes once said not there twice). Returns what it took.
+fn until_done(
+    db: &Db,
+    mut empty: impl FnMut() -> Result<usize, EngineError>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut took = 0;
+    for _ in 0..8 {
+        took += empty()?;
+        if crate::testkit::a_minute_on(&mut locked(db))? == 0 {
+            return Ok(took);
+        }
+    }
+    Err("never done".into())
 }
 
 fn listed(db: &Db) -> Result<Listed, StateError> {
@@ -157,7 +186,10 @@ fn emptying_takes_what_was_listed_and_nothing_since() -> Result<(), Box<dyn std:
             None => Err(StateError::Conflict("own isn't listed".into())),
         }
     })?;
-    assert_eq!(ops(&db, &remote).empty_listed(&summary.listed)?, 2);
+    assert_eq!(
+        twice(&db, || ops(&db, &remote).empty_listed(&summary.listed))?,
+        2
+    );
     assert_eq!(left(&db)?, sorted(vec![f, late, later_with, lone]));
     Ok(())
 }
@@ -209,10 +241,15 @@ fn a_live_node_is_never_deleted_for_good() -> Result<(), Box<dyn std::error::Err
                 // The count it shows is what emptying takes.
                 let (_, summary) = db.read(|s| deletes(s, 0))?;
                 assert_eq!((summary.deletes, summary.items), (4, 2));
-                ops(&db, &remote).empty_listed(&summary.listed)?
+                twice(&db, || ops(&db, &remote).empty_listed(&summary.listed))?
             }
-            "deletes" => ops(&db, &remote).empty(&[outer, other, g, h], &listed(&db)?)?,
-            _ => ops(&db, &remote).expire(11, None)?,
+            "deletes" => {
+                let listing = listed(&db)?;
+                twice(&db, || {
+                    ops(&db, &remote).empty(&[outer, other, g, h], &listing)
+                })?
+            }
+            _ => twice(&db, || ops(&db, &remote).expire(11, None))?,
         };
         assert_eq!(went, 2, "{how}");
         assert_eq!(left(&db)?, sorted(vec![outer, f, g, h]), "{how}");
@@ -283,7 +320,7 @@ fn emptying_an_unknown_listing_is_refused() -> Result<(), Box<dyn std::error::Er
     };
     assert_eq!(ops(&db, &remote).empty_listed(&nothing)?, 0);
     assert_eq!(left(&db)?, [x], "nothing went");
-    assert_eq!(ops(&db, &remote).empty_listed(&listing)?, 1);
+    assert_eq!(twice(&db, || ops(&db, &remote).empty_listed(&listing))?, 1);
     Ok(())
 }
 
@@ -302,9 +339,9 @@ fn a_cycle_in_recently_deleted_is_emptied() -> Result<(), Box<dyn std::error::Er
         let gone = match purge {
             false => {
                 let listing = listed(&db)?;
-                ops(&db, &remote).empty_listed(&listing)?
+                until_done(&db, || ops(&db, &remote).empty_listed(&listing))?
             }
-            true => ops(&db, &remote).expire(2, None)?,
+            true => until_done(&db, || ops(&db, &remote).expire(2, None))?,
         };
         assert_eq!(gone, 2, "purge: {purge}");
         assert_eq!(left(&db)?, [], "purge: {purge}");

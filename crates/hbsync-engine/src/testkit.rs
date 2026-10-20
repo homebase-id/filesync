@@ -116,6 +116,14 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
             .collect())
     }
 
+    /// As if a minute had passed since the identity first said a file isn't there: said
+    /// again, it is gone (sync semantics §8b). How many such files there are.
+    pub fn a_minute_on(&self) -> Res<usize> {
+        Ok(a_minute_on(&mut hbsync_state::StateDb::open(
+            &self.db_path(),
+        )?)?)
+    }
+
     /// What a listing of Recently deleted now saw: what emptying it as listed takes.
     pub fn listed(&self) -> Res<crate::deleted::Listed> {
         let mut reader = AccountReader::open(&self.db_path(), IDENTITY)?.ok_or("no state DB")?;
@@ -207,4 +215,10 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
             out.push((rel, fs::read(&path).unwrap_or_default()));
         }
     }
+}
+
+/// As if a minute had passed in `db` since the identity first said each file isn't there
+/// (sync semantics §8b). How many such files there are.
+pub fn a_minute_on(db: &mut hbsync_state::StateDb) -> Result<usize, hbsync_state::StateError> {
+    db.write(|s| s.account().age_gone_suspects(crate::gone::CONFIRM_AFTER_MS))
 }

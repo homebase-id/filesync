@@ -639,6 +639,9 @@ pub struct Faults {
     /// Updates and payload reads answer [`RemoteError::NotFound`] though the file is there (as
     /// a read past a payload's end might, or another reason a server has).
     pub not_found_writes: bool,
+    /// Headers answer [`RemoteError::NotFound`] though the file is there: the identity's own
+    /// 404 for a moment (a server's hiccup), which must not make a live file gone.
+    pub not_found_headers: bool,
     /// Requests seen, for assertions.
     pub requests: usize,
     /// Headers read ([`Remote::header`]), for assertions.
@@ -875,7 +878,14 @@ impl Remote for FakeRemote {
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         self.gate()?;
-        self.faults().headers += 1;
+        let not_found = {
+            let mut faults = self.faults();
+            faults.headers += 1;
+            faults.not_found_headers
+        };
+        if not_found {
+            return Err(RemoteError::NotFound);
+        }
         self.server().header(file_id)
     }
 

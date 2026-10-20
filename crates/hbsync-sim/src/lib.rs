@@ -30,6 +30,7 @@
 mod action;
 mod crash;
 mod exec;
+mod gone;
 mod model;
 mod oracle;
 mod trace;
@@ -118,6 +119,13 @@ pub struct Sim {
     /// each request it was sent, by everything the request sends.
     refusing: bool,
     judged: BTreeMap<String, bool>,
+    /// The drive answers a wrong "not there" now and then ([`Sim::with_wrong_not_theres`]):
+    /// the plans heard so far, the files it said it of, and a client that took one as gone
+    /// for good while the drive held it.
+    lying: bool,
+    plans_heard: u64,
+    lied: BTreeSet<NodeId>,
+    gone_while_there: Option<String>,
 }
 
 impl Sim {
@@ -157,6 +165,10 @@ impl Sim {
             split_downloads: false,
             refusing: false,
             judged: BTreeMap::new(),
+            lying: false,
+            plans_heard: 0,
+            lied: BTreeSet::new(),
+            gone_while_there: None,
             placed_from: None,
         }
     }
@@ -177,6 +189,15 @@ impl Sim {
     /// (`hbsync_engine::refused`; a download once it didn't match twice).
     pub fn with_refusals(mut self) -> Self {
         self.refusing = true;
+        self
+    }
+
+    /// The identity says now and then that a live file isn't there (its own 404, a hiccup),
+    /// once of each such file: every third plan, of a file the planning client holds. The
+    /// clients judge it as the engine does (sync semantics §8b), and none may take the file as
+    /// gone for good ([`crate::gone`]).
+    pub fn with_wrong_not_theres(mut self) -> Self {
+        self.lying = true;
         self
     }
 

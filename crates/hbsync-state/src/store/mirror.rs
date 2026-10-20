@@ -236,6 +236,8 @@ impl AccountTx<'_> {
         if self.has_version(row.remote_ref(), false)? || self.file_gone(row.file_id)? {
             return Ok(());
         }
+        // A new row of it: it is there, whatever the identity said once.
+        self.clear_gone_suspect(row.file_id)?;
         let Some(row) = &self.on_drive(row)? else {
             return Ok(());
         };
@@ -321,7 +323,7 @@ impl AccountTx<'_> {
     pub fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
         self.prep("INSERT OR IGNORE INTO gone_files (file_id) VALUES (?1)")?
             .execute([file_id.0.as_bytes()])?;
-        Ok(())
+        self.clear_gone_suspect(file_id)
     }
 }
 

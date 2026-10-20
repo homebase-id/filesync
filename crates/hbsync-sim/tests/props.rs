@@ -161,6 +161,19 @@ proptest! {
         run_settled(2, None, |sim| sim.with_refusals(), |sim| sim.quiesce_still(30), &events)?;
     }
 
+    /// The identity says now and then that a live file isn't there (its own 404, a hiccup;
+    /// sync semantics §8b): a file the identity said gone once but is live is never taken as
+    /// gone for good, nor deleted here, while files deleted for good still go; the clients
+    /// converge without loss.
+    #[test]
+    fn a_live_file_said_gone_once_is_never_deleted(
+        events in proptest::collection::vec(event(2), 0..80),
+    ) {
+        // Checked also when they don't settle: a file taken as gone keeps them from it.
+        let settle = |sim: &mut Sim| sim.quiesce(30) || sim.took_a_live_file_as_gone();
+        run_settled(2, None, |sim| sim.with_wrong_not_theres(), settle, &events)?;
+    }
+
     /// No poll (daemon.md): clients that sync only when asked (at start, when another changed
     /// the drive, when the user confirms what the guard held) converge without loss, and then
     /// a sync nobody asked for finds nothing to do: a timer never would.

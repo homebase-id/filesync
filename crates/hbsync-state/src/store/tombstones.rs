@@ -50,7 +50,7 @@ impl AccountTx<'_> {
              ON CONFLICT (file_id) DO NOTHING",
         )?
         .execute(params![file_id.0.as_bytes(), at])?;
-        Ok(())
+        self.clear_gone_suspect(file_id)
     }
 
     /// Records a tombstone the feed brought, written at `at` (Unix ms, the server's): its file

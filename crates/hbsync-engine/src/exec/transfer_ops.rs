@@ -289,9 +289,11 @@ impl Executor<'_> {
                 self.finish(&[Settle::node(job.node())], |_| Ok(()))
             }
             // Not found at a version this device knows: deleted for good meanwhile, maybe without
-            // a trace in the feed, if its header says so too. Then a removal is done (out of the
-            // tree all the same), and anything else is forgotten, so the next plan sees it gone
-            // (and creates the node anew where it is still wanted). If the header denies it, the
+            // a trace in the feed, if its header says so too: a tombstone, or the identity's "not
+            // there" a second time, a minute on at least (sync semantics §8b: once is a
+            // suspicion, and the write stays to do). Then a removal is done (out of the tree all
+            // the same), and anything else is forgotten, so the next plan sees it gone (and
+            // creates the node anew where it is still wanted). If the header denies it, the
             // write stays to do, a removal too: the next plan sends it again. An answer that it
             // is a tombstone says what the header would: it isn't read.
             (
@@ -301,24 +303,35 @@ impl Executor<'_> {
                     e @ (RemoteError::NotFound | RemoteError::Deleted),
                 )),
             ) if let Some(file_id) = job.file_id() => {
-                match mirror::gone_after(self.remote, &e, file_id) {
-                    Ok(true) => match (ctx, job) {
-                        (
-                            Ctx::Meta {
-                                hash,
-                                after: after @ remote::After::Removed { .. },
-                                ..
-                            },
-                            Job::Meta { meta, .. },
-                        ) => self.commit_meta(meta, hash, after, None),
-                        _ => {
-                            self.db
-                                .write(|s| mirror::forget(s.account(), file_id, None))?;
-                            Ok(Outcome::stale("deleted for good remotely"))
-                        }
-                    },
-                    Ok(false) => Ok(Outcome::stale("not found, but there")),
-                    Err(e) => Ok(remote_outcome(e)),
+                let said = match mirror::gone_after(self.remote, &e, file_id) {
+                    Ok(said) => said,
+                    Err(e) => return Ok(remote_outcome(e)),
+                };
+                // A removal is done once the file is gone (out of the tree all the same);
+                // anything else is forgotten, in the write that judges it.
+                let removal = matches!(
+                    (&ctx, &job),
+                    (
+                        Ctx::Meta {
+                            after: remote::After::Removed { .. },
+                            ..
+                        },
+                        Job::Meta { .. }
+                    )
+                );
+                let gone = self.db.write(|s| match removal {
+                    true => mirror::judged(s.account(), file_id, said),
+                    false => mirror::heard(s.account(), file_id, said),
+                })?;
+                match (ctx, job) {
+                    (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }) if gone && removal => {
+                        self.commit_meta(meta, hash, after, None)
+                    }
+                    _ if gone => Ok(Outcome::stale("deleted for good remotely")),
+                    _ if said == mirror::Said::There => Ok(Outcome::stale("not found, but there")),
+                    _ => Ok(Outcome::stale(
+                        "the identity says it isn't there: asked again at the next sync",
+                    )),
                 }
             }
             // The bytes didn't match what the drive says they are (its partial file is gone):
