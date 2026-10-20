@@ -539,7 +539,9 @@ fn apply_known(
 }
 
 /// Retries transient errors a few times with exponential backoff (50, 100, 200 ms).
-pub fn with_retries<T>(mut f: impl FnMut() -> Result<T, RemoteError>) -> Result<T, RemoteError> {
+pub(crate) fn with_retries<T>(
+    mut f: impl FnMut() -> Result<T, RemoteError>,
+) -> Result<T, RemoteError> {
     let mut delay = std::time::Duration::from_millis(50);
     for _ in 0..3 {
         match f() {
@@ -646,7 +648,7 @@ fn gone(s: &Store<'_>, file_id: RemoteFileId) -> Result<(), StateError> {
 
 /// The mirror row of a live header (removed or not); `None` for tombstones and for files
 /// without a payload.
-pub fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
+pub(crate) fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     let RemoteBody::Live {
         node,
         content,

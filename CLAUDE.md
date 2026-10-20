@@ -111,10 +111,10 @@ ID and notarized, its Windows packages signed by Azure Trusted Signing (keys fro
 
 | Crate | Role |
 |---|---|
-| `hbsync-platform` | OS differences: names and comparison keys, `RelPath`, file ids, no-clobber rename, bulk directory listing, USN/FSEvents journals, fs kind, Finder tags (macOS and KDE attributes) |
+| `hbsync-platform` | OS differences: names and comparison keys, `RelPath`, file ids, no-clobber rename, bulk directory listing, USN/FSEvents journals, fs kind, Finder tags (macOS and KDE attributes); a hash stable across builds (FNV-1a) |
 | `hbsync-fileio` | BLAKE3/SHA-256 streaming hashes, resumable verified partial files, guarded atomic swap |
 | `hbsync-namemap` | local spelling of remote names (Windows SFM escapes) |
-| `hbsync-types` | node ids, node state, node-schema-v1 content JSON |
+| `hbsync-types` | node ids, node state, content hash values, node-schema-v1 content JSON |
 | `hbsync-state` | SQLite state DB: base, local observations, remote mirror, dirty set, parked items |
 | `hbsync-local` | walker, scan merge, targeted rescans, journal catch-up, live watcher |
 | `hbsync-remote` | blocking `Remote` trait and the fake server/remote with Homebase semantics |

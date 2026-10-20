@@ -45,7 +45,7 @@ use crate::walk::End;
 
 /// The masks of one plan.
 #[derive(Debug, Default)]
-pub struct Masks {
+pub(crate) struct Masks {
     /// Remote nodes this device doesn't sync.
     pub masked: HashSet<NodeId>,
     /// Folders a masked live child keeps alive.
@@ -64,7 +64,7 @@ pub struct Masks {
 }
 
 impl Masks {
-    pub fn of(
+    pub(crate) fn of(
         input: &Input,
         filter: &Filter,
         scope: &Scope,
@@ -241,7 +241,7 @@ impl Masks {
 
 /// What this device doesn't sync of `remote`: what `filter` matches (see [`masked`]) and what
 /// lies outside `scope`.
-pub fn hidden(remote: &Tree, filter: &Filter, scope: &Scope) -> HashSet<NodeId> {
+pub(crate) fn hidden(remote: &Tree, filter: &Filter, scope: &Scope) -> HashSet<NodeId> {
     let mut hidden = masked(remote, filter);
     hidden.extend(scope.out_of_scope(remote));
     hidden

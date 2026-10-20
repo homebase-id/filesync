@@ -79,7 +79,7 @@ impl SealedKeyHeader {
 
     /// As sync keeps it, a file's token: the wrap IV, then the encrypted IV and key. `None` if
     /// it isn't that.
-    pub fn to_token(&self) -> Option<FileToken> {
+    pub(crate) fn to_token(&self) -> Option<FileToken> {
         let mut bytes = STANDARD
             .decode(&self.iv)
             .ok()
@@ -89,7 +89,7 @@ impl SealedKeyHeader {
     }
 
     /// A token back as a sealed key header; `None` if it isn't one.
-    pub fn from_token(token: &FileToken) -> Option<Self> {
+    pub(crate) fn from_token(token: &FileToken) -> Option<Self> {
         let bytes = &token.0;
         (bytes.len() == SEALED_LEN).then(|| SealedKeyHeader {
             iv: STANDARD.encode(&bytes[..BLOCK]),
@@ -100,7 +100,7 @@ impl SealedKeyHeader {
 
 impl KeyHeader {
     /// A new key and header IV, for a new file.
-    pub fn random() -> Result<Self, HomebaseError> {
+    pub(crate) fn random() -> Result<Self, HomebaseError> {
         Ok(KeyHeader {
             iv: strong()?,
             key: strong()?,
@@ -109,7 +109,7 @@ impl KeyHeader {
 
     /// The same key with a new header IV: what an update sends. The server keeps the file's
     /// key and takes the IV (odin-core `OverwriteMetadataInternal`).
-    pub fn with_new_iv(&self) -> Result<Self, HomebaseError> {
+    pub(crate) fn with_new_iv(&self) -> Result<Self, HomebaseError> {
         Ok(KeyHeader {
             iv: strong()?,
             key: self.key,
@@ -117,7 +117,7 @@ impl KeyHeader {
     }
 
     /// `iv || key`, AES-CBC under `shared_secret` with `wrap_iv`, as an upload sends it.
-    pub fn seal(&self, shared_secret: &Key, wrap_iv: &[u8; 16]) -> Value {
+    pub(crate) fn seal(&self, shared_secret: &Key, wrap_iv: &[u8; 16]) -> Value {
         let mut plain = [0u8; 32];
         plain[..16].copy_from_slice(&self.iv);
         plain[16..].copy_from_slice(&self.key);
@@ -135,7 +135,7 @@ impl KeyHeader {
     /// `shared_secret` with the header's own IV as the wrap IV (**[verified]** odin-core
     /// `DriveFileUtility.CreateClientFileHeader`, the stored `EncryptedKeyHeader.Iv` being the
     /// key header's, `DriveStorageServiceBase.EncryptKeyHeader`).
-    pub fn token(&self, shared_secret: &Key) -> FileToken {
+    pub(crate) fn token(&self, shared_secret: &Key) -> FileToken {
         let mut plain = [0u8; 32];
         plain[..16].copy_from_slice(&self.iv);
         plain[16..].copy_from_slice(&self.key);
@@ -146,7 +146,10 @@ impl KeyHeader {
     }
 
     /// Opens a key header sealed with `shared_secret`.
-    pub fn open(sealed: &SealedKeyHeader, shared_secret: &Key) -> Result<Self, HomebaseError> {
+    pub(crate) fn open(
+        sealed: &SealedKeyHeader,
+        shared_secret: &Key,
+    ) -> Result<Self, HomebaseError> {
         let mut plain = Envelope {
             iv: sealed.iv.clone(),
             data: sealed.encrypted_aes_key.clone(),
@@ -168,11 +171,11 @@ impl KeyHeader {
 
     /// `appData.content` of an encrypted file: AES-CBC under the file key with the header IV,
     /// base64.
-    pub fn seal_text(&self, text: &str) -> String {
+    pub(crate) fn seal_text(&self, text: &str) -> String {
         STANDARD.encode(aes_cbc_encrypt(&self.key, &self.iv, text.as_bytes()))
     }
 
-    pub fn open_text(&self, b64: &str) -> Result<String, HomebaseError> {
+    pub(crate) fn open_text(&self, b64: &str) -> Result<String, HomebaseError> {
         let sealed = STANDARD
             .decode(b64)
             .map_err(|_| crypto("the content isn't base64"))?;
@@ -182,7 +185,7 @@ impl KeyHeader {
 
     /// The content hash of a payload with `payload_iv`, encrypted under the file key with the
     /// payload IV XOR 0xAA…: 48 bytes, base64.
-    pub fn seal_hash(&self, payload_iv: &[u8; 16], hash: &ContentHash) -> String {
+    pub(crate) fn seal_hash(&self, payload_iv: &[u8; 16], hash: &ContentHash) -> String {
         STANDARD.encode(aes_cbc_encrypt(
             &self.key,
             &hash_iv(payload_iv),
@@ -190,7 +193,7 @@ impl KeyHeader {
         ))
     }
 
-    pub fn open_hash(
+    pub(crate) fn open_hash(
         &self,
         payload_iv: &[u8; 16],
         algorithm: HashAlgorithm,
@@ -250,7 +253,7 @@ impl<R> std::fmt::Debug for Encrypting<R> {
 }
 
 impl<R: Read> Encrypting<R> {
-    pub fn new(inner: R, key: &Key, iv: &[u8; 16]) -> Self {
+    pub(crate) fn new(inner: R, key: &Key, iv: &[u8; 16]) -> Self {
         Encrypting {
             inner,
             cipher: cbc::Encryptor::new(key.into(), iv.into()),
@@ -320,7 +323,7 @@ pub(crate) struct CipherRange {
 impl CipherRange {
     /// A range past the plaintext reaches into the padding block, which the reader removes
     /// ([`Decrypting::finish`]); past the stored payload, the server cuts it short.
-    pub fn of(range: &Range<u64>) -> Self {
+    pub(crate) fn of(range: &Range<u64>) -> Self {
         let block = BLOCK as u64;
         let first = range.start / block * block;
         let end = range.end.div_ceil(block) * block;
@@ -370,7 +373,7 @@ impl Drop for Decrypting<'_> {
 }
 
 impl<'a> Decrypting<'a> {
-    pub fn new(
+    pub(crate) fn new(
         key: &Key,
         iv: Option<&[u8; 16]>,
         skip: u64,
@@ -388,13 +391,13 @@ impl<'a> Decrypting<'a> {
     }
 
     /// Plaintext bytes asked for that didn't come (past the plaintext's end).
-    pub fn left(&self) -> u64 {
+    pub(crate) fn left(&self) -> u64 {
         self.left
     }
 
     /// After the last ciphertext: decrypts the last block and passes it on, without the
     /// padding when it is the payload's last (`padded`).
-    pub fn finish(&mut self, padded: bool) -> io::Result<()> {
+    pub(crate) fn finish(&mut self, padded: bool) -> io::Result<()> {
         let bad = |why: &str| io::Error::new(io::ErrorKind::InvalidData, why.to_owned());
         if self.carry.is_empty() && !padded {
             return Ok(());

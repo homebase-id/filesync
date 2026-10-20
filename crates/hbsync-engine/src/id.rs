@@ -1,6 +1,6 @@
 //! Node ids the engine derives instead of drawing at random: a replan picks the same one.
 
-use hbsync_fileio::{FNV1A64_OFFSET, fnv1a64_from};
+use hbsync_platform::fnv::{FNV1A64_OFFSET, fnv1a64_from};
 use hbsync_types::{NodeId, Uuid};
 
 /// The id derived from `parts` for the use `tag` (`b"fork"`, `b"detach"`): the same parts give

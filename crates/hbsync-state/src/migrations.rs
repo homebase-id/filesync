@@ -332,7 +332,7 @@ pub(crate) fn check(version: u32) -> Result<()> {
     }
 }
 
-pub fn apply(conn: &mut Connection) -> Result<()> {
+pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
     sibling_hash_in_sql(conn)?;
     migrate(conn)?;
     give_id(conn)

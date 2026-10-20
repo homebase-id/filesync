@@ -20,7 +20,7 @@ use crate::HomebaseError;
 use crate::crypto::{Key, aes_cbc_encrypt};
 use crate::drive::sealed::{KeyHeader, SealedKeyHeader, sealed_len};
 
-pub const CONTENT_TYPE: &str = "application/octet-stream";
+pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
 
 /// A file header as query-batch and the header routes return it (the fields the client
 /// reads).
@@ -85,7 +85,7 @@ pub struct PayloadHash {
 /// One page of `query-batch`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct QueryBatchResponse {
+pub(crate) struct QueryBatchResponse {
     pub cursor_state: Option<String>,
     #[serde(default)]
     pub has_more_rows: bool,
@@ -115,7 +115,7 @@ pub fn file_id_of(row: &str) -> Option<Uuid> {
 /// The time of the last change a feed cursor stands after: `cursorState` is odin-core's
 /// `QueryBatchCursor` as JSON, `{"paging": {"time": <Unix ms>, "row": …}, …}` (**[verified]**
 /// `QueryBatchCursor.cs`, `QueryBatchResponse.cs`).
-pub fn cursor_time(cursor: &str) -> Option<i64> {
+pub(crate) fn cursor_time(cursor: &str) -> Option<i64> {
     let state: Value = serde_json::from_str(cursor).ok()?;
     state["paging"]["time"].as_i64()
 }
@@ -143,7 +143,7 @@ pub struct FileRef {
 
 impl FileRef {
     /// Whether the row is another app's file, not a sync node (its type says so).
-    pub fn not_a_node(&self) -> bool {
+    pub(crate) fn not_a_node(&self) -> bool {
         self.file_type
             .is_some_and(|t| t != FILE_TYPE_FOLDER && t != FILE_TYPE_FILE)
     }
@@ -151,7 +151,7 @@ impl FileRef {
 
 impl FileRef {
     /// As [`to_remote`] reads the same row's header ([`Times`]).
-    pub fn to_ref(&self) -> ChangeRef {
+    pub(crate) fn to_ref(&self) -> ChangeRef {
         let times = Times::of(&self.file_state, self.archival_status, self.updated);
         ChangeRef {
             file_id: RemoteFileId(self.file_id),
@@ -180,7 +180,7 @@ pub struct Times {
 impl Times {
     /// A row whose `updated` is unknown has no time: removed, it counts as removed now
     /// (`removal_time(None)`, the newest: never old enough to go without a trace).
-    pub fn of(file_state: &str, archival_status: i32, updated: Option<i64>) -> Times {
+    pub(crate) fn of(file_state: &str, archival_status: i32, updated: Option<i64>) -> Times {
         let deleted = file_state == "deleted";
         Times {
             deleted,
@@ -225,7 +225,7 @@ pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
 /// any type, minimal rows: what [`HomebaseRemote::holding`](super::HomebaseRemote) asks.
 /// odin-core filters on `groupId`, `fileState` and `archivalStatus` (**[verified]**
 /// `QueryBatch.cs:130-142, 351`); live is any status but removed, so that is read per row.
-pub fn children_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) -> Value {
+pub(crate) fn children_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) -> Value {
     let mut options = json!({
         "maxRecords": limit.max(1),
         "resultShape": "minimal",
@@ -246,7 +246,7 @@ pub fn children_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) ->
 
 /// A header as a [`RemoteHeader`], decrypted with `shared_secret`; `Err` says why it isn't a
 /// usable sync node.
-pub fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
+pub(crate) fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<RemoteHeader, String> {
     let id = header.file_id;
     let meta = &header.file_metadata;
     let kind = match meta.app_data.file_type {
@@ -328,7 +328,7 @@ where
 
 impl FileHeader {
     /// The file key and header IV, opened with `shared_secret`. Every node is encrypted.
-    pub fn key(&self, shared_secret: &Key) -> Result<KeyHeader, HomebaseError> {
+    pub(crate) fn key(&self, shared_secret: &Key) -> Result<KeyHeader, HomebaseError> {
         if !self.file_metadata.is_encrypted {
             return Err(HomebaseError::Crypto("not encrypted".into()));
         }

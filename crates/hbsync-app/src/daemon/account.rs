@@ -98,7 +98,7 @@ enum Phase {
 impl Account {
     /// The account `identity` syncing `folder`, started paused when `paused`; its thread runs
     /// with the returned receiver ([`Account::run`]).
-    pub fn new(
+    pub(super) fn new(
         paths: &Paths,
         identity: &str,
         folder: &Path,
@@ -126,7 +126,7 @@ impl Account {
     }
 
     /// Its folders.
-    pub fn folders(&self) -> Vec<PathBuf> {
+    pub(super) fn folders(&self) -> Vec<PathBuf> {
         match &*lock(&self.phase) {
             Phase::Waiting { folders, .. } => folders.clone(),
             Phase::Running(runners) => runners.iter().map(|(p, _)| p.clone()).collect(),
@@ -134,7 +134,7 @@ impl Account {
     }
 
     /// Syncs the folder at `path` too (once connected).
-    pub fn add_folder(&self, path: &Path) {
+    pub(super) fn add_folder(&self, path: &Path) {
         match &mut *lock(&self.phase) {
             Phase::Waiting { folders, .. } => {
                 if !folders.iter().any(|f| f == path) {
@@ -147,7 +147,7 @@ impl Account {
     }
 
     /// Stops syncing the folder at `path`.
-    pub fn remove_folder(&self, path: &Path) {
+    pub(super) fn remove_folder(&self, path: &Path) {
         match &mut *lock(&self.phase) {
             Phase::Waiting { folders, .. } => {
                 folders.retain(|f| f != path);
@@ -158,7 +158,7 @@ impl Account {
     }
 
     /// Its status and its folders'.
-    pub fn status(&self) -> (AccountStatus, Vec<FolderStatus>) {
+    pub(super) fn status(&self) -> (AccountStatus, Vec<FolderStatus>) {
         let folders = match &*lock(&self.phase) {
             Phase::Running(runners) => runners.iter().map(|(_, h)| h.status()).collect(),
             Phase::Waiting {
@@ -187,7 +187,7 @@ impl Account {
     }
 
     /// The runner of its folder at `path`, once running.
-    pub fn runner(&self, path: &Path) -> Option<Handle> {
+    pub(super) fn runner(&self, path: &Path) -> Option<Handle> {
         match &*lock(&self.phase) {
             Phase::Running(runners) => runners
                 .iter()
@@ -198,7 +198,7 @@ impl Account {
     }
 
     /// Passes `command` to every runner. False while it isn't running yet.
-    pub fn send_all(&self, command: &Command) -> bool {
+    pub(crate) fn send_all(&self, command: &Command) -> bool {
         match &*lock(&self.phase) {
             Phase::Running(runners) => {
                 for (_, h) in runners {
@@ -211,7 +211,7 @@ impl Account {
     }
 
     /// Pauses (`Some`) or resumes its folders, also before they run.
-    pub fn pause(&self, pause: Option<Until>) {
+    pub(super) fn pause(&self, pause: Option<Until>) {
         *lock(&self.paused) = pause;
         self.wake();
         self.changed.raise();
@@ -222,7 +222,7 @@ impl Account {
     }
 
     /// Why it can't take requests yet; `None` once it runs.
-    pub fn not_running(&self) -> Option<String> {
+    pub(super) fn not_running(&self) -> Option<String> {
         match &*lock(&self.phase) {
             Phase::Running(_) => None,
             Phase::Waiting { error, .. } => Some(format!(
@@ -234,7 +234,7 @@ impl Account {
     }
 
     /// Asks for `control` on its Recently deleted; done on its thread.
-    pub fn request(&self, control: AccountControl) -> Result<(), String> {
+    pub(super) fn request(&self, control: AccountControl) -> Result<(), String> {
         if let Some(why) = self.not_running() {
             return Err(why);
         }
@@ -270,18 +270,18 @@ impl Account {
     }
 
     /// Ends the account: its runners stop between operations and [`Account::run`] returns.
-    pub fn end(&self) {
+    pub(super) fn end(&self) {
         self.ended.store(true, Ordering::Relaxed);
         self.wake();
     }
 
     /// Has its thread look again (whether to stop, its pause).
-    pub fn wake(&self) {
+    pub(super) fn wake(&self) {
         self.tell(Msg::Wake);
     }
 
     /// The machine woke up: its notifications reconnect, its folders sync.
-    pub fn woke(&self) {
+    pub(super) fn woke(&self) {
         self.tell(Msg::Woke);
     }
 
@@ -291,7 +291,7 @@ impl Account {
     }
 
     /// The newest `limit` entries of its folders' recently synced lists.
-    pub fn recent(&self, limit: usize) -> Vec<RecentItem> {
+    pub(super) fn recent(&self, limit: usize) -> Vec<RecentItem> {
         let folders = self.folders();
         self.read(|db| {
             let mut items = Vec::new();
@@ -316,7 +316,7 @@ impl Account {
 
     /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
     /// items are in it; and, when it holds anything, all of it as listed now.
-    pub fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
+    pub(super) fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
         let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
             return (Vec::new(), None);
         };
@@ -334,14 +334,14 @@ impl Account {
     }
 
     /// The items of its Recently deleted that are `nodes`.
-    pub fn find_deleted(&self, nodes: &[NodeId]) -> Vec<DeletedItem> {
+    pub(super) fn find_deleted(&self, nodes: &[NodeId]) -> Vec<DeletedItem> {
         self.read(|db| db.find_deleted(nodes))
             .map(|(found, listed)| self.items(found, &listed))
             .unwrap_or_default()
     }
 
     /// The items of its Recently deleted named `names`.
-    pub fn named_deleted(&self, names: &[String]) -> Vec<DeletedItem> {
+    pub(super) fn named_deleted(&self, names: &[String]) -> Vec<DeletedItem> {
         self.read(|db| db.named_deleted(names))
             .map(|(found, listed)| self.items(found, &listed))
             .unwrap_or_default()
@@ -439,7 +439,7 @@ impl Account {
 
     /// Connects and syncs its folders until it should stop, then stops them; a folder's runner
     /// that fails starts again after a pause. An error: a runner that couldn't start.
-    pub fn run(
+    pub(super) fn run(
         &self,
         paths: &Paths,
         config: &Config,
@@ -488,7 +488,7 @@ impl Account {
         // Tokens are sealed under the login's shared secret: another login's don't open.
         let login = format!(
             "{:016x}",
-            hbsync_fileio::fnv1a64(creds.shared_secret.as_bytes())
+            hbsync_platform::fnv::fnv1a64(creds.shared_secret.as_bytes())
         );
         if drive
             .tokens_sealed_by(&login)

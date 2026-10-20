@@ -51,7 +51,7 @@ impl Store<'_> {
         Ok(())
     }
 
-    pub fn delete_account_kv(&self, key: AccountKey) -> Result<()> {
+    pub(crate) fn delete_account_kv(&self, key: AccountKey) -> Result<()> {
         self.change("DELETE FROM kv WHERE key = ?1", key.0)?;
         Ok(())
     }

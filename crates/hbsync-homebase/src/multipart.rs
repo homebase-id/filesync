@@ -5,7 +5,7 @@
 use std::io::{self, Cursor, Read};
 
 /// One form part.
-pub struct Part<'a> {
+pub(crate) struct Part<'a> {
     name: &'static str,
     filename: Option<&'static str>,
     content_type: &'static str,
@@ -35,7 +35,7 @@ impl std::fmt::Debug for Part<'_> {
 }
 
 impl<'a> Part<'a> {
-    pub fn bytes(name: &'static str, content_type: &'static str, bytes: Vec<u8>) -> Self {
+    pub(crate) fn bytes(name: &'static str, content_type: &'static str, bytes: Vec<u8>) -> Self {
         Part {
             name,
             filename: None,
@@ -45,7 +45,7 @@ impl<'a> Part<'a> {
     }
 
     /// A part streamed from `reader`, which must yield `size` bytes.
-    pub fn reader(
+    pub(crate) fn reader(
         name: &'static str,
         filename: &'static str,
         content_type: &'static str,
@@ -62,7 +62,7 @@ impl<'a> Part<'a> {
 
     /// A part made by `make` when the body reaches it, after the parts before it were read
     /// (a hash of what they sent). It must make `size` bytes: the length is sent first.
-    pub fn later(
+    pub(crate) fn later(
         name: &'static str,
         filename: &'static str,
         content_type: &'static str,
@@ -102,23 +102,23 @@ impl<'a> Part<'a> {
 
 /// The parts of a form, in order.
 #[derive(Debug)]
-pub struct Multipart<'a> {
+pub(crate) struct Multipart<'a> {
     boundary: String,
     parts: Vec<Part<'a>>,
 }
 
 impl<'a> Multipart<'a> {
     /// `boundary` must not occur in any part (a random one: 32 hex characters).
-    pub fn new(boundary: String, parts: Vec<Part<'a>>) -> Self {
+    pub(crate) fn new(boundary: String, parts: Vec<Part<'a>>) -> Self {
         Multipart { boundary, parts }
     }
 
-    pub fn content_type(&self) -> String {
+    pub(crate) fn content_type(&self) -> String {
         format!("multipart/form-data; boundary={}", self.boundary)
     }
 
     /// The exact length of the body.
-    pub fn content_length(&self) -> u64 {
+    pub(crate) fn content_length(&self) -> u64 {
         let parts: u64 = self
             .parts
             .iter()
@@ -133,7 +133,7 @@ impl<'a> Multipart<'a> {
 
     /// The body as one reader. A streamed part that ends early is an error ([`SourceEnded`]);
     /// one that has more is cut at its size.
-    pub fn into_reader(self) -> impl Read + 'a {
+    pub(crate) fn into_reader(self) -> impl Read + 'a {
         let tail = Cursor::new(self.tail());
         let mut body: Box<dyn Read + 'a> = Box::new(io::empty());
         for part in self.parts {
@@ -185,7 +185,7 @@ impl Read for Later<'_> {
 
 /// A streamed part's source ended before its announced size: it changed since then.
 #[derive(Debug)]
-pub struct SourceEnded {
+pub(crate) struct SourceEnded {
     pub missing: u64,
 }
 

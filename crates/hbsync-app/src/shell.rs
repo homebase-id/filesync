@@ -21,7 +21,7 @@ pub struct Icons<'a> {
 /// The note that `folder` is decorated, holding the hash of the icon it got (empty when that
 /// failed): `folder-decorated-<hash of the folder's path>`.
 fn note(paths: &Paths, folder: &Path) -> PathBuf {
-    let key = hbsync_fileio::fnv1a64(folder.to_string_lossy().as_bytes());
+    let key = hbsync_platform::fnv::fnv1a64(folder.to_string_lossy().as_bytes());
     paths.state.join(format!("folder-decorated-{key:016x}"))
 }
 
@@ -44,7 +44,10 @@ fn icon_bytes(icons: Icons<'_>) -> &[u8] {
 /// with other names go (one Explorer still holds stays, until a later start).
 #[cfg(not(target_os = "macos"))]
 fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
-    let name = format!("homebase-{:016x}.{ext}", hbsync_fileio::fnv1a64(bytes));
+    let name = format!(
+        "homebase-{:016x}.{ext}",
+        hbsync_platform::fnv::fnv1a64(bytes)
+    );
     let path = paths.state.join(&name);
     if !path.exists() {
         hbsync_fileio::write_atomic(&path, bytes)?;
@@ -74,7 +77,7 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>) 
         return;
     }
     let done = note(paths, folder);
-    let key = format!("{:016x}", hbsync_fileio::fnv1a64(icon_bytes(icons)));
+    let key = format!("{:016x}", hbsync_platform::fnv::fnv1a64(icon_bytes(icons)));
     let (first, icon) = to_do(std::fs::read_to_string(&done).ok().as_deref(), &key);
     // Each time, not once: it also reaches folders decorated before there was one.
     #[cfg(windows)]
@@ -130,7 +133,7 @@ pub fn file_uri(path: &Path) -> String {
 
 /// GTK's bookmarks (`gtk-3.0/bookmarks`): one `URI label` per line. With `uri`, labelled.
 #[cfg(any(target_os = "linux", test))]
-pub fn gtk_bookmarks_with(text: &str, uri: &str, label: &str) -> Option<String> {
+pub(crate) fn gtk_bookmarks_with(text: &str, uri: &str, label: &str) -> Option<String> {
     if text.lines().any(|l| l.split(' ').next() == Some(uri)) {
         return None;
     }
@@ -144,7 +147,7 @@ pub fn gtk_bookmarks_with(text: &str, uri: &str, label: &str) -> Option<String> 
 
 /// GTK's bookmarks without `uri`.
 #[cfg(any(target_os = "linux", test))]
-pub fn gtk_bookmarks_without(text: &str, uri: &str) -> Option<String> {
+pub(crate) fn gtk_bookmarks_without(text: &str, uri: &str) -> Option<String> {
     let kept: Vec<&str> = text
         .lines()
         .filter(|l| l.split(' ').next() != Some(uri))
@@ -154,7 +157,7 @@ pub fn gtk_bookmarks_without(text: &str, uri: &str) -> Option<String> {
 
 /// KDE's places (`user-places.xbel`) with a bookmark for `uri`, before the closing tag.
 #[cfg(any(target_os = "linux", test))]
-pub fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
+pub(crate) fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
     if xbel.contains(&format!("href=\"{uri}\"")) {
         return None;
     }
@@ -170,7 +173,7 @@ pub fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
 
 /// KDE's places without the bookmark for `uri`.
 #[cfg(any(target_os = "linux", test))]
-pub fn kde_places_without(xbel: &str, uri: &str) -> Option<String> {
+pub(crate) fn kde_places_without(xbel: &str, uri: &str) -> Option<String> {
     let start = xbel.find(&format!("<bookmark href=\"{uri}\""))?;
     let start = xbel[..start].rfind('\n').map_or(start, |nl| nl + 1);
     let end = start + xbel[start..].find("</bookmark>")? + "</bookmark>".len();
@@ -218,7 +221,7 @@ mod os {
             .is_some_and(|icon| Path::new(icon).parent() == Some(&paths.state))
     }
 
-    pub fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+    pub(super) fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
         let icon = icon_file(paths, icons.png, "png")?;
         // GNOME's Files and others: GIO metadata (outside the folder).
         let _ = Command::new("gio")
@@ -236,7 +239,7 @@ mod os {
         Ok(())
     }
 
-    pub fn shortcut(folder: &Path) {
+    pub(super) fn shortcut(folder: &Path) {
         let uri = file_uri(folder);
         if let Some(config) = xdg_dir("XDG_CONFIG_HOME", ".config") {
             edit(&config.join("gtk-3.0/bookmarks"), true, |t| {
@@ -251,7 +254,7 @@ mod os {
         }
     }
 
-    pub fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    pub(super) fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let _ = Command::new("gio")
             .args(["set", "-d"])
             .arg(folder)
@@ -304,14 +307,14 @@ mod os {
         }
     }
 
-    pub fn icon(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+    pub(super) fn icon(_paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
         set_icon(folder, Some(icons.png))
     }
 
     /// Finder's sidebar has no public interface.
-    pub fn shortcut(_folder: &Path) {}
+    pub(super) fn shortcut(_folder: &Path) {}
 
-    pub fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    pub(super) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         set_icon(folder, None)
     }
 }
@@ -396,7 +399,13 @@ mod os {
     /// before (`!first`) may be pinned to Quick access, by an older version or as the fallback
     /// below: it comes off, so it isn't in the pane twice. Where Explorer won't take a root (not
     /// NTFS, a share, inside another provider's root), the first time pins it there instead.
-    pub fn sync_root(paths: &Paths, folder: &Path, identity: &str, icons: Icons<'_>, first: bool) {
+    pub(super) fn sync_root(
+        paths: &Paths,
+        folder: &Path,
+        identity: &str,
+        icons: Icons<'_>,
+        first: bool,
+    ) {
         let registered = icon_file(paths, icons.ico, "ico")
             .and_then(|icon| crate::sync_root::register(folder, identity, &icon));
         match registered {
@@ -411,13 +420,13 @@ mod os {
         }
     }
 
-    pub fn unregister(folder: &Path, identity: &str) {
+    pub(super) fn unregister(folder: &Path, identity: &str) {
         if let Err(e) = crate::sync_root::unregister(folder, identity) {
             tracing::info!("the folder in Explorer's navigation pane: {e}");
         }
     }
 
-    pub fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
+    pub(super) fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
         let icon = icon_file(paths, icons.ico, "ico")?;
         let ini = folder.join("desktop.ini");
         match std::fs::read_to_string(&ini) {
@@ -437,7 +446,7 @@ mod os {
         Ok(())
     }
 
-    pub fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    pub(super) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let ini = folder.join("desktop.ini");
         let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t.contains(OURS));
         if ours {

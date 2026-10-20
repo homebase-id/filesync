@@ -33,6 +33,8 @@ uuid = { version = "1.27", features = ["v4", "v7", "serde"] }
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"
+# `pub` only where the crate's root reaches it: the rest is `pub(crate)`.
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 dbg_macro = "warn"

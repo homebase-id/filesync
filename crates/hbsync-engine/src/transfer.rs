@@ -48,13 +48,13 @@ impl Default for TransferConfig {
 
 /// A token bucket shared by all workers. Holds at most one second of tokens.
 #[derive(Debug)]
-pub struct Throttle {
+pub(crate) struct Throttle {
     rate: f64,
     state: Mutex<(f64, Instant)>,
 }
 
 impl Throttle {
-    pub fn new(bytes_per_sec: u64) -> Self {
+    pub(crate) fn new(bytes_per_sec: u64) -> Self {
         let rate = bytes_per_sec.max(1) as f64;
         Throttle {
             rate,
@@ -63,7 +63,7 @@ impl Throttle {
     }
 
     /// Blocks until `n` bytes may pass.
-    pub fn take(&self, n: usize) {
+    pub(crate) fn take(&self, n: usize) {
         let wait = {
             let Ok(mut s) = self.state.lock() else { return };
             let now = Instant::now();
@@ -87,7 +87,7 @@ impl Throttle {
 /// What every byte of a transfer goes through: the bandwidth cap, if any, and the count of
 /// bytes moved, if anyone watches.
 #[derive(Debug, Default)]
-pub struct Meter<'a> {
+pub(crate) struct Meter<'a> {
     pub throttle: Option<Throttle>,
     pub moved: Option<&'a AtomicU64>,
 }
@@ -106,7 +106,7 @@ impl Pace for Meter<'_> {
 
 /// A writer whose bytes go through a [`Meter`].
 #[derive(Debug)]
-pub struct MeteredWrite<'a, W> {
+pub(crate) struct MeteredWrite<'a, W> {
     pub inner: W,
     pub meter: &'a Meter<'a>,
 }
@@ -176,7 +176,7 @@ impl Job {
     }
 
     /// The file it reads or writes at a version it knows; `None` for a create.
-    pub fn file_id(&self) -> Option<RemoteFileId> {
+    pub(crate) fn file_id(&self) -> Option<RemoteFileId> {
         match self {
             Job::Download(d) => Some(d.file_id),
             Job::Upload { target, .. } | Job::Meta { target, .. } => {
@@ -278,7 +278,7 @@ pub fn run_jobs(
 /// together, to record in one go). A small download's file may not be durable yet: the
 /// caller makes it so before putting it in place (`hbsync_fileio::sync_completed`). The bytes
 /// moved are added to `moved`.
-pub fn run_jobs_while(
+pub(crate) fn run_jobs_while(
     remote: &dyn Remote,
     cfg: TransferConfig,
     moved: Option<&AtomicU64>,

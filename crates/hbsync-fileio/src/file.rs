@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use hbsync_platform::{Fingerprint, LocalMeta, ops};
 
-use crate::hash::{ContentHash, HashAlgorithm, Hasher, feed};
+use crate::hash::{Hasher, feed};
+use hbsync_types::{ContentHash, HashAlgorithm};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FileIoError {

@@ -75,7 +75,7 @@ impl Faults {
     }
 
     /// Whether `point` fails now (one of its failures taken).
-    pub fn fails(&self, point: FailPoint) -> bool {
+    pub(crate) fn fails(&self, point: FailPoint) -> bool {
         let mut left = self.0.lock().unwrap_or_else(|p| p.into_inner());
         match left.get_mut(&point) {
             Some(n) if *n > 0 => {

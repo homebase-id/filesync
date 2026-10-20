@@ -100,7 +100,7 @@ impl RelPath {
 }
 
 /// Component-wise comparison of two `/`-separated paths: `/` sorts before every other byte.
-pub fn path_cmp(a: &str, b: &str) -> Ordering {
+pub(crate) fn path_cmp(a: &str, b: &str) -> Ordering {
     let rank = |byte: u8| {
         if byte == b'/' {
             0u16

@@ -51,19 +51,19 @@ pub(crate) struct Announced(Option<(Instant, Instant)>);
 
 impl Announced {
     /// The drive announced a change.
-    pub fn note(&mut self, now: Instant) {
+    pub(crate) fn note(&mut self, now: Instant) {
         let first = self.0.map_or(now, |(first, _)| first);
         self.0 = Some((first, now + REMOTE_QUIET));
     }
 
     /// When announced changes are due to be pulled ([`Announced::due`]); `None`: none were.
-    pub fn deadline(&self) -> Option<Instant> {
+    pub(crate) fn deadline(&self) -> Option<Instant> {
         self.0
             .map(|(first, quiet)| quiet.min(first + REMOTE_MAX_WAIT))
     }
 
     /// Whether announced changes are due to be pulled now: they are taken then.
-    pub fn due(&mut self, now: Instant) -> bool {
+    pub(crate) fn due(&mut self, now: Instant) -> bool {
         let due = self.deadline().is_some_and(|at| now >= at);
         if due {
             self.0 = None;
@@ -107,7 +107,7 @@ pub(crate) struct Schedule {
 
 impl Schedule {
     /// A folder starting (paused, with `pause`): it syncs at once unless paused.
-    pub fn new(now: Instant, look: Duration, pause: Option<Until>) -> Schedule {
+    pub(crate) fn new(now: Instant, look: Duration, pause: Option<Until>) -> Schedule {
         Schedule {
             look,
             next_look: now + look,
@@ -122,13 +122,13 @@ impl Schedule {
     }
 
     /// Something changed (here, or in this folder's part of the drive): a sync when allowed.
-    pub fn want(&mut self) {
+    pub(crate) fn want(&mut self) {
         self.wanted = true;
     }
 
     /// A sync asked for now (sync now, a confirmation, a resume, a wake-up): without waiting
     /// out a backoff, reading the feed first.
-    pub fn asked(&mut self, now: Instant) {
+    pub(crate) fn asked(&mut self, now: Instant) {
         self.wanted = true;
         self.read = true;
         self.not_before = now;
@@ -136,12 +136,12 @@ impl Schedule {
 
     /// Whether the sync starting now reads the feed first whatever the notifications say.
     /// Asked until a sync ended ([`Schedule::synced`]: it read first): a failed one asks again.
-    pub fn read(&self) -> bool {
+    pub(crate) fn read(&self) -> bool {
         self.read
     }
 
     /// The machine woke up: sync now, the backoff forgotten.
-    pub fn woke(&mut self, now: Instant) {
+    pub(crate) fn woke(&mut self, now: Instant) {
         self.asked(now);
         self.backoff = Backoff::new();
     }
@@ -149,35 +149,35 @@ impl Schedule {
     /// The drive can be reached again (the notifications connected): a sync that waits, for a
     /// failure's backoff or to try unfinished work again, goes now, its backoff forgotten.
     /// One that waits for nothing doesn't.
-    pub fn online(&mut self, now: Instant) {
+    pub(crate) fn online(&mut self, now: Instant) {
         if self.retry.is_some() || now < self.not_before {
             self.woke(now);
             self.retry_backoff = Backoff::new();
         }
     }
 
-    pub fn pause(&mut self, until: Until) {
+    pub(crate) fn pause(&mut self, until: Until) {
         self.pause = Some(until);
     }
 
-    pub fn paused(&self) -> Option<Until> {
+    pub(crate) fn paused(&self) -> Option<Until> {
         self.pause
     }
 
     /// Syncing goes on, at once. Whether it was paused.
-    pub fn resume(&mut self, now: Instant) -> bool {
+    pub(crate) fn resume(&mut self, now: Instant) -> bool {
         self.asked(now);
         self.pause.take().is_some()
     }
 
     /// A pause until a time that has come (`unix`, Unix seconds) ends. Whether it did.
-    pub fn pause_over(&mut self, now: Instant, unix: u64) -> bool {
+    pub(crate) fn pause_over(&mut self, now: Instant, unix: u64) -> bool {
         self.pause.flatten().is_some_and(|t| unix >= t) && self.resume(now)
     }
 
     /// Whether it is time to look at what is local again; the next look is a look later. It
     /// asks for no sync by itself.
-    pub fn look_due(&mut self, now: Instant) -> bool {
+    pub(crate) fn look_due(&mut self, now: Instant) -> bool {
         if now < self.next_look {
             return false;
         }
@@ -187,14 +187,14 @@ impl Schedule {
 
     /// Whether to sync now: wanted (or unfinished work's retry has come), not paused, not
     /// backing off.
-    pub fn due(&self, now: Instant) -> bool {
+    pub(crate) fn due(&self, now: Instant) -> bool {
         let retry = self.retry.is_some_and(|at| now >= at);
         self.pause.is_none() && (self.wanted || retry) && now >= self.not_before
     }
 
     /// Not now: tried again at the next look (the folder gone, rules that don't parse: both
     /// are local). Returns the wait.
-    pub fn later(&mut self, now: Instant) -> Duration {
+    pub(crate) fn later(&mut self, now: Instant) -> Duration {
         self.not_before = self.next_look;
         self.next_look.saturating_duration_since(now)
     }
@@ -202,7 +202,7 @@ impl Schedule {
     /// A sync ended. Work it left unfinished is tried again after a backoff (5 s, doubling to
     /// 5 min while the tries do nothing, from the start again after one that did some), so
     /// stuck work isn't a full sync every few seconds.
-    pub fn synced(&mut self, now: Instant, outcome: Synced) {
+    pub(crate) fn synced(&mut self, now: Instant, outcome: Synced) {
         self.backoff = Backoff::new();
         self.read = false;
         match outcome {
@@ -225,7 +225,7 @@ impl Schedule {
     /// When time alone next changes what [`Schedule::due`], [`Schedule::look_due`] (when
     /// `looking`) or [`Schedule::pause_over`] say, `unix` being the Unix time at `now`: the
     /// runner waits for an event until then. `None`: only an event can.
-    pub fn next_wake(&self, now: Instant, unix: u64, looking: bool) -> Option<Instant> {
+    pub(crate) fn next_wake(&self, now: Instant, unix: u64, looking: bool) -> Option<Instant> {
         let look = looking.then_some(self.next_look);
         let (pause_end, sync) = match self.pause {
             Some(until) => (pause_end(until, now, unix), None),
@@ -239,7 +239,7 @@ impl Schedule {
     }
 
     /// A sync failed, leaving `state`: tried again after a backoff. Returns the wait.
-    pub fn failed(&mut self, now: Instant, state: State) -> Duration {
+    pub(crate) fn failed(&mut self, now: Instant, state: State) -> Duration {
         let wait = self.backoff.after(state);
         self.not_before = now + wait;
         wait

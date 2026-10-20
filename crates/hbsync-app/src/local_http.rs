@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 /// A request larger than this (line, headers and body) isn't read.
-pub const MAX_REQUEST: usize = 64 * 1024;
+pub(crate) const MAX_REQUEST: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {

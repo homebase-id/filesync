@@ -35,7 +35,7 @@ pub enum CredentialError {
 
 /// Where a device's credentials are.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Location {
+pub(crate) enum Location {
     Keychain,
     /// In a file, because the keychain couldn't be used (`why`).
     File {
@@ -45,7 +45,7 @@ pub enum Location {
 }
 
 #[derive(Debug)]
-pub struct CredentialStore {
+pub(crate) struct CredentialStore {
     /// The OS keychain, or why there is none.
     keychain: Result<Arc<Keychain>, String>,
     /// Files only, on purpose (tests, development): no keychain to miss.
@@ -57,7 +57,7 @@ pub struct CredentialStore {
 impl CredentialStore {
     /// The OS keychain, with files in the config folder as the fallback.
     /// `HBSYNC_CREDENTIALS=file` uses the files only (tests, development).
-    pub fn open(paths: &Paths) -> CredentialStore {
+    pub(crate) fn open(paths: &Paths) -> CredentialStore {
         let files_only = std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file");
         let keychain = if files_only {
             Err("HBSYNC_CREDENTIALS=file".to_owned())
@@ -72,7 +72,8 @@ impl CredentialStore {
     }
 
     /// Files in `dir` only.
-    pub fn files_in(dir: &Path) -> CredentialStore {
+    #[cfg(test)]
+    pub(crate) fn files_in(dir: &Path) -> CredentialStore {
         CredentialStore {
             keychain: Err("files only".to_owned()),
             files_only: true,
@@ -81,18 +82,19 @@ impl CredentialStore {
     }
 
     /// Whether the keychain is used, or why not.
-    pub fn keychain(&self) -> Result<(), &str> {
+    #[cfg(test)]
+    pub(crate) fn keychain(&self) -> Result<(), &str> {
         self.keychain.as_ref().map(|_| ()).map_err(String::as_str)
     }
 
     /// The file the credentials for `identity` are kept in without a keychain.
-    pub fn file(&self, identity: &str) -> PathBuf {
+    pub(crate) fn file(&self, identity: &str) -> PathBuf {
         self.dir.join(format!("{identity}.json"))
     }
 
     /// Saves `creds`: in the keychain if it takes them, else in the file. A copy left in the
     /// file is removed once the keychain has them.
-    pub fn save(&self, creds: &Credentials) -> Result<Location, CredentialError> {
+    pub(crate) fn save(&self, creds: &Credentials) -> Result<Location, CredentialError> {
         let file = self.file(&creds.identity);
         let why = match self.keychain_entry(&creds.identity) {
             Ok(entry) => {
@@ -114,7 +116,10 @@ impl CredentialStore {
     /// The saved credentials for `identity`, and where they are. `None` only when they are
     /// known to be missing: a keychain that is there but can't be read now (locked at logon)
     /// is an error, not "not set up".
-    pub fn load(&self, identity: &str) -> Result<Option<(Credentials, Location)>, CredentialError> {
+    pub(crate) fn load(
+        &self,
+        identity: &str,
+    ) -> Result<Option<(Credentials, Location)>, CredentialError> {
         // Why the file is read: no keychain on this system (`Ok`), or one that failed (`Err`);
         // `None` when the keychain works and has no entry.
         let why: Option<Result<String, String>> = match &self.keychain {
@@ -153,7 +158,7 @@ impl CredentialStore {
 
     /// Forgets the credentials for `identity`, wherever they are. Returns why the keychain
     /// couldn't be looked at, if it couldn't (it may still hold them: say so).
-    pub fn delete(&self, identity: &str) -> Result<Option<String>, CredentialError> {
+    pub(crate) fn delete(&self, identity: &str) -> Result<Option<String>, CredentialError> {
         remove(&self.file(identity))?;
         match &self.keychain {
             Err(_) if self.files_only => Ok(None),

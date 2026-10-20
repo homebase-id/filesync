@@ -6,7 +6,7 @@ pub mod adopt;
 pub mod along;
 pub mod deleted;
 pub mod drive;
-pub mod engine;
+mod engine;
 pub mod exec;
 pub mod feed;
 mod id;

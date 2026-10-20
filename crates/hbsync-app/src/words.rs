@@ -72,7 +72,7 @@ pub fn bytes(n: u64) -> String {
 }
 
 /// What happened, as a verb phrase: "uploaded", "deleted on another device".
-pub fn verb(kind: SyncedKind) -> &'static str {
+pub(crate) fn verb(kind: SyncedKind) -> &'static str {
     match kind {
         SyncedKind::Uploaded => "uploaded",
         SyncedKind::Downloaded => "downloaded",
@@ -160,7 +160,7 @@ pub fn deleted_place(d: &Deleted, main: Option<&Path>) -> String {
 
 /// The name of the item at `place` ([`deleted_place`], a `/` after it or not): the last name
 /// of its path.
-pub fn deleted_place_name(place: &str) -> &str {
+pub(crate) fn deleted_place_name(place: &str) -> &str {
     let place = place.trim_end_matches('/');
     last_name(place.strip_prefix(ON_THE_DRIVE).unwrap_or(place))
 }
@@ -190,7 +190,7 @@ pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
 }
 
 /// A sync in progress: "12 of 40 files, 3.1 MB of 40 MB".
-pub fn progress(p: &Progress) -> String {
+pub(crate) fn progress(p: &Progress) -> String {
     let files = format!(
         "{} of {} files",
         count(p.files_done.min(p.files_total)),

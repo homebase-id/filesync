@@ -3,13 +3,14 @@
 
 use std::fmt;
 
-pub use hbsync_fileio::{ContentHash, HashAlgorithm};
+pub use hash::{ContentHash, HashAlgorithm, HashParseError};
 pub use hbsync_platform::tags::{Tag, Tags};
 pub use role::Role;
 pub use uuid::Uuid;
 
 pub mod activity;
-pub mod role;
+mod hash;
+mod role;
 pub mod schema;
 
 /// The name [`NodeId::RECOVERED`] gets when a device makes it; the user may rename it.

@@ -37,7 +37,7 @@ pub(crate) struct Keeper {
 }
 
 impl Keeper {
-    pub fn spawn(drive: Arc<Drive>) -> Keeper {
+    pub(super) fn spawn(drive: Arc<Drive>) -> Keeper {
         let mut keeper = Keeper {
             drive,
             worker: None,
@@ -88,19 +88,19 @@ impl Keeper {
 
     /// The purge, once a day: what Recently deleted has kept `keep_days` goes. Asked while one
     /// waits to start, it is that one.
-    pub fn purge(&mut self, keep_days: u32) {
+    pub(super) fn purge(&mut self, keep_days: u32) {
         if !self.purging.swap(true, Ordering::SeqCst) {
             self.send(Job::Purge(keep_days));
         }
     }
 
     /// The account is paused (or resumed): no purge starts while it is.
-    pub fn paused(&self, paused: bool) {
+    pub(super) fn paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::SeqCst);
     }
 
     /// Restores or empties as `control` asks.
-    pub fn request(&mut self, control: AccountControl) {
+    pub(super) fn request(&mut self, control: AccountControl) {
         self.send(Job::Control(control));
     }
 
@@ -126,7 +126,7 @@ impl Keeper {
 
     /// The account ends: what was asked of it is done (but a purge not started yet), then its
     /// thread ends.
-    pub fn finish(self) {
+    pub(super) fn finish(self) {
         self.ending.store(true, Ordering::SeqCst);
         if let Some((jobs, thread)) = self.worker {
             drop(jobs);

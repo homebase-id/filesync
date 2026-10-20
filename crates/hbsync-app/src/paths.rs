@@ -31,7 +31,7 @@ pub struct Paths {
 }
 
 /// Removes the file at `path`; already gone is fine.
-pub fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),

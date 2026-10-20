@@ -44,7 +44,7 @@ pub enum SkipReason {
 }
 
 /// Decides whether the walk enters a folder.
-pub type DescendFn<'a> = Box<dyn FnMut(&RelPath, &LocalMeta) -> bool + 'a>;
+pub(crate) type DescendFn<'a> = Box<dyn FnMut(&RelPath, &LocalMeta) -> bool + 'a>;
 
 /// A lazy depth-first walk.
 pub struct Walker<'a> {
@@ -73,7 +73,7 @@ struct Frame {
 
 impl<'a> Walker<'a> {
     /// Walks everything below `root` that `filter` lets through.
-    pub fn new(root: &Path, filter: &'a Filter) -> Self {
+    pub(crate) fn new(root: &Path, filter: &'a Filter) -> Self {
         Self::at(root, RelPath::root(), filter, None)
     }
 

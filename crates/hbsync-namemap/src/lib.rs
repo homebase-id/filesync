@@ -82,7 +82,7 @@ pub fn to_remote(local: &str, os: Os) -> Result<String, NameIssue> {
 pub fn sibling_hash(name: &str) -> i32 {
     // The key with the Windows escapes taken back; its low 32 bits fit an SQLite row in 4 bytes.
     let key = name_key(&unescape_windows(name));
-    hbsync_fileio::fnv1a64(key.as_bytes()) as i32
+    hbsync_platform::fnv::fnv1a64(key.as_bytes()) as i32
 }
 
 fn escape_windows(remote: &str) -> String {

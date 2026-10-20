@@ -31,7 +31,7 @@ fn io(e: windows::core::Error) -> std::io::Error {
 /// `icon` (an ICO file). Ours that are stale go: this one's id at another folder or with another
 /// icon, or another of ours at this folder (an earlier identity). True when it registered, false
 /// when it already was.
-pub fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<bool> {
+pub(crate) fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<bool> {
     if !StorageProviderSyncRootManager::IsSupported().map_err(io)? {
         return Err(std::io::Error::other(
             "Windows doesn't support Cloud Files here",
@@ -86,7 +86,7 @@ fn root_info(
 
 /// Unregisters the sync root of `identity` at `folder`, found by its id: it goes even when the
 /// folder was moved or deleted.
-pub fn unregister(folder: &Path, identity: &str) -> std::io::Result<()> {
+pub(crate) fn unregister(folder: &Path, identity: &str) -> std::io::Result<()> {
     let prefix = prefix()?;
     let id = id(&prefix, folder, identity);
     if ours(&prefix)?.iter().any(|(other, ..)| *other == id) {
@@ -132,7 +132,7 @@ fn prefix() -> std::io::Result<String> {
 /// The account is the identity and a hash of the folder, so each folder of each identity (and
 /// each private instance's) has its own root.
 fn id(prefix: &str, folder: &Path, identity: &str) -> String {
-    let hash = hbsync_fileio::fnv1a64(key(folder).as_bytes());
+    let hash = hbsync_platform::fnv::fnv1a64(key(folder).as_bytes());
     format!("{prefix}{identity}~{hash:016x}")
 }
 

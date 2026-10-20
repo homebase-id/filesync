@@ -3,20 +3,20 @@
 //! the one-daemon lock, and starting the daemon at logon.
 
 pub mod autostart;
-pub mod config;
+mod config;
 pub mod control;
 pub mod daemon;
 pub mod folders;
 pub mod install;
-pub mod ipc;
+mod ipc;
 pub mod local_http;
 pub mod lock;
 pub mod logging;
-pub mod login;
+mod login;
 pub mod paths;
 pub mod protocol;
 pub mod runner;
-pub mod secrets;
+mod secrets;
 pub mod setup;
 pub mod shell;
 #[cfg(windows)]
@@ -30,7 +30,8 @@ pub use hbsync_homebase::app::{APP_NAME, files_online};
 pub use paths::{NoHome, Paths};
 pub use protocol::{Control, DaemonStatus, FolderStatus, State};
 pub use runner::{Command, Handle, Runner, RunnerConfig};
-pub use secrets::{CredentialError, CredentialStore, Location};
+pub use secrets::CredentialError;
+pub(crate) use secrets::{CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

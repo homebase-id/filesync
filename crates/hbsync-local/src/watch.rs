@@ -27,7 +27,7 @@ use crate::scan::{ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan};
 
 /// A coalesced set of changes from the watcher.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WatchBatch {
+pub(crate) struct WatchBatch {
     /// Folders to rescan: one an event named itself, or the folder of an entry whose name
     /// isn't valid.
     pub dirs: BTreeSet<RelPath>,
@@ -65,7 +65,7 @@ impl Default for Debounce {
 pub type Bell = Arc<dyn Fn() + Send + Sync>;
 
 /// OS change notifications for one sync root.
-pub struct LiveWatcher {
+pub(crate) struct LiveWatcher {
     _watcher: RecommendedWatcher,
     rx: Receiver<notify::Result<Event>>,
     root: PathBuf,
@@ -88,7 +88,11 @@ impl std::fmt::Debug for LiveWatcher {
 impl LiveWatcher {
     /// Starts watching; `bell` rings when an event is queued or the ignore rules' file was
     /// changed.
-    pub fn start(root: &Path, filter: Arc<Filter>, bell: Option<Bell>) -> notify::Result<Self> {
+    pub(crate) fn start(
+        root: &Path,
+        filter: Arc<Filter>,
+        bell: Option<Bell>,
+    ) -> notify::Result<Self> {
         let root = root.canonicalize().map_err(notify::Error::io)?;
         let (tx, rx) = channel();
         let (rung, rules): (Arc<AtomicBool>, Arc<AtomicBool>) = Default::default();
@@ -140,7 +144,7 @@ impl LiveWatcher {
     /// `debounce.quiet` (the queue is then drained) or `debounce.max_delay` has passed.
     /// `None` if nothing changed. Events that change nothing neither start nor extend a batch.
     /// `first` is called once the first change came, before the rest is collected.
-    pub fn next_batch(
+    pub(crate) fn next_batch(
         &self,
         timeout: Duration,
         debounce: Debounce,

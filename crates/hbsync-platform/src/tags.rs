@@ -37,7 +37,7 @@ pub struct Tags(Vec<Tag>);
 /// keeps what the drive has. The server caps `appData.content` at 10,240 UTF-16 units of the
 /// encrypted, base64 text (**[verified]**, homebase-api-notes), about 7,600 bytes of JSON: room
 /// for a 255-byte name, the other keys and two devices' worth of tags merged.
-pub const MAX_BYTES: usize = 2000;
+pub(crate) const MAX_BYTES: usize = 2000;
 
 impl Tags {
     /// Sorted by name; of two with one name, the first is kept.
@@ -193,7 +193,7 @@ pub const XDG_ATTR: &str = "user.xdg.tags";
 /// Parses Finder's attribute. A suffix after the last newline that isn't a colour is part of
 /// the name.
 #[cfg(any(target_os = "macos", test))]
-pub fn decode_finder(bytes: &[u8]) -> Option<Tags> {
+pub(crate) fn decode_finder(bytes: &[u8]) -> Option<Tags> {
     let plist::Value::Array(items) = plist::Value::from_reader(io::Cursor::new(bytes)).ok()? else {
         return None;
     };
@@ -212,7 +212,7 @@ pub fn decode_finder(bytes: &[u8]) -> Option<Tags> {
 
 /// Finder's attribute for `tags`, of those it can hold.
 #[cfg(any(target_os = "macos", test))]
-pub fn encode_finder(tags: &Tags) -> Vec<u8> {
+pub(crate) fn encode_finder(tags: &Tags) -> Vec<u8> {
     let items = tags
         .held_by(Os::MacOs)
         .0
@@ -372,7 +372,7 @@ mod xattr {
     }
 
     /// The attribute's value, `None` if the item has none by that name.
-    pub fn get(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
+    pub(super) fn get(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
         let (path, name) = cstrings(path, name)?;
         loop {
             // SAFETY: valid C strings; a null buffer of size 0 asks for the length.
@@ -400,7 +400,7 @@ mod xattr {
         }
     }
 
-    pub fn set(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
+    pub(super) fn set(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
         let (path, name) = cstrings(path, name)?;
         // SAFETY: valid C strings and `value` of `value.len()` bytes.
         let rc = unsafe {
@@ -427,7 +427,7 @@ mod xattr {
     }
 
     /// Removes the attribute; one that isn't there is no error.
-    pub fn remove(path: &Path, name: &str) -> io::Result<()> {
+    pub(super) fn remove(path: &Path, name: &str) -> io::Result<()> {
         let (path, name) = cstrings(path, name)?;
         // SAFETY: valid C strings.
         let rc = unsafe {

@@ -42,7 +42,7 @@ impl std::fmt::Debug for Credentials {
 }
 
 impl Credentials {
-    pub fn shared_secret_key(&self) -> Result<Key, HomebaseError> {
+    pub(crate) fn shared_secret_key(&self) -> Result<Key, HomebaseError> {
         STANDARD
             .decode(&self.shared_secret)
             .ok()

@@ -9,7 +9,7 @@ use hbsync_app::{DaemonStatus, FolderStatus, State};
 use hbsync_types::activity::{Synced, SyncedKind};
 
 /// Entries of the recently synced list in the menu.
-pub const RECENT_SHOWN: usize = 10;
+pub(crate) const RECENT_SHOWN: usize = 10;
 /// Notes shown under Problems.
 const PROBLEMS_SHOWN: usize = 8;
 /// Menu text is cut to this many characters.
@@ -61,7 +61,7 @@ impl Daemon {
 
 /// Everything the menu depends on.
 #[derive(Debug, Clone)]
-pub struct View<'a> {
+pub(crate) struct View<'a> {
     pub daemon: &'a Daemon,
     pub recent: &'a [RecentItem],
     pub start_at_login: bool,
@@ -75,7 +75,7 @@ pub struct View<'a> {
 /// The tray icon: the Filesync cloud, its dot telling the state.
 /// Ordered by urgency: the icon shows the most urgent folder's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Look {
+pub(crate) enum Look {
     UpToDate,
     /// Paused, offline, not set up.
     Quiet,
@@ -85,7 +85,7 @@ pub enum Look {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Action {
+pub(crate) enum Action {
     LogIn,
     LogInAgain,
     OpenFolder,
@@ -110,7 +110,7 @@ pub enum Action {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Item {
+pub(crate) enum Item {
     /// Text that can't be clicked.
     Label(String),
     Action(Action, String),
@@ -119,7 +119,7 @@ pub enum Item {
     Separator,
 }
 
-pub fn look(view: &View) -> Look {
+pub(crate) fn look(view: &View) -> Look {
     match view.daemon {
         Daemon::NotSetUp => Look::Quiet,
         Daemon::Starting(Some(_)) => Look::Attention,
@@ -140,7 +140,7 @@ fn folder_look(s: &FolderStatus) -> Look {
 }
 
 /// One line saying what's going on.
-pub fn status_line(view: &View) -> String {
+pub(crate) fn status_line(view: &View) -> String {
     if let Some(busy) = view.busy {
         return busy.to_owned();
     }
@@ -155,11 +155,11 @@ pub fn status_line(view: &View) -> String {
     }
 }
 
-pub fn tooltip(view: &View) -> String {
+pub(crate) fn tooltip(view: &View) -> String {
     format!("Homebase Filesync · {}", status_line(view))
 }
 
-pub fn menu(view: &View) -> Vec<Item> {
+pub(crate) fn menu(view: &View) -> Vec<Item> {
     let mut items = vec![Item::Label(format!(
         "Homebase Filesync {}",
         hbsync_app::VERSION
@@ -283,7 +283,7 @@ fn recently_synced(recent: &[RecentItem], now: u64) -> Item {
 }
 
 /// "report.txt · uploaded · 2 min ago", or "Photos/2024 · 312 files downloaded · 1 h ago".
-pub fn recent_line(s: &Synced, now: u64) -> String {
+pub(crate) fn recent_line(s: &Synced, now: u64) -> String {
     let name = if s.is_group() {
         if s.path.is_empty() {
             "Homebase".to_owned()

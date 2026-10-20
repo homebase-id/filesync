@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The MSIX application's ID in Conveyor's manifest (its display name without spaces).
-pub const MSIX_APP_ID: &str = "HomebaseFilesync";
+pub(crate) const MSIX_APP_ID: &str = "HomebaseFilesync";
 /// The MSIX startup task Conveyor declares (`start-on-login`).
 pub const MSIX_STARTUP_TASK: &str = "HomebaseFilesync.StartupTask";
 
@@ -27,7 +27,7 @@ pub enum Install {
 /// This program's path with symlinks resolved (a CLI linked onto the PATH still finds its app),
 /// found once. Not resolved on Windows: its canonical form (`\\?\`) isn't wanted, and there
 /// are no such links.
-pub fn current_exe() -> std::io::Result<&'static Path> {
+pub(crate) fn current_exe() -> std::io::Result<&'static Path> {
     static CURRENT: OnceLock<Option<PathBuf>> = OnceLock::new();
     CURRENT
         .get_or_init(|| {

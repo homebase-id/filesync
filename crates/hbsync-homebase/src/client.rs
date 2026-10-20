@@ -166,7 +166,7 @@ impl std::fmt::Debug for Client {
 
 /// How a multipart upload is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UploadMethod {
+pub(crate) enum UploadMethod {
     Post,
     Patch,
 }
@@ -181,7 +181,7 @@ impl Client {
         })
     }
 
-    pub fn identity(&self) -> &str {
+    pub(crate) fn identity(&self) -> &str {
         &self.identity
     }
 
@@ -204,7 +204,7 @@ impl Client {
     }
 
     /// `GET {path}` with `query` encrypted into `ss`.
-    pub fn get<T: DeserializeOwned>(
+    pub(crate) fn get<T: DeserializeOwned>(
         &self,
         path: &str,
         query: &[(&str, &str)],
@@ -243,7 +243,7 @@ impl Client {
     }
 
     /// Sends a multipart form (plaintext; the parts carry their own encryption).
-    pub fn upload<T: DeserializeOwned>(
+    pub(crate) fn upload<T: DeserializeOwned>(
         &self,
         method: UploadMethod,
         path: &str,

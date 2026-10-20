@@ -6,13 +6,13 @@
 //! otherwise; see also `docs/spec/homebase-api-notes.md`.
 
 pub mod app;
-pub mod client;
+mod client;
 mod connections;
-pub mod crypto;
+mod crypto;
 pub mod drive;
-pub mod multipart;
+mod multipart;
 pub mod notify;
-pub mod problem;
+mod problem;
 pub mod youauth;
 
 pub use client::Client;

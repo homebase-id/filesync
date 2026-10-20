@@ -160,7 +160,7 @@ impl Drive {
     }
 
     /// Whether uploads are held: the drive said it is full lately.
-    pub fn full(&self) -> bool {
+    pub(crate) fn full(&self) -> bool {
         let full = self.full.lock().unwrap_or_else(|e| e.into_inner());
         full.is_some_and(|until| Instant::now() < until)
     }
@@ -171,7 +171,7 @@ impl Drive {
     }
 
     /// The drive refused an upload, out of storage: hold uploads for a while, in every folder.
-    pub fn set_full(&self) {
+    pub(crate) fn set_full(&self) {
         *self.full.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now() + FULL_HOLD);
     }
 
@@ -179,7 +179,7 @@ impl Drive {
         self.remote.as_ref()
     }
 
-    pub fn shared_remote(&self) -> Arc<dyn Remote> {
+    pub(crate) fn shared_remote(&self) -> Arc<dyn Remote> {
         Arc::clone(&self.remote)
     }
 
@@ -278,7 +278,7 @@ impl Drive {
 
     /// Wakes the engines of the folders the writes through `db` marked nodes dirty in
     /// ([`StateDb::take_touched`]), but `except`'s.
-    pub fn wake_touched(&self, db: &mut StateDb, except: Option<i64>) {
+    pub(crate) fn wake_touched(&self, db: &mut StateDb, except: Option<i64>) {
         let folders = db.take_touched();
         self.wake_where(|folder| Some(folder) != except && folders.contains(&folder));
     }

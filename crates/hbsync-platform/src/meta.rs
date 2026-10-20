@@ -110,7 +110,7 @@ mod imp {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
-    pub fn stat(path: &Path) -> io::Result<LocalMeta> {
+    pub(super) fn stat(path: &Path) -> io::Result<LocalMeta> {
         Ok(from_metadata(&fs::symlink_metadata(path)?))
     }
 
@@ -172,7 +172,7 @@ mod imp {
             .open(path)
     }
 
-    pub fn stat(path: &Path) -> io::Result<LocalMeta> {
+    pub(super) fn stat(path: &Path) -> io::Result<LocalMeta> {
         let m = fs::symlink_metadata(path)?;
         let file = open_attributes(path)?;
         let handle = file.as_raw_handle();

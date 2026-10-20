@@ -119,7 +119,7 @@ pub struct Listed {
 
 impl Listed {
     /// Whether every child of `folder` whose name may clash with `name` is held.
-    pub fn holds(&self, folder: NodeId, name: &str) -> bool {
+    pub(crate) fn holds(&self, folder: NodeId, name: &str) -> bool {
         self.full.contains(&folder)
             || self
                 .named
@@ -316,7 +316,7 @@ impl Op {
 
     /// Whether the executor runs it on its worker pool: the transfers, and every write to
     /// the remote.
-    pub fn pooled(&self) -> bool {
+    pub(crate) fn pooled(&self) -> bool {
         matches!(
             self,
             Op::LocalDownload { .. }

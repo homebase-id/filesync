@@ -17,7 +17,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub const PROTOCOL: u32 = 7;
+pub(crate) const PROTOCOL: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -95,7 +95,7 @@ pub enum Reply {
 }
 
 /// How long a pause lasts: until then (Unix seconds), or until resumed (`None`).
-pub type Until = Option<u64>;
+pub(crate) type Until = Option<u64>;
 
 /// A request to change what the daemon does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

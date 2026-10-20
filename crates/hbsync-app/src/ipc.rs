@@ -42,7 +42,7 @@ pub enum IpcError {
 }
 
 /// Asks the daemon `request` and waits for its reply.
-pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
+pub(crate) fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
     let mut stream = open(paths, request)?;
     read_reply(&mut stream)?.ok_or(IpcError::Protocol("no answer".into()))
 }
@@ -85,7 +85,7 @@ fn not_running(e: io::Error) -> IpcError {
 /// existing socket file is then left over from a daemon that died, and is replaced.
 ///
 /// [`InstanceLock`]: crate::lock::InstanceLock
-pub fn listen(paths: &Paths) -> io::Result<Listener> {
+pub(crate) fn listen(paths: &Paths) -> io::Result<Listener> {
     let name = endpoint(paths, true)?;
     let options = ListenerOptions::new().name(name);
     #[cfg(windows)]
@@ -103,7 +103,7 @@ pub fn listen(paths: &Paths) -> io::Result<Listener> {
 
 /// Answers requests on `listener` with `answer`, each connection on its own thread; hands a
 /// [`Ask::Watch`]'s connection to `watch`. Returns only if the listener fails.
-pub fn serve(
+pub(crate) fn serve(
     listener: Listener,
     answer: impl Fn(Request) -> Reply + Send + Sync + 'static,
     watch: impl Fn(Stream) + Send + Sync + 'static,
@@ -164,7 +164,7 @@ fn handle(
 }
 
 /// Watches the daemon's status ([`Ask::Watch`]).
-pub fn watch(paths: &Paths) -> Result<Watching, IpcError> {
+pub(crate) fn watch(paths: &Paths) -> Result<Watching, IpcError> {
     let stream = open(paths, &Request::new(Ask::Watch))?;
     // Replies come when the status changes: blocks until then.
     unless_unsupported(stream.get_ref().set_recv_timeout(None))?;
@@ -173,31 +173,31 @@ pub fn watch(paths: &Paths) -> Result<Watching, IpcError> {
 
 /// The daemon's replies to an [`Ask::Watch`], as they come.
 #[derive(Debug)]
-pub struct Watching(BufReader<Stream>);
+pub(crate) struct Watching(BufReader<Stream>);
 
 impl Watching {
     /// The next reply, waiting for it; `None` once the daemon closed the connection (it
     /// stopped).
-    pub fn reply(&mut self) -> Result<Option<Reply>, IpcError> {
+    pub(crate) fn reply(&mut self) -> Result<Option<Reply>, IpcError> {
         read_reply(&mut self.0)
     }
 }
 
 /// Readies a watching client's connection ([`Ask::Watch`]): writes wait at most [`PATIENCE`]
 /// where the OS can time them out (named pipes can't).
-pub fn watched(stream: &Stream) -> io::Result<()> {
+pub(crate) fn watched(stream: &Stream) -> io::Result<()> {
     unless_unsupported(stream.set_send_timeout(Some(PATIENCE)))
 }
 
 /// A reply as a line, to send to watching clients ([`send`]).
-pub fn line(reply: &Reply) -> Result<String, IpcError> {
+pub(crate) fn line(reply: &Reply) -> Result<String, IpcError> {
     let mut out = serde_json::to_string(reply).map_err(|e| IpcError::Protocol(e.to_string()))?;
     out.push('\n');
     Ok(out)
 }
 
 /// Writes a [`line`] to a watching client.
-pub fn send(stream: &mut Stream, line: &str) -> io::Result<()> {
+pub(crate) fn send(stream: &mut Stream, line: &str) -> io::Result<()> {
     stream.write_all(line.as_bytes())
 }
 
@@ -236,7 +236,7 @@ const MAX_SOCKET_PATH: usize = 100;
 /// The socket file (Unix): in the runtime folder or, when that path is too long for a socket
 /// address (a deep `HBSYNC_HOME`), in a private folder of the temp folder named after it.
 #[cfg(unix)]
-pub fn socket_path(paths: &Paths) -> PathBuf {
+pub(crate) fn socket_path(paths: &Paths) -> PathBuf {
     const SOCKET: &str = "hbsyncd.sock";
     let path = paths.runtime.join(SOCKET);
     if path.as_os_str().len() <= MAX_SOCKET_PATH {
@@ -244,7 +244,7 @@ pub fn socket_path(paths: &Paths) -> PathBuf {
     }
     use std::os::unix::ffi::OsStrExt;
     // Stable across builds, so an older daemon and a newer CLI agree.
-    let hash = hbsync_fileio::fnv1a64(paths.runtime.as_os_str().as_bytes());
+    let hash = hbsync_platform::fnv::fnv1a64(paths.runtime.as_os_str().as_bytes());
     std::env::temp_dir()
         .join(format!("hbsync-{hash:016x}"))
         .join(SOCKET)

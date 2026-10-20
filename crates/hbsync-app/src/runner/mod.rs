@@ -227,14 +227,14 @@ pub(crate) struct Wakeup {
 }
 
 impl Wakeup {
-    pub fn raise(&self) {
+    pub(crate) fn raise(&self) {
         *lock(&self.rung) += 1;
         self.rings.notify_all();
     }
 
     /// Waits until it was raised after `seen` (what this returned last; 0 at first), or
     /// `timeout` passed. Returns how often it has been raised.
-    pub fn wait(&self, seen: u64, timeout: Duration) -> u64 {
+    pub(crate) fn wait(&self, seen: u64, timeout: Duration) -> u64 {
         let rung = lock(&self.rung);
         let (rung, _) = self
             .rings

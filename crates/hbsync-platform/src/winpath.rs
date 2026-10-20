@@ -32,7 +32,7 @@ pub fn to_extended(path: &str) -> String {
 
 /// Returns `path` with the extended-length prefix on Windows; unchanged elsewhere.
 #[cfg(windows)]
-pub fn extended(path: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn extended(path: &std::path::Path) -> std::path::PathBuf {
     match path.to_str() {
         Some(s) => std::path::PathBuf::from(to_extended(s)),
         // Not valid Unicode: can't come from our own path model, leave it alone.
@@ -42,7 +42,7 @@ pub fn extended(path: &std::path::Path) -> std::path::PathBuf {
 
 /// Returns `path` with the extended-length prefix on Windows; unchanged elsewhere.
 #[cfg(not(windows))]
-pub fn extended(path: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn extended(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 

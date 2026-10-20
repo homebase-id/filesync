@@ -36,14 +36,14 @@ const ERROR_JOURNAL_NOT_ACTIVE: i32 = 1179;
 const ERROR_JOURNAL_ENTRY_DELETED: i32 = 1181;
 
 #[derive(Debug)]
-pub struct UsnJournal {
+pub(crate) struct UsnJournal {
     volume: File,
     /// `VolumeSerialNumber` as in [`FileId::volume`].
     volume_serial: u64,
 }
 
 impl UsnJournal {
-    pub fn open(root: &Path) -> io::Result<Self> {
+    pub(crate) fn open(root: &Path) -> io::Result<Self> {
         let volume_serial = crate::stat(root)?.file_id.volume;
         let device = volume_device(root)?;
         let open = |access: u32| {
