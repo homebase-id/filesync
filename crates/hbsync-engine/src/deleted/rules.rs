@@ -1,17 +1,66 @@
 //! Recently deleted's rules, pure: what a folder's delete took with it, what each item holds,
-//! and what emptying deletes for good and in which order. The simulator shares them.
+//! what emptying deletes for good and in which order, and a restore's waves. The simulator
+//! shares the public ones.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
+use hbsync_platform::name::name_key;
 use hbsync_remote::Holds;
-use hbsync_state::RemovedRow;
+use hbsync_state::{MirrorRow, RemovedRow};
 use hbsync_types::{NodeId, NodeKind, RemoteRef};
 
 /// Whether a node removed at `removed_at` was deleted with `folder`, the folder it is in, in
 /// Recently deleted too: removed no earlier than the folder (node schema, Recently deleted).
 pub(super) fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
     folder.time() <= removed_at
+}
+
+/// The next wave of a restore, its rows split by the names they come back under.
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub(super) struct RestoreWave<'r> {
+    /// Back in its own folder under its own name, free there (taken now). One whose folder isn't
+    /// live (so not in the restore either: gone for good) comes back so too, an orphan the main
+    /// folders move into Recovered files (sync semantics §6.3).
+    pub(super) asked: Vec<&'r MirrorRow>,
+    /// Its name taken in its folder: under a free name.
+    pub(super) rest: Vec<&'r MirrorRow>,
+    /// In a folder that isn't back yet: for a later wave.
+    pub(super) later: Vec<&'r MirrorRow>,
+}
+
+/// Of `left`, the rows of a restore still to come back, the next wave: those whose folder is
+/// back (`live`), or never left or went for good (not in the restore: `in_plan`), each after the
+/// folders it comes back into; the rest wait for a later one. The rows asked back under their
+/// own names take them in `taken` (the name keys taken in each live folder). `None` when no row
+/// can come back now.
+pub(super) fn restore_wave<'r>(
+    left: Vec<&'r MirrorRow>,
+    live: &HashSet<NodeId>,
+    in_plan: &HashSet<NodeId>,
+    taken: &mut HashMap<NodeId, HashSet<String>>,
+) -> Option<RestoreWave<'r>> {
+    let (wave, later): (Vec<&MirrorRow>, _) = left
+        .into_iter()
+        .partition(|row| live.contains(&row.parent) || !in_plan.contains(&row.parent));
+    if wave.is_empty() {
+        return None;
+    }
+    let mut asked = Vec::new();
+    let mut rest = Vec::new();
+    for row in wave {
+        let free = !live.contains(&row.parent)
+            || taken
+                .entry(row.parent)
+                .or_default()
+                .insert(name_key(&row.name));
+        if free {
+            asked.push(row)
+        } else {
+            rest.push(row)
+        }
+    }
+    Some(RestoreWave { asked, rest, later })
 }
 
 /// `top` and every removed node below it, through the removed folders, whenever each was

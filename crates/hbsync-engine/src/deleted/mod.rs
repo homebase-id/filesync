@@ -6,7 +6,8 @@
 //! back to the folder of this device whose part of the drive it was in, if any.
 //!
 //! - `listing`: what Recently deleted holds, as listed, and the listing's token ([`Listed`]).
-//! - `rules`: the pure rules: what a delete took along, and what emptying deletes, in order.
+//! - `rules`: the pure rules: what a delete took along, what emptying deletes and in which
+//!   order, and a restore's waves.
 //! - `restore` and `purge`: the operations on the drive ([`AccountOps`]).
 
 use std::sync::{Mutex, MutexGuard};

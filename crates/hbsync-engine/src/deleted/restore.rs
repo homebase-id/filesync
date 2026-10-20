@@ -15,6 +15,7 @@ use crate::tree::restored_names;
 use crate::walk::End;
 
 use super::listing::group;
+use super::rules::{RestoreWave, restore_wave};
 use super::{AccountOps, locked};
 
 impl AccountOps<'_> {
@@ -40,37 +41,18 @@ impl AccountOps<'_> {
         };
         let mut restored = 0;
         let mut left: Vec<&MirrorRow> = rows.iter().map(|r| &r.row).collect();
-        // In waves, each after the folders it comes back into: the rows whose folder is back (or
-        // never left, or went for good), then those in them. One that was to come back into a
-        // folder that didn't stays in Recently deleted.
+        // In waves, each after the folders it comes back into ([`restore_wave`]). One that was to
+        // come back into a folder that didn't stays in Recently deleted.
         while r.failed.is_none() {
-            let (wave, later): (Vec<&MirrorRow>, _) = left
-                .into_iter()
-                .partition(|row| r.live.contains(&row.parent) || !r.in_plan.contains(&row.parent));
-            if wave.is_empty() {
+            let Some(RestoreWave { asked, rest, later }) =
+                restore_wave(left, &r.live, &r.in_plan, &mut r.taken)
+            else {
                 break;
-            }
+            };
             left = later;
-            // Back in its own folder under its own name: only its removal undone, with the others
-            // in one request. One whose folder isn't live (so not in the plan either: gone for
-            // good) comes back so too, an orphan the main folders move into Recovered files (sync
-            // semantics §6.3). The rest, once those answered (a name one didn't take is free
-            // again), under a free name: a rewrite each.
-            let mut asked = Vec::new();
-            let mut rest = Vec::new();
-            for row in wave {
-                let free = !r.live.contains(&row.parent)
-                    || r.taken
-                        .entry(row.parent)
-                        .or_default()
-                        .insert(name_key(&row.name));
-                if free {
-                    asked.push(row)
-                } else {
-                    rest.push(row)
-                }
-            }
-            // As many a request as the drive takes.
+            // The rows under their own names first, only their removals undone, as many a request
+            // as the drive takes; the rest once those answered (a name one didn't take is free
+            // again), a rewrite each.
             for part in asked.chunks(crate::transfer::REMOVALS_AT_ONCE) {
                 let targets: Vec<Target> = part.iter().map(|row| row.target()).collect();
                 let (answers, stopped) = self

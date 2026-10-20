@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote};
 use hbsync_state::{MirrorRow, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Deleted;
@@ -8,7 +9,7 @@ use hbsync_types::{NodeId, NodeKind, RemoteFileId, Target, Uuid, VersionTag};
 
 use super::listing::{RemovedRows, all, deleted_by_item, find, named};
 use super::restore::plan_restore;
-use super::rules::select;
+use super::rules::{RestoreWave, restore_wave, select};
 use super::*;
 
 /// The account's DB as the drive holds it, read and written by a test as by the drive.
@@ -695,4 +696,43 @@ fn a_folder_holding_what_this_device_didnt_know_is_put_back()
         assert!(db.read(|s| s.removed_by_node(n))?.is_none(), "{n:?}");
     }
     Ok(())
+}
+
+/// A restore's waves: a row waits for its folder while that is still to come back; one whose
+/// folder went for good comes back as an orphan under its own name; one whose name is taken in
+/// its folder comes back under another, and the names asked for are taken.
+#[test]
+fn a_restore_comes_back_folder_first_and_by_free_names() {
+    let row = |node, parent, name: &str| MirrorRow {
+        name: name.to_owned(),
+        ..removed(node, parent, 1).row
+    };
+    let [f, gone] = [(); 2].map(|_| NodeId::new());
+    let folder = row(f, NodeId::ROOT, "f");
+    let inside = row(NodeId::new(), f, "in f");
+    let orphan = row(NodeId::new(), gone, "orphan");
+    // Folders gone for good take no names: two orphans of one name both keep it.
+    let twin = row(NodeId::new(), gone, "orphan");
+    let clash = row(NodeId::new(), NodeId::ROOT, "Taken");
+    let live = HashSet::from([NodeId::ROOT]);
+    let in_plan = HashSet::from([f, inside.node, orphan.node, twin.node, clash.node]);
+    let mut taken = HashMap::from([(NodeId::ROOT, HashSet::from([name_key("taken")]))]);
+    let left = vec![&inside, &folder, &orphan, &twin, &clash];
+
+    let wave = restore_wave(left, &live, &in_plan, &mut taken);
+    assert_eq!(
+        wave,
+        Some(RestoreWave {
+            asked: vec![&folder, &orphan, &twin],
+            rest: vec![&clash],
+            later: vec![&inside],
+        })
+    );
+    assert!(taken[&NodeId::ROOT].contains(&name_key("f")));
+    assert!(!taken.contains_key(&gone));
+    // Nothing can come back while its folder isn't.
+    assert_eq!(
+        restore_wave(vec![&inside], &live, &in_plan, &mut taken),
+        None
+    );
 }
