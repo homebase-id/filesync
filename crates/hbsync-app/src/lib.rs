@@ -19,6 +19,7 @@ pub mod runner;
 mod secrets;
 pub mod setup;
 pub mod shell;
+mod sync;
 #[cfg(windows)]
 mod sync_root;
 #[cfg(target_os = "linux")]

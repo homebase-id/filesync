@@ -1,6 +1,7 @@
 //! The Homebase side of the client: registering the Filesync app on an identity and
-//! authorizing this device (YouAuth), the shared-secret envelope every API call uses, and a
-//! small V2 API client. The drive adapter behind the `Remote` trait comes next (Layer 5).
+//! authorizing this device (YouAuth), the shared-secret envelope every API call uses, a small
+//! V2 API client, the drive as a `Remote` ([`drive`]), and the notification WebSocket
+//! ([`notify`]).
 //!
 //! Facts about the Homebase API here were verified in `../odin-core` unless a comment says
 //! otherwise; see also `docs/spec/homebase-api-notes.md`.

@@ -90,7 +90,7 @@ says so when it couldn't reach the keychain to remove the credentials there.
 2. Reads the config. Not set up: it says so and exits.
 3. Answers on the control socket from now on.
 4. Starts each account (identity) of the config on a thread of its own
-   (`hbsync-app/src/daemon/account.rs`), which:
+   (`hbsync-app/src/daemon/account/`), which:
    1. reads the credentials, waiting (backoff 5 s doubling to 5 min) while the keychain can't
       be read. None: it says so and the daemon exits;
    2. connects to the identity, retrying with the same backoff while it can't be reached

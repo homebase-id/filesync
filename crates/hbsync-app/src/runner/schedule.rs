@@ -1,7 +1,6 @@
 //! When a folder syncs: what asks for a sync (a change here or in its part of the drive, a
 //! request, work a sync left unfinished; never time alone, daemon.md "No poll") and what holds
-//! it back (a pause, the backoff after a failure); and when changes the drive announced are
-//! pulled ([`Announced`]). Pure: the caller tells the time.
+//! it back (a pause, the backoff after a failure). Pure: the caller tells the time.
 
 use std::time::{Duration, Instant};
 
@@ -10,10 +9,6 @@ use crate::protocol::{State, Until};
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
-/// A sync announced by the drive waits until its changes have stopped coming this long...
-const REMOTE_QUIET: Duration = Duration::from_millis(1000);
-/// ...but no longer than this after the first.
-const REMOTE_MAX_WAIT: Duration = Duration::from_secs(10);
 
 /// When a pause `until` then (Unix seconds; `None`: until resumed) ends, `unix` being the Unix
 /// time at `now`.
@@ -41,34 +36,6 @@ impl Backoff {
         };
         self.0 = (self.0 * 2).min(MAX_BACKOFF);
         wait
-    }
-}
-
-/// Changes the drive announced: pulled once they stop coming (a burst of deletes reaches the
-/// mass-delete guard whole), or [`REMOTE_MAX_WAIT`] after the first.
-#[derive(Debug, Default)]
-pub(crate) struct Announced(Option<(Instant, Instant)>);
-
-impl Announced {
-    /// The drive announced a change.
-    pub(crate) fn note(&mut self, now: Instant) {
-        let first = self.0.map_or(now, |(first, _)| first);
-        self.0 = Some((first, now + REMOTE_QUIET));
-    }
-
-    /// When announced changes are due to be pulled ([`Announced::due`]); `None`: none were.
-    pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.0
-            .map(|(first, quiet)| quiet.min(first + REMOTE_MAX_WAIT))
-    }
-
-    /// Whether announced changes are due to be pulled now: they are taken then.
-    pub(crate) fn due(&mut self, now: Instant) -> bool {
-        let due = self.deadline().is_some_and(|at| now >= at);
-        if due {
-            self.0 = None;
-        }
-        due
     }
 }
 
@@ -334,34 +301,6 @@ mod tests {
         assert_eq!(s.later(t0 + ms(10)), LOOK - ms(10));
         assert!(!s.due(t0 + LOOK - ms(1)));
         assert!(s.due(t0 + LOOK));
-    }
-
-    /// Announcements are pulled once they stop for a second, or ten seconds after the first.
-    #[test]
-    fn announcements_wait_until_they_stop() {
-        let t0 = Instant::now();
-        let mut a = Announced::default();
-        assert!(!a.due(t0), "nothing announced");
-        assert_eq!(a.deadline(), None);
-        a.note(t0);
-        assert_eq!(a.deadline(), Some(t0 + ms(1000)));
-        assert!(!a.due(t0 + ms(500)));
-        a.note(t0 + ms(800));
-        assert!(!a.due(t0 + ms(1500)), "still coming");
-        assert!(a.due(t0 + ms(1800)), "quiet for a second");
-        assert!(!a.due(t0 + ms(1900)), "taken");
-        // A steady stream: pulled after ten seconds all the same.
-        let t1 = t0 + Duration::from_secs(100);
-        for i in 0..20 {
-            a.note(t1 + ms(i * 500));
-        }
-        assert_eq!(
-            a.deadline(),
-            Some(t1 + ms(10_000)),
-            "no later than ten seconds"
-        );
-        assert!(!a.due(t1 + ms(9_999)));
-        assert!(a.due(t1 + ms(10_000)));
     }
 
     #[test]
