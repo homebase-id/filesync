@@ -15,14 +15,13 @@ hbsync-platform.workspace = true
 hbsync-remote.workspace = true
 hbsync-state.workspace = true
 hbsync-types.workspace = true
-serde_json.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing = "0.1.44"
 
 [features]
 # A test client (`testkit`) for the engine's tests and the live ones.
-testkit = ["dep:tempfile", "hbsync-state/testkit"]
+testkit = ["dep:tempfile", "hbsync-remote/testkit", "hbsync-state/testkit"]
 
 [dev-dependencies]
 hbsync-engine = { path = ".", features = ["testkit"] }

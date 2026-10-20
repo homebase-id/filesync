@@ -35,7 +35,7 @@ fn transfers_run_in_parallel() -> R {
     let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
     remote.faults().latency = Duration::from_millis(100);
     let jobs = (0..8)
-        .map(|i| upload_job(dir.path(), &format!("f{i}"), 10).map(|j| (false, j)))
+        .map(|i| upload_job(dir.path(), &format!("f{i}"), 10))
         .collect::<Result<Vec<_>, _>>()?;
     let start = Instant::now();
     let mut ok = 0;
@@ -67,13 +67,13 @@ fn only_a_few_large_files_at_once() -> R {
     let dir = tempfile::tempdir()?;
     let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
     remote.faults().latency = Duration::from_millis(100);
-    // Urgent large files first: the ones over the limit wait, and small files go meanwhile.
+    // Two large files at a time: the ones over the limit wait; the small ones don't wait for them.
     let mut jobs = Vec::new();
     for i in 0..4 {
-        jobs.push((true, upload_job(dir.path(), &format!("large{i}"), 1000)?));
+        jobs.push(upload_job(dir.path(), &format!("large{i}"), 1000)?);
     }
     for i in 0..8 {
-        jobs.push((false, upload_job(dir.path(), &format!("small{i}"), 10)?));
+        jobs.push(upload_job(dir.path(), &format!("small{i}"), 10)?);
     }
     let start = Instant::now();
     let mut done = Vec::new();
@@ -110,18 +110,17 @@ fn only_a_few_large_files_at_once() -> R {
 }
 
 #[test]
-fn urgent_first_then_smallest_first() -> R {
+fn smallest_first() -> R {
     let dir = tempfile::tempdir()?;
     let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
     let jobs = vec![
-        (false, upload_job(dir.path(), "large", 3000)?),
-        (false, upload_job(dir.path(), "small", 10)?),
-        (true, upload_job(dir.path(), "wanted", 5000)?),
-        (false, upload_job(dir.path(), "medium", 500)?),
+        upload_job(dir.path(), "large", 3000)?,
+        upload_job(dir.path(), "small", 10)?,
+        upload_job(dir.path(), "medium", 500)?,
     ];
     let names: std::collections::HashMap<NodeId, String> = jobs
         .iter()
-        .map(|(_, j)| match j {
+        .map(|j| match j {
             Job::Upload { meta, .. } => (meta.node, meta.content.name.clone()),
             _ => unreachable!(),
         })
@@ -136,7 +135,7 @@ fn urgent_first_then_smallest_first() -> R {
         jobs,
         |job, _| order.push(names[&job.node()].clone()),
     );
-    assert_eq!(order, ["wanted", "small", "medium", "large"]);
+    assert_eq!(order, ["small", "medium", "large"]);
     Ok(())
 }
 
@@ -183,16 +182,14 @@ fn interrupted_download_resumes_without_refetching() -> R {
     // Cut before the download's buffer is full: what came still reaches the partial file.
     remote.faults().cut_download_after = Some(30_000);
     let mut first = None;
-    run_jobs(&remote, cfg, vec![(false, job.clone())], |_, r| {
-        first = Some(r)
-    });
+    run_jobs(&remote, cfg, vec![job.clone()], |_, r| first = Some(r));
     assert!(
         matches!(first, Some(JobResult::Failed(ref e)) if e.is_transient()),
         "{first:?}"
     );
 
     let mut second = None;
-    run_jobs(&remote, cfg, vec![(false, job)], |_, r| second = Some(r));
+    run_jobs(&remote, cfg, vec![job], |_, r| second = Some(r));
     let Some(JobResult::Downloaded { file, local_hash }) = second else {
         panic!("{second:?}")
     };
@@ -211,8 +208,8 @@ fn bandwidth_cap_slows_transfers() -> R {
     let dir = tempfile::tempdir()?;
     let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
     let jobs = vec![
-        (false, upload_job(dir.path(), "a", 150_000)?),
-        (false, upload_job(dir.path(), "b", 150_000)?),
+        upload_job(dir.path(), "a", 150_000)?,
+        upload_job(dir.path(), "b", 150_000)?,
     ];
     let start = Instant::now();
     run_jobs(
@@ -239,9 +236,9 @@ fn results_arrive_while_other_transfers_still_run() -> R {
     let dir = tempfile::tempdir()?;
     let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
     let jobs = vec![
-        (false, upload_job(dir.path(), "small", 10)?),
+        upload_job(dir.path(), "small", 10)?,
         // Throttled so it takes a while.
-        (false, upload_job(dir.path(), "large", 400_000)?),
+        upload_job(dir.path(), "large", 400_000)?,
     ];
     let start = Instant::now();
     let mut arrivals = Vec::new();

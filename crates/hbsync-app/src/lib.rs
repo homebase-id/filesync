@@ -34,6 +34,24 @@ pub use secrets::{CredentialError, CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A count tests wait on (feature `testkit`), shared by its clones; nothing without it.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TestCount(
+    #[cfg(feature = "testkit")] std::sync::Arc<std::sync::atomic::AtomicU64>,
+);
+
+impl TestCount {
+    pub(crate) fn add(&self) {
+        #[cfg(feature = "testkit")]
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(feature = "testkit")]
+    pub(crate) fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// This build's version, with the git commit it was built from when known: `0.1.0 (47f0273)`.
 /// In the logs, `--version`, About, and the daemon's status (the tray restarts a daemon of
 /// another build).

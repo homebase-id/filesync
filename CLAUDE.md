@@ -79,6 +79,7 @@ Ground rules:
 ```sh
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p hbsync -p hbsync-tray -- -D warnings   # as released: no tests' `testkit`
 cargo test --workspace
 # Deeper runs (release mode):
 PROPTEST_CASES=150000 cargo test --release -p hbsync-sim --test props

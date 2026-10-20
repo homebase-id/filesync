@@ -53,7 +53,13 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 # The secret service's, already: systemd's scopes (`unit`).
 zbus = "5.19"
 
+[features]
+# Counters the tests wait on (`testkit`).
+testkit = []
+
 [dev-dependencies]
+hbsync-app = { path = ".", features = ["testkit"] }
+hbsync-remote = { workspace = true, features = ["testkit"] }
 tempfile.workspace = true
 
 [lints]

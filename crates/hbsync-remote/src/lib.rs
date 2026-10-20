@@ -4,8 +4,9 @@
 //! simulator needs no async runtime, and the Homebase adapter can still use async HTTP
 //! internally.
 //!
-//! Implementations: [`fake::FakeServer`] / [`fake::FakeRemote`] (in memory, Homebase
-//! semantics) and, later, the Homebase adapter.
+//! Implementations: `fake::FakeServer` / `fake::FakeRemote` (in memory, Homebase semantics;
+//! feature `testkit`, with the `contract` every remote passes) and the Homebase drive
+//! (`hbsync-homebase`).
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -16,8 +17,19 @@ use hbsync_types::{
     Target, VersionTag,
 };
 
+#[cfg(feature = "testkit")]
 pub mod contract;
+#[cfg(feature = "testkit")]
 pub mod fake;
+
+/// The cursor at the end of the feed, read on from `from` (`None`: the beginning) in slim pages.
+pub fn feed_end(remote: &dyn Remote, from: Option<&str>) -> Result<String, RemoteError> {
+    let mut page = remote.change_refs(from, 1000)?;
+    while page.has_more {
+        page = remote.change_refs(Some(&page.cursor), 1000)?;
+    }
+    Ok(page.cursor)
+}
 
 /// One file header as the change feed or a header read returns it.
 #[derive(Debug, Clone, PartialEq)]

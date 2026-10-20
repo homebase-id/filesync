@@ -328,7 +328,7 @@ impl RunFolder {
             hbsync_homebase::drive::HomebaseRemote::connect(saved_client(&live_identity()?)?)?;
         // After the clearing of runs that ended, if one is going on.
         let mut runs = runs();
-        let from = hbsync_remote::contract::feed_end(&remote, runs.since.as_deref())?;
+        let from = hbsync_remote::feed_end(&remote, runs.since.as_deref())?;
         if runs.held == 0 {
             runs.since = Some(from.clone());
         }
@@ -435,7 +435,7 @@ mod tests {
     /// removed or not, nor a tombstone from before.
     #[test]
     fn only_tombstones_go_for_good() -> Result<(), Box<dyn std::error::Error>> {
-        use hbsync_remote::contract::feed_end;
+        use hbsync_remote::feed_end;
         use std::collections::HashSet;
         let remote = FakeRemote::new(FakeServer::new(ServerConfig::default()));
         let mut made = Vec::new();

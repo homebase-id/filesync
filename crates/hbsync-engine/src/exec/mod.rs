@@ -64,62 +64,8 @@ pub struct ExecConfig {
     pub tags_kept: Arc<std::sync::OnceLock<bool>>,
     /// The part of the drive this engine syncs (§12).
     pub scope: Arc<crate::scope::Scope>,
-    /// Tests only: stop the run at this point, as if the process died there.
-    #[doc(hidden)]
-    pub crash_at: Option<CrashPoint>,
-    /// Tests only: the steps that fail, and how often ([`FailPoint`]).
-    #[doc(hidden)]
-    pub faults: Arc<Faults>,
-}
-
-/// Steps a test can make fail ([`Faults`]).
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FailPoint {
-    /// A placement's commit write, once its item is in place: the run stops, the record kept
-    /// for the next sync's recovery.
-    Commit,
-    /// Reading a placed item back (a folder's stat, a file's metadata): recovery settles it in
-    /// the run.
-    PlacedRead,
-    /// A tag write: the item keeps what it held.
-    TagWrite,
-    /// Reading what a failed tag write left: the item is taken to hold what it held before.
-    TagRead,
-    /// Putting a download's new version in place, once the old one it replaces from another
-    /// folder is in the trash.
-    AfterTrash,
-    /// Bringing that old version back from the trash.
-    Restore,
-    /// Making a group of downloads' bytes durable: none of them is put in place.
-    Barrier,
-}
-
-/// Tests only: how many more times each [`FailPoint`] fails.
-#[doc(hidden)]
-#[derive(Debug, Default)]
-pub struct Faults(std::sync::Mutex<HashMap<FailPoint, usize>>);
-
-impl Faults {
-    /// Makes `point` fail its next `n` times.
-    pub fn fail(&self, point: FailPoint, n: usize) {
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(point, n);
-    }
-
-    /// Whether `point` fails now (one of its failures taken).
-    pub fn fails(&self, point: FailPoint) -> bool {
-        let mut left = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        match left.get_mut(&point) {
-            Some(n) if *n > 0 => {
-                *n -= 1;
-                true
-            }
-            _ => false,
-        }
-    }
+    /// Tests only: where the run fails or stops as if it crashed (none without `testkit`).
+    pub hooks: Hooks,
 }
 
 /// What a tag write left on an item ([`Executor::write_tags`]).
@@ -135,19 +81,6 @@ struct TagsLeft {
     /// them.
     held: Option<Tags>,
     failed: bool,
-}
-
-/// Places where a test can make the executor stop as if it crashed.
-#[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CrashPoint {
-    /// After parking an occupant on disk, before its row follows.
-    AfterParkRename,
-    /// After a conflict-copy rename on disk, before the rows follow.
-    AfterForkRename,
-    /// After a download is moved into place, or a folder made in place (before its tags are
-    /// written), before its commit.
-    AfterPlaced,
 }
 
 /// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
@@ -291,7 +224,6 @@ pub struct Executor<'a> {
     /// deleted).
     unremoved: HashSet<NodeId>,
     report: ExecReport,
-    urgent: HashSet<NodeId>,
     /// Set when a test's crash point was reached: the run stops.
     crashed: bool,
     /// Nodes whose operation wrote a placement record and hasn't put its item in place yet: only
@@ -442,7 +374,6 @@ impl<'a> Executor<'a> {
             removing: HashSet::new(),
             unremoved: HashSet::new(),
             report: ExecReport::default(),
-            urgent: HashSet::new(),
             crashed: false,
             records: HashSet::new(),
             tags_refused: HashSet::new(),
@@ -487,12 +418,6 @@ impl<'a> Executor<'a> {
     /// Holds every upload: the drive was full lately ([`ExecReport::full`] of an earlier run).
     pub fn with_full(mut self, full: bool) -> Self {
         self.full = full;
-        self
-    }
-
-    /// Marks nodes whose transfers go first (files the user is waiting for).
-    pub fn with_urgent(mut self, urgent: HashSet<NodeId>) -> Self {
-        self.urgent = urgent;
         self
     }
 
@@ -717,9 +642,9 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// Whether test fault `point` fails now ([`ExecConfig::faults`]).
+    /// Whether test fault `point` fails now ([`ExecConfig::hooks`]).
     fn fails(&self, point: FailPoint) -> bool {
-        self.cfg.faults.fails(point)
+        self.cfg.hooks.fails(point)
     }
 
     /// Whether the root's volume keeps tags, as far as known (this OS keeps some, and no tag
@@ -782,7 +707,7 @@ impl<'a> Executor<'a> {
 
     /// Whether the test crash point `at` is reached; the run then stops.
     fn crash_here(&mut self, at: CrashPoint) -> bool {
-        self.crashed |= self.cfg.crash_at == Some(at);
+        self.crashed |= self.cfg.hooks.crashes_at(at);
         self.crashed
     }
 
@@ -1023,7 +948,7 @@ impl<'a> Executor<'a> {
                 records.push(d.record.clone());
             }
             pending.insert(job.node(), p);
-            jobs.push((self.urgent.contains(&job.node()), job));
+            jobs.push(job);
         }
         // Write-ahead: a download put in place whose commit a crash loses is found there again
         // by its record (`recover_placements`).
@@ -1038,8 +963,8 @@ impl<'a> Executor<'a> {
         let progress = Arc::clone(&self.progress);
         let new_bytes: u64 = jobs
             .iter()
-            .filter(|(_, j)| self.counted.insert(j.node()))
-            .map(|(_, j)| j.size())
+            .filter(|j| self.counted.insert(j.node()))
+            .map(Job::size)
             .sum();
         progress.bytes_total.fetch_add(new_bytes, Ordering::Relaxed);
         // Commit transfers as soon as they finish (with the others that finished meanwhile):
@@ -1357,6 +1282,7 @@ impl<'a> Executor<'a> {
     }
 }
 
+mod hooks;
 mod local;
 mod park;
 mod recover;
@@ -1367,6 +1293,9 @@ mod transfer_ops;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "testkit")]
+pub use hooks::Faults;
+pub use hooks::{CrashPoint, FailPoint, Hooks};
 use local::Trash;
 pub use park::parked_name;
 use park::{numbered_place, occupant, release_place, restore_parked};

@@ -94,7 +94,7 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   - crash recovery
 - **Transfer scheduler**:
   - concurrency limits
-  - priorities: user-opened file first, then small files first
+  - priorities: small files first (a user-opened file first comes with on-demand files)
   - throttling
   - resumable transfers
 - **Start-up orchestrator**: remote cursor catch-up and local catch-up run in parallel; uploads of local state that is still unknown wait for it

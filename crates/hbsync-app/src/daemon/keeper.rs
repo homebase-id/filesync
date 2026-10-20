@@ -4,7 +4,7 @@
 //! many files), so the notifications, folders added or removed and pauses are taken at once.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 
@@ -33,7 +33,7 @@ pub(crate) struct Keeper {
     paused: Arc<AtomicBool>,
     ending: Arc<AtomicBool>,
     /// Jobs done, for tests.
-    done: Arc<AtomicUsize>,
+    done: crate::TestCount,
 }
 
 impl Keeper {
@@ -44,7 +44,7 @@ impl Keeper {
             purging: Arc::default(),
             paused: Arc::default(),
             ending: Arc::default(),
-            done: Arc::default(),
+            done: crate::TestCount::default(),
         };
         keeper.start();
         keeper
@@ -57,7 +57,7 @@ impl Keeper {
             Arc::clone(&self.purging),
             Arc::clone(&self.paused),
             Arc::clone(&self.ending),
-            Arc::clone(&self.done),
+            self.done.clone(),
         );
         let thread = std::thread::Builder::new()
             .name("hbsync-deleted".into())
@@ -74,7 +74,7 @@ impl Keeper {
                         }
                         Job::Control(control) => run_request(&drive, control),
                     }
-                    done.fetch_add(1, Ordering::SeqCst);
+                    done.add();
                 }
             });
         self.worker = match thread {
@@ -136,8 +136,8 @@ impl Keeper {
 
     /// Jobs done so far.
     #[cfg(test)]
-    fn done(&self) -> usize {
-        self.done.load(Ordering::SeqCst)
+    fn done(&self) -> u64 {
+        self.done.get()
     }
 }
 
@@ -232,14 +232,14 @@ mod tests {
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
         let mut keeper = Keeper::spawn(drive);
-        let done = Arc::clone(&keeper.done);
+        let done = keeper.done.clone();
         let server = remote.server();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
         keeper.purge(30);
         keeper.ending.store(true, Ordering::SeqCst);
         drop(server);
         keeper.finish();
-        assert_eq!(done.load(Ordering::SeqCst), 2);
+        assert_eq!(done.get(), 2);
         let mut account = StateDb::open_account(&db)?;
         assert!(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_none());
         Ok(())

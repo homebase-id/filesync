@@ -19,7 +19,7 @@
 //! with a watcher wakes only every [`WAIT_AT_MOST`].
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -162,7 +162,8 @@ pub struct Handle {
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
     progress: Arc<Counters>,
-    woken: Arc<AtomicU64>,
+    #[cfg(feature = "testkit")]
+    woken: crate::TestCount,
     /// Raised when its status may have changed.
     changed: Arc<Wakeup>,
 }
@@ -180,9 +181,9 @@ impl Handle {
     }
 
     /// How often the runner's loop has woken up (tests: none while idle).
-    #[doc(hidden)]
+    #[cfg(feature = "testkit")]
     pub fn woken(&self) -> u64 {
-        self.woken.load(Ordering::Relaxed)
+        self.woken.get()
     }
 
     /// Paused while the pause flag is set: seen at once, not only once the runner gets to it.
@@ -257,8 +258,8 @@ pub struct Runner {
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
     progress: Arc<Counters>,
-    /// How often its loop woke up ([`Handle::woken`]).
-    woken: Arc<AtomicU64>,
+    /// How often its loop woke up (`Handle::woken`).
+    woken: crate::TestCount,
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
     /// The conflicts and failures of the last sync, to tell each one only once.
@@ -318,13 +319,14 @@ impl Runner {
         status.paused_until = cfg.paused.flatten();
         let status = Arc::new(Mutex::new(status));
         let progress = Arc::new(Counters::default());
-        let woken = Arc::new(AtomicU64::new(0));
+        let woken = crate::TestCount::default();
         let handle = Handle {
             control: Arc::new(Owner(tx.clone())),
             stop: Arc::clone(&stop),
             status: Arc::clone(&status),
             progress: Arc::clone(&progress),
-            woken: Arc::clone(&woken),
+            #[cfg(feature = "testkit")]
+            woken: woken.clone(),
             changed: cfg.changed.clone(),
         };
         let runner = Runner {
@@ -457,7 +459,7 @@ impl Runner {
                 .flatten(),
             );
             let mut first = self.control.recv_timeout(wait).ok();
-            self.woken.fetch_add(1, Ordering::Relaxed);
+            self.woken.add();
             while let Some(msg) = first.take().or_else(|| self.control.try_recv().ok()) {
                 match msg {
                     Msg::Command(Command::Stop) | Msg::Orphaned => {
