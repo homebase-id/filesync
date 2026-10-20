@@ -10,6 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use hbsync_app::daemon::{Notifications, Puller, UNANNOUNCED_READ};
+use hbsync_app::protocol::Pause;
 use hbsync_app::runner::RunnerError;
 use hbsync_app::{Command, FolderStatus, Handle, Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
@@ -228,7 +229,7 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     wait_until("b is idle", || b.status().state == State::Idle)?;
     assert!(b.status().last_sync.is_some());
 
-    b.handle.send(Command::Pause { until: None });
+    b.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
     assert_eq!(b.status().state, State::Paused, "shown at once");
     a.write("two.txt", "2")?;
     wait_until("two.txt is up", || on_server(&server, "two.txt"))?;
@@ -689,7 +690,7 @@ fn a_timed_pause_ends_by_itself() -> R {
     let a = Device::start(&server, "a")?;
     wait_until("a is idle", || a.status().state == State::Idle)?;
     let until = hbsync_types::unix_now() + 2;
-    a.handle.send(Command::Pause { until: Some(until) });
+    a.handle.send(Command::Pause(Pause::ending_at(until)));
     assert_eq!(a.status().state, State::Paused);
     wait_until("the pause shows its end", || {
         a.status().paused_until == Some(until)

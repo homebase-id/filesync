@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use hbsync_types::Role;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::Until;
+use crate::protocol::Pause;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -208,18 +208,21 @@ impl Config {
         }
     }
 
-    /// The name shown in conflict copies: the configured one, or the computer's.
-    /// The pause in effect at `now` (Unix seconds): until when, or until resumed; `None`
-    /// when syncing, also after a pause that has run out.
-    pub fn pause(&self, now: u64) -> Option<Until> {
-        (self.paused && self.paused_until.is_none_or(|t| t > now)).then_some(self.paused_until)
+    /// The pause in effect at `now` (Unix seconds); `None` when syncing, also after a pause
+    /// that has run out.
+    pub fn pause(&self, now: u64) -> Option<Pause> {
+        let pause = Pause {
+            until: self.paused_until,
+        };
+        (self.paused && !pause.ran_out(now)).then_some(pause)
     }
 
-    pub(crate) fn set_pause(&mut self, pause: Option<Until>) {
+    pub(crate) fn set_pause(&mut self, pause: Option<Pause>) {
         self.paused = pause.is_some();
-        self.paused_until = pause.flatten();
+        self.paused_until = pause.and_then(|p| p.until);
     }
 
+    /// The name shown in conflict copies: the configured one, or the computer's.
     pub fn device_name(&self) -> String {
         self.device_name
             .clone()

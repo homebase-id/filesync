@@ -334,7 +334,7 @@ mod tests {
     use super::*;
     use crate::protocol::{
         AccountControl, AccountStatus, Ask, Control, DaemonControl, DaemonStatus, FolderControl,
-        FolderStatus, RecentItem, State,
+        FolderStatus, Pause, RecentItem, State,
     };
 
     fn deleted(i: usize) -> crate::protocol::DeletedItem {
@@ -488,10 +488,16 @@ mod tests {
             r#"{"protocol":7,"ask":{"control":{"daemon":"sync_now"}}}"#
         );
         assert_eq!(
-            json(Ask::Control(Control::Daemon(DaemonControl::Pause {
-                until: Some(1_800_000_000)
-            })))?,
+            json(Ask::Control(Control::Daemon(DaemonControl::Pause(
+                Pause::ending_at(1_800_000_000)
+            ))))?,
             r#"{"protocol":7,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#
+        );
+        assert_eq!(
+            json(Ask::Control(Control::Daemon(DaemonControl::Pause(
+                Pause::UNTIL_RESUMED
+            ))))?,
+            r#"{"protocol":7,"ask":{"control":{"daemon":{"pause":{"until":null}}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Folder {

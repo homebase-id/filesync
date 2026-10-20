@@ -4,18 +4,11 @@
 
 use std::time::{Duration, Instant};
 
-use crate::protocol::{State, Until};
+use crate::protocol::{Pause, State};
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
-
-/// When a pause `until` then (Unix seconds; `None`: until resumed) ends, `unix` being the Unix
-/// time at `now`.
-pub(crate) fn pause_end(until: Until, now: Instant, unix: u64) -> Option<Instant> {
-    // Too far ahead for an instant: none, as for a pause until resumed.
-    until.and_then(|t| now.checked_add(Duration::from_secs(t.saturating_sub(unix))))
-}
 
 /// How long to wait after each failure in a row.
 #[derive(Debug, Clone, Copy)]
@@ -63,8 +56,8 @@ pub(crate) struct Schedule {
     read: bool,
     /// No sync before then (a failure's backoff, a folder that is gone).
     not_before: Instant,
-    /// Paused: until then (Unix seconds), or until resumed (`None`).
-    pause: Option<Until>,
+    /// Paused, while it is.
+    pause: Option<Pause>,
     backoff: Backoff,
     /// Work a sync left unfinished: tried again then. A timer of its own, with its own
     /// backoff, so a change meanwhile still syncs at once.
@@ -74,7 +67,7 @@ pub(crate) struct Schedule {
 
 impl Schedule {
     /// A folder starting (paused, with `pause`): it syncs at once unless paused.
-    pub(crate) fn new(now: Instant, look: Duration, pause: Option<Until>) -> Schedule {
+    pub(crate) fn new(now: Instant, look: Duration, pause: Option<Pause>) -> Schedule {
         Schedule {
             look,
             next_look: now + look,
@@ -123,11 +116,11 @@ impl Schedule {
         }
     }
 
-    pub(crate) fn pause(&mut self, until: Until) {
-        self.pause = Some(until);
+    pub(crate) fn pause(&mut self, pause: Pause) {
+        self.pause = Some(pause);
     }
 
-    pub(crate) fn paused(&self) -> Option<Until> {
+    pub(crate) fn paused(&self) -> Option<Pause> {
         self.pause
     }
 
@@ -137,9 +130,9 @@ impl Schedule {
         self.pause.take().is_some()
     }
 
-    /// A pause until a time that has come (`unix`, Unix seconds) ends. Whether it did.
+    /// A pause that ran out at `unix` (Unix seconds) ends. Whether it did.
     pub(crate) fn pause_over(&mut self, now: Instant, unix: u64) -> bool {
-        self.pause.flatten().is_some_and(|t| unix >= t) && self.resume(now)
+        self.pause.is_some_and(|p| p.ran_out(unix)) && self.resume(now)
     }
 
     /// Whether it is time to look at what is local again; the next look is a look later. It
@@ -195,7 +188,7 @@ impl Schedule {
     pub(crate) fn next_wake(&self, now: Instant, unix: u64, looking: bool) -> Option<Instant> {
         let look = looking.then_some(self.next_look);
         let (pause_end, sync) = match self.pause {
-            Some(until) => (pause_end(until, now, unix), None),
+            Some(pause) => (pause.end_at(now, unix), None),
             None => {
                 let wanted = self.wanted.then_some(now);
                 let earliest = wanted.into_iter().chain(self.retry).min();
@@ -328,13 +321,13 @@ mod tests {
     #[test]
     fn a_pause_holds_syncs_until_resumed_or_over() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, Some(None));
+        let mut s = Schedule::new(t0, LOOK, Some(Pause::UNTIL_RESUMED));
         assert!(!s.due(t0), "started paused");
         s.want();
         assert!(!s.due(t0));
         assert!(s.resume(t0));
         assert!(s.due(t0));
-        s.pause(Some(1_000));
+        s.pause(Pause::ending_at(1_000));
         assert!(!s.pause_over(t0, 999));
         assert!(!s.due(t0));
         assert!(s.pause_over(t0, 1_000));
@@ -375,7 +368,7 @@ mod tests {
         assert!(s.due(t0 + s5));
 
         // A timed pause: its end, and no sync before.
-        s.pause(Some(1_000));
+        s.pause(Pause::ending_at(1_000));
         assert_eq!(
             s.next_wake(t0, 990, false),
             Some(t0 + Duration::from_secs(10))
@@ -383,10 +376,10 @@ mod tests {
         assert!(!s.pause_over(t0 + Duration::from_secs(9), 999));
         assert!(s.pause_over(t0 + Duration::from_secs(10), 1_000));
         // So far ahead it has no instant: as if until resumed.
-        s.pause(Some(u64::MAX));
+        s.pause(Pause::ending_at(u64::MAX));
         assert_eq!(s.next_wake(t0, 0, false), None);
         // Paused until resumed: only the look.
-        s.pause(None);
+        s.pause(Pause::UNTIL_RESUMED);
         s.want();
         assert_eq!(s.next_wake(t0, 0, false), None);
         assert_eq!(s.next_wake(t0, 0, true), Some(t0 + LOOK));
