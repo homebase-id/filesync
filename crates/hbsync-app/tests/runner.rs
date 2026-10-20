@@ -684,6 +684,32 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
     Ok(())
 }
 
+/// A folder whose top can't be read isn't opened: its runner fails with nothing synced, and its
+/// account starts it again later, which syncs once the read works.
+#[test]
+fn a_folder_whose_top_cant_be_read_syncs_once_it_can() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
+    std::fs::write(root.join("a.txt"), "a")?;
+    let cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
+    let drive = drive(&cfg, &server)?;
+    let raw = rusqlite::Connection::open(&cfg.db)?;
+    let set_top = |top: &[u8]| raw.execute("UPDATE folders SET top = ?1", [top]);
+    set_top(&[0])?;
+    let (handle, thread) = Runner::spawn(cfg.clone(), Arc::clone(&drive))?;
+    assert!(thread.join().map_err(|_| "panicked")?.is_err());
+    assert_eq!(handle.status().state, State::Failing);
+    assert!(live_names(&server).is_empty(), "nothing was uploaded");
+
+    set_top(hbsync_types::NodeId::ROOT.0.as_bytes())?;
+    let (handle, thread) = Runner::spawn(cfg, drive)?;
+    wait_until("a.txt is on the drive", || on_server(&server, "a.txt"))?;
+    assert!(handle.send(Command::Stop));
+    thread.join().map_err(|_| "panicked")??;
+    Ok(())
+}
+
 #[test]
 fn a_timed_pause_ends_by_itself() -> R {
     let server = server();

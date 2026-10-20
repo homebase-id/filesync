@@ -47,8 +47,8 @@ impl Computer {
             StateDb::open_account(&db)?,
             Arc::new(FakeRemote::new(server.clone())),
         );
-        let main = Engine::new(main_db, drive.clone(), config(&main_root));
-        let docs = Engine::new(StateDb::open_folder(&db, docs)?, drive, config(&docs_root));
+        let main = Engine::new(main_db, drive.clone(), config(&main_root))?;
+        let docs = Engine::new(StateDb::open_folder(&db, docs)?, drive, config(&docs_root))?;
         Ok(Computer {
             _dir: dir,
             main_root,
@@ -162,6 +162,67 @@ fn each_folder_syncs_its_part_of_the_drive() -> R {
     );
     assert_eq!(files(&pc.main_root), ["Projects/plan.txt", "notes.txt"]);
     assert_eq!(files(&pc.docs_root), ["cv.txt", "letter.txt"]);
+    Ok(())
+}
+
+/// What is live on the server: each node's name and parent, sorted.
+fn on_server(server: &Arc<Mutex<FakeServer>>) -> Vec<(String, NodeId)> {
+    let srv = server.lock().expect("server");
+    let mut live: Vec<_> = srv
+        .live()
+        .filter_map(|h| match &h.body {
+            RemoteBody::Live { content, .. } => Some((content.name.clone(), h.parent)),
+            _ => None,
+        })
+        .collect();
+    live.sort();
+    live
+}
+
+/// A role folder whose top can't be read doesn't open: it never syncs as the main folder (its
+/// files gone from the drive, the main folder's coming in). Once the read works, it syncs as
+/// before, with nothing to do.
+#[test]
+fn a_folder_whose_top_cant_be_read_doesnt_open() -> R {
+    let server = server_with_documents()?;
+    let mut pc = Computer::new(&server)?;
+    pc.sync()?;
+    let (main_files, docs_files, drive) = (
+        files(&pc.main_root),
+        files(&pc.docs_root),
+        on_server(&server),
+    );
+    assert_eq!(docs_files, ["cv.txt"]);
+
+    let db = pc.docs_root.with_file_name("state.db");
+    let folder = pc.docs.db().folder();
+    let docs_db = StateDb::open_folder(&db, folder)?;
+    // The folder's top reads as something that isn't a node id.
+    let raw = rusqlite::Connection::open(&db)?;
+    let set_top = |top: &[u8]| {
+        raw.execute(
+            "UPDATE folders SET top = ?1 WHERE id = ?2",
+            rusqlite::params![top, folder],
+        )
+    };
+    set_top(&[0])?;
+    let drive_of = Arc::clone(pc.docs.drive());
+    assert!(Engine::new(docs_db, Arc::clone(&drive_of), config(&pc.docs_root)).is_err());
+    set_top(Role::Documents.node().0.as_bytes())?;
+    // Nothing changed anywhere.
+    assert_eq!(files(&pc.main_root), main_files);
+    assert_eq!(files(&pc.docs_root), docs_files);
+    assert_eq!(on_server(&server), drive);
+
+    // Read again, the top is Documents: nothing to do.
+    let mut docs = Engine::new(
+        StateDb::open_folder(&db, folder)?,
+        drive_of,
+        config(&pc.docs_root),
+    )?;
+    assert_eq!(sync(&mut docs)?.ops_done, 0);
+    assert_eq!(files(&pc.docs_root), docs_files);
+    assert_eq!(on_server(&server), drive);
     Ok(())
 }
 

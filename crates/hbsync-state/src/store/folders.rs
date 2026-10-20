@@ -7,16 +7,24 @@ impl ReadTx<'_> {
 
     /// How this store's folder sees the drive's rows (the mirror, Recently deleted): its top
     /// as the root, the rest of the drive as [`NodeId::OUTSIDE`]. The account (no folder) sees
-    /// them as they are.
+    /// them as they are. A folder the DB doesn't have (removed meanwhile) is an error, never
+    /// the main folder: a role folder seeing the whole drive would sync the wrong part of it.
     pub fn coords(&self) -> Result<Coords> {
         if let Some(c) = self.coords.get() {
             return Ok(c);
         }
-        let c = self
-            .folders()?
-            .into_iter()
-            .find(|f| f.id == self.folder)
-            .map_or(Coords::MAIN, |f| Coords { top: f.top });
+        let c = if self.folder == crate::NO_FOLDER {
+            Coords::MAIN
+        } else {
+            let folders = self.folder_list()?;
+            let folder = folders
+                .iter()
+                .find(|f| f.id == self.folder)
+                .ok_or_else(|| {
+                    StateError::Conflict(format!("no folder {} in this DB", self.folder))
+                })?;
+            Coords { top: folder.top }
+        };
         self.coords.set(Some(c));
         Ok(c)
     }
