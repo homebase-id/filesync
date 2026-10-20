@@ -210,6 +210,8 @@ pub struct Runner {
     told: report::Told,
     /// Stale skips sync after sync: one that keeps coming back is told after all.
     stalled: report::Stalled,
+    /// Sync now was asked: the next sync sends what the drive refused once more.
+    retry_refused: bool,
 }
 
 impl std::fmt::Debug for Runner {
@@ -288,6 +290,7 @@ impl Runner {
             held: Vec::new(),
             told: Default::default(),
             stalled: Default::default(),
+            retry_refused: false,
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -546,6 +549,11 @@ impl Runner {
             if let Some(seen) = confirmed.take() {
                 p.engine.confirm_deletes(seen);
             }
+            if std::mem::take(&mut self.retry_refused)
+                && let Err(e) = p.engine.clear_refused()
+            {
+                tracing::warn!("can't forget what the drive refused: {e}");
+            }
             // This sync pulls what woke it so far.
             p.drive_changed.store(false, Ordering::SeqCst);
             let began = Instant::now();
@@ -604,8 +612,9 @@ impl Runner {
             Command::SyncNow => {
                 schedule.asked(Instant::now());
                 *check_rules = true;
-                // The user may have made room on the drive.
+                // The user may have made room on the drive, or changed what it refused.
                 self.drive.clear_full();
+                self.retry_refused = true;
             }
             Command::Online => schedule.online(Instant::now()),
             Command::Woke => {

@@ -321,6 +321,14 @@ impl Executor<'_> {
                     Err(e) => Ok(remote_outcome(e)),
                 }
             }
+            // The bytes didn't match what the drive says they are (its partial file is gone):
+            // read again, and refused if it happens again at this version. (Too few bytes is
+            // a body cut short, as likely as not: tried again.)
+            (
+                Ctx::Download(_),
+                _,
+                JobResult::Failed(JobError::File(e @ FileIoError::HashMismatch { .. })),
+            ) => Ok(Outcome::Mismatch(e.to_string())),
             (_, _, JobResult::Failed(JobError::Remote(e))) => Ok(remote_outcome(e)),
             (_, _, JobResult::Failed(e)) => Ok(Outcome::of(e.class(), e.to_string(), None)),
             (Ctx::Download(d), _, JobResult::Downloaded { file, local_hash }) => {

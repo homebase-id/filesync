@@ -35,7 +35,10 @@ pub(super) fn notes(
         notes.push(describe_conflict(engine, c)?);
     }
     let failed = report.failed.iter().map(|(op, why)| (op, why.as_str()));
-    for (op, why) in failed.chain(skips.iter().map(|(op, why)| (op, why.as_str()))) {
+    // Refused before and not sent again: worded as when it was, so it is told once.
+    let refused = report.refused.iter().map(|(op, why)| (op, why.as_str()));
+    let skipped = skips.iter().map(|(op, why)| (op, why.as_str()));
+    for (op, why) in failed.chain(refused).chain(skipped) {
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
@@ -97,7 +100,7 @@ impl Stalled {
                 continue;
             }
             let tell = match why {
-                Skip::Unsyncable(_) => true,
+                Skip::Unsyncable(_) | Skip::Refused(_) => true,
                 Skip::Waiting(_) => false,
                 Skip::Stale(_) => {
                     let streak = self.0.entry(key).or_insert(Streak {

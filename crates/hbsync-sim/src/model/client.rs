@@ -44,6 +44,16 @@ pub(crate) struct Client {
     pub(crate) run_filter: Arc<Filter>,
     /// The nodes of the deletes the guard held in the last plan.
     pub(crate) held: Vec<NodeId>,
+    /// Operations the drive refused, by node and kind, with their key
+    /// (`hbsync_engine::refused::key`) and whether refused (else one strike: a download whose
+    /// bytes didn't match once): not sent again while their key is the same.
+    pub(crate) refused: HashMap<(NodeId, &'static str), (String, bool)>,
+    /// The operations the last plan held back for a refusal: refused themselves (`true`), or
+    /// waiting for one.
+    pub(crate) held_back: Vec<(Op, bool)>,
+    /// The operations the last plan sent to run (with refusals on: once nothing more happens,
+    /// those left are blocked, behind a refusal).
+    pub(crate) last_plan: Vec<Op>,
     /// The nodes whose deletes the user confirmed, until no delete is pending for them.
     pub(crate) confirmed: HashSet<NodeId>,
     /// How the client holds tags.
@@ -89,6 +99,9 @@ impl Client {
             run_filter: Arc::new(filter.clone()),
             filter: Arc::new(filter),
             held: Vec::new(),
+            refused: HashMap::new(),
+            held_back: Vec::new(),
+            last_plan: Vec::new(),
             confirmed: HashSet::new(),
             os,
             coords,

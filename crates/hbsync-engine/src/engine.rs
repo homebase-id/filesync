@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
-use hbsync_state::{DirtyCursor, StateDb, StateError, keys};
-use hbsync_types::NodeId;
+use hbsync_state::{DirtyCursor, ReadTx, StateDb, StateError, keys};
 use hbsync_types::activity::Synced;
+use hbsync_types::{NodeId, unix_now_ms};
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
@@ -20,6 +20,7 @@ use crate::exec::{ExecConfig, Executor, Stopped, record_dirs, recover, recover_p
 use crate::feed::FeedReport;
 use crate::folder::FolderCtx;
 use crate::reconcile::{Conflict, Op, Options, Plan, reconcile_with_known};
+use crate::refused::{REFUSED_FOR, Refusals, hold_back, key_of};
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
@@ -95,6 +96,9 @@ pub struct SyncReport {
     pub synced: Vec<Synced>,
     /// The drive is out of storage: uploads wait until there is room.
     pub full: bool,
+    /// Operations not sent because the drive refused them as they are ([`crate::refused`]),
+    /// with why: they wait for a change, an hour, or Sync now.
+    pub refused: Vec<(Op, String)>,
     /// Work is left that another try may do: the sweep was cut short by the round limit, or
     /// operations were skipped or failed with nodes still pending. Deletes held for a
     /// confirmation never count: another try doesn't let them through.
@@ -121,6 +125,7 @@ impl SyncReport {
         self.stopped = later.stopped;
         self.synced.extend(later.synced);
         self.full = later.full;
+        self.refused.extend(later.refused);
         self.unfinished = later.unfinished;
     }
 }
@@ -143,6 +148,8 @@ pub struct Engine {
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
     /// that can't be hashed yet isn't read again every round).
     rescanned: std::collections::HashSet<NodeId>,
+    /// The folder has no refusals ([`crate::refused`]): found so, and none written since.
+    no_refusals: bool,
 }
 
 impl std::fmt::Debug for Engine {
@@ -194,6 +201,7 @@ impl Engine {
             confirmed: Default::default(),
             progress: Arc::default(),
             rescanned: Default::default(),
+            no_refusals: false,
         })
     }
 
@@ -516,6 +524,68 @@ impl Engine {
         }
     }
 
+    /// The folder's refusals that still hold ([`REFUSED_FOR`]); older ones are forgotten.
+    /// Not read while none was found and none written since.
+    fn refusals(&mut self) -> Result<Refusals, StateError> {
+        if self.no_refusals {
+            return Ok(Refusals::default());
+        }
+        let rows = self.db.read(|s| s.all_refused())?;
+        if rows.is_empty() {
+            self.no_refusals = true;
+            return Ok(Refusals::default());
+        }
+        let since = unix_now_ms().saturating_sub(REFUSED_FOR.as_millis() as i64);
+        let (live, old): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.at >= since);
+        if !old.is_empty() {
+            self.db
+                .write(|s| s.folder().prune_refused(since).map(drop))?;
+        }
+        Ok(Refusals::new(live))
+    }
+
+    /// Takes the operations refused as they are (`refusals`) out of `ops`, and what waits for
+    /// them ([`hold_back`]): the refused, with why.
+    fn refused_out(
+        &mut self,
+        ops: &mut Vec<Op>,
+        refusals: &Refusals,
+    ) -> Result<Vec<(Op, String)>, StateError> {
+        if refusals.is_empty() {
+            return Ok(Vec::new());
+        }
+        let case_insensitive = self.cfg.folder.case_insensitive;
+        let (kept, out) = self.db.read(|s| {
+            hold_back(
+                std::mem::take(ops),
+                |op| match refusals.get(op) {
+                    Some(r) if r.refused => Ok(key_of(s, op)? == r.key),
+                    _ => Ok(false),
+                },
+                |node| place_of(s, node),
+                case_insensitive,
+            )
+        })?;
+        *ops = kept;
+        Ok(out
+            .into_iter()
+            .map(|op| {
+                let why = refusals
+                    .get(&op)
+                    .map_or_else(String::new, |r| r.why.clone());
+                (op, why)
+            })
+            .collect())
+    }
+
+    /// Forgets the folder's refusals (Sync now): each refused operation is sent once more.
+    pub fn clear_refused(&mut self) -> Result<(), StateError> {
+        self.db
+            .write(|s| s.folder().prune_refused(i64::MAX).map(drop))?;
+        self.no_refusals = true;
+        Ok(())
+    }
+
     /// Plans one page of dirty nodes and executes the plan. No feed read after it: each write
     /// is recorded from its answer (version, token, the server's time), and the notifications
     /// leave this device's own writes out. Returns the deletes the mass-delete guard held.
@@ -545,7 +615,12 @@ impl Engine {
                 .try_for_each(|n| s.folder().clear_dirty(*n))
         })?;
         report.conflicts.extend(plan.conflicts);
-        if plan.ops.is_empty() {
+        let refusals = self.refusals()?;
+        let mut ops = plan.ops;
+        report
+            .refused
+            .extend(self.refused_out(&mut ops, &refusals)?);
+        if ops.is_empty() {
             return Ok(plan.held);
         }
         let exec = Executor::new(
@@ -557,7 +632,11 @@ impl Engine {
         .with_stop(Arc::clone(&self.stop))
         .with_progress(Arc::clone(&self.progress))
         .with_full(self.drive.full())
-        .run(plan.ops)?;
+        .with_refusals(refusals);
+        // Until the run says it wrote none (a run that fails may have).
+        let none_before = std::mem::replace(&mut self.no_refusals, false);
+        let exec = exec.run(ops)?;
+        self.no_refusals = none_before && !exec.refused;
         if let Some(hold) = exec.full {
             self.drive.set_full(hold);
         }
@@ -596,6 +675,24 @@ impl Engine {
         }
         Ok(plan.held)
     }
+}
+
+/// Where `node` is ([`crate::refused::Place`]): its local item's folder and name, and the
+/// folders it is in here, in the base and on the drive.
+fn place_of(s: &ReadTx<'_>, node: NodeId) -> Result<crate::refused::Place, StateError> {
+    let mut place = crate::refused::Place::default();
+    if let Some(row) = s.local_by_node(node)?
+        && let Some(name) = row.path.name()
+        && let Some(parent) = s.local_parent(node)?
+    {
+        place.local = Some((parent, name.to_owned()));
+        place.folders.push(parent);
+    }
+    place
+        .folders
+        .extend(s.get_base(node)?.map(|b| b.state.parent));
+    place.folders.extend(s.get_mirror(node)?.map(|m| m.parent));
+    Ok(place)
 }
 
 /// Whether a sync reads the feed first.

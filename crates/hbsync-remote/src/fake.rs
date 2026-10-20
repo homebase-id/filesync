@@ -657,6 +657,13 @@ pub struct Faults {
     pub lose_answer_named: Option<String>,
     /// Payloads received, for assertions.
     pub uploads: usize,
+    /// Payload reads give other bytes than the file holds (the first one flipped): stored
+    /// bytes gone bad.
+    pub corrupt_downloads: bool,
+    /// Payload reads served, for assertions.
+    pub reads: usize,
+    /// Writes refused by `refuse_writes`, for assertions.
+    pub refused: usize,
 }
 
 /// A client of a [`FakeServer`], implementing [`Remote`].
@@ -754,8 +761,12 @@ impl FakeRemote {
         if self.faults().deny_writes {
             return Err(RemoteError::Denied("injected: no write access".into()));
         }
-        if self.faults().refuse_writes {
-            return Err(RemoteError::Fatal("injected: read-only".into()));
+        {
+            let mut faults = self.faults();
+            if faults.refuse_writes {
+                faults.refused += 1;
+                return Err(RemoteError::Fatal("injected: read-only".into()));
+            }
         }
         if self.faults().fail_writes_named.as_deref() == Some(name) {
             return Err(RemoteError::Transient("injected write failure".into()));
@@ -994,7 +1005,20 @@ impl Remote for FakeRemote {
         let range = range.unwrap_or(0..len);
         let (start, end) = (range.start.min(len), range.end.min(len));
         let slice = &bytes[start as usize..end as usize];
-        let cut = self.faults().cut_download_after.take();
+        let (cut, corrupt) = {
+            let mut faults = self.faults();
+            faults.reads += 1;
+            (faults.cut_download_after.take(), faults.corrupt_downloads)
+        };
+        // Stored bytes gone bad: the first one flipped.
+        let flipped;
+        let slice = match (corrupt, slice.split_first()) {
+            (true, Some((first, rest))) => {
+                flipped = [[first ^ 0xff].as_slice(), rest].concat();
+                flipped.as_slice()
+            }
+            _ => slice,
+        };
         match cut {
             Some(limit) if (limit as usize) < slice.len() => {
                 sink.write_all(&slice[..limit as usize])?;

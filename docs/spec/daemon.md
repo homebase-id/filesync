@@ -265,7 +265,9 @@ a failure (service managers restart it then).
   sync, and the folder or the account doesn't ask before then (up to an hour). A state DB
   error ends the sync, as a crash would: busy, the folder backs off; one only the user can fix
   (corrupt, from another version, the disk full or read-only) is tried again every 5 min. A row on the drive the
-  client can't read (not encrypted, another key, no content hash) is noted too.
+  client can't read (not encrypted, another key, no content hash) is noted too. An operation the
+  drive refused for good is noted once, and not sent again while it is the same (sync semantics
+  §8a, refused): a change of the item, Sync now, or an hour sends it once more.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
   transfers, done and to do.
 - **Pause for a while:** a pause can carry its end (Unix seconds), kept in the config with the

@@ -22,6 +22,9 @@ pub enum InRun {
     Stale,
     /// Left for the next plan: this device can't do it as planned.
     Unsyncable,
+    /// Left, and not sent again while it is the same (the refused record): the drive won't
+    /// take it as it is.
+    Refuse,
 }
 
 /// What a folder or an account shows while its syncs (or its connect) fail.
@@ -56,7 +59,8 @@ pub const fn policy(class: ErrorClass) -> Policy {
         // A lock another program holds, or a full disk, doesn't go away within microseconds:
         // left for a later sync, which the runner paces, as one that went stale.
         C::Stale | C::Gone | C::LocalBusy | C::LocalFull => (InRun::Stale, Shown::Failing),
-        C::Refused | C::LocalDenied => (InRun::Unsyncable, Shown::Failing),
+        C::Refused => (InRun::Refuse, Shown::Failing),
+        C::LocalDenied => (InRun::Unsyncable, Shown::Failing),
         C::LocalRaced | C::LocalFault => (InRun::Retry, Shown::Failing),
         C::StateBusy | C::NeedsUser | C::Bug => (InRun::End, Shown::Failing),
     };

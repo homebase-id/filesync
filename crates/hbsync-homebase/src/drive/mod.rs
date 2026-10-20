@@ -699,7 +699,7 @@ fn same_files<A>(
     asked: impl Iterator<Item = RemoteFileId>,
 ) -> Result<()> {
     if !answers.iter().map(answered).eq(asked.map(|f| f.0)) {
-        return Err(RemoteError::Fatal(format!(
+        return Err(RemoteError::Transient(format!(
             "{what} answered other files than asked"
         )));
     }

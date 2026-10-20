@@ -58,7 +58,7 @@ pub use coords::Coords;
 pub use reader::Reader;
 pub use store::{
     AccountTx, BaseRow, DirtyCursor, FolderRow, FolderTx, LocalRow, MAX_DEPTH, MirrorFile,
-    MirrorRow, Placing, PlannedBase, ReadTx, Recorded, RemovedRow, Store,
+    MirrorRow, Placing, PlannedBase, ReadTx, Recorded, Refused, RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]

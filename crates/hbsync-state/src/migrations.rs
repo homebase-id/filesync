@@ -221,6 +221,24 @@ const SCHEMA: &str = r#"
     CREATE TRIGGER placing_gone AFTER DELETE ON placing
         BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;
 
+    -- Per folder: operations the drive refused for good (a request it won't take as it is),
+    -- not sent again while what they would send is the same, for an hour at most, and until
+    -- Sync now (sync semantics §8a). Read whole before each plan: few rows, if any.
+    CREATE TABLE refused (
+        folder  INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id      INTEGER NOT NULL,                     -- nodes.id
+        op      TEXT NOT NULL,                        -- the operation's kind
+        key     TEXT NOT NULL,                        -- what it sends or fetches, as the engine
+                                                      -- keys it: another is another operation
+        refused INTEGER NOT NULL,                     -- 0: one strike (a download whose bytes
+                                                      -- didn't match once), 1: refused
+        why     TEXT NOT NULL,
+        at      INTEGER NOT NULL,                     -- Unix ms
+        PRIMARY KEY (id, folder, op)
+    ) WITHOUT ROWID;
+    CREATE TRIGGER refused_gone AFTER DELETE ON refused
+        BEGIN INSERT INTO gone VALUES (old.id); END;
+
     -- Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
     -- until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
     CREATE TABLE removed (
@@ -275,6 +293,21 @@ const MIGRATIONS: &[&str] = &[
     DROP INDEX remote_parent;
     CREATE INDEX remote_parent ON remote(parent, name_key);
     CREATE INDEX local_key ON local(parent, name_key, folder);",
+    // 15: operations the drive refused for good.
+    "CREATE TABLE refused (
+        folder  INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id      INTEGER NOT NULL,                     -- nodes.id
+        op      TEXT NOT NULL,                        -- the operation's kind
+        key     TEXT NOT NULL,                        -- what it sends or fetches, as the engine
+                                                      -- keys it: another is another operation
+        refused INTEGER NOT NULL,                     -- 0: one strike (a download whose bytes
+                                                      -- didn't match once), 1: refused
+        why     TEXT NOT NULL,
+        at      INTEGER NOT NULL,                     -- Unix ms
+        PRIMARY KEY (id, folder, op)
+    ) WITHOUT ROWID;
+    CREATE TRIGGER refused_gone AFTER DELETE ON refused
+        BEGIN INSERT INTO gone VALUES (old.id); END;",
 ];
 
 /// The version this client makes and reads.

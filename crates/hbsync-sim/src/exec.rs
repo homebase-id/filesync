@@ -212,12 +212,56 @@ impl Sim {
             });
         }
         self.conflicts += plan.conflicts.len();
+        // What the drive refused as it is isn't sent again (as `Engine::refused_out`).
+        let (ops, refused) = if !self.refusing {
+            (plan.ops.clone(), Vec::new())
+        } else {
+            let client = &self.clients[c];
+            let held = hbsync_engine::refused::hold_back(
+                plan.ops.clone(),
+                |op| {
+                    Ok::<_, Infallible>(
+                        client.refused.get(&(op.node(), op.kind())).is_some_and(
+                            |(key, refused)| *refused && *key == refusal_key(client, op),
+                        ),
+                    )
+                },
+                |node| {
+                    let local = client.local.get(node).map(|s| (s.parent, s.name.clone()));
+                    let folders = [&client.local, &client.base, &remote]
+                        .iter()
+                        .filter_map(|t| t.get(node).map(|s| s.parent))
+                        .collect();
+                    Ok(hbsync_engine::refused::Place { local, folders })
+                },
+                client.os != Os::Linux,
+            );
+            let Ok(held) = held;
+            held
+        };
+        let waiting: Vec<Op> = match self.refusing {
+            true => plan
+                .ops
+                .iter()
+                .filter(|op| !ops.contains(op) && !refused.contains(op))
+                .cloned()
+                .collect(),
+            false => Vec::new(),
+        };
         let client = &mut self.clients[c];
+        client.held_back = refused
+            .into_iter()
+            .map(|op| (op, true))
+            .chain(waiting.into_iter().map(|op| (op, false)))
+            .collect();
         // A confirmation lasts while the plan deletes its node.
         let deleting: HashSet<NodeId> = plan.ops.iter().filter_map(Op::deletes).collect();
         client.confirmed = confirmed.intersection(&deleting).copied().collect();
         client.held = plan.held.iter().map(Op::node).collect();
-        client.plan = plan.ops.into_iter().map(|op| (op, 0)).collect();
+        if self.refusing {
+            client.last_plan = ops.clone();
+        }
+        client.plan = ops.into_iter().map(|op| (op, 0)).collect();
         client.removed_by_plan.clear();
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
@@ -282,6 +326,7 @@ impl Sim {
         let landed = outcome == Outcome::Landed;
         let outcome = if landed { Outcome::Done } else { outcome };
         if outcome == Outcome::Done {
+            self.clients[c].refused.remove(&(node, op.kind()));
             let name = &self.clients[c].name;
             self.ledger
                 .wrote_outside_scope(|| breach.then(|| format!("{name} {op:?}")));
@@ -599,6 +644,18 @@ impl Sim {
         // The executor's server-side order guards, against the client's mirror.
         if !ready(&self.clients[c], op) {
             return Retry;
+        }
+        // The drive refuses it as it is: recorded, the operation isn't sent again as it is (a
+        // download once its bytes didn't match twice: the first time the drive is read again).
+        if self.drive_refuses(c, op) {
+            let key = refusal_key(&self.clients[c], op);
+            let record = self.clients[c].refused.get(&(op.node(), op.kind()));
+            let refused = !matches!(op, Op::LocalDownload { .. })
+                || record.is_some_and(|(k, refused)| !refused && *k == key);
+            self.clients[c]
+                .refused
+                .insert((op.node(), op.kind()), (key, refused));
+            return Skip;
         }
         // No placement over a record an earlier sync left (recovery kept it): the next plan,
         // once recovery settled it.
@@ -1452,6 +1509,54 @@ pub(crate) enum Outcome {
     /// A create found its node on the drive (another device brought it back): it wrote
     /// nothing, and settles against what is there.
     Landed,
+}
+
+/// The key of a refusal of `op` on `client` (`hbsync_engine::refused::key`): with the local
+/// file it sends if it uploads.
+pub(crate) fn refusal_key(client: &Client, op: &Op) -> String {
+    hbsync_engine::refused::key(op, uploaded(client, op).as_ref())
+}
+
+/// The local file `op` sends from `client`'s item, if it uploads.
+fn uploaded(client: &Client, op: &Op) -> Option<hbsync_types::FileContent> {
+    op.uploads()
+        .then(|| client.local.get(op.node()).and_then(|s| s.content))
+        .flatten()
+}
+
+impl Sim {
+    /// Whether the drive refuses `op` of client `c` as it is ([`Sim::with_refusals`]): a write
+    /// or a download, by everything it sends or fetches (the operation as planned, the bytes it
+    /// uploads). The simulator's own judgement: the client's record must follow it, not the
+    /// other way round.
+    pub(crate) fn drive_refuses(&mut self, c: usize, op: &Op) -> bool {
+        let Some(what) = self.request(c, op) else {
+            return false;
+        };
+        let seen = self.judged.len();
+        *self.judged.entry(what).or_insert(seen % 4 == 3)
+    }
+
+    /// Whether the drive refused `op` of client `c` as it is now, when it was sent.
+    pub(crate) fn drive_refused(&self, c: usize, op: &Op) -> bool {
+        self.request(c, op)
+            .is_some_and(|what| self.judged.get(&what) == Some(&true))
+    }
+
+    /// What `op` of client `c` sends the drive or fetches from it, if it does
+    /// ([`Sim::with_refusals`]): written out by the simulator itself, not with the client's key
+    /// (`hbsync_engine::refused::key`), so a key that leaves out an input is caught.
+    fn request(&self, c: usize, op: &Op) -> Option<String> {
+        let sends = matches!(
+            op,
+            Op::RemoteCreate { .. }
+                | Op::RemoteUpdate { .. }
+                | Op::RemoteTags { .. }
+                | Op::RemoteDelete { .. }
+                | Op::LocalDownload { .. }
+        );
+        (self.refusing && sends).then(|| format!("{op:?} {:?}", uploaded(&self.clients[c], op)))
+    }
 }
 
 /// The base's extra the executor records for `local` at `version`.

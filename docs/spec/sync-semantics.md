@@ -252,6 +252,19 @@ expected fingerprint is treated as done.
 - **Settling.** After each successful operation the base takes each attribute (location,
   content) that both sides now hold; never a value only one side has. A plan that stops half
   way can therefore never make the next round revert what did succeed.
+- **Refused.** An operation the drive refuses for good (a request it won't take as it is: a
+  bad request, a content it won't hold, a hash it won't have; a file whose bytes don't match
+  what the drive says they are, twice at one version) is recorded, keyed by its node, its kind
+  and everything it would send or fetch (its parent, name, tags, the version it acts on, the
+  local bytes it uploads). The plan leaves out an operation whose key matches, and what waits
+  for it (what goes into a folder whose create is refused, the removals in a folder whose
+  removal is, what goes to the local place the refused item doesn't leave, and the trash or
+  forgetting of a folder it is in): it stays dirty, but isn't sent again, nor counted as
+  unfinished work. Something else blocked behind it is tried and skipped, a local cost, told
+  when it keeps coming back. Any change
+  of the node, here or on the drive, is another key, and is sent. A refusal lasts an hour at
+  most, and until Sync now; the operation done forgets it. A download whose bytes didn't match
+  once reads the drive again first: it may have been written meanwhile.
 - **Retry within a plan.** An operation blocked only by order (target parent not created yet,
   a folder temporarily inside its own destination) goes to the back of the queue.
 - **Parking.** If a target name is held by a node the plan is about to move, trash or replace,
