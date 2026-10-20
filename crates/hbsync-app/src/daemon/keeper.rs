@@ -142,6 +142,10 @@ impl Keeper {
 }
 
 fn purge_now(drive: &Drive, keep_days: u32) {
+    // Refused: asked again once the identity lets this computer in.
+    if drive.is_denied() {
+        return;
+    }
     match drive.purge_when_due(keep_days) {
         Ok(Some(n)) if n > 0 => tracing::info!("{n} items deleted for good after {keep_days} days"),
         Ok(_) => {}
@@ -154,21 +158,34 @@ fn run_request(drive: &Drive, control: AccountControl) {
     match control {
         AccountControl::Restore { nodes } => match drive.restore(&nodes) {
             Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
-            Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
+            Err(e) => {
+                deny_if_refused(drive, &e);
+                tracing::warn!("restoring from Recently deleted failed: {e}")
+            }
         },
         AccountControl::EmptyDeleted { nodes, db, seq } => {
-            report_emptied(drive.empty(&nodes, &Listed { db, seq }))
+            report_emptied(drive, drive.empty(&nodes, &Listed { db, seq }))
         }
         AccountControl::EmptyListed { db, seq } => {
-            report_emptied(drive.empty_listed(&Listed { db, seq }))
+            report_emptied(drive, drive.empty_listed(&Listed { db, seq }))
         }
     }
 }
 
-fn report_emptied(result: Result<usize, EngineError>) {
+fn report_emptied(drive: &Drive, result: Result<usize, EngineError>) {
     match result {
         Ok(n) => tracing::info!("{n} items deleted for good"),
-        Err(e) => tracing::warn!("emptying Recently deleted failed: {e}"),
+        Err(e) => {
+            deny_if_refused(drive, &e);
+            tracing::warn!("emptying Recently deleted failed: {e}")
+        }
+    }
+}
+
+/// The identity refused this computer: the account asks nothing more ([`Drive::deny`]).
+fn deny_if_refused(drive: &Drive, e: &EngineError) {
+    if e.class() == hbsync_remote::ErrorClass::Denied {
+        drive.deny(&e.to_string());
     }
 }
 

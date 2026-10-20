@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError};
+use hbsync_remote::{ChangeRef, ErrorClass, NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 
 use hbsync_types::schema::NodeContent;
@@ -46,6 +46,9 @@ pub struct Drive {
     skipped: Mutex<Vec<String>>,
     /// The drive refused an upload, out of storage: until when uploads are held.
     full: Mutex<Option<Instant>>,
+    /// The identity refused this computer (401, 403), and why: nothing asks it again until
+    /// the user acts or the notifications connect ([`Drive::deny`]).
+    denied: Mutex<Option<String>>,
     /// Whether the account's picture is current.
     freshness: Freshness,
     /// The server's clock at the last page of the feed read, Unix ms (0: none yet).
@@ -164,6 +167,7 @@ impl Drive {
             wakes: Wakes::default(),
             skipped: Mutex::default(),
             full: Mutex::default(),
+            denied: Mutex::default(),
             freshness: Freshness::default(),
             server_time: AtomicI64::new(0),
             reread: Mutex::default(),
@@ -228,6 +232,35 @@ impl Drive {
         *lock(&self.full) = None;
     }
 
+    /// The identity refused this computer's credentials (401, 403): the account's folders and
+    /// its puller don't ask the drive again (each would be refused alike) until the user acts
+    /// (Sync now, resume), the notifications connect again (the credentials work), or new
+    /// credentials make a new drive. Whether it wasn't denied before.
+    pub fn deny(&self, why: &str) -> bool {
+        let mut denied = lock(&self.denied);
+        if denied.is_none() {
+            tracing::warn!(
+                "the identity refused this computer ({why}): asking no more until a login or Sync now"
+            );
+        }
+        denied.replace(why.to_owned()).is_none()
+    }
+
+    /// Why the identity refused this computer, while that holds ([`Drive::deny`]).
+    pub fn denied(&self) -> Option<String> {
+        lock(&self.denied).clone()
+    }
+
+    /// Whether the identity refuses this computer ([`Drive::deny`]).
+    pub fn is_denied(&self) -> bool {
+        lock(&self.denied).is_some()
+    }
+
+    /// The drive is asked again ([`Drive::deny`]).
+    pub fn allow(&self) {
+        *lock(&self.denied) = None;
+    }
+
     /// The drive refused an upload, out of storage: hold uploads in every folder for `hold`
     /// ([`crate::time::full_hold`]).
     pub(crate) fn set_full(&self, hold: Duration) {
@@ -289,7 +322,12 @@ impl Drive {
                     self.server_time.store(now, Ordering::SeqCst);
                 }
             }
-            Err(_) => self.set_behind(),
+            Err(e) => {
+                self.set_behind();
+                if e.class() == ErrorClass::Denied {
+                    self.deny(&e.to_string());
+                }
+            }
         }
         // Still one at a time: what it touched is its to wake, the pages it committed before a
         // failure too.

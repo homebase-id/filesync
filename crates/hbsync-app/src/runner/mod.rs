@@ -29,6 +29,7 @@ use hbsync_engine::activity::Counters;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
+use hbsync_remote::ErrorClass;
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
 use hbsync_types::unix_now;
@@ -42,6 +43,9 @@ mod schedule;
 
 pub(crate) use schedule::{Backoff, shown};
 use schedule::{Schedule, Synced};
+
+/// While the identity refuses this computer, how often a folder asks again (one sync).
+const DENIED_LOOK: Duration = Duration::from_secs(3600);
 
 /// The ignore rules are read this long after their file was last touched: not half written.
 const RULES_QUIET: Duration = Duration::from_secs(1);
@@ -60,6 +64,21 @@ pub enum RunnerError {
     Panicked,
     #[error(transparent)]
     Folder(#[from] RootError),
+}
+
+impl RunnerError {
+    /// What it means ([`ErrorClass`]).
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            RunnerError::State(e) => e.class(),
+            RunnerError::Engine(e) => e.class(),
+            // Rules that don't parse: the user's to fix.
+            RunnerError::Filter(_) => ErrorClass::NeedsUser,
+            RunnerError::Io(e) => ErrorClass::of_io(e),
+            RunnerError::Panicked => ErrorClass::Bug,
+            RunnerError::Folder(e) => e.class(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -212,6 +231,8 @@ pub struct Runner {
     stalled: report::Stalled,
     /// Sync now was asked: the next sync sends what the drive refused once more.
     retry_refused: bool,
+    /// Waited out a refusal: the next due sync asks the drive again ([`DENIED_LOOK`]).
+    probing: bool,
 }
 
 impl std::fmt::Debug for Runner {
@@ -291,6 +312,7 @@ impl Runner {
             told: Default::default(),
             stalled: Default::default(),
             retry_refused: false,
+            probing: false,
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -505,6 +527,20 @@ impl Runner {
             if !schedule.due(now) {
                 continue;
             }
+            // The identity refused this computer: not asked again until the user acts or the
+            // notifications connect (`Drive::deny`); a look now and then, asking nothing.
+            // An hour on, one sync asks again (a 403 for one write needn't hold the account for
+            // good): refused again, it latches again.
+            match (self.drive.denied(), std::mem::take(&mut self.probing)) {
+                (Some(why), false) => {
+                    let class = ErrorClass::Denied;
+                    self.backs_off(&mut schedule, "the sync", class, &why, Some(DENIED_LOOK));
+                    self.probing = true;
+                    continue;
+                }
+                (Some(_), true) => self.drive.allow(),
+                (None, _) => {}
+            }
             let marker = match SyncRoot::check(&self.cfg.folder, &self.cfg.identity) {
                 Ok(marker) => marker.id,
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
@@ -591,6 +627,10 @@ impl Runner {
                     }
                 }
                 Err(e) => {
+                    // Refused: the account asks nothing more until a login or the user acts.
+                    if e.class() == ErrorClass::Denied {
+                        self.drive.deny(&e.to_string());
+                    }
                     self.backs_off(&mut schedule, "the sync", e.class(), &e, e.retry_after());
                 }
             }
@@ -612,9 +652,11 @@ impl Runner {
             Command::SyncNow => {
                 schedule.asked(Instant::now());
                 *check_rules = true;
-                // The user may have made room on the drive, or changed what it refused.
+                // The user may have made room on the drive, changed what it refused, or let
+                // this computer in again.
                 self.drive.clear_full();
                 self.retry_refused = true;
+                self.drive.allow();
             }
             Command::Online => schedule.online(Instant::now()),
             Command::Woke => {
@@ -632,6 +674,7 @@ impl Runner {
                 }
             }
             Command::Resume => {
+                self.drive.allow();
                 if schedule.resume(Instant::now()) {
                     tracing::info!("resumed");
                 }

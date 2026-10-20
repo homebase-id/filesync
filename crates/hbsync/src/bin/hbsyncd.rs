@@ -6,11 +6,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use hbsync_app::Paths;
-use hbsync_app::daemon::{DaemonError, Stop};
-use hbsync_app::lock::LockError;
-use hbsync_app::runner::RunnerError;
-use hbsync_engine::root::RootError;
-use hbsync_state::StateError;
+use hbsync_app::daemon::Stop;
+use hbsync_types::ErrorClass;
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
@@ -50,20 +47,13 @@ fn main() -> ExitCode {
     if !std::io::stderr().is_terminal() {
         eprintln!("hbsyncd: {e}");
     }
-    match e {
-        // Nothing to do is no failure: launchd and systemd restart a daemon that failed. Nor
-        // is a folder that must be set up again: restarting can't help.
-        DaemonError::NotSetUp(_)
-        | DaemonError::Lock(LockError::Held { .. })
-        | DaemonError::Runner(RunnerError::Folder(
-            RootError::Unknown(_) | RootError::State(StateError::TooOld { .. }),
-        )) => {
-            tracing::warn!("{e}");
-            ExitCode::SUCCESS
-        }
-        e => {
-            tracing::error!("{e}");
-            ExitCode::FAILURE
-        }
+    // Nothing to do is no failure: launchd and systemd restart a daemon that failed. Nor is
+    // what only the user can fix (a folder to set up again, a state DB that is corrupt or from
+    // another version, a config that doesn't parse): restarting every few seconds can't help.
+    if e.class() == ErrorClass::NeedsUser {
+        tracing::warn!("{e}");
+        return ExitCode::SUCCESS;
     }
+    tracing::error!("{e}");
+    ExitCode::FAILURE
 }

@@ -90,14 +90,12 @@ impl StateError {
         match self {
             StateError::Sqlite(rusqlite::Error::SqliteFailure(e, _)) => match e.code {
                 Code::DatabaseBusy | Code::DatabaseLocked => ErrorClass::StateBusy,
-                // The whole DB can't be used: the user's to fix (room on the disk, access).
-                Code::DiskFull
-                | Code::SystemIoFailure
-                | Code::CannotOpen
-                | Code::PermissionDenied
-                | Code::ReadOnly
-                | Code::DatabaseCorrupt
-                | Code::NotADatabase => ErrorClass::NeedsUser,
+                // The disk: may pass (room made, a volume back).
+                Code::DiskFull => ErrorClass::LocalFull,
+                Code::SystemIoFailure | Code::CannotOpen => ErrorClass::LocalFault,
+                Code::PermissionDenied | Code::ReadOnly => ErrorClass::LocalDenied,
+                // The DB itself: the user's to set right.
+                Code::DatabaseCorrupt | Code::NotADatabase => ErrorClass::NeedsUser,
                 _ => ErrorClass::Bug,
             },
             StateError::Sqlite(_) | StateError::Conflict(_) => ErrorClass::Bug,
@@ -631,7 +629,7 @@ mod tests {
             ))
         };
         assert_eq!(sqlite(5).class(), ErrorClass::StateBusy); // SQLITE_BUSY
-        assert_eq!(sqlite(13).class(), ErrorClass::NeedsUser); // SQLITE_FULL
+        assert_eq!(sqlite(13).class(), ErrorClass::LocalFull); // SQLITE_FULL
         assert_eq!(sqlite(11).class(), ErrorClass::NeedsUser); // SQLITE_CORRUPT
         let too_new = StateError::TooNew {
             found: 99,
