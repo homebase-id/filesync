@@ -270,17 +270,20 @@ impl Sim {
                 return Err(format!("lost tag {name:?} of {node:?}: {:?}", s.tags));
             }
         }
-        // A synced tag a client removed stays removed (§11), unless another client added it,
-        // or holds it from a download whose record recovery dropped (`tags_unproven`, the known
-        // limit). One removed before a delete was settled by it (`deleted_now`,
-        // `restored_on_drive`).
-        for (by, node, name) in &self.tags_cleared {
-            let added_elsewhere = self
-                .tags_added
+        // A synced tag a client removed stays removed (§11), unless another client added it
+        // and the add wasn't on the drive yet when it was removed (not sent up then: the
+        // removal, sent up after an add on the drive, wins), or holds it from a download whose
+        // record recovery dropped (`tags_unproven`, the known limit). One removed before a
+        // delete was settled by it (`deleted_now`, `restored_on_drive`).
+        for ((by, node, name), removed) in &self.tags_cleared {
+            let elsewhere = |(c, n, t): &(usize, NodeId, String)| c != by && n == node && t == name;
+            let added_elsewhere = self.tags_added.iter().any(|add| {
+                elsewhere(add) && self.tags_sent.get(add).is_none_or(|sent| sent > removed)
+            }) || self
+                .tags_forked
                 .iter()
-                .chain(&self.tags_forked)
                 .chain(&self.tags_unproven)
-                .any(|(c, n, t)| c != by && n == node && t == name);
+                .any(elsewhere);
             if let Some(s) = server.get(*node)
                 && !added_elsewhere
                 && s.tags.get(name).is_some()

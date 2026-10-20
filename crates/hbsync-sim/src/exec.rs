@@ -374,7 +374,11 @@ impl Sim {
                     // The item no longer holds what this client's user added to it: the add
                     // stays with the node (on the drive, or nowhere), not with the item (a
                     // conflict copy made of it later doesn't take it along).
-                    if self.tags_added.remove(&(c, node, name.clone())) {
+                    let add = (c, node, name.clone());
+                    if self.tags_added.remove(&add) {
+                        if let Some(sent) = self.tags_sent.remove(&add) {
+                            self.tags_sent.insert((DETACHED, node, name.clone()), sent);
+                        }
                         self.tags_added.insert((DETACHED, node, name));
                     }
                 }
@@ -429,7 +433,10 @@ impl Sim {
                 for tag in tags.iter() {
                     let add = (c, node, tag.name.clone());
                     if self.tags_added.contains(&add) {
-                        self.tags_sent.insert(add);
+                        // The last write carrying it: one after a removal sends it again, as
+                        // this client's add (a node with no base here yet merges both sides').
+                        let now = self.server.now();
+                        self.tags_sent.insert(add, now);
                     }
                 }
             }
@@ -1103,13 +1110,8 @@ impl Sim {
             let client = &mut self.clients[c];
             client.local.remove(n);
             client.parked.remove(&n);
-            // Tag changes made here and not synced yet went to the trash with the item; an add
-            // sent up stands.
-            let sent = &self.tags_sent;
-            self.tags_added
-                .retain(|add| (add.0, add.1) != (c, n) || sent.contains(add));
-            self.tags_cleared
-                .retain(|(by, node, _)| (*by, *node) != (c, n));
+            // Tag changes made here went to the trash with the item, but for an add sent up.
+            self.tag_changes_left(c, n);
         }
         for r in released {
             let new = self.release_id();
