@@ -2,6 +2,7 @@
 //! the worker pool ([`Job::Meta`]), next to the transfers.
 
 use super::*;
+use crate::mirror;
 
 /// What a metadata write means for the DB once it landed.
 pub(super) enum After {
@@ -11,40 +12,6 @@ pub(super) enum After {
     Updated,
     /// Moved to Recently deleted: its mirror row (`file_id`) goes, its removed row comes.
     Removed { file_id: hbsync_types::RemoteFileId },
-}
-
-/// A mirror row's node as written back: at `parent` under `name`, removed or not.
-pub(crate) fn meta_at(row: &MirrorRow, parent: NodeId, name: &str, removed: bool) -> NodeMeta {
-    NodeMeta {
-        node: row.node,
-        parent,
-        kind: row.kind,
-        content: row.content(name),
-        removed,
-    }
-}
-
-/// [`meta_at`] where and as the row has it.
-fn meta(row: &MirrorRow, removed: bool) -> NodeMeta {
-    meta_at(row, row.parent, &row.name, removed)
-}
-
-/// A removal written (`row`, its answer; `None`: the drive no longer had the file): out of the
-/// mirror, into Recently deleted at the answer's time (open if it gave none, until the feed
-/// brings it).
-pub(crate) fn record_removed(
-    s: &Store<'_>,
-    file_id: hbsync_types::RemoteFileId,
-    row: Option<MirrorRow>,
-) -> Result<(), StateError> {
-    s.delete_mirror(file_id)?;
-    match row {
-        Some(row) => s.put_removed(&RemovedRow {
-            removed_at: row.changed_at,
-            row,
-        }),
-        None => Ok(()),
-    }
 }
 
 impl Executor<'_> {
@@ -162,7 +129,7 @@ impl Executor<'_> {
         else {
             return Err(Outcome::Done); // already out of the tree
         };
-        let meta = meta(&mirror, true);
+        let meta = mirror::meta(&mirror, true);
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,
@@ -183,13 +150,10 @@ impl Executor<'_> {
         written: Option<Target>,
     ) -> Step {
         let node = meta.node;
-        let row = written.map(|w| written_row(&meta, hash, w));
+        let row = written.map(|w| mirror::written(&meta, hash, w));
         self.finish(&[Settle::node(node)], |s| match after {
-            After::Created => {
-                s.delete_removed(node)?;
-                row.map_or(Ok(()), |row| s.put_mirror(&row))
-            }
-            After::Updated => row.map_or(Ok(()), |row| s.put_mirror(&row)),
+            After::Created => row.map_or(Ok(()), |row| mirror::live(s, &row)),
+            After::Updated => row.map_or(Ok(()), |row| mirror::updated(s, &row)),
             After::Removed { file_id } => removed(s, node, file_id, row),
         })
     }
@@ -204,7 +168,7 @@ impl Executor<'_> {
         let rows: Vec<(NodeId, hbsync_types::RemoteFileId, MirrorRow)> = landed
             .into_iter()
             .map(|l| {
-                let row = written_row(&l.meta, l.hash, l.written);
+                let row = mirror::written(&l.meta, l.hash, l.written);
                 (l.meta.node, l.file_id, row)
             })
             .collect();
@@ -213,11 +177,6 @@ impl Executor<'_> {
                 .try_for_each(|(node, file_id, row)| removed(s, node, file_id, Some(row)))
         })
     }
-}
-
-/// The mirror's row of `meta` as written (`w`, the drive's answer).
-fn written_row(meta: &NodeMeta, hash: Option<hbsync_types::ContentHash>, w: Target) -> MirrorRow {
-    MirrorRow::written(w, meta.node, meta.parent, meta.kind, &meta.content, hash)
 }
 
 /// A removal the drive answered, as written.
@@ -237,7 +196,7 @@ fn removed(
     file_id: hbsync_types::RemoteFileId,
     row: Option<MirrorRow>,
 ) -> Result<(), StateError> {
-    record_removed(s, file_id, row)?;
+    mirror::removed(s, file_id, row)?;
     s.mark_dirty(node)
 }
 

@@ -13,6 +13,7 @@ pub mod feed;
 mod folder;
 mod id;
 pub mod mask;
+pub mod mirror;
 pub mod plan;
 pub mod reconcile;
 pub mod root;

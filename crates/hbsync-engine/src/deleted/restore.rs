@@ -9,8 +9,7 @@ use hbsync_state::{MirrorRow, RemovedRow, StateError, Store};
 use hbsync_types::{NodeId, Target};
 
 use crate::error::EngineError;
-use crate::exec::meta_at;
-use crate::feed::{apply_tombstone, gone_after};
+use crate::mirror::{self, gone_after, meta_at};
 use crate::tree::restored_names;
 use crate::walk::End;
 
@@ -89,11 +88,8 @@ impl AccountOps<'_> {
             // write marks each dirty in the folders it comes back to.
             let (back, gone) = (std::mem::take(&mut r.back), std::mem::take(&mut r.gone));
             locked(self.account).write(|s| {
-                gone.iter().try_for_each(|f| apply_tombstone(s, *f))?;
-                back.iter().try_for_each(|m| {
-                    s.delete_removed(m.node)?;
-                    s.put_mirror(m)
-                })
+                gone.iter().try_for_each(|f| mirror::forget(s, *f, None))?;
+                back.iter().try_for_each(|m| mirror::live(s, m))
             })?;
             restored += back.len();
         }
@@ -126,14 +122,7 @@ impl Restoring<'_> {
             Ok(w) => {
                 let hash = row.file.map(|f| f.hash);
                 self.live.insert(row.node);
-                self.back.push(MirrorRow::written(
-                    w,
-                    meta.node,
-                    meta.parent,
-                    meta.kind,
-                    &meta.content,
-                    hash,
-                ));
+                self.back.push(mirror::written(meta, hash, w));
                 return;
             }
             Err(e) => e,

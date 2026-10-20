@@ -30,6 +30,7 @@ mod kv;
 mod local;
 mod mirror;
 mod parked;
+mod picture;
 mod removed;
 mod tombstones;
 

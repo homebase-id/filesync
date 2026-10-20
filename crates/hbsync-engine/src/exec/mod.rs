@@ -26,7 +26,7 @@ use hbsync_fileio::FileIoError;
 use hbsync_platform::name::name_key;
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, RemovedRow, StateDb, StateError, Store};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, StateDb, StateError, Store};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target};
@@ -1285,7 +1285,6 @@ use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
 use recover::{complete_fork, download_key};
-pub(crate) use remote::{meta_at, record_removed};
 pub use transfer_ops::tags_lost;
 
 // Every change the executor makes to a folder's entries goes through these two, which keep the

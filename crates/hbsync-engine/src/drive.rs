@@ -11,13 +11,13 @@ use std::time::{Duration, Instant};
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
 
-use hbsync_state::MirrorRow;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Role};
 
 use crate::deleted;
 use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
+use crate::mirror;
 use crate::root::{RootError, SyncRoot};
 
 /// Rows of the change feed read per request, at most: whole pages (decrypted headers), and slim
@@ -325,20 +325,10 @@ impl Drive {
             match self.remote().create(&meta, None) {
                 // Recorded from the answer, as the executor records its writes.
                 Ok(written) => {
-                    let row = MirrorRow::written(
-                        written,
-                        meta.node,
-                        meta.parent,
-                        meta.kind,
-                        &meta.content,
-                        None,
-                    );
+                    let row = mirror::written(&meta, None, written);
                     let mut db = self.account();
-                    // As the executor records a folder it made: out of Recently deleted too.
-                    db.write(|s| {
-                        s.delete_removed(top)?;
-                        s.put_mirror(&row)
-                    })?;
+                    // As the executor records a folder it made.
+                    db.write(|s| mirror::live(s, &row))?;
                     self.wake_touched(&mut db, None);
                 }
                 // Another device made it (or deleted it) meanwhile: read it.
@@ -365,7 +355,7 @@ impl Drive {
         self.account().write(|s| {
             let changed = s.account_kv(keys::TOKENS_SEALED_BY)?.as_deref() != Some(by);
             if changed {
-                s.clear_tokens()?;
+                mirror::clear_tokens(s)?;
                 s.set_account_kv(keys::TOKENS_SEALED_BY, by)?;
             }
             Ok(changed)
