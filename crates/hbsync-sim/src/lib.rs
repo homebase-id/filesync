@@ -38,7 +38,7 @@ mod world;
 pub use action::{Action, Event};
 pub use model::server::{PURGE_EVERY, TRACE};
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use hbsync_engine::reconcile::DriveVersion;
 use hbsync_engine::tree::Tree;
@@ -89,16 +89,18 @@ pub struct Sim {
     /// the node was deleted. An item that gets a new id on its client takes its tags along.
     tags_added: BTreeSet<(usize, NodeId, String)>,
     tags_removed: BTreeSet<(NodeId, String)>,
-    /// Tags a client removed from a node its base had them on, and not added again since:
-    /// they stay removed, unless another client added them (a merge keeps either side's add).
-    tags_cleared: BTreeSet<(usize, NodeId, String)>,
+    /// Tags a client removed from a node its base had them on, and not added again since, with
+    /// the server's time then: they stay removed, unless another client added them and the add
+    /// wasn't on the drive yet (a merge keeps either side's add; a removal made after the add
+    /// was sent up goes up after it, and wins).
+    tags_cleared: BTreeMap<(usize, NodeId, String), i64>,
     /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
     /// them to the original too, as that client's add.
     tags_forked: BTreeSet<(usize, NodeId, String)>,
-    /// Tag adds a client's remote write sent up (until the client adds the tag again): they
-    /// stand once the item goes from it; a restore keeps an add only if it holds it, or the add
-    /// is still to go up ([`Sim::restored`]).
-    tags_sent: BTreeSet<(usize, NodeId, String)>,
+    /// Tag adds a client's remote write sent up (until the client adds the tag again), with the
+    /// server's time of the last such write: they stand once the item goes from it; a restore
+    /// keeps an add only if it holds it, or the add is still to go up ([`Sim::restored`]).
+    tags_sent: BTreeMap<(usize, NodeId, String), i64>,
     /// Tags a download wrote on a client's item whose record recovery dropped (the item
     /// changed since: it can't be told from the file there before), that the item still
     /// holds: read against the old base, they are that client's adds, and a removal made
@@ -142,10 +144,10 @@ impl Sim {
             guard: None,
             tags_added: BTreeSet::new(),
             tags_forked: BTreeSet::new(),
-            tags_sent: BTreeSet::new(),
+            tags_sent: BTreeMap::new(),
             tags_removed: BTreeSet::new(),
             tags_unproven: BTreeSet::new(),
-            tags_cleared: BTreeSet::new(),
+            tags_cleared: BTreeMap::new(),
             deleted: BTreeSet::new(),
             computers: Vec::new(),
             split_downloads: false,

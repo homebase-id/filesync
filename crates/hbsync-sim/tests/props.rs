@@ -3447,3 +3447,63 @@ fn regression_a_folder_made_back_whose_tag_write_fails_keeps_a_removal() {
         sim.server_paths()
     );
 }
+
+/// c1 makes folder a and syncs it. c0 gets a, untagged, and tags it Work, writing files into
+/// it. c1 tags a Work too, syncs, removes Work and syncs that: the drive's a has none. c0, which
+/// never saw c1's Work, sends its own add up over that version (an add either side made is in,
+/// §11). c1 writes a file into a, and c0 deletes a before it sees that file: the delete loses,
+/// and a comes back to c0 with the drive's Work. Right: c0's add stands, as a lost delete
+/// settles nothing. The oracle dropped c0's add with its delete, sent up or not, and so took
+/// Work for c1's removal coming back (`cc 35f5b92e…`).
+#[test]
+fn regression_an_add_sent_up_outlives_its_own_delete_that_lost() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Phone, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 8 }),
+        plan(1),
+        step(1),
+        act(1, Tag { node: 0, tag: 13 }),
+        plan(0),
+        step(0),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, Tag { node: 6, tag: 1 }),
+        act(0, CreateFile { parent: 0, name: 1 }),
+        plan(1),
+        step(1),
+        act(1, Tag { node: 0, tag: 5 }),
+        plan(1),
+        act(0, CreateFile { parent: 0, name: 3 }),
+        step(1),
+        plan(0),
+        act(1, CreateFile { parent: 6, name: 0 }),
+        step(0),
+        act(0, Phone { op: 3, pick: 0 }),
+        step(0),
+        plan(1),
+        step(0),
+        step(0),
+        plan(0),
+        step(0),
+        act(0, Delete { node: 5 }),
+        step(1),
+    ];
+    run_with(3, None, Sim::with_role_folder, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+    // The story: c0's delete of a lost to c1's file, and a came back with c0's Work.
+    let mut sim = Sim::with_role_folder(Sim::new(3));
+    sim.run(&events);
+    assert!(sim.quiesce(30), "no convergence");
+    assert!(
+        sim.item(0, "a/a (conflict 1)").is_some(),
+        "c1's file kept a"
+    );
+    for c in 0..2 {
+        // (c2 is on Windows: it holds no tags.)
+        assert_eq!(sim.local_tags(c, "a"), Some(vec!["Work:0".to_owned()]));
+    }
+}

@@ -269,7 +269,8 @@ impl Sim {
                             .get(node)
                             .is_some_and(|b| b.tags.get(name).is_some());
                         if synced {
-                            self.tags_cleared.insert((c, node, name.to_owned()));
+                            let now = self.server.now();
+                            self.tags_cleared.insert((c, node, name.to_owned()), now);
                         }
                     }
                     (Action::Tag { .. }, None) => {
@@ -447,8 +448,6 @@ impl Sim {
                 for n in self.clients[c].local.subtree(node) {
                     self.clients[c].local.remove(n);
                     self.deleted_here(c, n);
-                    self.tags_added
-                        .retain(|(at, node, _)| (*at, *node) != (c, n));
                 }
             }
         }
@@ -522,16 +521,26 @@ impl Sim {
     /// `node` left the drive (a delete won): it settles the tag removals made before it.
     pub(crate) fn deleted_now(&mut self, node: NodeId) {
         self.deleted.insert(node);
-        self.tags_cleared.retain(|(_, n, _)| *n != node);
+        self.tags_cleared.retain(|(_, n, _), _| *n != node);
     }
 
     /// The user of client `c` deleted `node` there: what they did to its tags there went with
-    /// it, won or lost; other clients' tag changes stand until the delete wins.
+    /// it, won or lost, but for an add sent up ([`Sim::tag_changes_left`]); other clients' tag
+    /// changes stand until the delete wins.
     fn deleted_here(&mut self, c: usize, node: NodeId) {
         self.deleted.insert(node);
+        self.tag_changes_left(c, node);
+    }
+
+    /// Client `c`'s item `node` left it (deleted or trashed there): the tag changes made there
+    /// went with it, but for an add sent up, which stands (where a delete loses, the drive's
+    /// version comes back with it).
+    pub(crate) fn tag_changes_left(&mut self, c: usize, node: NodeId) {
         self.tags_cleared
-            .retain(|(by, n, _)| (*by, *n) != (c, node));
-        self.tags_added.retain(|(at, n, _)| (*at, *n) != (c, node));
+            .retain(|(by, n, _), _| (*by, *n) != (c, node));
+        let sent = &self.tags_sent;
+        self.tags_added
+            .retain(|add| (add.0, add.1) != (c, node) || sent.contains_key(add));
     }
 
     /// `node` is back on the drive (from Recently deleted, or made again after the purge).
@@ -556,13 +565,13 @@ impl Sim {
         if !self.deleted.remove(&node) {
             return;
         }
-        self.tags_cleared.retain(|(_, n, _)| *n != node);
+        self.tags_cleared.retain(|(_, n, _), _| *n != node);
         let (sent, clients) = (&self.tags_sent, &self.clients);
         self.tags_added.retain(|add| {
             let (c, n, name) = add;
             let pending = || {
                 *c != DETACHED
-                    && !sent.contains(add)
+                    && !sent.contains_key(add)
                     && clients.get(*c).is_some_and(|client| {
                         client
                             .local
@@ -755,16 +764,16 @@ impl Sim {
         for name in removed {
             self.tags_removed.insert((new, name));
         }
-        let cleared: Vec<String> = self
+        let cleared: Vec<(String, i64)> = self
             .tags_cleared
             .iter()
-            .filter(|(at, n, _)| *at == c && *n == node)
-            .map(|(_, _, name)| name.clone())
+            .filter(|((at, n, _), _)| *at == c && *n == node)
+            .map(|((_, _, name), when)| (name.clone(), *when))
             .collect();
         // The item's removal is the new id's now: the old node no longer has it.
-        for name in cleared {
+        for (name, when) in cleared {
             self.tags_cleared.remove(&(c, node, name.clone()));
-            self.tags_cleared.insert((c, new, name));
+            self.tags_cleared.insert((c, new, name), when);
         }
     }
 }
@@ -773,10 +782,12 @@ impl Sim {
 mod tests {
     use super::*;
     use crate::action::{Event, act};
+    use hbsync_types::Tag;
 
     /// A delete here that loses (another device edited the file) settles nothing of what other
     /// clients did to its tags: a removal and an addition client 1 hasn't synced yet still
-    /// count. Only the deleting client's own went with its item.
+    /// count. Of the deleting client's own, only an add sent up stays: the drive has it. One
+    /// sent before client 1 removed the tag doesn't excuse the tag coming back.
     #[test]
     fn a_lost_delete_settles_nothing_of_other_clients() {
         let mut sim = Sim::new(2);
@@ -797,8 +808,23 @@ mod tests {
         ]);
         assert!(sim.quiesce(10));
         assert!(sim.item(0, "a").is_some(), "the delete lost");
-        assert!(sim.tags_cleared.contains(&(1, file, "Red".into())));
+        assert!(sim.tags_cleared.contains_key(&(1, file, "Red".into())));
         assert!(sim.tags_added.contains(&(1, file, "Work".into())));
+        assert!(sim.tags_added.contains(&(0, file, "Red".into())), "sent up");
         sim.check().unwrap_or_else(|e| panic!("{e}"));
+        // Red back everywhere, as an engine that kept it over the removal would leave it.
+        assert_eq!(sim.server_tags("a"), Some(vec!["Work:0".to_owned()]));
+        let back = Tags::new(vec![Tag::new("Red", 6), Tag::new("Work", 0)]);
+        sim.server.live.get_mut(&file).expect("live").state.tags = back.clone();
+        for client in &mut sim.clients {
+            for tree in [&mut client.local, &mut client.base] {
+                if let Some(mut s) = tree.get(file).cloned() {
+                    s.tags = back.clone();
+                    tree.insert(file, s);
+                }
+            }
+        }
+        let back = sim.check().expect_err("Red coming back is reported");
+        assert!(back.contains("came back"), "{back}");
     }
 }

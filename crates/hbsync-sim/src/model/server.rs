@@ -50,6 +50,11 @@ impl Server {
         (*node, n.remote.version)
     }
 
+    /// The server's clock now ([`time`]): past its last write, and past the last purge.
+    pub(crate) fn now(&self) -> i64 {
+        self.next as i64
+    }
+
     pub(crate) fn uuid(&mut self) -> Uuid {
         self.next += 1;
         Uuid::from_u128(self.next)

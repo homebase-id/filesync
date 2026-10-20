@@ -111,3 +111,5 @@ cc 7561dfb3dd13ff15c467af6bf7a9d7ad285428f61925b768e235a29deb2e0775 # a folder a
 cc e06eb0c6815ab4b00afb98b33f14576228f14cb7f8e3c8a783d6399c901acccc # a file left with no folder (gone for good) was shown nowhere: now in Recovered files
 cc f25d990945c4b9e2c543f1a6577a634fd5eab18475d06dc49e899ff9c4304576 # the same, after the phone's work in Documents: now in Recovered files
 cc b63b7063a2a017a90242c896a4cc70b865dd62a594c9a332d48f3ffa2c0dc78f # a folder made back whose tag write failed kept the tag in its base: its absence went up as a removal (CI run 39377359513)
+cc 35f5b92eeb3d8b97434a318a845696fd8f8b986cbaaefaf119a04b0e2578af96 # an add sent up outlives its own delete that lost: another client's removal before it doesn't win
+cc 547261dd60a394e104f0dfa8132f69144c8a1b6a2e60f46bf257f2c3ffeb4972 # an add sent again after a removal (a conflict copy with no base yet) is a new add: not the removal lost
