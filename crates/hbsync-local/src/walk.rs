@@ -215,7 +215,7 @@ mod tests {
             fs::write(r.join(f), b"x")?;
         }
         fs::create_dir(r.join(".hbsync"))?;
-        fs::write(&crate::layout::older_db(r)[0], b"")?;
+        fs::write(r.join(".hbsync/state.db"), b"")?;
 
         let got = entries(r);
         assert_eq!(

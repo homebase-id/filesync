@@ -1,20 +1,29 @@
-//! The state DB's schema. `PRAGMA user_version` holds its version: [`SCHEMA`] is version
-//! [`BASE`], and each migration after it adds one. Migrations are append-only once released:
-//! never edit one that has shipped. A DB older than `BASE` (one per folder, before 0.6) isn't
-//! upgraded: its folder is set up again.
+//! The state DB's schema. `PRAGMA user_version` holds its version: a new DB is made at
+//! [`VERSION`] by [`SCHEMA`]; one of version [`BASE`] or later is brought up to it by
+//! [`MIGRATIONS`], each adding one. A DB older than `BASE` (before 0.7) isn't upgraded: its
+//! account is set up again.
+//!
+//! Changing the schema:
+//! - a migration is appended, and [`SCHEMA`] makes the same change: a new DB never runs
+//!   migrations. `the_schema_is_what_an_upgrade_makes` checks that they agree;
+//! - a migration's data steps (filling a column, a kv row) are for the DBs it upgrades: what a
+//!   new DB needs too goes in [`SCHEMA`] or in creating it ([`apply`]);
+//! - migrations are append-only once released: never edit one that has shipped;
+//! - a release that ships a [`SCHEMA`] the first time freezes its schema, as SQLite keeps it, in
+//!   `v<N>.sql` beside `v13.sql`, for the test to bring up to date too.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{Result, StateError};
 
-/// The version [`SCHEMA`] creates: one DB per account (0.6).
-const BASE: u32 = 5;
+/// The oldest version upgraded: 0.7.0's and 0.7.1's.
+const BASE: u32 = 13;
 
-/// The whole schema, as of [`BASE`]: one DB per account. The drive's side (`nodes`, `remote`,
+/// The whole schema, as of [`VERSION`]: one DB per account. The drive's side (`nodes`, `remote`,
 /// `removed`, `kv`) is the account's; each synced folder has its rows in the other tables,
 /// with `folder` last in every key and index: a node's rows are found by id, a folder's listings
 /// by parent or file id, and a folder alone matches no index, so the planner (which has no
-/// statistics) never scans a whole folder for a lookup. `the_schema_is_pinned` pins it.
+/// statistics) never scans a whole folder for a lookup.
 const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
@@ -52,10 +61,14 @@ const SCHEMA: &str = r#"
         local_name     TEXT,                          -- recorded local spelling, if any
         local_hash     BLOB,                          -- hash of the local bytes then
         tags           TEXT,                          -- Finder tags (JSON, node schema `tags`); NULL: none
+        name_key       INTEGER NOT NULL DEFAULT 0,    -- sibling hash of name (below)
         PRIMARY KEY (id, folder),
         UNIQUE (remote_file_id, folder)
     ) WITHOUT ROWID;
-    CREATE INDEX base_parent ON base(parent, folder);
+    -- Each side's rows by their name's sibling hash (`hbsync_namemap::sibling_hash`) with their
+    -- folder: planning a change reads the rows that may clash with its name, not the whole
+    -- folder.
+    CREATE INDEX base_parent ON base(parent, name_key, folder);
 
     -- Per folder: what the last observation saw on disk, as a tree: each row holds its folder
     -- and its on-disk name, so a path is derived and a moved folder changes one row.
@@ -76,10 +89,12 @@ const SCHEMA: &str = r#"
         hash       BLOB,                              -- NULL until hashed (files)
         tags       TEXT,                              -- Finder tags (JSON); NULL: not known (none on
                                                       -- this system, or the read failed)
+        name_key   INTEGER NOT NULL DEFAULT 0,        -- sibling hash of name
         PRIMARY KEY (id, folder),
         UNIQUE (parent, name, folder)
     ) WITHOUT ROWID;
     CREATE INDEX local_file_id ON local(file_id, folder);
+    CREATE INDEX local_key ON local(parent, name_key, folder);
 
     -- The client's copy of the live remote nodes (the remote side of the merge), the drive's
     -- whole tree.
@@ -94,9 +109,15 @@ const SCHEMA: &str = r#"
         size          INTEGER,
         mtime_ms      INTEGER,
         executable    INTEGER NOT NULL DEFAULT 0,
-        content_extra TEXT                            -- unknown content keys (JSON), kept on rewrite
+        content_extra TEXT,                           -- unknown content keys (JSON), kept on rewrite
+        token         BLOB,                           -- what the remote needs to write the file
+                                                      -- again without reading it; NULL: not known
+        changed_at    INTEGER,                        -- the server's time of the version; NULL for
+                                                      -- this device's own write until the feed
+                                                      -- brings it where it matters
+        name_key      INTEGER NOT NULL DEFAULT 0      -- sibling hash of name
     );
-    CREATE INDEX remote_parent ON remote(parent);
+    CREATE INDEX remote_parent ON remote(parent, name_key);
 
     -- Per folder: nodes whose local or remote side changed and still need reconciling.
     CREATE TABLE dirty (
@@ -172,6 +193,34 @@ const SCHEMA: &str = r#"
     );
     CREATE INDEX synced_folder ON synced(folder, id);
 
+    -- Per folder: downloads about to be put in place (written before a batch of them runs),
+    -- each with the base its commit writes: one whose commit a crash lost is still known as its
+    -- node, as of that version.
+    CREATE TABLE placing (
+        folder         INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id             INTEGER NOT NULL,              -- nodes.id
+        path           TEXT NOT NULL,                 -- where it goes
+        parent         INTEGER NOT NULL,              -- nodes.id; the rest as in base
+        name           TEXT NOT NULL,
+        kind           INTEGER NOT NULL,
+        hash           BLOB,
+        size           INTEGER,
+        mtime_ms       INTEGER,
+        executable     INTEGER NOT NULL DEFAULT 0,
+        remote_file_id BLOB NOT NULL,
+        version_tag    BLOB NOT NULL,
+        tags           TEXT,
+        placed_tags    TEXT,                          -- what the item holds of tags; NULL: not known
+        prior_tags     TEXT,                          -- what it held before; NULL: not known
+        base_at        BLOB,                          -- the base's version its plan saw (empty: no
+                                                      -- base; NULL: a record not checked)
+        held_ms        INTEGER,                       -- since when recovery found its file there
+                                                      -- but not hashed yet; NULL: not so far
+        PRIMARY KEY (id, folder)
+    ) WITHOUT ROWID;
+    CREATE TRIGGER placing_gone AFTER DELETE ON placing
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;
+
     -- Recently deleted: the removed remote nodes (node schema, archivalStatus 2), restorable
     -- until purged. By UUID, not nodes.id: these nodes are out of the tree and its collection.
     CREATE TABLE removed (
@@ -186,112 +235,32 @@ const SCHEMA: &str = r#"
         mtime_ms      INTEGER,
         executable    INTEGER NOT NULL DEFAULT 0,
         content_extra TEXT,                           -- as in remote, without rm
-        removed_at    INTEGER NOT NULL,               -- Unix ms
-        root          BLOB NOT NULL                   -- the node whose delete took this one
+        removed_at    INTEGER,                        -- Unix ms; NULL: open (this device's own
+                                                      -- removal, until the feed brings its time)
+        token         BLOB,                           -- as in remote
+        seq           INTEGER NOT NULL DEFAULT 0      -- its place in this device's order of
+                                                      -- recording removals (kv `deleted.seq`):
+                                                      -- emptying as listed takes the rows up to
+                                                      -- the counter the listing read; no index
     ) WITHOUT ROWID;
     CREATE INDEX removed_at ON removed(removed_at);
-    CREATE INDEX removed_root ON removed(root);
     CREATE INDEX removed_parent ON removed(parent);
+
+    -- File ids deleted for good (a tombstone, or an announced hard delete taken): Homebase never
+    -- gives one back, so no row may put one back in the mirror or Recently deleted. With the
+    -- tombstone it left while that is still on the drive (its version and time, the server's:
+    -- deleted hard once old enough), and since when it is known gone (the server's time; NULL:
+    -- not known yet, the next purge's). No index: the daily purge reads them all once.
+    CREATE TABLE gone_files (
+        file_id     BLOB PRIMARY KEY,
+        version_tag BLOB,
+        at          INTEGER,
+        gone_at     INTEGER
+    ) WITHOUT ROWID;
 "#;
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
 const MIGRATIONS: &[&str] = &[
-    // 6: per folder, downloads about to be put in place (written before a batch of them
-    // runs), each with the base its commit writes: one whose commit a crash lost is still
-    // known as its node, as of that version.
-    "CREATE TABLE placing (
-        folder         INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-        id             INTEGER NOT NULL,              -- nodes.id
-        path           TEXT NOT NULL,                 -- where it goes
-        parent         INTEGER NOT NULL,              -- nodes.id; the rest as in base
-        name           TEXT NOT NULL,
-        kind           INTEGER NOT NULL,
-        hash           BLOB,
-        size           INTEGER,
-        mtime_ms       INTEGER,
-        executable     INTEGER NOT NULL DEFAULT 0,
-        remote_file_id BLOB NOT NULL,
-        version_tag    BLOB NOT NULL,
-        tags           TEXT,
-        PRIMARY KEY (id, folder)
-    ) WITHOUT ROWID;
-    CREATE TRIGGER placing_gone AFTER DELETE ON placing
-        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;",
-    // 7: each file's token (what the remote needs to write it again without reading it
-    // first), NULL until known; the server's time of each version (NULL for this device's own
-    // writes until the feed brings it where it matters); what was deleted with what goes by
-    // these times (node schema, Recently deleted), so the root goes.
-    "ALTER TABLE remote ADD COLUMN token BLOB;
-    ALTER TABLE remote ADD COLUMN changed_at INTEGER;
-    ALTER TABLE removed ADD COLUMN token BLOB;
-    DROP INDEX removed_root;
-    ALTER TABLE removed DROP COLUMN root;",
-    // 8: a removal's time may be open: this device's own removal is in Recently deleted from
-    // its write on, its time NULL until the feed brings the server's (so the feed knows that
-    // version without reading it whole). SQLite drops a NOT NULL only by making the table again.
-    "CREATE TABLE removed_new (
-        node          BLOB PRIMARY KEY,
-        file_id       BLOB NOT NULL UNIQUE,
-        version_tag   BLOB NOT NULL,
-        parent        BLOB NOT NULL,
-        kind          INTEGER NOT NULL,
-        name          TEXT NOT NULL,
-        hash          BLOB,
-        size          INTEGER,
-        mtime_ms      INTEGER,
-        executable    INTEGER NOT NULL DEFAULT 0,
-        content_extra TEXT,
-        removed_at    INTEGER,                        -- Unix ms; NULL: open
-        token         BLOB
-    ) WITHOUT ROWID;
-    INSERT INTO removed_new (node, file_id, version_tag, parent, kind, name, hash, size,
-        mtime_ms, executable, content_extra, removed_at, token)
-        SELECT node, file_id, version_tag, parent, kind, name, hash, size, mtime_ms, executable,
-            content_extra, removed_at, token FROM removed;
-    DROP TABLE removed;
-    ALTER TABLE removed_new RENAME TO removed;
-    CREATE INDEX removed_at ON removed(removed_at);
-    CREATE INDEX removed_parent ON removed(parent);",
-    // 9: each removal's place in this device's order of recording them (`seq`), and the
-    // counter (kv `deleted.seq`): emptying Recently deleted as listed takes exactly the rows up
-    // to the counter the listing read. The rows there get theirs in a stable order.
-    "ALTER TABLE removed ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;
-    CREATE TEMP TABLE removed_order AS
-        SELECT node FROM removed ORDER BY removed_at IS NULL, removed_at, node;
-    CREATE INDEX temp.removed_order_node ON removed_order(node);
-    UPDATE removed SET seq = (SELECT o.rowid FROM temp.removed_order o WHERE o.node = removed.node);
-    INSERT OR REPLACE INTO kv (key, value)
-        SELECT 'deleted.seq', CAST(COUNT(*) AS TEXT) FROM removed;
-    DROP TABLE temp.removed_order;
-    CREATE INDEX removed_seq ON removed(seq);",
-    // 10: file ids deleted for good (a tombstone or an announced hard delete taken): Homebase
-    // never gives one back, so no row may put one back in the mirror or Recently deleted.
-    "CREATE TABLE gone_files (file_id BLOB PRIMARY KEY) WITHOUT ROWID;",
-    // 11: what a placement's item holds of tags (NULL: not known), and what it held before
-    // (NULL: not known): the base records what the write changed, in recovery as in its commit.
-    // And the base's version its plan saw, which recovery checks as the commit does (empty: no
-    // base; NULL: a record from before, not checked). And since when recovery found its file
-    // there but not hashed yet (NULL: not so far): it holds its node only so long then.
-    "ALTER TABLE placing ADD COLUMN placed_tags TEXT;
-    ALTER TABLE placing ADD COLUMN prior_tags TEXT;
-    ALTER TABLE placing ADD COLUMN base_at BLOB;
-    ALTER TABLE placing ADD COLUMN held_ms INTEGER;",
-    // 12: no index on a removal's `seq`: each removal recorded wrote to it (about two pages a
-    // commit, a sixth of what deleting a folder of files writes), and only emptying as listed
-    // reads by it, a scan of Recently deleted then.
-    "DROP INDEX removed_seq;",
-    // 13: of a file deleted for good, the tombstone it left, while that is still on the drive
-    // (its version and time, the server's: deleted hard once that is old enough, so none stays
-    // in the feed for long), and since when it is known gone (the server's time; NULL: not
-    // known yet, the next purge's). No index: the daily purge reads them all once. The whole
-    // feed is read again once, so the tombstones from before are known too, and the removal
-    // times an earlier build stored as 0 (a header without one) become open: the re-read
-    // brings the real ones.
-    "ALTER TABLE gone_files ADD COLUMN version_tag BLOB;
-    ALTER TABLE gone_files ADD COLUMN at INTEGER;
-    ALTER TABLE gone_files ADD COLUMN gone_at INTEGER;
-    INSERT OR REPLACE INTO kv (key, value) VALUES ('remote.rereading', '1');
-    UPDATE removed SET removed_at = NULL WHERE removed_at = 0;",
     // 14: each row's sibling hash (`hbsync_namemap::sibling_hash` of its name, which `apply`
     // gives SQL as `sibling_hash`), indexed with its folder on every side: planning a change
     // reads the rows that may clash with its name, not the whole folder.
@@ -307,9 +276,6 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX remote_parent ON remote(parent, name_key);
     CREATE INDEX local_key ON local(parent, name_key, folder);",
 ];
-
-/// Migration 8, which [`repair_early_8`] runs again.
-const MIGRATION_8: &str = MIGRATIONS[(8 - BASE - 1) as usize];
 
 /// The version this client makes and reads.
 pub(crate) const VERSION: u32 = BASE + MIGRATIONS.len() as u32;
@@ -332,12 +298,6 @@ pub(crate) fn check(version: u32) -> Result<()> {
     }
 }
 
-pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
-    sibling_hash_in_sql(conn)?;
-    migrate(conn)?;
-    give_id(conn)
-}
-
 /// `sibling_hash(name)` in SQL: what migration 14 fills the new columns with.
 fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
@@ -350,30 +310,10 @@ fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Gives the DB its own random id (kv `db.id`) if it has none (or an empty one): a listing of
-/// its Recently deleted names it, so one of another DB of the identity (made again) is told
-/// apart.
-fn give_id(conn: &Connection) -> Result<()> {
-    let id: Option<String> = conn
-        .query_row("SELECT value FROM kv WHERE key = 'db.id'", [], |r| r.get(0))
-        .optional()?;
-    if id.is_none_or(|id| id.is_empty()) {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value) \
-             SELECT 'db.id', lower(hex(randomblob(16))) \
-             WHERE NOT EXISTS (SELECT 1 FROM kv WHERE key = 'db.id' AND value <> '')",
-            [],
-        )?;
-    }
-    Ok(())
-}
-
-fn migrate(conn: &mut Connection) -> Result<()> {
+/// Makes a new DB, or brings one of [`BASE`] or later up to [`VERSION`].
+pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
     let seen = user_version(conn)?;
     check(seen)?;
-    if seen >= 8 {
-        repair_early_8(conn)?;
-    }
     if seen == VERSION {
         return Ok(());
     }
@@ -385,39 +325,21 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     if current == VERSION {
         return Ok(());
     }
-    let from = if current == 0 {
+    if current == 0 {
         tx.execute_batch(SCHEMA)?;
-        BASE
+        // Its own random id: a listing of its Recently deleted names it, so one of another DB
+        // of the identity (made again) is told apart.
+        tx.execute(
+            "INSERT INTO kv (key, value) VALUES ('db.id', lower(hex(randomblob(16))))",
+            [],
+        )?;
     } else {
-        current
-    };
-    for sql in &MIGRATIONS[(from - BASE) as usize..] {
-        tx.execute_batch(sql)?;
+        sibling_hash_in_sql(&tx)?;
+        for sql in &MIGRATIONS[(current - BASE) as usize..] {
+            tx.execute_batch(sql)?;
+        }
     }
     tx.pragma_update(None, "user_version", VERSION)?;
-    tx.commit()?;
-    Ok(())
-}
-
-/// Version 8 as an earlier build of it made it (a branch, never released): a table `pending` of
-/// this device's own removals, and `removed.removed_at` still NOT NULL. Made what version 8 is:
-/// those removals come back through the feed as anyone else's (the table goes, unread).
-fn repair_early_8(conn: &mut Connection) -> Result<()> {
-    let early = |c: &Connection| -> Result<bool> {
-        Ok(c.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending')",
-            [],
-            |r| r.get(0),
-        )?)
-    };
-    if !early(conn)? {
-        return Ok(());
-    }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if early(&tx)? {
-        tx.execute_batch("DROP TABLE pending;")?;
-        tx.execute_batch(MIGRATION_8)?;
-    }
     tx.commit()?;
     Ok(())
 }
@@ -425,7 +347,6 @@ fn repair_early_8(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::OptionalExtension;
 
     #[test]
     fn applying_twice_changes_nothing() -> Result<()> {
@@ -437,141 +358,6 @@ mod tests {
         let value: String =
             conn.query_row("SELECT value FROM kv WHERE key = 'k'", [], |r| r.get(0))?;
         assert_eq!(value, "v");
-        Ok(())
-    }
-
-    /// A DB of 0.6.0 (version 6) gets the token columns, its rows without one, and loses the
-    /// roots of its removals.
-    #[test]
-    fn version_6_gets_tokens_and_loses_roots() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(MIGRATIONS[0])?;
-        conn.pragma_update(None, "user_version", 6)?;
-        conn.execute(
-            "INSERT INTO remote (id, file_id, version_tag, parent, kind, name) \
-             VALUES (1, x'01', x'02', 0, 1, 'd')",
-            [],
-        )?;
-        conn.execute(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at, \
-             root) VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5, x'01')",
-            [],
-        )?;
-        apply(&mut conn)?;
-        assert_eq!(user_version(&conn)?, VERSION);
-        let token: Option<Vec<u8>> =
-            conn.query_row("SELECT token FROM remote WHERE id = 1", [], |r| r.get(0))?;
-        assert_eq!(token, None);
-        let at: i64 = conn.query_row("SELECT removed_at FROM removed", [], |r| r.get(0))?;
-        assert_eq!(at, 5);
-        conn.execute(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at, \
-             token) VALUES (x'05', x'06', x'07', x'04', 1, 'e', 6, x'00')",
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// A DB at version 7 keeps its removals and their times, and takes an open one.
-    #[test]
-    fn version_7_takes_open_removal_times() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(MIGRATIONS[0])?;
-        conn.execute_batch(MIGRATIONS[1])?;
-        conn.pragma_update(None, "user_version", 7)?;
-        conn.execute(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at, \
-             token) VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5, x'09')",
-            [],
-        )?;
-        apply(&mut conn)?;
-        assert_eq!(user_version(&conn)?, VERSION);
-        let (at, token): (i64, Vec<u8>) =
-            conn.query_row("SELECT removed_at, token FROM removed", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?;
-        assert_eq!((at, token), (5, vec![9]));
-        conn.execute(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name) \
-             VALUES (x'05', x'06', x'07', x'04', 1, 'e')",
-            [],
-        )?;
-        Ok(())
-    }
-
-    /// A DB an earlier build took to version 8 (a `pending` table, `removed_at` NOT NULL) is
-    /// made version 8 as it is now when opened: its removals and their times stay.
-    #[test]
-    fn an_early_version_8_is_repaired() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        conn.execute_batch(MIGRATIONS[0])?;
-        conn.execute_batch(MIGRATIONS[1])?;
-        conn.execute_batch(
-            "CREATE TABLE pending (file_id BLOB PRIMARY KEY, node BLOB NOT NULL, \
-             version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, \
-             name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, \
-             executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, token BLOB) WITHOUT ROWID;",
-        )?;
-        conn.pragma_update(None, "user_version", 8)?;
-        conn.execute(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, removed_at) \
-             VALUES (x'01', x'02', x'03', x'04', 1, 'd', 5)",
-            [],
-        )?;
-        apply(&mut conn)?;
-        assert_eq!(user_version(&conn)?, VERSION);
-        let pending: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'pending')",
-            [],
-            |r| r.get(0),
-        )?;
-        assert!(!pending);
-        let at: i64 = conn.query_row("SELECT removed_at FROM removed", [], |r| r.get(0))?;
-        assert_eq!(at, 5);
-        conn.execute(
-            "INSERT INTO removed (node, file_id, version_tag, parent, kind, name) \
-             VALUES (x'05', x'06', x'07', x'04', 1, 'e')",
-            [],
-        )?;
-        // Opened again: nothing more to do.
-        apply(&mut conn)?;
-        Ok(())
-    }
-
-    /// A DB at version 8 gives each removal there a place in its order of recording (oldest
-    /// removal first, an open one last), and its counter the largest.
-    #[test]
-    fn version_8_numbers_its_removals() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        for sql in &MIGRATIONS[..3] {
-            conn.execute_batch(sql)?;
-        }
-        conn.pragma_update(None, "user_version", 8)?;
-        for (node, at) in [("01", Some(9)), ("02", None), ("03", Some(4))] {
-            conn.execute(
-                &format!(
-                    "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, \
-                     removed_at) VALUES (x'{node}', x'11{node}', x'22{node}', x'00', 1, 'n', ?1)"
-                ),
-                [at],
-            )?;
-        }
-        apply(&mut conn)?;
-        assert_eq!(user_version(&conn)?, VERSION);
-        let seqs: Vec<(Vec<u8>, i64)> = conn
-            .prepare("SELECT node, seq FROM removed ORDER BY seq")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        assert_eq!(seqs, [(vec![3], 1), (vec![1], 2), (vec![2], 3)]);
-        let counter: String =
-            conn.query_row("SELECT value FROM kv WHERE key = 'deleted.seq'", [], |r| {
-                r.get(0)
-            })?;
-        assert_eq!(counter, "3");
         Ok(())
     }
 
@@ -591,90 +377,13 @@ mod tests {
         let mut other = Connection::open_in_memory()?;
         apply(&mut other)?;
         assert_ne!(id(&other)?, first);
-        for missing in [
-            "DELETE FROM kv WHERE key = 'db.id'",
-            "UPDATE kv SET value = '' WHERE key = 'db.id'",
-        ] {
-            conn.execute(missing, [])?;
-            apply(&mut conn)?;
-            assert_eq!(id(&conn)?.len(), 32, "{missing}");
-        }
-        Ok(())
-    }
-
-    /// A removal's `seq` has no index (12).
-    #[test]
-    fn no_index_on_a_removals_seq() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        apply(&mut conn)?;
-        let indexed: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master \
-             WHERE type = 'index' AND name = 'removed_seq')",
-            [],
-            |r| r.get(0),
-        )?;
-        assert!(!indexed);
-        Ok(())
-    }
-
-    /// A DB at version 12 keeps what it knows gone, and reads the whole feed again once, for
-    /// the tombstones on the drive.
-    #[test]
-    fn version_12_reads_the_feed_again_for_tombstones() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        for sql in &MIGRATIONS[..(12 - BASE) as usize] {
-            conn.execute_batch(sql)?;
-        }
-        conn.pragma_update(None, "user_version", 12)?;
-        conn.execute("INSERT INTO gone_files (file_id) VALUES (x'01')", [])?;
-        // An earlier build stored a header without a time as 0.
-        for (node, at) in [("05", 0), ("06", 7)] {
-            conn.execute(
-                &format!(
-                    "INSERT INTO removed (node, file_id, version_tag, parent, kind, name, \
-                     removed_at) VALUES (x'{node}', x'11{node}', x'22{node}', x'00', 1, 'n', ?1)"
-                ),
-                [at],
-            )?;
-        }
-        apply(&mut conn)?;
-        let times: Vec<Option<i64>> = conn
-            .prepare("SELECT removed_at FROM removed ORDER BY node")?
-            .query_map([], |r| r.get(0))?
-            .collect::<std::result::Result<_, _>>()?;
-        assert_eq!(times, [None, Some(7)], "0 is a time not known");
-        assert_eq!(user_version(&conn)?, VERSION);
-        let row: (Option<Vec<u8>>, Option<i64>, Option<i64>) = conn.query_row(
-            "SELECT version_tag, at, gone_at FROM gone_files WHERE file_id = x'01'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )?;
-        assert_eq!(
-            row,
-            (None, None, None),
-            "gone, no tombstone, since a time not known"
-        );
-        let reread: Option<String> = conn
-            .query_row(
-                "SELECT value FROM kv WHERE key = 'remote.rereading'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
-        assert_eq!(reread.as_deref(), Some("1"), "the feed is read again once");
         Ok(())
     }
 
     /// A DB at version 13 gets each row's sibling hash, on every side.
     #[test]
     fn version_13_gets_sibling_hashes() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        for sql in &MIGRATIONS[..(13 - BASE) as usize] {
-            conn.execute_batch(sql)?;
-        }
-        conn.pragma_update(None, "user_version", 13)?;
+        let mut conn = version_13()?;
         conn.execute_batch(
             "INSERT INTO folders (top, path, marker, added_at) VALUES (x'00', '/f', 'm', 0);
              INSERT INTO base (folder, id, parent, name, kind, remote_file_id, version_tag)
@@ -695,71 +404,110 @@ mod tests {
         Ok(())
     }
 
+    /// One from before 0.7 (6: 0.6.0's; 12: the last before 0.7; 4: one DB per folder) isn't
+    /// upgraded.
     #[test]
-    fn a_db_of_one_folder_is_refused() -> Result<()> {
-        let mut conn = Connection::open_in_memory()?;
-        conn.pragma_update(None, "user_version", 4)?;
-        assert!(matches!(
-            apply(&mut conn),
-            Err(StateError::TooOld { found: 4 })
-        ));
+    fn a_db_from_before_0_7_is_refused() -> Result<()> {
+        for found in [6, 12, 4] {
+            let mut conn = Connection::open_in_memory()?;
+            conn.pragma_update(None, "user_version", found)?;
+            assert!(matches!(
+                apply(&mut conn),
+                Err(StateError::TooOld { found: f }) if f == found
+            ));
+        }
         Ok(())
     }
 
-    /// The SQL of every table, index and trigger [`SCHEMA`] makes, without comments or layout.
-    #[test]
-    fn the_schema_is_pinned() -> Result<()> {
+    /// A DB of 0.7.0 or 0.7.1 (version 13), as SQLite keeps its schema.
+    fn version_13() -> Result<Connection> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        let mut objects = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE sql NOT NULL ORDER BY type DESC, name")?;
-        let made: Vec<String> = objects
-            .query_map([], |r| r.get::<_, String>(0))?
-            .map(|sql| {
-                let sql = sql?;
-                let code = sql
-                    .lines()
-                    .map(|l| l.split("--").next().unwrap_or_default());
-                Ok(code
-                    .flat_map(str::split_whitespace)
-                    .collect::<Vec<_>>()
-                    .join(" "))
-            })
-            .collect::<Result<_>>()?;
-        assert_eq!(made.join("\n"), PINNED);
-        Ok(())
+        conn.execute_batch(include_str!("v13.sql"))?;
+        conn.pragma_update(None, "user_version", 13)?;
+        Ok(conn)
     }
 
-    /// What [`SCHEMA`] makes. Once released, this changes only through [`MIGRATIONS`].
-    const PINNED: &str = "\
-        CREATE TRIGGER base_gone AFTER DELETE ON base BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER base_regone AFTER UPDATE OF parent ON base WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
-        CREATE TRIGGER dirty_gone AFTER DELETE ON dirty BEGIN INSERT INTO gone VALUES (old.id); END\n\
-        CREATE TRIGGER forks_gone AFTER DELETE ON forks BEGIN INSERT INTO gone VALUES (old.id), (old.new_node); END\n\
-        CREATE TRIGGER local_gone AFTER DELETE ON local BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER local_regone AFTER UPDATE OF id, parent ON local WHEN old.id IS NOT new.id OR old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER parked_gone AFTER DELETE ON parked BEGIN INSERT INTO gone VALUES (old.id); END\n\
-        CREATE TRIGGER remote_gone AFTER DELETE ON remote BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER remote_regone AFTER UPDATE OF parent ON remote WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
-        CREATE TABLE base ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL, version_tag BLOB NOT NULL, content_state INTEGER NOT NULL DEFAULT 0, local_name TEXT, local_hash BLOB, tags TEXT, PRIMARY KEY (id, folder), UNIQUE (remote_file_id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE dirty ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE folder_kv ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (folder, key) ) WITHOUT ROWID\n\
-        CREATE TABLE folders ( id INTEGER PRIMARY KEY AUTOINCREMENT, top BLOB NOT NULL UNIQUE, path TEXT NOT NULL, marker TEXT NOT NULL, added_at INTEGER NOT NULL )\n\
-        CREATE TABLE forks ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, new_node INTEGER NOT NULL, to_name TEXT NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE gone (id INTEGER NOT NULL)\n\
-        CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID\n\
-        CREATE TABLE local ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, volume INTEGER NOT NULL, file_id INTEGER NOT NULL, file_id_hi INTEGER, executable INTEGER, hash BLOB, tags TEXT, PRIMARY KEY (id, folder), UNIQUE (parent, name, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE nodes ( id INTEGER PRIMARY KEY AUTOINCREMENT, uuid BLOB NOT NULL UNIQUE )\n\
-        CREATE TABLE parked ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, original_name TEXT NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE remote ( id INTEGER PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT )\n\
-        CREATE TABLE removed ( node BLOB PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, removed_at INTEGER NOT NULL, root BLOB NOT NULL ) WITHOUT ROWID\n\
-        CREATE TABLE sqlite_sequence(name,seq)\n\
-        CREATE TABLE synced ( id INTEGER PRIMARY KEY AUTOINCREMENT, folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, at INTEGER NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL )\n\
-        CREATE INDEX base_parent ON base(parent, folder)\n\
-        CREATE INDEX local_file_id ON local(file_id, folder)\n\
-        CREATE INDEX remote_parent ON remote(parent)\n\
-        CREATE INDEX removed_at ON removed(removed_at)\n\
-        CREATE INDEX removed_parent ON removed(parent)\n\
-        CREATE INDEX removed_root ON removed(root)\n\
-        CREATE INDEX synced_folder ON synced(folder, id)";
+    /// Everything SQLite knows of a schema: each table's columns (type, NOT NULL, default,
+    /// key), its foreign keys, whether it has rowids and whether they are AUTOINCREMENT (never
+    /// handed out again); each index's table, columns, order, uniqueness and origin; each
+    /// trigger's SQL. Not how the SQL was spelled: a table a migration changed keeps its first
+    /// `CREATE` with the changes appended.
+    fn shape(conn: &Connection) -> Result<Vec<String>> {
+        // Each row's values, in Debug form (NULL apart from 0, text apart from numbers).
+        let rows = |sql: &str| -> Result<Vec<String>> {
+            let mut st = conn.prepare(sql)?;
+            let n = st.column_count();
+            let all = st.query_map([], |r| {
+                (0..n)
+                    .map(|i| Ok(format!("{:?}", r.get::<_, rusqlite::types::Value>(i)?)))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map(|v| v.join(" "))
+            })?;
+            Ok(all.collect::<rusqlite::Result<_>>()?)
+        };
+        let names = |sql: &str| -> Result<Vec<String>> {
+            let mut st = conn.prepare(sql)?;
+            let all = st.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(all.collect::<rusqlite::Result<_>>()?)
+        };
+        let mut out = Vec::new();
+        for t in names("SELECT name FROM pragma_table_list WHERE schema = 'main' ORDER BY name")? {
+            out.push(format!("table {t} (type, ncol, wr, strict): {:?}", rows(&format!(
+                "SELECT type, ncol, wr, strict FROM pragma_table_list('{t}') WHERE schema = 'main'"
+            ))?));
+            out.push(format!(
+                "  columns {:?}",
+                rows(&format!("SELECT * FROM pragma_table_xinfo('{t}')"))?
+            ));
+            out.push(format!(
+                "  keys {:?}",
+                rows(&format!("SELECT * FROM pragma_foreign_key_list('{t}')"))?
+            ));
+            out.push(format!(
+                "  autoincrement {:?}",
+                rows(&format!(
+                    "SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master \
+                     WHERE type = 'table' AND name = '{t}'"
+                ))?
+            ));
+            for i in names(&format!(
+                "SELECT name FROM pragma_index_list('{t}') ORDER BY name"
+            ))? {
+                out.push(format!(
+                    "  index {i} {:?} {:?}",
+                    rows(&format!(
+                        "SELECT \"unique\", origin, partial FROM pragma_index_list('{t}') WHERE name = '{i}'"
+                    ))?,
+                    rows(&format!("SELECT * FROM pragma_index_xinfo('{i}')"))?
+                ));
+            }
+        }
+        // Without comments or layout.
+        for sql in names("SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name")? {
+            let code = sql
+                .lines()
+                .map(|l| l.split("--").next().unwrap_or_default());
+            out.push(
+                code.flat_map(str::split_whitespace)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        Ok(out)
+    }
+
+    /// A new DB and one of 0.7.1 brought up to date have the same schema: [`SCHEMA`] is what
+    /// the migrations from it made.
+    #[test]
+    fn the_schema_is_what_an_upgrade_makes() -> Result<()> {
+        let mut new = Connection::open_in_memory()?;
+        apply(&mut new)?;
+        let mut upgraded = version_13()?;
+        apply(&mut upgraded)?;
+        assert_eq!(user_version(&upgraded)?, VERSION);
+        let (new, upgraded) = (shape(&new)?, shape(&upgraded)?);
+        assert!(new.len() > 20, "{new:#?}");
+        assert_eq!(new, upgraded);
+        Ok(())
+    }
 }

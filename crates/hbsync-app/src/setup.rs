@@ -442,10 +442,10 @@ pub fn set_up(
             .into());
         }
         // Its state is gone (or it was copied here): its files are merged, when asked to.
-        Err(RootError::Unknown(_) | RootError::Older(_)) if has_files && !checked.existing => {
+        Err(RootError::Unknown(_)) if has_files && !checked.existing => {
             return Err(Refusal::NeedsMerge(folder).into());
         }
-        Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {}
+        Err(RootError::NoMarker(_) | RootError::Unknown(_)) => {}
         Err(e) => return Err(e.into()),
     }
     if running && authorized {
