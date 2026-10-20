@@ -136,7 +136,7 @@ impl Schedule {
         )?;
         match met {
             Met::Yes => Ok(()),
-            Met::Later => Err(Outcome::Retry(format!("waiting for {requires:?}"))),
+            Met::Later => Err(Outcome::Retry(format!("waiting for {:?}", Some(requires)))),
             Met::NextPlan => Err(Outcome::waiting("its folder wasn't removed")),
         }
     }

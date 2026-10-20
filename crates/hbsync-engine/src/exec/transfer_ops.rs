@@ -116,7 +116,7 @@ impl Executor<'_> {
         // write, a move: the base is there). Where the drive moved on otherwise (another
         // folder's engine pulled the next version), the next plan decides on that. Its commit
         // settles against it; kept until then, its tags not known until written.
-        let ours = self.settled.get(&node).map(|o| o.version);
+        let ours = self.settled.get(&node).copied();
         let acts = DriveVersion::acted_by_download(
             drive,
             mirror.remote_ref(),

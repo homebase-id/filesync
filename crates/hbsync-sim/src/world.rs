@@ -573,17 +573,10 @@ impl Sim {
         }
         let mut nodes = up.items;
         nodes.reverse();
-        // Then it and what was deleted with it, level by level, each once.
+        // Then it and what was deleted with it ([`Server::group`]), each once.
         let mut seen: HashSet<NodeId> = nodes.iter().copied().collect();
-        let mut next = nodes.len();
-        if seen.insert(node) {
-            nodes.push(node);
-        }
-        while next < nodes.len() {
-            let with = self.server.deleted_with(nodes[next]);
-            nodes.extend(with.into_iter().filter(|n| seen.insert(*n)));
-            next += 1;
-        }
+        let group = self.server.group(node);
+        nodes.extend(group.into_iter().filter(|n| seen.insert(*n)));
         let rows: Vec<Row> = nodes
             .iter()
             .map(|n| Row {

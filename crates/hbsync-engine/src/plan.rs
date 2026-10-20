@@ -446,12 +446,12 @@ impl DriveVersion {
         plan: Option<&DriveVersion>,
         mirror_at: RemoteRef,
         expected: Option<ContentHash>,
-        ours: Option<VersionTag>,
+        ours: Option<RemoteRef>,
         base_at: Option<VersionTag>,
     ) -> Acts<'_> {
         let own = |d: &DriveVersion| {
-            ours == Some(mirror_at.version)
-                && base_at == ours
+            ours == Some(mirror_at)
+                && base_at == ours.map(|o| o.version)
                 && d.state.content.map(|c| c.hash) == expected
         };
         match plan {
@@ -465,18 +465,19 @@ impl DriveVersion {
     /// against (sync semantics §8: compare and set), with this version's tags: this version,
     /// where the base is still at the version the write's plan saw (`base_at`, the base's now),
     /// or where this run's own operations settled it (`ours`) at this version; the mirror's
-    /// (`mirror` of that version, read only then: `None` where it holds another) where they settled it at the version the mirror holds (this
-    /// run's own remote write moved it past this one). `None`: the base moved otherwise, and
-    /// only the tags settle. The executor's settle and the simulator's decide by it.
+    /// where they settled it at the version the mirror holds (this run's own remote write moved
+    /// it past this one: `mirror` of that version, read only then, `None` where it holds
+    /// another). `None`: the base moved otherwise, and only the tags settle. The executor's
+    /// settle and the simulator's decide by it.
     pub fn settles_against(
         &self,
         base_at: Option<VersionTag>,
-        ours: Option<VersionTag>,
-        mirror: impl FnOnce(VersionTag) -> Option<(NodeState, RemoteRef)>,
+        ours: Option<RemoteRef>,
+        mirror: impl FnOnce(RemoteRef) -> Option<(NodeState, RemoteRef)>,
     ) -> Option<(NodeState, RemoteRef)> {
         match ours {
             _ if base_at == self.base_at => Some((self.state.clone(), self.at)),
-            Some(o) if o == self.at.version => Some((self.state.clone(), self.at)),
+            Some(o) if o == self.at => Some((self.state.clone(), self.at)),
             Some(o) => mirror(o).map(|(r, at)| {
                 let tags = self.state.tags.clone();
                 (NodeState { tags, ..r }, at)

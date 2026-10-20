@@ -440,9 +440,10 @@ impl Sim {
                 let client = &self.clients[c];
                 let windows = client.os == Os::Windows;
                 let written = client.local.get(node).map(|l| l.tags.held_by(client.os));
+                // Where the volume keeps no tags, the record claims none (the executor's
+                // `placed_tags`), a folder's as a file's.
                 let tags = match &op {
-                    _ if tag_failed => None,
-                    Op::LocalDownload { .. } if windows => None,
+                    _ if tag_failed || windows => None,
                     _ => written,
                 };
                 let prior = match &op {
@@ -805,7 +806,10 @@ impl Sim {
                         // What it acts on, as the executor decides it: the version the plan
                         // saw while the mirror holds it, or the one this run's own write made
                         // of it since.
-                        let ours = client.run_settled.get(&node).copied();
+                        let ours = client.run_settled.get(&node).map(|v| RemoteRef {
+                            version: *v,
+                            ..mirror_at
+                        });
                         let base_at = client
                             .extra
                             .get(&node)
@@ -1314,16 +1318,14 @@ impl Sim {
             .filter(|_| client.base.contains(node));
         let ours = ours.filter(|o| base_at == Some(*o));
         let drive = against.drive();
-        // The executor's compare and set; the sim's mirror is the drive as it is now (another
-        // folder's engine may have pulled it: the mirror lagging the drive mid-run isn't
-        // simulated).
+        // The executor's compare and set. The mirror it reads here is the drive as it is now
+        // (another folder's engine may have pulled it), where the run's downloads and order
+        // guards read the plan's snapshot with its own writes (no pull mid-run): both happen in
+        // the engine, though not mixed in one run as here.
         let acted = drive.map(|d| {
-            let mirror = |o| {
-                server
-                    .clone()
-                    .zip(remote_ref)
-                    .filter(|(_, at)| at.version == o)
-            };
+            // The node's file id is the version's: ours is at another version of it.
+            let ours = ours.map(|version| RemoteRef { version, ..d.at });
+            let mirror = |o| server.clone().zip(remote_ref).filter(|(_, at)| *at == o);
             d.settles_against(base_at, ours, mirror)
                 .map(|(r, at)| (r, at.version))
         });

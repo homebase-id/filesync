@@ -70,9 +70,13 @@ impl Server {
     }
 
     /// The nodes in Recently deleted that were deleted with folder `node` (node schema): in it,
-    /// removed no earlier than it.
+    /// removed no earlier than it. A file holds none (another app may have put nodes in it).
     pub(crate) fn deleted_with(&self, node: NodeId) -> Vec<NodeId> {
-        let Some(at) = self.removed_at.get(&node) else {
+        let folder = self
+            .removed
+            .get(&node)
+            .is_some_and(|r| r.state.kind == NodeKind::Folder);
+        let Some(at) = self.removed_at.get(&node).filter(|_| folder) else {
             return Vec::new();
         };
         self.removed
@@ -152,24 +156,21 @@ impl Server {
             time(n) < before
                 && !(self.removed.contains_key(&r.state.parent) && time(&r.state.parent) <= time(n))
         });
-        tops.map(|(top, _)| {
-            let mut item = vec![*top];
-            let mut next = 0;
-            while next < item.len() {
-                let folder = item[next];
-                let at = time(&folder);
-                let with: Vec<NodeId> = self
-                    .removed
-                    .iter()
-                    .filter(|(n, r)| r.state.parent == folder && time(n) >= at && !item.contains(n))
-                    .map(|(n, _)| *n)
-                    .collect();
-                item.extend(with);
-                next += 1;
-            }
-            item
-        })
-        .collect()
+        tops.map(|(top, _)| self.group(*top)).collect()
+    }
+
+    /// `top` and what was deleted with it ([`Server::deleted_with`]), level by level, each once:
+    /// what restoring it restores, and the purge's item of it (the engine's `group`).
+    pub(crate) fn group(&self, top: NodeId) -> Vec<NodeId> {
+        let mut seen = BTreeSet::from([top]);
+        let mut item = vec![top];
+        let mut next = 0;
+        while next < item.len() {
+            let with = self.deleted_with(item[next]);
+            item.extend(with.into_iter().filter(|n| seen.insert(*n)));
+            next += 1;
+        }
+        item
     }
 
     pub(crate) fn tree(&self) -> Tree {

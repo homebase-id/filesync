@@ -175,9 +175,9 @@ pub(crate) fn settle(
     // A local write's version of the drive its content, place and version settle against
     // (`None` in it: the base moved), with the tags of the version it acted on.
     let acted = drive.map(|d| {
-        d.settles_against(at.map(|r| r.version), ours.map(|o| o.version), |o| {
-            let m = mirror.as_ref().filter(|m| m.version == o)?;
-            Some((m.state()?, m.remote_ref()))
+        d.settles_against(at.map(|r| r.version), ours, |o| {
+            let m = mirror.as_ref().filter(|m| m.remote_ref() == o)?;
+            Some((m.state()?, o))
         })
     });
     // What the local tags read as, against the tags they're judged against.
