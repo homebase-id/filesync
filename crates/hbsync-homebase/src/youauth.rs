@@ -42,6 +42,16 @@ impl std::fmt::Debug for Credentials {
 }
 
 impl Credentials {
+    /// Which login these are, without saying anything of the secret: a fingerprint of the
+    /// shared secret (FNV-1a, stable across builds). A new login gets a new shared secret, so
+    /// what was sealed under the old one (the files' tokens) is known not to open.
+    pub fn login_id(&self) -> String {
+        format!(
+            "{:016x}",
+            hbsync_platform::fnv::fnv1a64(self.shared_secret.as_bytes())
+        )
+    }
+
     pub(crate) fn shared_secret_key(&self) -> Result<Key, HomebaseError> {
         STANDARD
             .decode(&self.shared_secret)
@@ -185,4 +195,28 @@ struct TokenResponse {
     base64_client_auth_token_iv: String,
     #[serde(default)]
     cipher: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A login's id is stored (the files' tokens are sealed by it): it never changes between
+    /// builds, and a new shared secret gives a new one.
+    #[test]
+    fn a_logins_id_is_stable() {
+        let creds = |secret: &str| Credentials {
+            identity: "a.example".into(),
+            client_auth_token: "cat".into(),
+            shared_secret: secret.into(),
+        };
+        assert_eq!(
+            creds("AAAAAAAAAAAAAAAAAAAAAA==").login_id(),
+            "475ad89adabbaa9d"
+        );
+        assert_ne!(
+            creds("AAAAAAAAAAAAAAAAAAAAAA==").login_id(),
+            creds("AQAAAAAAAAAAAAAAAAAAAA==").login_id()
+        );
+    }
 }

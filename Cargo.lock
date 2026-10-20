@@ -1640,6 +1640,7 @@ dependencies = [
  "cbc",
  "getrandom 0.3.4",
  "hbsync-fileio",
+ "hbsync-platform",
  "hbsync-remote",
  "hbsync-types",
  "hkdf",

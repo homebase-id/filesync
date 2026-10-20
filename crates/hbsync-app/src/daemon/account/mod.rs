@@ -7,8 +7,9 @@
 //! is due.
 //!
 //! Its files: this one holds the account's handle, shared with the control socket's thread,
-//! and the answers it gives; `run.rs` its loop (the credentials, connecting, the account's
-//! wiring, serving its channel); `feed.rs` the notifications and the puller that bring the
+//! and the answers it gives; `run.rs` its loop (the credentials, connecting, serving its
+//! channel); `parts.rs` the account's wiring once connected, shared with the dev tool
+//! `hbsync-sync`; `feed.rs` the notifications and the puller that bring the
 //! drive's changes; `runners.rs` its folders' runners and their restarts.
 
 use std::path::{Path, PathBuf};
@@ -32,10 +33,12 @@ use crate::runner::{Command, Handle};
 use crate::sync::{Wakeup, lock};
 
 mod feed;
+mod parts;
 mod run;
 mod runners;
 
 pub use feed::{Notifications, Puller, UNANNOUNCED_READ};
+pub use parts::AccountParts;
 
 /// An account of the daemon, shared with the control socket's thread.
 pub(crate) struct Account {

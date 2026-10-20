@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::notify::Notifier;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_types::unix_now;
 
-use super::feed::{Notifications, Puller};
+use super::parts::AccountParts;
 use super::runners::{Life, Running, shown};
 use super::{Account, Msg, Phase, Request};
 use crate::daemon::DaemonError;
@@ -91,18 +90,23 @@ impl Account {
         // The notifications' events reach this thread's channel through a thread of their own,
         // which ends with them.
         let (tx, events) = channel();
-        let hints = self.requests.clone();
+        let to_account = self.requests.clone();
         std::thread::Builder::new()
             .name("hbsync-hints".into())
             .spawn(move || {
                 for event in events {
-                    if hints.send(Msg::Hint(event)).is_err() {
+                    if to_account.send(Msg::Hint(event)).is_err() {
                         return;
                     }
                 }
             })
             .map_err(DaemonError::Ipc)?;
-        let notifier = match Notifier::spawn(client, remote.drive(), tx) {
+        let AccountParts {
+            drive,
+            notifier,
+            mut notifications,
+        } = AccountParts::open(&self.identity, remote, &self.db, tx)?;
+        let notifier = match notifier {
             Ok(n) => {
                 self.set_status(|s| s.hints = Hints::Connecting);
                 Some(n)
@@ -116,21 +120,6 @@ impl Account {
                 None
             }
         };
-        let drive = Drive::open(&self.db, &self.identity, remote)
-            .map_err(|e| DaemonError::Runner(e.into()))?;
-        // Tokens are sealed under the login's shared secret: another login's don't open.
-        let login = format!(
-            "{:016x}",
-            hbsync_platform::fnv::fnv1a64(creds.shared_secret.as_bytes())
-        );
-        if drive
-            .tokens_sealed_by(&login)
-            .map_err(|e| DaemonError::Runner(e.into()))?
-        {
-            tracing::info!("a new login: the files' tokens are read again as they're written");
-        }
-        let mut notifications =
-            Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now());
         let mut keeper = Keeper::spawn(Arc::clone(&drive));
         let mut runners: Vec<Running> = Vec::new();
         // A runner that couldn't start: the account stops its runners and ends with it, the
