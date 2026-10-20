@@ -137,6 +137,30 @@ fn concurrent_edits_keep_both_versions() -> R {
     Ok(())
 }
 
+/// A sync that makes a conflict copy and is then refused keeps what it did for the telling:
+/// the conflict is told although the sync failed.
+#[test]
+fn a_conflict_made_before_a_refusal_is_still_told() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "laptop")?;
+    let mut b = Client::new(&server, "desktop")?;
+    a.write("notes.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("notes.txt", "from laptop")?;
+    b.write("notes.txt", "from desktop!")?;
+    a.sync()?;
+    b.remote.faults().deny_writes = true;
+    assert!(b.sync().is_err(), "refused");
+    let partial = b
+        .engine
+        .take_unreported()
+        .ok_or("what the sync did is kept")?;
+    assert_eq!(partial.conflicts.len(), 1, "{partial:?}");
+    assert!(b.engine.take_unreported().is_none(), "taken once");
+    Ok(())
+}
+
 /// A change in a folder is planned from the few rows that may clash with its names; a clash
 /// is then judged against the whole folder: the numbered name taken already is skipped. (The
 /// test kit checks every plan against one made from whole folders.)

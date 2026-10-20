@@ -148,6 +148,8 @@ pub struct Engine {
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
     /// that can't be hashed yet isn't read again every round).
     rescanned: std::collections::HashSet<NodeId>,
+    /// What a sync that failed had done before ([`Engine::take_unreported`]).
+    unreported: Option<SyncReport>,
     /// The folder has no refusals ([`crate::refused`]): found so, and none written since.
     no_refusals: bool,
 }
@@ -202,6 +204,7 @@ impl Engine {
             progress: Arc::default(),
             rescanned: Default::default(),
             no_refusals: false,
+            unreported: None,
         })
     }
 
@@ -356,6 +359,28 @@ impl Engine {
         let mut report = SyncReport::default();
         self.progress.reset();
         self.rescanned.clear();
+        self.unreported = None;
+        match self.sync_into(date, pulled, &mut report) {
+            Ok(()) => Ok(report),
+            // What it did before is told all the same (its conflicts: their copies are made):
+            // [`Engine::take_unreported`]. Kept only when there is something to tell.
+            Err(e) => {
+                let tell = !(report.conflicts.is_empty()
+                    && report.failed.is_empty()
+                    && report.skipped.is_empty());
+                self.unreported = tell.then_some(report);
+                Err(e)
+            }
+        }
+    }
+
+    /// One sync, into `report`.
+    fn sync_into(
+        &mut self,
+        date: &str,
+        pulled: Pull,
+        report: &mut SyncReport,
+    ) -> Result<(), EngineError> {
         self.rescan_records()?;
         recover(&mut self.db, &self.cfg.folder)?;
         let folder = Some(self.db.folder());
@@ -432,7 +457,7 @@ impl Engine {
             if !dirty.is_empty() {
                 report.rounds += 1;
                 let done_before = report.ops_done;
-                held.extend(self.plan_and_execute(&dirty, &opts, &mut report)?);
+                held.extend(self.plan_and_execute(&dirty, &opts, report)?);
                 progress |= report.ops_done > done_before;
             }
             after = next;
@@ -466,7 +491,7 @@ impl Engine {
         self.drive.wake_touched(&mut self.db, Some(folder));
         // Also when nothing ran: the drive is still full for this folder.
         report.full = self.drive.full();
-        Ok(report)
+        Ok(())
     }
 
     /// Rescans the folders that downloads and folders being placed go into (their records), and
@@ -576,6 +601,12 @@ impl Engine {
                 (op, why)
             })
             .collect())
+    }
+
+    /// What the last sync, which failed (stopped denied or unreachable, say), had done before:
+    /// its conflicts are to be told all the same.
+    pub fn take_unreported(&mut self) -> Option<SyncReport> {
+        self.unreported.take()
     }
 
     /// Forgets the folder's refusals (Sync now): each refused operation is sent once more.

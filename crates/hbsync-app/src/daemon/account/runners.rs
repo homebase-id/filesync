@@ -36,6 +36,11 @@ const RAN_WELL: Duration = Duration::from_secs(3600);
 
 impl Running {
     /// Whether the status shows it: not once its folder was removed.
+    /// Its thread runs.
+    pub(super) fn syncing(&self) -> bool {
+        matches!(self.life, Life::Syncing(_))
+    }
+
     pub(super) fn shows(&self) -> bool {
         matches!(self.life, Life::Syncing(_) | Life::Waiting(_))
     }

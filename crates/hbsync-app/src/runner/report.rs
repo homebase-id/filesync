@@ -2,10 +2,12 @@
 //! the folder's status after it.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::{Duration, Instant};
 
 use hbsync_engine::exec::Skip;
 use hbsync_engine::{Conflict, Engine, Op, SyncReport};
+use hbsync_local::{ScanReport, SkipReason};
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
 
@@ -61,6 +63,13 @@ pub(super) fn notes(
 pub(super) struct Told(HashSet<String>);
 
 impl Told {
+    /// Of `notes` (a sync's that failed part way), those not told already, and told now: the
+    /// others are kept for the next whole sync's [`Told::fresh`].
+    pub(super) fn unseen(&mut self, mut notes: Vec<String>) -> Vec<String> {
+        notes.retain(|n| self.0.insert(n.clone()));
+        notes
+    }
+
     /// The notes of the last sync that weren't in the one before, each once.
     pub(super) fn fresh(&mut self, mut notes: Vec<String>) -> Vec<String> {
         let before = std::mem::take(&mut self.0);
@@ -185,12 +194,68 @@ pub(super) fn record(
         downloaded_changes: report.feed.live + report.feed.deleted,
         adopted: report.adopted,
     });
+    add_notes(s, notes, at);
+    s.synced_added += report.synced.len() as u64;
+}
+
+/// Adds `notes`, made at `at` (Unix seconds), to the folder's recent ones.
+pub(super) fn add_notes(s: &mut FolderStatus, notes: Vec<String>, at: u64) {
     s.notes_added += notes.len() as u64;
     s.recent
         .extend(notes.into_iter().map(|text| Note { at, text }));
     let excess = s.recent.len().saturating_sub(RECENT);
     s.recent.drain(..excess);
-    s.synced_added += report.synced.len() as u64;
+}
+
+/// What `scan` skipped that the user may want to know, each item once (`told`, a hash of its
+/// reason and path: 8 bytes an item), one note a reason with a few of its paths: a folder it
+/// can't read, a name the drive can't hold, a link or a device it doesn't sync. (Junk, ignored
+/// items and the client's own folder are by design; a file locked for now is hashed later.)
+///
+/// `whole`: the scan walked the whole folder; `told` becomes what it skipped, so an item fixed
+/// and skipped again later is told again, and `told` holds no more than the folder skips.
+pub(super) fn scan_notes(scan: &ScanReport, told: &mut HashSet<u64>, whole: bool) -> Vec<String> {
+    let before = match whole {
+        true => std::mem::take(told),
+        false => HashSet::new(),
+    };
+    const SHOWN: usize = 3;
+    let unreadable = scan.unreadable.iter().map(|p| (0, p.to_string()));
+    let skipped = scan.skipped.iter().filter_map(|(path, why)| {
+        let reason = match why {
+            SkipReason::NotUnicode | SkipReason::InvalidName => 1,
+            SkipReason::Symlink => 2,
+            SkipReason::Special => 3,
+            SkipReason::Excluded | SkipReason::Junk | SkipReason::Ignored => return None,
+        };
+        Some((reason, path.display().to_string()))
+    });
+    let mut new: [Vec<String>; 4] = Default::default();
+    for (reason, path) in unreadable.chain(skipped) {
+        let mut hasher = DefaultHasher::new();
+        (reason, &path).hash(&mut hasher);
+        let key = hasher.finish();
+        if told.insert(key) && !before.contains(&key) {
+            new[reason].push(path);
+        }
+    }
+    let said = [
+        "can't be read, so what is in it isn't synced",
+        "its name can't be used on Homebase, so it isn't synced",
+        "a link, which isn't synced",
+        "not a file or a folder, so it isn't synced",
+    ];
+    new.iter()
+        .zip(said)
+        .filter(|(paths, _)| !paths.is_empty())
+        .map(|(paths, said)| {
+            let shown = paths[..paths.len().min(SHOWN)].join(", ");
+            match paths.len().saturating_sub(SHOWN) {
+                0 => format!("{shown}: {said}"),
+                more => format!("{shown} and {more} more: {said}"),
+            }
+        })
+        .collect()
 }
 
 fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateError> {
@@ -233,7 +298,47 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
 mod tests {
     use std::path::Path;
 
+    use hbsync_platform::RelPath;
+
     use super::*;
+
+    /// What a scan skipped and the user may want to know is told, each once; what is skipped
+    /// by design (junk, ignored) isn't.
+    #[test]
+    fn scan_skips_are_told_once() {
+        let scan = ScanReport {
+            unreadable: vec![RelPath::new("Locked").unwrap_or_default()],
+            skipped: vec![
+                ("bad\u{fffd}name".into(), SkipReason::NotUnicode),
+                ("link".into(), SkipReason::Symlink),
+                ("Thumbs.db".into(), SkipReason::Junk),
+                ("private".into(), SkipReason::Ignored),
+            ],
+            ..ScanReport::default()
+        };
+        let mut told = HashSet::new();
+        let notes = scan_notes(&scan, &mut told, false);
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes[0].starts_with("Locked: can't be read"), "{notes:?}");
+        assert!(scan_notes(&scan, &mut told, false).is_empty(), "told once");
+        // Many of one reason: one note, a few of them named.
+        let links = ScanReport {
+            skipped: (0..10)
+                .map(|i| (format!("l{i}").into(), SkipReason::Symlink))
+                .collect(),
+            ..ScanReport::default()
+        };
+        assert_eq!(
+            scan_notes(&links, &mut told, false),
+            ["l0, l1, l2 and 7 more: a link, which isn't synced"]
+        );
+        // A whole scan forgets what it no longer skips: skipped again later, it is told again.
+        let none = ScanReport::default();
+        assert!(scan_notes(&none, &mut told, true).is_empty());
+        assert!(told.is_empty());
+        assert_eq!(scan_notes(&links, &mut told, true).len(), 1);
+        assert!(scan_notes(&links, &mut told, true).is_empty(), "told once");
+    }
 
     #[test]
     fn a_note_is_told_once_until_it_goes_away() {
