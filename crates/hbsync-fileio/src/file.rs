@@ -243,18 +243,19 @@ impl CompletedFile {
     /// The file at `src` (on the volume the download goes to) as a completed download, where
     /// it is, if it holds exactly the bytes `expected` (`size` of them): hashed now (unchanged
     /// while read), its bytes synced, as a download's are. `None` where it holds other bytes, or
-    /// where its size or mtime (Unix ms) isn't `size` and `mtime_ms` (nothing read then). It
+    /// where its size or mtime (Unix ms) isn't `size` and `mtime_ms`, if given (nothing read
+    /// then). It
     /// stays where it is until persisted ([`CompletedFile::adopted`]).
     pub fn adopt(
         src: &Path,
         expected: ContentHash,
         size: u64,
-        mtime_ms: i64,
+        mtime_ms: Option<i64>,
     ) -> Result<Option<CompletedFile>, FileIoError> {
         let meta = hbsync_platform::stat(src)?;
         if meta.kind != hbsync_platform::EntryKind::File
             || meta.size != size
-            || meta.mtime_ns.div_euclid(1_000_000) != mtime_ms
+            || mtime_ms.is_some_and(|ms| meta.mtime_ns.div_euclid(1_000_000) != ms)
         {
             return Ok(None);
         }
@@ -447,10 +448,10 @@ mod tests {
         let expected = hash_bytes(b"wanted", ALG);
         let mtime = |p: &Path| hbsync_platform::stat(p).map(|m| m.mtime_ns.div_euclid(1_000_000));
         let (at, other_at) = (mtime(&same)?, mtime(&other)?);
-        assert!(CompletedFile::adopt(&other, expected, 6, other_at)?.is_none());
-        assert!(CompletedFile::adopt(&same, expected, 5, at)?.is_none());
-        assert!(CompletedFile::adopt(&same, expected, 6, at + 1)?.is_none());
-        let done = CompletedFile::adopt(&same, expected, 6, at)?.expect("taken");
+        assert!(CompletedFile::adopt(&other, expected, 6, Some(other_at))?.is_none());
+        assert!(CompletedFile::adopt(&same, expected, 5, Some(at))?.is_none());
+        assert!(CompletedFile::adopt(&same, expected, 6, Some(at + 1))?.is_none());
+        let done = CompletedFile::adopt(&same, expected, 6, Some(at))?.expect("taken");
         assert!(done.adopted() && same.exists(), "where it was");
         let target = dir.path().join("placed");
         done.persist_new(&target, None)?;

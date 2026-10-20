@@ -237,7 +237,9 @@ impl MirrorRow {
         let mut content = match &self.file {
             Some(f) => NodeContent {
                 mtime: f.mtime_ms,
-                ..NodeContent::file(name, 0, f.size, f.executable)
+                size: Some(f.size),
+                x: f.executable,
+                ..NodeContent::folder(name)
             },
             None => NodeContent::folder(name),
         };
@@ -590,7 +592,8 @@ fn mirror_row(r: &Row<'_>) -> Result<MirrorRow> {
         NodeKind::File => Some(MirrorFile {
             hash: codec::hash_from(&r.get::<_, Vec<u8>>(6)?)?,
             size: r.get::<_, Option<i64>>(7)?.unwrap_or(0) as u64,
-            mtime_ms: r.get(8)?,
+            // An earlier version of this client stored a missing one as 0, which reads the same.
+            mtime_ms: r.get::<_, Option<i64>>(8)?.filter(|&ms| ms != 0),
             executable: r.get(9)?,
         }),
     };

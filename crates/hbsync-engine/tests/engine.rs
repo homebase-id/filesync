@@ -2875,7 +2875,8 @@ fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
 }
 
 /// A rename writes the node's content again with what another writer put there as it was: no
-/// `mtime` stays none (never 1970), and the tags keep their form while the set is the same.
+/// `mtime` stays none (never 1970, on the drive or here), and the tags keep their form while
+/// the set is the same.
 #[test]
 fn a_rename_keeps_what_another_writer_wrote() -> R {
     let server = server();
@@ -2901,6 +2902,9 @@ fn a_rename_keeps_what_another_writer_wrote() -> R {
     }
     let mut b = Client::new(&server, "b")?;
     b.sync()?;
+    // No date on the drive: the download keeps its own, never 1970.
+    let modified = fs::metadata(b.root.join("note.txt"))?.modified()?;
+    assert!(modified > std::time::UNIX_EPOCH + std::time::Duration::from_secs(86_400));
     fs::rename(b.root.join("note.txt"), b.root.join("renamed.txt"))?;
     b.sync()?;
     let srv = server.lock().map_err(|_| "poisoned")?;

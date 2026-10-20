@@ -118,15 +118,17 @@ of this schema may define some of them.)
 
 - "Required" is for writers. A reader skips a file without `size` (an encrypted payload's stored
   size is padded, `encryption.md`) but keeps one without `mtime`, as a file with no date (this
-  client reads it as 0, and writes it back without one). A folder's `mtime`, `size` or `x` from
-  another writer is kept as read, as an unknown key is.
+  client reads it as 0, writes it back without one, and gives the file its own date when it
+  downloads it). A folder's `mtime`, `size` or `x` from another writer is kept as an unknown key
+  is (a `false` or `null` one as none, which reads the same).
 - Readers ignore unknown keys. Writers keep unknown keys they read (forward compatibility).
 - `ct` is kept the same way through every rewrite (new bytes, a rename, a move): editors that
   save by writing a new file and renaming it over the old one would otherwise reset it. A
   download gives it to the file once in place (after the mtime). A node without one (from
   before `ct`, or a client that sends none) gets its file's on its next update or rename.
 - `tags` is kept the same way through every write that isn't about tags, as it was written (its
-  entries' other keys, an entry a reader skips) until the set of tags changes. Where they live on
+  entries' other keys, an entry a reader skips) until the set of tags changes (or past about
+  2,000 bytes, then written as this client writes them). Where they live on
   each system: macOS `com.apple.metadata:_kMDItemUserTags` (what Finder and Spotlight use),
   Linux `user.xdg.tags` (KDE; names only, so a Linux device keeps the colours as they are on
   the drive), Windows nowhere (a Windows device keeps them all as they are). Readers take names
@@ -336,9 +338,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
 
 ## Changes
 - 2026-10-20: a rewrite keeps what it doesn't act on as another writer wrote it: `tags` in their
-  form until the set changes, no `mtime` on a file that had none (before, `0`), and a folder's
-  `mtime`, `size` and `x`. The header fields sync doesn't use are listed as reset on write
-  (they always were). The node is the same.
+  form until the set changes, no `mtime` on a file that had none (before, `0`; a download no
+  longer dates such a file 1970), and a folder's `mtime`, `size` and `x`. The header fields
+  sync doesn't use are listed as reset on write (they always were). The node is the same.
 - 2026-10-20: readers take a fractional `mtime` (rounded) and `x` as `1` or `0`, which
   JavaScript and Kotlin writers may send (before, such a node was unreadable). A node with the
   root's id, or a file with a folder's fixed id, isn't read. A node whose `groupId` is a file

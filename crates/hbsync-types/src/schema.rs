@@ -18,6 +18,9 @@ pub(crate) const VERSION: u32 = 1;
 const CREATED: &str = "ct";
 /// The content key of the Finder tags ([`NodeContent::tags`]).
 const TAGS_KEY: &str = "tags";
+/// The most bytes of another writer's `tags` kept as written: about what this client syncs of
+/// tags per item (`hbsync_platform::tags::Tags::fits`).
+const RAW_TAGS_MAX: usize = 2000;
 /// The content key of an older writer's removal marker: read by no one, dropped when the
 /// content is read (node schema, Recently deleted).
 const REMOVAL_KEY: &str = "rm";
@@ -115,13 +118,8 @@ impl NodeContent {
             .unwrap_or_default()
     }
 
-    /// Sets the tags; none removes the key. The same set as the content has leaves the key as
-    /// it was written (another writer's form, its extra keys, an entry this client skips): it
-    /// changes only with the set (node schema, `tags`).
+    /// Sets the tags; none removes the key.
     pub fn set_tags(&mut self, tags: &Tags) {
-        if self.tags() == *tags {
-            return;
-        }
         if tags.is_empty() {
             self.unknown.remove(TAGS_KEY);
         } else {
@@ -129,25 +127,41 @@ impl NodeContent {
         }
     }
 
+    /// [`NodeContent::set_tags`] on content whose tags read as `had`: the same set leaves
+    /// `tags` as written (another writer's form, its entries' other keys, an entry this client
+    /// skips), unless that is past what tags may take ([`RAW_TAGS_MAX`]). It changes only with
+    /// the set (node schema, `tags`).
+    pub fn set_tags_over(&mut self, tags: &Tags, had: &Tags) {
+        let raw_fits = self
+            .unknown
+            .get(TAGS_KEY)
+            .is_none_or(|raw| raw.to_string().len() <= RAW_TAGS_MAX);
+        if tags != had || !raw_fits {
+            self.set_tags(tags);
+        }
+    }
+
     /// The keys sync carries without acting on them, as a JSON object (read back by
     /// [`keys_from_str`]): the unknown ones, the creation time and the tags; and a folder's
     /// `mtime`, `size` and `x`, which only files use (another writer's: written back as read).
     pub fn carried_json(&self, kind: NodeKind) -> Option<String> {
-        let mut keys = match kind {
-            // A map of JSON values can't fail to serialize.
-            NodeKind::File => {
-                return (!self.unknown.is_empty())
-                    .then(|| serde_json::to_string(&self.unknown).unwrap_or_default());
-            }
-            // As it serializes: the unknown keys and the file keys it has (`x` only when true).
-            NodeKind::Folder => match serde_json::to_value(self) {
-                Ok(Value::Object(keys)) => keys,
-                _ => return None,
-            },
-        };
-        keys.remove("v");
-        keys.remove("name");
-        (!keys.is_empty()).then(|| Value::Object(keys).to_string())
+        // `x` as it serializes: only when true. A map of JSON values can't fail to serialize.
+        let file_keys = [
+            ("mtime", self.mtime.map(Value::from)),
+            ("size", self.size.map(Value::from)),
+            ("x", self.x.then_some(Value::Bool(true))),
+        ];
+        if kind == NodeKind::File || file_keys.iter().all(|(_, v)| v.is_none()) {
+            return (!self.unknown.is_empty())
+                .then(|| serde_json::to_string(&self.unknown).unwrap_or_default());
+        }
+        let mut keys = self.unknown.clone();
+        keys.extend(
+            file_keys
+                .into_iter()
+                .filter_map(|(k, v)| Some((k.to_owned(), v?))),
+        );
+        Some(Value::Object(keys).to_string())
     }
 
     /// A reader that finds a newer version treats the node as read-only.
@@ -334,9 +348,9 @@ mod tests {
         // Written back as read while the set is the same; as this client writes them once it
         // changes.
         let mut kept = odd.clone();
-        kept.set_tags(&odd.tags());
+        kept.set_tags_over(&odd.tags(), &odd.tags());
         assert_eq!(kept.to_json(), odd.to_json());
-        kept.set_tags(&Tags::new([Tag::new("z", 2)]));
+        kept.set_tags_over(&Tags::new([Tag::new("z", 2)]), &odd.tags());
         assert_eq!(
             kept.to_json(),
             r#"{"v":1,"name":"a","tags":[{"c":2,"n":"z"}]}"#

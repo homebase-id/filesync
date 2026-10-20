@@ -149,8 +149,7 @@ impl Executor<'_> {
             file_id: mirror.file_id,
             expected,
             size: file.size,
-            // No date reads as 0, as in `MirrorRow::state`.
-            mtime_ms: file.mtime_ms.unwrap_or(0),
+            mtime_ms: file.mtime_ms,
             executable: (self.folder.os != Os::Windows).then_some(file.executable),
             tmp_dir: layout::tmp_dir(&self.folder.root),
             key: download_key(node, &expected),
@@ -217,11 +216,15 @@ impl Executor<'_> {
             return Err(self.detach(node, NodeId::new()).unwrap_or_else(|o| o));
         }
         let mut tags = tags.clone();
+        // The drive's tags of the version written over, if one is.
+        let mut had = None;
         let target = match existing {
             // In Recently deleted: restored with these bytes (an edit wins over the delete).
             None if let Some(r) = &removed => {
                 content.unknown = r.row.carried_keys();
-                tags = self.merged_with_drive(base.as_ref(), &tags, &r.row.tags());
+                let drive = r.row.tags();
+                tags = self.merged_with_drive(base.as_ref(), &tags, &drive);
+                had = Some(drive);
                 Some(r.row.target())
             }
             // A new node: the file's own creation time, kept from then on.
@@ -234,7 +237,9 @@ impl Executor<'_> {
                     return Err(Outcome::stale("gone remotely"));
                 };
                 content.unknown = mirror.carried_keys();
-                tags = self.merged_with_drive(base.as_ref(), &tags, &mirror.tags());
+                let drive = mirror.tags();
+                tags = self.merged_with_drive(base.as_ref(), &tags, &drive);
+                had = Some(drive);
                 // A node from before creation times, or from a client that sends none.
                 if content.created_ms().is_none() {
                     content.set_created_ms(ops::created_ms(&path));
@@ -242,7 +247,10 @@ impl Executor<'_> {
                 Some(mirror.target_at(version))
             }
         };
-        content.set_tags(&tags);
+        match &had {
+            Some(had) => content.set_tags_over(&tags, had),
+            None => content.set_tags(&tags),
+        }
         let job = Job::Upload {
             meta: NodeMeta {
                 node,

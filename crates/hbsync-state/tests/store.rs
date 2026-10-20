@@ -1477,7 +1477,7 @@ fn a_rewrite_keeps_what_another_writer_wrote() -> R {
     // A rename writes the content again, with the tags it holds.
     let renamed = |row: &MirrorRow| {
         let mut c = row.content("new");
-        c.set_tags(&row.tags());
+        c.set_tags_over(&row.tags(), &row.tags());
         c.to_json()
     };
     assert_eq!(
