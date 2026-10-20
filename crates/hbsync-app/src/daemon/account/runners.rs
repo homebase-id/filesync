@@ -1,18 +1,19 @@
 //! The account's folders' runners, on the account's thread: one that failed starts again
 //! after a pause, backing off; one whose folder was removed stops for good.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::Root;
 use crate::protocol::State;
 use crate::runner::{Backoff, Command, Handle, RunnerError};
 
 /// A folder's runner, on the account's thread.
 pub(super) struct Running {
-    pub(super) path: PathBuf,
+    /// Its folder, as the config lists it.
+    pub(super) root: Root,
     pub(super) handle: Handle,
     pub(super) life: Life,
     /// Its thread is ending: joining it waits for no more than that.
@@ -49,6 +50,14 @@ impl Running {
         };
     }
 
+    /// When it is to start again, if it waits to.
+    pub(super) fn restart_at(&self) -> Option<Instant> {
+        match self.life {
+            Life::Waiting(at) => Some(at),
+            _ => None,
+        }
+    }
+
     /// Whether it is to start again at `now`.
     pub(super) fn due(&self, now: Instant) -> bool {
         matches!(self.life, Life::Waiting(at) if now >= at)
@@ -79,18 +88,9 @@ impl Running {
             self.backoff = Backoff::new();
         }
         let pause = self.backoff.after(State::Failing);
-        tracing::info!("syncing {} again in {pause:?}", self.path.display());
+        tracing::info!("syncing {} again in {pause:?}", self.root.folder.display());
         self.life = Life::Waiting(Instant::now() + pause);
     }
-}
-
-/// The runners the status shows.
-pub(super) fn shown(runners: &[Running]) -> Vec<(PathBuf, Handle)> {
-    runners
-        .iter()
-        .filter(|r| r.shows())
-        .map(|r| (r.path.clone(), r.handle.clone()))
-        .collect()
 }
 
 #[cfg(test)]
@@ -122,7 +122,7 @@ mod tests {
             let cfg = RunnerConfig::new(&folder, &db, &"a.example".into(), "pc");
             let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
             let mut r = Running {
-                path: folder.clone(),
+                root: Root::main(&"a.example".into(), &folder),
                 handle,
                 life: Life::Syncing(thread),
                 done: Arc::default(),

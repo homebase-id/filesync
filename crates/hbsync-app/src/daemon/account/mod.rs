@@ -6,11 +6,12 @@
 //! with new credentials. Its thread blocks on one channel ([`Msg`]) until the next thing that
 //! is due.
 //!
-//! Its files: this one holds the account's handle, shared with the control socket's thread,
-//! and the answers it gives; `run.rs` its loop (the credentials, connecting, serving its
-//! channel); `parts.rs` the account's wiring once connected, shared with the dev tool
-//! `hbsync-sync`; `feed.rs` the notifications and the puller that bring the
-//! drive's changes; `runners.rs` its folders' runners and their restarts.
+//! Its files: this one holds the account's handle, shared with the control socket's thread
+//! (what it shows and its folders' runners, under one lock; only the loop changes the
+//! runners), and the answers it gives; `run.rs` its loop (the credentials, connecting, serving
+//! its channel); `parts.rs` the account's wiring once connected, shared with the dev tool
+//! `hbsync-sync`; `feed.rs` the notifications and the puller that bring the drive's changes;
+//! `runners.rs` its folders' runners and their restarts.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,26 +31,26 @@ use crate::protocol::{
 };
 use crate::runner::{Command, Handle};
 use crate::sync::{Wakeup, lock};
-use crate::{Identity, Paths};
+use crate::{Identity, Paths, Root};
 
 mod feed;
 mod parts;
 mod run;
 mod runners;
 
+use runners::Running;
+
 pub use feed::{Notifications, Puller, UNANNOUNCED_READ};
 pub use parts::AccountParts;
 
-/// An account of the daemon, shared with the control socket's thread.
+/// An account of the daemon: the handle its thread and the control socket's share. What it
+/// shows and its folders' runners are under one lock ([`Shown`]); its thread alone changes the
+/// runners ([`Account::run`]).
 pub(crate) struct Account {
     pub identity: Identity,
     /// Its state DB.
     db: PathBuf,
-    status: Mutex<AccountStatus>,
-    /// Its folders here, and their runners once it runs.
-    phase: Mutex<Phase>,
-    /// Paused (kept in the config too): a runner starts paused.
-    paused: Mutex<Option<Pause>>,
+    shown: Mutex<Shown>,
     /// What its thread is told.
     requests: Sender<Msg>,
     /// Told to end (to start over with new credentials).
@@ -61,6 +62,46 @@ pub(crate) struct Account {
     reader: Mutex<Option<AccountReader>>,
     /// Raised when its status (or its folders') may have changed.
     changed: Arc<Wakeup>,
+}
+
+/// The account's status, its pause and its folders.
+struct Shown {
+    status: AccountStatus,
+    /// Paused (kept in the config too): a runner starts paused.
+    paused: Option<Pause>,
+    /// Waiting for the credentials or the identity; `None` once its runners run (taken as
+    /// they start: there are none before).
+    waiting: Option<Waiting>,
+    /// Its folders' runners once it runs, changed by its thread alone. Those whose folder was
+    /// removed don't show ([`Running::shows`]) while they stop.
+    runners: Vec<Running>,
+}
+
+/// Before its runners start, the account still answers.
+struct Waiting {
+    /// Its folders, as the config lists them.
+    roots: Vec<Root>,
+    state: State,
+    error: Option<String>,
+}
+
+impl Shown {
+    /// The runners the status shows.
+    fn shown(&self) -> impl Iterator<Item = &Running> {
+        self.runners.iter().filter(|r| r.shows())
+    }
+
+    /// Passes `command` to every runner shown; refused, saying why, while it isn't running
+    /// yet.
+    fn send(&self, identity: &Identity, command: &Command) -> Result<(), String> {
+        if let Some(waiting) = &self.waiting {
+            return Err(waiting.not_running(identity));
+        }
+        for r in self.shown() {
+            r.handle.send(command.clone());
+        }
+        Ok(())
+    }
 }
 
 /// What the account's thread waits for, on one channel.
@@ -78,43 +119,35 @@ pub(crate) enum Msg {
 pub(crate) enum Request {
     Deleted(AccountControl),
     /// Start syncing this folder.
-    AddFolder(PathBuf),
+    AddFolder(Root),
     /// Stop syncing this folder.
     RemoveFolder(PathBuf),
 }
 
-/// Before its runners start, the account still answers.
-enum Phase {
-    /// Waiting for the credentials or the identity.
-    Waiting {
-        folders: Vec<PathBuf>,
-        state: State,
-        error: Option<String>,
-    },
-    Running(Vec<(PathBuf, Handle)>),
-}
-
 impl Account {
-    /// The account `identity` syncing `folder`, started paused when `paused`; its thread runs
-    /// with the returned receiver ([`Account::run`]).
+    /// The account of `root`'s identity syncing `root`, started paused when `paused`; its
+    /// thread runs with the returned receiver ([`Account::run`]).
     pub(super) fn new(
         paths: &Paths,
-        identity: &Identity,
-        folder: &Path,
+        root: &Root,
         paused: Option<Pause>,
         changed: Arc<Wakeup>,
     ) -> (Arc<Account>, Receiver<Msg>) {
         let (requests, rx) = channel();
+        let identity = &root.identity;
         let account = Account {
             identity: identity.clone(),
             db: paths.account_db(identity),
-            status: Mutex::new(AccountStatus::new(identity)),
-            phase: Mutex::new(Phase::Waiting {
-                folders: vec![folder.to_path_buf()],
-                state: State::Starting,
-                error: None,
+            shown: Mutex::new(Shown {
+                status: AccountStatus::new(identity),
+                paused,
+                waiting: Some(Waiting {
+                    roots: vec![root.clone()],
+                    state: State::Starting,
+                    error: None,
+                }),
+                runners: Vec::new(),
             }),
-            paused: Mutex::new(paused),
             requests,
             ended: AtomicBool::new(false),
             done: AtomicBool::new(false),
@@ -125,111 +158,92 @@ impl Account {
     }
 
     /// Its folders.
-    pub(super) fn folders(&self) -> Vec<PathBuf> {
-        match &*lock(&self.phase) {
-            Phase::Waiting { folders, .. } => folders.clone(),
-            Phase::Running(runners) => runners.iter().map(|(p, _)| p.clone()).collect(),
+    pub(super) fn folders(&self) -> Vec<Root> {
+        let shown = lock(&self.shown);
+        match &shown.waiting {
+            Some(waiting) => waiting.roots.clone(),
+            None => shown.shown().map(|r| r.root.clone()).collect(),
         }
     }
 
-    /// Syncs the folder at `path` too (once connected).
-    pub(super) fn add_folder(&self, path: &Path) {
-        match &mut *lock(&self.phase) {
-            Phase::Waiting { folders, .. } => {
-                if !folders.iter().any(|f| f == path) {
-                    folders.push(path.to_path_buf());
+    /// Syncs the folder `root` too (once connected).
+    pub(super) fn add_folder(&self, root: &Root) {
+        match &mut lock(&self.shown).waiting {
+            Some(waiting) => {
+                if !waiting.roots.iter().any(|r| r.folder == root.folder) {
+                    waiting.roots.push(root.clone());
                     self.changed.raise();
                 }
             }
-            Phase::Running(_) => self.tell(Msg::Request(Request::AddFolder(path.to_path_buf()))),
+            None => self.tell(Msg::Request(Request::AddFolder(root.clone()))),
         }
     }
 
     /// Stops syncing the folder at `path`.
     pub(super) fn remove_folder(&self, path: &Path) {
-        match &mut *lock(&self.phase) {
-            Phase::Waiting { folders, .. } => {
-                folders.retain(|f| f != path);
+        match &mut lock(&self.shown).waiting {
+            Some(waiting) => {
+                waiting.roots.retain(|r| r.folder != path);
                 self.changed.raise();
             }
-            Phase::Running(_) => self.tell(Msg::Request(Request::RemoveFolder(path.to_path_buf()))),
+            None => self.tell(Msg::Request(Request::RemoveFolder(path.to_path_buf()))),
         }
     }
 
     /// Its status and its folders'.
     pub(super) fn status(&self) -> (AccountStatus, Vec<FolderStatus>) {
-        let folders = match &*lock(&self.phase) {
-            Phase::Running(runners) => runners.iter().map(|(_, h)| h.status()).collect(),
-            Phase::Waiting {
-                folders,
-                state,
-                error,
-            } => {
-                let paused = *lock(&self.paused);
-                folders
-                    .iter()
-                    .map(|path| {
-                        let mut folder = FolderStatus::new(&self.identity, path);
-                        folder.state = if paused.is_some() {
-                            State::Paused
-                        } else {
-                            *state
-                        };
-                        folder.paused_until = paused.and_then(|p| p.until);
-                        folder.error.clone_from(error);
-                        folder
-                    })
-                    .collect()
-            }
-        };
-        (lock(&self.status).clone(), folders)
-    }
-
-    /// The runner of its folder at `path`, once running.
-    pub(super) fn runner(&self, path: &Path) -> Option<Handle> {
-        match &*lock(&self.phase) {
-            Phase::Running(runners) => runners
+        let shown = lock(&self.shown);
+        let folders = match &shown.waiting {
+            None => shown.shown().map(|r| r.handle.status()).collect(),
+            Some(waiting) => waiting
+                .roots
                 .iter()
-                .find(|(p, _)| p == path)
-                .map(|(_, h)| h.clone()),
-            Phase::Waiting { .. } => None,
-        }
+                .map(|root| waiting.status(root, shown.paused))
+                .collect(),
+        };
+        (shown.status.clone(), folders)
     }
 
-    /// Passes `command` to every runner. False while it isn't running yet.
-    pub(crate) fn send_all(&self, command: &Command) -> bool {
-        match &*lock(&self.phase) {
-            Phase::Running(runners) => {
-                for (_, h) in runners {
-                    h.send(command.clone());
-                }
-                true
-            }
-            Phase::Waiting { .. } => false,
+    /// The runner of its folder at `path`: `None` when it doesn't sync it; refused, saying
+    /// why, while it isn't running yet.
+    pub(super) fn runner(&self, path: &Path) -> Option<Result<Handle, String>> {
+        let shown = lock(&self.shown);
+        if let Some(waiting) = &shown.waiting {
+            let syncs = waiting.roots.iter().any(|r| r.folder == path);
+            return syncs.then(|| Err(waiting.not_running(&self.identity)));
         }
+        let found = shown.shown().find(|r| r.root.folder == path);
+        found.map(|r| Ok(r.handle.clone()))
+    }
+
+    /// Passes `command` to every runner; refused, saying why, while it isn't running yet.
+    pub(crate) fn send_all(&self, command: &Command) -> Result<(), String> {
+        lock(&self.shown).send(&self.identity, command)
     }
 
     /// Pauses (`Some`) or resumes its folders, also before they run.
     pub(super) fn pause(&self, pause: Option<Pause>) {
-        *lock(&self.paused) = pause;
+        {
+            let mut shown = lock(&self.shown);
+            shown.paused = pause;
+            // Before they run, they start as `paused` says.
+            let _ = shown.send(
+                &self.identity,
+                &match pause {
+                    Some(pause) => Command::Pause(pause),
+                    None => Command::Resume,
+                },
+            );
+        }
         self.wake();
         self.changed.raise();
-        self.send_all(&match pause {
-            Some(pause) => Command::Pause(pause),
-            None => Command::Resume,
-        });
     }
 
     /// Why it can't take requests yet; `None` once it runs.
     pub(super) fn not_running(&self) -> Option<String> {
-        match &*lock(&self.phase) {
-            Phase::Running(_) => None,
-            Phase::Waiting { error, .. } => Some(format!(
-                "not connected to {} yet{}",
-                self.identity,
-                error.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
-            )),
-        }
+        let shown = lock(&self.shown);
+        let waiting = shown.waiting.as_ref()?;
+        Some(waiting.not_running(&self.identity))
     }
 
     /// Asks for `control` on its Recently deleted; done on its thread.
@@ -296,7 +310,7 @@ impl Account {
             let mut items = Vec::new();
             for f in db.folders()? {
                 let path = PathBuf::from(&f.path);
-                if !folders.contains(&path) {
+                if !folders.iter().any(|r| r.folder == path) {
                     continue;
                 }
                 items.extend(
@@ -397,6 +411,28 @@ impl Account {
     }
 }
 
+impl Waiting {
+    /// The status of its folder `root`, `paused` or waiting.
+    fn status(&self, root: &Root, paused: Option<Pause>) -> FolderStatus {
+        let mut folder = FolderStatus::new(&root.identity, &root.folder);
+        folder.role = root.role;
+        folder.state = if paused.is_some() {
+            State::Paused
+        } else {
+            self.state
+        };
+        folder.paused_until = paused.and_then(|p| p.until);
+        folder.error.clone_from(&self.error);
+        folder
+    }
+
+    /// Why the account `identity` can't take requests yet.
+    fn not_running(&self, identity: &Identity) -> String {
+        let why = self.error.as_ref().map(|e| format!(": {e}"));
+        format!("not connected to {identity} yet{}", why.unwrap_or_default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,9 +445,8 @@ mod tests {
     fn a_foreign_listing_is_refused_in_the_answer() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
         let paths = Paths::under(home.path());
-        let folder = home.path().join("Homebase");
-        let (account, _requests) =
-            Account::new(&paths, &"a.example".into(), &folder, None, Arc::default());
+        let root = Root::main(&"a.example".into(), &home.path().join("Homebase"));
+        let (account, _requests) = Account::new(&paths, &root, None, Arc::default());
         // Its DB, from the drive; its runners running (none needed here).
         let db = paths.account_db(&"a.example".into());
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
@@ -420,7 +455,7 @@ mod tests {
             "a.example",
             Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
         )?;
-        *lock(&account.phase) = Phase::Running(Vec::new());
+        lock(&account.shown).waiting = None;
         let listed = account.read(|r| r.deletes(0)).ok_or("unreadable")?.1.listed;
         let empty = |db: &str, seq| {
             account.request(AccountControl::EmptyListed {
@@ -443,13 +478,8 @@ mod tests {
         use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
         let home = tempfile::tempdir()?;
         let paths = Paths::under(home.path());
-        let (account, _requests) = Account::new(
-            &paths,
-            &"a.example".into(),
-            &home.path().join("Homebase"),
-            None,
-            Arc::default(),
-        );
+        let root = Root::main(&"a.example".into(), &home.path().join("Homebase"));
+        let (account, _requests) = Account::new(&paths, &root, None, Arc::default());
         let db = paths.account_db(&"a.example".into());
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         Drive::open(
@@ -481,5 +511,33 @@ mod tests {
         let summary = summary.ok_or("Recently deleted shown empty")?;
         assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
         Ok(())
+    }
+
+    /// While it waits for the identity, a role folder shows as that role's (not as a main
+    /// folder), from the config's entry; paused, it shows paused.
+    #[test]
+    fn a_waiting_folder_shows_its_role() {
+        let paths = Paths::under(Path::new("/h"));
+        let main = Root::main(&"a.example".into(), Path::new("/h/Homebase"));
+        let documents = Root {
+            role: Some(hbsync_types::Role::Documents),
+            ..Root::main(&"a.example".into(), Path::new("/h/Documents"))
+        };
+        let (account, _requests) = Account::new(&paths, &documents, None, Arc::default());
+        account.add_folder(&main);
+        let (_, folders) = account.status();
+        let shown: Vec<_> = folders.iter().map(|f| (f.path.as_path(), f.role)).collect();
+        assert_eq!(
+            shown,
+            [
+                (documents.folder.as_path(), documents.role),
+                (main.folder.as_path(), None)
+            ]
+        );
+        assert!(folders.iter().all(|f| f.state == State::Starting));
+        account.pause(Some(Pause::UNTIL_RESUMED));
+        let (_, folders) = account.status();
+        assert!(folders.iter().all(|f| f.state == State::Paused));
+        assert_eq!(account.folders(), [documents, main]);
     }
 }

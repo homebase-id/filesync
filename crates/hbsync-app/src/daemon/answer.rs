@@ -9,13 +9,13 @@ use hbsync_types::NodeId;
 
 use super::Daemon;
 use super::account::Account;
-use crate::Config;
 use crate::protocol::{
     Ask, Control, DaemonControl, DaemonStatus, DeletedItem, DeletedList, FolderControl, Reply,
     Request,
 };
 use crate::runner::Command;
 use crate::words;
+use crate::{Config, Root};
 
 pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
     let accounts = &daemon.accounts();
@@ -79,7 +79,11 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             role,
         } => done((|| {
             crate::folders::add(&daemon.paths, &identity, &path, role)?;
-            daemon.add_folder(&identity, &path)?;
+            daemon.add_folder(&Root {
+                identity,
+                folder: path,
+                role,
+            })?;
             Ok(())
         })()),
         Ask::RemoveFolder { path } => done((|| {
@@ -182,8 +186,8 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
         Control::Daemon(DaemonControl::SyncNow) => {
             let mut not_running = Vec::new();
             for a in accounts {
-                if !a.send_all(&Command::SyncNow) {
-                    not_running.extend(a.not_running());
+                if let Err(why) = a.send_all(&Command::SyncNow) {
+                    not_running.push(why);
                 }
             }
             match not_running.len() < accounts.len() {
@@ -201,11 +205,10 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
             }
         }
         Control::Folder { path, control } => {
-            let Some(account) = accounts.iter().find(|a| a.folders().contains(&path)) else {
-                return Reply::Refused(format!("{} isn't synced here", path.display()));
-            };
-            let Some(runner) = account.runner(&path) else {
-                return Reply::Refused(account.not_running().unwrap_or_default());
+            let runner = match accounts.iter().find_map(|a| a.runner(&path)) {
+                None => return Reply::Refused(format!("{} isn't synced here", path.display())),
+                Some(Err(why)) => return Reply::Refused(why),
+                Some(Ok(runner)) => runner,
             };
             let FolderControl::ConfirmDeletes { token } = control;
             if runner.status().held_deletes.map(|held| held.token) != Some(token.clone()) {
