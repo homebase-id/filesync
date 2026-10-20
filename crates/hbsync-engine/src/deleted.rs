@@ -851,16 +851,12 @@ pub fn empty(
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
     let passes = locked(account).read(|s| {
-        if !listed_here(s, listed)? {
-            return Err(StateError::Conflict(
-                "Recently deleted was never listed so here: look at it again".to_owned(),
-            ));
-        }
-        let since: HashSet<NodeId> = s
-            .recorded_after(listed.seq)?
-            .into_iter()
-            .map(|r| r.removed.row.node)
-            .collect();
+        refuse_unlisted(s, listed)?;
+        // Read only when anything was recorded since (a scan: `seq` has no index).
+        let since = match listed.seq < s.removed_seq()? {
+            true => s.removed_since(listed.seq)?,
+            false => HashSet::new(),
+        };
         let mut chosen = Vec::new();
         for &node in nodes {
             if let Some(top) = s.removed_by_node(node)? {
@@ -888,15 +884,21 @@ pub fn empty_listed(
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
     let passes = locked(account).read(|s| {
-        if !listed_here(s, listed)? {
-            return Err(StateError::Conflict(
-                "Recently deleted was never listed so here: look at it again".to_owned(),
-            ));
-        }
+        refuse_unlisted(s, listed)?;
         let chosen = s.recorded_upto(listed.seq)?;
         going(s, chosen.into_iter().map(|r| r.removed).collect())
     })?;
     delete_for_good(account, remote, &passes, None, moved)
+}
+
+/// Refuses `listed` unless this DB gave it ([`listed_here`]).
+fn refuse_unlisted(s: &Store<'_>, listed: &Listed) -> Result<(), StateError> {
+    match listed_here(s, listed)? {
+        true => Ok(()),
+        false => Err(StateError::Conflict(
+            "Recently deleted was never listed so here: look at it again".to_owned(),
+        )),
+    }
 }
 
 /// Whether this DB gave `listed`: its own, up to a counter it reached.

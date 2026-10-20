@@ -738,26 +738,23 @@ fn remote_error(e: HomebaseError) -> RemoteError {
         }
         HomebaseError::Io(e) => RemoteError::Io(e),
         HomebaseError::Api { what, error } => {
-            let why = format!("{what}: {error}");
-            let mapped = error
-                .code
-                .as_deref()
-                .and_then(code_error)
-                .unwrap_or_else(|| match error.status {
+            let why = || format!("{what}: {error}");
+            let mapped = match error.code.as_deref().and_then(code_error) {
+                Some(mapped) => mapped,
+                None => match error.status {
                     404 | 410 => RemoteError::NotFound,
-                    416 => RemoteError::StaleRange(why.clone()),
-                    507 => RemoteError::Full(why.clone()),
-                    408 | 429 | 499 | 500..=599 => RemoteError::Transient(why.clone()),
-                    _ => RemoteError::Fatal(why.clone()),
-                });
+                    416 => RemoteError::StaleRange(why()),
+                    507 => RemoteError::Full(why()),
+                    408 | 429 | 499 | 500..=599 => RemoteError::Transient(why()),
+                    _ => RemoteError::Fatal(why()),
+                },
+            };
             // "Not there" deletes here and is remembered for good: believed only from the
             // identity itself, never from a proxy or a page in front of it (`ApiError::read`).
-            match mapped {
-                RemoteError::NotFound if !error.from_identity => {
-                    RemoteError::Transient(format!("{why} (not from the identity)"))
-                }
-                mapped => mapped,
+            if matches!(mapped, RemoteError::NotFound) && !error.from_identity {
+                return RemoteError::Transient(format!("{} (not from the identity)", why()));
             }
+            mapped
         }
         e @ (HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_)) => {
             RemoteError::Fatal(e.to_string())

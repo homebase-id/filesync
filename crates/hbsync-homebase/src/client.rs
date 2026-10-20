@@ -292,10 +292,7 @@ impl Client {
         what: &str,
     ) -> Result<T, HomebaseError> {
         let mut response = checked(response, what)?;
-        let encrypted = response
-            .headers()
-            .get("X-SSE")
-            .is_some_and(|v| v.as_bytes() == b"1");
+        let encrypted = sealed(response.headers());
         let body = response
             .body_mut()
             .with_config()
@@ -467,6 +464,11 @@ impl<R: Read> Read for Recording<R> {
     }
 }
 
+/// Whether an answer is sealed under the shared secret (`X-SSE: 1`).
+fn sealed(headers: &ureq::http::HeaderMap) -> bool {
+    headers.get("X-SSE").is_some_and(|v| v.as_bytes() == b"1")
+}
+
 /// The response if it is a success; otherwise the error it carries.
 fn checked(
     response: Result<Response<ureq::Body>, ureq::Error>,
@@ -477,10 +479,9 @@ fn checked(
     if status < 400 {
         return Ok(response);
     }
-    let headers = response.headers();
     let sender = Sender {
-        odin: headers.contains_key("X-Odin-Version"),
-        sealed: headers.get("X-SSE").is_some_and(|v| v.as_bytes() == b"1"),
+        odin: response.headers().contains_key("X-Odin-Version"),
+        sealed: sealed(response.headers()),
     };
     let body = response
         .body_mut()

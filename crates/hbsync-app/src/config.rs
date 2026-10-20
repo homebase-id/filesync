@@ -65,11 +65,7 @@ impl KeepDays {
     /// What every client keeps (node schema, The purge): a device may keep longer only.
     pub const MIN: u32 = hbsync_engine::deleted::MIN_KEEP_DAYS;
 
-    /// `days`, at least [`KeepDays::MIN`].
-    pub fn new(days: u32) -> KeepDays {
-        KeepDays(days.max(Self::MIN))
-    }
-
+    /// The days kept, at least [`KeepDays::MIN`].
     pub fn days(self) -> u32 {
         self.0.max(Self::MIN)
     }
@@ -135,13 +131,12 @@ impl Config {
             toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_owned(), e))?;
         if config.keep_deleted_days.0 < KeepDays::MIN {
             tracing::warn!(
-                "{}: keep_deleted_days = {} is below the {} days every device keeps: {} it is",
+                "{}: keep_deleted_days = {} is below the {min} days every device keeps: {min} it is",
                 path.display(),
                 config.keep_deleted_days.0,
-                KeepDays::MIN,
-                KeepDays::MIN
+                min = KeepDays::MIN,
             );
-            config.keep_deleted_days = KeepDays::new(config.keep_deleted_days.0);
+            config.keep_deleted_days = KeepDays::default();
         }
         // Earlier versions kept Windows folders with `\\?\` (setup's `canonicalize`).
         for root in &mut config.roots {
@@ -251,7 +246,7 @@ mod tests {
                 min_files: 10,
                 fraction: 0.5,
             },
-            keep_deleted_days: KeepDays::new(45),
+            keep_deleted_days: KeepDays(45),
             roots: vec![
                 Root::main("anna.example.com", Path::new("/home/anna/Homebase")),
                 Root {
@@ -304,10 +299,9 @@ mod tests {
         for (written, kept) in [(0, 30), (1, 30), (29, 30), (30, 30), (90, 90)] {
             std::fs::write(&path, format!("keep_deleted_days = {written}\n")).expect("ok");
             let config = Config::load(&path)?.expect("a config");
-            assert_eq!(config.keep_deleted_days.days(), kept, "{written}");
-            assert_eq!(config.keep_deleted_days, KeepDays::new(kept), "{written}");
+            assert_eq!(config.keep_deleted_days, KeepDays(kept), "{written}");
         }
-        assert_eq!(KeepDays::new(3).days(), 30);
+        assert_eq!(KeepDays(3).days(), 30);
         Ok(())
     }
 

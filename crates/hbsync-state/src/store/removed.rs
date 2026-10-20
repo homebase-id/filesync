@@ -166,13 +166,16 @@ impl Store<'_> {
         )
     }
 
-    /// Recently deleted's rows recorded after `seq`: what a listing that read it didn't see.
-    /// Emptying alone reads it (a scan: `seq` has no index, migration 12).
-    pub fn recorded_after(&self, seq: u64) -> Result<Vec<Recorded>> {
-        self.recorded_rows(
-            &format!("{REMOVED_SELECT} WHERE seq > ?1"),
+    /// The nodes of Recently deleted recorded after `seq`: what a listing that read it didn't
+    /// see. Emptying alone reads it (a scan: `seq` has no index, migration 12).
+    pub fn removed_since(&self, seq: u64) -> Result<std::collections::HashSet<NodeId>> {
+        let c = self.coords()?;
+        let nodes = self.many(
+            "SELECT node FROM removed WHERE seq > ?1",
             [i64::try_from(seq).unwrap_or(i64::MAX)],
-        )
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )?;
+        Ok(nodes.into_iter().map(|n| c.from_drive(n)).collect())
     }
 
     fn recorded_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Recorded>> {

@@ -22,7 +22,7 @@ pub struct ApiError {
     /// The `errorCode` as its camelCase name (numbers of known codes are translated).
     pub code: Option<String>,
     pub title: String,
-    /// The identity itself answered ([`Sender::is_identity`]), not something in front of it.
+    /// The identity itself answered ([`ApiError::read`]), not something in front of it.
     pub from_identity: bool,
 }
 
