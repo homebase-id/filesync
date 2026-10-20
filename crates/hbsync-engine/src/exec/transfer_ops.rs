@@ -22,7 +22,11 @@ impl Executor<'_> {
             Op::LocalDownload { drive: Some(d), .. } => d.at.file_id,
             _ => return Ok(()),
         };
-        if !self.db.read(|s| s.is_held(file_id))? {
+        let held = match &self.held {
+            Some(held) => held,
+            None => self.held.insert(self.db.read(|s| s.held_files())?),
+        };
+        if !held.contains(&file_id) {
             return Ok(());
         }
         Err(match op {

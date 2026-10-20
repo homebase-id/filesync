@@ -114,6 +114,11 @@ pub fn file_id_of(row: &str) -> Option<Uuid> {
     serde_json::from_str::<Id>(row).ok().map(|id| id.file_id)
 }
 
+/// Whether `file_type` is a sync node's.
+fn node_type(file_type: i32) -> bool {
+    file_type == FILE_TYPE_FOLDER || file_type == FILE_TYPE_FILE
+}
+
 /// What of a feed row that isn't a usable node ([`to_remote`] said why) still reads: its file
 /// and version, `uniqueId` and `groupId`, for a sync node's file type; nothing for another
 /// app's file.
@@ -144,12 +149,15 @@ pub(crate) fn skipped_row(row: &str, why: String) -> Skipped {
     let Ok(row) = serde_json::from_str::<Row>(row) else {
         return Skipped::why(why);
     };
-    let ids = row.file_metadata.app_data;
-    let node_type = ids
-        .as_ref()
-        .and_then(|i| i.file_type)
-        .is_some_and(|t| t == FILE_TYPE_FOLDER || t == FILE_TYPE_FILE);
-    if !node_type {
+    let Some(Ids {
+        unique_id,
+        group_id,
+        file_type: Some(t),
+    }) = row.file_metadata.app_data
+    else {
+        return Skipped::why(why);
+    };
+    if !node_type(t) {
         return Skipped::why(why);
     }
     Skipped {
@@ -157,8 +165,8 @@ pub(crate) fn skipped_row(row: &str, why: String) -> Skipped {
             file_id: RemoteFileId(row.file_id),
             version: VersionTag(row.file_metadata.version_tag),
         }),
-        node: ids.as_ref().and_then(|i| i.unique_id).map(NodeId),
-        parent: ids.as_ref().and_then(|i| i.group_id).map(NodeId),
+        node: unique_id.map(NodeId),
+        parent: group_id.map(NodeId),
         why,
     }
 }
@@ -195,8 +203,7 @@ pub struct FileRef {
 impl FileRef {
     /// Whether the row is another app's file, not a sync node (its type says so).
     pub(crate) fn not_a_node(&self) -> bool {
-        self.file_type
-            .is_some_and(|t| t != FILE_TYPE_FOLDER && t != FILE_TYPE_FILE)
+        self.file_type.is_some_and(|t| !node_type(t))
     }
 }
 
@@ -722,6 +729,38 @@ mod tests {
         let mut tomb = fixture("tombstone.json");
         tomb.file_metadata.app_data.group_id = None;
         assert!(to_remote(tomb, &SS).is_ok_and(|h| h.is_deleted()));
+        Ok(())
+    }
+
+    /// A sync node's row that doesn't read is kept as there: its file, version and ids; another
+    /// app's file is only a reason.
+    #[test]
+    fn a_skipped_row_keeps_what_reads() -> R {
+        let mut row = fixture_value("file-node.json");
+        row["fileMetadata"]["appData"]["content"] = json!("not sealed");
+        let skipped = skipped_row(&row.to_string(), "why".into());
+        let header: FileHeader = serde_json::from_value(row.clone())?;
+        let meta = &header.file_metadata;
+        assert_eq!(
+            skipped.at,
+            Some(RemoteRef {
+                file_id: RemoteFileId(header.file_id),
+                version: VersionTag(meta.version_tag),
+            })
+        );
+        assert_eq!(
+            (skipped.node, skipped.parent),
+            (
+                meta.app_data.unique_id.map(NodeId),
+                meta.app_data.group_id.map(NodeId)
+            )
+        );
+        row["fileMetadata"]["appData"]["fileType"] = json!(100);
+        assert_eq!(
+            skipped_row(&row.to_string(), "why".into()),
+            Skipped::why("why")
+        );
+        assert_eq!(skipped_row("{]", "why".into()), Skipped::why("why"));
         Ok(())
     }
 

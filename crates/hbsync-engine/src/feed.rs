@@ -436,8 +436,11 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
     let nothing_new = db().write(|s| {
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
         let nothing_new = known(s, &refs)?;
+        // There all the same, where its file and version read.
         for row in &page.skipped {
-            mirror::unreadable(s.account(), row)?;
+            if let Some(at) = row.at {
+                s.account().put_unreadable(at, row.node, row.parent)?;
+            }
         }
         for header in &page.entries {
             report.count(apply(s.account(), header)?);

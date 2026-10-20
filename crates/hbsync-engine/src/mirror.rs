@@ -7,21 +7,12 @@
 //! renames and removals are recorded as they always were ([`updated`], [`removed`]): a pull
 //! may have recorded a newer state of the node meanwhile, which they must not undo.
 
-use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Skipped};
+use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{AccountTx, MirrorRow, RemovedRow, StateError};
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target};
 use hbsync_types::{Role, removal_time};
 
 // ---- facts the feed brings ----
-
-/// A feed row the remote couldn't read as a node: recorded as there all the same, where its
-/// file and version read ([`AccountTx::put_unreadable`]).
-pub(crate) fn unreadable(s: AccountTx<'_>, row: &Skipped) -> Result<(), StateError> {
-    match row.at {
-        Some(at) => s.put_unreadable(at, row.node, row.parent),
-        None => Ok(()),
-    }
-}
 
 /// What [`apply`] made of a header.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,20 +43,21 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
     };
     // The store marks the nodes that changed dirty where that concerns.
     let removed_at = header.removed_at;
-    if s.has_version(row.remote_ref(), removed_at.is_some())? {
+    let known = s.known_file(row.file_id)?;
+    if known.is_some_and(|(v, _, removed)| v == row.version && removed == removed_at.is_some()) {
         return apply_known(s, &ChangeRef::of(header), header.token.as_ref());
     }
     // A node is one folder or one file for its life (node schema, Identity and tombstones).
     // Taken as a delete and a create, a change of kind would trash this device's copy on
     // another writer's mistake: left out, the drive keeps every byte, and the node is held as
     // this device had it (its writes fork; what is in it waits).
-    if let Some(had) = s.known_kind(row.node)?
+    if let Some((_, had, _)) = known
         && had != row.kind
     {
-        let (file, node, kind) = (row.file_id, row.node, row.kind);
-        s.put_unreadable(row.remote_ref(), Some(node), Some(row.parent))?;
+        s.put_unreadable(row.remote_ref(), Some(row.node), Some(row.parent))?;
         return Ok(Applied::Refused(format!(
-            "{file:?}: node {node:?} was a {had:?}, now a {kind:?}"
+            "{:?}: node {:?} was a {had:?}, now a {:?}",
+            row.file_id, row.node, row.kind
         )));
     }
     if let Some(removed_at) = removed_at {

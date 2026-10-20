@@ -27,15 +27,45 @@ impl ReadTx<'_> {
             .exists([file_id.0.as_bytes()])?)
     }
 
-    /// The kind this device knows `node` as: its mirror row's, else its row's in Recently
-    /// deleted. One indexed lookup, no row decoded.
-    pub fn known_kind(&self, node: NodeId) -> Result<Option<NodeKind>> {
+    /// The files the drive has in a version this client can't read (held, where it knows an
+    /// older one).
+    pub fn held_files(&self) -> Result<std::collections::HashSet<RemoteFileId>> {
+        Ok(self
+            .many("SELECT file_id FROM unreadable", [], |r| {
+                Ok(RemoteFileId(codec::uuid_from(&r.get::<_, Vec<u8>>(0)?)?))
+            })?
+            .into_iter()
+            .collect())
+    }
+
+    /// The version this device knows of file `file_id`, its kind, and whether it is in Recently
+    /// deleted: one lookup by file id.
+    pub fn known_file(
+        &self,
+        file_id: RemoteFileId,
+    ) -> Result<Option<(VersionTag, NodeKind, bool)>> {
         self.one(
-            "SELECT m.kind FROM remote m JOIN nodes n ON n.id = m.id WHERE n.uuid = ?1 \
-             UNION ALL SELECT kind FROM removed WHERE node = ?1 LIMIT 1",
-            node.0.as_bytes(),
-            |r| codec::kind_from(r.get(0)?),
+            "SELECT version_tag, kind, 0 FROM remote WHERE file_id = ?1 \
+             UNION ALL SELECT version_tag, kind, 1 FROM removed WHERE file_id = ?1 LIMIT 1",
+            file_id.0.as_bytes(),
+            |r| {
+                Ok((
+                    codec::version(&r.get::<_, Vec<u8>>(0)?)?,
+                    codec::kind_from(r.get(1)?)?,
+                    r.get(2)?,
+                ))
+            },
         )
+    }
+
+    /// Whether the store has no unreadable row, read once per transaction.
+    fn none_unreadable(&self) -> Result<bool> {
+        if let Some(none) = self.no_unreadable.get() {
+            return Ok(none);
+        }
+        let none = !self.prep("SELECT 1 FROM unreadable")?.exists([])?;
+        self.no_unreadable.set(Some(none));
+        Ok(none)
     }
 }
 
@@ -59,16 +89,21 @@ impl AccountTx<'_> {
             node.map(|n| n.0.as_bytes().to_vec()),
             parent.map(|p| p.0.as_bytes().to_vec()),
         ])?;
+        self.no_unreadable.set(Some(false));
         if let Some(node) = node {
             self.fan_out(node, parent.unwrap_or(NodeId::ROOT))?;
         }
         Ok(())
     }
 
-    /// File `file_id` read again, or deleted: no longer an unreadable row.
-    pub(super) fn clear_unreadable(&self, file_id: RemoteFileId) -> Result<()> {
-        self.prep("DELETE FROM unreadable WHERE file_id = ?1")?
-            .execute([file_id.0.as_bytes()])?;
+    /// A new row of file `file_id`, or its delete: it is there (or gone), whatever the identity
+    /// said once, and no longer a row this client can't read.
+    pub(super) fn clear_file_marks(&self, file_id: RemoteFileId) -> Result<()> {
+        self.clear_gone_suspect(file_id)?;
+        if !self.none_unreadable()? {
+            self.prep("DELETE FROM unreadable WHERE file_id = ?1")?
+                .execute([file_id.0.as_bytes()])?;
+        }
         Ok(())
     }
 }

@@ -257,6 +257,9 @@ pub(crate) struct Executor<'a> {
     /// Nodes whose tags the drive refused this run for good (access, a drive that won't take
     /// it): a tag only the item here has can't go up now, so a download no longer waits for it.
     tags_refused: HashSet<NodeId>,
+    /// The files the drive has in a version this device can't read ([`ReadTx::held_files`]),
+    /// read at the run's first write to an existing file.
+    held: Option<HashSet<hbsync_types::RemoteFileId>>,
     /// Where this run's operations settled each node's base: a later operation's compare and
     /// set takes the base there as the one its plan saw.
     settled: HashMap<NodeId, RemoteRef>,
@@ -400,6 +403,7 @@ impl<'a> Executor<'a> {
             crashed: false,
             records: HashSet::new(),
             tags_refused: HashSet::new(),
+            held: None,
             settled: HashMap::new(),
             stop: None,
             progress: Arc::default(),

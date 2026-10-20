@@ -292,8 +292,7 @@ impl AccountTx<'_> {
             return Ok(());
         }
         // A new row of it: it is there, whatever the identity said once.
-        self.clear_gone_suspect(removed.row.file_id)?;
-        self.clear_unreadable(removed.row.file_id)?;
+        self.clear_file_marks(removed.row.file_id)?;
         let Some(row) = &self.on_drive(&removed.row)? else {
             return Ok(());
         };

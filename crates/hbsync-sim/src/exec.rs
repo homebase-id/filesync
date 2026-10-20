@@ -102,14 +102,11 @@ impl Sim {
             local_unhashed: client.unhashed.iter().copied().collect(),
             ..Default::default()
         };
-        // On the drive, in a version no client reads ([`Action::NewerFolder`]); one deleted for
-        // good is known gone (its tombstone, or a delete for good announced, or asked about).
-        let server = &self.server;
-        input.unreadable = server
-            .unreadable
-            .keys()
-            .filter(|n| server.live.contains_key(n) || server.removed.contains_key(n))
-            .map(|n| client.coords.from_drive(*n))
+        // On the drive, in a version no client reads ([`Action::NewerFolder`]).
+        input.unreadable = self
+            .server
+            .unreadable_on_drive()
+            .map(|(n, _)| client.coords.from_drive(*n))
             .collect();
         input.remote_refs = self
             .server

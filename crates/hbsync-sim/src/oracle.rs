@@ -515,13 +515,7 @@ impl Sim {
         let coords = self.clients[c].coords;
         // A folder no client reads, while it is on the drive, and what is in it: what is in
         // it waits for it (`Action::NewerFolder`).
-        let server = &self.server;
-        let unread: BTreeSet<NodeId> = server
-            .unreadable
-            .keys()
-            .filter(|f| server.live.contains_key(f) || server.removed.contains_key(f))
-            .copied()
-            .collect();
+        let unread: BTreeSet<NodeId> = self.server.unreadable_on_drive().map(|(n, _)| *n).collect();
         let mut tree = Tree::new();
         for (node, n) in &self.server.live {
             let up = up_from(drive, *node);
