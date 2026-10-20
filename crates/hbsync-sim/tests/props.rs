@@ -1297,7 +1297,8 @@ fn emptying_as_listed_spares_what_came_after_the_listing() {
 /// good only with everything removed below it). The file stays restorable, and nothing is lost.
 /// The same when client 0 itself finishes its delete after the listing, and so knows the
 /// removal: emptying the item takes what was in it as listed, nothing recorded since
-/// (`deleted::empty` with the listing, as `empty_listed`; before, the item took all of it).
+/// (`deleted::AccountOps::empty` with the listing, as `empty_listed`; before, the item took all
+/// of it).
 #[test]
 fn regression_emptying_spares_a_folder_holding_a_removal_it_didnt_know() {
     for finisher in [1, 0] {

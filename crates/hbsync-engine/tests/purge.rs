@@ -928,6 +928,21 @@ impl hbsync_remote::Remote for Watched {
     }
 }
 
+/// The purge as the drive runs it ([`deleted::AccountOps::purge`]); `behind` set when the
+/// account fell behind.
+fn purge(
+    account: &Mutex<StateDb>,
+    remote: &dyn hbsync_remote::Remote,
+    keep_ms: i64,
+    now: i64,
+    behind: &mut bool,
+) -> Result<usize, hbsync_engine::EngineError> {
+    let mut ops = deleted::AccountOps::new(account, remote);
+    let gone = ops.purge(keep_ms, now);
+    *behind |= ops.behind;
+    gone
+}
+
 /// Reads the feed into `account`: the server's time.
 fn pull_into(account: &Mutex<StateDb>, remote: &dyn hbsync_remote::Remote) -> common::Res<i64> {
     let report = feed::pull(|| account.lock().expect("account"), remote, 1000, &mut None)?;
@@ -965,10 +980,7 @@ fn the_purge_holds_the_account_only_for_its_own_reads_and_writes() -> common::Re
     pull_into(&account, &remote)?;
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
     let now = pull_into(&account, &remote)?;
-    assert_eq!(
-        deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?,
-        3
-    );
+    assert_eq!(purge(&account, &remote, TRACE_MS, now, &mut false)?, 3);
     assert!(matches!(
         server.lock().map_err(|_| "poisoned")?.header(d.file_id),
         Err(RemoteError::NotFound)
@@ -1013,7 +1025,7 @@ fn a_purge_cut_short_keeps_what_went() -> common::Res<()> {
         let mut moved = false;
         let why = stop();
         assert!(
-            deleted::purge(&account, &remote, TRACE_MS, now, &mut moved).is_err(),
+            purge(&account, &remote, TRACE_MS, now, &mut moved).is_err(),
             "{why:?}"
         );
         let gone = |f: &RemoteFileId| {
@@ -1039,10 +1051,7 @@ fn a_purge_cut_short_keeps_what_went() -> common::Res<()> {
         assert!(!moved, "nothing refused: {why:?}");
 
         remote.cut = None;
-        assert_eq!(
-            deleted::purge(&account, &remote, TRACE_MS, now, &mut moved)?,
-            1
-        );
+        assert_eq!(purge(&account, &remote, TRACE_MS, now, &mut moved)?, 1);
         assert!(files.iter().all(gone));
         assert!(!moved);
     }
@@ -1067,7 +1076,7 @@ fn a_not_found_the_header_denies_keeps_the_item() -> common::Res<()> {
     let now = pull_into(&account, &remote)?;
     remote.answer = Some(|| RemoteError::NotFound);
     let mut moved = false;
-    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut moved)?, 0);
+    assert_eq!(purge(&account, &remote, 0, now, &mut moved)?, 0);
     assert!(moved, "behind");
     {
         let mut account = account.lock().map_err(|_| "poisoned")?;
@@ -1077,7 +1086,7 @@ fn a_not_found_the_header_denies_keeps_the_item() -> common::Res<()> {
         }
     }
     remote.answer = None;
-    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut false)?, 2);
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, 2);
     Ok(())
 }
 
@@ -1092,10 +1101,7 @@ fn a_pass_of_files_doesnt_wait() -> common::Res<()> {
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
     let now = pull_into(&account, &remote)?;
     let began = Instant::now();
-    assert_eq!(
-        deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?,
-        1
-    );
+    assert_eq!(purge(&account, &remote, TRACE_MS, now, &mut false)?, 1);
     assert!(began.elapsed() < remote.hold, "{:?}", began.elapsed());
     assert!(remote.waited.lock().map_err(|_| "poisoned")?.is_empty());
     Ok(())
@@ -1140,7 +1146,7 @@ fn a_failing_part_of_the_purge_doesnt_stop_the_others() -> common::Res<()> {
         1
     );
     remote.soft_fails = true;
-    assert!(deleted::purge(&account, &remote, 0, now, &mut false).is_err());
+    assert!(purge(&account, &remote, 0, now, &mut false).is_err());
     assert!(
         matches!(
             server.lock().map_err(|_| "poisoned")?.header(z),
@@ -1166,7 +1172,7 @@ fn asking_after_not_found_stops_at_a_failed_request() -> common::Res<()> {
     remote.answer = Some(|| RemoteError::NotFound);
     remote.headers_fail = true;
     let mut moved = false;
-    assert!(deleted::purge(&account, &remote, 0, now, &mut moved).is_err());
+    assert!(purge(&account, &remote, 0, now, &mut moved).is_err());
     assert_eq!(remote.headers.load(Ordering::SeqCst), 1, "one asked");
     assert!(moved);
     assert_eq!(
@@ -1189,7 +1195,7 @@ fn a_page_read_before_a_soft_delete_doesnt_bring_it_back() -> common::Res<()> {
     let remote = Watched::new(&server, &account, Duration::ZERO);
     let now = pull_into(&account, &remote)?;
     let before = header_named(&server, "x.txt");
-    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut false)?, 1);
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, 1);
     assert!(
         server
             .lock()
@@ -1216,7 +1222,7 @@ fn an_unknown_answer_fails_the_purge() -> common::Res<()> {
     let mut remote = Watched::new(&server, &account, Duration::ZERO);
     let now = pull_into(&account, &remote)?;
     remote.answer = Some(|| RemoteError::Fatal("someNewCode".into()));
-    assert!(deleted::purge(&account, &remote, TRACE_MS, now, &mut false).is_err());
+    assert!(purge(&account, &remote, TRACE_MS, now, &mut false).is_err());
     let mut db = account.lock().map_err(|_| "poisoned")?;
     assert_eq!(db.read(|s| s.list_removed(10))?.len(), 1);
     assert!(!db.read(|s| s.file_gone(x))?);
@@ -1239,7 +1245,7 @@ fn the_trash_waits_for_the_items() -> common::Res<()> {
     let mut remote = Watched::new(&server, &account, Duration::ZERO);
     // The first purge starts the trash's clock.
     let now = pull_into(&account, &remote)?;
-    deleted::purge(&account, &remote, 0, now, &mut false)?;
+    purge(&account, &remote, 0, now, &mut false)?;
     let entry = layout::trash_dir(&folder)
         .join(layout::trash_entry(
             hbsync_types::unix_now() + 1,
@@ -1253,10 +1259,10 @@ fn the_trash_waits_for_the_items() -> common::Res<()> {
     let now = pull_into(&account, &remote)?;
     remote.soft_fails = true;
     // Kept less than nothing: the entry is old enough, and so is y.
-    assert!(deleted::purge(&account, &remote, -10_000, now, &mut false).is_err());
+    assert!(purge(&account, &remote, -10_000, now, &mut false).is_err());
     assert!(entry.exists(), "the trash waits");
     remote.soft_fails = false;
-    deleted::purge(&account, &remote, -10_000, now, &mut false)?;
+    purge(&account, &remote, -10_000, now, &mut false)?;
     assert!(!entry.exists(), "emptied");
     Ok(())
 }
@@ -1276,7 +1282,7 @@ fn emptying_many_files_takes_a_request_per_thousand() -> common::Res<()> {
     let requests = || remote.inner.faults().requests;
     let before = requests();
     let began = Instant::now();
-    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut false)?, 2041);
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, 2041);
     eprintln!(
         "emptied 2,041 files: {} requests, {:?}",
         requests() - before,
@@ -1306,7 +1312,7 @@ fn emptying_many_files_takes_a_request_per_thousand() -> common::Res<()> {
     );
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
     let now = pull_into(&account, &remote)?;
-    deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?;
+    purge(&account, &remote, TRACE_MS, now, &mut false)?;
     let server = server.lock().map_err(|_| "poisoned")?;
     assert!(
         files
@@ -1326,11 +1332,11 @@ fn a_tombstone_without_its_version_waits_for_the_feed() -> common::Res<()> {
     let (account, files) = removed_now(&server, &["x.txt"])?;
     let remote = Watched::new(&server, &account, Duration::ZERO);
     let now = pull_into(&account, &remote)?;
-    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut false)?, 1);
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, 1);
     let x = files[0];
     // Long after, the feed unread meanwhile.
     let now = now + LATER;
-    deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?;
+    purge(&account, &remote, TRACE_MS, now, &mut false)?;
     assert!(
         server
             .lock()
@@ -1348,7 +1354,7 @@ fn a_tombstone_without_its_version_waits_for_the_feed() -> common::Res<()> {
     );
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
     let now = pull_into(&account, &remote)?;
-    deleted::purge(&account, &remote, TRACE_MS, now, &mut false)?;
+    purge(&account, &remote, TRACE_MS, now, &mut false)?;
     assert!(
         matches!(
             server.lock().map_err(|_| "poisoned")?.header(x),
@@ -1369,7 +1375,7 @@ fn a_file_written_since_stays_and_the_rest_of_its_batch_go() -> common::Res<()> 
     // Another device writes y since this one read it: removed still, at a new version.
     remove_on_server(&server, &header_named(&server, "y.txt"));
     let mut moved = false;
-    assert_eq!(deleted::purge(&account, &remote, 0, now, &mut moved)?, 2);
+    assert_eq!(purge(&account, &remote, 0, now, &mut moved)?, 2);
     assert!(moved, "behind");
     let server = server.lock().map_err(|_| "poisoned")?;
     for (f, deleted) in files.iter().zip([true, false, true]) {
