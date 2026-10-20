@@ -1,13 +1,13 @@
 //! The state DB's schema. `PRAGMA user_version` holds its version: a new DB is made at
 //! [`VERSION`] by [`SCHEMA`]; one of version [`BASE`] or later is brought up to it by
 //! [`MIGRATIONS`], each adding one. A DB older than `BASE` (before 0.7) isn't upgraded: its
-//! account is set up again (setup moves it aside).
+//! account is set up again.
 //!
 //! Changing the schema:
 //! - a migration is appended, and [`SCHEMA`] makes the same change: a new DB never runs
 //!   migrations. `the_schema_is_what_an_upgrade_makes` checks that they agree;
 //! - a migration's data steps (filling a column, a kv row) are for the DBs it upgrades: what a
-//!   new DB needs too goes in [`SCHEMA`] or in creating it ([`migrate`]);
+//!   new DB needs too goes in [`SCHEMA`] or in creating it ([`apply`]);
 //! - migrations are append-only once released: never edit one that has shipped;
 //! - a release that ships a [`SCHEMA`] the first time freezes its schema, as SQLite keeps it, in
 //!   `v<N>.sql` beside `v13.sql`, for the test to bring up to date too.
@@ -261,7 +261,7 @@ const SCHEMA: &str = r#"
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
 const MIGRATIONS: &[&str] = &[
-    // 14: each row's sibling hash (`hbsync_namemap::sibling_hash` of its name, which `migrate`
+    // 14: each row's sibling hash (`hbsync_namemap::sibling_hash` of its name, which `apply`
     // gives SQL as `sibling_hash`), indexed with its folder on every side: planning a change
     // reads the rows that may clash with its name, not the whole folder.
     "ALTER TABLE base ADD COLUMN name_key INTEGER NOT NULL DEFAULT 0;
@@ -298,10 +298,6 @@ pub(crate) fn check(version: u32) -> Result<()> {
     }
 }
 
-pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
-    migrate(conn)
-}
-
 /// `sibling_hash(name)` in SQL: what migration 14 fills the new columns with.
 fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
@@ -314,7 +310,8 @@ fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn migrate(conn: &mut Connection) -> Result<()> {
+/// Makes a new DB, or brings one of [`BASE`] or later up to [`VERSION`].
+pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
     let seen = user_version(conn)?;
     check(seen)?;
     if seen == VERSION {

@@ -33,8 +33,10 @@ disk for atomic renames; the ignore rules), hidden on Windows too (the hidden at
 at every start), and its marker `.hbsync/folder`: the identity and the folder's id in that DB.
 A folder is synced only through its marker: without one it is gone (or not mounted), with
 another identity's it is refused, and one the DB doesn't know is set up again. An account's DB
-from before 0.7 isn't upgraded: `hbsync setup` keeps it aside (`state.db.before-0.7`) and sets
-the folder up again as a folder with files (what it has is adopted, nothing is copied twice).
+from before 0.7 isn't upgraded: the daemon stops (its log says why). Moving
+`accounts/<identity>/state.db` (and its `-wal` file) aside and running `hbsync setup --existing`
+sets the folder up again as a folder with files: what it has is adopted, nothing is copied
+twice.
 
 ## `config.toml`
 

@@ -69,7 +69,7 @@ pub enum StateError {
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
     #[error(
-        "state DB schema version {found} is from a Filesync before 0.7 and isn't upgraded: set it up again (`hbsync setup` keeps it aside)"
+        "state DB schema version {found} is from a Filesync before 0.7 and isn't upgraded: move the account's state.db (and its -wal file) aside, then `hbsync setup --existing`"
     )]
     TooOld { found: u32 },
     /// Older than this client's, and a [`Reader`] can't bring it up to date: a writer does
