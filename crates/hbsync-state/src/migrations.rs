@@ -1,10 +1,18 @@
 //! The state DB's schema. `PRAGMA user_version` holds its version: a new DB is made at
 //! [`VERSION`] by [`SCHEMA`]; one of version [`BASE`] or later is brought up to it by
-//! [`MIGRATIONS`], each adding one. Migrations are append-only once released: never edit one
-//! that has shipped. A DB older than `BASE` (before 0.7) isn't upgraded: its account is set
-//! up again.
+//! [`MIGRATIONS`], each adding one. A DB older than `BASE` (before 0.7) isn't upgraded: its
+//! account is set up again (setup moves it aside).
+//!
+//! Changing the schema:
+//! - a migration is appended, and [`SCHEMA`] makes the same change: a new DB never runs
+//!   migrations. `the_schema_is_what_an_upgrade_makes` checks that they agree;
+//! - a migration's data steps (filling a column, a kv row) are for the DBs it upgrades: what a
+//!   new DB needs too goes in [`SCHEMA`] or in creating it ([`migrate`]);
+//! - migrations are append-only once released: never edit one that has shipped;
+//! - a release that ships a [`SCHEMA`] the first time freezes its schema, as SQLite keeps it, in
+//!   `v<N>.sql` beside `v13.sql`, for the test to bring up to date too.
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{Result, StateError};
 
@@ -15,7 +23,7 @@ const BASE: u32 = 13;
 /// `removed`, `kv`) is the account's; each synced folder has its rows in the other tables,
 /// with `folder` last in every key and index: a node's rows are found by id, a folder's listings
 /// by parent or file id, and a folder alone matches no index, so the planner (which has no
-/// statistics) never scans a whole folder for a lookup. `the_schema_is_pinned` pins it.
+/// statistics) never scans a whole folder for a lookup.
 const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
@@ -253,7 +261,7 @@ const SCHEMA: &str = r#"
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
 const MIGRATIONS: &[&str] = &[
-    // 14: each row's sibling hash (`hbsync_namemap::sibling_hash` of its name, which `apply`
+    // 14: each row's sibling hash (`hbsync_namemap::sibling_hash` of its name, which `migrate`
     // gives SQL as `sibling_hash`), indexed with its folder on every side: planning a change
     // reads the rows that may clash with its name, not the whole folder.
     "ALTER TABLE base ADD COLUMN name_key INTEGER NOT NULL DEFAULT 0;
@@ -291,9 +299,7 @@ pub(crate) fn check(version: u32) -> Result<()> {
 }
 
 pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
-    sibling_hash_in_sql(conn)?;
-    migrate(conn)?;
-    give_id(conn)
+    migrate(conn)
 }
 
 /// `sibling_hash(name)` in SQL: what migration 14 fills the new columns with.
@@ -305,24 +311,6 @@ fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| Ok(hbsync_namemap::sibling_hash(&ctx.get::<String>(0)?)),
     )?;
-    Ok(())
-}
-
-/// Gives the DB its own random id (kv `db.id`) if it has none (or an empty one): a listing of
-/// its Recently deleted names it, so one of another DB of the identity (made again) is told
-/// apart.
-fn give_id(conn: &Connection) -> Result<()> {
-    let id: Option<String> = conn
-        .query_row("SELECT value FROM kv WHERE key = 'db.id'", [], |r| r.get(0))
-        .optional()?;
-    if id.is_none_or(|id| id.is_empty()) {
-        conn.execute(
-            "INSERT OR REPLACE INTO kv (key, value) \
-             SELECT 'db.id', lower(hex(randomblob(16))) \
-             WHERE NOT EXISTS (SELECT 1 FROM kv WHERE key = 'db.id' AND value <> '')",
-            [],
-        )?;
-    }
     Ok(())
 }
 
@@ -342,7 +330,14 @@ fn migrate(conn: &mut Connection) -> Result<()> {
     }
     if current == 0 {
         tx.execute_batch(SCHEMA)?;
+        // Its own random id: a listing of its Recently deleted names it, so one of another DB
+        // of the identity (made again) is told apart.
+        tx.execute(
+            "INSERT INTO kv (key, value) VALUES ('db.id', lower(hex(randomblob(16))))",
+            [],
+        )?;
     } else {
+        sibling_hash_in_sql(&tx)?;
         for sql in &MIGRATIONS[(current - BASE) as usize..] {
             tx.execute_batch(sql)?;
         }
@@ -385,14 +380,6 @@ mod tests {
         let mut other = Connection::open_in_memory()?;
         apply(&mut other)?;
         assert_ne!(id(&other)?, first);
-        for missing in [
-            "DELETE FROM kv WHERE key = 'db.id'",
-            "UPDATE kv SET value = '' WHERE key = 'db.id'",
-        ] {
-            conn.execute(missing, [])?;
-            apply(&mut conn)?;
-            assert_eq!(id(&conn)?.len(), 32, "{missing}");
-        }
         Ok(())
     }
 
@@ -420,10 +407,11 @@ mod tests {
         Ok(())
     }
 
-    /// One from before 0.7 (12: 0.6's last; 4: one DB per folder) isn't upgraded.
+    /// One from before 0.7 (6: 0.6.0's; 12: the last before 0.7; 4: one DB per folder) isn't
+    /// upgraded.
     #[test]
     fn a_db_from_before_0_7_is_refused() -> Result<()> {
-        for found in [12, 4] {
+        for found in [6, 12, 4] {
             let mut conn = Connection::open_in_memory()?;
             conn.pragma_update(None, "user_version", found)?;
             assert!(matches!(
@@ -443,9 +431,10 @@ mod tests {
     }
 
     /// Everything SQLite knows of a schema: each table's columns (type, NOT NULL, default,
-    /// key), its foreign keys and whether it has rowids; each index's table, columns, order,
-    /// uniqueness and origin; each trigger's SQL. Not how the SQL was spelled: a table a
-    /// migration changed keeps its first `CREATE` with the changes appended.
+    /// key), its foreign keys, whether it has rowids and whether they are AUTOINCREMENT (never
+    /// handed out again); each index's table, columns, order, uniqueness and origin; each
+    /// trigger's SQL. Not how the SQL was spelled: a table a migration changed keeps its first
+    /// `CREATE` with the changes appended.
     fn shape(conn: &Connection) -> Result<Vec<String>> {
         // Each row's values, in Debug form (NULL apart from 0, text apart from numbers).
         let rows = |sql: &str| -> Result<Vec<String>> {
@@ -477,6 +466,13 @@ mod tests {
                 "  keys {:?}",
                 rows(&format!("SELECT * FROM pragma_foreign_key_list('{t}')"))?
             ));
+            out.push(format!(
+                "  autoincrement {:?}",
+                rows(&format!(
+                    "SELECT sql LIKE '%AUTOINCREMENT%' FROM sqlite_master \
+                     WHERE type = 'table' AND name = '{t}'"
+                ))?
+            ));
             for i in names(&format!(
                 "SELECT name FROM pragma_index_list('{t}') ORDER BY name"
             ))? {
@@ -489,8 +485,16 @@ mod tests {
                 ));
             }
         }
+        // Without comments or layout.
         for sql in names("SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name")? {
-            out.push(sql.split_whitespace().collect::<Vec<_>>().join(" "));
+            let code = sql
+                .lines()
+                .map(|l| l.split("--").next().unwrap_or_default());
+            out.push(
+                code.flat_map(str::split_whitespace)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
         }
         Ok(out)
     }
@@ -509,64 +513,4 @@ mod tests {
         assert_eq!(new, upgraded);
         Ok(())
     }
-
-    /// The SQL of every table, index and trigger [`SCHEMA`] makes, without comments or layout.
-    #[test]
-    fn the_schema_is_pinned() -> Result<()> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        let mut objects = conn
-            .prepare("SELECT sql FROM sqlite_master WHERE sql NOT NULL ORDER BY type DESC, name")?;
-        let made: Vec<String> = objects
-            .query_map([], |r| r.get::<_, String>(0))?
-            .map(|sql| {
-                let sql = sql?;
-                let code = sql
-                    .lines()
-                    .map(|l| l.split("--").next().unwrap_or_default());
-                Ok(code
-                    .flat_map(str::split_whitespace)
-                    .collect::<Vec<_>>()
-                    .join(" "))
-            })
-            .collect::<Result<_>>()?;
-        assert_eq!(made.join("\n"), PINNED);
-        Ok(())
-    }
-
-    /// What [`SCHEMA`] makes. Once released, this changes only through [`MIGRATIONS`].
-    const PINNED: &str = "\
-        CREATE TRIGGER base_gone AFTER DELETE ON base BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER base_regone AFTER UPDATE OF parent ON base WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
-        CREATE TRIGGER dirty_gone AFTER DELETE ON dirty BEGIN INSERT INTO gone VALUES (old.id); END\n\
-        CREATE TRIGGER forks_gone AFTER DELETE ON forks BEGIN INSERT INTO gone VALUES (old.id), (old.new_node); END\n\
-        CREATE TRIGGER local_gone AFTER DELETE ON local BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER local_regone AFTER UPDATE OF id, parent ON local WHEN old.id IS NOT new.id OR old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER parked_gone AFTER DELETE ON parked BEGIN INSERT INTO gone VALUES (old.id); END\n\
-        CREATE TRIGGER placing_gone AFTER DELETE ON placing BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER remote_gone AFTER DELETE ON remote BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END\n\
-        CREATE TRIGGER remote_regone AFTER UPDATE OF parent ON remote WHEN old.parent IS NOT new.parent BEGIN INSERT INTO gone VALUES (old.parent); END\n\
-        CREATE TABLE base ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL, version_tag BLOB NOT NULL, content_state INTEGER NOT NULL DEFAULT 0, local_name TEXT, local_hash BLOB, tags TEXT, name_key INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, folder), UNIQUE (remote_file_id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE dirty ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE folder_kv ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (folder, key) ) WITHOUT ROWID\n\
-        CREATE TABLE folders ( id INTEGER PRIMARY KEY AUTOINCREMENT, top BLOB NOT NULL UNIQUE, path TEXT NOT NULL, marker TEXT NOT NULL, added_at INTEGER NOT NULL )\n\
-        CREATE TABLE forks ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, new_node INTEGER NOT NULL, to_name TEXT NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE gone (id INTEGER NOT NULL)\n\
-        CREATE TABLE gone_files ( file_id BLOB PRIMARY KEY, version_tag BLOB, at INTEGER, gone_at INTEGER ) WITHOUT ROWID\n\
-        CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID\n\
-        CREATE TABLE local ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, ctime_ns INTEGER NOT NULL, volume INTEGER NOT NULL, file_id INTEGER NOT NULL, file_id_hi INTEGER, executable INTEGER, hash BLOB, tags TEXT, name_key INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (id, folder), UNIQUE (parent, name, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE nodes ( id INTEGER PRIMARY KEY AUTOINCREMENT, uuid BLOB NOT NULL UNIQUE )\n\
-        CREATE TABLE parked ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, original_name TEXT NOT NULL, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE placing ( folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, id INTEGER NOT NULL, path TEXT NOT NULL, parent INTEGER NOT NULL, name TEXT NOT NULL, kind INTEGER NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, remote_file_id BLOB NOT NULL, version_tag BLOB NOT NULL, tags TEXT, placed_tags TEXT, prior_tags TEXT, base_at BLOB, held_ms INTEGER, PRIMARY KEY (id, folder) ) WITHOUT ROWID\n\
-        CREATE TABLE remote ( id INTEGER PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent INTEGER NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, token BLOB, changed_at INTEGER, name_key INTEGER NOT NULL DEFAULT 0 )\n\
-        CREATE TABLE removed ( node BLOB PRIMARY KEY, file_id BLOB NOT NULL UNIQUE, version_tag BLOB NOT NULL, parent BLOB NOT NULL, kind INTEGER NOT NULL, name TEXT NOT NULL, hash BLOB, size INTEGER, mtime_ms INTEGER, executable INTEGER NOT NULL DEFAULT 0, content_extra TEXT, removed_at INTEGER, token BLOB, seq INTEGER NOT NULL DEFAULT 0 ) WITHOUT ROWID\n\
-        CREATE TABLE sqlite_sequence(name,seq)\n\
-        CREATE TABLE synced ( id INTEGER PRIMARY KEY AUTOINCREMENT, folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE, at INTEGER NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, files INTEGER NOT NULL, bytes INTEGER NOT NULL )\n\
-        CREATE INDEX base_parent ON base(parent, name_key, folder)\n\
-        CREATE INDEX local_file_id ON local(file_id, folder)\n\
-        CREATE INDEX local_key ON local(parent, name_key, folder)\n\
-        CREATE INDEX remote_parent ON remote(parent, name_key)\n\
-        CREATE INDEX removed_at ON removed(removed_at)\n\
-        CREATE INDEX removed_parent ON removed(parent)\n\
-        CREATE INDEX synced_folder ON synced(folder, id)";
 }

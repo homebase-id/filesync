@@ -265,6 +265,30 @@ fn has_files(folder: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// Moves the DB at `db` (and its WAL files) aside, under the first name of
+/// `<name>.before-0.7`, `<name>.before-0.7-2`, … that is free: nothing in it is deleted.
+/// Returns where the DB went.
+fn set_aside(db: &Path) -> std::io::Result<PathBuf> {
+    let name = db.file_name().unwrap_or_default().to_string_lossy();
+    let aside = |n: u32, suffix: &str| {
+        let more = if n == 1 {
+            String::new()
+        } else {
+            format!("-{n}")
+        };
+        db.with_file_name(format!("{name}{suffix}.before-0.7{more}"))
+    };
+    let n = (1..).find(|&n| !aside(n, "").exists()).unwrap_or(u32::MAX);
+    for suffix in ["-wal", "-shm"] {
+        let from = db.with_file_name(format!("{name}{suffix}"));
+        if from.exists() {
+            std::fs::rename(&from, aside(n, suffix))?;
+        }
+    }
+    std::fs::rename(db, aside(n, ""))?;
+    Ok(aside(n, ""))
+}
+
 /// `anna.example.com`, `frodo.dotyou.cloud:8443`: letters, digits, dots, hyphens, a port.
 fn looks_like_a_domain(s: &str) -> bool {
     let host = s.split(':').next().unwrap_or_default();
@@ -424,8 +448,20 @@ pub fn set_up(
     let has_files = has_files(&folder)?;
     let running = control::running(paths)?;
     if !running && db.exists() {
-        // Nothing else writes it: brought up to date here, for the checks (which only look).
-        SyncRoot::upgrade(&db, identity)?;
+        // Nothing else writes it: brought up to date here, for the checks (which only look). One
+        // from before 0.7 isn't upgraded: it is kept aside, and the folder set up again (what it
+        // has merged, when asked to).
+        match SyncRoot::upgrade(&db, identity) {
+            Err(RootError::State(hbsync_state::StateError::TooOld { found })) => {
+                let aside = set_aside(&db)?;
+                say(&format!(
+                    "The state of {identity} is from a Filesync before 0.7 (version {found}): \
+                     kept as {}, and set up again.",
+                    aside.display()
+                ));
+            }
+            other => other?,
+        }
     }
     match SyncRoot::find(&db, identity, &folder) {
         Ok(_) => {}
@@ -479,6 +515,29 @@ pub fn set_up(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A DB from before 0.7 is moved aside with its WAL files, never over one moved before.
+    #[test]
+    fn an_old_db_is_set_aside() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db = dir.path().join("state.db");
+        for (name, text) in [("state.db", "one"), ("state.db-wal", "wal")] {
+            std::fs::write(dir.path().join(name), text)?;
+        }
+        assert_eq!(set_aside(&db)?, dir.path().join("state.db.before-0.7"));
+        assert!(!db.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("state.db-wal.before-0.7"))?,
+            "wal"
+        );
+        std::fs::write(&db, "two")?;
+        assert_eq!(set_aside(&db)?, dir.path().join("state.db.before-0.7-2"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("state.db.before-0.7"))?,
+            "one"
+        );
+        Ok(())
+    }
 
     /// A refused circle fails nothing: setup goes on without it (and so keeps the credentials).
     /// Only a refused drive or feed is a revoked authorization.
