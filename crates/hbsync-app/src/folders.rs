@@ -57,7 +57,7 @@ pub fn add(paths: &Paths, identity: &str, path: &Path, role: Option<Role>) -> Re
     // One at a time in this process (the tray's pages serve each request on a thread): two
     // set-ups of one folder would each make it anew, the second undoing the first.
     static ADDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = crate::runner::lock(&ADDING);
+    let _one = crate::sync::lock(&ADDING);
     let config_path = paths.config_file();
     let config = Config::load(&config_path)?.unwrap_or_default();
     if let Some(why) = refusal(&config, identity, path, role) {

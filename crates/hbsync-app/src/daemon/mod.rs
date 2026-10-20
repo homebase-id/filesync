@@ -23,7 +23,8 @@ use hbsync_types::unix_now;
 
 use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
-use crate::runner::{Command, OnDrop, RunnerError, WAIT_AT_MOST, Wakeup, lock};
+use crate::runner::{Command, RunnerError};
+use crate::sync::{OnDrop, WAIT_AT_MOST, Wakeup, lock};
 use crate::{Config, ConfigError, CredentialError, Paths};
 use account::Account;
 

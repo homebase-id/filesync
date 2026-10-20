@@ -1,7 +1,7 @@
 //! Local observation: what is on disk, and what changed since the last look.
 //!
-//! All sources (the tier-C walk now; journals, watchers and File Provider later) end in the same
-//! place: `local` rows in the state DB plus the dirty set.
+//! All sources (the walk, the OS change journals, the live watcher; File Provider later) end in
+//! the same place: `local` rows in the state DB plus the dirty set.
 
 mod filter;
 pub mod journal;

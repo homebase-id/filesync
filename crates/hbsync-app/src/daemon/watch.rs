@@ -13,7 +13,7 @@ use super::Daemon;
 use super::answer::status;
 use crate::ipc;
 use crate::protocol::{DaemonStatus, Reply, State};
-use crate::runner::{WAIT_AT_MOST, Wakeup, lock};
+use crate::sync::{WAIT_AT_MOST, Wakeup, lock};
 
 /// While a folder syncs, the status is sent this often at most.
 const EVERY: Duration = Duration::from_secs(1);

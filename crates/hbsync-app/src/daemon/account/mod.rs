@@ -1,0 +1,481 @@
+//! One account (identity) of the daemon: it waits for the credentials (a keychain locked at
+//! logon), connects (retrying while the identity can't be reached: a laptop starts offline),
+//! and owns what is the account's: the [`Drive`](hbsync_engine::Drive), the notifications (a
+//! change announced is pulled once, which wakes the folders it concerns), Recently deleted and
+//! its daily purge. Its folders' runners sync until the daemon stops, or until it starts over
+//! with new credentials. Its thread blocks on one channel ([`Msg`]) until the next thing that
+//! is due.
+//!
+//! Its files: this one holds the account's handle, shared with the control socket's thread,
+//! and the answers it gives; `run.rs` its loop (the credentials, connecting, the account's
+//! wiring, serving its channel); `feed.rs` the notifications and the puller that bring the
+//! drive's changes; `runners.rs` its folders' runners and their restarts.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
+
+use hbsync_engine::deleted::Listed;
+use hbsync_engine::root::{AccountReader, RootError};
+use hbsync_homebase::notify::Event;
+use hbsync_state::StateError;
+use hbsync_types::NodeId;
+use hbsync_types::activity::Deleted;
+
+use crate::Paths;
+use crate::protocol::{
+    AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, RecentItem, State,
+    Until,
+};
+use crate::runner::{Command, Handle};
+use crate::sync::{Wakeup, lock};
+
+mod feed;
+mod run;
+mod runners;
+
+pub use feed::{Notifications, Puller, UNANNOUNCED_READ};
+
+/// An account of the daemon, shared with the control socket's thread.
+pub(crate) struct Account {
+    pub identity: String,
+    /// Its state DB.
+    db: PathBuf,
+    status: Mutex<AccountStatus>,
+    /// Its folders here, and their runners once it runs.
+    phase: Mutex<Phase>,
+    /// Paused (kept in the config too): a runner starts paused.
+    paused: Mutex<Option<Until>>,
+    /// What its thread is told.
+    requests: Sender<Msg>,
+    /// Told to end (to start over with new credentials).
+    ended: AtomicBool,
+    /// Its thread is ending: joining it waits for no more than that.
+    pub done: AtomicBool,
+    /// A connection to its DB for the control socket's answers (recent, deleted), opened on
+    /// first use.
+    reader: Mutex<Option<AccountReader>>,
+    /// Raised when its status (or its folders') may have changed.
+    changed: Arc<Wakeup>,
+}
+
+/// What the account's thread waits for, on one channel.
+pub(crate) enum Msg {
+    Request(Request),
+    /// From its notifications.
+    Hint(Event),
+    /// The machine woke up.
+    Woke,
+    /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
+    Wake,
+}
+
+/// What the account's thread is asked to do.
+pub(crate) enum Request {
+    Deleted(AccountControl),
+    /// Start syncing this folder.
+    AddFolder(PathBuf),
+    /// Stop syncing this folder.
+    RemoveFolder(PathBuf),
+}
+
+/// Before its runners start, the account still answers.
+enum Phase {
+    /// Waiting for the credentials or the identity.
+    Waiting {
+        folders: Vec<PathBuf>,
+        state: State,
+        error: Option<String>,
+    },
+    Running(Vec<(PathBuf, Handle)>),
+}
+
+impl Account {
+    /// The account `identity` syncing `folder`, started paused when `paused`; its thread runs
+    /// with the returned receiver ([`Account::run`]).
+    pub(super) fn new(
+        paths: &Paths,
+        identity: &str,
+        folder: &Path,
+        paused: Option<Until>,
+        changed: Arc<Wakeup>,
+    ) -> (Arc<Account>, Receiver<Msg>) {
+        let (requests, rx) = channel();
+        let account = Account {
+            identity: identity.to_owned(),
+            db: paths.account_db(identity),
+            status: Mutex::new(AccountStatus::new(identity)),
+            phase: Mutex::new(Phase::Waiting {
+                folders: vec![folder.to_path_buf()],
+                state: State::Starting,
+                error: None,
+            }),
+            paused: Mutex::new(paused),
+            requests,
+            ended: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+            reader: Mutex::new(None),
+            changed,
+        };
+        (Arc::new(account), rx)
+    }
+
+    /// Its folders.
+    pub(super) fn folders(&self) -> Vec<PathBuf> {
+        match &*lock(&self.phase) {
+            Phase::Waiting { folders, .. } => folders.clone(),
+            Phase::Running(runners) => runners.iter().map(|(p, _)| p.clone()).collect(),
+        }
+    }
+
+    /// Syncs the folder at `path` too (once connected).
+    pub(super) fn add_folder(&self, path: &Path) {
+        match &mut *lock(&self.phase) {
+            Phase::Waiting { folders, .. } => {
+                if !folders.iter().any(|f| f == path) {
+                    folders.push(path.to_path_buf());
+                    self.changed.raise();
+                }
+            }
+            Phase::Running(_) => self.tell(Msg::Request(Request::AddFolder(path.to_path_buf()))),
+        }
+    }
+
+    /// Stops syncing the folder at `path`.
+    pub(super) fn remove_folder(&self, path: &Path) {
+        match &mut *lock(&self.phase) {
+            Phase::Waiting { folders, .. } => {
+                folders.retain(|f| f != path);
+                self.changed.raise();
+            }
+            Phase::Running(_) => self.tell(Msg::Request(Request::RemoveFolder(path.to_path_buf()))),
+        }
+    }
+
+    /// Its status and its folders'.
+    pub(super) fn status(&self) -> (AccountStatus, Vec<FolderStatus>) {
+        let folders = match &*lock(&self.phase) {
+            Phase::Running(runners) => runners.iter().map(|(_, h)| h.status()).collect(),
+            Phase::Waiting {
+                folders,
+                state,
+                error,
+            } => {
+                let paused = *lock(&self.paused);
+                folders
+                    .iter()
+                    .map(|path| {
+                        let mut folder = FolderStatus::new(&self.identity, path);
+                        folder.state = if paused.is_some() {
+                            State::Paused
+                        } else {
+                            *state
+                        };
+                        folder.paused_until = paused.flatten();
+                        folder.error.clone_from(error);
+                        folder
+                    })
+                    .collect()
+            }
+        };
+        (lock(&self.status).clone(), folders)
+    }
+
+    /// The runner of its folder at `path`, once running.
+    pub(super) fn runner(&self, path: &Path) -> Option<Handle> {
+        match &*lock(&self.phase) {
+            Phase::Running(runners) => runners
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, h)| h.clone()),
+            Phase::Waiting { .. } => None,
+        }
+    }
+
+    /// Passes `command` to every runner. False while it isn't running yet.
+    pub(crate) fn send_all(&self, command: &Command) -> bool {
+        match &*lock(&self.phase) {
+            Phase::Running(runners) => {
+                for (_, h) in runners {
+                    h.send(command.clone());
+                }
+                true
+            }
+            Phase::Waiting { .. } => false,
+        }
+    }
+
+    /// Pauses (`Some`) or resumes its folders, also before they run.
+    pub(super) fn pause(&self, pause: Option<Until>) {
+        *lock(&self.paused) = pause;
+        self.wake();
+        self.changed.raise();
+        self.send_all(&match pause {
+            Some(until) => Command::Pause { until },
+            None => Command::Resume,
+        });
+    }
+
+    /// Why it can't take requests yet; `None` once it runs.
+    pub(super) fn not_running(&self) -> Option<String> {
+        match &*lock(&self.phase) {
+            Phase::Running(_) => None,
+            Phase::Waiting { error, .. } => Some(format!(
+                "not connected to {} yet{}",
+                self.identity,
+                error.as_ref().map(|e| format!(": {e}")).unwrap_or_default()
+            )),
+        }
+    }
+
+    /// Asks for `control` on its Recently deleted; done on its thread.
+    pub(super) fn request(&self, control: AccountControl) -> Result<(), String> {
+        if let Some(why) = self.not_running() {
+            return Err(why);
+        }
+        // Answered before it runs: a listing the drive would refuse is refused here, so the
+        // refusal reaches whoever asked (the drive checks again as it empties).
+        if let AccountControl::EmptyListed { db, seq }
+        | AccountControl::EmptyDeleted { db, seq, .. } = &control
+        {
+            let listed = Listed {
+                db: db.clone(),
+                seq: *seq,
+            };
+            match self.try_read(|r| r.listed_here(&listed)) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!(
+                        "Recently deleted of {} was never listed so: look at it again",
+                        self.identity
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "can't read Recently deleted of {}: {e}",
+                        self.identity
+                    ));
+                }
+            }
+        }
+        let request = Msg::Request(Request::Deleted(control));
+        self.requests
+            .send(request)
+            .map_err(|_| "the account has stopped".to_owned())
+    }
+
+    /// Ends the account: its runners stop between operations and [`Account::run`] returns.
+    pub(super) fn end(&self) {
+        self.ended.store(true, Ordering::Relaxed);
+        self.wake();
+    }
+
+    /// Has its thread look again (whether to stop, its pause).
+    pub(super) fn wake(&self) {
+        self.tell(Msg::Wake);
+    }
+
+    /// The machine woke up: its notifications reconnect, its folders sync.
+    pub(super) fn woke(&self) {
+        self.tell(Msg::Woke);
+    }
+
+    /// Tells its thread `msg`; lost only once the thread has ended.
+    fn tell(&self, msg: Msg) {
+        let _ = self.requests.send(msg);
+    }
+
+    /// The newest `limit` entries of its folders' recently synced lists.
+    pub(super) fn recent(&self, limit: usize) -> Vec<RecentItem> {
+        let folders = self.folders();
+        self.read(|db| {
+            let mut items = Vec::new();
+            for f in db.folders()? {
+                let path = PathBuf::from(&f.path);
+                if !folders.contains(&path) {
+                    continue;
+                }
+                items.extend(
+                    db.recent_synced(f.id, limit)?
+                        .into_iter()
+                        .map(|synced| RecentItem {
+                            folder: path.clone(),
+                            synced,
+                        }),
+                );
+            }
+            Ok(items)
+        })
+        .unwrap_or_default()
+    }
+
+    /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
+    /// items are in it; and, when it holds anything, all of it as listed now.
+    pub(super) fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
+        let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
+            return (Vec::new(), None);
+        };
+        let items = self.items(deletes, &summary.listed);
+        // Anything to list, though emptying may take nothing (a folder holding a live node).
+        let account = (summary.deletes > 0).then(|| DeletedAccount {
+            identity: self.identity.clone(),
+            deletes: summary.deletes,
+            items: summary.items,
+            stays: summary.stays,
+            db: summary.listed.db,
+            seq: summary.listed.seq,
+        });
+        (items, account)
+    }
+
+    /// The items of its Recently deleted that are `nodes`.
+    pub(super) fn find_deleted(&self, nodes: &[NodeId]) -> Vec<DeletedItem> {
+        self.read(|db| db.find_deleted(nodes))
+            .map(|(found, listed)| self.items(found, &listed))
+            .unwrap_or_default()
+    }
+
+    /// The items of its Recently deleted named `names`.
+    pub(super) fn named_deleted(&self, names: &[String]) -> Vec<DeletedItem> {
+        self.read(|db| db.named_deleted(names))
+            .map(|(found, listed)| self.items(found, &listed))
+            .unwrap_or_default()
+    }
+
+    /// `found`, as the listing `listed` saw them.
+    fn items(&self, found: Vec<(Deleted, usize)>, listed: &Listed) -> Vec<DeletedItem> {
+        found
+            .into_iter()
+            .map(|(deleted, along)| DeletedItem {
+                identity: self.identity.clone(),
+                deleted,
+                along,
+                db: listed.db.clone(),
+                seq: listed.seq,
+            })
+            .collect()
+    }
+
+    /// `f` on the answers' connection, which only reads, opened on first use; `None` when the
+    /// DB isn't there yet (or not brought up to date yet: the drive does as it opens) or `f`
+    /// failed, which drops the connection.
+    fn read<T>(&self, f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>) -> Option<T> {
+        self.try_read(f).ok()
+    }
+
+    /// [`Account::read`], saying why there is no answer.
+    fn try_read<T>(
+        &self,
+        f: impl FnOnce(&mut AccountReader) -> Result<T, StateError>,
+    ) -> Result<T, String> {
+        let mut reader = lock(&self.reader);
+        if reader.is_none() {
+            *reader = match AccountReader::open(&self.db, &self.identity) {
+                Ok(opened) => opened,
+                Err(RootError::State(e @ StateError::Behind { .. })) => {
+                    tracing::debug!("{}: {e}", self.identity);
+                    return Err(e.to_string());
+                }
+                Err(e) => {
+                    tracing::warn!("{}: can't read its state DB: {e}", self.identity);
+                    return Err(e.to_string());
+                }
+            };
+        }
+        let Some(opened) = reader.as_mut() else {
+            return Err("its state DB isn't there yet".to_owned());
+        };
+        f(opened).map_err(|e| {
+            tracing::warn!("{}: can't read its state DB: {e}", self.identity);
+            *reader = None;
+            e.to_string()
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_engine::Drive;
+    use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+
+    /// Emptying Recently deleted as listed is refused in the answer for a listing of another DB
+    /// (the identity's, made again) or one this DB never gave; one it gave is taken.
+    #[test]
+    fn a_foreign_listing_is_refused_in_the_answer() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let folder = home.path().join("Homebase");
+        let (account, _requests) = Account::new(&paths, "a.example", &folder, None, Arc::default());
+        // Its DB, from the drive; its runners running (none needed here).
+        let db = paths.account_db("a.example");
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        Drive::open(
+            &db,
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        *lock(&account.phase) = Phase::Running(Vec::new());
+        let listed = account.read(|r| r.deletes(0)).ok_or("unreadable")?.1.listed;
+        let empty = |db: &str, seq| {
+            account.request(AccountControl::EmptyListed {
+                db: db.to_owned(),
+                seq,
+            })
+        };
+        let refused = empty("another-db", listed.seq).expect_err("another DB's listing");
+        assert!(refused.contains("never listed"), "{refused}");
+        assert!(empty(&listed.db, listed.seq + 1).is_err(), "never given");
+        empty(&listed.db, listed.seq)?;
+        Ok(())
+    }
+
+    /// Recently deleted holding only a folder that stays (it holds a live node) is still listed:
+    /// the folder can be restored, though emptying takes nothing.
+    #[test]
+    fn a_folder_that_only_stays_is_still_listed() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_state::{MirrorRow, RemovedRow, StateDb};
+        use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let (account, _requests) = Account::new(
+            &paths,
+            "a.example",
+            &home.path().join("Homebase"),
+            None,
+            Arc::default(),
+        );
+        let db = paths.account_db("a.example");
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        Drive::open(
+            &db,
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        let row = |node, parent| MirrorRow {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            node,
+            parent,
+            name: node.0.to_string(),
+            kind: NodeKind::Folder,
+            file: None,
+            content_extra: None,
+            token: None,
+            changed_at: Some(5),
+        };
+        let folder = NodeId::new();
+        StateDb::open_account(&db)?.write(|s| {
+            s.put_removed(&RemovedRow {
+                row: row(folder, NodeId::ROOT),
+                removed_at: Some(10),
+            })?;
+            s.put_mirror(&row(NodeId::new(), folder))
+        })?;
+        let (items, summary) = account.deleted(10);
+        let summary = summary.ok_or("Recently deleted shown empty")?;
+        assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
+        Ok(())
+    }
+}

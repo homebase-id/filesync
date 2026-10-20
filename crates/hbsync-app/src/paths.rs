@@ -1,9 +1,9 @@
 //! Where the client keeps its files outside the sync folder: the config, the credentials file
-//! (when there is no keychain), the daemon's lock, logs and socket.
+//! (when there is no keychain), each account's state DB ([`Paths::account_db`]), the daemon's
+//! lock, logs and socket.
 //!
 //! `HBSYNC_HOME` puts all of them in one folder (tests, a second instance while developing).
-//! Otherwise each OS's conventions apply. The state DB is not here: it lives in the sync
-//! folder's `.hbsync`.
+//! Otherwise each OS's conventions apply.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ pub struct NoHome(&'static str);
 pub struct Paths {
     /// The config file and the credentials file.
     pub config: PathBuf,
-    /// The daemon's lock and anything else it keeps between runs.
+    /// The daemon's lock, the accounts' state DBs, and anything else it keeps between runs.
     pub state: PathBuf,
     pub logs: PathBuf,
     /// The control socket.
