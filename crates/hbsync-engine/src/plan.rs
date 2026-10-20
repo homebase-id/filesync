@@ -382,6 +382,39 @@ pub enum Requirement {
     FolderFirst(NodeId),
 }
 
+/// Whether an operation's [`Requirement`] is met, as the executor's order guards judge it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Met {
+    /// It may run.
+    Yes,
+    /// Not yet: later in this run (what it waits for may still happen).
+    Later,
+    /// Not in this run: its folder's removal ended without removing it, so what is in it waits
+    /// for the next plan (nothing is removed before its folder: node schema, Recently deleted).
+    NextPlan,
+}
+
+impl Requirement {
+    /// Whether the requirement is met: `on_drive` says whether the mirror has a folder,
+    /// `removing` whether a folder's removal is still to run in this run (or to retry), and
+    /// `unremoved` whether one ended in this run without removing it. The executor and the
+    /// simulator both judge by it.
+    pub fn met<E>(
+        self,
+        on_drive: impl FnOnce(NodeId) -> Result<bool, E>,
+        removing: impl FnOnce(NodeId) -> bool,
+        unremoved: impl FnOnce(NodeId) -> bool,
+    ) -> Result<Met, E> {
+        Ok(match self {
+            Requirement::RemoteFolder(folder) if on_drive(folder)? => Met::Yes,
+            Requirement::RemoteFolder(_) => Met::Later,
+            Requirement::FolderFirst(folder) if unremoved(folder) => Met::NextPlan,
+            Requirement::FolderFirst(folder) if removing(folder) => Met::Later,
+            Requirement::FolderFirst(_) => Met::Yes,
+        })
+    }
+}
+
 /// A version of a node on the drive: what it holds, and which version it is; for a local
 /// write, also the version of the base the plan saw (`None`: none), which its commit checks
 /// the base is still at.
@@ -401,6 +434,35 @@ impl DriveVersion {
             base_at,
         })
     }
+
+    /// What a download acts on, with the mirror at `mirror_at`: the drive's version its plan
+    /// saw (`plan`), only while the mirror still holds it; else, where `own` says this run's own
+    /// write made the mirror's version of it since (the bytes the same: a tag write, a move),
+    /// or the plan saw none, the mirror's. Where the drive moved on otherwise (another folder's
+    /// engine pulled the next version), it is stale: the next plan decides on that. The
+    /// executor and the simulator both decide by it.
+    pub fn acted_by_download(
+        plan: Option<&DriveVersion>,
+        mirror_at: RemoteRef,
+        own: impl FnOnce(&DriveVersion) -> bool,
+    ) -> Acts<'_> {
+        match plan {
+            Some(d) if d.at == mirror_at => Acts::Plan(d),
+            Some(d) if !own(d) => Acts::Stale,
+            _ => Acts::Mirror,
+        }
+    }
+}
+
+/// What a download acts on ([`DriveVersion::acted_by_download`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acts<'a> {
+    /// The version its plan saw.
+    Plan(&'a DriveVersion),
+    /// The mirror's version.
+    Mirror,
+    /// Neither: the drive moved on since the plan.
+    Stale,
 }
 
 /// What an operation did to its item's tags, for the base's (sync semantics §11). The base

@@ -3945,3 +3945,44 @@ fn regression_a_folder_moved_into_a_file_is_recovered() {
         "{paths:?}"
     );
 }
+
+/// Client 0 deletes folder b with b/a in it; before its plan runs, client 1 renames b. The
+/// folder's removal is stale, so it ends without removing b, and b/a's removal waits for the
+/// next plan (nothing is removed before its folder): b/a is still live once the plan ran. The
+/// next plans settle the rename against the delete.
+#[test]
+fn regression_a_skipped_folder_removal_holds_back_what_is_in_it() {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let act = |client, action| Event::Act { client, action };
+    sim.run(&[act(0, CreateFolder { parent: 0, name: 1 })]); // NAMES: "b"
+    let b = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, b, true).expect("b");
+    sim.run(&[act(0, CreateFile { parent, name: 0 })]); // NAMES: "a"
+    assert!(sim.quiesce(30), "no convergence");
+    let node = sim.pick(0, b, false).expect("b");
+    sim.run(&[act(0, Delete { node }), Event::Plan { client: 0 }]);
+    assert_eq!(sim.planned(0), ["RemoteDelete", "RemoteDelete"]);
+    let node = sim.pick(1, b, false).expect("b");
+    let parent = sim.pick(1, NodeId::ROOT, true).expect("the top");
+    sim.run(&[
+        act(
+            1,
+            Move {
+                node,
+                parent,
+                name: 3,
+            },
+        ), // NAMES: "c.txt"
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    assert!(sim.planned(0).is_empty());
+    assert_eq!(sim.server_paths(), ["c.txt", "c.txt/a"], "b/a waits for b");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+}

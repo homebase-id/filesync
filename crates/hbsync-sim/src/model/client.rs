@@ -27,6 +27,9 @@ pub(crate) struct Client {
     pub(crate) plan: VecDeque<(Op, u8)>,
     /// What the pending plan removed to Recently deleted so far.
     pub(crate) removed_by_plan: BTreeSet<NodeId>,
+    /// The folders whose removal in the pending plan ended without removing them: what is in
+    /// them waits for the next plan.
+    pub(crate) unremoved: HashSet<NodeId>,
     /// Nodes parked under a temporary name, with their original (parent, name).
     pub(crate) parked: HashMap<NodeId, (NodeId, String)>,
     /// The local tree when the pending plan was made (for the fingerprint guard).
@@ -97,6 +100,7 @@ impl Client {
             extra: HashMap::new(),
             plan: VecDeque::new(),
             removed_by_plan: BTreeSet::new(),
+            unremoved: HashSet::new(),
             parked: HashMap::new(),
             planned_local: Tree::new(),
             planned_remote: Tree::new(),
