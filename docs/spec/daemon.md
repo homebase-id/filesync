@@ -284,27 +284,27 @@ refused this device: `hbsync setup` again), `stopped`.
 One request line, one reply line (JSON), then the connection closes; but `watch`, answered with
 the status now and again each time it changes (at most once a second while a folder syncs: its
 progress changes without telling), on the open connection until either side closes it (what
-the tray shows). Requests carry the protocol version (now 7); a daemon refuses another one
+the tray shows). Requests carry the protocol version (now 8); a daemon refuses another one
 with the reason (after an update: restart it). The
 wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":7,"ask":"status"}
-{"protocol":7,"ask":"watch"}                                        // a status line now, then one per change
-{"protocol":7,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":7,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":7,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":7,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":7,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":7,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
-{"protocol":7,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
-{"protocol":7,"ask":{"recent":{"limit":10}}}
-{"protocol":7,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
-{"protocol":7,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":7,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
-{"protocol":7,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":7,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":8,"ask":"status"}
+{"protocol":8,"ask":"watch"}                                        // a status line now, then one per change
+{"protocol":8,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":8,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":8,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":8,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":8,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":8,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
+{"protocol":8,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
+{"protocol":8,"ask":{"recent":{"limit":10}}}
+{"protocol":8,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":8,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":8,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
+{"protocol":8,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":8,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
@@ -324,9 +324,13 @@ Replies:
   `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
   that tell a client what is new.
-- `{"recent":[…]}` (each entry with its `folder`), newest first.
+- `{"recent":[…]}` (each entry with its `folder`, and `main` when that is the main folder),
+  newest first.
 - `{"deleted":{"items":[…],"accounts":[…]}}`: the newest `limit` deletes, newest first, each an
-  item deleted on its own with its account's `identity`, `along`, how many items are in it:
+  item deleted on its own with its account's `identity`, its `place` (where it was, as people
+  name it and `hbsync restore` takes it: the folder's path before its path in another folder
+  than the main one, `(on the drive) ` before it in a part of the drive no folder here syncs;
+  left out in the main folder, where it is its `path`), `along`, how many items are in it:
   all of Recently deleted below it, through removed folders, what was deleted with it (which
   restoring it restores) and what was deleted from it before (listed on its own too), which
   emptying it takes along (not those items: a deleted folder of thousands of files is one

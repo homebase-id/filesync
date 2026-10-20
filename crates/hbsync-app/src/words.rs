@@ -5,7 +5,7 @@ use std::path::Path;
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
-use crate::protocol::{FolderStatus, HeldDeletes, State};
+use crate::protocol::{DeletedItem, FolderStatus, HeldDeletes, State};
 
 /// Now, in Unix seconds.
 pub use hbsync_types::unix_now as now;
@@ -112,13 +112,14 @@ pub fn synced(s: &Synced) -> String {
 /// What held deletes would do, a sentence for each side: "100 items deleted on this computer
 /// will be deleted from your Homebase and your other devices."
 /// An item of Recently deleted, for a list: "photos/a.jpg (2.1 MB), deleted 3 h ago".
-pub fn deleted(d: &Deleted, main: Option<&Path>, now: u64) -> String {
+pub fn deleted(item: &DeletedItem, now: u64) -> String {
+    let d = &item.deleted;
     let size = d
         .size
         .map(|n| format!(" ({})", bytes(n)))
         .unwrap_or_default();
     let folder = if d.kind == NodeKind::Folder { "/" } else { "" };
-    let place = deleted_place(d, main);
+    let place = item.place();
     let when = match d.removed_at_ms {
         Some(ms) => when(u64::try_from(ms / 1000).unwrap_or(0), now),
         None => "just now".to_owned(),
@@ -150,7 +151,7 @@ const ON_THE_DRIVE: &str = "(on the drive) ";
 /// Where a deleted item was, as people name it (and `hbsync restore` takes it): its path in
 /// the main folder (`main`), the folder's path before it in another folder of this computer,
 /// `(on the drive) ` before it in a part of the drive no folder here syncs.
-pub fn deleted_place(d: &Deleted, main: Option<&Path>) -> String {
+pub(crate) fn deleted_place(d: &Deleted, main: Option<&Path>) -> String {
     match d.folder.as_deref() {
         Some(f) if f.is_empty() || main.is_some_and(|m| m == Path::new(f)) => d.path.clone(),
         Some(f) => format!("{}/{}", f.trim_end_matches(['/', '\\']), d.path),

@@ -35,8 +35,9 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
         Ask::Deleted { limit } => {
             // Each account's newest `limit` deletes; newest first, `limit` deletes of them all.
             let mut list = DeletedList::default();
+            let main = main_folder(accounts);
             for a in accounts {
-                let (items, account) = a.deleted(limit);
+                let (items, account) = a.deleted(limit, main.as_deref());
                 list.items.extend(items);
                 list.accounts.extend(account);
             }
@@ -46,24 +47,20 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             Reply::Deleted(list)
         }
         Ask::FindDeleted { items } => {
-            // The main folder names places: read only when a place is to be found.
-            let main = || match crate::control::configured(&daemon.paths) {
-                Ok(root) => Ok(root.map(|r| r.folder)),
-                Err(e) => Err(format!("reading the config: {e}")),
-            };
+            let main = main_folder(accounts);
             let by_node = |nodes: &[NodeId]| {
                 accounts
                     .iter()
-                    .flat_map(|a| a.find_deleted(nodes))
+                    .flat_map(|a| a.find_deleted(nodes, main.as_deref()))
                     .collect()
             };
             let by_name = |names: &[String]| {
                 accounts
                     .iter()
-                    .flat_map(|a| a.named_deleted(names))
+                    .flat_map(|a| a.named_deleted(names, main.as_deref()))
                     .collect()
             };
-            match find_deleted(by_node, by_name, &items, main) {
+            match find_deleted(by_node, by_name, &items) {
                 Ok(found) => Reply::Found(found),
                 Err(why) => Reply::Refused(why),
             }
@@ -97,18 +94,23 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
     }
 }
 
+/// The main folder of this computer (one in all, for now): it names the places of Recently
+/// deleted's items ([`DeletedItem::place`]).
+fn main_folder(accounts: &[Arc<Account>]) -> Option<PathBuf> {
+    accounts.iter().find_map(|a| a.main_folder())
+}
+
 /// The items of Recently deleted, any account's, that `picks` name: a node id, or the place
-/// [`words::deleted_place`] shows. A place names what `hbsync deleted` lists there: a delete
-/// (the newest, if there are more); only where none is, an item a delete took along. Refused
-/// naming the first pick that isn't there. `by_node` gives the items that are those nodes;
-/// `by_name` the items with the names the places' items have ([`words::deleted_place_name`]),
-/// and `main` the main folder (it names places), both asked only when a pick names a place (a
-/// pick shaped like a node id that isn't one is tried as a place too).
+/// an item has ([`DeletedItem::place`]). A place names what `hbsync deleted` lists there: a
+/// delete (the newest, if there are more); only where none is, an item a delete took along.
+/// Refused naming the first pick that isn't there. `by_node` gives the items that are those
+/// nodes; `by_name` the items with the names the places' items have
+/// ([`words::deleted_place_name`]), asked only when a pick names a place (a pick shaped like a
+/// node id that isn't one is tried as a place too).
 fn find_deleted(
     by_node: impl Fn(&[NodeId]) -> Vec<DeletedItem>,
     by_name: impl Fn(&[String]) -> Vec<DeletedItem>,
     picks: &[String],
-    main: impl Fn() -> Result<Option<PathBuf>, String>,
 ) -> Result<Vec<DeletedItem>, String> {
     let ids: Vec<NodeId> = picks
         .iter()
@@ -128,7 +130,6 @@ fn find_deleted(
         .map(|p| words::deleted_place_name(p).to_owned())
         .collect();
     if !names.is_empty() {
-        let main = main()?;
         let mut all = by_name(&names);
         all.sort_by_key(|i| {
             (
@@ -137,9 +138,7 @@ fn find_deleted(
             )
         });
         for item in all {
-            by_place
-                .entry(words::deleted_place(&item.deleted, main.as_deref()))
-                .or_insert(item);
+            by_place.entry(item.place().to_owned()).or_insert(item);
         }
     }
     picks
@@ -231,10 +230,12 @@ mod tests {
     use super::*;
     use hbsync_types::activity::Deleted;
     use hbsync_types::{NodeKind, Uuid};
+    use std::path::Path;
 
     fn item(identity: &str, n: u128, path: &str, at: i64, along: usize) -> DeletedItem {
-        DeletedItem {
+        placed(DeletedItem {
             identity: identity.into(),
+            place: None,
             deleted: Deleted {
                 node: NodeId(Uuid::from_u128(n)),
                 parent: NodeId::ROOT,
@@ -249,6 +250,15 @@ mod tests {
             along,
             db: "d1".into(),
             seq: 1,
+        })
+    }
+
+    /// `item` placed as the daemon places it, the main folder `/home/a/Homebase`.
+    fn placed(item: DeletedItem) -> DeletedItem {
+        let place = words::deleted_place(&item.deleted, Some(Path::new("/home/a/Homebase")));
+        DeletedItem {
+            place: Some(place).filter(|p| *p != item.deleted.path),
+            ..item
         }
     }
 
@@ -259,7 +269,7 @@ mod tests {
         i
     }
 
-    /// A pick by node id asks only for those nodes, and needs no config; a place asks once for
+    /// A pick by node id asks only for those nodes; a place asks once for
     /// the items with its item's name, and names what `hbsync deleted` lists there: the newest
     /// delete, an item taken along only where no delete is; a node-id-shaped name that isn't one
     /// is tried as a place; a place no folder here syncs is found as listed.
@@ -275,13 +285,13 @@ mod tests {
             item("bob.example", 2, "notes.txt", 20, 0),
             item("bob.example", 4, &uuid_name, 5, 0),
             // In no folder here.
-            DeletedItem {
+            placed(DeletedItem {
                 deleted: Deleted {
                     folder: None,
                     ..item("bob.example", 8, "cv.txt", 50, 0).deleted
                 },
                 ..item("bob.example", 8, "cv.txt", 50, 0)
-            },
+            }),
         ];
         let everything = std::cell::Cell::new(0);
         let by_node = |nodes: &[NodeId]| {
@@ -298,43 +308,33 @@ mod tests {
                 .cloned()
                 .collect()
         };
-        let main = || Ok(Some(PathBuf::from("/home/a/Homebase")));
-        let broken = || Err("reading the config: bad".to_owned());
         let picks = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let node = |n: u128| NodeId(Uuid::from_u128(n));
 
         let id = Uuid::from_u128(2).to_string();
-        let found = find_deleted(by_node, every, &picks(&[&id]), broken).expect("found");
+        let found = find_deleted(by_node, every, &picks(&[&id])).expect("found");
         assert_eq!(found[0].identity.as_str(), "bob.example");
-        assert_eq!(
-            everything.get(),
-            0,
-            "a node id needs no listing and no config"
-        );
+        assert_eq!(everything.get(), 0, "a node id needs no listing");
 
-        let found = find_deleted(by_node, every, &picks(&["Photos/", &uuid_name]), main);
+        let found = find_deleted(by_node, every, &picks(&["Photos/", &uuid_name]));
         let found = found.expect("found");
         assert_eq!((found[0].deleted.node, found[0].along), (node(1), 2));
         assert_eq!(found[1].deleted.node, node(4));
         assert_eq!(everything.get(), 1, "one listing for every place");
 
-        let found = find_deleted(by_node, every, &picks(&["Old/x.txt"]), main).expect("found");
+        let found = find_deleted(by_node, every, &picks(&["Old/x.txt"])).expect("found");
         assert_eq!(
             found[0].deleted.node,
             node(6),
             "taken along, where no delete is"
         );
 
-        let found = find_deleted(by_node, every, &picks(&["(on the drive) cv.txt"]), main);
+        let found = find_deleted(by_node, every, &picks(&["(on the drive) cv.txt"]));
         assert_eq!(found.map(|f| f[0].deleted.node), Ok(node(8)));
 
         assert_eq!(
-            find_deleted(by_node, every, &picks(&["Photos", "gone.txt"]), main),
+            find_deleted(by_node, every, &picks(&["Photos", "gone.txt"])),
             Err("gone.txt isn't in Recently deleted".to_owned())
-        );
-        assert_eq!(
-            find_deleted(by_node, every, &picks(&["Photos"]), broken),
-            Err("reading the config: bad".to_owned())
         );
     }
 }

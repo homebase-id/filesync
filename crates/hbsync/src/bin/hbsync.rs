@@ -224,11 +224,10 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(list) if list.is_empty() => println!("Nothing synced yet."),
             Some(list) => {
                 let now = words::now();
-                let main = daemon::configured(&paths)?.map(|r| r.folder);
                 for item in &list {
                     let s = &item.synced;
                     // Items of another folder than the main one say which.
-                    let folder = if main.as_ref() == Some(&item.folder) {
+                    let folder = if item.main {
                         String::new()
                     } else {
                         format!(" (in {})", item.folder.display())
@@ -250,7 +249,7 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(list) if list.is_empty() => println!("Recently deleted is empty."),
             Some(list) => {
                 // Each item deleted on its own, with how many items are in it.
-                for (item, what) in list.iter().zip(described(&paths, &list)?) {
+                for (item, what) in list.iter().zip(described(&list)) {
                     println!("{}  {what}", item.deleted.node.0);
                 }
             }
@@ -270,7 +269,7 @@ fn run(command: Command) -> Res<ExitCode> {
             // What was found, as `hbsync deleted` shows it: the user's words may name another.
             let question = format!(
                 "In Recently deleted:\n  {}\nDelete {} for good?",
-                described(&paths, &found)?.join("\n  "),
+                described(&found).join("\n  "),
                 if found.len() == 1 { "it" } else { "them" }
             );
             if !yes && !ask_yes(&question)? {
@@ -281,7 +280,7 @@ fn run(command: Command) -> Res<ExitCode> {
             let staying: Vec<DeletedItem> =
                 found.iter().filter(|i| i.deleted.stays).cloned().collect();
             println!("{}", emptied(staying.len()));
-            for what in described(&paths, &staying)? {
+            for what in described(&staying) {
                 println!("  {what}");
             }
         }
@@ -303,7 +302,7 @@ fn run(command: Command) -> Res<ExitCode> {
                     "Nothing in Recently deleted can be emptied yet: the folders in it still \
                      hold items that aren't deleted. In it:"
                 );
-                for what in described(&paths, &shown)? {
+                for what in described(&shown) {
                     println!("  {what}");
                 }
                 return Ok(ExitCode::SUCCESS);
@@ -432,10 +431,9 @@ fn parse_role(s: &str) -> Result<Role, String> {
 
 /// Items of Recently deleted as `hbsync deleted` shows them: where, when deleted, how many
 /// items are in each, and which stay when emptied.
-fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
+fn described(items: &[DeletedItem]) -> Vec<String> {
     let now = words::now();
-    let main = daemon::configured(paths)?.map(|r| r.folder);
-    Ok(items
+    items
         .iter()
         .map(|item| {
             let along = match item.along {
@@ -446,12 +444,9 @@ fn described(paths: &Paths, items: &[DeletedItem]) -> Res<Vec<String>> {
                 true => format!("; {}", words::STAYS),
                 false => String::new(),
             };
-            format!(
-                "{}{along}{stays}",
-                words::deleted(&item.deleted, main.as_deref(), now)
-            )
+            format!("{}{along}{stays}", words::deleted(item, now))
         })
-        .collect())
+        .collect()
 }
 
 /// What emptying does, `staying` items left (they hold a live node): never "deleting" alone
