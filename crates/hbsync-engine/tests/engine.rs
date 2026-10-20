@@ -2874,6 +2874,47 @@ fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
     Ok(())
 }
 
+/// A rename writes the node's content again with what another writer put there as it was: no
+/// `mtime` stays none (never 1970), and the tags keep their form while the set is the same.
+#[test]
+fn a_rename_keeps_what_another_writer_wrote() -> R {
+    let server = server();
+    // With a creation time: one without gets the file's on a rename (node schema, `ct`).
+    let raw =
+        r#"{"v":1,"name":"note.txt","size":4,"ct":7,"tags":[{"by":"phone","c":6,"n":"Red"}]}"#;
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let (node, written) = srv.seed_file(
+            hbsync_types::NodeId::ROOT,
+            "note.txt",
+            b"note",
+            hbsync_fileio::HashAlgorithm::Blake3,
+        )?;
+        let meta = NodeMeta {
+            node,
+            parent: hbsync_types::NodeId::ROOT,
+            kind: hbsync_types::NodeKind::File,
+            content: hbsync_types::schema::NodeContent::from_json(raw)?,
+            removed: false,
+        };
+        srv.update(written.file_id, written.version, &meta, None)?;
+    }
+    let mut b = Client::new(&server, "b")?;
+    b.sync()?;
+    fs::rename(b.root.join("note.txt"), b.root.join("renamed.txt"))?;
+    b.sync()?;
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let content = srv
+        .live()
+        .find_map(|h| match &h.body {
+            hbsync_remote::RemoteBody::Live { content, .. } => Some(content.to_json()),
+            _ => None,
+        })
+        .ok_or("not on the drive")?;
+    assert_eq!(content, raw.replace("note.txt", "renamed.txt"));
+    Ok(())
+}
+
 // ---- §12 scopes ----
 
 /// The role folder `role` on the drive, made by another device, with one file in it.

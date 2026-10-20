@@ -89,6 +89,15 @@ Computers syncing the main folder move such a node into it (sync semantics §6.3
 The file types must stay outside the server's reserved range `2100000000..int.MaxValue`, which
 app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStreamWriter.cs:35`.
 
+These are all the header fields sync uses. A write replaces the whole header (**[verified]**
+`StandardFileUpdateWriter.cs:48-85`, homebase-api-notes), and every write of this client sends
+the fields above with an owner-only `accessControlList`: what another client sets elsewhere in
+the header (an ACL that shares the node, `appData.tags`, `userDate`, a preview, an
+`archivalStatus` other than `0` and `2`) is reset by the next rename, move, tag change, upload or
+restore of the node on a computer. Other clients must not rely on them. (Keeping them would cost
+every node its raw header in each computer's store, for fields no client uses; a later version
+of this schema may define some of them.)
+
 ## `appData.content`
 
 ```json
@@ -109,13 +118,15 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 
 - "Required" is for writers. A reader skips a file without `size` (an encrypted payload's stored
   size is padded, `encryption.md`) but keeps one without `mtime`, as a file with no date (this
-  client reads it as 0).
+  client reads it as 0, and writes it back without one). A folder's `mtime`, `size` or `x` from
+  another writer is kept as read, as an unknown key is.
 - Readers ignore unknown keys. Writers keep unknown keys they read (forward compatibility).
 - `ct` is kept the same way through every rewrite (new bytes, a rename, a move): editors that
   save by writing a new file and renaming it over the old one would otherwise reset it. A
   download gives it to the file once in place (after the mtime). A node without one (from
   before `ct`, or a client that sends none) gets its file's on its next update or rename.
-- `tags` is kept the same way through every write that isn't about tags. Where they live on
+- `tags` is kept the same way through every write that isn't about tags, as it was written (its
+  entries' other keys, an entry a reader skips) until the set of tags changes. Where they live on
   each system: macOS `com.apple.metadata:_kMDItemUserTags` (what Finder and Spotlight use),
   Linux `user.xdg.tags` (KDE; names only, so a Linux device keeps the colours as they are on
   the drive), Windows nowhere (a Windows device keeps them all as they are). Readers take names
@@ -324,6 +335,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-20: a rewrite keeps what it doesn't act on as another writer wrote it: `tags` in their
+  form until the set changes, no `mtime` on a file that had none (before, `0`), and a folder's
+  `mtime`, `size` and `x`. The header fields sync doesn't use are listed as reset on write
+  (they always were). The node is the same.
 - 2026-10-20: readers take a fractional `mtime` (rounded) and `x` as `1` or `0`, which
   JavaScript and Kotlin writers may send (before, such a node was unreadable). A node with the
   root's id, or a file with a folder's fixed id, isn't read. A node whose `groupId` is a file

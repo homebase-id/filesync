@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::{Tag, Tags};
+use crate::{NodeKind, Tag, Tags};
 
 /// `appData.fileType` of a folder node (provisional, see the spec).
 pub const FILE_TYPE_FOLDER: i32 = 7101;
@@ -115,8 +115,13 @@ impl NodeContent {
             .unwrap_or_default()
     }
 
-    /// Sets the tags; none removes the key.
+    /// Sets the tags; none removes the key. The same set as the content has leaves the key as
+    /// it was written (another writer's form, its extra keys, an entry this client skips): it
+    /// changes only with the set (node schema, `tags`).
     pub fn set_tags(&mut self, tags: &Tags) {
+        if self.tags() == *tags {
+            return;
+        }
         if tags.is_empty() {
             self.unknown.remove(TAGS_KEY);
         } else {
@@ -125,9 +130,22 @@ impl NodeContent {
     }
 
     /// The keys sync carries without acting on them, as a JSON object (read back by
-    /// [`keys_from_str`]): the unknown ones, the creation time and the tags.
-    pub fn carried_json(&self) -> Option<String> {
-        (!self.unknown.is_empty()).then(|| Value::Object(self.unknown.clone()).to_string())
+    /// [`keys_from_str`]): the unknown ones, the creation time and the tags; and a folder's
+    /// `mtime`, `size` and `x`, which only files use (another writer's: written back as read).
+    pub fn carried_json(&self, kind: NodeKind) -> Option<String> {
+        let mut keys = self.unknown.clone();
+        if kind == NodeKind::Folder {
+            if let Some(mtime) = self.mtime {
+                keys.insert("mtime".into(), mtime.into());
+            }
+            if let Some(size) = self.size {
+                keys.insert("size".into(), size.into());
+            }
+            if self.x {
+                keys.insert("x".into(), true.into());
+            }
+        }
+        (!keys.is_empty()).then(|| Value::Object(keys).to_string())
     }
 
     /// A reader that finds a newer version treats the node as read-only.
@@ -311,6 +329,16 @@ mod tests {
             r#"{"v":1,"name":"a","tags":[{"n":"x","c":42},{"c":1},"y",{"n":"z","c":2}]}"#,
         )?;
         assert_eq!(odd.tags(), Tags::new([Tag::new("x", 0), Tag::new("z", 2)]));
+        // Written back as read while the set is the same; as this client writes them once it
+        // changes.
+        let mut kept = odd.clone();
+        kept.set_tags(&odd.tags());
+        assert_eq!(kept.to_json(), odd.to_json());
+        kept.set_tags(&Tags::new([Tag::new("z", 2)]));
+        assert_eq!(
+            kept.to_json(),
+            r#"{"v":1,"name":"a","tags":[{"c":2,"n":"z"}]}"#
+        );
         assert_eq!(tags_from_str(&tags_to_string(&tags)), tags);
         Ok(())
     }
