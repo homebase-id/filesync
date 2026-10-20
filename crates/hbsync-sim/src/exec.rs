@@ -215,6 +215,13 @@ impl Sim {
             });
         }
         self.conflicts += plan.conflicts.len();
+        // For the oracle: what a delete had taken along when this plan was made.
+        let taken = self
+            .taken_along()
+            .into_iter()
+            .map(|n| (n, self.server.live[&n].remote.version))
+            .collect();
+        self.ledger.planned_with(c, taken);
         // What the drive refused as it is isn't sent again (as `Engine::refused_out`).
         let (ops, refused) = if !self.refusing {
             (plan.ops.clone(), Vec::new())
@@ -299,6 +306,9 @@ impl Sim {
             client.parked.remove(&n);
             rekey_client(client, n, new);
             self.retrack(c, n, new);
+            // The user's rule took it out of what this client syncs: its removal from the
+            // drive (§10) is theirs.
+            self.user_removed(c, n);
         }
     }
 
@@ -505,7 +515,7 @@ impl Sim {
                 op,
                 Op::LocalMkdir { .. } | Op::LocalDownload { replace: false, .. }
             ) {
-                self.placed_back(node);
+                self.placed_back(c, node);
             }
             let record = self.placed_from.take();
             let against = match &op {
@@ -995,8 +1005,17 @@ impl Sim {
                 Some(server) if server.remote.version != expected => Skip, // changed meanwhile
                 // Removed to Recently deleted now, or already gone: done either way.
                 _ => {
+                    let now = self.on_drive(node);
+                    // Rightly so where a user deleted it as it is now, or a folder's removal had
+                    // taken it along when the plan was made: anything else the engine removes no
+                    // user wanted gone.
+                    let version = self.server.live.get(&node).map(|n| n.remote.version);
+                    let rightly = now
+                        .as_ref()
+                        .is_some_and(|now| self.ledger.deleted_by_user(node, now))
+                        || version.is_some_and(|v| self.ledger.plan_saw_taken(c, node, v));
                     if let Some(n) = self.server.live.remove(&node) {
-                        self.server.remove(node, n);
+                        self.remove_on_drive(node, n, rightly);
                         let client = &mut self.clients[c];
                         let after = client.removed_by_plan.iter().find(|r| {
                             self.server
@@ -1461,7 +1480,7 @@ fn filled_tags(
 }
 
 /// Gives each item of `view` (a client's local tree) the tags the client sees on it.
-pub(crate) fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
+fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
     let changed: Vec<(NodeId, NodeState)> = view
         .iter()
         .filter_map(|(n, state)| {

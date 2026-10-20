@@ -84,24 +84,6 @@ impl Server {
             .collect()
     }
 
-    /// The live nodes a folder's removal took along, by the engine's one rule
-    /// ([`hbsync_engine::along::taken_along`]). They count as removed, whether or not a device
-    /// marked them so yet.
-    pub(crate) fn taken_along(&self) -> BTreeSet<NodeId> {
-        hbsync_engine::along::taken_along(
-            self.live.iter().map(|(n, l)| (*n, l.state.parent)),
-            |f| {
-                self.removed
-                    .contains_key(&f)
-                    .then(|| self.removed_at.get(&f).copied())
-                    .flatten()
-            },
-            |n| self.live.get(&n).map(|l| time(l.remote.version)),
-        )
-        .into_iter()
-        .collect()
-    }
-
     /// The engine's purge (`deleted::AccountOps::purge`), its clock moved on [`PURGE_EVERY`], first
     /// part: what the deletes of the items removed [`TRACE`] before now (each deleted on its own)
     /// took along and left live, top-down, as the engine picks it

@@ -1,14 +1,14 @@
 //! The oracle: the [`Ledger`] and [`Sim::check`] (convergence, invariants, no loss).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use hbsync_engine::mask::masked;
 use hbsync_engine::tree::{Tree, Violation};
+use hbsync_local::Filter;
+use hbsync_platform::Os;
 use hbsync_platform::name::check_remote_name;
-use hbsync_types::{ContentHash, FileContent, NodeId, Role, Tags, VersionTag};
+use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, Role, Tags, VersionTag};
 
 use crate::Sim;
-use crate::exec::see_held_tags;
 
 /// The oracle's bookkeeping: every blob written and the ones no longer owed, the last listing
 /// of Recently deleted, and the first breach of each rule the model saw happen (each kept
@@ -40,7 +40,25 @@ pub(crate) struct Ledger {
     emptied_unlisted: Option<String>,
     /// The first item emptied on its own that stayed though nothing kept it.
     emptied_kept: Option<String>,
+    /// For each folder in Recently deleted, what its last rightful removal took along as it
+    /// happened: the live nodes in it then, through live folders, each at its version then.
+    took: BTreeMap<NodeId, BTreeMap<NodeId, VersionTag>>,
+    /// The rows of Recently deleted (each node at its version there) a user's delete or a true
+    /// take-along put there: only their blobs may go for good.
+    removed_rightly: BTreeSet<(NodeId, VersionTag)>,
+    /// The items each client's user deleted there (or moved out of its folder, or a filter
+    /// rule took out of it), not back there since, as the user saw them then.
+    user_deleted: BTreeMap<(usize, NodeId), Seen>,
+    /// For each client, what a delete took along when it made its pending plan, each node at
+    /// its version then.
+    plan_taken: BTreeMap<usize, BTreeSet<(NodeId, VersionTag)>>,
+    /// The first node that went to Recently deleted though no one deleted it.
+    wrongly_removed: Option<String>,
 }
+
+/// An item as a user saw it on the drive, but for its tags (a tag change loses to a delete):
+/// its folder there, its name, and its bytes.
+pub(crate) type Seen = (NodeId, String, Option<ContentHash>);
 
 /// Keeps the first breach of a rule: `what` is asked only while none is kept.
 fn first(kept: &mut Option<String>, what: impl FnOnce() -> Option<String>) {
@@ -110,6 +128,112 @@ impl Ledger {
     pub(crate) fn emptied_kept(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.emptied_kept, what);
     }
+
+    /// Folder `folder` went to Recently deleted rightly, with the live nodes in it then
+    /// (through live folders) each at its version: what its removal took along, as it happened.
+    pub(crate) fn folder_removed(&mut self, folder: NodeId, below: BTreeMap<NodeId, VersionTag>) {
+        self.took.insert(folder, below);
+    }
+
+    /// Client `c` made a plan while a delete had taken `taken` along (each at its version).
+    pub(crate) fn planned_with(&mut self, c: usize, taken: BTreeSet<(NodeId, VersionTag)>) {
+        self.plan_taken.insert(c, taken);
+    }
+
+    /// Whether client `c`'s pending plan was made while a delete had taken `node` along at
+    /// `version` (the plan may bring the folder back for an edit and mark what its removal took
+    /// along, in one go). The mark may also come after a user restored the folder, which no
+    /// device can rule out: a removal can't be made conditional on another node's state. Such a
+    /// node is in Recently deleted, as its own item, for the user to restore.
+    pub(crate) fn plan_saw_taken(&self, c: usize, node: NodeId, version: VersionTag) -> bool {
+        self.plan_taken
+            .get(&c)
+            .is_some_and(|t| t.contains(&(node, version)))
+    }
+
+    /// The live nodes a folder's removal took along, by what happened ([`Ledger::folder_removed`]),
+    /// not by the engine's rule: each node below a folder in Recently deleted (`removed`; the
+    /// nearest one on its way up through live folders) that was in it when it went, at the same
+    /// version since, and so was every folder between them; but a node not taken keeps the
+    /// folders above it, up to the removed one (node schema, Recently deleted). `live` gives
+    /// each live node's folder and version.
+    pub(crate) fn taken_along(
+        &self,
+        live: &BTreeMap<NodeId, (NodeId, VersionTag)>,
+        removed: impl Fn(NodeId) -> bool,
+    ) -> BTreeSet<NodeId> {
+        let mut taken = BTreeSet::new();
+        let mut kept = BTreeSet::new();
+        for &node in live.keys() {
+            // Up through live folders to a removed one (a cycle or a gap ends the walk).
+            let mut path = vec![node];
+            let folder = loop {
+                let at = path[path.len() - 1];
+                let Some(&(parent, _)) = live.get(&at) else {
+                    break None;
+                };
+                if removed(parent) {
+                    break Some(parent);
+                }
+                if !live.contains_key(&parent) || path.contains(&parent) {
+                    break None;
+                }
+                path.push(parent);
+            };
+            let Some(folder) = folder else {
+                continue;
+            };
+            let took = self.took.get(&folder);
+            let unchanged =
+                |n: &NodeId| took.and_then(|t| t.get(n)) == live.get(n).map(|(_, version)| version);
+            if path.iter().all(unchanged) {
+                taken.insert(node);
+            } else {
+                kept.extend(path);
+            }
+        }
+        &taken - &kept
+    }
+
+    /// Row `row` (a node at its version) went to Recently deleted; `rightly`: a user deleted it
+    /// (on a device, or another app), or a folder's delete took it along. One that went there
+    /// wrongly is a breach, whatever becomes of it.
+    pub(crate) fn row_removed(&mut self, row: (NodeId, VersionTag), rightly: bool) {
+        if rightly {
+            self.removed_rightly.insert(row);
+        }
+        first(&mut self.wrongly_removed, || {
+            (!rightly).then(|| format!("{:?} at {:?}", row.0, row.1))
+        });
+    }
+
+    /// Whether row `row` of Recently deleted went there rightly ([`Ledger::row_removed`]): only
+    /// then may its blob go for good.
+    pub(crate) fn removed_rightly(&self, row: &(NodeId, VersionTag)) -> bool {
+        self.removed_rightly.contains(row)
+    }
+
+    /// The user of client `c` deleted its item `node` there (or moved it out of the folder, or
+    /// a filter rule took it out), having seen it as `seen`.
+    pub(crate) fn user_deleted(&mut self, c: usize, node: NodeId, seen: Seen) {
+        self.user_deleted.insert((c, node), seen);
+    }
+
+    /// Whether some client's user deleted `node` there, as the drive has it now (`now`: an
+    /// edit or a move made elsewhere since wins over the delete), and it isn't back there
+    /// since: whichever device then removes it from the drive does what that user asked.
+    pub(crate) fn deleted_by_user(&self, node: NodeId, now: &Seen) -> bool {
+        self.user_deleted
+            .iter()
+            .any(|((_, n), seen)| *n == node && seen == now)
+    }
+
+    /// `node` is back on client `c`: its user's delete there lost, or the node came back to the
+    /// drive since and from there to `c` (a restore alone doesn't undo the delete: the client
+    /// sends it up again over the version back).
+    pub(crate) fn back(&mut self, c: usize, node: NodeId) {
+        self.user_deleted.remove(&(c, node));
+    }
 }
 
 impl Sim {
@@ -132,9 +256,16 @@ impl Sim {
                 return Err(format!("c{c}: the record of {node:?} is never settled"));
             }
         }
+        // Recently deleted holds only what a user deleted, or a folder's removal took along.
+        if let Some(what) = &ledger.wrongly_removed {
+            return Err(format!(
+                "{what} went to Recently deleted, though no one deleted it"
+            ));
+        }
         // What a folder's removal took along is removed, marked so or not yet.
-        let taken = self.server.taken_along();
-        let mut server = self.server.tree();
+        let taken = self.taken_along();
+        let drive = self.server.tree();
+        let mut server = drive.clone();
         for n in &taken {
             server.remove(*n);
         }
@@ -144,31 +275,18 @@ impl Sim {
         // What some client syncs: a node in a file no client syncs is left there by all.
         let mut synced_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
-            let mut server = self.server_view(c);
-            for n in &taken {
-                server.remove(*n);
-            }
-            let hidden = masked(&client.local, &client.filter);
             let mut visible = client.local.clone();
-            for n in &hidden {
+            for n in filtered(&client.local, &client.filter) {
                 if let Some(blob) = visible
-                    .remove(*n)
+                    .remove(n)
                     .and_then(|s| s.content)
                     .and_then(|c| ledger.blobs.get(&c.hash))
                 {
                     kept_here.insert(*blob);
                 }
             }
-            let mut synced = server.clone();
-            for n in masked(&server, &client.filter) {
-                synced.remove(n);
-            }
-            for n in client.scope().out_of_scope(&server) {
-                synced.remove(n);
-            }
+            let mut synced = self.expected(c, &drive, &taken);
             synced_somewhere.extend(synced.ids());
-            // The tags as the client sees them.
-            see_held_tags(client, &mut visible, &server);
             // What the client holds back for a refusal: each operation refused itself is one
             // the drive refuses as it is now (by its own judgement: a record that held back one
             // it takes hid a later change); it stays on its client with what is in it, and
@@ -209,8 +327,9 @@ impl Sim {
                     }
                 }
             }
-            let server_view = view(&synced);
-            let local_view = view(&visible);
+            // The tags as the client holds them, on both sides.
+            let server_view = view(&held_by(&synced, client.os));
+            let local_view = view(&held_by(&visible, client.os));
             if local_view != server_view {
                 return Err(format!(
                     "{} diverged:\n  local:  {local_view:?}\n  server: {server_view:?}",
@@ -220,7 +339,7 @@ impl Sim {
             if !client.local.violations().is_empty() {
                 return Err(format!("{}: {:?}", client.name, client.local.violations()));
             }
-            if view(&base) != server_view {
+            if view(&base) != view(&synced) {
                 return Err(format!("{}: base not settled", client.name));
             }
             if !synced.violations().is_empty() {
@@ -246,7 +365,7 @@ impl Sim {
             // A cycle whose repair (a move out of it) the drive refused stays one.
             .filter(|v| {
                 !matches!(v, Violation::Cycle { node }
-                    if cycle_of(&server, *node).iter().any(|n| refused_here.contains(n)))
+                    if up_from(&server, *node).iter().any(|n| refused_here.contains(n)))
             })
             .collect();
         if !broken.is_empty() {
@@ -360,6 +479,74 @@ impl Sim {
     }
 }
 
+impl Sim {
+    /// The live nodes a folder's removal took along, as it happened ([`Ledger::taken_along`]),
+    /// not as the engine's rule has it.
+    pub(crate) fn taken_along(&self) -> BTreeSet<NodeId> {
+        let live = self
+            .server
+            .live
+            .iter()
+            .map(|(n, l)| (*n, (l.state.parent, l.remote.version)))
+            .collect();
+        self.ledger
+            .taken_along(&live, |f| self.server.removed.contains_key(&f))
+    }
+
+    /// What client `c` syncs of the drive, in its folder's coordinates, by the oracle's own
+    /// walks: the live nodes in its folder's part (the main folder's: all but the role folders
+    /// and what is in them; a role folder's: what is in it), but for what a delete took along
+    /// (`taken`) and what its filter leaves out.
+    fn expected(&self, c: usize, drive: &Tree, taken: &BTreeSet<NodeId>) -> Tree {
+        let coords = self.clients[c].coords;
+        let mut tree = Tree::new();
+        for (node, n) in &self.server.live {
+            let up = up_from(drive, *node);
+            let ours = match coords.top {
+                top if top.is_root() => !Role::ALL.iter().any(|r| up.contains(&r.node())),
+                top => *node != top && up.contains(&top),
+            };
+            if ours && !taken.contains(node) {
+                let parent = coords.from_drive(n.state.parent);
+                tree.insert(
+                    *node,
+                    NodeState {
+                        parent,
+                        ..n.state.clone()
+                    },
+                );
+            }
+        }
+        for n in filtered(&tree, &self.clients[c].filter) {
+            tree.remove(n);
+        }
+        tree
+    }
+}
+
+/// The items of `tree` `filter` leaves out, by their paths (each folder on the way judged, so
+/// what is in a folder left out is too); one not connected to the root isn't judged.
+fn filtered(tree: &Tree, filter: &Filter) -> Vec<NodeId> {
+    tree.iter()
+        .filter(|(n, s)| {
+            tree.path(*n)
+                .is_some_and(|path| !filter.names(path, s.kind == NodeKind::Folder).is_sync())
+        })
+        .map(|(n, _)| n)
+        .collect()
+}
+
+/// `tree` with each item's tags as `os` holds them: what the other side has of what it can't
+/// hold doesn't count.
+fn held_by(tree: &Tree, os: Os) -> Tree {
+    let mut held = tree.clone();
+    for (n, s) in tree.iter() {
+        let tags = s.tags.held_by(os);
+        held.insert(n, NodeState { tags, ..s.clone() });
+    }
+    held
+}
+
 /// Tags as `name:colour`.
 pub(crate) fn tag_names(tags: &Tags) -> Vec<String> {
     tags.iter()
@@ -400,8 +587,9 @@ pub(crate) fn view_with(tree: &Tree, blobs: &HashMap<ContentHash, u64>) -> Vec<S
     out
 }
 
-/// The folders of the cycle `node` is in, going up from it in `tree`.
-fn cycle_of(tree: &Tree, node: NodeId) -> Vec<NodeId> {
+/// `node` and the folders above it in `tree`, going up until a gap (the first missing one
+/// included) or a cycle (each once).
+fn up_from(tree: &Tree, node: NodeId) -> Vec<NodeId> {
     let mut seen = Vec::new();
     let mut at = node;
     while !seen.contains(&at) {
@@ -430,7 +618,7 @@ fn below(tree: &Tree, node: NodeId) -> Vec<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Action, act};
+    use crate::action::{Action, Event, act};
     use hbsync_types::Tag;
 
     /// A restore ends a delete: a tag removed after it counts, and coming back is reported. A
@@ -525,18 +713,91 @@ mod tests {
         assert!(lost.contains("lost tag"), "{lost}");
     }
 
+    /// What a stopped delete took along is what happened: the folder's contents as they were
+    /// then. A file the phone edited since wasn't taken (it keeps its folders), its untouched
+    /// sibling was.
+    #[test]
+    fn taken_along_is_what_happened() {
+        let mut sim = Sim::new(1);
+        sim.run(&[act(0, Action::CreateFolder { parent: 0, name: 1 })]);
+        let parent = sim.pick(0, sim.item(0, "b").expect("b"), true).expect("b");
+        sim.run(&[
+            act(0, Action::CreateFile { parent, name: 0 }),
+            act(0, Action::CreateFile { parent, name: 3 }),
+        ]);
+        assert!(sim.quiesce(10));
+        let [b, a, c] = ["b", "b/a", "b/c.txt"].map(|p| sim.item(0, p).expect(p));
+        let pick = sim.stopped_pick(b).expect("b");
+        sim.run(&[act(0, Action::DeleteStopped { pick, done: 0 })]);
+        assert_eq!(sim.taken_along(), BTreeSet::from([a, c]));
+        // EditTaken picks among the files taken along, in id order: a.
+        sim.run(&[act(
+            0,
+            Action::EditTaken {
+                pick: usize::from(a > c),
+            },
+        )]);
+        assert_eq!(sim.taken_along(), BTreeSet::from([c]));
+    }
+
+    /// A node a client removes from the drive though no one deleted it (nor took it along) is
+    /// reported, the engine's word on it notwithstanding.
+    #[test]
+    fn a_removal_no_one_asked_for_is_reported() {
+        let mut sim = Sim::new(2);
+        sim.run(&[act(0, Action::CreateFile { parent: 0, name: 0 })]);
+        assert!(sim.quiesce(10));
+        let file = sim.item(1, "a").expect("a");
+        let remote = sim.server.live[&file].remote;
+        let op = hbsync_engine::reconcile::Op::RemoteDelete {
+            node: file,
+            parent: NodeId::ROOT,
+            file_id: remote.file_id,
+            expected: remote.version,
+        };
+        sim.execute(1, &op);
+        assert!(sim.quiesce(10));
+        let wrong = sim.check().expect_err("a removal no one asked for");
+        assert!(wrong.contains("no one deleted it"), "{wrong}");
+    }
+
+    /// A user's delete covers the item as they saw it: an edit made elsewhere since wins, and a
+    /// removal of the edited version is reported.
+    #[test]
+    fn a_users_delete_doesnt_cover_a_later_edit() {
+        let mut sim = Sim::new(2);
+        sim.run(&[act(0, Action::CreateFile { parent: 0, name: 0 })]);
+        assert!(sim.quiesce(10));
+        let file = sim.item(0, "a").expect("a");
+        sim.run(&[
+            act(0, Action::Delete { node: 0 }),
+            act(1, Action::Edit { file: 0 }),
+            Event::Plan { client: 1 },
+            Event::Step { client: 1 },
+        ]);
+        let remote = sim.server.live[&file].remote;
+        let op = hbsync_engine::reconcile::Op::RemoteDelete {
+            node: file,
+            parent: NodeId::ROOT,
+            file_id: remote.file_id,
+            expected: remote.version,
+        };
+        sim.execute(0, &op);
+        let wrong = sim.check().expect_err("the edit was removed");
+        assert!(wrong.contains("no one deleted it"), "{wrong}");
+    }
+
     /// The oracle trusts the engine no more than it does now: no path into the engine, nor into
     /// the rest of the crate (the model and `exec` mirror the engine), but these `use` lines.
     #[test]
     fn the_oracle_reaches_no_further_into_the_engine() {
-        // TODO(B5.1): with the oracle's own take-along and filter walk, only `tree::Tree`. It
-        // also leans on the engine through `see_held_tags` and through `Sim` methods it calls
-        // (`server_view`, `Server::taken_along`, `Client::scope`): R6.
+        // Of the engine, `Tree` and its `Violation`s only: what a delete took along, a folder's
+        // part of the drive and what a filter leaves out are the oracle's own walks. (What it
+        // reads of the model, through `Sim`, is the model's state, and `drive_refused`, the
+        // drive's own judgement; it calls no engine rule through them.)
         const ALLOWED: &[&str] = &[
-            "use hbsync_engine::mask::masked;",
             "use hbsync_engine::tree::{Tree, Violation};",
             "use crate::Sim;",
-            "use crate::exec::see_held_tags;",
         ];
         // Up to this module (`lines` reads a Windows checkout's line ends too).
         let source = include_str!("oracle.rs").lines();

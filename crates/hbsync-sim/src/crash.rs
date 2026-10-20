@@ -64,7 +64,7 @@ impl Sim {
                         // Nothing was there.
                         self.lose_commit(c, &op, record, Some(Tags::default()), fresh);
                     } else {
-                        self.placed_back(node);
+                        self.placed_back(c, node);
                     }
                 }
             }
@@ -107,7 +107,7 @@ impl Sim {
         else {
             return;
         };
-        self.placed_back(*node);
+        self.placed_back(c, *node);
         let client = &mut self.clients[c];
         // The parking record goes with the commit, void now anyway.
         client.parked.remove(node);
@@ -153,7 +153,7 @@ impl Sim {
         else {
             return;
         };
-        self.placed_back(*node);
+        self.placed_back(c, *node);
         let client = &mut self.clients[c];
         client.parked.remove(node);
         let placement = Placement {
