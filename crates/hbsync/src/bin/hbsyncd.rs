@@ -56,9 +56,7 @@ fn main() -> ExitCode {
         DaemonError::NotSetUp(_)
         | DaemonError::Lock(LockError::Held { .. })
         | DaemonError::Runner(RunnerError::Folder(
-            RootError::Older(_)
-            | RootError::Unknown(_)
-            | RootError::State(StateError::TooOld { .. }),
+            RootError::Unknown(_) | RootError::State(StateError::TooOld { .. }),
         )) => {
             tracing::warn!("{e}");
             ExitCode::SUCCESS

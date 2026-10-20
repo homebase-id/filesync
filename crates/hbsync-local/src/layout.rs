@@ -29,11 +29,6 @@ pub fn trash_dir(root: &Path) -> PathBuf {
     state_dir(root).join("trash")
 }
 
-/// The state DB an older Filesync kept in the folder (and its WAL files).
-pub fn older_db(root: &Path) -> [PathBuf; 3] {
-    ["state.db", "state.db-wal", "state.db-shm"].map(|name| state_dir(root).join(name))
-}
-
 /// The user's ignore rules' file name in [`STATE_DIR`] (gitignore syntax): per device, never
 /// synced.
 pub const IGNORE_FILE: &str = "ignore";

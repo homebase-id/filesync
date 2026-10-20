@@ -32,9 +32,9 @@ A sync folder keeps the rest in `<folder>/.hbsync` (temp files and trash, on the
 disk for atomic renames; the ignore rules), hidden on Windows too (the hidden attribute, set
 at every start), and its marker `.hbsync/folder`: the identity and the folder's id in that DB.
 A folder is synced only through its marker: without one it is gone (or not mounted), with
-another identity's it is refused, and one the DB doesn't know is set up again. A folder of an
-older Filesync (its DB in `.hbsync`, no marker) is set up again as a folder with files: what it
-has is adopted, nothing is copied twice.
+another identity's it is refused, and one the DB doesn't know is set up again. An account's DB
+from before 0.7 isn't upgraded: its folders are set up again as folders with files (what they
+have is adopted, nothing is copied twice).
 
 ## `config.toml`
 

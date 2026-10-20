@@ -683,30 +683,6 @@ fn a_folder_synced_with_another_identity_is_refused() -> R {
     Ok(())
 }
 
-/// A folder an older Filesync synced (its state DB in .hbsync, no marker) isn't gone: the
-/// runner stops and says to set it up again.
-#[test]
-fn a_folder_of_an_older_filesync_is_set_up_again() -> R {
-    let server = server();
-    let dir = tempfile::tempdir()?;
-    let root = dir.path().canonicalize()?.join("sync");
-    std::fs::create_dir_all(root.join(".hbsync"))?;
-    std::fs::write(root.join(".hbsync/state.db"), "an older Filesync's")?;
-    let (handle, thread) = spawn_at(&server, &root)?;
-    let err = thread
-        .join()
-        .map_err(|_| "panicked")?
-        .expect_err("the runner stopped");
-    assert!(err.to_string().contains("set it up again"), "{err}");
-    assert!(
-        handle
-            .status()
-            .error
-            .is_some_and(|e| e.contains("older Filesync"))
-    );
-    Ok(())
-}
-
 #[test]
 fn a_timed_pause_ends_by_itself() -> R {
     let server = server();

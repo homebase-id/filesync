@@ -25,11 +25,6 @@ pub enum RootError {
     /// Its marker names a folder the account's DB doesn't have (the state folder was wiped).
     #[error("{0} isn't known to this computer's state: set it up again")]
     Unknown(PathBuf),
-    /// A folder of an older Filesync: its state DB in `.hbsync`, no marker.
-    #[error(
-        "{0} was synced by an older Filesync: set it up again (its files are merged, not copied twice)"
-    )]
-    Older(PathBuf),
     /// Set up as another folder (the main folder, another role's).
     #[error("{0} is synced as another folder already: remove it first")]
     OtherTop(PathBuf),
@@ -103,8 +98,7 @@ impl SyncRoot {
 
     /// Sets the folder at `path` up in `identity`'s DB at `db`, holding the drive's node `top`
     /// (the root, or a role folder's): it starts over (an earlier folder holding `top` goes,
-    /// with its rows; a DB of an older Filesync in its `.hbsync` too), and its marker is
-    /// written last.
+    /// with its rows), and its marker is written last.
     pub fn create_for(
         db: &Path,
         identity: &str,
@@ -122,12 +116,6 @@ impl SyncRoot {
             s.add_folder(top, &text, &marker.id)
         })?;
         std::fs::create_dir_all(layout::state_dir(path))?;
-        for old in layout::older_db(path) {
-            match std::fs::remove_file(old) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
-            }
-        }
         marker.write(path)?;
         Ok(SyncRoot {
             path: path.to_path_buf(),
@@ -138,8 +126,8 @@ impl SyncRoot {
         })
     }
 
-    /// [`SyncRoot::open`], or [`SyncRoot::create`] when it has no marker, isn't known to the
-    /// DB, or is an older Filesync's: the caller has checked that starting it over is wanted.
+    /// [`SyncRoot::open`], or [`SyncRoot::create`] when it has no marker or isn't known to the
+    /// DB: the caller has checked that starting it over is wanted.
     pub fn open_or_create(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
         Self::open_or_create_for(db, identity, path, NodeId::ROOT)
     }
@@ -153,7 +141,7 @@ impl SyncRoot {
         top: NodeId,
     ) -> Result<SyncRoot, RootError> {
         match Self::open(db, identity, path) {
-            Err(RootError::NoMarker(_) | RootError::Unknown(_) | RootError::Older(_)) => {
+            Err(RootError::NoMarker(_) | RootError::Unknown(_)) => {
                 Self::create_for(db, identity, path, top)
             }
             Ok(found) if found.top != top => Err(RootError::OtherTop(path.to_path_buf())),
@@ -164,11 +152,7 @@ impl SyncRoot {
     /// The marker of the folder at `path`, which must be `identity`'s.
     pub fn check(path: &Path, identity: &str) -> Result<Marker, RootError> {
         let Some(marker) = Marker::read(path)? else {
-            return Err(if layout::older_db(path)[0].exists() {
-                RootError::Older(path.to_path_buf())
-            } else {
-                RootError::NoMarker(path.to_path_buf())
-            });
+            return Err(RootError::NoMarker(path.to_path_buf()));
         };
         if marker.identity != identity {
             return Err(RootError::OtherIdentity {
@@ -338,14 +322,7 @@ mod tests {
             SyncRoot::open(&db, anna, &root),
             Err(RootError::NoMarker(_))
         ));
-        std::fs::create_dir_all(layout::state_dir(&root))?;
-        std::fs::write(&layout::older_db(&root)[0], "an older Filesync's")?;
-        assert!(matches!(
-            SyncRoot::open(&db, anna, &root),
-            Err(RootError::Older(_))
-        ));
         let first = SyncRoot::create(&db, anna, &root)?.folder();
-        assert!(!layout::older_db(&root)[0].exists());
         assert_eq!(SyncRoot::open(&db, anna, &root)?.folder(), first);
         assert!(matches!(
             SyncRoot::open(&db, "bob.example.com", &root),
