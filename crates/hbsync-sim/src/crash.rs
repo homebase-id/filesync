@@ -214,6 +214,10 @@ impl Sim {
                 let new = self.ids.fresh();
                 rekey_client(&mut self.clients[c], node, new);
                 self.retrack(c, node, new);
+                // The node's item here is gone with it: what the user did to the item (a move,
+                // a change) made it another, and the node's removal from the drive is theirs,
+                // as a delete's (the item lives on as the new one).
+                self.user_removed(c, node);
             }
         }
     }
