@@ -54,7 +54,7 @@ fn the_contract_holds_on_a_live_drive() -> R {
 fn a_missing_file_is_not_found() -> R {
     let _drive = beside_others();
     let remote = live_remote()?;
-    let missing = hbsync_types::RemoteFileId(uuid::Uuid::new_v4());
+    let missing = hbsync_types::RemoteFileId(hbsync_types::Uuid::new_v4());
     let header = remote.header(missing);
     assert!(
         matches!(header, Err(hbsync_remote::RemoteError::NotFound)),

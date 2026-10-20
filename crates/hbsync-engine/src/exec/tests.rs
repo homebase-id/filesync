@@ -3004,7 +3004,7 @@ fn a_folder_made_back_whose_tag_write_fails(
             removed_at: Some(1),
         })
     })?;
-    h.cfg.faults.fail(FailPoint::TagWrite, 1);
+    h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
