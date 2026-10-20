@@ -21,10 +21,15 @@ enum Job {
     Control(AccountControl),
 }
 
+/// Tells the user a note (the account's: [`Keeper::spawn`]).
+pub(super) type Tell = Arc<dyn Fn(String) + Send + Sync>;
+
 /// Does Recently deleted's work one job at a time, in the order asked, never on the asker's
 /// thread: a thread that ended (or couldn't start) is started again, as the puller's is.
 pub(crate) struct Keeper {
     drive: Arc<Drive>,
+    /// How a request that failed is told.
+    tell: Tell,
     worker: Option<(Sender<Job>, JoinHandle<()>)>,
     /// A purge is asked for and hasn't started: asked again meanwhile, it is that one.
     purging: Arc<AtomicBool>,
@@ -37,9 +42,11 @@ pub(crate) struct Keeper {
 }
 
 impl Keeper {
-    pub(super) fn spawn(drive: Arc<Drive>) -> Keeper {
+    /// The keeper of `drive`'s Recently deleted; a request that fails is told with `tell`.
+    pub(super) fn spawn(drive: Arc<Drive>, tell: Tell) -> Keeper {
         let mut keeper = Keeper {
             drive,
+            tell,
             worker: None,
             purging: Arc::default(),
             paused: Arc::default(),
@@ -53,6 +60,7 @@ impl Keeper {
     fn start(&mut self) {
         let (tx, rx) = channel::<Job>();
         let drive = Arc::clone(&self.drive);
+        let tell = Arc::clone(&self.tell);
         let (purging, paused, ending, done) = (
             Arc::clone(&self.purging),
             Arc::clone(&self.paused),
@@ -72,7 +80,7 @@ impl Keeper {
                                 purge_now(&drive, keep_days);
                             }
                         }
-                        Job::Control(control) => run_request(&drive, control),
+                        Job::Control(control) => run_request(&drive, control, &*tell),
                     }
                     done.add();
                 }
@@ -153,40 +161,47 @@ fn purge_now(drive: &Drive, keep_days: u32) {
     }
 }
 
-/// Runs a request for Recently deleted; the folders it concerns sync next.
-fn run_request(drive: &Drive, control: AccountControl) {
-    match control {
-        AccountControl::Restore { nodes } => match drive.restore(&nodes) {
-            Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
-            Err(e) => {
-                deny_if_refused(drive, &e);
-                tracing::warn!("restoring from Recently deleted failed: {e}")
-            }
-        },
+/// Runs a request for Recently deleted; the folders it concerns sync next. One that fails is
+/// told to the user (`tell`): it was answered before it ran.
+fn run_request(drive: &Drive, control: AccountControl, tell: &dyn Fn(String)) {
+    const EMPTY: (&str, &str) = ("Emptying Recently deleted", "deleted for good");
+    let (result, (what, done)) = match control {
+        AccountControl::Restore { nodes } => (
+            drive.restore(&nodes),
+            ("Restoring from Recently deleted", "restored"),
+        ),
         AccountControl::EmptyDeleted { nodes, db, seq } => {
-            report_emptied(drive, drive.empty(&nodes, &Listed { db, seq }))
+            (drive.empty(&nodes, &Listed { db, seq }), EMPTY)
         }
-        AccountControl::EmptyListed { db, seq } => {
-            report_emptied(drive, drive.empty_listed(&Listed { db, seq }))
-        }
-    }
-}
-
-fn report_emptied(drive: &Drive, result: Result<usize, EngineError>) {
+        AccountControl::EmptyListed { db, seq } => (drive.empty_listed(&Listed { db, seq }), EMPTY),
+    };
     match result {
-        Ok(n) => tracing::info!("{n} items deleted for good"),
+        Ok(n) => tracing::info!("{what}: {n} items {done}"),
         Err(e) => {
-            deny_if_refused(drive, &e);
-            tracing::warn!("emptying Recently deleted failed: {e}")
+            // Refused: the account asks nothing more ([`Drive::deny`]).
+            if e.class() == hbsync_remote::ErrorClass::Denied {
+                drive.deny(&e.to_string());
+            }
+            tell(failed(what, &e))
         }
     }
 }
 
-/// The identity refused this computer: the account asks nothing more ([`Drive::deny`]).
-fn deny_if_refused(drive: &Drive, e: &EngineError) {
-    if e.class() == hbsync_remote::ErrorClass::Denied {
-        drive.deny(&e.to_string());
-    }
+/// The note for `what` that failed with `e`: what to do about it.
+fn failed(what: &str, e: &EngineError) -> String {
+    let then = match e.class() {
+        hbsync_remote::ErrorClass::Transient | hbsync_remote::ErrorClass::RateLimited => {
+            "Homebase can't be reached now: try again later"
+        }
+        hbsync_remote::ErrorClass::Denied => {
+            "Homebase no longer accepts this computer: log in again"
+        }
+        hbsync_remote::ErrorClass::Full => {
+            "the identity's storage is full: make room, then try again"
+        }
+        _ => "try again",
+    };
+    format!("{what} failed ({e}): {then}")
 }
 
 #[cfg(test)]
@@ -221,7 +236,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let mut keeper = Keeper::spawn(Arc::clone(&drive));
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), Arc::new(|_| {}));
         let purged = || -> Result<bool, Box<dyn std::error::Error>> {
             let mut account = StateDb::open_account(&db)?;
             Ok(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_some())
@@ -250,7 +265,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let mut keeper = Keeper::spawn(drive);
+        let mut keeper = Keeper::spawn(drive, Arc::new(|_| {}));
         let done = keeper.done.clone();
         let server = remote.server();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
@@ -264,6 +279,35 @@ mod tests {
         Ok(())
     }
 
+    /// A request that fails is told to the user (it was answered before it ran), with what to
+    /// do: a refused one, log in again.
+    #[test]
+    fn a_failed_request_is_told() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let notes = Arc::clone(&told);
+        let tell: Tell =
+            Arc::new(move |note| notes.lock().unwrap_or_else(|e| e.into_inner()).push(note));
+        let mut keeper = Keeper::spawn(drive, tell);
+        remote.faults().denied = true;
+        keeper.request(AccountControl::EmptyListed {
+            db: "x".into(),
+            seq: 0,
+        });
+        keeper.finish();
+        let told = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0].starts_with("Emptying Recently deleted failed"),
+            "{told:?}"
+        );
+        assert!(told[0].ends_with("log in again"), "{told:?}");
+        Ok(())
+    }
+
     /// A purge asked for before a pause doesn't start during it.
     #[test]
     fn no_purge_starts_while_paused() -> R {
@@ -271,7 +315,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let mut keeper = Keeper::spawn(drive);
+        let mut keeper = Keeper::spawn(drive, Arc::new(|_| {}));
         let server = remote.server();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
         keeper.purge(30);

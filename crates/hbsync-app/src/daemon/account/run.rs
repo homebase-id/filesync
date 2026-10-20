@@ -138,7 +138,9 @@ impl Account {
                 None
             }
         };
-        let mut keeper = Keeper::spawn(Arc::clone(&drive));
+        let to_account = self.requests.clone();
+        let tell = Arc::new(move |note| drop(to_account.send(Msg::Note(note))));
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell);
         // A runner that couldn't start: the account stops its runners and ends with it, the
         // daemon with it (restarted whole). One that ended with an error is started again after a
         // pause, its folder showing why meanwhile; the others sync on.
@@ -215,6 +217,7 @@ impl Account {
                         }
                         changed = true;
                     }
+                    Msg::Note(note) => lock(&self.shown).send_one(Command::Note(note)),
                     // Looked at below.
                     Msg::Wake => {}
                 }

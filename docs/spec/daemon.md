@@ -281,7 +281,13 @@ included (service managers restart it then).
   error ends the sync, as a crash would: busy, the folder backs off; one only the user can fix
   (corrupt, from another version) is tried again every 5 min; the disk full, read-only or
   failing, after a pause from 5 s doubling to 5 min. A row on the drive the
-  client can't read (not encrypted, another key, no content hash) is noted too. An operation the
+  client can't read (not encrypted, another key, no content hash) is noted too. So is what a
+  scan of the folder skips that the user may want to know: a folder it can't read (what is in
+  it isn't synced), a name Homebase can't hold, a link, a device or socket; one note a reason
+  with a few of its paths, each item once (again once a whole scan found it fixed). A
+  sync that stops (refused, the drive out of reach) still tells the conflicts and failures it
+  had come to. A restore or an emptying of Recently deleted that fails is noted on the main
+  folder (it was answered before it ran), with what to do. An operation the
   drive refused for good is noted once, and not sent again while it is the same (sync semantics
   §8a, refused): a change of the item, Sync now, or an hour sends it once more.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its

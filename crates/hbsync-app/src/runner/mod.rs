@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use hbsync_engine::activity::Counters;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
+use hbsync_local::journal::Tier;
 use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
 use hbsync_remote::ErrorClass;
 use hbsync_state::StateError;
@@ -141,6 +142,8 @@ pub enum Command {
     },
     /// The machine woke up: sync now, the backoff forgotten.
     Woke,
+    /// Tell the user `text` (the account's work: restoring, emptying Recently deleted).
+    Note(String),
     /// Stop the runner (between operations).
     Stop,
 }
@@ -229,6 +232,8 @@ pub struct Runner {
     told: report::Told,
     /// Stale skips sync after sync: one that keeps coming back is told after all.
     stalled: report::Stalled,
+    /// What scans skipped and told, each once ([`report::scan_notes`]).
+    scan_told: std::collections::HashSet<u64>,
     /// Sync now was asked: the next sync sends what the drive refused once more.
     retry_refused: bool,
     /// Waited out a refusal: the next due sync asks the drive again ([`DENIED_LOOK`]).
@@ -311,6 +316,7 @@ impl Runner {
             held: Vec::new(),
             told: Default::default(),
             stalled: Default::default(),
+            scan_told: Default::default(),
             retry_refused: false,
             probing: false,
         };
@@ -462,8 +468,15 @@ impl Runner {
                 }
                 let observing = observe_after.is_none_or(|at| Instant::now() >= at);
                 match observing.then(|| p.engine.observe(&mut p.observer, Duration::ZERO)) {
-                    Some(Ok(Some(scan))) if scan.dirty > 0 => schedule.want(),
-                    Some(Ok(_)) => observe_after = None,
+                    Some(Ok(scan)) => {
+                        observe_after = None;
+                        if let Some(scan) = scan {
+                            self.tell_scan(&scan, false);
+                            if scan.dirty > 0 {
+                                schedule.want();
+                            }
+                        }
+                    }
                     // Kept (a busy DB, say): the folder backs off, as after a failed sync,
                     // instead of starting over, and doesn't take them again before then.
                     Some(Err(e)) => {
@@ -509,8 +522,12 @@ impl Runner {
                     && !p.observer.has_watcher()
                 {
                     match p.engine.scan_local() {
-                        Ok(scan) if scan.dirty > 0 => schedule.want(),
-                        Ok(_) => {}
+                        Ok(scan) => {
+                            self.tell_scan(&scan, true);
+                            if scan.dirty > 0 {
+                                schedule.want();
+                            }
+                        }
                         Err(e) => tracing::warn!("scanning the folder failed: {e}"),
                     }
                 }
@@ -607,7 +624,13 @@ impl Runner {
             let result = if started {
                 p.engine.sync(&today, read)
             } else {
-                p.engine.start_up(&mut p.observer, &today).map(|r| r.sync)
+                p.engine.start_up(&mut p.observer, &today).map(|r| {
+                    self.tell_scan(
+                        &r.local.report,
+                        matches!(r.local.tier, Tier::FullWalk { .. }),
+                    );
+                    r.sync
+                })
             };
             match result {
                 Ok(report) => {
@@ -630,6 +653,12 @@ impl Runner {
                     // Refused: the account asks nothing more until a login or the user acts.
                     if e.class() == ErrorClass::Denied {
                         self.drive.deny(&e.to_string());
+                    }
+                    // What it did before is told all the same (a conflict copy made).
+                    if let Some(partial) = p.engine.take_unreported()
+                        && let Err(e) = self.tell_unreported(&mut p.engine, &partial)
+                    {
+                        tracing::warn!("telling what the failed sync did failed: {e}");
                     }
                     self.backs_off(&mut schedule, "the sync", e.class(), &e, e.retry_after());
                 }
@@ -689,6 +718,7 @@ impl Runner {
                 *confirmed = Some(self.held.clone());
                 schedule.asked(Instant::now());
             }
+            Command::Note(text) => self.tell(vec![text]),
             Command::Stop => {}
         }
     }
@@ -718,6 +748,50 @@ impl Runner {
         });
     }
 
+    /// Adds `notes` to what the user is told.
+    fn tell(&self, notes: Vec<String>) {
+        if notes.is_empty() {
+            return;
+        }
+        for note in &notes {
+            tracing::warn!("{note}");
+        }
+        self.set(|s| report::add_notes(s, notes, unix_now()));
+    }
+
+    /// Tells what a scan skipped and the user may want to know (a folder it can't read, a
+    /// name or kind it can't sync), each once.
+    /// `whole`: the scan walked the whole folder, so what it didn't skip is no longer skipped
+    /// (told again if it is again).
+    fn tell_scan(&mut self, scan: &hbsync_local::ScanReport, whole: bool) {
+        let notes = report::scan_notes(scan, &mut self.scan_told, whole);
+        self.tell(notes);
+    }
+
+    /// Tells the conflicts and failures of a sync that then failed (`partial`).
+    fn tell_unreported(
+        &mut self,
+        engine: &mut Engine,
+        partial: &SyncReport,
+    ) -> Result<(), StateError> {
+        // Told once, the notes told so far kept: a part of a sync doesn't say what went away.
+        let notes = self.notes_of(engine, partial, Vec::new())?;
+        let notes = self.told.unseen(notes);
+        self.tell(notes);
+        Ok(())
+    }
+
+    /// `report`'s notes, with the drive's unreadable `rows`.
+    fn notes_of(
+        &mut self,
+        engine: &mut Engine,
+        report: &SyncReport,
+        rows: Vec<String>,
+    ) -> Result<Vec<String>, StateError> {
+        let skips = self.stalled.told(&report.skipped, Instant::now());
+        report::notes(engine, report, &skips, rows)
+    }
+
     /// Publishes a finished sync.
     fn record(
         &mut self,
@@ -725,11 +799,9 @@ impl Runner {
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), StateError> {
-        let skips = self.stalled.told(&report.skipped, Instant::now());
         let rows = self.drive.take_skipped();
-        let notes = self
-            .told
-            .fresh(report::notes(engine, report, &skips, rows)?);
+        let notes = self.notes_of(engine, report, rows)?;
+        let notes = self.told.fresh(notes);
         self.held = report.held.iter().map(|op| op.node()).collect();
         let held = report::held(engine, report, &self.held)?;
         if report.ops_done > 0 || !notes.is_empty() {

@@ -92,6 +92,17 @@ impl Shown {
         self.runners.iter().filter(|r| r.shows())
     }
 
+    /// Passes `command` to the main folder's runner (else another), one that runs: what
+    /// concerns the account, told once.
+    fn send_one(&self, command: Command) {
+        let mut running = self.runners.iter().filter(|r| r.syncing());
+        let main = running.clone().find(|r| r.root.role.is_none());
+        match main.or_else(|| running.next()) {
+            Some(r) => drop(r.handle.send(command)),
+            None => tracing::warn!("no folder runs to tell: {command:?}"),
+        }
+    }
+
     /// Passes `command` to every runner shown; refused, saying why, while it isn't running
     /// yet.
     fn send(&self, identity: &Identity, command: &Command) -> Result<(), String> {
@@ -112,6 +123,8 @@ pub(crate) enum Msg {
     Hint(Event),
     /// The machine woke up.
     Woke,
+    /// Tell the user this (the account's work: Recently deleted's requests).
+    Note(String),
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
     Wake,
 }
