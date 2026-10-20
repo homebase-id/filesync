@@ -22,6 +22,9 @@ Rules that keep these reachable (from [../foundations.md](../foundations.md) §3
 - The reconciler works on the dirty set plus the ancestors and siblings it needs, not the
   whole tree: in a folder, only the children whose names may clash with a dirty node's (found
   by their sibling hash, an indexed column), unless a plan finds a clash there.
+- A watcher event looks at the entry it names (one `stat`, one row), not its whole folder; a
+  folder, or a name that may be another spelling of one (case-insensitive volumes), rescans
+  its folder. The client's own writes, named again by the watcher, write nothing.
 - Catch-up runs at background I/O and CPU priority.
 
 ## Measured: sync with a live identity (2026-10-09)

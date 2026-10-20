@@ -13,7 +13,7 @@
 //! 5. **One transaction** updates the `local` rows and marks every node whose local state changed
 //!    as dirty.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -32,6 +32,10 @@ pub struct ScanOptions {
     pub fs_family: FsFamily,
     /// What is never synced (the client's own state folder, junk, ignored items).
     pub filter: Arc<Filter>,
+    /// The volume tells names apart byte for byte (case-sensitive, no normalization folding),
+    /// so a path names one entry whatever else is in its folder: a watcher's event is looked at
+    /// by itself ([`rescan_entries`]). Otherwise only what a look at one path can't mistake.
+    pub exact_names: bool,
 }
 
 impl ScanOptions {
@@ -42,6 +46,7 @@ impl ScanOptions {
             algorithm,
             fs_family: hbsync_platform::fskind::detect(root).unwrap_or(FsFamily::Other),
             filter: Arc::default(),
+            exact_names: false,
         }
     }
 }
@@ -91,7 +96,236 @@ pub fn rescan_dirs(
     dirs: &[RelPath],
     opts: &ScanOptions,
 ) -> Result<ScanReport, StateError> {
-    let mut targets = std::collections::BTreeSet::new();
+    rescan_entries(db, root, dirs, &[], opts)
+}
+
+/// [`rescan_dirs`] for `dirs`, and a look at each of `entries` by itself (what a watcher's
+/// events name, all of them: both names of a rename): one `stat` and one row instead of the
+/// whole folder. An entry is looked at alone only where that can't mistake anything: a file
+/// the filter lets through, in a known folder that is still the one recorded. Where the
+/// folder's names are byte-exact ([`ScanOptions::exact_names`], and not a casefold folder) a
+/// new name too, if no other row holds its file id; elsewhere only the same file still at its
+/// row's path, or a row's name with nothing there. Anything else, and a folder with many
+/// entries, rescans the folder.
+pub fn rescan_entries(
+    db: &mut StateDb,
+    root: &Path,
+    dirs: &[RelPath],
+    entries: &[RelPath],
+    opts: &ScanOptions,
+) -> Result<ScanReport, StateError> {
+    let mut dirs: BTreeSet<RelPath> = dirs.iter().cloned().collect();
+    // A folder with many entries is listed instead: one bulk listing beats a stat each.
+    let mut per_folder: HashMap<RelPath, usize> = HashMap::new();
+    for entry in entries {
+        *per_folder
+            .entry(entry.parent().unwrap_or_default())
+            .or_default() += 1;
+    }
+    dirs.extend(
+        per_folder
+            .into_iter()
+            .filter(|(_, n)| *n > ENTRIES_PER_FOLDER)
+            .map(|(folder, _)| folder),
+    );
+    let entries: BTreeSet<&RelPath> = entries
+        .iter()
+        .filter(|e| !dirs.contains(&e.parent().unwrap_or_default()))
+        .collect();
+    // Each entry's row and its folder's file id, if the folder is a known one (else it is
+    // rescanned), and for an entry without a row whether another one there has a name of the
+    // same sibling hash (another spelling of it, maybe), in one read.
+    let rows = db.read(|s| {
+        let mut folders: HashMap<RelPath, Option<Option<FileId>>> = HashMap::new();
+        let mut rows = Vec::with_capacity(entries.len());
+        for &entry in &entries {
+            let parent = entry.parent().unwrap_or_default();
+            let folder = match folders.get(&parent) {
+                Some(f) => *f,
+                None => {
+                    let f = known_folder(s, &parent)?;
+                    folders.insert(parent.clone(), f);
+                    f
+                }
+            };
+            rows.push(match folder {
+                Some(id) => {
+                    let row = s.get_local(entry)?;
+                    let spelled = match (&row, entry.name()) {
+                        (None, Some(name)) => {
+                            let key = hbsync_namemap::sibling_hash(name);
+                            !s.local_named(&parent, key)?.is_empty()
+                        }
+                        _ => false,
+                    };
+                    Some((id, row, spelled))
+                }
+                None => None,
+            });
+        }
+        Ok(rows)
+    })?;
+    // What the entries looked at alone show. Each folder is looked at once: still the one
+    // recorded there (not moved or replaced meanwhile, its contents with it; the root not
+    // gone, as with a volume unmounted), a real folder (not a link to elsewhere), and whether
+    // its names are byte-exact.
+    let mut alone = Diff::default();
+    let mut here: HashMap<RelPath, Option<bool>> = HashMap::new();
+    for (&entry, row) in entries.iter().zip(rows) {
+        let parent = entry.parent().unwrap_or_default();
+        let exact = match row {
+            Some((folder_id, _, _)) => *here.entry(parent.clone()).or_insert_with(|| {
+                let dir = parent.to_native(root);
+                match hbsync_platform::meta::stat(&dir) {
+                    Ok(m)
+                        if m.kind == EntryKind::Dir
+                            && folder_id.is_none_or(|id| m.file_id == id) =>
+                    {
+                        Some(opts.exact_names && !hbsync_platform::fskind::folds_case(&dir))
+                    }
+                    _ => None,
+                }
+            }),
+            None => None,
+        };
+        let looked = match (exact, row) {
+            (Some(exact), Some((_, row, spelled))) => {
+                let names = Names { exact, spelled };
+                look_alone(root, entry, row, names, opts, &mut alone)
+            }
+            _ => false,
+        };
+        if !looked {
+            dirs.insert(entry.parent().unwrap_or_default());
+        }
+    }
+    // A new name whose file id another row holds (one not gone in this batch) was moved or
+    // is another spelling of that row: both folders are rescanned together.
+    if !alone.added.is_empty() {
+        let gone: HashSet<FileId> = alone
+            .removed
+            .iter()
+            .map(|r| r.fingerprint.file_id)
+            .collect();
+        let held = db.read(|s| {
+            let mut held = Vec::new();
+            for (path, meta) in &alone.added {
+                if gone.contains(&meta.file_id) {
+                    continue;
+                }
+                for row in s.local_by_file_id(&meta.file_id)? {
+                    held.push(path.parent().unwrap_or_default());
+                    held.push(row.path.parent().unwrap_or_default());
+                }
+            }
+            Ok(held)
+        })?;
+        dirs.extend(held);
+    }
+    // What a folder's rescan sees is its own.
+    alone.retain(|p| !dirs.contains(&p.parent().unwrap_or_default()));
+    let dirs: Vec<RelPath> = dirs.into_iter().collect();
+    let mut report = ScanReport::default();
+    let mut diff = rescan_diff(db, root, &dirs, opts, &mut report)?;
+    if !alone.is_empty() {
+        // An entry below a folder the rescan walked in full (or found gone) is its too.
+        let mine: HashSet<&RelPath> = alone.paths().collect();
+        let walked: HashSet<RelPath> = diff.paths().filter(|p| mine.contains(p)).cloned().collect();
+        alone.retain(|p| !walked.contains(p));
+        diff.append(alone);
+    }
+    let plan = resolve(db, root, diff, opts, &mut report)?;
+    apply(db, plan, &mut report)?;
+    Ok(report)
+}
+
+/// Past this many entries in one folder, [`rescan_entries`] lists the folder.
+const ENTRIES_PER_FOLDER: usize = 64;
+
+/// Whether `path` is the root or a folder with a row: `Some` with the folder's file id (`None`
+/// for the root), else `None`.
+fn known_folder(
+    s: &hbsync_state::Store<'_>,
+    path: &RelPath,
+) -> Result<Option<Option<FileId>>, StateError> {
+    if path.is_root() {
+        return Ok(Some(None));
+    }
+    Ok(s.get_local(path)?
+        .filter(|r| r.kind == NodeKind::Folder)
+        .map(|r| Some(r.fingerprint.file_id)))
+}
+
+/// What is known of the names in an entry's folder ([`look_alone`]).
+#[derive(Clone, Copy)]
+struct Names {
+    /// The folder's names are byte-exact.
+    exact: bool,
+    /// Another row there has a name of the entry's sibling hash.
+    spelled: bool,
+}
+
+/// Looks at `entry` by itself (`row`: its row, if any), as [`rescan_entries`] says, adding
+/// what it finds to `diff`; `false` if its folder must be rescanned instead.
+fn look_alone(
+    root: &Path,
+    entry: &RelPath,
+    row: Option<LocalRow>,
+    names: Names,
+    opts: &ScanOptions,
+    diff: &mut Diff,
+) -> bool {
+    // A file the filter lets through (the walk's verdict); anything else is its folder's to
+    // judge, and so is a folder.
+    if !opts.filter.path(entry, false).is_sync()
+        || row.as_ref().is_some_and(|r| r.kind != NodeKind::File)
+    {
+        return false;
+    }
+    let meta = match hbsync_platform::meta::stat(&entry.to_native(root)) {
+        Ok(meta) if meta.kind == EntryKind::File => Some(meta),
+        Ok(_) => return false,
+        Err(e) if hbsync_platform::meta::nothing_there(&e) => None,
+        Err(_) => return false,
+    };
+    // Where names aren't byte-exact, only what no other spelling can be: the same file still
+    // at its row's path (a rename to another spelling names that spelling too, which rescans
+    // the folder); nothing of any spelling where a row was; nothing, or a new file, where no
+    // row has a name of its sibling hash (case and normalization; Windows' short names have
+    // another, so there an event under a name without a row rescans the folder). A new file
+    // whose id a row holds is looked at with that row's folder (`rescan_entries`).
+    let Names { exact, spelled } = names;
+    let unspelled = exact || !spelled;
+    match (row, meta) {
+        (None, None) => return unspelled && (exact || !cfg!(windows)),
+        (Some(row), None) => diff.removed.push(row),
+        (None, Some(meta)) => {
+            if !unspelled || !opts.fs_family.has_stable_file_ids() {
+                return false;
+            }
+            diff.added.push((entry.clone(), meta));
+        }
+        (Some(row), Some(meta)) => {
+            if !exact && row.fingerprint.file_id != meta.file_id {
+                return false;
+            }
+            if differs(&row, &meta) {
+                diff.changed.push((row, meta));
+            }
+        }
+    }
+    true
+}
+
+/// The differences a rescan of `dirs` ([`rescan_dirs`]) finds.
+fn rescan_diff(
+    db: &mut StateDb,
+    root: &Path,
+    dirs: &[RelPath],
+    opts: &ScanOptions,
+    report: &mut ScanReport,
+) -> Result<Diff, StateError> {
+    let mut targets = BTreeSet::new();
     for dir in dirs {
         // Never look inside filtered folders (the client's own state, junk, ignored folders),
         // whoever reported them. Their parent's rescan notices one that just became filtered.
@@ -101,17 +335,12 @@ pub fn rescan_dirs(
         // A folder the DB doesn't know yet is new: its parent's rescan finds it and walks it in
         // full (its own creation event may come in a later batch, or never).
         let mut dir = real_dir_prefix(root, dir);
-        while !dir.is_root()
-            && !db
-                .read(|s| s.get_local(&dir))?
-                .is_some_and(|r| r.kind == NodeKind::Folder)
-        {
+        while db.read(|s| known_folder(s, &dir))?.is_none() {
             dir = dir.parent().unwrap_or_default();
         }
         targets.insert(dir);
     }
 
-    let mut report = ScanReport::default();
     let mut diff = Diff::default();
     // Subtrees already walked in full; targets inside them are covered.
     let mut covered: Vec<RelPath> = Vec::new();
@@ -159,16 +388,10 @@ pub fn rescan_dirs(
             rows.extend(below.into_iter().filter(|r| r.path != *deep));
         }
         rows.sort_by(|a, b| a.path.cmp(&b.path)); // walk order
-        let part = merge(db, events.into_iter(), DbRows::fixed(rows), &mut report)?;
-        diff.added.extend(part.added);
-        diff.removed.extend(part.removed);
-        diff.changed.extend(part.changed);
-        diff.unknown.extend(part.unknown);
+        diff.append(merge(db, events.into_iter(), DbRows::fixed(rows), report)?);
         covered.extend(descended);
     }
-    let plan = resolve(db, root, diff, opts, &mut report)?;
-    apply(db, plan, &mut report)?;
-    Ok(report)
+    Ok(diff)
 }
 
 /// The longest leading part of `dir` that is a real folder: a folder that no longer exists, or
@@ -194,6 +417,35 @@ struct Diff {
     changed: Vec<(LocalRow, LocalMeta)>,
     /// Folders whose contents couldn't be read this time.
     unknown: Vec<RelPath>,
+}
+
+impl Diff {
+    fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+    }
+
+    /// The paths of the entries it holds.
+    fn paths(&self) -> impl Iterator<Item = &RelPath> {
+        let added = self.added.iter().map(|(p, _)| p);
+        let removed = self.removed.iter().map(|r| &r.path);
+        added
+            .chain(removed)
+            .chain(self.changed.iter().map(|(r, _)| &r.path))
+    }
+
+    /// Keeps the entries whose paths `keep` says.
+    fn retain(&mut self, mut keep: impl FnMut(&RelPath) -> bool) {
+        self.added.retain(|(p, _)| keep(p));
+        self.removed.retain(|r| keep(&r.path));
+        self.changed.retain(|(r, _)| keep(&r.path));
+    }
+
+    fn append(&mut self, other: Diff) {
+        self.added.extend(other.added);
+        self.removed.extend(other.removed);
+        self.changed.extend(other.changed);
+        self.unknown.extend(other.unknown);
+    }
 }
 
 fn merge(
@@ -715,6 +967,10 @@ fn apply(db: &mut StateDb, mut plan: Plan, report: &mut ScanReport) -> Result<()
     dirty.sort();
     dirty.dedup();
     report.dirty = dirty.len();
+    // Nothing to write (a sync's own writes, looked at again): no transaction.
+    if plan.delete.is_empty() && plan.put_rows.is_empty() && dirty.is_empty() {
+        return Ok(());
+    }
     // Deletes first, so a node that moved can take its new place, and contents before their
     // folder; then new rows parents first (walk order).
     plan.delete.sort_by(|a, b| b.0.cmp(&a.0));

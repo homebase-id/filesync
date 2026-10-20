@@ -23,12 +23,17 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::filter::Filter;
 use crate::journal::{CatchUp, catch_up, relpath_prefix};
-use crate::scan::{ScanOptions, ScanReport, rescan_dirs, scan};
+use crate::scan::{ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan};
 
 /// A coalesced set of changes from the watcher.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WatchBatch {
+    /// Folders to rescan: one an event named itself, or the folder of an entry whose name
+    /// isn't valid.
     pub dirs: BTreeSet<RelPath>,
+    /// Entries the events named, each looked at by itself where that is enough
+    /// ([`crate::scan::rescan_entries`]).
+    pub entries: BTreeSet<RelPath>,
     /// Events were lost (queue overflow, watcher error): rescan everything.
     pub rescan_all: bool,
     /// The batch ended with a quiet period, so no delivered event was left behind (one closed
@@ -269,11 +274,14 @@ fn fold(root: &Path, batch: &mut WatchBatch, event: notify::Result<Event>) {
         let Ok(rel) = path.strip_prefix(root) else {
             continue;
         };
-        // The parent of the changed entry; a name that isn't valid ends the path early, which
-        // rescans a folder higher up.
-        batch
-            .dirs
-            .insert(relpath_prefix(rel.parent().unwrap_or(Path::new(""))));
+        // The changed entry. A name that isn't valid ends the path early: the folder above is
+        // rescanned (the root, for an event on the root itself).
+        let entry = relpath_prefix(rel);
+        if !entry.is_root() && entry.depth() == rel.components().count() {
+            batch.entries.insert(entry);
+        } else {
+            batch.dirs.insert(entry);
+        }
     }
 }
 
@@ -410,11 +418,18 @@ impl LocalObserver {
             // No position is stored without a watcher; the one stored is older, which is safe.
             self.unsaved = false;
         }
-        let dirs: Vec<RelPath> = batch.dirs.into_iter().collect();
+        let mut dirs = batch.dirs;
+        let mut entries: Vec<RelPath> = batch.entries.into_iter().collect();
+        // A batch cut off by `max_delay` may hold half of a rename: its folders are listed,
+        // which sees the whole of it.
+        if !batch.drained {
+            dirs.extend(entries.drain(..).map(|e| e.parent().unwrap_or_default()));
+        }
+        let dirs: Vec<RelPath> = dirs.into_iter().collect();
         let report = if batch.rescan_all {
             scan(db, &self.root, &self.opts)?
         } else {
-            rescan_dirs(db, &self.root, &dirs, &self.opts)?
+            rescan_entries(db, &self.root, &dirs, &entries, &self.opts)?
         };
         match position {
             Some(position) if batch.drained => {
@@ -480,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn events_touch_parent_folders() {
+    fn events_name_their_entries() {
         let root = Path::new("/sync");
         let mut batch = WatchBatch::default();
         let excl = Filter::from_rules("node_modules/\n", false).expect("valid rules");
@@ -540,11 +555,33 @@ mod tests {
                 &["/sync/w/f"],
             ),
         );
-        let expected: BTreeSet<_> = [rp("a/b"), rp("x"), rp("y"), rp("w"), RelPath::root()].into();
+        // The root itself, and a name that isn't valid: their folders.
+        add_event(
+            root,
+            &excl,
+            &mut batch,
+            ev(EventKind::Modify(ModifyKind::Any), &["/sync"]),
+        );
+        let long = format!("/sync/v/{}", "n".repeat(300));
+        add_event(
+            root,
+            &excl,
+            &mut batch,
+            ev(EventKind::Create(CreateKind::File), &[long.as_str()]),
+        );
+        let entries: BTreeSet<_> = [
+            rp("a/b/new.txt"),
+            rp("x/f"),
+            rp("y/f"),
+            rp("top.txt"),
+            rp("w/f"),
+        ]
+        .into();
         assert_eq!(
             batch,
             WatchBatch {
-                dirs: expected,
+                dirs: [RelPath::root(), rp("v")].into(),
+                entries,
                 rescan_all: false,
                 drained: false,
             }
@@ -632,7 +669,7 @@ mod tests {
             started.elapsed()
         );
         assert!(batch.drained);
-        assert_eq!(batch.dirs, [RelPath::root()].into());
+        assert_eq!(batch.entries, [rp("new")].into());
 
         reading.store(false, std::sync::atomic::Ordering::Relaxed);
         let _ = reader.join();
@@ -675,7 +712,7 @@ mod tests {
         let batch = watcher
             .next_batch(Duration::from_secs(1), debounce, || {})
             .ok_or("no batch")?;
-        assert_eq!(batch.dirs, [rp("a"), rp("b")].into());
+        assert_eq!(batch.entries, [rp("a/first"), rp("b/behind")].into());
         assert!(batch.drained);
         Ok(())
     }

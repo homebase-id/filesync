@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 hbsync-fileio.workspace = true
 hbsync-platform.workspace = true
+hbsync-namemap.workspace = true
 hbsync-state.workspace = true
 hbsync-types.workspace = true
 ignore = "0.4.33"
@@ -17,6 +18,7 @@ notify = "8.2"
 thiserror.workspace = true
 
 [dev-dependencies]
+proptest.workspace = true
 tempfile.workspace = true
 
 [lints]

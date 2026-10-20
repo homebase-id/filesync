@@ -69,6 +69,30 @@ pub fn read_only(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// Whether the folder `dir` folds the case of names in it by itself (Linux: ext4 or f2fs
+/// casefold, `chattr +F`), whatever its volume does. `false` where it can't tell, or the
+/// system has no such folders.
+pub fn folds_case(dir: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        /// `FS_CASEFOLD_FL` (linux/fs.h).
+        const CASEFOLD: libc::c_long = 0x4000_0000;
+        let Ok(file) = std::fs::File::open(dir) else {
+            return false;
+        };
+        let mut flags: libc::c_long = 0;
+        // SAFETY: a valid descriptor and an out value of the size the request writes.
+        let ok = unsafe { libc::ioctl(file.as_raw_fd(), libc::FS_IOC_GETFLAGS, &mut flags) } == 0;
+        ok && flags & CASEFOLD != 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dir;
+        false
+    }
+}
+
 /// Probes whether names in `dir` are case-sensitive, by creating a temporary file.
 ///
 /// Per-directory on Windows (case sensitivity can be enabled per folder), per-volume elsewhere.

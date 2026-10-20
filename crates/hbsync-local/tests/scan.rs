@@ -12,6 +12,10 @@ use hbsync_types::{
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
+fn p(s: &str) -> RelPath {
+    RelPath::new(s).expect("valid path")
+}
+
 struct Fixture {
     dir: tempfile::TempDir,
     db: StateDb,
@@ -45,14 +49,18 @@ impl Fixture {
     fn scan(&mut self) -> Result<(ScanReport, Vec<NodeId>), Box<dyn std::error::Error>> {
         let root = self.dir.path().to_path_buf();
         let report = scan(&mut self.db, &root, &self.opts)?;
-        let dirty = self.db.write(|s| {
+        Ok((report, self.take_dirty()?))
+    }
+
+    /// The nodes marked dirty, which are then clean.
+    fn take_dirty(&mut self) -> Result<Vec<NodeId>, Box<dyn std::error::Error>> {
+        Ok(self.db.write(|s| {
             let nodes = s.dirty_nodes(usize::MAX >> 1)?;
             for n in &nodes {
                 s.clear_dirty(*n)?;
             }
             Ok(nodes)
-        })?;
-        Ok((report, dirty))
+        })?)
     }
 
     /// Records every local file as synced (a base row), as a sync would.
@@ -504,10 +512,6 @@ mod targeted {
     use super::*;
     use hbsync_local::rescan_dirs;
 
-    fn p(s: &str) -> RelPath {
-        RelPath::new(s).expect("valid path")
-    }
-
     impl Fixture {
         fn rescan(
             &mut self,
@@ -516,14 +520,7 @@ mod targeted {
             let root = self.dir.path().to_path_buf();
             let dirs: Vec<RelPath> = dirs.iter().map(|d| p(d)).collect();
             let report = rescan_dirs(&mut self.db, &root, &dirs, &self.opts)?;
-            let dirty = self.db.write(|s| {
-                let nodes = s.dirty_nodes(usize::MAX >> 1)?;
-                for n in &nodes {
-                    s.clear_dirty(*n)?;
-                }
-                Ok(nodes)
-            })?;
-            Ok((report, dirty))
+            Ok((report, self.take_dirty()?))
         }
 
         /// (path, kind, hash) of every row: what a full scan would record, minus node ids.
@@ -756,4 +753,352 @@ fn tags_are_read_and_a_tag_change_is_a_change() -> R {
     let read = f.db.read(|s| s.get_local(&path))?.and_then(|r| r.tags);
     assert_eq!(read, Some(red));
     Ok(())
+}
+
+/// Entries a watcher's events name, looked at by themselves where that is enough
+/// (`rescan_entries`), on a volume with byte-exact names and on one without.
+mod entries {
+    use super::*;
+    use hbsync_local::rescan_entries;
+
+    impl Fixture {
+        fn look(
+            &mut self,
+            exact: bool,
+            entries: &[&str],
+        ) -> Result<(ScanReport, Vec<NodeId>), Box<dyn std::error::Error>> {
+            self.opts.exact_names = exact;
+            let root = self.dir.path().to_path_buf();
+            let entries: Vec<RelPath> = entries.iter().map(|e| p(e)).collect();
+            let report = rescan_entries(&mut self.db, &root, &[], &entries, &self.opts)?;
+            Ok((report, self.take_dirty()?))
+        }
+
+        fn big() -> Result<Self, Box<dyn std::error::Error>> {
+            let mut f = Fixture::new()?;
+            for i in 0..20 {
+                f.write(&format!("big/f{i}"), format!("{i}").as_bytes())?;
+            }
+            f.scan()?;
+            Ok(f)
+        }
+    }
+
+    fn both(test: impl Fn(bool) -> R) -> R {
+        for exact in [true, false] {
+            test(exact).map_err(|e| format!("exact names {exact}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// An edit in place is seen by itself, on any volume: the folder isn't listed (an edit
+    /// no event named isn't seen).
+    #[test]
+    fn an_edit_is_seen_alone() -> R {
+        both(|exact| {
+            let mut f = Fixture::big()?;
+            f.write("big/f7", b"edited")?;
+            f.write("big/f8", b"edited too")?;
+            let (report, dirty) = f.look(exact, &["big/f7"])?;
+            assert_eq!(report.modified, 1, "{report:?}");
+            assert_eq!(dirty, [f.node("big/f7")?]);
+            Ok(())
+        })
+    }
+
+    /// The client's own write, named again by the watcher, changes nothing.
+    #[test]
+    fn an_unchanged_entry_changes_nothing() -> R {
+        both(|exact| {
+            let mut f = Fixture::big()?;
+            let (report, dirty) = f.look(exact, &["big/f1", "big/f2"])?;
+            assert_eq!((report.modified, report.hashed), (0, 0), "{report:?}");
+            assert!(dirty.is_empty());
+            Ok(())
+        })
+    }
+
+    /// A new file is added by itself. Where names aren't byte-exact, one whose name another
+    /// row shares under case and normalization (maybe another spelling of it) rescans its
+    /// folder, which finds the rest too.
+    #[test]
+    fn a_new_file() -> R {
+        both(|exact| {
+            let mut f = Fixture::big()?;
+            f.write("big/new", b"n")?;
+            f.write("big/unnamed", b"u")?;
+            let (report, _) = f.look(exact, &["big/new"])?;
+            assert_eq!(report.added, 1, "{report:?}");
+            assert!(f.node("big/new").is_ok());
+            // On a volume that folds case this writes f1 itself: its file id is a row's, and the
+            // folder is rescanned either way.
+            let folds = !hbsync_platform::fskind::probe_case_sensitive(f.root())?;
+            f.write("big/F1", b"another spelling?")?;
+            let (report, _) = f.look(exact, &["big/F1"])?;
+            assert_eq!(f.node("big/unnamed").is_ok(), !exact || folds, "{report:?}");
+            assert_eq!(f.node("big/F1").is_ok(), !folds, "{report:?}");
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn a_deleted_file() -> R {
+        both(|exact| {
+            let mut f = Fixture::big()?;
+            let node = f.node("big/f3")?;
+            fs::remove_file(f.root().join("big/f3"))?;
+            let (report, dirty) = f.look(exact, &["big/f3"])?;
+            assert_eq!(report.removed, 1, "{report:?}");
+            assert_eq!(dirty, [node]);
+            Ok(())
+        })
+    }
+
+    /// A rename, also one of case only, keeps its node: both names are looked at together.
+    #[test]
+    fn a_rename_keeps_its_node() -> R {
+        both(|exact| {
+            let mut f = Fixture::big()?;
+            for (from, to) in [("big/f4", "big/g4"), ("big/f5", "big/F5")] {
+                let node = f.node(from)?;
+                fs::rename(f.root().join(from), f.root().join(to))?;
+                let (report, dirty) = f.look(exact, &[from, to])?;
+                assert_eq!(
+                    (report.moved, report.added, report.removed),
+                    (1, 0, 0),
+                    "{report:?}"
+                );
+                assert_eq!(f.node(to)?, node);
+                assert_eq!(dirty, [node]);
+            }
+            Ok(())
+        })
+    }
+
+    /// A change of metadata alone (a tag, a mode) is looked at alone on any volume: the same
+    /// file at its row's path. The folder isn't listed (a new file no event named isn't seen).
+    #[test]
+    fn a_metadata_change_is_seen_alone() -> R {
+        both(|exact| {
+            let mut f = Fixture::big()?;
+            let path = f.root().join("big/f6");
+            let mode = fs::metadata(&path)?.permissions();
+            fs::set_permissions(&path, mode)?;
+            f.write("big/unnamed", b"u")?;
+            let (report, _) = f.look(exact, &["big/f6"])?;
+            assert_eq!(report.added, 0, "{report:?}");
+            Ok(())
+        })
+    }
+
+    /// The root gone (a volume unmounted, the folder renamed away): nothing at the top is
+    /// taken for deleted.
+    #[test]
+    fn a_missing_root_deletes_nothing() -> R {
+        both(|exact| {
+            let mut f = Fixture::new()?;
+            f.write("top", b"t")?;
+            f.scan()?;
+            let away = tempfile::tempdir()?;
+            let gone = away.path().join("moved");
+            fs::rename(f.root(), &gone)?;
+            let result = f.look(exact, &["top"]);
+            fs::rename(&gone, f.root())?;
+            let (report, _) = result?;
+            assert_eq!(report.removed, 0, "{report:?}");
+            assert!(f.node("top").is_ok());
+            Ok(())
+        })
+    }
+
+    /// Folders are their folder's to judge: a new one is walked whole, a gone one takes its
+    /// contents (named too) along once.
+    #[test]
+    fn folders_rescan_their_folder() -> R {
+        both(|exact| {
+            let mut f = Fixture::big()?;
+            f.write("big/sub/x", b"x")?;
+            let (report, _) = f.look(exact, &["big/sub", "big/sub/x"])?;
+            assert_eq!(report.added, 2, "{report:?}");
+            fs::remove_dir_all(f.root().join("big/sub"))?;
+            let (report, _) = f.look(exact, &["big/sub", "big/sub/x"])?;
+            assert_eq!(report.removed, 2, "{report:?}");
+            // A file in a folder not known yet: the folders above are recorded with it.
+            f.write("new/deep/file", b"n")?;
+            let (report, _) = f.look(exact, &["new/deep/file"])?;
+            assert_eq!(report.added, 3, "{report:?}");
+            assert!(f.node("new/deep").is_ok());
+            Ok(())
+        })
+    }
+
+    /// Files on disk, by path, in walk order.
+    fn files(root: &Path, dir: &str, out: &mut Vec<String>) {
+        let mut names: Vec<String> = fs::read_dir(root.join(dir))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        for name in names {
+            let rel = if dir.is_empty() {
+                name
+            } else {
+                format!("{dir}/{name}")
+            };
+            if root.join(&rel).is_dir() {
+                files(root, &rel, out);
+            } else {
+                out.push(rel);
+            }
+        }
+    }
+
+    /// Changes as a watcher reports them (every path an event names) leave the DB as a full
+    /// scan would, and a renamed file keeps its node.
+    fn events_equal_a_full_scan(exact: bool, ops: &[(u8, u8, u8)]) -> R {
+        let mut f = Fixture::new()?;
+        for path in ["a/1", "a/2", "a/s/3", "b/4", "5"] {
+            f.write(path, path.as_bytes())?;
+        }
+        f.scan()?;
+        let folders = ["", "a", "b", "a/s", "c"];
+        let mut entries: Vec<String> = Vec::new();
+        let mut renamed: Vec<(String, NodeId)> = Vec::new();
+        // Edited since the scan: renamed too, a new node where inodes are recycled.
+        let mut edited: Vec<String> = Vec::new();
+        for (i, &(op, x, y)) in ops.iter().enumerate() {
+            let mut on_disk = Vec::new();
+            files(f.root(), "", &mut on_disk);
+            on_disk.retain(|p| !p.starts_with(".hbsync"));
+            let pick = |n: u8| on_disk.get(n as usize % on_disk.len().max(1)).cloned();
+            let folder = |n: u8| folders[n as usize % folders.len()];
+            let join = |d: &str, name: String| {
+                if d.is_empty() {
+                    name
+                } else {
+                    format!("{d}/{name}")
+                }
+            };
+            match op % 5 {
+                0 => {
+                    // A new file (its folder made if needed).
+                    let path = join(folder(x), format!("n{i}"));
+                    if let Some(d) = Path::new(&path)
+                        .parent()
+                        .filter(|d| !f.root().join(d).exists())
+                    {
+                        entries.push(d.to_string_lossy().into_owned());
+                    }
+                    f.write(&path, format!("new {i} {y}").as_bytes())?;
+                    entries.push(path);
+                }
+                1 => {
+                    if let Some(p) = pick(x) {
+                        f.write(&p, format!("edit {i} {y}").as_bytes())?;
+                        renamed.retain(|(r, _)| *r != p);
+                        edited.push(p.clone());
+                        entries.push(p);
+                    }
+                }
+                2 => {
+                    if let Some(p) = pick(x) {
+                        fs::remove_file(f.root().join(&p))?;
+                        entries.push(p);
+                    }
+                }
+                3 => {
+                    // A rename, maybe of case only, maybe into another folder.
+                    if let Some(p) = pick(x) {
+                        let name = Path::new(&p)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let to = if y % 2 == 0 {
+                            join(
+                                Path::new(&p)
+                                    .parent()
+                                    .map(|d| d.to_string_lossy().into_owned())
+                                    .unwrap_or_default()
+                                    .as_str(),
+                                name.to_uppercase() + "x",
+                            )
+                        } else {
+                            join(folder(y), format!("{name}-m{i}"))
+                        };
+                        let to_dir = f.root().join(&to);
+                        if to_dir.exists() || !to_dir.parent().is_some_and(|d| d.is_dir()) {
+                            continue;
+                        }
+                        let node = f.node(&p).ok().filter(|_| !edited.contains(&p));
+                        if edited.contains(&p) {
+                            edited.push(to.clone());
+                        }
+                        fs::rename(f.root().join(&p), &to_dir)?;
+                        entries.push(p);
+                        entries.push(to.clone());
+                        if let Some(node) = node {
+                            renamed.retain(|(_, n)| *n != node);
+                            renamed.push((to, node));
+                        }
+                    }
+                }
+                _ => {
+                    // A folder renamed.
+                    let from = folder(x);
+                    if from.is_empty() || !f.root().join(from).is_dir() {
+                        continue;
+                    }
+                    let to = format!("r{i}");
+                    fs::rename(f.root().join(from), f.root().join(&to))?;
+                    entries.push(from.to_owned());
+                    entries.push(to);
+                }
+            }
+        }
+        let renamed: Vec<(String, NodeId)> = renamed
+            .into_iter()
+            .filter(|(p, _)| f.root().join(p).is_file())
+            .collect();
+        let root = f.root().to_path_buf();
+        f.opts.exact_names = exact;
+        let entries: Vec<RelPath> = entries.iter().map(|e| p(e)).collect();
+        rescan_entries(&mut f.db, &root, &[], &entries, &f.opts)?;
+        for (path, node) in &renamed {
+            if let Ok(now) = f.node(path) {
+                assert_eq!(now, *node, "{path} kept its node");
+            }
+        }
+        let watched: Vec<String> =
+            f.db.read(|s| s.local_subtree(&RelPath::root()))?
+                .into_iter()
+                .map(|r| format!("{} {:?} {:?}", r.path, r.kind, r.hash))
+                .collect();
+        let mut fresh = Fixture {
+            dir: tempfile::tempdir()?,
+            db: StateDb::open_in_memory()?,
+            opts: f.opts.clone(),
+        };
+        std::mem::swap(&mut fresh.dir, &mut f.dir);
+        fresh.scan()?;
+        let full: Vec<String> = fresh
+            .db
+            .read(|s| s.local_subtree(&RelPath::root()))?
+            .into_iter()
+            .map(|r| format!("{} {:?} {:?}", r.path, r.kind, r.hash))
+            .collect();
+        assert_eq!(watched, full);
+        Ok(())
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn watched_changes_equal_a_full_scan(
+            exact in proptest::bool::ANY,
+            ops in proptest::collection::vec((0u8..5, 0u8..16, 0u8..16), 1..8),
+        ) {
+            events_equal_a_full_scan(exact, &ops).map_err(|e| proptest::test_runner::TestCaseError::fail(e.to_string()))?;
+        }
+    }
 }

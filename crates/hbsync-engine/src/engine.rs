@@ -215,6 +215,9 @@ impl Engine {
         }
         let mut scan_opts = ScanOptions::for_root(&cfg.exec.root, cfg.exec.algorithm);
         scan_opts.filter = Arc::clone(&cfg.exec.filter);
+        // Case-sensitive Linux volumes: byte-exact names (macOS folds normalization whatever
+        // its case, and Windows can turn case sensitivity on per folder).
+        scan_opts.exact_names = cfg!(target_os = "linux") && !cfg.exec.case_insensitive;
         let remote = cfg.exec.scope.remote(drive.shared_remote());
         Engine {
             db,

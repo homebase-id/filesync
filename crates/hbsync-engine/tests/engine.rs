@@ -1303,6 +1303,7 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
         algorithm: hbsync_fileio::HashAlgorithm::Blake3,
         fs_family: hbsync_platform::FsFamily::Other,
         filter: Default::default(),
+        exact_names: false,
     };
     hbsync_local::scan(&mut db, dir.path(), &opts)?;
     let cell = std::cell::RefCell::new(db);
