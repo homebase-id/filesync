@@ -47,21 +47,33 @@ pub struct Config {
     pub paused_until: Option<u64>,
     #[serde(default)]
     pub mass_delete: MassDelete,
-    /// Recently deleted keeps an item this long, then deletes it for good.
+    /// Recently deleted keeps an item this long, then deletes it for good: at least
+    /// [`KeepDays::MIN`].
     #[serde(default)]
     pub keep_deleted_days: KeepDays,
     #[serde(default)]
     pub roots: Vec<Root>,
 }
 
-/// Days Recently deleted keeps an item (sync semantics §7).
+/// Days Recently deleted keeps an item, and the trash its local copy (sync semantics §7): the
+/// purge is the account's, so a value below [`KeepDays::MIN`] reads as it ([`Config::load`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct KeepDays(pub u32);
+pub struct KeepDays(u32);
+
+impl KeepDays {
+    /// What every client keeps (node schema, The purge): a device may keep longer only.
+    pub const MIN: u32 = hbsync_engine::deleted::MIN_KEEP_DAYS;
+
+    /// The days kept, at least [`KeepDays::MIN`].
+    pub fn days(self) -> u32 {
+        self.0.max(Self::MIN)
+    }
+}
 
 impl Default for KeepDays {
     fn default() -> Self {
-        KeepDays(30)
+        KeepDays(Self::MIN)
     }
 }
 
@@ -117,6 +129,15 @@ impl Config {
         };
         let mut config: Config =
             toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_owned(), e))?;
+        if config.keep_deleted_days.0 < KeepDays::MIN {
+            tracing::warn!(
+                "{}: keep_deleted_days = {} is below the {min} days every device keeps: {min} it is",
+                path.display(),
+                config.keep_deleted_days.0,
+                min = KeepDays::MIN,
+            );
+            config.keep_deleted_days = KeepDays::default();
+        }
         // Earlier versions kept Windows folders with `\\?\` (setup's `canonicalize`).
         for root in &mut config.roots {
             root.folder = hbsync_platform::winpath::plain(&root.folder);
@@ -225,7 +246,7 @@ mod tests {
                 min_files: 10,
                 fraction: 0.5,
             },
-            keep_deleted_days: KeepDays(7),
+            keep_deleted_days: KeepDays(45),
             roots: vec![
                 Root::main("anna.example.com", Path::new("/home/anna/Homebase")),
                 Root {
@@ -264,9 +285,24 @@ mod tests {
         let config: Config = toml::from_str("").expect("ok");
         assert_eq!(config, Config::default());
         assert_eq!(config.mass_delete, MassDelete::default());
-        assert_eq!(config.keep_deleted_days, KeepDays(30));
+        assert_eq!(config.keep_deleted_days.days(), 30);
         assert_eq!(config.root().expect("ok"), None);
         assert!(!config.device_name().is_empty());
+    }
+
+    /// The purge is the whole account's: one device can't make Recently deleted keep less than
+    /// every client does, only more.
+    #[test]
+    fn keep_deleted_days_has_a_floor() -> Result<(), ConfigError> {
+        let dir = tempfile::tempdir().expect("ok");
+        let path = dir.path().join("config.toml");
+        for (written, kept) in [(0, 30), (1, 30), (29, 30), (30, 30), (90, 90)] {
+            std::fs::write(&path, format!("keep_deleted_days = {written}\n")).expect("ok");
+            let config = Config::load(&path)?.expect("a config");
+            assert_eq!(config.keep_deleted_days, KeepDays(kept), "{written}");
+        }
+        assert_eq!(KeepDays(3).days(), 30);
+        Ok(())
     }
 
     #[test]

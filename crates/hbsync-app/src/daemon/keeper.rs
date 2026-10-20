@@ -156,7 +156,9 @@ fn run_request(drive: &Drive, control: AccountControl) {
             Ok(n) => tracing::info!("{n} items restored from Recently deleted"),
             Err(e) => tracing::warn!("restoring from Recently deleted failed: {e}"),
         },
-        AccountControl::EmptyDeleted { nodes } => report_emptied(drive.empty(&nodes)),
+        AccountControl::EmptyDeleted { nodes, db, seq } => {
+            report_emptied(drive.empty(&nodes, &Listed { db, seq }))
+        }
         AccountControl::EmptyListed { db, seq } => {
             report_emptied(drive.empty_listed(&Listed { db, seq }))
         }

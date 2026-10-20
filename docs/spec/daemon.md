@@ -41,7 +41,8 @@ has is adopted, nothing is copied twice.
 ```toml
 device_name = "Anna's laptop"   # optional; the computer's name otherwise
 paused = false                  # hbsync pause / resume
-keep_deleted_days = 30          # Recently deleted: removed items are deleted for good after this
+keep_deleted_days = 30          # Recently deleted: removed items are deleted for good after this;
+                                # at least 30 (the purge is the account's): less reads as 30, with a warning
 
 [mass_delete]                   # sync semantics, the mass-delete guard
 min_files = 50
@@ -256,8 +257,9 @@ a failure (service managers restart it then).
   its state DB (table `removed`), listed newest first with their path and the folder each comes
   back to. Restore and Empty are the account's: run on its Recently deleted thread when asked
   (once connected), in turn with the purge.
-  Empty takes what the user was shown: the items named, or everything removed until the newest
-  one listed, and the device's own removals shown "just now" (their time still open: not back
+  Empty takes what the user was shown: the items named, each with what was in it when it was
+  listed (a `deleted` or `find_deleted` answer carries its listing: a removal recorded in it
+  since stays), or everything removed until the newest one listed, and the device's own removals shown "just now" (their time still open: not back
   from the server yet) by name. Once a day (the time is kept in the state DB) the account deletes for good what
   was removed more than
   `keep_deleted_days` ago (a folder's delete as a whole, never a live node: a removed folder
@@ -276,27 +278,27 @@ refused this device: `hbsync setup` again), `stopped`.
 One request line, one reply line (JSON), then the connection closes; but `watch`, answered with
 the status now and again each time it changes (at most once a second while a folder syncs: its
 progress changes without telling), on the open connection until either side closes it (what
-the tray shows). Requests carry the protocol version (now 6); a daemon refuses another one
+the tray shows). Requests carry the protocol version (now 7); a daemon refuses another one
 with the reason (after an update: restart it). The
 wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":6,"ask":"status"}
-{"protocol":6,"ask":"watch"}                                        // a status line now, then one per change
-{"protocol":6,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":6,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":6,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":6,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":6,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":6,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"]}}}}}}
-{"protocol":6,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
-{"protocol":6,"ask":{"recent":{"limit":10}}}
-{"protocol":6,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
-{"protocol":6,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":6,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
-{"protocol":6,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":6,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":7,"ask":"status"}
+{"protocol":7,"ask":"watch"}                                        // a status line now, then one per change
+{"protocol":7,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":7,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":7,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":7,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":7,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":7,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
+{"protocol":7,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
+{"protocol":7,"ask":{"recent":{"limit":10}}}
+{"protocol":7,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":7,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":7,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
+{"protocol":7,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":7,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
@@ -477,7 +479,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
 | `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |
 | `hbsync restore <path or node id>…` | restores removed items (a folder with what was deleted with it) |
-| `hbsync empty-deleted [--yes]` | deletes everything in Recently deleted for good, after asking |
+| `hbsync empty-deleted [<path or node id>…] [--yes]` | deletes everything in Recently deleted for good, or the items named as it shows them (nothing removed in them since), after asking |
 | `hbsync log` | the log folder (a daily file, a week kept) |
 
 ## Not yet

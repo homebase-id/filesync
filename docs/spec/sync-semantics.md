@@ -183,7 +183,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 ## 7. Delete safety
 
 - **Deletes are removals.** A remote delete sets the node's `archivalStatus` to removed and
-  keeps its bytes for `keep_deleted_days` (30): "Recently deleted" lists them, and a restore
+  keeps its bytes for `keep_deleted_days` (30, never less: the purge is the whole account's, so
+  a device may only keep longer): "Recently deleted" lists them, and a restore
   brings them back on every device (node schema, "Recently deleted"). The daily purge deletes
   older ones for good (node schema, "The purge"). The reconciler sees a removed node as
   deleted.

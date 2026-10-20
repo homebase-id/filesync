@@ -244,6 +244,8 @@ mod tests {
                 stays: false,
             },
             along,
+            db: "d1".into(),
+            seq: 1,
         }
     }
 

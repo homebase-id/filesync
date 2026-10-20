@@ -191,7 +191,7 @@ impl Server {
             .flatten()
             .unwrap_or_default()
             .keep_deleted_days
-            .0
+            .days()
     }
 
     pub(super) fn confirm_deletes(&self, form: &HashMap<String, String>) -> String {

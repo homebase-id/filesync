@@ -133,7 +133,8 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
   restoring it restores, and what was deleted from it before, listed on its own too.
 - **Emptying an item** takes everything removed below it, through removed folders: what was deleted with it and
   what was deleted from it before (a sub-folder deleted first). Taking only what was deleted with it leaves the
-  folder holding the earlier delete, so it stays.
+  folder holding the earlier delete, so it stays. Take it as you listed it: a removal that arrived below it
+  after the user looked stays, and so does its folder (the desktop does the same since 2026-10-20).
 - **Deleting for good** (emptying, or the 30-day purge) takes removed nodes only, never a live node: a folder
   holding a live node, or a removed node that isn't going, stays with the folders it is in, emptied of the
   rest. So a removed folder still holding a live node stays in Recently deleted, restorable; it never goes for

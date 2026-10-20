@@ -353,6 +353,8 @@ mod tests {
                 stays: false,
             },
             along: 0,
+            db: "d1".into(),
+            seq: 1,
         }
     }
 
@@ -478,25 +480,25 @@ mod tests {
     #[test]
     fn requests_look_as_documented() -> Result<(), serde_json::Error> {
         let json = |ask| serde_json::to_string(&Request::new(ask));
-        assert_eq!(json(Ask::Status)?, r#"{"protocol":6,"ask":"status"}"#);
-        assert_eq!(json(Ask::Watch)?, r#"{"protocol":6,"ask":"watch"}"#);
-        assert_eq!(json(Ask::Stop)?, r#"{"protocol":6,"ask":"stop"}"#);
+        assert_eq!(json(Ask::Status)?, r#"{"protocol":7,"ask":"status"}"#);
+        assert_eq!(json(Ask::Watch)?, r#"{"protocol":7,"ask":"watch"}"#);
+        assert_eq!(json(Ask::Stop)?, r#"{"protocol":7,"ask":"stop"}"#);
         assert_eq!(
             json(Ask::Control(Control::Daemon(DaemonControl::SyncNow)))?,
-            r#"{"protocol":6,"ask":{"control":{"daemon":"sync_now"}}}"#
+            r#"{"protocol":7,"ask":{"control":{"daemon":"sync_now"}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Daemon(DaemonControl::Pause {
                 until: Some(1_800_000_000)
             })))?,
-            r#"{"protocol":6,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#
+            r#"{"protocol":7,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Folder {
                 path: PathBuf::from("/h"),
                 control: FolderControl::ConfirmDeletes { token: "t".into() }
             }))?,
-            r#"{"protocol":6,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
+            r#"{"protocol":7,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
         );
         let node = hbsync_types::NodeId(hbsync_types::Uuid::from_u128(1));
         assert_eq!(
@@ -504,7 +506,7 @@ mod tests {
                 identity: "a.example".into(),
                 control: AccountControl::Restore { nodes: vec![node] }
             }))?,
-            r#"{"protocol":6,"ask":{"control":{"account":{"identity":"a.example","control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}}}"#
+            r#"{"protocol":7,"ask":{"control":{"account":{"identity":"a.example","control":{"restore":{"nodes":["00000000-0000-0000-0000-000000000001"]}}}}}}"#
         );
         assert_eq!(
             json(Ask::Control(Control::Account {
@@ -514,21 +516,32 @@ mod tests {
                     seq: 7
                 }
             }))?,
-            r#"{"protocol":6,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"db":"d1","seq":7}}}}}}"#
+            r#"{"protocol":7,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_listed":{"db":"d1","seq":7}}}}}}"#
+        );
+        assert_eq!(
+            json(Ask::Control(Control::Account {
+                identity: "a.example".into(),
+                control: AccountControl::EmptyDeleted {
+                    nodes: vec![node],
+                    db: "d1".to_owned(),
+                    seq: 7
+                }
+            }))?,
+            r#"{"protocol":7,"ask":{"control":{"account":{"identity":"a.example","control":{"empty_deleted":{"nodes":["00000000-0000-0000-0000-000000000001"],"db":"d1","seq":7}}}}}}"#
         );
         assert_eq!(
             json(Ask::Recent { limit: 10 })?,
-            r#"{"protocol":6,"ask":{"recent":{"limit":10}}}"#
+            r#"{"protocol":7,"ask":{"recent":{"limit":10}}}"#
         );
         assert_eq!(
             json(Ask::Deleted { limit: 100 })?,
-            r#"{"protocol":6,"ask":{"deleted":{"limit":100}}}"#
+            r#"{"protocol":7,"ask":{"deleted":{"limit":100}}}"#
         );
         assert_eq!(
             json(Ask::FindDeleted {
                 items: vec!["Photos/2024".into()]
             })?,
-            r#"{"protocol":6,"ask":{"find_deleted":{"items":["Photos/2024"]}}}"#
+            r#"{"protocol":7,"ask":{"find_deleted":{"items":["Photos/2024"]}}}"#
         );
         assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);
         Ok(())

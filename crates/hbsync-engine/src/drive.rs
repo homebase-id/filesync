@@ -377,11 +377,12 @@ impl Drive {
         done.map(|()| restored)
     }
 
-    /// Deletes these items of Recently deleted for good, each with what was deleted with it.
-    pub fn empty(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+    /// Deletes these items of Recently deleted for good as `listed` showed them, each with
+    /// what was in it then ([`deleted::empty`]).
+    pub fn empty(&self, nodes: &[NodeId], listed: &deleted::Listed) -> Result<usize, EngineError> {
         self.catch_up(None)?;
         let mut moved = false;
-        let gone = deleted::empty(&self.account, self.remote(), nodes, &mut moved);
+        let gone = deleted::empty(&self.account, self.remote(), nodes, listed, &mut moved);
         self.behind_if(moved, &gone);
         gone
     }
@@ -408,10 +409,11 @@ impl Drive {
         gone
     }
 
-    /// Once a day: deletes for good what Recently deleted has kept `keep_days` (and the trash
-    /// of the same age). A failure waits for the next day's try... or the next call: it is only
-    /// recorded as done when it worked.
+    /// Once a day: deletes for good what Recently deleted has kept `keep_days`, never less
+    /// than [`deleted::MIN_KEEP_DAYS`] (and the trash of the same age). A failure waits for the
+    /// next day's try... or the next call: it is only recorded as done when it worked.
     pub fn purge_when_due(&self, keep_days: u32) -> Result<Option<usize>, EngineError> {
+        let keep_days = keep_days.max(deleted::MIN_KEEP_DAYS);
         const DAY: u64 = 24 * 60 * 60;
         let now = hbsync_types::unix_now();
         let last = self

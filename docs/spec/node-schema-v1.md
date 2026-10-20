@@ -185,7 +185,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
      since stays. An item holding a removal whose time the client doesn't know yet waits for a
      purge that knows it. A user emptying an item takes everything removed below it, through
      removed folders: what was deleted from it before too (a sub-folder deleted first, listed
-     on its own), else the folder would stay holding it.
+     on its own), else the folder would stay holding it; as it was listed to the user: a
+     removal that arrived below it since stays, and so does the folder holding it.
   2. **Never a live node:** the purge and emptying delete removed nodes only, never a live
      node. A folder holding a live node, or a removed node that isn't going, stays with the
      folders it is in, emptied of the rest: it never goes for good while it holds one, however
@@ -314,6 +315,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-20: a user emptying an item takes it as it was listed to them: a removal that arrived
+  below it since stays in Recently deleted, and so does the folder holding it (before, the
+  desktop took everything removed below it when it ran).
 - 2026-10-20: a restore whose folder is gone for good undoes only the removal (`archivalStatus`
   `0`, `groupId` as it was), leaving an orphan the computers move into Recovered files (before,
   the restore moved it to the top under a free name).

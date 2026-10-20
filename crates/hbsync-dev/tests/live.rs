@@ -46,6 +46,28 @@ fn the_contract_holds_on_a_live_drive() -> R {
     Ok(())
 }
 
+/// A file the drive doesn't have is "not there" as the identity answers it: its header read
+/// (sealed) and its payload read (ProblemDetails) both carry odin-core's mark
+/// (`ApiError::read`), so a missing file is still gone, and a proxy's 404 is not.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn a_missing_file_is_not_found() -> R {
+    let _drive = beside_others();
+    let remote = live_remote()?;
+    let missing = hbsync_types::RemoteFileId(uuid::Uuid::new_v4());
+    let header = remote.header(missing);
+    assert!(
+        matches!(header, Err(hbsync_remote::RemoteError::NotFound)),
+        "{header:?}"
+    );
+    let read = remote.read(missing, Some(0..16), &mut std::io::sink());
+    assert!(
+        matches!(read, Err(hbsync_remote::RemoteError::NotFound)),
+        "{read:?}"
+    );
+    Ok(())
+}
+
 /// Every registration finds the app's one circle by its slug: asking twice, or from a second
 /// registration of the app on the same identity (`hbsync-register <identity> --as b`), gives
 /// the same id; nothing is created when the app holds the slug.
@@ -666,7 +688,7 @@ fn echo_run(
                 .map(|d| d.node)
                 .collect();
             assert_eq!(nodes.len(), 1, "{run}/files in Recently deleted");
-            let gone = a.engine.drive().empty(&nodes)?;
+            let gone = a.engine.drive().empty(&nodes, &a.listed()?)?;
             assert_eq!(gone, n + 1, "every file and their folder");
             Ok(())
         })?;
@@ -686,7 +708,7 @@ fn echo_run(
         .filter(|d| d.path == run)
         .map(|d| d.node)
         .collect();
-    a.engine.drive().empty(&top)?;
+    a.engine.drive().empty(&top, &a.listed()?)?;
     result?;
     taken?;
     Ok(rows)

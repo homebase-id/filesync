@@ -25,6 +25,10 @@ use crate::tree::restored_names;
 use crate::walk::End;
 use hbsync_local::layout;
 
+/// The fewest days Recently deleted keeps an item: the purge is the whole account's, and every
+/// client keeps 30 (node schema, The purge). A device may keep longer, never shorter.
+pub const MIN_KEEP_DAYS: u32 = 30;
+
 /// Recently deleted as a whole: how much it holds, and what emptying all of it as it is now
 /// takes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,13 +71,19 @@ pub fn deletes(
                     .is_some_and(|h| h.stays)
             })
             .count(),
-        listed: Listed {
-            db: s.db_id()?,
-            seq: s.removed_seq()?,
-        },
+        listed: listed_now(s)?,
     };
     let picked = listing.deletes().take(limit).collect();
     Ok((listing.with_along(picked)?, summary))
+}
+
+/// What a listing of Recently deleted that reads it now sees ([`Listed`]): to read in the
+/// transaction that reads the items shown.
+pub fn listed_now(s: &Store<'_>) -> Result<Listed, StateError> {
+    Ok(Listed {
+        db: s.db_id()?,
+        seq: s.removed_seq()?,
+    })
 }
 
 /// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, each
@@ -827,20 +837,35 @@ fn empty_trashes(account: &Mutex<StateDb>, keep_ms: i64) -> Result<(), EngineErr
     Ok(())
 }
 
-/// Deletes for good the items `nodes` name, each with all of Recently deleted that is in it
-/// ([`inside`]: what was deleted with it, and what was deleted from it before), as [`select`]s
-/// it, leaving tombstones. Returns how many items went.
+/// Deletes for good the items `nodes` name as `listed` showed them, each with all of Recently
+/// deleted in it then ([`inside`]: what was deleted with it, and what was deleted from it
+/// before), as [`select`]s it, leaving tombstones: nothing recorded since the listing (a removal
+/// that arrived inside it later, or the item deleted again after a restore), and never a live
+/// node. Refused like [`empty_listed`] for a listing this DB never gave. Returns how many items
+/// went.
 pub fn empty(
     account: &Mutex<StateDb>,
     remote: &dyn Remote,
     nodes: &[NodeId],
+    listed: &Listed,
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
     let passes = locked(account).read(|s| {
+        refuse_unlisted(s, listed)?;
         let mut chosen = Vec::new();
         for &node in nodes {
-            if let Some(top) = s.removed_by_node(node)? {
-                chosen.extend(inside_of(s, top)?);
+            if let Some(top) = s.recorded_by_node(node)? {
+                // Each row with its `seq`: what the listing saw is up to its counter.
+                let rows = inside(
+                    top,
+                    |r| (r.removed.row.node, r.removed.row.kind == NodeKind::Folder),
+                    |n| s.recorded_children(n),
+                )?;
+                chosen.extend(
+                    rows.into_iter()
+                        .filter(|r| r.seq <= listed.seq)
+                        .map(|r| r.removed),
+                );
             }
         }
         going(s, chosen)
@@ -860,15 +885,21 @@ pub fn empty_listed(
     moved: &mut bool,
 ) -> Result<usize, EngineError> {
     let passes = locked(account).read(|s| {
-        if !listed_here(s, listed)? {
-            return Err(StateError::Conflict(
-                "Recently deleted was never listed so here: look at it again".to_owned(),
-            ));
-        }
+        refuse_unlisted(s, listed)?;
         let chosen = s.recorded_upto(listed.seq)?;
         going(s, chosen.into_iter().map(|r| r.removed).collect())
     })?;
     delete_for_good(account, remote, &passes, None, moved)
+}
+
+/// Refuses `listed` unless this DB gave it ([`listed_here`]).
+fn refuse_unlisted(s: &Store<'_>, listed: &Listed) -> Result<(), StateError> {
+    match listed_here(s, listed)? {
+        true => Ok(()),
+        false => Err(StateError::Conflict(
+            "Recently deleted was never listed so here: look at it again".to_owned(),
+        )),
+    }
 }
 
 /// Whether this DB gave `listed`: its own, up to a counter it reached.
@@ -1729,7 +1760,13 @@ mod tests {
                     assert_eq!((summary.deletes, summary.items), (4, 2));
                     empty_listed(&db, &remote, &summary.listed, &mut false)?
                 }
-                "deletes" => empty(&db, &remote, &[outer, other, g, h], &mut false)?,
+                "deletes" => empty(
+                    &db,
+                    &remote,
+                    &[outer, other, g, h],
+                    &listed(&db)?,
+                    &mut false,
+                )?,
                 _ => expire(&db, &remote, 11, None, &mut false)?,
             };
             assert_eq!(went, 2, "{how}");
@@ -2116,7 +2153,7 @@ mod tests {
                     let listing = listed(&db)?;
                     empty_listed(&db, &remote, &listing, &mut false)?
                 }
-                "deletes" => empty(&db, &remote, &[f, other, a], &mut false)?,
+                "deletes" => empty(&db, &remote, &[f, other, a], &listed(&db)?, &mut false)?,
                 _ => expire(&db, &remote, 11, None, &mut false)?,
             };
             assert_eq!(went, 4, "{how}");

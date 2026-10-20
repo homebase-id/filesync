@@ -117,8 +117,9 @@ pub enum Action {
     EmptyListed,
     /// The user empties one item of Recently deleted as last listed (a pick of its rows; nothing
     /// without a listing): it and all of Recently deleted in it ([`deleted::inside`]: what was
-    /// deleted from it before too), at their listed versions, as the engine selects them. An
-    /// item holding nothing live and nothing written since the listing goes.
+    /// deleted from it before too), at their listed versions, as the engine selects them
+    /// ([`deleted::empty`] with the listing: nothing recorded since). An item holding nothing
+    /// live and nothing written since the listing goes.
     EmptyItem {
         pick: usize,
     },

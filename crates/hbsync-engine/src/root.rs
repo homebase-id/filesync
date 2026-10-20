@@ -289,12 +289,18 @@ impl AccountReader {
         self.db.read(|s| crate::deleted::listed_here(s, listed))
     }
 
-    /// Items of Recently deleted by node ([`crate::deleted::find`]).
+    /// Items of Recently deleted by node ([`crate::deleted::find`]), and the listing that saw
+    /// them, which emptying them takes.
     pub fn find_deleted(
         &mut self,
         nodes: &[hbsync_types::NodeId],
-    ) -> Result<Vec<(Deleted, usize)>, StateError> {
-        self.db.read(|s| crate::deleted::find(s, nodes))
+    ) -> Result<(Vec<(Deleted, usize)>, crate::deleted::Listed), StateError> {
+        self.db.read(|s| {
+            Ok((
+                crate::deleted::find(s, nodes)?,
+                crate::deleted::listed_now(s)?,
+            ))
+        })
     }
 
     /// Every item of Recently deleted ([`crate::deleted::all`]).
@@ -303,9 +309,18 @@ impl AccountReader {
         self.db.read(crate::deleted::all)
     }
 
-    /// The items of Recently deleted named `names` ([`crate::deleted::named`]).
-    pub fn named_deleted(&mut self, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
-        self.db.read(|s| crate::deleted::named(s, names))
+    /// The items of Recently deleted named `names` ([`crate::deleted::named`]), and the
+    /// listing that saw them.
+    pub fn named_deleted(
+        &mut self,
+        names: &[String],
+    ) -> Result<(Vec<(Deleted, usize)>, crate::deleted::Listed), StateError> {
+        self.db.read(|s| {
+            Ok((
+                crate::deleted::named(s, names)?,
+                crate::deleted::listed_now(s)?,
+            ))
+        })
     }
 }
 

@@ -150,26 +150,36 @@ pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> 
 
 /// Restores `items` (each with what its delete took along), in their accounts.
 pub fn restore(paths: &Paths, items: &[DeletedItem]) -> Result<()> {
-    for (identity, nodes) in by_account(items) {
+    // A restore takes the items as they are now: one request per account, whatever listed them.
+    for (identity, nodes) in grouped(items, |i| i.identity.clone()) {
         account(paths, &identity, AccountControl::Restore { nodes })?;
     }
     Ok(())
 }
 
-/// Deletes `items` (each with what its delete took along) for good, in their accounts.
+/// Deletes `items` for good as they were listed (each with what was in it then), in their
+/// accounts.
 pub fn empty(paths: &Paths, items: &[DeletedItem]) -> Result<()> {
-    for (identity, nodes) in by_account(items) {
-        account(paths, &identity, AccountControl::EmptyDeleted { nodes })?;
+    for ((identity, db, seq), nodes) in
+        grouped(items, |i| (i.identity.clone(), i.db.clone(), i.seq))
+    {
+        account(
+            paths,
+            &identity,
+            AccountControl::EmptyDeleted { nodes, db, seq },
+        )?;
     }
     Ok(())
 }
 
-fn by_account(items: &[DeletedItem]) -> std::collections::BTreeMap<String, Vec<NodeId>> {
-    let mut by = std::collections::BTreeMap::<String, Vec<NodeId>>::new();
+/// The nodes of `items` by `key` (their account, say, or the listing that gave them).
+fn grouped<K: Ord>(
+    items: &[DeletedItem],
+    key: impl Fn(&DeletedItem) -> K,
+) -> std::collections::BTreeMap<K, Vec<NodeId>> {
+    let mut by = std::collections::BTreeMap::<K, Vec<NodeId>>::new();
     for item in items {
-        by.entry(item.identity.clone())
-            .or_default()
-            .push(item.deleted.node);
+        by.entry(key(item)).or_default().push(item.deleted.node);
     }
     by
 }

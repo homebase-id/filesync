@@ -17,7 +17,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub const PROTOCOL: u32 = 6;
+pub const PROTOCOL: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -132,8 +132,15 @@ pub enum DaemonControl {
 pub enum AccountControl {
     /// Restore these items of Recently deleted, each with what was deleted with it.
     Restore { nodes: Vec<NodeId> },
-    /// Delete these items of Recently deleted for good, each with what was deleted with it.
-    EmptyDeleted { nodes: Vec<NodeId> },
+    /// Delete these items of Recently deleted for good, each with what was in it when it was
+    /// listed ([`DeletedItem::db`], [`DeletedItem::seq`]): nothing recorded since (a removal
+    /// that arrived in it later) and nothing live. A listing of another DB, or one the account
+    /// never gave, is refused in the reply.
+    EmptyDeleted {
+        nodes: Vec<NodeId>,
+        db: String,
+        seq: u64,
+    },
     /// Delete for good what Recently deleted held when it was listed ([`DeletedAccount::db`],
     /// [`DeletedAccount::seq`]): every removal this device recorded up to `seq`, nothing recorded
     /// since and nothing live (a folder holding either stays). A listing of another DB, or one
@@ -209,6 +216,10 @@ pub struct DeletedItem {
     /// files is one item with its count.
     #[serde(default)]
     pub along: usize,
+    /// The listing that saw it, as [`DeletedAccount::db`] and [`DeletedAccount::seq`]: emptying
+    /// it takes what was in it then ([`AccountControl::EmptyDeleted`]).
+    pub db: String,
+    pub seq: u64,
 }
 
 impl DeletedItem {

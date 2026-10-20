@@ -166,6 +166,27 @@ impl Store<'_> {
         )
     }
 
+    /// The row of Recently deleted that is `node`, with its [`Recorded::seq`]
+    /// ([`Store::removed_by_node`]).
+    pub fn recorded_by_node(&self, node: NodeId) -> Result<Option<Recorded>> {
+        Ok(self
+            .recorded_rows(
+                &format!("{REMOVED_SELECT} WHERE node = ?1"),
+                [node.0.as_bytes()],
+            )?
+            .pop())
+    }
+
+    /// The removed nodes in folder `parent`, with their [`Recorded::seq`]
+    /// ([`Store::removed_children`]).
+    pub fn recorded_children(&self, parent: NodeId) -> Result<Vec<Recorded>> {
+        let parent = self.coords()?.to_drive(parent);
+        self.recorded_rows(
+            &format!("{REMOVED_SELECT} WHERE parent = ?1"),
+            [parent.0.as_bytes()],
+        )
+    }
+
     fn recorded_rows(&self, sql: &str, params: impl rusqlite::Params) -> Result<Vec<Recorded>> {
         let mut seen = Vec::new();
         for r in self.many(sql, params, recorded_row)? {
