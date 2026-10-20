@@ -32,7 +32,7 @@ use hbsync_dev::{
 };
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier, OwnWrites};
-use hbsync_remote::contract::{feed_end, file, folder, removed, upload, with};
+use hbsync_remote::contract::{doomed, feed_end, file, folder, removed, upload, with};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, RemoteFileId, Target, VersionTag};
@@ -333,7 +333,7 @@ impl Harness {
     /// `Ok(false)`: changed meanwhile (a conflict), left alone.
     fn delete(&self, by: usize, node: NodeId) -> Res<bool> {
         let at = self.doc(node)?.target.at;
-        match self.remote(by).delete(&[at])?.single() {
+        match self.remote(by).delete(&doomed(&[at]))?.single() {
             Ok(_) => {}
             Err(RemoteError::VersionMismatch) => {
                 self.conflicts.fetch_add(1, Ordering::Relaxed);

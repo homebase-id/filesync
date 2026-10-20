@@ -1,10 +1,10 @@
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_state::{BaseRow, LocalRow, StateDb, StateError, keys};
-use hbsync_types::RemoteRef;
 use hbsync_types::{
     ContentState, FileContent, FileToken, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId,
     Tag, Tags, Uuid, VersionTag,
 };
+use hbsync_types::{Doomed, RemoteRef};
 
 type R = Result<(), StateError>;
 
@@ -525,7 +525,10 @@ mod mirror {
             s.account().put_tombstone(old, 10)?;
             s.account().put_tombstone(young, 20)
         })?;
-        assert_eq!(db.read(|s| s.tombstones_before(15))?, [old]);
+        assert_eq!(
+            db.read(|s| s.tombstones_before(15))?,
+            [Doomed::unchecked(old)]
+        );
         db.write(|s| s.account().delete_tombstone_at(old).map(drop))?;
         assert!(db.read(|s| s.tombstones_before(15))?.is_empty());
         assert!(db.read(|s| s.file_gone(old.file_id))?, "still gone");

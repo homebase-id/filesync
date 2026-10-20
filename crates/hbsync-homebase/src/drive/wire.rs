@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::HomebaseError;
 use crate::crypto::{Key, aes_cbc_encrypt};
-use crate::drive::sealed::{KeyHeader, SealedKeyHeader, sealed_len};
+use crate::drive::sealed::{KeyHeader, SealedKeyHeader, checked_sealed_len, sealed_len};
 
 pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
 
@@ -278,16 +278,24 @@ pub(crate) fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<Remot
                 .map_err(|e| format!("file {id}: content: {e}"))?;
             let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
-            // The stored size of an encrypted payload isn't the file's: only `size` tells it.
-            if kind == NodeKind::File && content.size.is_none() {
-                return Err(format!("file {id}: no size (node schema v1)"));
-            }
             let payload = match kind {
                 NodeKind::Folder => None,
                 NodeKind::File => {
+                    // The stored size of an encrypted payload isn't the file's: only `size`
+                    // tells it.
+                    let size = content
+                        .size
+                        .ok_or_else(|| format!("file {id}: no size (node schema v1)"))?;
                     let p = meta
                         .sync_payload()
                         .ok_or_else(|| format!("file {id}: no payload"))?;
+                    // Bytes that can't be the file's would fail every download, in full.
+                    if checked_sealed_len(size) != Some(p.bytes_written) {
+                        return Err(format!(
+                            "file {id}: size {size} doesn't fit its payload's {} bytes",
+                            p.bytes_written
+                        ));
+                    }
                     Some(payload_info(p, &key).map_err(|e| format!("file {id}: {e}"))?)
                 }
             };
@@ -553,6 +561,7 @@ mod tests {
             meta.app_data.content = Some(kh.seal_text(plain));
         }
         for payload in meta.payloads.iter_mut().flatten() {
+            payload.bytes_written = sealed_len(payload.bytes_written);
             let payload_iv = sealed::strong()?;
             payload.iv = Some(STANDARD.encode(payload_iv));
             if let Some(hash) = payload.hash.as_mut() {
@@ -622,19 +631,27 @@ mod tests {
         let mut no_parent = fixture("file-node.json");
         no_parent.file_metadata.app_data.group_id = None;
         refused(no_parent, "no parent")?;
+        // The file fixture with content `size`.
+        let with_size = |size: Option<u64>| -> Result<FileHeader, Box<dyn std::error::Error>> {
+            let mut row = fixture("file-node.json");
+            let meta = &mut row.file_metadata.app_data;
+            let mut content = NodeContent::from_json(meta.content.as_deref().unwrap_or_default())?;
+            content.size = size;
+            meta.content = Some(content.to_json());
+            Ok(row)
+        };
         // Without its size, the stored (padded) size would be taken for the file's.
-        let mut sizeless = fixture("file-node.json");
-        let mut content = NodeContent::from_json(
-            sizeless
-                .file_metadata
-                .app_data
-                .content
-                .as_deref()
-                .unwrap_or_default(),
-        )?;
-        content.size = None;
-        sizeless.file_metadata.app_data.content = Some(content.to_json());
-        refused(sizeless, "no size")?;
+        refused(with_size(None)?, "no size")?;
+        // A size its stored bytes can't hold, or one near u64::MAX (whose sealed size would
+        // overflow): every download would fail its check, in full.
+        for (size, stored) in [(1000, None), (1040, None), (u64::MAX - 3, Some(u64::MAX))] {
+            let mut odd = as_stored(with_size(Some(size))?)?;
+            for payload in odd.file_metadata.payloads.iter_mut().flatten() {
+                payload.bytes_written = stored.unwrap_or(payload.bytes_written);
+            }
+            let error = to_remote(odd, &SS).err().ok_or("decoded")?;
+            assert!(error.contains("doesn't fit its payload"), "{error}");
+        }
         // A file is its payload, and its content hash is what sync compares.
         let mut bare = fixture("file-node.json");
         bare.file_metadata.payloads = None;

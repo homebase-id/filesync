@@ -71,8 +71,8 @@ a restore brought back something whose folder went for good).
   `archivalStatus` 2, still in its folder (filesync's "Recently deleted").
 - Every row is encrypted: names, sizes and times. Decrypt each one, then sort on the device.
 - Skip any row that won't decrypt, isn't encrypted or has a different file type; a name that
-  breaks the name rules under "Uploading"; and a file without `size` or without a hashed
-  `sync_data` payload.
+  breaks the name rules under "Uploading"; a file without `size` or without a hashed
+  `sync_data` payload; and one whose payload's `bytesWritten` isn't `(size / 16 + 1) · 16`.
 - odin-core has no index on `groupId` yet, so on a big drive each listing scans the whole drive
   (to fix in odin-core).
 

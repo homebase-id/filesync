@@ -11,8 +11,8 @@ use hbsync_types::schema::{
     Keys, NodeContent, keys_from_str, tags_from_str, tags_in_keys, tags_to_string,
 };
 use hbsync_types::{
-    ContentHash, ContentState, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId,
-    RemoteRef, Tags, Target, VersionTag,
+    ContentHash, ContentState, Doomed, FileContent, FileToken, NodeId, NodeKind, NodeState,
+    RemoteFileId, RemoteRef, Tags, Target, VersionTag,
 };
 use std::collections::HashMap;
 
@@ -161,6 +161,11 @@ impl RemovedRow {
     /// ([`hbsync_types::removal_time`]).
     pub fn time(&self) -> i64 {
         hbsync_types::removal_time(self.removed_at)
+    }
+
+    /// This file at the version recorded in Recently deleted: what a delete may name.
+    pub fn doomed(&self) -> Doomed {
+        Doomed::unchecked(self.row.remote_ref())
     }
 }
 

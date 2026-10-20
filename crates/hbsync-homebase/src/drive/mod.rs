@@ -16,14 +16,14 @@ use hbsync_remote::{
     RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
-use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
+use hbsync_types::{ContentHash, Doomed, NodeId, RemoteFileId, RemoteRef, Target, VersionTag};
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::client::{Client, Fetched, UploadMethod};
 use crate::drive::sealed::{
-    CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
+    CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, checked_sealed_len, sealed_len,
 };
 use crate::multipart::{Multipart, Part, SourceEnded};
 use crate::{ApiError, HomebaseError, app};
@@ -219,7 +219,7 @@ impl HomebaseRemote {
         let mut sending = match payload {
             None => None,
             Some(p) => {
-                let size = sealed_len(p.size);
+                let size = checked_sealed_len(p.size).unwrap_or(u64::MAX);
                 if size > MAX_PAYLOAD {
                     return Err(RemoteError::Fatal(format!(
                         "{} bytes is too large for this server (odin-core #1893)",
@@ -571,16 +571,16 @@ impl Remote for HomebaseRemote {
     /// goes only at its version (a tombstone isn't checked: it answers as deleted, with its own
     /// time), one after another in the order asked; one file's answer never stops the others.
     /// No recipients: nothing goes to peers.
-    fn delete(&self, files: &[RemoteRef]) -> Result<Deletes> {
+    fn delete(&self, files: &[Doomed]) -> Result<Deletes> {
         Answers::in_batches(files, BATCH_FILES, |batch| {
             let answer: BatchAnswer<SoftDeleted> = self
                 .client
                 .post(
                     &format!("{}/soft-delete-batch", self.files()),
-                    &versioned(batch.iter()),
+                    &versioned(batch.iter().map(|f| f.at())),
                 )
                 .map_err(remote_error)?;
-            let asked = batch.iter().map(|f| f.file_id);
+            let asked = batch.iter().map(|f| f.at().file_id);
             same_files("soft-delete-batch", &answer.results, |a| a.file_id, asked)?;
             Ok(answer.results.iter().map(soft_deleted).collect())
         })
@@ -588,16 +588,16 @@ impl Remote for HomebaseRemote {
 
     /// One request per [`BATCH_FILES`] files (`hard-delete-batch`, odin-core #1968): each
     /// file goes only at its version, and one file's answer never stops the others.
-    fn delete_for_good(&self, files: &[RemoteRef]) -> Result<ForGood> {
+    fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood> {
         Answers::in_batches(files, BATCH_FILES, |batch| {
             let answer: BatchAnswer<HardDeleted> = self
                 .client
                 .post(
                     &format!("{}/hard-delete-batch", self.files()),
-                    &versioned(batch.iter()),
+                    &versioned(batch.iter().map(|f| f.at())),
                 )
                 .map_err(remote_error)?;
-            let asked = batch.iter().map(|f| f.file_id);
+            let asked = batch.iter().map(|f| f.at().file_id);
             same_files("hard-delete-batch", &answer.results, |a| a.file_id, asked)?;
             Ok(answer.results.iter().map(hard_deleted).collect())
         })
@@ -608,7 +608,7 @@ impl Remote for HomebaseRemote {
     /// one after another in the order asked; one file's answer never stops the others.
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Target>> {
         Answers::in_batches(files, BATCH_FILES, |batch| {
-            let mut body = versioned(batch.iter().map(|t| &t.at));
+            let mut body = versioned(batch.iter().map(|t| t.at));
             body["archivalStatus"] = json!(if removed { ARCHIVAL_REMOVED } else { 0 });
             let answer: BatchAnswer<ArchivalSet> = self
                 .client
@@ -684,7 +684,7 @@ impl Remote for HomebaseRemote {
 }
 
 /// The body of a batch of files each at its version: `{files: [{fileId, versionTag}]}`.
-fn versioned<'a>(files: impl Iterator<Item = &'a RemoteRef>) -> serde_json::Value {
+fn versioned(files: impl Iterator<Item = RemoteRef>) -> serde_json::Value {
     json!({ "files": files.map(|f| json!({
         "fileId": f.file_id.0,
         "versionTag": f.version.0,

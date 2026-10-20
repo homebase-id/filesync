@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use hbsync_remote::{Answers, Holds, Remote, RemoteError};
 use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError, keys};
-use hbsync_types::{NodeId, NodeKind, RemoteRef, Role, Target};
+use hbsync_types::{Doomed, NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
 use crate::mirror::{self, look};
@@ -431,9 +431,8 @@ impl AccountOps<'_> {
             }
             let (hard, soft): (Vec<&RemovedRow>, Vec<&RemovedRow>) =
                 going.into_iter().partition(|r| hard(r));
-            let refs = |rows: &[&RemovedRow]| -> Vec<RemoteRef> {
-                rows.iter().map(|r| r.row.remote_ref()).collect()
-            };
+            let refs =
+                |rows: &[&RemovedRow]| -> Vec<Doomed> { rows.iter().map(|r| r.doomed()).collect() };
             let (answers, mut failed) = hard_delete(self.remote, &refs(&hard));
             let mut answered: Vec<(&RemovedRow, Answer)> = hard.into_iter().zip(answers).collect();
             if failed.is_none() {
@@ -505,7 +504,7 @@ impl AccountOps<'_> {
                 .iter()
                 .zip(answers)
                 .filter(|(_, answer)| matches!(answer, Answer::Deleted(_) | Answer::Missing))
-                .try_for_each(|(t, _)| mirror::tombstone_deleted(s.account(), *t))
+                .try_for_each(|(t, _)| mirror::tombstone_deleted(s.account(), t.at()))
         })?;
         match failed {
             Some(e) => Err(EngineError::Remote(e)),
@@ -606,7 +605,7 @@ enum Answer {
 }
 
 /// Deletes `files` without a trace, each only at its version: [`answers_to`].
-fn hard_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option<RemoteError>) {
+fn hard_delete(remote: &dyn Remote, files: &[Doomed]) -> (Vec<Answer>, Option<RemoteError>) {
     answers_to(files, |f| remote.delete_for_good(f), |()| None)
 }
 
@@ -615,8 +614,8 @@ fn hard_delete(remote: &dyn Remote, files: &[RemoteRef]) -> (Vec<Answer>, Option
 /// request that stopped it there, if one did (the files not answered stay), or else the first
 /// answer that isn't one of [`Answer`]'s.
 fn answers_to<T>(
-    files: &[RemoteRef],
-    delete: impl FnOnce(&[RemoteRef]) -> Result<Answers<T>, RemoteError>,
+    files: &[Doomed],
+    delete: impl FnOnce(&[Doomed]) -> Result<Answers<T>, RemoteError>,
     tombstone: impl Fn(T) -> Option<i64>,
 ) -> (Vec<Answer>, Option<RemoteError>) {
     if files.is_empty() {

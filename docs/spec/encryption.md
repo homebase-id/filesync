@@ -110,7 +110,10 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   decrypt the content, and the content hash under its payload IV. A row that doesn't decrypt is
   skipped with its reason, like any unreadable row. So is a file whose content has
   no `size` (node schema v1 requires it for files): its stored size is padded, and taking it
-  for the file's would make every download fail its hash.
+  for the file's would make every download fail its hash. So is a file whose payload's
+  `bytesWritten` isn't the stored size of `size` (`(size / 16 + 1) · 16`, within odin-core's
+  signed 64-bit `BytesWritten`, **[verified]** `PayloadDescriptor.cs`): every download of it
+  would fail, in full.
 - A tombstone's key header isn't read: one that doesn't parse (null fields, say) is ignored.
 - Payload range `p0..p1` (plaintext offsets, `p1` at most the plaintext size): fetch
   ciphertext from the block before `p0`'s block, or from 0, where the payload IV is the block

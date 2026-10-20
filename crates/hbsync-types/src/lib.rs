@@ -119,6 +119,29 @@ pub struct RemoteRef {
     pub version: VersionTag,
 }
 
+/// A file a delete may name (`Remote::delete`, `Remote::delete_for_good`), at its version: in
+/// the product, one this device recorded in Recently deleted (`RemovedRow::doomed`) or as a
+/// tombstone (`ReadTx::tombstones_before`). The type marks the rule and lint keeps it: the
+/// engine's and the app's `clippy.toml` disallow [`Doomed::unchecked`], so they get one only
+/// from the store. It is no proof against a `RemovedRow` made by hand, and the server's version
+/// check still guards every delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Doomed(RemoteRef);
+
+impl Doomed {
+    /// Any file, unchecked, live ones too: for the store, which makes one from what it
+    /// recorded, and for tools and tests that delete what they wrote themselves
+    /// (`hbsync-clean`).
+    pub fn unchecked(at: RemoteRef) -> Self {
+        Doomed(at)
+    }
+
+    /// The file and the version the delete names.
+    pub fn at(self) -> RemoteRef {
+        self.0
+    }
+}
+
 /// Opaque bytes a remote attaches to a file so it can write it again without reading it first
 /// (Homebase: the file's key header as the server hands it out, sealed with the app's shared
 /// secret). It belongs to one file: never written with another.

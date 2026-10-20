@@ -584,7 +584,10 @@ mod tests {
         };
         db.write(|s| announced(s.account(), &[deleted(Some(7))]).map(drop))?;
         assert_eq!(
-            db.read(|s| s.tombstones_before(8))?,
+            db.read(|s| s.tombstones_before(8))?
+                .iter()
+                .map(|t| t.at())
+                .collect::<Vec<_>>(),
             [at],
             "a tombstone on the drive"
         );
