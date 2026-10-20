@@ -330,7 +330,8 @@ fn cycle_root(rows: &mut RemovedRows<'_, '_>, walked: &[NodeId]) -> Result<NodeI
 }
 
 /// The path of folder `at` below the top it is under (one of `tops`, else the drive's root:
-/// a folder deleted for good ends the path, which starts below it), and that top, from the
+/// a folder deleted for good ends the path, which starts in Recovered files, where a restore
+/// brings what was in it), and that top, from the
 /// tree or from Recently deleted. Memoized in `known`.
 fn place(
     rows: &mut RemovedRows<'_, '_>,
@@ -351,10 +352,11 @@ fn place(
     })?;
     let (mut path, top) = match up.end {
         End::At(n) if tops.contains(&n) => (String::new(), n),
-        End::At(n) => known
-            .get(&n)
-            .cloned()
-            .unwrap_or((String::new(), NodeId::ROOT)),
+        End::At(n) => match known.get(&n) {
+            Some(place) => place.clone(),
+            // Deleted for good: a restore brings it back an orphan, for Recovered files.
+            None => (recovered_name(rows.s)?, NodeId::ROOT),
+        },
         End::Top | End::Cycle | End::Deep => (String::new(), NodeId::ROOT),
     };
     // Top-down, remembering each folder on the way.
@@ -363,6 +365,12 @@ fn place(
         known.insert(id, (path.clone(), top));
     }
     Ok((path, top))
+}
+
+/// Recovered files' name on the drive, or the one it gets when made.
+fn recovered_name(s: &Store<'_>) -> Result<String, StateError> {
+    Ok(s.get_mirror(NodeId::RECOVERED)?
+        .map_or_else(|| hbsync_types::RECOVERED_NAME.to_owned(), |m| m.name))
 }
 
 fn join(folder: &str, name: &str) -> String {
@@ -406,8 +414,8 @@ pub fn restore(
     let mut restored = 0;
     let mut left: Vec<&MirrorRow> = rows.iter().map(|r| &r.row).collect();
     // In waves, each after the folders it comes back into: the rows whose folder is back (or
-    // never left; one deleted for good, the top takes), then those in them. One that was to
-    // come back into a folder that didn't stays in Recently deleted.
+    // never left, or went for good), then those in them. One that was to come back into a
+    // folder that didn't stays in Recently deleted.
     while r.failed.is_none() {
         let (wave, later): (Vec<&MirrorRow>, _) = left
             .into_iter()
@@ -417,13 +425,15 @@ pub fn restore(
         }
         left = later;
         // Back in its own folder under its own name: only its removal undone, with the others
-        // in one request. The rest, once those answered (a name one didn't take is free again),
-        // under a free name or at the top: a rewrite each.
+        // in one request. One whose folder isn't live (so not in the plan either: gone for
+        // good) comes back so too, an orphan the main folders move into Recovered files (sync
+        // semantics §6.3). The rest, once those answered (a name one didn't take is free
+        // again), under a free name: a rewrite each.
         let mut asked = Vec::new();
         let mut rest = Vec::new();
         for row in wave {
-            let free = r.live.contains(&row.parent)
-                && r.taken
+            let free = !r.live.contains(&row.parent)
+                || r.taken
                     .entry(row.parent)
                     .or_default()
                     .insert(name_key(&row.name));
@@ -455,17 +465,13 @@ pub fn restore(
             if r.failed.is_some() {
                 break;
             }
-            let parent = match r.live.contains(&row.parent) {
-                true => row.parent,
-                false => NodeId::ROOT,
-            };
-            let names = r.taken.entry(parent).or_default();
+            let names = r.taken.entry(row.parent).or_default();
             let Some(name) = restored_names(&row.name).find(|n| !names.contains(&name_key(n)))
             else {
                 continue; // no free name: it stays in Recently deleted
             };
             names.insert(name_key(&name));
-            let meta = meta_at(row, parent, &name, false);
+            let meta = meta_at(row, row.parent, &name, false);
             let answer = remote.update(&row.target(), &meta, None);
             r.settle(row, &meta, answer);
         }
@@ -528,7 +534,8 @@ impl Restoring<'_> {
         *self.moved = true;
         match e {
             // Deleted for good meanwhile (its answer or its header says so), maybe without a
-            // trace in the feed: gone here too, and what was to come back into it, the top takes.
+            // trace in the feed: gone here too, and what was to come back into it comes back as
+            // into any folder gone for good.
             RemoteError::NotFound | RemoteError::Deleted => {
                 match gone_after(self.remote, &e, row.file_id) {
                     Ok(true) => {
@@ -693,14 +700,19 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
         return Ok(None);
     };
     // The folders above, as far as they are in Recently deleted (then in the tree, or deleted
-    // for good: the top it is).
-    let mut chain = crate::walk::up::<_, StateError>(top.row.parent, |at| {
+    // for good: the item comes back as an orphan, for Recovered files). A chain past any depth
+    // a path may have (only a malicious drive makes one) stays where it is: above its top is
+    // still a removed folder, not one gone for good.
+    let up = crate::walk::up::<_, StateError>(top.row.parent, |at| {
         Ok(s.removed_by_node(at)?.map(|f| {
             let parent = f.row.parent;
             (f, parent)
         }))
-    })?
-    .items;
+    })?;
+    if matches!(up.end, End::Deep) {
+        return Ok(None);
+    }
+    let mut chain = up.items;
     chain.reverse();
     // Then the node and what was deleted with it, each after its folder; each node once. What
     // is live still comes back with its folder by itself.
@@ -711,7 +723,8 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
             rows.push(r);
         }
     }
-    // The folders in the tree the rows may go into, and their names.
+    // The folders in the tree the rows may go into, and the folders coming back: their names.
+    // (One that is neither went for good: what was in it takes no name there.)
     let mut live = HashSet::from([NodeId::ROOT]);
     let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
     for parent in rows.iter().map(|r| r.row.parent).chain([NodeId::ROOT]) {
@@ -720,6 +733,8 @@ fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, Stat
         }
         if !parent.is_root() && s.get_mirror(parent)?.is_some() {
             live.insert(parent);
+        } else if !parent.is_root() && !seen.contains(&parent) {
+            continue;
         }
         let names = s
             .mirror_children(parent)?

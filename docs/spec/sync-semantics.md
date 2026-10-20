@@ -157,7 +157,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
    **Orphans go into Recovered files.** A live node whose folder is nowhere on the drive
    (deleted for good: a stale plan's create racing a delete and an emptied Recently deleted,
-   another app, a hard delete), or a folder in Recently deleted that such a node brings back,
+   a restore of something whose folder went for good, another app, a hard delete), or a folder in Recently deleted that such a node brings back,
    is moved on the drive into **Recovered files** (one metadata update at its version; a
    mismatch plans again), a folder at the top with a fixed node id (node schema, "Recovered
    files"). Nowhere means on a whole picture of the drive: the feed read to its end (it reads on

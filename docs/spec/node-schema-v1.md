@@ -52,7 +52,8 @@ the same on every drive: devices that add one join it.
 
 ## Recovered files
 A folder at the top holding what lost its folder for good: a live node whose `groupId` is no
-node on the drive (deleted for good while something was written into it, or by another app).
+node on the drive (deleted for good while something was written into it, or by another app; or
+a restore of something whose folder went for good).
 Computers syncing the main folder move such a node into it (sync semantics §6.3).
 
 | `uniqueId` | Name when created |
@@ -170,7 +171,8 @@ app uploads may not use **[verified]** `ReservedFileTypes.cs`, `StandardFileStre
 - Restore is the update back: `archivalStatus` `0` (and new bytes, when an edit
   restores it; the same batch when nothing else changes). Restoring a folder also restores the removed nodes below it that were deleted
   with it (not what was deleted from it before); a node whose parent is removed brings the
-  parent back first, and one whose parent is gone for good comes back at the top. If a folder
+  parent back first, and one whose parent is gone for good comes back as it was, an orphan
+  the computers move into Recovered files (see above). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
   meanwhile gets ` (restored)`.
 - **The purge**, the one rule for deleting for good (a user emptying Recently deleted follows
@@ -312,6 +314,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-20: a restore whose folder is gone for good undoes only the removal (`archivalStatus`
+  `0`, `groupId` as it was), leaving an orphan the computers move into Recovered files (before,
+  the restore moved it to the top under a free name).
 - 2026-10-19: Recovered files, a folder at the top with the fixed node id
   `fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b`, named `Recovered files` when made: a live node whose
   folder is nowhere on the drive is moved into it on the drive (before, computers moved it to
