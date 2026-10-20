@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use hbsync_local::{Marker, layout};
 use hbsync_state::{FolderRow, Reader, StateDb, StateError, keys};
 use hbsync_types::NodeId;
-use hbsync_types::activity::{Deleted, Synced};
+use hbsync_types::activity::Synced;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RootError {
@@ -236,7 +236,8 @@ fn refuse_other(db: &Path, theirs: Option<String>, identity: &str) -> Result<(),
 /// Recently deleted) and checked (setup) while the daemon's engines may be writing it.
 #[derive(Debug)]
 pub struct AccountReader {
-    db: Reader,
+    /// The crate's: Recently deleted's queries live with its listing (`deleted::listing`).
+    pub(crate) db: Reader,
 }
 
 impl AccountReader {
@@ -257,54 +258,6 @@ impl AccountReader {
     /// The newest `limit` entries of `folder`'s recently synced list.
     pub fn recent_synced(&mut self, folder: i64, limit: usize) -> Result<Vec<Synced>, StateError> {
         self.db.read_folder(folder, |s| s.recent_synced(limit))
-    }
-
-    /// Recently deleted's newest deletes with their counts, and its summary
-    /// ([`crate::deleted::deletes`]).
-    pub fn deletes(
-        &mut self,
-        limit: usize,
-    ) -> Result<(Vec<(Deleted, usize)>, crate::deleted::DeletedSummary), StateError> {
-        self.db.read(|s| crate::deleted::deletes(s, limit))
-    }
-
-    /// Whether this DB gave `listed` ([`crate::deleted::listed_here`]).
-    pub fn listed_here(&mut self, listed: &crate::deleted::Listed) -> Result<bool, StateError> {
-        self.db.read(|s| crate::deleted::listed_here(s, listed))
-    }
-
-    /// Items of Recently deleted by node (`deleted::find`), and the listing that saw
-    /// them, which emptying them takes.
-    pub fn find_deleted(
-        &mut self,
-        nodes: &[hbsync_types::NodeId],
-    ) -> Result<(Vec<(Deleted, usize)>, crate::deleted::Listed), StateError> {
-        self.db.read(|s| {
-            Ok((
-                crate::deleted::find(s, nodes)?,
-                crate::deleted::listed_now(s)?,
-            ))
-        })
-    }
-
-    /// Every item of Recently deleted (`deleted::all`).
-    #[cfg(any(test, feature = "testkit"))]
-    pub fn all_deleted(&mut self) -> Result<Vec<(Deleted, usize)>, StateError> {
-        self.db.read(crate::deleted::all)
-    }
-
-    /// The items of Recently deleted named `names` (`deleted::named`), and the
-    /// listing that saw them.
-    pub fn named_deleted(
-        &mut self,
-        names: &[String],
-    ) -> Result<(Vec<(Deleted, usize)>, crate::deleted::Listed), StateError> {
-        self.db.read(|s| {
-            Ok((
-                crate::deleted::named(s, names)?,
-                crate::deleted::listed_now(s)?,
-            ))
-        })
     }
 }
 
