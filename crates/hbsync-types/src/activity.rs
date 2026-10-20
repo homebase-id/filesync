@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{NodeId, NodeKind};
+use crate::{NodeId, NodeKind, removal_time};
 
 /// One thing synced, or several of one kind in one folder taken together.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,12 +66,6 @@ pub struct Progress {
     pub files_total: u64,
     pub bytes_done: u64,
     pub bytes_total: u64,
-}
-
-/// A removal's time for comparing (Unix ms): an open one (this device's own, its time not back
-/// from the server yet) is the newest of all.
-pub fn removal_time(removed_at_ms: Option<i64>) -> i64 {
-    removed_at_ms.unwrap_or(i64::MAX)
 }
 
 /// One item in Recently deleted (node schema): out of the tree, restorable until the purge.

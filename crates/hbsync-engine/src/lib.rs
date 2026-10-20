@@ -21,6 +21,7 @@ pub mod scope;
 mod settle;
 #[cfg(feature = "testkit")]
 pub mod testkit;
+pub mod time;
 pub mod transfer;
 mod trash;
 pub mod tree;

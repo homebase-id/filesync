@@ -1216,7 +1216,7 @@ impl<'a> Executor<'a> {
             return Ok(false);
         }
         let parent = occupant.path.parent().unwrap_or_default();
-        let Ok(parked) = parent.join(&parked_name(occupant.node)) else {
+        let Ok(parked) = parent.join(&layout::parked_name(occupant.node)) else {
             return Ok(false);
         };
         // Write-ahead: after a crash between the rename and the row update, the scan finds the
@@ -1255,8 +1255,6 @@ mod transfer_ops;
 mod tests;
 
 use disk::Disk;
-/// Re-exported for the simulator, which names what the executor parks.
-pub use hbsync_local::layout::parked_name;
 #[cfg(feature = "testkit")]
 pub use hooks::Faults;
 pub use hooks::{CrashPoint, FailPoint, Hooks};

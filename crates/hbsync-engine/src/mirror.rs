@@ -9,7 +9,7 @@
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{AccountTx, MirrorRow, RemovedRow, StateError};
-use hbsync_types::activity::removal_time;
+use hbsync_types::removal_time;
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target};
 
 // ---- facts the feed brings ----

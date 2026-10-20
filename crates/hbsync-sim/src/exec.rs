@@ -8,7 +8,6 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_engine::Against;
-use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::plan::{TagWrite, not_reached};
 use hbsync_engine::reconcile::{
@@ -17,6 +16,7 @@ use hbsync_engine::reconcile::{
 };
 use hbsync_engine::tree::{Tree, first_free, numbered_names};
 use hbsync_local::Verdict;
+use hbsync_local::layout::parked_name;
 use hbsync_platform::Os;
 use hbsync_platform::tags::express;
 use hbsync_types::{

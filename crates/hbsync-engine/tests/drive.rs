@@ -376,7 +376,7 @@ fn a_reread_answer_doesnt_write_over_a_later_removal() -> R {
     inner.server().unlist(docs.at.file_id);
     inner
         .server()
-        .advance(hbsync_engine::feed::TRACE_MS + 24 * 60 * 60 * 1000);
+        .advance(hbsync_engine::time::TRACE_MS + 24 * 60 * 60 * 1000);
     remote.hold_header.store(true, Ordering::SeqCst);
     let rereading = {
         let drive = Arc::clone(&drive);

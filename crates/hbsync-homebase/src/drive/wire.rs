@@ -185,7 +185,7 @@ impl Times {
         Times {
             deleted,
             removed_at: (!deleted && archival_status == ARCHIVAL_REMOVED)
-                .then(|| updated.unwrap_or(hbsync_types::activity::removal_time(None))),
+                .then(|| updated.unwrap_or(hbsync_types::removal_time(None))),
             changed_at: updated,
         }
     }

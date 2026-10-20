@@ -32,7 +32,7 @@ pub(crate) struct Server {
 }
 
 /// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed
-/// (30 days: `hbsync_engine::feed::TRACE_MS`), on the server's clock ([`time`]).
+/// (30 days: `hbsync_engine::time::TRACE_MS`), on the server's clock ([`time`]).
 pub const TRACE: i64 = 24;
 
 /// How far the server's clock moves on from one purge to the next.

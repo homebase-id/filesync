@@ -480,7 +480,7 @@ impl Engine {
     }
 
     /// Plans `dirty` from a view of what the rules may need ([`view::build_narrow`]), again
-    /// with the folders a plan judged in part listed whole, until a plan needs no more.
+    /// with the folders a plan judged in part covered whole, until a plan needs no more.
     fn plan(&mut self, dirty: &[NodeId], opts: &Options) -> Result<Plan, EngineError> {
         let folder = &self.cfg.folder;
         let db = &mut self.db;
@@ -493,10 +493,10 @@ impl Engine {
         loop {
             let input = db.read(|s| view::build_narrow(s, dirty, folder, &full))?;
             let plan = reconcile(&input, db);
-            // Each round lists at least one more folder whole: it ends.
-            let listed = full.len();
-            full.extend(&plan.unlisted);
-            if full.len() > listed {
+            // Each round covers at least one more folder whole: it ends.
+            let before = full.len();
+            full.extend(&plan.uncovered);
+            if full.len() > before {
                 continue;
             }
             #[cfg(feature = "testkit")]

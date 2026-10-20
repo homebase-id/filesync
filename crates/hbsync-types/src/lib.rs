@@ -23,6 +23,12 @@ pub fn unix_now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// A removal's time for comparing (Unix ms, the server's): an open one (this device's own, its
+/// time not back from the server yet) is the newest of all.
+pub fn removal_time(removed_at_ms: Option<i64>) -> i64 {
+    removed_at_ms.unwrap_or(i64::MAX)
+}
+
 /// Now, in Unix seconds.
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()

@@ -14,15 +14,7 @@ use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
 use hbsync_types::{RemoteFileId, RemoteRef};
 
 use crate::mirror::{self, apply};
-
-/// How long the feed keeps a trace of a delete for good, Unix ms: what was removed (or became
-/// a tombstone) this long ago may be deleted hard (node schema, Recently deleted), and a device
-/// away this long reads the whole feed again.
-pub const TRACE_MS: i64 = 30 * DAY_MS;
-/// A device away this long reads the whole feed again: a day before [`TRACE_MS`], for a
-/// server answer's time and its clock that differ.
-const REREAD_MS: i64 = TRACE_MS - DAY_MS;
-const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+use crate::time::{DAY_MS, REREAD_MS};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -65,10 +57,11 @@ impl std::ops::AddAssign for FeedReport {
 /// runs, so after a page with something new the next is read whole at once, as is a first read
 /// (no cursor: all of it is new), until a whole page holds nothing new.
 ///
-/// A delete for good leaves nothing in the feed once the feed had it for [`TRACE_MS`] (node
-/// schema, Recently deleted): a device that hasn't read the feed for nearly that long (by the
-/// server's clock: the cursor's time, or [`keys::READ_AT`], against the first page's; decided
-/// before that page is applied) reads all of it again ([`Reread`]).
+/// A delete for good leaves nothing in the feed once the feed had it for
+/// [`TRACE_MS`](crate::time::TRACE_MS) (node schema, Recently deleted): a device that hasn't
+/// read the feed for nearly that long (by the server's clock: the cursor's time, or
+/// [`keys::READ_AT`], against the first page's; decided before that page is applied) reads all
+/// of it again ([`Reread`]).
 ///
 /// Slim pages may be longer than whole ones ([`Pages`]): after a whole page they are as long,
 /// and each slim page applied doubles them. A slim page read again whole is read as far as a
