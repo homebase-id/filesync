@@ -3711,3 +3711,37 @@ fn a_tag_written_where_no_base_settles_is_not_an_add() -> R {
     assert_eq!(base.state.name, "b (conflict 1)");
     Ok(())
 }
+
+/// Every error goes through the one policy: a file another program locks or a full disk is
+/// left for a later sync (paced by the runner, told when it keeps coming back), not retried
+/// at once; a failing state DB ends the run, as at a crash; a server that says when to come
+/// back stops the run until then.
+#[test]
+fn errors_go_through_the_policy() {
+    // EBUSY and ENOSPC, on Linux and macOS alike.
+    #[cfg(unix)]
+    for code in [16, 28] {
+        let outcome = io_outcome(io::Error::from_raw_os_error(code));
+        assert!(
+            matches!(outcome, Outcome::Skip(Skip::Stale(_))),
+            "{outcome:?}"
+        );
+    }
+    let denied = io_outcome(io::Error::from(io::ErrorKind::PermissionDenied));
+    assert!(
+        matches!(denied, Outcome::Skip(Skip::Unsyncable(_))),
+        "{denied:?}"
+    );
+    let corrupt = StateError::Corrupt("test".into());
+    assert!(matches!(Outcome::from(corrupt), Outcome::Fatal(_)));
+    let later = remote_outcome(RemoteError::Later {
+        why: "paused".into(),
+        retry_after: Duration::from_secs(600),
+    });
+    assert!(matches!(later, Outcome::Stop(Stopped::Later(_, d)) if d == Duration::from_secs(600)));
+    let full = remote_outcome(RemoteError::Full {
+        why: "quota".into(),
+        retry_after: Some(Duration::from_secs(60)),
+    });
+    assert!(matches!(full, Outcome::Full(Some(_))));
+}

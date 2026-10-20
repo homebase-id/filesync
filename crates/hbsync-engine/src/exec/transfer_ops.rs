@@ -321,7 +321,8 @@ impl Executor<'_> {
                     Err(e) => Ok(remote_outcome(e)),
                 }
             }
-            (_, _, JobResult::Failed(e)) => Ok(Outcome::of(e.class(), e.to_string())),
+            (_, _, JobResult::Failed(JobError::Remote(e))) => Ok(remote_outcome(e)),
+            (_, _, JobResult::Failed(e)) => Ok(Outcome::of(e.class(), e.to_string(), None)),
             (Ctx::Download(d), _, JobResult::Downloaded { file, local_hash }) => {
                 self.place_download(*d, file, local_hash)
             }

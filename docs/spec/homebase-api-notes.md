@@ -335,6 +335,16 @@ enveloped) `{title, status, correlationId, errorCode}`. `errorCode` is the camel
 `OdinSecurityException` → 403, a bad or missing token → 401 with an empty body. A `NotFound()`
 on an enveloped route comes back as 404 with an encrypted body (`X-SSE: 1`): check the status first.
 
+**Retry-After** **[verified]** in odin-core's code: an `OdinRetryLaterException` answers with
+the status its service chose (507 out of quota) and `Retry-After` in whole seconds
+(`ExceptionHandlingMiddleware`); a paused identity answers 503 with `Retry-After: 600`
+(`MultiTenantContainerMiddleware`, `TenantStatusRules.PausedRetryAfterSeconds`). The client reads
+the seconds form only.
+
+**Who answered** **[verified]**: every answer of odin-core carries `X-Odin-Version` (below), a
+success too, so one without it (a captive portal's login page, a proxy's) isn't the identity's:
+the client takes it for the network not being there yet, as it does a redirect it was given.
+
 **Who sent a 404** **[verified]** in odin-core's code: `OdinVersionNumberMiddleware` sets
 `X-Odin-Version` on every answer, first after logging (`Startup.Configure`; odin-core tells a
 peer that is an Odin server by it, `PeerDriveQueryService`). A route odin-core matched answers a

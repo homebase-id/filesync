@@ -472,6 +472,21 @@ impl<R: Read> Read for Recording<R> {
     }
 }
 
+/// An answer's `Retry-After`, in seconds (the HTTP date form isn't read).
+fn retry_after(headers: &ureq::http::HeaderMap) -> Option<Duration> {
+    let seconds = headers
+        .get("Retry-After")?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+/// odin-core's header on every answer (`OdinVersionNumberMiddleware`).
+const ODIN_VERSION: &str = "X-Odin-Version";
+
 /// Whether an answer is sealed under the shared secret (`X-SSE: 1`).
 fn sealed(headers: &ureq::http::HeaderMap) -> bool {
     headers.get("X-SSE").is_some_and(|v| v.as_bytes() == b"1")
@@ -484,12 +499,23 @@ fn checked(
 ) -> Result<Response<ureq::Body>, HomebaseError> {
     let mut response = response.map_err(|e| HomebaseError::Network(format!("{what}: {e}")))?;
     let status = response.status().as_u16();
+    let odin = response.headers().contains_key(ODIN_VERSION);
     if status < 400 {
+        // Only the identity's own answer is one: a captive portal's page, a proxy's, or where
+        // a redirect led has no `X-Odin-Version` (odin-core sets it on every answer), and a
+        // redirect not followed isn't an answer either. The network isn't there yet: offline,
+        // not a refusal of each file.
+        if !odin || (300..400).contains(&status) {
+            return Err(HomebaseError::Network(format!(
+                "{what}: HTTP {status} not from the identity (a login page or a proxy in the way)"
+            )));
+        }
         return Ok(response);
     }
     let sender = Sender {
-        odin: response.headers().contains_key("X-Odin-Version"),
+        odin,
         sealed: sealed(response.headers()),
+        retry_after: retry_after(response.headers()),
     };
     let body = response
         .body_mut()
@@ -549,7 +575,7 @@ mod tests {
                     request.clear();
                     let head = format!(
                         "HTTP/1.1 206 Partial Content\r\ncontent-range: bytes 0-{}/{}\r\n\
-                         content-length: {}\r\n\r\n",
+                         x-odin-version: test\r\ncontent-length: {}\r\n\r\n",
                         len - 1,
                         body.len().max(len),
                         body.len()
@@ -661,6 +687,34 @@ mod tests {
         );
         assert_eq!(got, b"0123456789");
         stop(&connections, &url, server)?;
+        Ok(())
+    }
+
+    /// An answer that isn't the identity's (a captive portal's login page, a proxy's), or a
+    /// redirect, is the network not being there yet: offline, not a refusal.
+    #[test]
+    fn an_answer_not_from_the_identity_is_offline() -> Result<(), Box<dyn std::error::Error>> {
+        let heads: [&[u8]; 2] = [
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 6\r\n\r\n<html>",
+            b"HTTP/1.1 304 Not Modified\r\nx-odin-version: test\r\ncontent-length: 0\r\n\r\n",
+        ];
+        for head in heads {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let url = format!("http://{}/", listener.local_addr()?);
+            let server = std::thread::spawn(move || -> std::io::Result<()> {
+                let (mut socket, _) = listener.accept()?;
+                let _ = socket.read(&mut [0u8; 1024])?;
+                socket.write_all(head)
+            });
+            let got = fetch(&connections(REUSED_WITHIN), &url, 10);
+            server.join().map_err(|_| "server panicked")??;
+            match got {
+                Err(e @ HomebaseError::Network(_)) => {
+                    assert_eq!(e.class(), hbsync_remote::ErrorClass::Transient)
+                }
+                other => panic!("{other:?}"),
+            }
+        }
         Ok(())
     }
 

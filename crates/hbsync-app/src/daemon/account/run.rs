@@ -417,7 +417,7 @@ impl Account {
                 Ok(r) => return Some(Arc::new(r)),
                 Err(e) => {
                     let class = e.class();
-                    let wait_for = backoff.after(class);
+                    let wait_for = backoff.after(class, e.retry_after());
                     tracing::warn!(
                         "can't connect to {} ({e}); trying again in {wait_for:?}",
                         self.identity

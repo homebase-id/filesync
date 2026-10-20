@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError};
 use hbsync_state::{StateDb, StateError, keys};
@@ -18,6 +18,7 @@ use crate::deleted;
 use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
 use crate::mirror;
+use crate::policy::InRun;
 use crate::root::{RootError, SyncRoot};
 
 /// Rows of the change feed read per request, at most: whole pages (decrypted headers), and slim
@@ -195,7 +196,8 @@ impl Drive {
     /// Behind after deleting for good when the drive refused something for its state
     /// (`moved`), or a request failed on the way.
     fn behind_if<T>(&self, moved: bool, done: &Result<T, EngineError>) {
-        if moved || matches!(done, Err(EngineError::Remote(e)) if e.is_transient()) {
+        let failed = |e: &RemoteError| crate::policy::policy(e.class()).in_run == InRun::Backoff;
+        if moved || matches!(done, Err(EngineError::Remote(e)) if failed(e)) {
             self.set_behind();
         }
     }
@@ -226,9 +228,10 @@ impl Drive {
         *lock(&self.full) = None;
     }
 
-    /// The drive refused an upload, out of storage: hold uploads for a while, in every folder.
-    pub(crate) fn set_full(&self) {
-        *lock(&self.full) = Some(Instant::now() + crate::time::FULL_HOLD);
+    /// The drive refused an upload, out of storage: hold uploads in every folder for `hold`
+    /// ([`crate::time::full_hold`]).
+    pub(crate) fn set_full(&self, hold: Duration) {
+        *lock(&self.full) = Some(Instant::now() + hold);
     }
 
     fn remote(&self) -> &dyn Remote {

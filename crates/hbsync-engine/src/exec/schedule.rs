@@ -21,8 +21,9 @@ pub(super) enum Retried {
     Queued,
     /// Out of attempts.
     Failed(Op),
-    /// Left for the next plan, read from the feed first.
-    Replan(Op),
+    /// Left for the next plan, read from the feed first; `stop`: transient errors kept coming,
+    /// the run stops, unreachable.
+    Replan { op: Op, stop: bool },
     /// Transient errors kept coming: the run stops, unreachable.
     Unreachable,
 }
@@ -144,7 +145,7 @@ impl Schedule {
     pub(super) fn ended(&mut self, op: &Op, outcome: &Outcome) {
         if matches!(
             outcome,
-            Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full
+            Outcome::Done | Outcome::Settled | Outcome::Skip(_) | Outcome::Full(_)
         ) {
             self.streak = 0; // the remote answered (or wasn't needed)
         }
@@ -169,13 +170,19 @@ impl Schedule {
     /// the last; a remote write whose answer didn't come goes back to the plan.
     pub(super) fn retry(&mut self, op: Op, attempts: u8, transient: bool) -> Retried {
         if transient {
-            if !self.backoff() {
-                return Retried::Unreachable;
-            }
+            let reachable = self.backoff();
             if op.writes_remote() {
                 // A write whose answer didn't come may have landed: not sent again blind (a
-                // large upload twice), but planned again from the feed, read first.
-                return Retried::Replan(op);
+                // large upload twice), but planned again from the feed, read first, also when
+                // the run stops here. What waits on it waits for the next plan too.
+                self.finished(&op, false);
+                return Retried::Replan {
+                    op,
+                    stop: !reachable,
+                };
+            }
+            if !reachable {
+                return Retried::Unreachable;
             }
         }
         if attempts + 1 < self.attempts {
@@ -279,7 +286,10 @@ mod tests {
             s.ready(&removal(child, folder), |_| Ok(true)),
             Err(Outcome::Skip(Skip::Waiting(_)))
         ));
-        assert!(matches!(s.retry(op, 0, true), Retried::Replan(_)));
+        assert!(matches!(
+            s.retry(op, 0, true),
+            Retried::Replan { stop: false, .. }
+        ));
     }
 
     /// Transient errors in a row, with no answer between them, stop the run; an answer starts
@@ -303,5 +313,32 @@ mod tests {
             s.wait_out_backoff();
         }
         assert!(matches!(s.retry(settle(), 0, true), Retried::Unreachable));
+    }
+
+    /// A remote write whose answer didn't come goes back to the plan, also when the run stops
+    /// on it, and what waits on it waits for the next plan.
+    #[test]
+    fn a_write_without_its_answer_goes_back_to_the_plan() {
+        let (folder, child) = (NodeId::new(), NodeId::new());
+        let mut s = schedule();
+        s.load(vec![removal(folder, NodeId::ROOT), removal(child, folder)]);
+        let (op, _) = s.next().expect("queued");
+        assert!(matches!(
+            s.retry(op, 0, true),
+            Retried::Replan { stop: false, .. }
+        ));
+        assert!(matches!(
+            s.ready(&removal(child, folder), |_| Ok(true)),
+            Err(Outcome::Skip(Skip::Waiting(_)))
+        ));
+        for _ in 2..UNREACHABLE_AFTER {
+            s.wait_out_backoff();
+            s.retry(removal(NodeId::new(), NodeId::ROOT), 0, true);
+        }
+        s.wait_out_backoff();
+        assert!(matches!(
+            s.retry(removal(NodeId::new(), NodeId::ROOT), 0, true),
+            Retried::Replan { stop: true, .. }
+        ));
     }
 }

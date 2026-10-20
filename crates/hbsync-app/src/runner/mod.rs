@@ -377,6 +377,8 @@ impl Runner {
         let mut check_rules = false;
         // When to read the ignore rules, touched a moment ago.
         let mut rules_at: Option<Instant> = None;
+        // After taking local changes failed: not again before then.
+        let mut observe_after: Option<Instant> = None;
         tracing::info!(
             "syncing {} with {}{}",
             self.cfg.folder.display(),
@@ -391,7 +393,10 @@ impl Runner {
             // Until something happens, or time alone changes something.
             let now = Instant::now();
             let looking = parts.as_ref().is_none_or(|p| !p.observer.has_watcher());
-            let observer = parts.as_ref().and_then(|p| p.observer.deadline());
+            let observer = match observe_after {
+                Some(at) if now < at => Some(at),
+                _ => parts.as_ref().and_then(|p| p.observer.deadline()),
+            };
             let wait = wait_for(
                 now,
                 [
@@ -426,10 +431,23 @@ impl Runner {
                 if p.drive_changed.swap(false, Ordering::SeqCst) {
                     schedule.want();
                 }
-                if let Some(scan) = p.engine.observe(&mut p.observer, Duration::ZERO)?
-                    && scan.dirty > 0
-                {
-                    schedule.want();
+                let observing = observe_after.is_none_or(|at| Instant::now() >= at);
+                match observing.then(|| p.engine.observe(&mut p.observer, Duration::ZERO)) {
+                    Some(Ok(Some(scan))) if scan.dirty > 0 => schedule.want(),
+                    Some(Ok(_)) => observe_after = None,
+                    // Kept (a busy DB, say): the folder backs off, as after a failed sync,
+                    // instead of starting over, and doesn't take them again before then.
+                    Some(Err(e)) => {
+                        let wait = self.backs_off(
+                            &mut schedule,
+                            "taking local changes",
+                            e.class(),
+                            &e,
+                            None,
+                        );
+                        observe_after = Some(Instant::now() + wait);
+                    }
+                    None => {}
                 }
                 // After the poll, which has the watcher ring again for a touch from now on.
                 if p.observer.rules_touched() {
@@ -550,14 +568,12 @@ impl Runner {
                         Synced::Done
                     };
                     schedule.synced(Instant::now(), outcome);
-                    self.record(&mut p.engine, &report, began.elapsed())?;
+                    if let Err(e) = self.record(&mut p.engine, &report, began.elapsed()) {
+                        self.backs_off(&mut schedule, "recording the sync", e.class(), &e, None);
+                    }
                 }
                 Err(e) => {
-                    let class = e.class();
-                    let state = schedule::shown(class);
-                    let wait = schedule.failed(Instant::now(), class);
-                    tracing::warn!("sync failed ({e}); trying again in {wait:?}");
-                    self.failing(state, e.to_string(), wait);
+                    self.backs_off(&mut schedule, "the sync", e.class(), &e, e.retry_after());
                 }
             }
             if self.cfg.once {
@@ -615,6 +631,22 @@ impl Runner {
         }
     }
 
+    /// `what` failed with `e` (of `class`; the server said to ask again after `retry_after`):
+    /// the folder shows it and backs off.
+    fn backs_off(
+        &self,
+        schedule: &mut Schedule,
+        what: &str,
+        class: hbsync_remote::ErrorClass,
+        e: &dyn std::fmt::Display,
+        retry_after: Option<Duration>,
+    ) -> Duration {
+        let wait = schedule.failed(Instant::now(), class, retry_after);
+        tracing::warn!("{what} failed ({e}); trying again in {wait:?}");
+        self.failing(schedule::shown(class), e.to_string(), wait);
+        wait
+    }
+
     /// Shows `why` nothing syncs (in `state`), until another try after `wait`.
     fn failing(&self, state: State, why: String, wait: Duration) {
         self.set(|s| {
@@ -630,7 +662,7 @@ impl Runner {
         engine: &mut Engine,
         report: &SyncReport,
         took: Duration,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<(), StateError> {
         let skips = self.stalled.told(&report.skipped, Instant::now());
         let rows = self.drive.take_skipped();
         let notes = self

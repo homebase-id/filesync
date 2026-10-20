@@ -251,9 +251,20 @@ a failure (service managers restart it then).
   is planned again quietly, and told only when it keeps being skipped for ten minutes
   (something holds it back that the plan can't see: a file written all the time, one that can't
   be read). One waiting for another operation (a folder's base for its children's) isn't told:
-  that one says why. A full drive (Homebase's 507) is one note, "Homebase is out of storage":
-  every folder of the account holds its uploads for ten minutes (or until Sync now) and does
-  the rest (downloads, moves, deletes); then one upload tries again. A row on the drive the
+  that one says why. A file another program holds locked, or one that can't be downloaded
+  because the disk is full, is left for a later sync (no retry within the run) and is told
+  like a stale one, when it keeps coming back for ten minutes. A full drive (Homebase's 507)
+  is one note, "Homebase is out of storage": the uploads already queued in the run don't send
+  their bytes, and every folder of the account holds its uploads for the time the 507's
+  `Retry-After` says (between 30 s and a day; ten minutes without one), or until Sync now, and
+  does the rest (downloads, moves, deletes); then one upload tries again.
+- **Errors** are judged by one table (`hbsync_engine::policy`): the network or the server out
+  of reach shows `offline`; that includes an answer that isn't the identity's (a captive
+  portal's login page or a proxy's: no `X-Odin-Version`) and a redirect. A server that says
+  when to ask again (429 or 503 with `Retry-After`: a paused identity says 10 min) stops the
+  sync, and the folder or the account doesn't ask before then (up to an hour). A state DB
+  error ends the sync, as a crash would: busy, the folder backs off; one only the user can fix
+  (corrupt, from another version, the disk full or read-only) is tried again every 5 min. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
   transfers, done and to do.

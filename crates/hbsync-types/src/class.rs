@@ -11,6 +11,8 @@ pub enum ErrorClass {
     /// No answer, a timeout, a server or a page in front of it in trouble: the network or the
     /// server is down for now.
     Transient,
+    /// The server is busy or paused, and said when to ask again (`Retry-After`).
+    RateLimited,
     /// The identity refused the credentials or the drive (401, 403): nothing gets better until
     /// the user logs in again.
     Denied,
@@ -24,8 +26,10 @@ pub enum ErrorClass {
     /// The drive won't take it as it is, or answered what can't be read: the same request
     /// gets the same answer.
     Refused,
-    /// A local item is locked, or changed meanwhile (gone, or another in its place).
+    /// A local item is locked by another program.
     LocalBusy,
+    /// A local item changed meanwhile (gone, another in its place, written while read).
+    LocalRaced,
     /// The local volume is full or over quota.
     LocalFull,
     /// Local access denied, or a name or path this OS can't hold.
@@ -50,7 +54,8 @@ impl ErrorClass {
 impl From<IoClass> for ErrorClass {
     fn from(class: IoClass) -> Self {
         match class {
-            IoClass::Locked | IoClass::Raced => ErrorClass::LocalBusy,
+            IoClass::Locked => ErrorClass::LocalBusy,
+            IoClass::Raced => ErrorClass::LocalRaced,
             IoClass::DiskFull => ErrorClass::LocalFull,
             IoClass::Denied | IoClass::TooLong => ErrorClass::LocalDenied,
             IoClass::Other => ErrorClass::LocalFault,

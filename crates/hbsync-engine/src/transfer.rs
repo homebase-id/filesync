@@ -249,7 +249,8 @@ impl JobError {
     pub fn class(&self) -> ErrorClass {
         match self {
             JobError::Remote(e) => e.class(),
-            JobError::File(_) | JobError::Io(_) => ErrorClass::LocalFault,
+            JobError::File(e) => e.class(),
+            JobError::Io(e) => ErrorClass::of_io(e),
         }
     }
 }
@@ -272,8 +273,9 @@ pub fn run_jobs(
 }
 
 /// [`run_jobs`], until `commit` returns `false`, `halt` is set, or the remote is out (a job
-/// failed with [`RemoteError::Transient`]: the next would too). Jobs not started by then are
-/// dropped; jobs already running finish and are committed. `commit` is given every job that
+/// failed for now, [`InRun::Backoff`]: the next would too). Jobs not
+/// started by then are dropped; jobs already running finish and are committed. After the
+/// drive said it is full ([`InRun::HoldUploads`]), the uploads not started are dropped. `commit` is given every job that
 /// finished since the last call, each with its result (removals answered by one request
 /// together, to record in one go). A small download's file may not be durable yet: the
 /// caller makes it so before putting it in place (`hbsync_fileio::sync_completed`). The bytes
@@ -306,6 +308,7 @@ pub(crate) fn run_jobs_while(
         large: 0,
         large_from: cfg.large_from,
         large_at_once: cfg.large_at_once.max(1),
+        uploads_dropped: false,
     });
     let meter = Meter {
         throttle: cfg.max_bytes_per_sec.map(Throttle::new),
@@ -336,12 +339,23 @@ pub(crate) fn run_jobs_while(
                         }
                         Task::Removals(jobs) => remove(remote, jobs),
                     };
-                    // The next would fail the same way.
-                    if results.iter().any(|(_, result)| {
-                        matches!(result, JobResult::Failed(e)
-                            if policy(e.class()).in_run == InRun::Backoff)
-                    }) {
-                        out.store(true, Ordering::Relaxed);
+                    let failed = results.iter().filter_map(|(_, result)| match result {
+                        JobResult::Failed(e) => Some(policy(e.class()).in_run),
+                        _ => None,
+                    });
+                    for in_run in failed {
+                        match in_run {
+                            // The next would fail the same way.
+                            InRun::Backoff => out.store(true, Ordering::Relaxed),
+                            // Out of storage: no other upload sends its bytes to hear so too
+                            // (they go back to the caller, which holds them).
+                            InRun::HoldUploads => {
+                                if let Ok(mut q) = queue.lock() {
+                                    q.drop_uploads();
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     if tx.send(results).is_err() {
                         break;
@@ -371,6 +385,7 @@ struct Queue {
     large: usize,
     large_from: u64,
     large_at_once: usize,
+    uploads_dropped: bool,
 }
 
 impl Queue {
@@ -391,6 +406,14 @@ impl Queue {
             self.large += 1;
         }
         self.jobs.pop_front()
+    }
+
+    /// Drops the uploads not started (once: none are added later).
+    fn drop_uploads(&mut self) {
+        if !std::mem::replace(&mut self.uploads_dropped, true) {
+            self.jobs
+                .retain(|t| !matches!(t, Task::One(job) if matches!(**job, Job::Upload { .. })));
+        }
     }
 
     fn finished(&mut self, job: &Job) {

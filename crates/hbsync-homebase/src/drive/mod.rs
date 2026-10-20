@@ -754,8 +754,17 @@ fn api_error(what: &str, error: &ApiError) -> RemoteError {
         None => match error.status {
             404 | 410 => RemoteError::NotFound,
             416 => RemoteError::StaleRange(why()),
-            507 => RemoteError::Full(why()),
-            408 | 429 | 499 | 500..=599 => RemoteError::Transient(why()),
+            507 => RemoteError::Full {
+                why: why(),
+                retry_after: error.retry_after,
+            },
+            408 | 429 | 499 | 500..=599 => match error.retry_after {
+                Some(retry_after) => RemoteError::Later {
+                    why: why(),
+                    retry_after,
+                },
+                None => RemoteError::Transient(why()),
+            },
             _ => RemoteError::Fatal(why()),
         },
     };
@@ -768,13 +777,21 @@ fn api_error(what: &str, error: &ApiError) -> RemoteError {
 }
 
 impl HomebaseError {
+    /// When the server said to ask again (`Retry-After`).
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            HomebaseError::Api { error, .. } => error.retry_after,
+            _ => None,
+        }
+    }
+
     /// What it means ([`ErrorClass`]): as the drive's error for it would say.
     pub fn class(&self) -> ErrorClass {
         match self {
             HomebaseError::Network(_) => ErrorClass::Transient,
             HomebaseError::Denied(_) => ErrorClass::Denied,
             HomebaseError::Io(e) if source_ended(e) => ErrorClass::Stale,
-            HomebaseError::Io(_) => ErrorClass::LocalFault,
+            HomebaseError::Io(e) => ErrorClass::of_io(e),
             HomebaseError::Api { what, error } => api_error(what, error).class(),
             HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_) => {
                 ErrorClass::Refused
@@ -796,6 +813,7 @@ mod tests {
                 code: code.map(str::to_owned),
                 title: String::new(),
                 from_identity: true,
+                retry_after: None,
             },
         }
     }
@@ -831,6 +849,42 @@ mod tests {
         assert_eq!(api(503, None).class(), ErrorClass::Transient);
         assert_eq!(proxy.class(), ErrorClass::Transient);
         assert_eq!(api(404, None).class(), ErrorClass::Gone);
+    }
+
+    /// A server that says when to ask again is waited for: a busy or paused one (429, 503)
+    /// stops the run until then, a full one holds uploads until then.
+    #[test]
+    fn retry_after_is_kept() {
+        let later = |status| {
+            let mut e = api(status, None);
+            if let HomebaseError::Api { error, .. } = &mut e {
+                error.retry_after = Some(std::time::Duration::from_secs(600));
+            }
+            e
+        };
+        for status in [429, 503] {
+            let e = later(status);
+            assert_eq!(e.class(), ErrorClass::RateLimited);
+            assert_eq!(e.retry_after(), Some(std::time::Duration::from_secs(600)));
+            let mapped = remote_error(e);
+            assert_eq!(
+                mapped.retry_after(),
+                Some(std::time::Duration::from_secs(600))
+            );
+            assert!(matches!(mapped, RemoteError::Later { .. }), "{mapped:?}");
+        }
+        let full = remote_error(later(507));
+        assert!(
+            matches!(
+                full,
+                RemoteError::Full {
+                    retry_after: Some(_),
+                    ..
+                }
+            ),
+            "{full:?}"
+        );
+        assert_eq!(full.class(), ErrorClass::Full);
     }
 
     /// A batch that fails after others went keeps their answers and stops there: the files
@@ -976,7 +1030,15 @@ mod tests {
     #[test]
     fn not_found_only_from_the_identity() {
         let read = |status: u16, body: &[u8], odin: bool, sealed: bool| {
-            let error = ApiError::read(status, body, crate::problem::Sender { odin, sealed });
+            let error = ApiError::read(
+                status,
+                body,
+                crate::problem::Sender {
+                    odin,
+                    sealed,
+                    retry_after: None,
+                },
+            );
             format!(
                 "{:?}",
                 remote_error(HomebaseError::Api {

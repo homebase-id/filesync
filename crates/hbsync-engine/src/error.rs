@@ -34,4 +34,17 @@ impl EngineError {
             EngineError::Remote(e) => e.class(),
         }
     }
+
+    /// When the server said to ask again, if it is busy or paused.
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            EngineError::Stopped(Stopped::Later(_, after)) => Some(*after),
+            EngineError::Feed(FeedError::Remote(e)) | EngineError::Remote(e)
+                if e.class() == ErrorClass::RateLimited =>
+            {
+                e.retry_after()
+            }
+            _ => None,
+        }
+    }
 }
