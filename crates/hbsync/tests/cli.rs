@@ -300,3 +300,56 @@ fn the_daemon_keeps_its_folders_through_start_over_and_restart() -> R {
     home.ok(&["stop"])?;
     Ok(())
 }
+
+/// Unlinking while a daemon starts (the tray's, say) leaves no daemon syncing: unlink holds the
+/// config's lock from before it stops the daemon until it has emptied the config, and a daemon
+/// starting waits for that lock. Here the lock is held first: unlink waits, the daemon still
+/// runs, and the next one waits too; then, whichever goes first, none is left syncing.
+#[test]
+fn unlink_while_a_daemon_starts_leaves_none_syncing() -> R {
+    let home = Home::new()?;
+    home.set_up()?;
+    home.ok(&["start"])?;
+    // The config's lock, as `ConfigLock` takes it (from another process: this one).
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.path().join("config.lock"))?;
+    lock.lock()?;
+    let quiet = |args: &[&str], exe: &str| {
+        home.command(exe, args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+    let mut unlink = quiet(&["unlink"], env!("CARGO_BIN_EXE_hbsync"))?;
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        unlink.try_wait()?.is_none(),
+        "unlink didn't wait for the lock"
+    );
+    assert!(
+        home.hbsync(&["status"])?.status.success(),
+        "stopped before the lock"
+    );
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(config.contains(IDENTITY), "{config}");
+    let mut starting = quiet(&[], env!("CARGO_BIN_EXE_hbsyncd"))?;
+    std::thread::sleep(Duration::from_millis(200));
+    drop(lock);
+    let until = Instant::now() + Duration::from_secs(60);
+    while unlink.try_wait()?.is_none() || starting.try_wait()?.is_none() {
+        assert!(
+            Instant::now() < until,
+            "unlink or the daemon starting still runs"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(unlink.wait()?.success());
+    let out = home.hbsync(&["status"])?;
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(!config.contains(IDENTITY), "{config}");
+    Ok(())
+}

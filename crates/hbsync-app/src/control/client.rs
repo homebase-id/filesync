@@ -122,12 +122,15 @@ fn done(answer: std::result::Result<Reply, IpcError>) -> Result<()> {
         Ok(Reply::Done) => Ok(()),
         Ok(Reply::Refused(why)) => Err(why.into()),
         Ok(other) => Err(format!("unexpected answer: {other:?}").into()),
-        Err(IpcError::NotRunning) => {
-            Err("the daemon isn't running (`hbsync start` starts it)".into())
-        }
+        Err(IpcError::NotRunning) => Err(NotRunning.into()),
         Err(e) => Err(e.into()),
     }
 }
+
+/// No daemon took the request: none runs (any more).
+#[derive(Debug, thiserror::Error)]
+#[error("the daemon isn't running (`hbsync start` starts it)")]
+pub struct NotRunning;
 
 /// Sends `control` to every folder (sync now, pause, resume).
 pub fn daemon(paths: &Paths, control: DaemonControl) -> Result<()> {

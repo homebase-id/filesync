@@ -147,25 +147,17 @@ impl Config {
     }
 
     /// Writes the config to `path` in one step: a crash leaves the old file or the new one.
-    pub(crate) fn save(&self, path: &Path) -> Result<(), ConfigError> {
+    fn save(&self, path: &Path) -> Result<(), ConfigError> {
         let text = toml::to_string_pretty(self)?;
         hbsync_fileio::write_atomic(path, text.as_bytes())
             .map_err(|e| ConfigError::Io(path.to_owned(), e))
     }
 
     /// Changes the config at `path` (an empty one when there is none) with `f`, and saves it
-    /// when `f` changed it. One change at a time in this process: the daemon's request threads
-    /// don't undo each other's.
+    /// when `f` changed it. One change at a time, in any process or thread
+    /// ([`ConfigLock`]): none undoes another's.
     pub fn update<T>(path: &Path, f: impl FnOnce(&mut Config) -> T) -> Result<T, ConfigError> {
-        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _turn = crate::sync::lock(&TURN);
-        let before = Config::load(path)?.unwrap_or_default();
-        let mut config = before.clone();
-        let out = f(&mut config);
-        if config != before {
-            config.save(path)?;
-        }
-        Ok(out)
+        ConfigLock::take(path)?.update(f)
     }
 
     /// The folder `identity` syncs as `role` (`None`: its main folder), if it does.
@@ -233,6 +225,66 @@ impl Config {
             .clone()
             .filter(|n| !n.trim().is_empty())
             .unwrap_or_else(hbsync_platform::host::device_name)
+    }
+}
+
+/// The lock on changing the config at a path: on `config.lock` beside it, held by one
+/// process and one thread at a time. Held while the config is read, changed and written
+/// ([`Config::update`]); by a program other than the daemon from looking whether the daemon
+/// runs until it changed the config itself, when none runs; and by the daemon as it starts,
+/// until it has read the config and bound its socket. So while the daemon runs, it alone changes the config (the
+/// others ask it), and a daemon starting reads what was changed before it. Held for one
+/// change (adding a folder makes its DB entry under it), or while the daemon stops for a log
+/// out or unlink: a daemon starting waits for it.
+#[derive(Debug)]
+pub(crate) struct ConfigLock {
+    /// Locked, unless the file system can't lock it; unlocked as it closes.
+    _file: Option<std::fs::File>,
+    /// This process's threads, one at a time: a file lock emulated per process (NFS) doesn't
+    /// keep them apart. Taken first.
+    _turn: std::sync::MutexGuard<'static, ()>,
+    /// The config's.
+    path: PathBuf,
+}
+
+impl ConfigLock {
+    /// Waits for the lock of the config at `path`.
+    pub(crate) fn take(path: &Path) -> Result<ConfigLock, ConfigError> {
+        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let turn = crate::sync::lock(&TURN);
+        let lock = path.with_extension("lock");
+        let file = crate::lock::lock_file(&lock).map_err(|e| ConfigError::Io(lock.clone(), e))?;
+        let file = match file.lock() {
+            Ok(()) => Some(file),
+            // A file system without locks (some network ones): this process's threads are
+            // still kept apart.
+            Err(e) => {
+                tracing::warn!("can't lock {}: {e}", lock.display());
+                None
+            }
+        };
+        Ok(ConfigLock {
+            _file: file,
+            _turn: turn,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The config as it is now; `None` when there is no file yet.
+    pub(crate) fn load(&self) -> Result<Option<Config>, ConfigError> {
+        Config::load(&self.path)
+    }
+
+    /// Changes the config (an empty one when there is none) with `f`, and saves it when `f`
+    /// changed it.
+    pub(crate) fn update<T>(&self, f: impl FnOnce(&mut Config) -> T) -> Result<T, ConfigError> {
+        let before = self.load()?.unwrap_or_default();
+        let mut config = before.clone();
+        let out = f(&mut config);
+        if config != before {
+            config.save(&self.path)?;
+        }
+        Ok(out)
     }
 }
 
@@ -342,5 +394,51 @@ mod tests {
         std::fs::write(&path, "paused = maybe").expect("ok");
         let err = Config::load(&path).expect_err("an error").to_string();
         assert!(err.contains("config.toml"), "{err}");
+    }
+
+    /// Changes made at once, from threads here (or other processes), each take the config
+    /// as the one before left it: none is lost.
+    #[test]
+    fn changes_at_once_are_each_kept() -> Result<(), ConfigError> {
+        let dir = tempfile::tempdir().map_err(|e| ConfigError::Io(PathBuf::new(), e))?;
+        let path = dir.path().join("config.toml");
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..5 {
+                        Config::update(&path, |c| c.mass_delete.min_files += 1).expect("saved");
+                    }
+                });
+            }
+        });
+        let config = Config::load(&path)?.expect("a config");
+        assert_eq!(config.mass_delete.min_files, 50 + 20);
+        Ok(())
+    }
+
+    /// The lock is the file's: one taken through another handle (as another process takes
+    /// it) holds a change back until it goes.
+    #[test]
+    fn a_change_waits_for_the_lock_of_another_process() -> Result<(), ConfigError> {
+        let io = |e| ConfigError::Io(PathBuf::new(), e);
+        let dir = tempfile::tempdir().map_err(io)?;
+        let path = dir.path().join("config.toml");
+        let other = crate::lock::lock_file(&path.with_extension("lock")).map_err(io)?;
+        other.lock().map_err(io)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let changing = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let changed = Config::update(&path, |c| c.paused = true);
+                let _ = tx.send(());
+                changed
+            })
+        };
+        let waited = rx.recv_timeout(std::time::Duration::from_millis(300));
+        assert!(waited.is_err(), "changed while another held the lock");
+        drop(other);
+        changing.join().expect("no panic")?;
+        assert!(Config::load(&path)?.expect("a config").paused);
+        Ok(())
     }
 }

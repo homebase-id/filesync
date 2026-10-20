@@ -332,7 +332,7 @@ pub fn set_up(
         control::start_over(paths, identity)?;
     }
     // A running daemon sets the folder up and starts syncing it, without a restart.
-    crate::folders::add_synced(paths, identity, &folder, None)?;
+    let taken = crate::folders::add_synced(paths, identity, &folder, None)?;
     say(&format!("{} syncs with {identity}.", folder.display()));
 
     if request.at_logon {
@@ -349,7 +349,7 @@ pub fn set_up(
     if !request.start {
         return Ok(());
     }
-    if !running {
+    if taken == crate::folders::Taken::AtStart {
         control::start(paths)?;
     }
     say("The daemon is running: `hbsync status` shows what it does.");

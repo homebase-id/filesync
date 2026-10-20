@@ -16,8 +16,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(crate) use interprocess::local_socket::Listener;
 use interprocess::local_socket::prelude::*;
-use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream};
+use interprocess::local_socket::{ListenerOptions, Name, Stream};
 
 use crate::Paths;
 use crate::protocol::{Ask, OTHER_PROTOCOL, PROTOCOL, Reply, Request};
