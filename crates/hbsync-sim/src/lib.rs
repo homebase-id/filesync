@@ -80,9 +80,9 @@ pub enum Action {
     /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
     ToggleIgnore,
     /// The user restores one item of Recently deleted, on the server at once, with what was
-    /// deleted with it (node schema: in it, removed no earlier than it), folders first: back in
-    /// its folder, or at the top if that is gone, under a free name. (The engine's restore also
-    /// brings back the folders above: each such step is one of these.)
+    /// deleted with it (node schema: in it, removed no earlier than it), and the folders above it
+    /// in Recently deleted first: back in its folder under a free name, or as it was if that is
+    /// gone for good (an orphan, for Recovered files).
     Restore {
         node: usize,
     },
@@ -1549,8 +1549,21 @@ impl Sim {
     }
 
     /// Brings `node` back from Recently deleted with what was deleted with it, folders before
-    /// what is in them; what doesn't come back keeps what is in it there.
+    /// what is in them; what doesn't come back keeps what is in it there. As the engine's
+    /// restore: the folders above it in Recently deleted first (just those, outermost first).
     fn restore_with(&mut self, node: NodeId) {
+        let mut above = Vec::new();
+        let mut at = self.server.removed.get(&node).map(|n| n.state.parent);
+        while let Some(f) = at.filter(|f| self.is_removed(*f) && !above.contains(f)) {
+            above.push(f);
+            at = self.server.removed.get(&f).map(|n| n.state.parent);
+        }
+        for f in above.into_iter().rev() {
+            self.restore_node(f);
+            if !self.server.live.contains_key(&f) {
+                return;
+            }
+        }
         let mut queue = VecDeque::from([node]);
         while let Some(n) = queue.pop_front() {
             let with = self.server.deleted_with(n);
@@ -1561,23 +1574,27 @@ impl Sim {
         }
     }
 
-    /// Brings `node` back from Recently deleted: into its folder if that is live, else at the
-    /// top, under a free name (it stays deleted if none is).
+    /// Brings `node` back from Recently deleted: into its folder if that is live, under a free
+    /// name (it stays deleted if none is); as it was if its folder is gone for good (an orphan,
+    /// for Recovered files); not while its folder is removed.
     fn restore_node(&mut self, node: NodeId) {
         let Some(mut n) = self.server.removed.remove(&node) else {
             return;
         };
-        if !n.state.parent.is_root() && !self.server.live.contains_key(&n.state.parent) {
-            n.state.parent = NodeId::ROOT;
-        }
-        let tree = self.server.tree();
-        let Some(name) = restored_names(&n.state.name)
-            .find(|name| tree.child_named(n.state.parent, name, None).is_none())
-        else {
-            self.server.removed.insert(node, n); // no free name: it stays deleted
+        let parent = n.state.parent;
+        if parent.is_root() || self.server.live.contains_key(&parent) {
+            let tree = self.server.tree();
+            let Some(name) = restored_names(&n.state.name)
+                .find(|name| tree.child_named(parent, name, None).is_none())
+            else {
+                self.server.removed.insert(node, n); // no free name: it stays deleted
+                return;
+            };
+            n.state.name = name;
+        } else if self.is_removed(parent) {
+            self.server.removed.insert(node, n); // its folder didn't come back
             return;
-        };
-        n.state.name = name;
+        }
         n.remote.version = VersionTag(self.server.uuid());
         self.server.live.insert(node, n);
         self.restored_on_drive(node);

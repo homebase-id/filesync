@@ -421,9 +421,9 @@ fn a_node_written_into_a_removed_folder_later_holds_it() -> common::Res<()> {
 }
 
 /// A restore whose folder went for good meanwhile (another device's purge) brings the item
-/// back at the top in the same restore.
+/// back where it was, an orphan the next sync moves into Recovered files (sync semantics §6.3).
 #[test]
-fn a_restore_whose_folder_went_for_good_comes_back_at_the_top() -> common::Res<()> {
+fn a_restore_whose_folder_went_for_good_comes_back_in_recovered_files() -> common::Res<()> {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("d/x.txt", "x")?;
@@ -438,7 +438,37 @@ fn a_restore_whose_folder_went_for_good_comes_back_at_the_top() -> common::Res<(
     let x = header_named(&server, "x.txt");
     assert_eq!(a.engine.drive().restore(&[node_of(&x)])?, 1);
     a.sync()?;
-    assert_eq!(a.read_text("x.txt")?, "x");
+    assert_eq!(a.read_text("Recovered files/x.txt")?, "x");
+    let server = server.lock().map_err(|_| "poisoned")?;
+    assert_eq!(server.live_names(), ["Recovered files", "x.txt"]);
+    Ok(())
+}
+
+/// The same with the folder's delete for good already read (another device's purge, through
+/// the feed): Recently deleted lists the item in Recovered files, and the restore brings it
+/// there.
+#[test]
+fn an_item_whose_folder_went_for_good_lists_and_comes_back_in_recovered_files() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/x.txt", "x")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let d = header_named(&server, "d");
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .delete(d.file_id, d.version)?;
+    a.sync()?;
+    let item = a
+        .recently_deleted(10)?
+        .pop()
+        .ok_or("x in Recently deleted")?;
+    assert_eq!(item.path, "Recovered files/x.txt");
+    assert_eq!(a.engine.drive().restore(&[item.node])?, 1);
+    a.sync()?;
+    assert_eq!(a.read_text("Recovered files/x.txt")?, "x");
     Ok(())
 }
 

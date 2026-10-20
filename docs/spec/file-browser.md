@@ -52,7 +52,8 @@ place, from its own Documents folder and so on, never inside the main folder.
 A top-level folder with the fixed node id `fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b`, named
 `Recovered files` when made (node schema, "Recovered files"). The desktop computers move into it
 what lost its folder for good: a live node whose `groupId` is no node on the drive (another
-device wrote into a folder as it was deleted for good, or another app deleted a folder outright).
+device wrote into a folder as it was deleted for good, another app deleted a folder outright, or
+a restore brought back something whose folder went for good).
 - Recognise it by `uniqueId`, never by name: the user may rename it, and a plain folder may be
   called `Recovered files` too (both are listed).
 - Hide it while it is empty, or show it dimmed (slightly transparent); show it as any folder
@@ -145,17 +146,20 @@ filesync's own rules are in its node schema ("Recently deleted") and `deleted.rs
 - **Restore** is a metadata-only update by fileId:
   - Back under its own name in its own folder: `update-archival-status-batch` with `archivalStatus` 0,
     each item at its `versionTag`, a level at a time (each folder's request before what is in it).
-  - Under a new name, or at the top: an update with the node's own key with a new IV, its `versionTag`, an
+  - Under a new name: an update with the node's own key with a new IV, its `versionTag`, an
     empty manifest (the payload stays) and `archivalStatus` 0.
   - The content is written back as read, unknown keys included, without an `rm` (the batch leaves the
     content, an old `rm` too: it means nothing).
   - Order: the removed folders above the item first, outermost first, then the item, then what was deleted
     with it (not what was deleted from it before).
-  - An item whose folder is gone for good goes to the top level; one whose folder didn't come back stays
-    removed.
+  - An item whose folder is gone for good comes back as it was, in the same batch (its `groupId` names no
+    node: an orphan, which the computers move into Recovered files; don't move it yourself). Until a
+    computer is on, no listing shows it: say where it will appear ("in Recovered files, once one of
+    your computers syncs"). One whose folder didn't come back stays removed.
   - A name a live sibling took meanwhile gets ` (restored)`, then ` (restored 2)` up to 99, before the
     extension.
-  - A `VersionTagMismatch` or not-found skips the item: another device changed it.
+  - A `VersionTagMismatch` or not-found skips the item: another device changed it. A folder above
+    that is not found went for good: what was to come back into it comes back as it was, as above.
 - **Delete forever:** only what the user saw.
   - Use `soft-delete-batch` (odin-core #1977), up to 1,000 files a request, each with its
     `versionTag` and no recipients: an item changed since isn't deleted, and the rest of the

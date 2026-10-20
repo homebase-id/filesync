@@ -2820,7 +2820,8 @@ fn regression_a_folder_brought_back_from_a_removal_keeps_the_drives_tag() {
 }
 
 /// Documents removes a folder, then a file in it; in between the role folder is deleted and
-/// the folder restored to the top, and the file's removal decided in Documents still runs.
+/// the folder restored, and the file's removal decided in Documents still runs. (Found when a
+/// restore put the folder at the top; a restore now brings the role folder back first.)
 #[test]
 fn regression_a_restore_during_a_folder_delete_isnt_a_write_outside() {
     use Action::*;
@@ -2856,12 +2857,12 @@ fn regression_a_restore_during_a_folder_delete_isnt_a_write_outside() {
     ]);
     assert!(sim.quiesce(30));
     sim.check().unwrap_or_else(|e| panic!("{e}"));
+    // The role folder (named "a" here) came back first, then the folder in it.
     let paths = sim.server_paths();
     assert!(
-        paths.iter().any(|p| p == "a"),
+        paths.iter().any(|p| p == "a/a"),
         "the restored folder: {paths:?}"
     );
-    assert!(!paths.iter().any(|p| p == "a/a"), "{paths:?}");
     assert!(sim.is_removed(file), "the file is in Recently deleted");
 }
 

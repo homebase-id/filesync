@@ -182,8 +182,9 @@ main e0d52f336 (frodo runs it): `V2DriveBatchFileWriteOperationsController.SoftD
   `cannotUpdateNonActiveFile` answer is a tombstone (a file is active or deleted:
   `AssertActiveForUpdate`, **[verified]**): the file is taken as deleted for good without
   reading its header; a `fileNotFound` one is still checked by a header read. A
-  restore under a new name (` (restored)`) or at the top is a PATCH, as it rewrites content
-  or `groupId`.
+  restore under a new name (` (restored)`) is a PATCH, as it rewrites content; one whose
+  folder went for good is batched like any other (its `groupId` as it was: an orphan, for
+  Recovered files).
 
 Upload instructions **[verified]** `UploadInstructionSet.cs`, `UploadManifest.cs`:
 `{transferIv, storageOptions?, transitOptions?, manifest: {payloadDescriptors: [{payloadKey,
