@@ -59,7 +59,7 @@ pub(super) struct Told(HashSet<String>);
 
 impl Told {
     /// The notes of the last sync that weren't in the one before, each once.
-    pub fn fresh(&mut self, mut notes: Vec<String>) -> Vec<String> {
+    pub(super) fn fresh(&mut self, mut notes: Vec<String>) -> Vec<String> {
         let before = std::mem::take(&mut self.0);
         notes.retain(|n| self.0.insert(n.clone()) && !before.contains(n));
         notes
@@ -83,7 +83,11 @@ impl Stalled {
     /// The skips of a sync ended at `now` to tell, each operation once: those this device can't
     /// do, and stale ones skipped [`STALLED_SKIPS`] times over [`STALLED_FOR`] (once a streak).
     /// One waiting for another operation isn't told: that one says why.
-    pub fn told<'r>(&mut self, skipped: &'r [(Op, Skip)], now: Instant) -> Vec<&'r (Op, Skip)> {
+    pub(super) fn told<'r>(
+        &mut self,
+        skipped: &'r [(Op, Skip)],
+        now: Instant,
+    ) -> Vec<&'r (Op, Skip)> {
         let mut seen = HashSet::new();
         let mut told = Vec::new();
         for item in skipped {

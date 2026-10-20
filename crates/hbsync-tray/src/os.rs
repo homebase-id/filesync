@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Opens a folder in the file manager, or a page in the browser.
-pub fn open(what: impl AsRef<std::ffi::OsStr>) {
+pub(crate) fn open(what: impl AsRef<std::ffi::OsStr>) {
     let what = what.as_ref();
     if let Err(e) = hbsync_app::setup::open_browser(None, what) {
         tracing::warn!("can't open {}: {e}", what.display());
@@ -14,7 +14,7 @@ pub fn open(what: impl AsRef<std::ffi::OsStr>) {
 }
 
 /// Shows `path` selected in its folder (or its folder, where that can't be done).
-pub fn reveal(path: &Path) {
+pub(crate) fn reveal(path: &Path) {
     if let Err(e) = show_selected(path) {
         tracing::debug!(
             "can't show {} in its folder ({e}): opening the folder",
@@ -63,7 +63,7 @@ fn show_selected(path: &Path) -> std::io::Result<()> {
 }
 
 /// A desktop notification, from a thread of its own (some systems take their time).
-pub fn notify(summary: String, body: String) {
+pub(crate) fn notify(summary: String, body: String) {
     std::thread::spawn(move || {
         let mut notification = notify_rust::Notification::new();
         notification
@@ -83,7 +83,7 @@ pub fn notify(summary: String, body: String) {
 }
 
 /// Notifications on macOS come from the app bundle, when there is one.
-pub fn name_notifications() {
+pub(crate) fn name_notifications() {
     #[cfg(target_os = "macos")]
     if matches!(Install::current(), Install::MacApp { .. })
         && let Err(e) = notify_rust::set_application(hbsync_app::autostart::LABEL)
@@ -95,7 +95,7 @@ pub fn name_notifications() {
 /// The program that replaced this one on disk since it started (a package or `cargo install`
 /// update): Linux keeps running the old one until it restarts; elsewhere the updater restarts
 /// it. Not when it was removed (nothing to restart into).
-pub fn replacement() -> Option<PathBuf> {
+pub(crate) fn replacement() -> Option<PathBuf> {
     if !cfg!(target_os = "linux") {
         return None;
     }

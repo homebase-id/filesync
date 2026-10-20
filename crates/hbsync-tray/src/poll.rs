@@ -29,7 +29,7 @@ const UNWATCHED: Duration = Duration::from_secs(10);
 const START_AGAIN: Duration = Duration::from_secs(30);
 
 /// What wakes the watcher's thread.
-pub enum Poke {
+pub(crate) enum Poke {
     /// Look now (after an action).
     Look,
     /// Show what was seen last again (the minute's look while watching: relative times).
@@ -41,7 +41,7 @@ pub enum Poke {
 }
 
 /// Starts watching; [`Poke::Look`] sent on the returned channel has it look at once.
-pub fn spawn(paths: Paths, send: Sender) -> std::io::Result<mpsc::Sender<Poke>> {
+pub(crate) fn spawn(paths: Paths, send: Sender) -> std::io::Result<mpsc::Sender<Poke>> {
     let (wake, woken) = mpsc::channel();
     let me = wake.clone();
     std::thread::Builder::new()

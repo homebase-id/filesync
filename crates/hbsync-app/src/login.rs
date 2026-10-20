@@ -25,7 +25,7 @@ pub struct Login {
 
 /// Starts logging in to `identity` (a domain such as `frodo.dotyou.cloud`); `friendly_name`
 /// names the device in the owner's list.
-pub fn begin(identity: &str, friendly_name: &str) -> Result<Login, HomebaseError> {
+pub(crate) fn begin(identity: &str, friendly_name: &str) -> Result<Login, HomebaseError> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://localhost:{port}{CALLBACK_PATH}");

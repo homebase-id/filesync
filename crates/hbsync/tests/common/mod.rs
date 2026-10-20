@@ -7,25 +7,25 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
+pub(crate) type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
-pub struct Home {
+pub(crate) struct Home {
     dir: tempfile::TempDir,
 }
 
 impl Home {
-    pub fn new() -> std::io::Result<Home> {
+    pub(crate) fn new() -> std::io::Result<Home> {
         Ok(Home {
             dir: tempfile::tempdir()?,
         })
     }
 
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.dir.path()
     }
 
     /// `exe` with `args`, in this home, credentials in files.
-    pub fn command(&self, exe: &str, args: &[&str]) -> Command {
+    pub(crate) fn command(&self, exe: &str, args: &[&str]) -> Command {
         let mut c = Command::new(exe);
         c.args(args)
             .env("HBSYNC_HOME", self.path())
@@ -33,12 +33,12 @@ impl Home {
         c
     }
 
-    pub fn hbsync(&self, args: &[&str]) -> std::io::Result<Output> {
+    pub(crate) fn hbsync(&self, args: &[&str]) -> std::io::Result<Output> {
         self.command(env!("CARGO_BIN_EXE_hbsync"), args).output()
     }
 
     /// `hbsync` with `args`, which must succeed; what it said.
-    pub fn ok(&self, args: &[&str]) -> Res<String> {
+    pub(crate) fn ok(&self, args: &[&str]) -> Res<String> {
         let out = self.hbsync(args)?;
         if !out.status.success() {
             return Err(format!("hbsync {}: {}", args.join(" "), text(&out)).into());
@@ -55,7 +55,7 @@ impl Drop for Home {
 }
 
 /// What a process wrote, stdout then stderr.
-pub fn text(out: &Output) -> String {
+pub(crate) fn text(out: &Output) -> String {
     format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),

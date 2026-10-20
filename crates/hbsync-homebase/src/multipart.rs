@@ -5,7 +5,7 @@
 use std::io::{self, Cursor, Read};
 
 /// One form part.
-pub struct Part<'a> {
+pub(crate) struct Part<'a> {
     name: &'static str,
     filename: Option<&'static str>,
     content_type: &'static str,
@@ -102,14 +102,14 @@ impl<'a> Part<'a> {
 
 /// The parts of a form, in order.
 #[derive(Debug)]
-pub struct Multipart<'a> {
+pub(crate) struct Multipart<'a> {
     boundary: String,
     parts: Vec<Part<'a>>,
 }
 
 impl<'a> Multipart<'a> {
     /// `boundary` must not occur in any part (a random one: 32 hex characters).
-    pub fn new(boundary: String, parts: Vec<Part<'a>>) -> Self {
+    pub(crate) fn new(boundary: String, parts: Vec<Part<'a>>) -> Self {
         Multipart { boundary, parts }
     }
 

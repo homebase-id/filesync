@@ -132,7 +132,7 @@ fn prefix() -> std::io::Result<String> {
 /// The account is the identity and a hash of the folder, so each folder of each identity (and
 /// each private instance's) has its own root.
 fn id(prefix: &str, folder: &Path, identity: &str) -> String {
-    let hash = hbsync_fileio::fnv1a64(key(folder).as_bytes());
+    let hash = hbsync_platform::fnv::fnv1a64(key(folder).as_bytes());
     format!("{prefix}{identity}~{hash:016x}")
 }
 

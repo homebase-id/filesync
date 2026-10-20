@@ -253,7 +253,7 @@ impl<R> std::fmt::Debug for Encrypting<R> {
 }
 
 impl<R: Read> Encrypting<R> {
-    pub fn new(inner: R, key: &Key, iv: &[u8; 16]) -> Self {
+    pub(crate) fn new(inner: R, key: &Key, iv: &[u8; 16]) -> Self {
         Encrypting {
             inner,
             cipher: cbc::Encryptor::new(key.into(), iv.into()),
@@ -373,7 +373,7 @@ impl Drop for Decrypting<'_> {
 }
 
 impl<'a> Decrypting<'a> {
-    pub fn new(
+    pub(crate) fn new(
         key: &Key,
         iv: Option<&[u8; 16]>,
         skip: u64,

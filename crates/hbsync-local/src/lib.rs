@@ -11,13 +11,13 @@ pub mod scan;
 mod walk;
 mod watch;
 
-pub use filter::{Filter, FilterError, Verdict, is_junk};
+pub use filter::{Filter, FilterError, Verdict};
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
 pub use layout::IGNORE_FILE;
 pub use marker::Marker;
 pub use scan::{ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
-pub use watch::{Bell, Debounce, LiveWatcher, LocalObserver, WatchBatch};
+pub use watch::{Bell, Debounce, LocalObserver};
 
 /// The client's own folder at the top of the sync root (its marker, ignore rules, temp files,
 /// trash). Never synced. The state DB is the account's, elsewhere.

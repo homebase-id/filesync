@@ -119,7 +119,7 @@ mod imp {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    pub fn detect(path: &Path) -> io::Result<FsFamily> {
+    pub(super) fn detect(path: &Path) -> io::Result<FsFamily> {
         let c_path = CString::new(path.as_os_str().as_bytes())?;
         // SAFETY: zeroed POD out struct, valid path.
         let mut st: libc::statfs = unsafe { std::mem::zeroed() };
@@ -130,7 +130,7 @@ mod imp {
         Ok(from_magic(st.f_type as u64))
     }
 
-    pub fn from_magic(magic: u64) -> FsFamily {
+    pub(super) fn from_magic(magic: u64) -> FsFamily {
         match magic {
             0xEF53 => FsFamily::Ext4,
             0x9123_683E => FsFamily::Btrfs,
@@ -153,7 +153,7 @@ mod imp {
     use std::ffi::{CStr, CString};
     use std::os::unix::ffi::OsStrExt;
 
-    pub fn detect(path: &Path) -> io::Result<FsFamily> {
+    pub(super) fn detect(path: &Path) -> io::Result<FsFamily> {
         let c_path = CString::new(path.as_os_str().as_bytes())?;
         // SAFETY: zeroed POD out struct, valid path; f_fstypename is NUL-terminated.
         let mut st: libc::statfs = unsafe { std::mem::zeroed() };
@@ -164,7 +164,7 @@ mod imp {
         Ok(from_name(&name.to_string_lossy()))
     }
 
-    pub fn read_only(path: &Path) -> io::Result<bool> {
+    pub(super) fn read_only(path: &Path) -> io::Result<bool> {
         let c_path = CString::new(path.as_os_str().as_bytes())?;
         // SAFETY: zeroed POD out struct, valid path.
         let mut st: libc::statfs = unsafe { std::mem::zeroed() };
@@ -174,7 +174,7 @@ mod imp {
         Ok(st.f_flags & libc::MNT_RDONLY as u32 != 0)
     }
 
-    pub fn from_name(name: &str) -> FsFamily {
+    pub(super) fn from_name(name: &str) -> FsFamily {
         match name {
             "apfs" => FsFamily::Apfs,
             "hfs" => FsFamily::HfsPlus,
@@ -194,7 +194,7 @@ mod imp {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
 
-    pub fn detect(path: &Path) -> io::Result<FsFamily> {
+    pub(super) fn detect(path: &Path) -> io::Result<FsFamily> {
         let file = crate::meta::open_attributes(path)?;
         let mut name = [0u16; 64];
         // SAFETY: the buffer length is passed; other out pointers are optional (null).
@@ -224,7 +224,7 @@ mod imp {
         }
     }
 
-    pub fn from_name(name: &str) -> FsFamily {
+    pub(super) fn from_name(name: &str) -> FsFamily {
         match name.to_ascii_uppercase().as_str() {
             "NTFS" => FsFamily::Ntfs,
             "REFS" => FsFamily::ReFs,

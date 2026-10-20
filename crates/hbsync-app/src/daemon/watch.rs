@@ -71,7 +71,7 @@ impl Outbox {
 }
 
 impl Watchers {
-    pub fn new(changed: Arc<Wakeup>) -> Watchers {
+    pub(super) fn new(changed: Arc<Wakeup>) -> Watchers {
         Watchers {
             list: Mutex::default(),
             changed,
@@ -79,7 +79,7 @@ impl Watchers {
     }
 
     /// Keeps a new watcher: it is sent the status at once ([`push`]).
-    pub fn add(&self, stream: Stream) {
+    pub(super) fn add(&self, stream: Stream) {
         if let Err(e) = ipc::watched(&stream) {
             tracing::debug!("a watcher's connection: {e}");
             return;

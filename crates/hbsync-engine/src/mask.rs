@@ -64,7 +64,7 @@ pub(crate) struct Masks {
 }
 
 impl Masks {
-    pub fn of(
+    pub(crate) fn of(
         input: &Input,
         filter: &Filter,
         scope: &Scope,

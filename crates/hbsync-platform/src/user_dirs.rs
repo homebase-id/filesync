@@ -107,7 +107,7 @@ fn xdg_dir(text: &str, dir: UserDir, home: &Path) -> Option<PathBuf> {
 mod imp {
     use super::*;
 
-    pub fn user_dir(dir: UserDir) -> Option<PathBuf> {
+    pub(super) fn user_dir(dir: UserDir) -> Option<PathBuf> {
         let home = home()?;
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|c| !c.is_empty())
@@ -118,7 +118,7 @@ mod imp {
         }
     }
 
-    pub fn synced_roots() -> Vec<(Owner, PathBuf)> {
+    pub(super) fn synced_roots() -> Vec<(Owner, PathBuf)> {
         Vec::new()
     }
 }
@@ -127,14 +127,14 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn user_dir(dir: UserDir) -> Option<PathBuf> {
+    pub(super) fn user_dir(dir: UserDir) -> Option<PathBuf> {
         Some(home()?.join(english(dir)))
     }
 
     /// OneDrive's folders under `~/Library/CloudStorage`, and iCloud Drive's own. (iCloud's
     /// Desktop & Documents, which keeps `~/Documents` in iCloud Drive, isn't told apart from a
     /// folder the user named Documents there: not detected.)
-    pub fn synced_roots() -> Vec<(Owner, PathBuf)> {
+    pub(super) fn synced_roots() -> Vec<(Owner, PathBuf)> {
         let Some(home) = home() else {
             return Vec::new();
         };
@@ -166,7 +166,7 @@ mod imp {
         KF_FLAG_DEFAULT, SHGetKnownFolderPath,
     };
 
-    pub fn user_dir(dir: UserDir) -> Option<PathBuf> {
+    pub(super) fn user_dir(dir: UserDir) -> Option<PathBuf> {
         let id = match dir {
             UserDir::Documents => FOLDERID_Documents,
             UserDir::Pictures => FOLDERID_Pictures,
@@ -191,7 +191,7 @@ mod imp {
     }
 
     /// OneDrive's folders, as it sets them in the environment (personal and work).
-    pub fn synced_roots() -> Vec<(Owner, PathBuf)> {
+    pub(super) fn synced_roots() -> Vec<(Owner, PathBuf)> {
         ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]
             .into_iter()
             .filter_map(std::env::var_os)

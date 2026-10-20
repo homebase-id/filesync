@@ -111,7 +111,7 @@ pub(crate) fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usi
 /// Every item of Recently deleted, newest first, each with how many items are in it: listed
 /// whole (tests).
 #[cfg(any(test, feature = "testkit"))]
-pub fn all(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
+pub(crate) fn all(s: &Store<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::read(s)?;
     let picked = (0..listing.roots.len()).collect();
     listing.with_along(picked)

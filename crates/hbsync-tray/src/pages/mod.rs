@@ -62,7 +62,7 @@ impl Shared {
 
 /// The pages' server.
 #[derive(Debug, Clone)]
-pub struct Pages {
+pub(crate) struct Pages {
     base: String,
     shared: Arc<Mutex<Shared>>,
 }
@@ -73,7 +73,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl Pages {
     /// Starts serving on a free port.
-    pub fn start(paths: Paths, send: Sender) -> std::io::Result<Pages> {
+    pub(crate) fn start(paths: Paths, send: Sender) -> std::io::Result<Pages> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let secret = uuid::Uuid::new_v4().simple().to_string();
         let base = format!(
@@ -114,13 +114,13 @@ impl Pages {
     }
 
     /// The URL of `page` (`setup`, `deletions`).
-    pub fn url(&self, page: &str) -> String {
+    pub(crate) fn url(&self, page: &str) -> String {
         format!("{}/{page}", self.base)
     }
 
     /// Opens the login page, with `identity` and `folder` filled in (logging in again). A login
     /// waiting for approval goes on (its page offers to start over).
-    pub fn prepare_setup(&self, identity: &str, folder: Option<PathBuf>) {
+    pub(crate) fn prepare_setup(&self, identity: &str, folder: Option<PathBuf>) {
         let mut s = lock(&self.shared);
         if s.phase != Phase::Connecting {
             s.clear_form();
@@ -143,12 +143,12 @@ impl Pages {
     }
 
     /// Something the tray shows while a login goes on.
-    pub fn busy(&self) -> Option<&'static str> {
+    pub(crate) fn busy(&self) -> Option<&'static str> {
         (lock(&self.shared).phase == Phase::Connecting)
             .then_some("Waiting for your approval in the browser…")
     }
 
-    pub fn set_status(&self, status: Option<FolderStatus>) {
+    pub(crate) fn set_status(&self, status: Option<FolderStatus>) {
         lock(&self.shared).status = status;
     }
 }

@@ -372,7 +372,7 @@ mod xattr {
     }
 
     /// The attribute's value, `None` if the item has none by that name.
-    pub fn get(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
+    pub(super) fn get(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
         let (path, name) = cstrings(path, name)?;
         loop {
             // SAFETY: valid C strings; a null buffer of size 0 asks for the length.
@@ -400,7 +400,7 @@ mod xattr {
         }
     }
 
-    pub fn set(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
+    pub(super) fn set(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
         let (path, name) = cstrings(path, name)?;
         // SAFETY: valid C strings and `value` of `value.len()` bytes.
         let rc = unsafe {
@@ -427,7 +427,7 @@ mod xattr {
     }
 
     /// Removes the attribute; one that isn't there is no error.
-    pub fn remove(path: &Path, name: &str) -> io::Result<()> {
+    pub(super) fn remove(path: &Path, name: &str) -> io::Result<()> {
         let (path, name) = cstrings(path, name)?;
         // SAFETY: valid C strings.
         let rc = unsafe {

@@ -24,7 +24,7 @@ pub(crate) fn random<const N: usize>() -> Result<[u8; N], HomebaseError> {
 }
 
 /// One side of the YouAuth key exchange.
-pub struct Exchange {
+pub(crate) struct Exchange {
     secret: SecretKey,
 }
 
@@ -43,7 +43,7 @@ struct Jwk {
 }
 
 impl Exchange {
-    pub fn new() -> Result<Self, HomebaseError> {
+    pub(crate) fn new() -> Result<Self, HomebaseError> {
         loop {
             // Almost every 48-byte value is a valid scalar; retry the rare one that isn't.
             if let Ok(secret) = SecretKey::from_slice(&random::<48>()?) {
@@ -68,7 +68,11 @@ impl Exchange {
 
     /// The exchange key both sides derive: ECDH with the peer's JWK, the x coordinate at its
     /// full 48 bytes, then HKDF-SHA256 with `salt` and no info, 16 bytes.
-    pub fn derive(&self, peer_jwk_base64url: &str, salt: &[u8]) -> Result<Key, HomebaseError> {
+    pub(crate) fn derive(
+        &self,
+        peer_jwk_base64url: &str,
+        salt: &[u8],
+    ) -> Result<Key, HomebaseError> {
         let bad = |what: &str| HomebaseError::Crypto(format!("peer public key: {what}"));
         let json = URL_SAFE_NO_PAD
             .decode(peer_jwk_base64url.trim_end_matches('='))
@@ -119,7 +123,7 @@ pub(crate) fn aes_cbc_decrypt(key: &Key, iv: &[u8], data: &[u8]) -> Result<Vec<u
 /// The shared-secret envelope every API request and encrypted response uses: `{"iv", "data"}`,
 /// both standard base64.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Envelope {
+pub(crate) struct Envelope {
     pub iv: String,
     pub data: String,
 }

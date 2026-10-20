@@ -333,7 +333,7 @@ mod imp {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    pub(super) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         let c_from = CString::new(from.as_os_str().as_bytes())?;
         let c_to = CString::new(to.as_os_str().as_bytes())?;
         // The system call itself: musl (the static release build) has no renameat2 wrapper.
@@ -368,7 +368,7 @@ mod imp {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
-    pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    pub(super) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         let c_from = CString::new(from.as_os_str().as_bytes())?;
         let c_to = CString::new(to.as_os_str().as_bytes())?;
         // SAFETY: valid NUL-terminated strings.
@@ -410,7 +410,7 @@ mod imp {
             .collect()
     }
 
-    pub fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
+    pub(super) fn rename_noreplace(from: &Path, to: &Path) -> io::Result<()> {
         let (w_from, w_to) = (wide(from), wide(to));
         // SAFETY: NUL-terminated wide strings. Without MOVEFILE_REPLACE_EXISTING the call
         // fails with ERROR_ALREADY_EXISTS when the target exists.
@@ -422,7 +422,7 @@ mod imp {
         }
     }
 
-    pub fn set_hidden(path: &Path) -> io::Result<()> {
+    pub(super) fn set_hidden(path: &Path) -> io::Result<()> {
         let w = wide(path);
         // SAFETY: a NUL-terminated wide string.
         let now = unsafe { GetFileAttributesW(w.as_ptr()) };

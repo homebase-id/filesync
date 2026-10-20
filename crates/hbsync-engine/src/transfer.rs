@@ -54,7 +54,7 @@ pub(crate) struct Throttle {
 }
 
 impl Throttle {
-    pub fn new(bytes_per_sec: u64) -> Self {
+    pub(crate) fn new(bytes_per_sec: u64) -> Self {
         let rate = bytes_per_sec.max(1) as f64;
         Throttle {
             rate,

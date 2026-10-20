@@ -364,7 +364,7 @@ impl std::fmt::Debug for Executor<'_> {
 }
 
 impl<'a> Executor<'a> {
-    pub fn new(db: &'a mut StateDb, remote: &'a dyn Remote, cfg: &'a ExecConfig) -> Self {
+    pub(crate) fn new(db: &'a mut StateDb, remote: &'a dyn Remote, cfg: &'a ExecConfig) -> Self {
         Executor {
             db,
             remote,

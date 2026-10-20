@@ -30,7 +30,8 @@ pub use hbsync_homebase::app::{APP_NAME, files_online};
 pub use paths::{NoHome, Paths};
 pub use protocol::{Control, DaemonStatus, FolderStatus, State};
 pub use runner::{Command, Handle, Runner, RunnerConfig};
-pub use secrets::{CredentialError, CredentialStore, Location};
+pub use secrets::CredentialError;
+pub(crate) use secrets::{CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

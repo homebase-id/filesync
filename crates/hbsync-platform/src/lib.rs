@@ -21,4 +21,4 @@ pub use errors::{IoClass, classify};
 pub use fskind::FsFamily;
 pub use meta::{EntryKind, FileId, Fingerprint, LocalMeta, nothing_there, stat};
 pub use name::{NameIssue, Os, check_local_name, check_remote_name, name_key, nfc};
-pub use relpath::{RelPath, path_cmp};
+pub use relpath::RelPath;

@@ -5,22 +5,22 @@
 use crate::model::Look;
 
 /// The app icon, for pages and the Linux launcher.
-pub const APP_256: &[u8] = include_bytes!("../assets/app-icon-256.png");
+pub(crate) const APP_256: &[u8] = include_bytes!("../assets/app-icon-256.png");
 /// The synced folder's icon: the open cloud (Linux, macOS), the tile (Windows).
-pub const FOLDER: hbsync_app::shell::Icons<'static> = hbsync_app::shell::Icons {
+pub(crate) const FOLDER: hbsync_app::shell::Icons<'static> = hbsync_app::shell::Icons {
     png: include_bytes!("../assets/folder-256.png"),
     ico: include_bytes!("../assets/homebase.ico"),
 };
 
 /// An image as RGBA rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rgba {
+pub(crate) struct Rgba {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
 }
 
-pub fn decode(png_bytes: &[u8]) -> Result<Rgba, png::DecodingError> {
+pub(crate) fn decode(png_bytes: &[u8]) -> Result<Rgba, png::DecodingError> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info()?;
@@ -59,7 +59,7 @@ fn tile(look: Look) -> &'static [u8] {
 }
 
 /// The tray's icon for `look`, and whether it is a template image (macOS).
-pub fn tray(look: Look) -> Result<(Rgba, bool), png::DecodingError> {
+pub(crate) fn tray(look: Look) -> Result<(Rgba, bool), png::DecodingError> {
     // The menu bar shows one colour; the state shows in the menu's first lines. A problem
     // still shows, on the tile with its magenta dot.
     #[cfg(target_os = "macos")]

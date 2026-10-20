@@ -14,13 +14,13 @@ use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_state::StateDb;
 use hbsync_state::testkit::{Commit, Hook, on_commit};
 
-pub use hbsync_engine::testkit::Res;
+pub(crate) use hbsync_engine::testkit::Res;
 
-pub fn server() -> Arc<Mutex<FakeServer>> {
+pub(crate) fn server() -> Arc<Mutex<FakeServer>> {
     FakeServer::new(ServerConfig::default())
 }
 
-pub struct Client(TestClient<FakeRemote>);
+pub(crate) struct Client(TestClient<FakeRemote>);
 
 impl Deref for Client {
     type Target = TestClient<FakeRemote>;
@@ -36,11 +36,11 @@ impl DerefMut for Client {
 }
 
 impl Client {
-    pub fn new(server: &Arc<Mutex<FakeServer>>, name: &str) -> Res<Self> {
+    pub(crate) fn new(server: &Arc<Mutex<FakeServer>>, name: &str) -> Res<Self> {
         Self::with_config(server, name, |_| {})
     }
 
-    pub fn with_config(
+    pub(crate) fn with_config(
         server: &Arc<Mutex<FakeServer>>,
         name: &str,
         tweak: impl Fn(&mut EngineConfig) + 'static,
@@ -55,19 +55,19 @@ impl Client {
     }
 
     /// Scan, then sync until idle. The report accumulates every pass.
-    pub fn sync(&mut self) -> Res<SyncReport> {
+    pub(crate) fn sync(&mut self) -> Res<SyncReport> {
         self.0.sync_until_idle("2026-10-08", true, || {})
     }
 
     /// Syncs until idle as the daemon syncs a local change: reading the feed only if the
     /// drive isn't current.
-    pub fn sync_unasked(&mut self) -> Res<SyncReport> {
+    pub(crate) fn sync_unasked(&mut self) -> Res<SyncReport> {
         self.0.sync_until_idle("2026-10-08", false, || {})
     }
 
     /// Takes the drive's changes as announced from now on, as when the notifications connect
     /// and the read that follows works.
-    pub fn announced(&self) {
+    pub(crate) fn announced(&self) {
         let drive = self.engine.drive();
         drive.announcing_from(drive.connection());
     }
@@ -78,7 +78,7 @@ struct Crash;
 
 /// How much of its state DB a crashed client keeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kept {
+pub(crate) enum Kept {
     /// Every commit: the process crashed.
     All,
     /// Up to its last durable commit, or its `n`-th commit of the sync if later (`None`: no
@@ -90,7 +90,7 @@ pub enum Kept {
 /// the sync (just before a commit: that operation's DB changes are lost, what it did on disk or
 /// on the drive stays), the DB keeping what `kept` says, then starts it again. Returns whether
 /// it crashed.
-pub fn crash(
+pub(crate) fn crash(
     c: &mut Client,
     kept: Kept,
     when: impl Fn(Commit, usize) -> bool + Send + Sync + 'static,

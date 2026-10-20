@@ -66,7 +66,7 @@ fn portable_meta(entry: &fs::DirEntry) -> io::Result<LocalMeta> {
 
 #[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
-    pub use super::list_dir_portable as list_dir;
+    pub(super) use super::list_dir_portable as list_dir;
 }
 
 #[cfg(windows)]
@@ -88,7 +88,7 @@ mod imp {
     const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
     const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
 
-    pub fn list_dir(dir: &Path) -> io::Result<Vec<DirItem>> {
+    pub(super) fn list_dir(dir: &Path) -> io::Result<Vec<DirItem>> {
         match list_bulk(dir) {
             // FAT and some network redirectors don't implement the extended id class.
             Err(e) if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) => {
@@ -274,7 +274,7 @@ mod imp {
         }
     }
 
-    pub fn list_dir(dir: &Path) -> io::Result<Vec<DirItem>> {
+    pub(super) fn list_dir(dir: &Path) -> io::Result<Vec<DirItem>> {
         let c_dir = CString::new(dir.as_os_str().as_bytes())?;
         // SAFETY: valid path; the fd is closed below.
         let fd = unsafe {

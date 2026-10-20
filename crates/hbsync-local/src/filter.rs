@@ -78,7 +78,7 @@ fn ends(name: &str, s: &str) -> bool {
 }
 
 /// Whether `name` is on the built-in junk list (at any depth, in any case).
-pub fn is_junk(name: &str) -> bool {
+pub(crate) fn is_junk(name: &str) -> bool {
     JUNK.iter().any(|pat| match *pat {
         Pat::Name(n) => name.eq_ignore_ascii_case(n),
         Pat::Prefix(p) => starts(name, p),

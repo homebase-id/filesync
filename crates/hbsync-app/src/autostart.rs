@@ -269,7 +269,7 @@ mod os {
         format!("gui/{}", unsafe { libc::getuid() })
     }
 
-    pub fn installed() -> io::Result<bool> {
+    pub(crate) fn installed() -> io::Result<bool> {
         for label in labels() {
             if plist(&label)?.exists() {
                 return Ok(true);
@@ -278,7 +278,7 @@ mod os {
         Ok(false)
     }
 
-    pub fn install(program: &Program) -> io::Result<()> {
+    pub(crate) fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
         let path = plist(&program.label())?;
         hbsync_fileio::write_if_changed(&path, launchd_plist(program, &passed_env()).as_bytes())?;
@@ -296,7 +296,7 @@ mod os {
         })
     }
 
-    pub fn uninstall() -> io::Result<()> {
+    pub(crate) fn uninstall() -> io::Result<()> {
         for label in labels() {
             // The daemon's agent is unloaded too (not loaded is fine); the tray's isn't: that
             // would end the tray that asks.
@@ -309,7 +309,7 @@ mod os {
     }
 
     /// Through launchd only when it starts the daemon (not the tray).
-    pub fn start() -> io::Result<bool> {
+    pub(crate) fn start() -> io::Result<bool> {
         if !plist(LABEL)?.exists() {
             return Ok(false);
         }
@@ -349,11 +349,11 @@ mod os {
         Ok(config.join("autostart").join(DESKTOP_ENTRY))
     }
 
-    pub fn installed() -> io::Result<bool> {
+    pub(super) fn installed() -> io::Result<bool> {
         Ok(unit()?.exists() || desktop()?.exists())
     }
 
-    pub fn install(program: &Program) -> io::Result<()> {
+    pub(super) fn install(program: &Program) -> io::Result<()> {
         uninstall()?;
         let daemon = match program {
             Program::Tray(tray) => {
@@ -373,7 +373,7 @@ mod os {
             })
     }
 
-    pub fn uninstall() -> io::Result<()> {
+    pub(super) fn uninstall() -> io::Result<()> {
         crate::paths::remove_if_exists(&desktop()?)?;
         let path = unit()?;
         if !path.exists() {
@@ -384,7 +384,7 @@ mod os {
         systemctl(&["daemon-reload"])
     }
 
-    pub fn add_launcher(icon_png: &[u8]) -> io::Result<()> {
+    pub(super) fn add_launcher(icon_png: &[u8]) -> io::Result<()> {
         let data = crate::paths::xdg_dir("XDG_DATA_HOME", ".local/share")
             .ok_or_else(|| io::Error::other("HOME isn't set"))?;
         let packaged = crate::install::Install::current().lists_itself();
@@ -392,7 +392,7 @@ mod os {
     }
 
     /// Through systemd only when it starts the daemon (not the tray).
-    pub fn start() -> io::Result<bool> {
+    pub(super) fn start() -> io::Result<bool> {
         if !unit()?.exists() {
             return Ok(false);
         }
@@ -431,7 +431,7 @@ mod os {
         )
     }
 
-    pub fn installed() -> io::Result<bool> {
+    pub(crate) fn installed() -> io::Result<bool> {
         // Unreadable, it counts as off: callers that only consult it (starting the daemon,
         // logging out) mustn't fail on it.
         if msix() {
@@ -460,7 +460,7 @@ mod os {
         }
     }
 
-    pub fn install(program: &Program) -> io::Result<()> {
+    pub(crate) fn install(program: &Program) -> io::Result<()> {
         if msix() {
             return startup_task::enable();
         }
@@ -482,7 +482,7 @@ mod os {
         })
     }
 
-    pub fn uninstall() -> io::Result<()> {
+    pub(crate) fn uninstall() -> io::Result<()> {
         if msix() {
             // Also a Run value an earlier, unpackaged copy left (it would start that one too).
             // The package sees the registry through its own layer: try, but don't depend on it.
@@ -504,7 +504,7 @@ mod os {
     }
 
     /// The Run key only starts programs at logon: the caller starts the daemon itself.
-    pub fn start() -> io::Result<bool> {
+    pub(crate) fn start() -> io::Result<bool> {
         Ok(false)
     }
 
@@ -529,11 +529,11 @@ mod os {
             state == StartupTaskState::Enabled || state == StartupTaskState::EnabledByPolicy
         }
 
-        pub fn enabled() -> io::Result<bool> {
+        pub(crate) fn enabled() -> io::Result<bool> {
             task()?.State().map(on).map_err(err)
         }
 
-        pub fn enable() -> io::Result<()> {
+        pub(crate) fn enable() -> io::Result<()> {
             let state = task()?
                 .RequestEnableAsync()
                 .and_then(|op| op.join())
@@ -550,7 +550,7 @@ mod os {
             }
         }
 
-        pub fn disable() -> io::Result<()> {
+        pub(crate) fn disable() -> io::Result<()> {
             task()?.Disable().map_err(err)
         }
     }
