@@ -631,33 +631,21 @@ mod tests {
         let mut no_parent = fixture("file-node.json");
         no_parent.file_metadata.app_data.group_id = None;
         refused(no_parent, "no parent")?;
+        // The file fixture with content `size`.
+        let with_size = |size: Option<u64>| -> Result<FileHeader, Box<dyn std::error::Error>> {
+            let mut row = fixture("file-node.json");
+            let meta = &mut row.file_metadata.app_data;
+            let mut content = NodeContent::from_json(meta.content.as_deref().unwrap_or_default())?;
+            content.size = size;
+            meta.content = Some(content.to_json());
+            Ok(row)
+        };
         // Without its size, the stored (padded) size would be taken for the file's.
-        let mut sizeless = fixture("file-node.json");
-        let mut content = NodeContent::from_json(
-            sizeless
-                .file_metadata
-                .app_data
-                .content
-                .as_deref()
-                .unwrap_or_default(),
-        )?;
-        content.size = None;
-        sizeless.file_metadata.app_data.content = Some(content.to_json());
-        refused(sizeless, "no size")?;
+        refused(with_size(None)?, "no size")?;
         // A size its stored bytes can't hold, or one near u64::MAX (whose sealed size would
         // overflow): every download would fail its check, in full.
         for (size, stored) in [(1000, None), (1040, None), (u64::MAX - 3, Some(u64::MAX))] {
-            let mut odd = fixture("file-node.json");
-            let mut content = NodeContent::from_json(
-                odd.file_metadata
-                    .app_data
-                    .content
-                    .as_deref()
-                    .unwrap_or_default(),
-            )?;
-            content.size = Some(size);
-            odd.file_metadata.app_data.content = Some(content.to_json());
-            let mut odd = as_stored(odd)?;
+            let mut odd = as_stored(with_size(Some(size))?)?;
             for payload in odd.file_metadata.payloads.iter_mut().flatten() {
                 payload.bytes_written = stored.unwrap_or(payload.bytes_written);
             }

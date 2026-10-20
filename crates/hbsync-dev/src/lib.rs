@@ -373,7 +373,7 @@ impl Drop for RunFolder {
 
 #[cfg(test)]
 mod tests {
-    use hbsync_remote::contract::folder;
+    use hbsync_remote::contract::{doomed, folder};
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
     use hbsync_remote::{NodeMeta, Remote};
     use hbsync_types::NodeId;
@@ -441,12 +441,10 @@ mod tests {
         for name in ["old", "a", "b", "kept", "removed"] {
             made.push(remote.create(&folder(name, NodeId::ROOT), None)?);
         }
-        remote
-            .delete(&hbsync_remote::contract::doomed(&[made[0].at]))?
-            .into_answers()?;
+        remote.delete(&doomed(&[made[0].at]))?.into_answers()?;
         let from = feed_end(&remote, None)?;
         remote
-            .delete(&hbsync_remote::contract::doomed(&[made[1].at, made[2].at]))?
+            .delete(&doomed(&[made[1].at, made[2].at]))?
             .into_answers()?;
         remote
             .set_removed(&[made[4].clone()], true)?

@@ -955,7 +955,10 @@ impl Remote for FakeRemote {
             let mut server = self.server();
             Ok(batch
                 .iter()
-                .map(|f| server.hard_delete(f.at().file_id, f.at().version))
+                .map(|f| {
+                    let RemoteRef { file_id, version } = f.at();
+                    server.hard_delete(file_id, version)
+                })
                 .collect())
         })
     }

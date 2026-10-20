@@ -1,4 +1,5 @@
 # The engine deletes only what the store recorded: `RemovedRow::doomed`, `tombstones_before`.
 disallowed-methods = [
     { path = "hbsync_types::Doomed::unchecked", reason = "a delete names a file recorded in Recently deleted or as a tombstone (RemovedRow::doomed)" },
+    { path = "hbsync_remote::contract::doomed", reason = "a delete names a file recorded in Recently deleted or as a tombstone (RemovedRow::doomed)" },
 ]

@@ -10,7 +10,7 @@ use hbsync_dev::{
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_remote::Remote;
-use hbsync_remote::contract::{Bench, feed_end};
+use hbsync_remote::contract::{Bench, doomed, feed_end};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -907,9 +907,7 @@ fn write_answers_carry_the_feeds_time() -> R {
             r["updated"].as_i64(),
         ));
         let (_, w) = made("deleted")?;
-        let deleted = remote
-            .delete(&hbsync_remote::contract::doomed(&[w.at]))?
-            .single()?;
+        let deleted = remote.delete(&doomed(&[w.at]))?.single()?;
         let tomb = remote.header(w.at.file_id)?;
         answers.push((
             "soft-delete batch",
@@ -1231,9 +1229,7 @@ fn hard_purge() -> R {
         for (i, batch) in made.chunks(BATCH_FILES).enumerate() {
             let (sent, recv) = (socket_count("bytes_sent:")?, socket_bytes()?);
             let start = std::time::Instant::now();
-            let results = remote
-                .delete_for_good(&hbsync_remote::contract::doomed(batch))?
-                .into_answers()?;
+            let results = remote.delete_for_good(&doomed(batch))?.into_answers()?;
             let took = start.elapsed();
             total += took;
             // A socket closed meanwhile takes its counts along: none then.

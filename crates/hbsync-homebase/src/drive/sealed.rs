@@ -228,9 +228,13 @@ fn crypto(why: impl Into<String>) -> HomebaseError {
     HomebaseError::Crypto(why.into())
 }
 
-/// The size of `plain` bytes encrypted: PKCS#7 always adds 1 to 16 bytes.
+/// The size of `plain` bytes encrypted: PKCS#7 always adds 1 to 16 bytes. Panics past what a
+/// payload can hold ([`checked_sealed_len`]): no file is that large.
 pub const fn sealed_len(plain: u64) -> u64 {
-    (plain / BLOCK as u64 + 1) * BLOCK as u64
+    match checked_sealed_len(plain) {
+        Some(n) => n,
+        None => panic!("larger than a payload can be"),
+    }
 }
 
 /// [`sealed_len`] of a size a stored payload can have: `None` past odin-core's limit, a
