@@ -121,13 +121,9 @@ pub(crate) fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPa
 }
 
 /// Loads everything the reconciler needs for `dirty`, with every child of each folder involved,
-/// for `folder` (its filter, §10, and its scope, §12).
-pub fn build_input(
-    s: &Store<'_>,
-    dirty: &[NodeId],
-    folder: &FolderCtx,
-) -> Result<Input, StateError> {
-    build(s, dirty, folder, None)
+/// for the sync folder `ctx` (its filter, §10, and its scope, §12).
+pub fn build_input(s: &Store<'_>, dirty: &[NodeId], ctx: &FolderCtx) -> Result<Input, StateError> {
+    build(s, dirty, ctx, None)
 }
 
 /// [`build_input`] with only the children the rules may need, except in the folders in `full`
@@ -136,10 +132,10 @@ pub fn build_input(
 pub(crate) fn build_narrow(
     s: &Store<'_>,
     dirty: &[NodeId],
-    folder: &FolderCtx,
+    ctx: &FolderCtx,
     full: &HashSet<NodeId>,
 ) -> Result<Input, StateError> {
-    build(s, dirty, folder, Some(full))
+    build(s, dirty, ctx, Some(full))
 }
 
 /// Past this many names to look up in one folder, it is listed whole: one query instead.
@@ -148,13 +144,13 @@ const NAMED_MAX: usize = 32;
 fn build(
     s: &Store<'_>,
     dirty: &[NodeId],
-    folder: &FolderCtx,
+    ctx: &FolderCtx,
     full: Option<&HashSet<NodeId>>,
 ) -> Result<Input, StateError> {
-    let (filter, scope) = (&*folder.filter, &*folder.scope);
+    let (filter, scope) = (&*ctx.filter, &*ctx.scope);
     let mut b = Builder {
         s,
-        os: folder.os,
+        os: ctx.os,
         input: Input::default(),
         base_done: HashSet::new(),
         mirror_done: HashSet::new(),

@@ -1343,8 +1343,9 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
         &mut None,
     )?;
     let mut db = cell.into_inner();
+    let folder = hbsync_engine::FolderCtx::new(dir.path());
     let started = std::time::Instant::now();
-    let adopted = hbsync_engine::adopt::adopt(&mut db, &hbsync_engine::FolderCtx::new(dir.path()))?;
+    let adopted = hbsync_engine::adopt::adopt(&mut db, &folder)?;
     let took = started.elapsed();
     assert_eq!(adopted, N);
     // Matching each file against all its siblings took 50 s here (debug); grouped, under 1 s.

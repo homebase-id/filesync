@@ -44,18 +44,13 @@ impl FolderCtx {
         }
     }
 
-    /// Whether the volume tells names apart byte for byte ([`ScanOptions::exact_names`]):
-    /// case-sensitive Linux volumes (macOS folds normalization whatever its case, and Windows
-    /// can turn case sensitivity on per folder).
-    pub fn exact_names(&self) -> bool {
-        cfg!(target_os = "linux") && !self.case_insensitive
-    }
-
-    /// How the scan reads the folder.
+    /// How the scan reads the folder (with a look at its volume: [`ScanOptions::for_root`]).
     pub(crate) fn scan_options(&self) -> ScanOptions {
         ScanOptions {
             filter: Arc::clone(&self.filter),
-            exact_names: self.exact_names(),
+            // Byte-exact names on case-sensitive Linux volumes (macOS folds normalization
+            // whatever its case, and Windows can turn case sensitivity on per folder).
+            exact_names: cfg!(target_os = "linux") && !self.case_insensitive,
             ..ScanOptions::for_root(&self.root, self.algorithm)
         }
     }

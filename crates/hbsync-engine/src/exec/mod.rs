@@ -594,10 +594,10 @@ impl<'a> Executor<'a> {
                 judge(root, &record, Some(row))
             }
         };
-        let (os, scope) = (self.folder.os, Arc::clone(&self.folder.scope));
+        let (os, scope) = (self.folder.os, &*self.folder.scope);
         match self
             .db
-            .write(|s| apply(s, &record, judged, &scope, os, now))?
+            .write(|s| apply(s, &record, judged, scope, os, now))?
         {
             Applied::Settled(at) => {
                 self.note([(node, at)]);

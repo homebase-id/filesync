@@ -3,7 +3,6 @@
 
 use super::recover::recover_placements;
 use super::*;
-use crate::engine::EngineConfig;
 use crate::scope::Scope;
 use hbsync_fileio::hash_bytes;
 use hbsync_platform::tags;
@@ -25,13 +24,12 @@ struct Harness {
 impl Harness {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
-        let EngineConfig { folder, exec, .. } = EngineConfig::new(dir.path(), "t");
         Ok(Harness {
+            folder: FolderCtx::new(dir.path()),
             _dir: dir,
             db: StateDb::open_in_memory()?,
             remote: FakeRemote::new(FakeServer::new(ServerConfig::default())),
-            folder,
-            cfg: exec,
+            cfg: ExecConfig::default(),
         })
     }
 
@@ -1172,11 +1170,7 @@ fn a_delete_while_the_download_is_in_flight_is_taken() -> R {
     let path = dir.path().join("state.db");
     let root = dir.path().join("root");
     fs::create_dir_all(&root)?;
-    let EngineConfig {
-        folder: ctx,
-        exec: cfg,
-        ..
-    } = EngineConfig::new(&root, "t");
+    let (ctx, cfg) = (FolderCtx::new(&root), ExecConfig::default());
     let mut db = StateDb::open(&path)?;
     let fake = FakeRemote::new(FakeServer::new(ServerConfig::default()));
     let (node, at) = fake
@@ -1250,11 +1244,7 @@ fn a_record_stays_when_the_commit_fails_after_placing() -> R {
     let path = dir.path().join("state.db");
     let root = dir.path().join("root");
     fs::create_dir_all(root.join("d"))?;
-    let EngineConfig {
-        folder: ctx,
-        exec: cfg,
-        ..
-    } = EngineConfig::new(&root, "t");
+    let (ctx, cfg) = (FolderCtx::new(&root), ExecConfig::default());
     let mut db = StateDb::open(&path)?;
     let fake = FakeRemote::new(FakeServer::new(ServerConfig::default()));
     let folder = NodeId::new();

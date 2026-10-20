@@ -176,7 +176,7 @@ impl Executor<'_> {
             hash: None,
             tags: self.held_after(left, held_before),
         };
-        let (os, scope) = (self.folder.os, Arc::clone(&self.folder.scope));
+        let (os, scope) = (self.folder.os, &*self.folder.scope);
         let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {
@@ -184,7 +184,7 @@ impl Executor<'_> {
             }
             s.put_local(&row)?;
             match &record {
-                Some(r) => settle_placement(s, r, &scope, os).map(Placed::at),
+                Some(r) => settle_placement(s, r, scope, os).map(Placed::at),
                 None => {
                     // Made from Recently deleted (its folder restored, its RemoteCreate to
                     // follow): it settles against the version there, what it was made of, as

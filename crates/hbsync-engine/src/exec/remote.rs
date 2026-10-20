@@ -25,7 +25,7 @@ pub(crate) fn meta_at(row: &MirrorRow, parent: NodeId, name: &str, removed: bool
 }
 
 /// [`meta_at`] where and as the row has it.
-pub(crate) fn meta(row: &MirrorRow, removed: bool) -> NodeMeta {
+fn meta(row: &MirrorRow, removed: bool) -> NodeMeta {
     meta_at(row, row.parent, &row.name, removed)
 }
 
@@ -61,9 +61,7 @@ impl Executor<'_> {
         let base = base.map(|b| b.state.tags.clone()).unwrap_or_default();
         Tags::merge_onto(&base, ours, drive, self.folder.os)
     }
-}
 
-impl Executor<'_> {
     // ---- remote operations: guards before the worker pool, the DB after ----
 
     pub(super) fn prepare_folder(
