@@ -31,6 +31,7 @@ use crate::protocol::{
 };
 use crate::runner::{Command, Handle};
 use crate::sync::{Wakeup, lock};
+use crate::words;
 use crate::{Identity, Paths, Root};
 
 mod feed;
@@ -164,6 +165,16 @@ impl Account {
             Some(waiting) => waiting.roots.clone(),
             None => shown.shown().map(|r| r.root.clone()).collect(),
         }
+    }
+
+    /// Its main folder, if it syncs one.
+    pub(super) fn main_folder(&self) -> Option<PathBuf> {
+        let shown = lock(&self.shown);
+        let main = match &shown.waiting {
+            Some(waiting) => waiting.roots.iter().find(|r| r.role.is_none()),
+            None => shown.shown().map(|r| &r.root).find(|r| r.role.is_none()),
+        };
+        main.map(|r| r.folder.clone())
     }
 
     /// Syncs the folder `root` too (once connected).
@@ -310,14 +321,15 @@ impl Account {
             let mut items = Vec::new();
             for f in db.folders()? {
                 let path = PathBuf::from(&f.path);
-                if !folders.iter().any(|r| r.folder == path) {
+                let Some(root) = folders.iter().find(|r| r.folder == path) else {
                     continue;
-                }
+                };
                 items.extend(
                     db.recent_synced(f.id, limit)?
                         .into_iter()
                         .map(|synced| RecentItem {
                             folder: path.clone(),
+                            main: root.role.is_none(),
                             synced,
                         }),
                 );
@@ -329,11 +341,15 @@ impl Account {
 
     /// The newest `limit` deletes of its Recently deleted, newest first, each with how many
     /// items are in it; and, when it holds anything, all of it as listed now.
-    pub(super) fn deleted(&self, limit: usize) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
+    pub(super) fn deleted(
+        &self,
+        limit: usize,
+        main: Option<&Path>,
+    ) -> (Vec<DeletedItem>, Option<DeletedAccount>) {
         let Some((deletes, summary)) = self.read(|db| db.deletes(limit)) else {
             return (Vec::new(), None);
         };
-        let items = self.items(deletes, &summary.listed);
+        let items = self.items(deletes, &summary.listed, main);
         // Anything to list, though emptying may take nothing (a folder holding a live node).
         let account = (summary.deletes > 0).then(|| DeletedAccount {
             identity: self.identity.clone(),
@@ -347,25 +363,32 @@ impl Account {
     }
 
     /// The items of its Recently deleted that are `nodes`.
-    pub(super) fn find_deleted(&self, nodes: &[NodeId]) -> Vec<DeletedItem> {
+    pub(super) fn find_deleted(&self, nodes: &[NodeId], main: Option<&Path>) -> Vec<DeletedItem> {
         self.read(|db| db.find_deleted(nodes))
-            .map(|(found, listed)| self.items(found, &listed))
+            .map(|(found, listed)| self.items(found, &listed, main))
             .unwrap_or_default()
     }
 
     /// The items of its Recently deleted named `names`.
-    pub(super) fn named_deleted(&self, names: &[String]) -> Vec<DeletedItem> {
+    pub(super) fn named_deleted(&self, names: &[String], main: Option<&Path>) -> Vec<DeletedItem> {
         self.read(|db| db.named_deleted(names))
-            .map(|(found, listed)| self.items(found, &listed))
+            .map(|(found, listed)| self.items(found, &listed, main))
             .unwrap_or_default()
     }
 
-    /// `found`, as the listing `listed` saw them.
-    fn items(&self, found: Vec<(Deleted, usize)>, listed: &Listed) -> Vec<DeletedItem> {
+    /// `found`, as the listing `listed` saw them, placed as people name them, `main` being
+    /// the main folder ([`words::deleted_place`]).
+    fn items(
+        &self,
+        found: Vec<(Deleted, usize)>,
+        listed: &Listed,
+        main: Option<&Path>,
+    ) -> Vec<DeletedItem> {
         found
             .into_iter()
             .map(|(deleted, along)| DeletedItem {
                 identity: self.identity.clone(),
+                place: Some(words::deleted_place(&deleted, main)).filter(|p| *p != deleted.path),
                 deleted,
                 along,
                 db: listed.db.clone(),
@@ -507,8 +530,10 @@ mod tests {
             })?;
             s.put_mirror(&row(NodeId::new(), folder))
         })?;
-        let (items, summary) = account.deleted(10);
+        let (items, summary) = account.deleted(10, Some(Path::new("/h/Homebase")));
         let summary = summary.ok_or("Recently deleted shown empty")?;
+        // In no folder here: placed so.
+        assert!(items[0].place().starts_with("(on the drive) "), "{items:?}");
         assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
         Ok(())
     }

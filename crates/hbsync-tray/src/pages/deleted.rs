@@ -64,10 +64,6 @@ impl Server {
             return "<h1>Recently deleted</h1><p>Nothing is in Recently deleted.</p>".into();
         }
         let now = words::now();
-        let main = control::configured(&self.paths)
-            .ok()
-            .flatten()
-            .map(|r| r.folder);
         // Shown: the items deleted on their own, each with how many items are in it, and whether
         // emptying leaves it.
         let rows: String = list
@@ -91,7 +87,7 @@ impl Server {
                     url = self.pages.url("deleted/restore"),
                     node = d.node.0,
                     identity = escape(&item.identity),
-                    what = escape(&words::deleted(d, main.as_deref(), now)),
+                    what = escape(&words::deleted(item, now)),
                 )
             })
             .collect();

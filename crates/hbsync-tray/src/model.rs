@@ -565,6 +565,7 @@ mod tests {
             .into_iter()
             .map(|synced| RecentItem {
                 folder: PathBuf::from("/home/anna/Homebase"),
+                main: true,
                 synced,
             })
             .collect();

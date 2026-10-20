@@ -20,7 +20,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub(crate) const PROTOCOL: u32 = 7;
+pub(crate) const PROTOCOL: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -189,6 +189,9 @@ pub enum FolderControl {
 pub struct RecentItem {
     /// The folder's path.
     pub folder: PathBuf,
+    /// The folder is the main one (its items need no folder named).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub main: bool,
     #[serde(flatten)]
     pub synced: Synced,
 }
@@ -238,6 +241,11 @@ pub struct DeletedItem {
     pub identity: Identity,
     #[serde(flatten)]
     pub deleted: Deleted,
+    /// Where it was, as people name it and `hbsync restore` takes it
+    /// ([`crate::words::deleted_place`], with the daemon's main folder), when that isn't its
+    /// path (in the main folder): [`DeletedItem::place`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
     /// How many items are in it: all of Recently deleted below it (through removed folders),
     /// what was deleted with it, which restoring it restores, and what was deleted from it before
     /// (listed on its own too), which emptying it takes along. A deleted folder of thousands of
@@ -251,6 +259,11 @@ pub struct DeletedItem {
 }
 
 impl DeletedItem {
+    /// Where it was, as people name it and `hbsync restore` takes it.
+    pub fn place(&self) -> &str {
+        self.place.as_deref().unwrap_or(&self.deleted.path)
+    }
+
     /// This item and what is in it.
     pub fn count(&self) -> usize {
         1 + self.along
