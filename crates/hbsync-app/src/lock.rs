@@ -3,7 +3,7 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::Paths;
 
@@ -35,26 +35,46 @@ impl InstanceLock {
 
     /// Takes the lock of `program`, or says which process has it.
     pub fn acquire_for(paths: &Paths, program: &'static str) -> Result<InstanceLock, LockError> {
-        std::fs::create_dir_all(&paths.state)?;
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(lock_path(paths, program))?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                let pid = std::fs::read_to_string(pid_path(paths, program))
-                    .ok()
-                    .and_then(|p| p.trim().parse().ok());
-                return Err(LockError::Held { program, pid });
-            }
-            Err(TryLockError::Error(e)) => return Err(e.into()),
-        }
+        let Some(file) = try_lock(paths, program)? else {
+            let pid = std::fs::read_to_string(pid_path(paths, program))
+                .ok()
+                .and_then(|p| p.trim().parse().ok());
+            return Err(LockError::Held { program, pid });
+        };
         // Beside the lock file: Windows doesn't let others read a locked file.
         std::fs::write(pid_path(paths, program), std::process::id().to_string())?;
         Ok(InstanceLock { _file: file })
     }
+}
+
+/// Whether the daemon runs: its lock is held. Taken for a moment if it isn't, so only while
+/// the config's lock is held ([`crate::config::ConfigLock`]): a daemon starting takes that
+/// one first, and doesn't find its own taken.
+pub(crate) fn daemon_runs(paths: &Paths) -> io::Result<bool> {
+    Ok(try_lock(paths, DAEMON)?.is_none())
+}
+
+/// The lock file of `program`, locked; `None` when another process holds it.
+fn try_lock(paths: &Paths, program: &str) -> io::Result<Option<File>> {
+    let file = lock_file(&lock_path(paths, program))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// The file at `path`, made (and its folder) if missing, to be locked: its content is never
+/// read or written.
+pub(crate) fn lock_file(path: &Path) -> io::Result<File> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
 }
 
 fn lock_path(paths: &Paths, program: &str) -> PathBuf {
@@ -89,6 +109,22 @@ mod tests {
             "{err}"
         );
         drop((held, tray));
+        let _again = InstanceLock::acquire(&paths)?;
+        Ok(())
+    }
+
+    /// Whether the daemon runs, told by its lock; looking doesn't take its place (its pid).
+    #[test]
+    fn whether_the_daemon_runs() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::under(dir.path());
+        assert!(!daemon_runs(&paths)?);
+        let held = InstanceLock::acquire(&paths)?;
+        assert!(daemon_runs(&paths)?);
+        let pid = std::fs::read_to_string(pid_path(&paths, DAEMON))?;
+        assert_eq!(pid, std::process::id().to_string());
+        drop(held);
+        assert!(!daemon_runs(&paths)?);
         let _again = InstanceLock::acquire(&paths)?;
         Ok(())
     }

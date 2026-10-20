@@ -8,6 +8,7 @@ use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_local::STATE_DIR;
 use hbsync_types::{NodeId, Role};
 
+use crate::config::ConfigLock;
 use crate::{Config, Identity, Paths, Root};
 
 pub use crate::control::Error;
@@ -163,23 +164,37 @@ pub(crate) fn has_files(folder: &Path) -> std::io::Result<bool> {
 /// checked that this is what the user wants (a folder whose state is gone is merged only when
 /// asked). With `role`, it syncs that role folder of the drive (joined if the drive has it,
 /// back from Recently deleted, or made when the folder first syncs). The daemon's half: see
-/// [`add_synced`].
+/// [`add_synced`]. One at a time, in any process or thread (the tray's pages serve each request
+/// on a thread): two set-ups of one folder would each make it anew, the second undoing the
+/// first.
 pub fn add(
     paths: &Paths,
     identity: &Identity,
     path: &Path,
     role: Option<Role>,
 ) -> Result<(), Error> {
-    // One at a time in this process (the tray's pages serve each request on a thread): two
-    // set-ups of one folder would each make it anew, the second undoing the first.
-    static ADDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _one = crate::sync::lock(&ADDING);
-    let config_path = paths.config_file();
-    let config = Config::load(&config_path)?.unwrap_or_default();
+    add_locked(
+        &ConfigLock::take(&paths.config_file())?,
+        paths,
+        identity,
+        path,
+        role,
+    )
+}
+
+/// [`add`], the config's lock held.
+fn add_locked(
+    held: &ConfigLock,
+    paths: &Paths,
+    identity: &Identity,
+    path: &Path,
+    role: Option<Role>,
+) -> Result<(), Error> {
+    let config = held.load()?.unwrap_or_default();
     check(&config, identity, path, role, home().as_deref())?;
     let top = role.map_or(NodeId::ROOT, Role::node);
     SyncRoot::open_or_create_for(&paths.account_db(identity), identity, path, top)?;
-    Config::update(&config_path, |config| {
+    held.update(|config| {
         if !config.roots.iter().any(|r| r.folder == path) {
             config.roots.push(Root {
                 role,
@@ -199,38 +214,73 @@ pub enum Taken {
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
-/// the daemon's start when none runs.
+/// the daemon's start when none runs ([`changed`]).
 pub fn add_synced(
     paths: &Paths,
     identity: &Identity,
     path: &Path,
     role: Option<Role>,
 ) -> Result<Taken, Error> {
-    if crate::control::running(paths)? {
-        crate::control::add_folder(paths, identity, path, role)?;
-        Ok(Taken::Now)
-    } else {
-        add(paths, identity, path, role)?;
-        Ok(Taken::AtStart)
-    }
+    changed(
+        paths,
+        |held| add_locked(held, paths, identity, path, role),
+        || crate::control::add_folder(paths, identity, path, role),
+    )
 }
 
 /// Has the running daemon stop syncing the folder at `path` and take it off the config, or
-/// takes it off when none runs ([`remove`]).
+/// takes it off when none runs ([`remove`], [`changed`]).
 pub fn remove_synced(paths: &Paths, path: &Path) -> Result<Taken, Error> {
-    if crate::control::running(paths)? {
-        crate::control::remove_folder(paths, path)?;
-        Ok(Taken::Now)
-    } else {
-        remove(paths, path)?;
-        Ok(Taken::AtStart)
+    changed(
+        paths,
+        |held| remove_locked(held, path).map(drop),
+        || crate::control::remove_folder(paths, path),
+    )
+}
+
+/// A change of the config: asked of the daemon (`ask`) when it runs, else made here
+/// (`here`). Whether it runs is looked at holding the config's lock, kept while the config is
+/// changed here ([`ConfigLock`]): a daemon starting meanwhile reads the change, and one
+/// running has its socket bound. One gone before it was asked is looked at again.
+fn changed(
+    paths: &Paths,
+    here: impl Fn(&ConfigLock) -> Result<(), Error>,
+    ask: impl Fn() -> Result<(), Error>,
+) -> Result<Taken, Error> {
+    let runs = || -> Result<bool, Error> {
+        let held = ConfigLock::take(&paths.config_file())?;
+        if crate::lock::daemon_runs(paths)? {
+            return Ok(true);
+        }
+        here(&held)?;
+        Ok(false)
+    };
+    let mut tries = 3;
+    loop {
+        tries -= 1;
+        if !runs()? {
+            return Ok(Taken::AtStart);
+        }
+        match ask() {
+            Ok(()) => return Ok(Taken::Now),
+            // Gone, or about to be (its lock goes as it exits).
+            Err(e) if tries > 0 && e.is::<crate::control::NotRunning>() => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
 /// Takes the folder at `path` off the config; its files and its state stay (setting it up again
 /// picks up where it was). The folder it was; `None` if it wasn't listed.
 pub(crate) fn remove(paths: &Paths, path: &Path) -> Result<Option<Root>, Error> {
-    Ok(Config::update(&paths.config_file(), |config| {
+    remove_locked(&ConfigLock::take(&paths.config_file())?, path)
+}
+
+/// [`remove`], the config's lock held.
+fn remove_locked(held: &ConfigLock, path: &Path) -> Result<Option<Root>, Error> {
+    Ok(held.update(|config| {
         let at = config.roots.iter().position(|r| r.folder == path)?;
         Some(config.roots.remove(at))
     })?)
@@ -370,6 +420,47 @@ mod tests {
             refused(&pictures, &a, Some(Role::Pictures)).contains("b.example"),
             "another identity's"
         );
+        Ok(())
+    }
+
+    /// A daemon that runs as it is looked at, but stops before it is asked (its request
+    /// fails), is looked at again: gone, the change is made here.
+    #[test]
+    fn a_change_asked_of_a_daemon_that_stopped_is_made_here() -> Result<(), Error> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let daemon = std::cell::RefCell::new(Some(crate::lock::InstanceLock::acquire(&paths)?));
+        let (asked, made) = (std::cell::Cell::new(0), std::cell::Cell::new(0));
+        let taken = changed(
+            &paths,
+            |_| {
+                made.set(made.get() + 1);
+                Ok(())
+            },
+            || {
+                asked.set(asked.get() + 1);
+                // It stops: its lock goes, its socket is closed.
+                daemon.borrow_mut().take();
+                Err(crate::control::NotRunning.into())
+            },
+        )?;
+        assert_eq!((taken, asked.get(), made.get()), (Taken::AtStart, 1, 1));
+        // While it runs and answers, it is asked, and nothing is made here; its refusal is
+        // passed on, asked once.
+        let _runs = crate::lock::InstanceLock::acquire(&paths)?;
+        let taken = changed(&paths, |_| Err("made here".into()), || Ok(()))?;
+        assert_eq!(taken, Taken::Now);
+        asked.set(0);
+        let refused = changed(
+            &paths,
+            |_| Err("made here".into()),
+            || {
+                asked.set(asked.get() + 1);
+                Err("refused".into())
+            },
+        );
+        assert_eq!(refused.map_err(|e| e.to_string()), Err("refused".into()));
+        assert_eq!(asked.get(), 1);
         Ok(())
     }
 }

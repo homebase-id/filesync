@@ -58,9 +58,13 @@ folder = "/home/anna/Homebase"
 
 Unknown keys are an error. An identity is read as the client keeps it, here and on the
 control socket: in lower case, without a trailing `/` (`Anna.Example.com/` is
-`anna.example.com`). Writes replace the file in one step. The daemon writes it as it
-adds and removes folders (and keeps a pause in it); `hbsync setup` writes it only when no
-daemon runs.
+`anna.example.com`). Writes replace the file in one step. While the daemon runs, it alone
+writes it: as it adds and removes folders, and to keep a pause. The CLI, setup and the tray ask
+it; when none runs, they write it themselves. Every change reads, changes and writes the file
+holding `config.lock` beside it (one writer at a time, in any process). A program that finds no
+daemon running keeps that lock from looking until it has written, and a daemon starting takes it
+before its own lock, and reads the config and binds its socket under it: it starts after such a
+change and reads it, and a program that finds it running can ask it.
 
 ## Credentials
 

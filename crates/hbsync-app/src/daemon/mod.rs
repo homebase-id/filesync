@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use hbsync_homebase::HomebaseError;
 use hbsync_types::unix_now;
 
+use crate::config::ConfigLock;
 use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
 use crate::runner::{Command, RunnerError};
@@ -67,12 +68,10 @@ impl Stop {
 /// Runs the daemon until a stop request, or until `stop` (a signal). It ends when its last
 /// account has (one failing stops them all: the daemon is restarted whole).
 pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
-    let _lock = InstanceLock::acquire(paths)?;
-    let config = Config::load(&paths.config_file())?
-        .ok_or_else(|| DaemonError::NotSetUp("no config".into()))?;
-    if config.roots.is_empty() {
-        return Err(DaemonError::NotSetUp("no folder to sync".into()));
-    }
+    let (_lock, config, listener) = {
+        let held = ConfigLock::take(&paths.config_file())?;
+        claim(paths, &held)?
+    };
     let daemon = Arc::new(Daemon {
         paths: paths.clone(),
         stop,
@@ -105,7 +104,6 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
             root.folder.display()
         );
     }
-    let listener = ipc::listen(paths).map_err(DaemonError::Ipc)?;
     let watchers = Arc::new(watch::Watchers::new(Arc::clone(&daemon.changed)));
     {
         let (weak, watchers) = (Arc::downgrade(&daemon), Arc::clone(&watchers));
@@ -143,6 +141,32 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
     }
     tracing::info!("daemon stopped");
     result
+}
+
+/// The daemon's lock, its config and its socket, taken holding the config's lock (`held`): a
+/// program that finds no daemon running changes the config holding it
+/// (`folders::add_synced`), and the daemon reads that change; one that finds it running finds
+/// its socket bound too. With nothing to sync, its lock goes first, before `held`: that program
+/// finds none running.
+fn claim(
+    paths: &Paths,
+    held: &ConfigLock,
+) -> Result<(InstanceLock, Config, ipc::Listener), DaemonError> {
+    let lock = InstanceLock::acquire(paths)?;
+    let config = match held.load()? {
+        Some(config) if !config.roots.is_empty() => config,
+        other => {
+            drop(lock);
+            let why = if other.is_some() {
+                "no folder to sync"
+            } else {
+                "no config"
+            };
+            return Err(DaemonError::NotSetUp(why.into()));
+        }
+    };
+    let listener = ipc::listen(paths).map_err(DaemonError::Ipc)?;
+    Ok((lock, config, listener))
 }
 
 /// The daemon's accounts, each on a thread of its own; folders and accounts come and go while
@@ -278,4 +302,39 @@ pub(crate) fn join_finished<T, E: From<RunnerError>>(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A daemon starting with nothing to sync lets its lock go while it still holds the
+    /// config's: a program waiting for that lock finds no daemon running, and writes the
+    /// config itself. One with a folder holds its lock and has bound its socket.
+    #[test]
+    fn a_daemon_with_nothing_to_sync_is_gone_before_the_config_is_free()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let held = ConfigLock::take(&paths.config_file())?;
+        assert!(matches!(
+            claim(&paths, &held),
+            Err(DaemonError::NotSetUp(_))
+        ));
+        assert!(!crate::lock::daemon_runs(&paths)?, "no config");
+        held.update(|c| c.device_name = Some("pc".into()))?;
+        assert!(matches!(
+            claim(&paths, &held),
+            Err(DaemonError::NotSetUp(_))
+        ));
+        assert!(!crate::lock::daemon_runs(&paths)?, "no folder");
+
+        let root = crate::Root::main(&"a.example".into(), &home.path().join("Homebase"));
+        held.update(|c| c.roots.push(root))?;
+        let claimed = claim(&paths, &held)?;
+        assert!(crate::lock::daemon_runs(&paths)?);
+        drop(claimed);
+        assert!(!crate::lock::daemon_runs(&paths)?);
+        Ok(())
+    }
 }
