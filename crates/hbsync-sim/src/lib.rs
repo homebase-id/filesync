@@ -114,6 +114,10 @@ pub struct Sim {
     split_downloads: bool,
     /// The version the download just put in place acted on, for its commit.
     placed_from: Option<DriveVersion>,
+    /// The drive refuses some requests as they are ([`Sim::with_refusals`]): what it judged
+    /// each request it was sent, by everything the request sends.
+    refusing: bool,
+    judged: BTreeMap<String, bool>,
 }
 
 impl Sim {
@@ -151,6 +155,8 @@ impl Sim {
             deleted: BTreeSet::new(),
             computers: Vec::new(),
             split_downloads: false,
+            refusing: false,
+            judged: BTreeMap::new(),
             placed_from: None,
         }
     }
@@ -160,6 +166,17 @@ impl Sim {
     /// commit of a file already in place, for recovery to settle.
     pub fn with_split_downloads(mut self) -> Self {
         self.split_downloads = true;
+        self
+    }
+
+    /// The drive refuses some requests as they are, for good, as Homebase refuses one it won't
+    /// take (a write), or gives other bytes than it says (a download, at a version): every
+    /// fourth request it hasn't seen before ([`Sim::drive_refuses`]), and the same request
+    /// again as it did the first time; another (an edit, a rename, a delete, a new version on
+    /// the drive) is judged anew. The clients record each refusal and don't send the same operation again
+    /// (`hbsync_engine::refused`; a download once it didn't match twice).
+    pub fn with_refusals(mut self) -> Self {
+        self.refusing = true;
         self
     }
 
@@ -356,6 +373,24 @@ impl Sim {
             }
             let unchanged = !self.server.changed_since(&server);
             if unchanged && (!any_planned || (self.ops_executed == before && self.all_settled())) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Like [`Sim::quiesce`], until nothing more happens: a round in which no operation runs
+    /// and the drive doesn't change, whatever plans are left (an operation that waits for one
+    /// the drive refused waits for good). Returns whether that came within `max_rounds`.
+    pub fn quiesce_still(&mut self, max_rounds: usize) -> bool {
+        for _ in 0..max_rounds {
+            let before = self.ops_executed;
+            let server = self.server.snapshot();
+            for c in 0..self.clients.len() {
+                self.plan(c);
+                while self.step(c) {}
+            }
+            if self.ops_executed == before && !self.server.changed_since(&server) {
                 return true;
             }
         }

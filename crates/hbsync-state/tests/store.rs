@@ -243,7 +243,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 14);
+    assert_eq!(db.schema_version()?, 15);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -253,6 +253,36 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
         StateDb::open(&db_path),
         Err(StateError::TooNew { found: 99, .. })
     ));
+    Ok(())
+}
+
+/// A refusal is kept per node and kind, in place of an earlier one; it goes when done, when
+/// old, or all at once; a node with one isn't collected.
+#[test]
+fn refusals_are_kept_until_forgotten() -> R {
+    use hbsync_state::Refused;
+    let mut db = StateDb::open_in_memory()?;
+    let node = NodeId::new();
+    let refused = |key: &str, at| Refused {
+        node,
+        op: "RemoteCreate".into(),
+        key: key.into(),
+        refused: true,
+        why: "fatal: 400".into(),
+        at,
+    };
+    db.write(|s| {
+        s.folder().put_refused(&refused("one", 10))?;
+        s.folder().put_refused(&refused("two", 20))
+    })?;
+    assert_eq!(db.read(|s| s.all_refused())?, [refused("two", 20)]);
+    db.write(|s| s.account().collect_nodes().map(drop))?;
+    assert_eq!(db.read(|s| s.all_refused())?.len(), 1, "its node is kept");
+    assert_eq!(db.write(|s| s.folder().prune_refused(20))?, 0);
+    assert_eq!(db.write(|s| s.folder().prune_refused(21))?, 1);
+    db.write(|s| s.folder().put_refused(&refused("three", 30)))?;
+    db.write(|s| s.folder().delete_refused(node, "RemoteCreate"))?;
+    assert!(db.read(|s| s.all_refused())?.is_empty());
     Ok(())
 }
 
@@ -1033,7 +1063,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 14);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 15);
     Ok(())
 }
 

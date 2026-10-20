@@ -3048,6 +3048,113 @@ fn a_role_folder_moved_into_a_folder_keeps_it_alive() -> R {
     Ok(())
 }
 
+/// An upload the drive refuses as it is isn't sent again while it is the same: not on the next
+/// sync, and it leaves no work unfinished; an edit is sent (and here refused again); Sync now
+/// sends it once more.
+#[test]
+fn a_refused_upload_is_sent_again_only_once_it_changes() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.remote.faults().refuse_writes = true;
+    a.write("doc.txt", "v1")?;
+    let report = a.sync()?;
+    let refused = |r: &hbsync_engine::SyncReport| {
+        r.skipped
+            .iter()
+            .filter(|(_, why)| matches!(why, hbsync_engine::exec::Skip::Refused(_)))
+            .count()
+    };
+    assert_eq!(refused(&report), 1, "{report:?}");
+
+    let sent = writes_refused(&a);
+    assert_eq!(sent, 1);
+
+    // The same: not sent, told as refused, nothing left that another try would do.
+    let report = a.sync()?;
+    assert_eq!(writes_refused(&a), sent, "{report:?}");
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert!(!report.unfinished, "{report:?}");
+    assert!(report.pending > 0, "still to sync: {report:?}");
+
+    // A change is another upload.
+    a.write("doc.txt", "v2")?;
+    let report = a.sync()?;
+    assert_eq!(writes_refused(&a), sent + 1, "{report:?}");
+    assert_eq!(refused(&report), 1, "{report:?}");
+
+    // Taken now, but held back until Sync now (or an hour).
+    a.remote.faults().refuse_writes = false;
+    a.sync()?;
+    assert_eq!(writes_refused(&a), sent + 1);
+    a.engine.clear_refused()?;
+    let report = a.sync()?;
+    assert!(
+        report.refused.is_empty() && report.pending == 0,
+        "{report:?}"
+    );
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["doc.txt"]
+    );
+
+    Ok(())
+}
+
+/// A refused upload made executable is another upload: sent.
+#[cfg(unix)]
+#[test]
+fn a_refused_upload_made_executable_is_sent_again() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.remote.faults().refuse_writes = true;
+    a.write("run.sh", "echo")?;
+    a.sync()?;
+    a.sync()?;
+    let sent = writes_refused(&a);
+    assert_eq!(sent, 1);
+    let path = a.root.join("run.sh");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    a.sync()?;
+    assert_eq!(
+        writes_refused(&a),
+        sent + 1,
+        "the executable bit is another request"
+    );
+    Ok(())
+}
+
+fn writes_refused(c: &Client) -> usize {
+    c.remote.faults().refused
+}
+
+/// A download whose bytes don't match what the drive says they are is read again once (the
+/// drive may have been written meanwhile); a second time at that version it is refused, not
+/// downloaded again every sync.
+#[test]
+fn a_download_that_doesnt_match_twice_is_refused() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "on the drive")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.remote.faults().corrupt_downloads = true;
+    b.sync()?;
+    assert_eq!(b.remote.faults().reads, 1);
+    let report = b.sync()?;
+    assert_eq!(b.remote.faults().reads, 2, "read again once: {report:?}");
+    let report = b.sync()?;
+    assert_eq!(b.remote.faults().reads, 2, "not read again: {report:?}");
+    assert_eq!(report.refused.len(), 1, "{report:?}");
+    assert!(!b.root.join("doc.txt").exists());
+    // Once the drive gives the right bytes and the user asks.
+    b.remote.faults().corrupt_downloads = false;
+    b.engine.clear_refused()?;
+    b.sync()?;
+    assert_eq!(b.read_text("doc.txt")?, "on the drive");
+    Ok(())
+}
+
 /// Once the drive said it is full, the uploads queued behind the refused one don't send their
 /// bytes only to hear so too.
 #[test]

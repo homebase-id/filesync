@@ -27,7 +27,7 @@ use hbsync_platform::name::name_key;
 use hbsync_platform::{EntryKind, Os, RelPath, ops, tags};
 use hbsync_remote::{ErrorClass, NodeMeta, Remote, RemoteError};
 use hbsync_state::{
-    BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, StateDb, StateError, Store,
+    BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, Refused, StateDb, StateError, Store,
 };
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
@@ -38,6 +38,7 @@ use crate::folder::FolderCtx;
 use crate::plan::{DriveVersion, TagWrite, not_reached};
 use crate::policy::{InRun, policy};
 use crate::reconcile::{Op, Requirement};
+use crate::refused::Refusals;
 use crate::settle::{
     Placed, Settle, mark_children, settle, settle_placement, spell, tags_recorded,
 };
@@ -99,6 +100,8 @@ pub(crate) struct ExecReport {
     /// The drive refused an upload, out of storage: the run's uploads from then on were held
     /// (left dirty), and are held on the account this long.
     pub full: Option<Duration>,
+    /// A refusal (or a download's strike) was recorded ([`crate::refused`]).
+    pub refused: bool,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
     /// A remote write was refused for the drive's state, an earlier try of it had landed
@@ -140,6 +143,9 @@ enum Outcome {
     /// The drive is out of storage: hold this and every later upload of the run (and on the
     /// account: for the time the drive said, if it did).
     Full(Option<Duration>),
+    /// A download's bytes didn't match what the drive said they are: the first time at a
+    /// version, the drive is read again; the second, it is refused.
+    Mismatch(String),
     /// The state DB failed (a placement's commit, say): the run stops, as at a crash.
     Fatal(StateError),
 }
@@ -166,6 +172,7 @@ impl Outcome {
             // Told only once it keeps coming back (the runner's stalled skips).
             InRun::Stale => Outcome::Skip(Skip::Stale(why)),
             InRun::Unsyncable => Outcome::Skip(Skip::Unsyncable(why)),
+            InRun::Refuse => Outcome::Skip(Skip::Refused(why)),
         }
     }
 
@@ -191,9 +198,12 @@ pub enum Skip {
     /// Another operation of the plan must go first and didn't (held or failed: that one says
     /// why).
     Waiting(String),
-    /// This device can't do it as planned: a name or path it can't hold, access denied, the
-    /// drive refusing it, a fault of its own.
+    /// This device can't do it as planned: a name or path it can't hold, access denied, a
+    /// fault of its own.
     Unsyncable(String),
+    /// The drive won't take it as it is (or gave other bytes than it said, twice): recorded, it
+    /// isn't sent again while it is the same ([`crate::refused`]).
+    Refused(String),
 }
 
 impl Stopped {
@@ -212,7 +222,9 @@ impl Stopped {
 impl Skip {
     pub fn as_str(&self) -> &str {
         match self {
-            Skip::Stale(why) | Skip::Waiting(why) | Skip::Unsyncable(why) => why,
+            Skip::Stale(why) | Skip::Waiting(why) | Skip::Unsyncable(why) | Skip::Refused(why) => {
+                why
+            }
         }
     }
 }
@@ -255,6 +267,8 @@ pub(crate) struct Executor<'a> {
     counted: HashSet<NodeId>,
     /// The drive is full: uploads are held (from the start, when it was lately).
     full: bool,
+    /// The folder's refusals of the operations planned ([`crate::refused`]).
+    refusals: Refusals,
     /// The sync root, written only through it.
     disk: Disk<'a>,
 }
@@ -391,6 +405,7 @@ impl<'a> Executor<'a> {
             progress: Arc::default(),
             counted: HashSet::new(),
             full: false,
+            refusals: Refusals::default(),
             disk: Disk::new(&folder.root),
         }
     }
@@ -424,6 +439,12 @@ impl<'a> Executor<'a> {
     /// Holds every upload: the drive was full lately ([`ExecReport::full`] of an earlier run).
     pub(crate) fn with_full(mut self, full: bool) -> Self {
         self.full = full;
+        self
+    }
+
+    /// The folder's refusals of the planned operations: one that is done forgets its own.
+    pub(crate) fn with_refusals(mut self, refusals: Refusals) -> Self {
+        self.refusals = refusals;
         self
     }
 
@@ -724,6 +745,35 @@ impl<'a> Executor<'a> {
         outcome: Outcome,
         gone: Option<String>,
     ) -> Result<(), StateError> {
+        // A download whose bytes didn't match: its strike, or a second time at one version,
+        // refused.
+        let (outcome, strike) = match outcome {
+            Outcome::Mismatch(why) => {
+                let strike = self.refusal(&op, &why, false)?;
+                let twice = self
+                    .refusals
+                    .get(&op)
+                    .is_some_and(|r| !r.refused && r.key == strike.key);
+                match twice {
+                    true => (
+                        Outcome::Skip(Skip::Refused(format!(
+                            "{why}, twice: the drive holds other bytes than it says"
+                        ))),
+                        None,
+                    ),
+                    false => (Outcome::Mismatch(why), Some(strike)),
+                }
+            }
+            outcome => (outcome, None),
+        };
+        // Done: a refusal of it is over.
+        if matches!(outcome, Outcome::Done | Outcome::Settled)
+            && !self.refusals.is_empty()
+            && self.refusals.take(&op).is_some()
+        {
+            let (node, kind) = (op.node(), op.kind());
+            self.db.write(|s| s.folder().delete_refused(node, kind))?;
+        }
         // A placement that failed before its item was in place leaves no record: recovery
         // never takes an item the user puts at that place for it (a retry writes its own).
         if matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. })
@@ -740,7 +790,8 @@ impl<'a> Executor<'a> {
             Op::RemoteTags { .. } | Op::RemoteUpdate { .. } | Op::RemoteCreate { .. }
         ) && matches!(
             outcome,
-            Outcome::Skip(Skip::Unsyncable(_)) | Outcome::Stop(Stopped::Denied(_))
+            Outcome::Skip(Skip::Unsyncable(_) | Skip::Refused(_))
+                | Outcome::Stop(Stopped::Denied(_))
         ) {
             self.tags_refused.insert(op.node());
         }
@@ -764,8 +815,33 @@ impl<'a> Executor<'a> {
             Outcome::Retry(why) => self.retried(op, attempts, false, why)?,
             Outcome::Skip(why) => {
                 let node = op.node();
-                self.db.write(|s| s.folder().mark_dirty(node))?;
+                let refused = match &why {
+                    Skip::Refused(why) => Some(self.refusal(&op, why, true)?),
+                    _ => None,
+                };
+                self.db.write(|s| {
+                    s.folder().mark_dirty(node)?;
+                    refused
+                        .as_ref()
+                        .map_or(Ok(()), |r| s.folder().put_refused(r))
+                })?;
+                self.report.refused |= refused.is_some();
                 self.report.skipped.push((op, why));
+            }
+            Outcome::Mismatch(why) => {
+                // The first time at this version: the drive is read again (it may have been
+                // written meanwhile), and the strike recorded.
+                let Some(strike) = strike else {
+                    unreachable!("a mismatch has its strike");
+                };
+                let node = op.node();
+                self.db.write(|s| {
+                    s.folder().mark_dirty(node)?;
+                    s.folder().put_refused(&strike)
+                })?;
+                self.report.refused = true;
+                self.report.drive_moved = true;
+                self.report.skipped.push((op, Skip::Stale(why)));
             }
             Outcome::Stop(stopped) => {
                 let node = op.node();
@@ -786,6 +862,19 @@ impl<'a> Executor<'a> {
             Outcome::Fatal(e) => return Err(e),
         }
         Ok(())
+    }
+
+    /// The record of `op`'s refusal (`refused`; else its first strike), with `why`, now.
+    fn refusal(&mut self, op: &Op, why: &str, refused: bool) -> Result<Refused, StateError> {
+        let key = self.db.read(|s| crate::refused::key_of(s, op))?;
+        Ok(Refused {
+            node: op.node(),
+            op: op.kind().to_owned(),
+            key,
+            refused,
+            why: why.to_owned(),
+            at: hbsync_types::unix_now_ms(),
+        })
     }
 
     /// Takes `op`, which failed for now ([`Schedule::retry`]), with `why`.

@@ -148,6 +148,19 @@ proptest! {
         run(3, &events)?;
     }
 
+    /// The drive refuses some requests as they are, for good (a write it won't take, a
+    /// download whose bytes don't match at a version): each client records a refusal and
+    /// doesn't send the same operation again (`hbsync_engine::refused`). The record never hides
+    /// a later change: whatever a client holds back is refused by the drive as it is now (a
+    /// local edit, a new version on the drive, a rename or a delete is another request), and
+    /// everything else converges without loss.
+    #[test]
+    fn refusals_never_hide_a_later_change(
+        events in proptest::collection::vec(event(2), 0..80),
+    ) {
+        run_settled(2, None, |sim| sim.with_refusals(), |sim| sim.quiesce_still(30), &events)?;
+    }
+
     /// No poll (daemon.md): clients that sync only when asked (at start, when another changed
     /// the drive, when the user confirms what the guard held) converge without loss, and then
     /// a sync nobody asked for finds nothing to do: a timer never would.

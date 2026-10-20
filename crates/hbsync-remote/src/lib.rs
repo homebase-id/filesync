@@ -402,7 +402,8 @@ impl<T> Answers<T> {
         } = self;
         let stopped = stopped.or_else(|| {
             (answers.len() < asked)
-                .then(|| RemoteError::Fatal("the drive didn't answer every file".into()))
+                // An answer that can't be matched to the files asked: not a refusal of them.
+                .then(|| RemoteError::Transient("the drive didn't answer every file".into()))
         });
         if let Some(e) = &stopped {
             answers.resize_with(asked.max(answers.len()), || Err(e.again()));

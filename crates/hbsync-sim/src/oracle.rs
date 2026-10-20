@@ -136,6 +136,8 @@ impl Sim {
             server.remove(*n);
         }
         let mut kept_here: BTreeSet<u64> = BTreeSet::new();
+        // Items the drive refuses as they are (with the name it refuses), with what is in them.
+        let mut refused_here: BTreeSet<NodeId> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
             let mut server = self.server_view(c);
             for n in &taken {
@@ -161,6 +163,46 @@ impl Sim {
             }
             // The tags as the client sees them.
             see_held_tags(client, &mut visible, &server);
+            // What the client holds back for a refusal: each operation refused itself is one
+            // the drive refuses as it is now (by its own judgement: a record that held back one
+            // it takes hid a later change); it stays on its client with what is in it, and
+            // anything else converges.
+            // Once nothing more happens, what the last plan still sent was tried and is blocked
+            // behind one (an operation that waits for a refused one stays: a local cost, told
+            // when it keeps coming back): it, too, stays as it is, unhidden.
+            let mut base = client.base.clone();
+            for (op, refused) in &client.held_back {
+                if *refused && !self.drive_refused(c, op) {
+                    return Err(format!(
+                        "{}: the refusal record hid {op:?}, which the drive takes as it is",
+                        client.name
+                    ));
+                }
+            }
+            // A parked item waits for its name, which a folder held back may keep.
+            let left = client.held_back.iter().map(|(op, _)| op.node());
+            let parked = client.parked.keys().copied().filter(|_| self.refusing);
+            let nodes: Vec<NodeId> = left
+                .chain(client.last_plan.iter().map(|op| op.node()))
+                .chain(parked)
+                .collect();
+            for n in nodes {
+                let mut inside = below(&visible, n);
+                inside.extend(below(&synced, n));
+                inside.extend(below(&base, n));
+                for m in inside {
+                    refused_here.insert(m);
+                    synced.remove(m);
+                    base.remove(m);
+                    if let Some(blob) = visible
+                        .remove(m)
+                        .and_then(|s| s.content)
+                        .and_then(|c| ledger.blobs.get(&c.hash))
+                    {
+                        kept_here.insert(*blob);
+                    }
+                }
+            }
             let server_view = view(&synced);
             let local_view = view(&visible);
             if local_view != server_view {
@@ -172,7 +214,7 @@ impl Sim {
             if !client.local.violations().is_empty() {
                 return Err(format!("{}: {:?}", client.name, client.local.violations()));
             }
-            if view(&client.base) != server_view {
+            if view(&base) != server_view {
                 return Err(format!("{}: base not settled", client.name));
             }
             if !synced.violations().is_empty() {
@@ -185,10 +227,17 @@ impl Sim {
         }
         // Names are judged per client (above): a clash among nodes every client filters stays,
         // as no client syncs them, and any client that does would rename one.
+        // An orphan whose adoption the drive refused stays one (the record holds it back).
         let broken: Vec<_> = server
             .violations()
             .into_iter()
             .filter(|v| !matches!(v, Violation::DuplicateName { .. }))
+            .filter(|v| !matches!(v, Violation::Orphan { node, .. } if refused_here.contains(node)))
+            // A cycle whose repair (a move out of it) the drive refused stays one.
+            .filter(|v| {
+                !matches!(v, Violation::Cycle { node }
+                    if cycle_of(&server, *node).iter().any(|n| refused_here.contains(n)))
+            })
             .collect();
         if !broken.is_empty() {
             return Err(format!("server: {broken:?}"));
@@ -263,6 +312,7 @@ impl Sim {
         };
         for (_, node, name) in &self.tags_added {
             if let Some(s) = server.get(*node)
+                && !refused_here.contains(node)
                 && !self.tags_removed.contains(&(*node, name.clone()))
                 && (!self.deleted.contains(node) || held_at_removal(node, name))
                 && s.tags.get(name).is_none()
@@ -286,6 +336,7 @@ impl Sim {
                 .any(elsewhere);
             if let Some(s) = server.get(*node)
                 && !added_elsewhere
+                && !refused_here.contains(node)
                 && s.tags.get(name).is_some()
             {
                 return Err(format!(
@@ -336,6 +387,33 @@ pub(crate) fn view_with(tree: &Tree, blobs: &HashMap<ContentHash, u64>) -> Vec<S
         .collect();
     out.sort();
     out
+}
+
+/// The folders of the cycle `node` is in, going up from it in `tree`.
+fn cycle_of(tree: &Tree, node: NodeId) -> Vec<NodeId> {
+    let mut seen = Vec::new();
+    let mut at = node;
+    while !seen.contains(&at) {
+        seen.push(at);
+        match tree.get(at) {
+            Some(s) => at = s.parent,
+            None => break,
+        }
+    }
+    seen
+}
+
+/// `node` and everything below it in `tree`, each once: a tree a refusal left half moved may
+/// hold a cycle (which the checks report), and a walk must still end.
+fn below(tree: &Tree, node: NodeId) -> Vec<NodeId> {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if seen.insert(n) {
+            stack.extend(tree.children(n));
+        }
+    }
+    seen.into_iter().collect()
 }
 
 #[cfg(test)]

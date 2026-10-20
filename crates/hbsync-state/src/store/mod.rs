@@ -31,6 +31,8 @@ mod local;
 mod mirror;
 mod parked;
 mod picture;
+mod refused;
+pub use refused::Refused;
 mod removed;
 mod tombstones;
 

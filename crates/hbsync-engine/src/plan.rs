@@ -284,14 +284,17 @@ impl Op {
 
     /// Whether it moves file bytes: the executor runs these together on its worker pool.
     pub fn is_transfer(&self) -> bool {
+        matches!(self, Op::LocalDownload { .. }) || self.uploads()
+    }
+
+    /// Whether it sends the local item's bytes.
+    pub fn uploads(&self) -> bool {
         matches!(
             self,
-            Op::LocalDownload { .. }
-                | Op::RemoteCreate {
-                    kind: NodeKind::File,
-                    ..
-                }
-                | Op::RemoteUpdate { upload: true, .. }
+            Op::RemoteCreate {
+                kind: NodeKind::File,
+                ..
+            } | Op::RemoteUpdate { upload: true, .. }
         )
     }
 
