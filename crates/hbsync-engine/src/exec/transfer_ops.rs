@@ -116,13 +116,15 @@ impl Executor<'_> {
         // write, a move: the base is there). Where the drive moved on otherwise (another
         // folder's engine pulled the next version), the next plan decides on that. Its commit
         // settles against it; kept until then, its tags not known until written.
-        let ours = self.settled.get(&node).copied();
-        let own = |d: &DriveVersion| {
-            ours == Some(mirror.remote_ref())
-                && base_at == ours.map(|o| o.version)
-                && d.state.content.map(|c| c.hash) == Some(expected)
-        };
-        let acted = match DriveVersion::acted_by_download(drive, mirror.remote_ref(), own) {
+        let ours = self.settled.get(&node).map(|o| o.version);
+        let acts = DriveVersion::acted_by_download(
+            drive,
+            mirror.remote_ref(),
+            Some(expected),
+            ours,
+            base_at,
+        );
+        let acted = match acts {
             Acts::Plan(d) => d.clone(),
             Acts::Stale => return Err(Outcome::stale("changed on the drive since the plan")),
             Acts::Mirror => {

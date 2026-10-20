@@ -436,50 +436,65 @@ impl DriveVersion {
         })
     }
 
-    /// What a download acts on, with the mirror at `mirror_at`: the drive's version its plan
-    /// saw (`plan`), only while the mirror still holds it; else, where `own` says this run's own
-    /// write made the mirror's version of it since (the bytes the same: a tag write, a move),
-    /// or the plan saw none, the mirror's. Where the drive moved on otherwise (another folder's
-    /// engine pulled the next version), it is stale: the next plan decides on that. The
-    /// executor and the simulator both decide by it.
+    /// What a download acts on, with the mirror at `mirror_at` holding bytes `expected`: the
+    /// drive's version its plan saw (`plan`), only while the mirror still holds it; else, where
+    /// this run's own write made the mirror's version since (`ours`, the base there: `base_at`),
+    /// the bytes the same (a tag write, a move), or the plan saw none, the mirror's. Where the
+    /// drive moved on otherwise (another folder's engine pulled the next version), it is stale:
+    /// the next plan decides on that. The executor and the simulator both decide by it.
     pub fn acted_by_download(
         plan: Option<&DriveVersion>,
         mirror_at: RemoteRef,
-        own: impl FnOnce(&DriveVersion) -> bool,
+        expected: Option<ContentHash>,
+        ours: Option<VersionTag>,
+        base_at: Option<VersionTag>,
     ) -> Acts<'_> {
+        let own = |d: &DriveVersion| {
+            ours == Some(mirror_at.version)
+                && base_at == ours
+                && d.state.content.map(|c| c.hash) == expected
+        };
         match plan {
             Some(d) if d.at == mirror_at => Acts::Plan(d),
             Some(d) if !own(d) => Acts::Stale,
             _ => Acts::Mirror,
         }
     }
-}
 
-impl DriveVersion {
     /// What a local write that acted on this version settles its content, place and version
     /// against (sync semantics §8: compare and set), with this version's tags: this version,
     /// where the base is still at the version the write's plan saw (`base_at`, the base's now),
     /// or where this run's own operations settled it (`ours`) at this version; the mirror's
-    /// (`mirror`, read only then) where they settled it at the version the mirror holds (this
+    /// (`mirror` of that version, read only then: `None` where it holds another) where they settled it at the version the mirror holds (this
     /// run's own remote write moved it past this one). `None`: the base moved otherwise, and
     /// only the tags settle. The executor's settle and the simulator's decide by it.
     pub fn settles_against(
         &self,
         base_at: Option<VersionTag>,
         ours: Option<VersionTag>,
-        mirror: impl FnOnce() -> Option<(NodeState, RemoteRef)>,
+        mirror: impl FnOnce(VersionTag) -> Option<(NodeState, RemoteRef)>,
     ) -> Option<(NodeState, RemoteRef)> {
-        let state = match ours {
+        match ours {
             _ if base_at == self.base_at => Some((self.state.clone(), self.at)),
             Some(o) if o == self.at.version => Some((self.state.clone(), self.at)),
-            Some(o) => mirror().filter(|(_, at)| at.version == o),
+            Some(o) => mirror(o).map(|(r, at)| {
+                let tags = self.state.tags.clone();
+                (NodeState { tags, ..r }, at)
+            }),
             None => None,
-        };
-        state.map(|(r, at)| {
-            let tags = self.state.tags.clone();
-            (NodeState { tags, ..r }, at)
-        })
+        }
     }
+}
+
+/// What a download acts on ([`DriveVersion::acted_by_download`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acts<'a> {
+    /// The version its plan saw.
+    Plan(&'a DriveVersion),
+    /// The mirror's version.
+    Mirror,
+    /// Neither: the drive moved on since the plan.
+    Stale,
 }
 
 /// What a tag write left (`written`) and what the item held before it (`before`), read as the
@@ -498,17 +513,6 @@ pub fn tags_written(before: &Tags, written: &Tags, reference: &Tags, os: Os) -> 
         Tags::fill(Some(before), &holdable, os),
         Tags::fill(Some(written), reference, os),
     )
-}
-
-/// What a download acts on ([`DriveVersion::acted_by_download`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Acts<'a> {
-    /// The version its plan saw.
-    Plan(&'a DriveVersion),
-    /// The mirror's version.
-    Mirror,
-    /// Neither: the drive moved on since the plan.
-    Stale,
 }
 
 /// What an operation did to its item's tags, for the base's (sync semantics §11). The base

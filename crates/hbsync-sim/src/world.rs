@@ -1,11 +1,12 @@
 //! What the users, other devices and the server do, and how each folder sees the drive.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_engine::deleted;
 use hbsync_engine::mask::masked;
-use hbsync_engine::tree::{Tree, restored_names};
+use hbsync_engine::tree::Tree;
 use hbsync_engine::walk::End;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::Filter;
@@ -562,12 +563,15 @@ impl Sim {
         let Some(top) = removed.get(&node) else {
             return;
         };
-        let mut nodes = Vec::new();
-        let mut at = top.state.parent;
-        while removed.contains_key(&at) && at != node && !nodes.contains(&at) {
-            nodes.push(at);
-            at = removed[&at].state.parent;
+        // The folders above it in Recently deleted, outermost first (past any depth a path may
+        // have, nothing comes back: above is still a removed folder, as the engine's).
+        let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(top.state.parent, |at| {
+            Ok(removed.get(&at).map(|f| (at, f.state.parent)))
+        });
+        if up.end == End::Deep {
+            return;
         }
+        let mut nodes = up.items;
         nodes.reverse();
         // Then it and what was deleted with it, level by level, each once.
         let mut seen: HashSet<NodeId> = nodes.iter().copied().collect();
@@ -580,16 +584,23 @@ impl Sim {
             nodes.extend(with.into_iter().filter(|n| seen.insert(*n)));
             next += 1;
         }
-        let rows: Vec<(NodeId, NodeId, String)> = nodes
+        let rows: Vec<Row> = nodes
             .iter()
-            .map(|n| (*n, removed[n].state.parent, removed[n].state.name.clone()))
+            .map(|n| Row {
+                node: *n,
+                parent: removed[n].state.parent,
+                name: removed[n].state.name.clone(),
+            })
             .collect();
         // The folders in the tree the rows may go into, and the names taken in those and in
         // the folders coming back (one that is neither went for good: no name is taken there).
         let tree = self.server.tree();
         let mut live = HashSet::from([NodeId::ROOT]);
         let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        for parent in rows.iter().map(|r| r.1).chain([NodeId::ROOT]) {
+        for parent in rows.iter().map(|r| r.parent).chain([NodeId::ROOT]) {
+            if taken.contains_key(&parent) {
+                continue;
+            }
             if self.server.live.contains_key(&parent) {
                 live.insert(parent);
             } else if !parent.is_root() && !seen.contains(&parent) {
@@ -598,24 +609,22 @@ impl Sim {
             let names = tree.children(parent).filter_map(|c| tree.get(c));
             taken.insert(parent, names.map(|c| name_key(&c.name)).collect());
         }
-        let mut left: Vec<&(NodeId, NodeId, String)> = rows.iter().collect();
+        let mut left: Vec<&Row> = rows.iter().collect();
         while let Some(wave) =
-            deleted::restore_wave(left, |r| (r.1, &r.2), &live, &seen, &mut taken)
+            deleted::restore_wave(left, |r| (r.parent, &r.name), &live, &seen, &mut taken)
         {
             left = wave.later;
-            for (node, _, name) in wave.asked {
-                self.restore_as(*node, name.clone());
-                live.insert(*node);
+            for row in wave.asked {
+                self.restore_as(row.node, row.name.clone());
+                live.insert(row.node);
             }
-            for (node, parent, name) in wave.rest {
-                let names = taken.entry(*parent).or_default();
-                let Some(name) = restored_names(name).find(|n| !names.contains(&name_key(n)))
+            for row in wave.rest {
+                let Some(name) = deleted::take_restored_name(&mut taken, row.parent, &row.name)
                 else {
                     continue; // no free name: it stays deleted
                 };
-                names.insert(name_key(&name));
-                self.restore_as(*node, name);
-                live.insert(*node);
+                self.restore_as(row.node, name);
+                live.insert(row.node);
             }
         }
     }
@@ -945,6 +954,13 @@ impl Sim {
             self.tags_cleared.insert((c, new, name), when);
         }
     }
+}
+
+/// A row of Recently deleted a restore brings back: its node, folder and name.
+struct Row {
+    node: NodeId,
+    parent: NodeId,
+    name: String,
 }
 
 #[cfg(test)]

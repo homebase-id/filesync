@@ -811,21 +811,23 @@ impl Sim {
                             .get(&node)
                             .and_then(|e| e.version)
                             .filter(|_| client.base.contains(node));
-                        let own = |d: &DriveVersion| {
-                            ours == Some(mirror_at.version)
-                                && base_at == ours
-                                && d.state.content.map(|c| c.hash) == content.map(|c| c.hash)
+                        let expected = content.map(|c| c.hash);
+                        let acts = DriveVersion::acted_by_download(
+                            op.drive(),
+                            mirror_at,
+                            expected,
+                            ours,
+                            base_at,
+                        );
+                        let record = match acts {
+                            Acts::Plan(d) => d.clone(),
+                            Acts::Mirror => DriveVersion {
+                                state: mirror.clone(),
+                                at: mirror_at,
+                                base_at,
+                            },
+                            Acts::Stale => return Skip,
                         };
-                        let record =
-                            match DriveVersion::acted_by_download(op.drive(), mirror_at, own) {
-                                Acts::Plan(d) => d.clone(),
-                                Acts::Mirror => DriveVersion {
-                                    state: mirror.clone(),
-                                    at: mirror_at,
-                                    base_at,
-                                },
-                                Acts::Stale => return Skip,
-                            };
                         if self.split_downloads {
                             self.clients[c].fetched.insert(node, record);
                             return Outcome::Fetched;
@@ -1287,6 +1289,11 @@ impl Sim {
     /// alone (the next plan decides); where the plan's own remote write moved the node past the
     /// version it acted on, the rest settles against that write's version while the server
     /// holds it. Returns the version it put the base at, if it did.
+    ///
+    /// Which version it settles against and how the written tags read come from the engine
+    /// ([`DriveVersion::settles_against`], [`tags_written`]); the rest stays a copy of the
+    /// executor's `settle`: there it is woven through its store's reads (the local row and its
+    /// spelling, an online-only base), which the sim's trees stand for.
     pub(crate) fn settle_against(
         &mut self,
         c: usize,
@@ -1297,7 +1304,8 @@ impl Sim {
         ours: Option<VersionTag>,
     ) -> Option<VersionTag> {
         let server = self.server_state(c, node);
-        let live = self.server.live.get(&node).map(|n| n.remote.version);
+        let remote_ref = self.server.live.get(&node).map(|n| n.remote);
+        let live = remote_ref.map(|r| r.version);
         let client = &self.clients[c];
         let base_at = client
             .extra
@@ -1309,9 +1317,14 @@ impl Sim {
         // The executor's compare and set; the sim's mirror is the drive as it is now (another
         // folder's engine may have pulled it: the mirror lagging the drive mid-run isn't
         // simulated).
-        let remote_ref = self.server.live.get(&node).map(|n| n.remote);
         let acted = drive.map(|d| {
-            d.settles_against(base_at, ours, || server.clone().zip(remote_ref))
+            let mirror = |o| {
+                server
+                    .clone()
+                    .zip(remote_ref)
+                    .filter(|(_, at)| at.version == o)
+            };
+            d.settles_against(base_at, ours, mirror)
                 .map(|(r, at)| (r, at.version))
         });
         let base_moved = matches!(acted, Some(None));
@@ -1339,13 +1352,9 @@ impl Sim {
         // the executor's.
         let filled = match tags {
             TagWrite::Wrote { before, written } => {
-                let reference = reference.as_ref().map(|s| &s.tags);
-                Some(tags_written(
-                    before,
-                    written,
-                    reference.unwrap_or(&Tags::default()),
-                    client.os,
-                ))
+                let reference = reference.as_ref().map(|s| s.tags.clone());
+                let reference = reference.unwrap_or_default();
+                Some(tags_written(before, written, &reference, client.os))
             }
             _ => None,
         };

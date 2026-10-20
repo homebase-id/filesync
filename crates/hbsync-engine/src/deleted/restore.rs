@@ -10,11 +10,10 @@ use hbsync_types::{NodeId, Target};
 
 use crate::error::EngineError;
 use crate::mirror::{self, Said, gone_after, meta_at};
-use crate::tree::restored_names;
 use crate::walk::End;
 
 use super::listing::group;
-use super::rules::{RestoreWave, restore_wave};
+use super::rules::{RestoreWave, restore_wave, take_restored_name};
 use super::{AccountOps, locked};
 
 impl AccountOps<'_> {
@@ -78,12 +77,9 @@ impl AccountOps<'_> {
                 if r.failed.is_some() {
                     break;
                 }
-                let names = r.taken.entry(row.parent).or_default();
-                let Some(name) = restored_names(&row.name).find(|n| !names.contains(&name_key(n)))
-                else {
+                let Some(name) = take_restored_name(&mut r.taken, row.parent, &row.name) else {
                     continue; // no free name: it stays in Recently deleted
                 };
-                names.insert(name_key(&name));
                 let meta = meta_at(row, row.parent, &name, false);
                 let answer = self.remote.update(&row.target(), &meta, None);
                 r.settle(row, &meta, answer);

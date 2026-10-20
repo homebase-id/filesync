@@ -10,6 +10,8 @@ use hbsync_remote::Holds;
 use hbsync_state::RemovedRow;
 use hbsync_types::{NodeId, NodeKind, RemoteRef};
 
+use crate::tree::restored_names;
+
 /// Whether a node removed at `removed_at` was deleted with `folder`, the folder it is in, in
 /// Recently deleted too: removed no earlier than the folder (node schema, Recently deleted).
 pub(super) fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
@@ -62,6 +64,20 @@ pub fn restore_wave<'r, R>(
         }
     }
     Some(RestoreWave { asked, rest, later })
+}
+
+/// The name a restored row that can't take its own (`name`) in `parent` comes back under: the
+/// first of its restored names free there, taken now (`None`: none is). The engine's restore and
+/// the simulator's share it.
+pub fn take_restored_name(
+    taken: &mut HashMap<NodeId, HashSet<String>>,
+    parent: NodeId,
+    name: &str,
+) -> Option<String> {
+    let names = taken.entry(parent).or_default();
+    let name = restored_names(name).find(|n| !names.contains(&name_key(n)))?;
+    names.insert(name_key(&name));
+    Some(name)
 }
 
 /// `top` and every removed node below it, through the removed folders, whenever each was
