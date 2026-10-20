@@ -545,7 +545,7 @@ fn a_pull_that_fails_partway_wakes_what_it_took() -> R {
     );
     let woken = drive.subscribe(main);
     // More than a page: the second read fails.
-    for i in 0..=hbsync_engine::drive::FEED_PAGE {
+    for i in 0..=hbsync_engine::drive::FEED_PAGES.whole {
         inner.create(&folder(&format!("f{i}")), None)?;
     }
     assert!(drive.pull(None).is_err(), "the second page fails");

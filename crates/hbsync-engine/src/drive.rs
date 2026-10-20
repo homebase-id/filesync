@@ -20,8 +20,14 @@ use crate::engine::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
 use crate::root::{RootError, SyncRoot};
 
-/// Rows of the change feed read per request, at most.
-pub const FEED_PAGE: usize = 500;
+/// Rows of the change feed read per request, at most: whole pages (decrypted headers), and slim
+/// ones (which file changed, a quarter of the bytes; most of a first read of a drive with many
+/// deletes), which grow to their most in a run of them. Fewer requests save their round trips,
+/// and a page is one commit.
+pub const FEED_PAGES: feed::Pages = feed::Pages {
+    whole: 500,
+    slim: 2000,
+};
 /// Skipped feed rows kept until a folder's runner reports them, at most.
 const MAX_SKIPPED: usize = 1000;
 
@@ -202,7 +208,7 @@ impl Drive {
         let doubts = self.doubts.load(Ordering::SeqCst);
         let pulled = {
             let mut reread = self.reread.lock().unwrap_or_else(|e| e.into_inner());
-            feed::pull(|| self.account(), self.remote(), FEED_PAGE, &mut reread)
+            feed::pull(|| self.account(), self.remote(), FEED_PAGES, &mut reread)
         };
         match &pulled {
             // What was in doubt when it started is answered; a doubt since isn't.

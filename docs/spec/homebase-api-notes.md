@@ -286,7 +286,9 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   the rows are filtered for the caller, and every shape filters alike. `versionTag` changes
   only when the header is written; `updated` also on reactions and transfer history. Measured
   against frodo (2,000 files, pages of 500, bytes received over TLS): a full row 2,510 bytes,
-  a minimal one 588 (the encrypted envelope and its base64 included).
+  a minimal one 588 (the encrypted envelope and its base64 included). 2026-10-19, 100,000
+  tombstones: a full row 1.84 KB, a minimal one 0.52 KB; pages of 2,000 minimal rows work
+  (measured; no cap on `maxRecords` in query-batch found in odin-core, inferred).
 - How the client reads with it: `hbsync_engine::feed::pull`. A server without `fileRefs` in
   its answer is refused, not read as an empty page.
 - **A kept answer could hide a write** (odin-core #1909, fixed by #1973, merged as
@@ -306,10 +308,11 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   (`RemovalCounter.cs`, `FusionCacheWrapper.cs`); tried on frodo at 2f0ff3592: 0 of 20
   rounds hid the write. Not covered by it **[verified]** in its PR: FusionCache's own tag
   expiry across two hosts on one Redis, when the removing host's clock lags the storing
-  host's. The client relies on the fix: every read asks for pages of `FEED_PAGE` (500), and
-  an announced change is read for once. Until the fix it varied the page size per read and
-  read for an announced change again for up to six reads (removed with filesync #90). The
-  live checks `a_page_read_during_a_write_may_be_kept_stale` and
+  host's. The client relies on the fix: a read starts with a page of 500 rows (`FEED_PAGES`;
+  slim pages grow to 2,000 in a run of them, and a slim page's rows before its first new one
+  are asked for by their count), and an announced change is read for once. Until the fix it
+  varied the page size per read and read for an announced change again for up to six reads
+  (removed with filesync #90). The live checks `a_page_read_during_a_write_may_be_kept_stale` and
   `another_clients_write_is_in_the_feed_at_once` (`hbsync-dev/tests/live.rs`) fail if the
   server hides a write again.
 - **Rows held back**: a row written in the server's last millisecond or so is held back,
