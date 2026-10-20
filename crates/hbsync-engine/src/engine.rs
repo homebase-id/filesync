@@ -392,11 +392,6 @@ impl Engine {
             Ok((pending, synced, still, computer))
         })?;
         self.confirmed = confirmed;
-        // The folder's own, borrowed for the sync (the engine is borrowed mutably meanwhile).
-        let (filter, scope) = (
-            Arc::clone(&self.cfg.folder.filter),
-            Arc::clone(&self.cfg.folder.scope),
-        );
         let opts = Options {
             device: self.cfg.device.clone(),
             computer,
@@ -407,8 +402,6 @@ impl Engine {
             allow_mass_delete: self.cfg.allow_mass_delete,
             confirmed: Arc::new(self.confirmed.clone()),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
-            filter: &filter,
-            scope: &scope,
             taken: Arc::default(),
         };
         // The dirty set is planned page by page in node id order and swept round after
@@ -488,11 +481,11 @@ impl Engine {
 
     /// Plans `dirty` from a view of what the rules may need ([`view::build_narrow`]), again
     /// with the folders a plan judged in part listed whole, until a plan needs no more.
-    fn plan(&mut self, dirty: &[NodeId], opts: &Options<'_>) -> Result<Plan, EngineError> {
+    fn plan(&mut self, dirty: &[NodeId], opts: &Options) -> Result<Plan, EngineError> {
         let folder = &self.cfg.folder;
         let db = &mut self.db;
         let reconcile = |input: &crate::reconcile::Input, db: &mut StateDb| {
-            reconcile_with_known(input, opts, |id| {
+            reconcile_with_known(input, opts, folder.masking(), |id| {
                 db.read(|s| s.knows_node(id)).unwrap_or(true)
             })
         };
@@ -525,7 +518,7 @@ impl Engine {
     fn plan_and_execute(
         &mut self,
         dirty: &[NodeId],
-        opts: &Options<'_>,
+        opts: &Options,
         report: &mut SyncReport,
     ) -> Result<Vec<Op>, EngineError> {
         // What an earlier round left placed (its operation failed after), as at the start of a

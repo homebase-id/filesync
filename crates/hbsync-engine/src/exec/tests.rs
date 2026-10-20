@@ -373,6 +373,7 @@ fn plan_of(h: &mut Harness, nodes: &[NodeId]) -> Result<crate::plan::Plan, State
     Ok(crate::reconcile::reconcile(
         &input,
         &crate::plan::Options::default(),
+        folder.masking(),
     ))
 }
 
@@ -1224,7 +1225,7 @@ fn a_delete_while_the_download_is_in_flight_is_taken() -> R {
         ..ctx
     };
     let input = db.read(|s| view::build_input(s, &[node], &ctx))?;
-    let plan = crate::reconcile::reconcile(&input, &crate::plan::Options::default());
+    let plan = crate::reconcile::reconcile(&input, &crate::plan::Options::default(), ctx.masking());
     assert!(
         plan.ops
             .iter()
@@ -2098,9 +2099,9 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
         hash: Some(h.content(b"A").hash),
         tags: None,
     };
-    let os = h.folder.os;
+    let folder = &h.folder;
     let applied =
-        h.db.write(|s| apply(s, &record, Judged::Settle(row), &Scope::main(), os, 0))?;
+        h.db.write(|s| apply(s, &record, Judged::Settle(row), folder, 0))?;
     assert!(matches!(applied, Applied::Kept));
     assert_eq!(h.records()?, [record]);
     let path = RelPath::new("f")?;

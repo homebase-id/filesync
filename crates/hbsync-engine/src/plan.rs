@@ -26,9 +26,18 @@ pub struct BaseExtra {
     pub version: Option<VersionTag>,
 }
 
+/// What a folder leaves out of the drive, which the reconciler masks: this device's filter
+/// (§10) and the part of the drive outside the folder's scope (§12). The folder's own
+/// ([`crate::FolderCtx::masking`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Masking<'a> {
+    pub filter: &'a Filter,
+    pub scope: &'a Scope,
+}
+
 /// Settings that affect decisions.
 #[derive(Debug, Clone)]
-pub struct Options<'a> {
+pub struct Options {
     /// Device name used in conflict-copy names.
     pub device: String,
     /// This computer's id for the account (its state DB's own id): a conflict copy's id
@@ -49,21 +58,11 @@ pub struct Options<'a> {
     /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
     /// totals too, so a large delete split over several batches is still held.
     pub pending_deletes: (usize, usize),
-    /// What this device never syncs: remote nodes it matches are masked (§10). The folder's
-    /// ([`crate::FolderCtx::filter`]).
-    pub filter: &'a Filter,
-    /// The part of the drive this engine syncs: what is outside it is masked (§12). The
-    /// folder's ([`crate::FolderCtx::scope`]).
-    pub scope: &'a Scope,
     /// Ids a detach must not give: already known here (an earlier detach of the same node).
     pub taken: Arc<HashSet<NodeId>>,
 }
 
-/// [`Options::default`]'s filter and scope: the built-in rules only, the main folder's part.
-static NO_RULES: std::sync::LazyLock<Filter> = std::sync::LazyLock::new(Filter::default);
-static MAIN: std::sync::LazyLock<Scope> = std::sync::LazyLock::new(Scope::main);
-
-impl Default for Options<'static> {
+impl Default for Options {
     fn default() -> Self {
         Options {
             device: "device".into(),
@@ -75,8 +74,6 @@ impl Default for Options<'static> {
             allow_mass_delete: false,
             confirmed: Arc::default(),
             pending_deletes: (0, 0),
-            filter: &NO_RULES,
-            scope: &MAIN,
             taken: Arc::default(),
         }
     }

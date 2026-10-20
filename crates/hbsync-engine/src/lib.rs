@@ -31,8 +31,8 @@ pub use engine::{Engine, EngineConfig, StartupReport, SyncReport};
 pub use error::EngineError;
 pub use folder::FolderCtx;
 pub use plan::{
-    Against, Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Op, Options, Plan,
-    Requirement,
+    Against, Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Masking, Op, Options,
+    Plan, Requirement,
 };
 pub use reconcile::reconcile;
 pub use tree::{Tree, Violation, conflict_copy_name, numbered_conflict_name};

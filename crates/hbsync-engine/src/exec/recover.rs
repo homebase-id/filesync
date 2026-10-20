@@ -70,7 +70,7 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateEr
 /// hashed, its folder unreadable), for a later recovery, for [`UNHASHED_HOLD`] at most from
 /// when it was first found so.
 pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
-    let (root, os, algorithm) = (folder.root.as_path(), folder.os, folder.algorithm);
+    let (root, algorithm) = (folder.root.as_path(), folder.algorithm);
     // Each record with the scan's row at its target: the node's own (or a new one), or another
     // node's.
     let found = db.read(|s| {
@@ -117,7 +117,7 @@ pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), St
     db.write(|s| {
         judged
             .into_iter()
-            .try_for_each(|(p, judged)| apply(s, &p, judged, &folder.scope, os, now).map(drop))
+            .try_for_each(|(p, judged)| apply(s, &p, judged, folder, now).map(drop))
     })
 }
 
@@ -180,8 +180,7 @@ pub(super) fn apply(
     s: &Store<'_>,
     p: &Placing,
     judged: Judged,
-    scope: &crate::scope::Scope,
-    os: Os,
+    folder: &FolderCtx,
     now: i64,
 ) -> Result<Applied, StateError> {
     let node = p.base.node;
@@ -211,7 +210,7 @@ pub(super) fn apply(
             }
             // What the commit does: the record goes with the base written, or stays until the
             // item can be read (its folder scanned).
-            match settle_placement(s, p, scope, os)? {
+            match settle_placement(s, p, folder)? {
                 // Its node gone on the drive, its item not one the drive takes (its name): held
                 // as a file not hashed yet is, then dropped.
                 Placed::Kept => hold(s, p, now),

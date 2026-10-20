@@ -1,6 +1,9 @@
 //! One test per rule of `docs/spec/sync-semantics.md`.
 
-use hbsync_engine::{BaseExtra, Conflict, Coverage, DriveVersion, Input, Op, Options, reconcile};
+use hbsync_engine::scope::Scope;
+use hbsync_engine::{
+    BaseExtra, Conflict, Coverage, DriveVersion, Input, Masking, Op, Options, reconcile,
+};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME,
@@ -43,7 +46,9 @@ const ROOT: NodeId = NodeId::ROOT;
 #[derive(Default)]
 struct World {
     input: Input,
-    opts: Options<'static>,
+    opts: Options,
+    /// This device's ignore rules (§10).
+    filter: hbsync_local::Filter,
 }
 
 impl World {
@@ -101,7 +106,12 @@ impl World {
     }
 
     fn plan(&self) -> hbsync_engine::Plan {
-        reconcile(&self.input, &self.opts)
+        let scope = Scope::main();
+        let masking = Masking {
+            filter: &self.filter,
+            scope: &scope,
+        };
+        reconcile(&self.input, &self.opts, masking)
     }
 
     fn version(&self, node: NodeId) -> VersionTag {
@@ -830,7 +840,7 @@ fn a_deleted_or_filtered_recovered_files_and_a_new_orphan() {
     assert!(plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == child && *parent == recovered)));
 
     let mut w = World {
-        opts: ignoring(&format!("/{RECOVERED_NAME}/\n")),
+        filter: ignoring(&format!("/{RECOVERED_NAME}/\n")),
         ..World::default()
     };
     w.input.remote_complete = true;
@@ -922,13 +932,8 @@ fn children_of_a_withdrawn_orphan_are_withdrawn_too() {
 
 // ---- §10 filters ----
 
-fn ignoring(rules: &str) -> Options<'static> {
-    // Leaked: a test's options live as long as the test.
-    let filter = hbsync_local::Filter::from_rules(rules, false).expect("valid rules");
-    Options {
-        filter: Box::leak(Box::new(filter)),
-        ..Options::default()
-    }
+fn ignoring(rules: &str) -> hbsync_local::Filter {
+    hbsync_local::Filter::from_rules(rules, false).expect("valid rules")
 }
 
 #[test]
@@ -937,7 +942,7 @@ fn filtered_remote_nodes_are_never_downloaded() {
         unreachable!()
     };
     let mut w = World {
-        opts: ignoring("build/\n*.log\n"),
+        filter: ignoring("build/\n*.log\n"),
         ..World::default()
     };
     w.remote(junk, Some(file(ROOT, ".DS_Store", "x")))
@@ -953,7 +958,7 @@ fn filtered_remote_nodes_are_never_downloaded() {
 fn a_remote_move_into_an_ignored_folder_takes_the_file_away_here() {
     let [b, f] = ids(2)[..] else { unreachable!() };
     let mut w = World {
-        opts: ignoring("build/\n"),
+        filter: ignoring("build/\n"),
         ..World::default()
     };
     w.synced(f, file(ROOT, "a.txt", "v1"));
@@ -985,7 +990,7 @@ fn a_remote_move_into_an_ignored_folder_takes_the_file_away_here() {
 fn a_local_edit_of_a_file_moved_into_an_ignored_folder_stays_as_a_new_file() {
     let [b, f] = ids(2)[..] else { unreachable!() };
     let mut w = World {
-        opts: ignoring("build/\n"),
+        filter: ignoring("build/\n"),
         ..World::default()
     };
     w.synced(f, file(ROOT, "a.txt", "v1"));
@@ -1015,7 +1020,7 @@ fn a_detached_items_id_is_its_computers() {
     let [b, f] = ids(2)[..] else { unreachable!() };
     let detached = |computer: &str| {
         let mut w = World {
-            opts: ignoring("build/\n"),
+            filter: ignoring("build/\n"),
             ..World::default()
         };
         w.opts.device = "laptop".into();
@@ -1041,7 +1046,7 @@ fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
         unreachable!()
     };
     let mut w = World {
-        opts: ignoring("build/\n"),
+        filter: ignoring("build/\n"),
         ..World::default()
     };
     w.synced(d, folder(ROOT, "proj"))
@@ -1094,7 +1099,7 @@ fn a_folder_with_children_this_device_ignores_survives_a_local_delete() {
         unreachable!()
     };
     let mut w = World {
-        opts: ignoring("*.log\n"),
+        filter: ignoring("*.log\n"),
         ..World::default()
     };
     w.synced(d, folder(ROOT, "proj"))
@@ -1112,7 +1117,7 @@ fn what_a_new_rule_hides_leaves_the_drive_unless_another_device_added_to_it() {
         unreachable!()
     };
     let mut w = World {
-        opts: ignoring("build/\n"),
+        filter: ignoring("build/\n"),
         ..World::default()
     };
     w.synced(d, folder(ROOT, "build"))
@@ -1138,7 +1143,7 @@ fn a_folder_deleted_here_stays_deleted_when_what_it_held_leaves_the_drive() {
         unreachable!()
     };
     let mut w = World {
-        opts: ignoring("build/\n"),
+        filter: ignoring("build/\n"),
         ..World::default()
     };
     w.synced(p, folder(ROOT, "proj"))
@@ -1158,7 +1163,7 @@ fn a_file_brought_back_into_view_keeps_its_place_over_a_remote_move() {
         unreachable!()
     };
     let mut w = World {
-        opts: ignoring("*.o\n"),
+        filter: ignoring("*.o\n"),
         ..World::default()
     };
     w.synced(logs, folder(ROOT, "logs"))

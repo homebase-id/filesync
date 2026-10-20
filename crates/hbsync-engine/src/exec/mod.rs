@@ -594,11 +594,8 @@ impl<'a> Executor<'a> {
                 judge(root, &record, Some(row))
             }
         };
-        let (os, scope) = (self.folder.os, &*self.folder.scope);
-        match self
-            .db
-            .write(|s| apply(s, &record, judged, scope, os, now))?
-        {
+        let folder = self.folder;
+        match self.db.write(|s| apply(s, &record, judged, folder, now))? {
             Applied::Settled(at) => {
                 self.note([(node, at)]);
                 Ok(Outcome::Settled)

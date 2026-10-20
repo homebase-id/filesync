@@ -12,7 +12,7 @@ use hbsync_engine::exec::parked_name;
 use hbsync_engine::mask::masked;
 use hbsync_engine::plan::{TagWrite, not_reached};
 use hbsync_engine::reconcile::{
-    Agreement, BaseExtra, DriveVersion, Input, Op, Options, Removed, Requirement,
+    Agreement, BaseExtra, DriveVersion, Input, Masking, Op, Options, Removed, Requirement,
     reconcile_with_known,
 };
 use hbsync_engine::tree::{Tree, first_free, numbered_names};
@@ -169,12 +169,14 @@ impl Sim {
             mass_delete_fraction: 0.0,
             synced_files,
             confirmed: Arc::clone(&confirmed),
-            filter: &client.filter,
-            scope: &scope,
             ..Options::default()
         };
+        let masking = Masking {
+            filter: &client.filter,
+            scope: &scope,
+        };
         // Ids the client or the server knows are taken, as in the executor's state DB.
-        let plan = reconcile_with_known(&input, &opts, |id| {
+        let plan = reconcile_with_known(&input, &opts, masking, |id| {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         });
         // The guard's rule, checked independently: no plan deletes more files on a side than

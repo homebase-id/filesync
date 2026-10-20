@@ -9,6 +9,7 @@ use hbsync_fileio::HashAlgorithm;
 use hbsync_local::{Filter, ScanOptions};
 use hbsync_platform::Os;
 
+use crate::plan::Masking;
 use crate::scope::Scope;
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,14 @@ impl FolderCtx {
             filter: Arc::default(),
             scope: Arc::new(Scope::main()),
             tags_kept: Arc::default(),
+        }
+    }
+
+    /// What the folder leaves out of the drive, for the reconciler to mask.
+    pub fn masking(&self) -> Masking<'_> {
+        Masking {
+            filter: &self.filter,
+            scope: &self.scope,
         }
     }
 

@@ -7,9 +7,9 @@ use hbsync_platform::{Os, RelPath, tags};
 use hbsync_state::{BaseRow, MirrorRow, Placing, PlannedBase, StateError, Store};
 use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef, Tags};
 
+use crate::folder::FolderCtx;
 use crate::plan::{Against, DriveVersion, TagWrite};
 use crate::reconcile::Agreement;
-use crate::scope::Scope;
 use crate::view;
 
 /// A node to settle after an operation, and what against.
@@ -76,16 +76,16 @@ impl<'a> Settle<'a> {
 pub(crate) fn settle_placement(
     s: &Store<'_>,
     record: &Placing,
-    scope: &Scope,
-    os: Os,
+    folder: &FolderCtx,
 ) -> Result<Placed, StateError> {
+    let os = folder.os;
     let node = record.base.node;
     // Gone on the drive since (deleted, in Recently deleted, or taken along by a folder there):
     // settled at the record's version whatever the plan saw, so the removal reaches the item.
     // Against a base that moved meanwhile, the item read as an edit, which won over the delete
     // and brought the node back. Only an item that reads as the node (its name one the drive
     // takes): the record stays otherwise.
-    let gone = view::gone_on_drive(s, node, scope)?;
+    let gone = view::gone_on_drive(s, node, &folder.scope)?;
     if gone && !view::local_node(s, node, os, None)?.is_some_and(|l| l.state.is_some()) {
         return Ok(Placed::Kept);
     }

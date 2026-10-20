@@ -476,7 +476,7 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
         let target = target.clone();
-        let (os, scope) = (self.folder.os, &*self.folder.scope);
+        let folder = self.folder;
         let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {
@@ -496,7 +496,7 @@ impl Executor<'_> {
                 tags,
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
-            settle_placement(s, &record, scope, os).map(Placed::at)
+            settle_placement(s, &record, folder).map(Placed::at)
         });
         // The DB failing stops the run; the record is the next sync's recovery's.
         let at = match committed {
