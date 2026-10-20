@@ -57,7 +57,7 @@ impl Fixture {
         Ok(self.db.write(|s| {
             let nodes = s.dirty_nodes(usize::MAX >> 1)?;
             for n in &nodes {
-                s.clear_dirty(*n)?;
+                s.folder().clear_dirty(*n)?;
             }
             Ok(nodes)
         })?)
@@ -71,7 +71,7 @@ impl Fixture {
                     continue;
                 };
                 let id = || hbsync_types::Uuid::new_v4();
-                s.put_base(&BaseRow {
+                s.folder().put_base(&BaseRow {
                     node: row.node,
                     state: NodeState::file(
                         NodeId::ROOT,
@@ -748,7 +748,10 @@ fn tags_are_read_and_a_tag_change_is_a_change() -> R {
     assert!(f.scan()?.1.is_empty(), "nothing changed since");
 
     // Tags that couldn't be read are tried again at the next scan, nothing else changing.
-    f.db.write(|s| s.put_local(&hbsync_state::LocalRow { tags: None, ..row }))?;
+    f.db.write(|s| {
+        s.folder()
+            .put_local(&hbsync_state::LocalRow { tags: None, ..row })
+    })?;
     assert_eq!(f.scan()?.1, [node]);
     let read = f.db.read(|s| s.get_local(&path))?.and_then(|r| r.tags);
     assert_eq!(read, Some(red));

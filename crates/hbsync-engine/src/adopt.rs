@@ -18,7 +18,7 @@ use std::path::Path;
 use hbsync_fileio::hash_file;
 use hbsync_namemap::to_remote;
 use hbsync_platform::name::name_key;
-use hbsync_state::{LocalRow, MirrorRow, StateDb, StateError, Store};
+use hbsync_state::{FolderTx, LocalRow, MirrorRow, StateDb, StateError};
 use hbsync_types::{ContentHash, NodeId, NodeKind};
 
 use crate::folder::FolderCtx;
@@ -75,7 +75,7 @@ pub fn adopt(db: &mut StateDb, folder: &FolderCtx) -> Result<usize, StateError> 
         }
         db.write(|s| {
             for (row, remote_node, agreed) in &matches {
-                take_over(s, row.node, *remote_node)?;
+                take_over(s.folder(), row.node, *remote_node)?;
                 // Recorded right away where the reconciler couldn't tell they agree: a match
                 // proven by hashing with the remote's algorithm (it can't compare hashes of
                 // different algorithms), or at this device's spelling of a drive name the name
@@ -85,7 +85,7 @@ pub fn adopt(db: &mut StateDb, folder: &FolderCtx) -> Result<usize, StateError> 
                         same_bytes: true,
                         ..Settle::node(*remote_node)
                     };
-                    settle(s, how, os)?;
+                    settle(s.folder(), how, os)?;
                 }
             }
             Ok(())
@@ -96,7 +96,7 @@ pub fn adopt(db: &mut StateDb, folder: &FolderCtx) -> Result<usize, StateError> 
 }
 
 /// Hands the local item of `local` to `node`: it is that node from now on, to be planned.
-pub(crate) fn take_over(s: &Store<'_>, local: NodeId, node: NodeId) -> Result<(), StateError> {
+pub(crate) fn take_over(s: FolderTx<'_>, local: NodeId, node: NodeId) -> Result<(), StateError> {
     s.rekey_local(local, node)?;
     s.clear_dirty(local)?;
     s.mark_dirty(node)

@@ -39,8 +39,10 @@ impl Computer {
         }
         let db = base.join("state.db");
         let mut main_db = StateDb::open(&db)?;
-        let docs = main_db
-            .write(|s| s.add_folder(Role::Documents.node(), &docs_root.to_string_lossy(), "m"))?;
+        let docs = main_db.write(|s| {
+            s.account()
+                .add_folder(Role::Documents.node(), &docs_root.to_string_lossy(), "m")
+        })?;
         let drive = Drive::new(
             StateDb::open_account(&db)?,
             Arc::new(FakeRemote::new(server.clone())),

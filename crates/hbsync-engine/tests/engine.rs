@@ -766,8 +766,8 @@ fn parked_item_from_a_crash_is_put_back() -> R {
         hbsync_platform::RelPath::new(&parked)?,
     );
     a.engine.db().write(|s| {
-        s.move_local_subtree(&from, &to)?;
-        s.put_parked(node, &from)
+        s.folder().move_local_subtree(&from, &to)?;
+        s.folder().put_parked(node, &from)
     })?;
     a.sync()?;
     assert_eq!(a.read_text("doc.txt")?, "keep me");
@@ -982,8 +982,8 @@ fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
         hbsync_platform::RelPath::new(&format!("A/{}", hbsync_local::layout::parked_name(node)))?;
     fs::rename(from.to_native(&a.root), to.to_native(&a.root))?;
     a.engine.db().write(|s| {
-        s.move_local_subtree(&from, &to)?;
-        s.put_parked(node, &from)
+        s.folder().move_local_subtree(&from, &to)?;
+        s.folder().put_parked(node, &from)
     })?;
     fs::rename(a.root.join("A"), a.root.join("B"))?;
     a.sync()?;
@@ -1183,7 +1183,9 @@ fn crash_right_after_a_fork_rename_is_completed_not_published() -> R {
         .ok_or("row")?
         .node;
     let copy = hbsync_types::NodeId::new();
-    b.engine.db().write(|s| s.put_fork(node, copy, &to))?;
+    b.engine
+        .db()
+        .write(|s| s.folder().put_fork(node, copy, &to))?;
     fs::rename(b.root.join("notes.txt"), b.root.join(to.as_str()))?;
 
     let report = b.sync()?;
@@ -2278,8 +2280,8 @@ fn a_parked_file_whose_name_became_ignored_and_taken_moves_to_a_numbered_one() -
     let to = hbsync_platform::RelPath::new(&hbsync_local::layout::parked_name(node))?;
     fs::rename(from.to_native(&a.root), to.to_native(&a.root))?;
     a.engine.db().write(|s| {
-        s.move_local_subtree(&from, &to)?;
-        s.put_parked(node, &from)
+        s.folder().move_local_subtree(&from, &to)?;
+        s.folder().put_parked(node, &from)
     })?;
     a.write("app.log", "new log")?;
     restart_ignoring(&mut a, "*.log\n")?;

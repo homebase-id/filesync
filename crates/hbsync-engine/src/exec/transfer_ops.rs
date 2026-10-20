@@ -312,7 +312,8 @@ impl Executor<'_> {
                             Job::Meta { meta, .. },
                         ) => self.commit_meta(meta, hash, after, None),
                         _ => {
-                            self.db.write(|s| mirror::forget(s, file_id, None))?;
+                            self.db
+                                .write(|s| mirror::forget(s.account(), file_id, None))?;
                             Ok(Outcome::stale("deleted for good remotely"))
                         }
                     },
@@ -336,7 +337,7 @@ impl Executor<'_> {
                     same_bytes: true,
                     ..Settle::node(node)
                 };
-                self.finish(&[how], |s| mirror::live(s, &row))
+                self.finish(&[how], |s| mirror::live(s.account(), &row))
             }
             _ => Ok(Outcome::unsyncable(
                 "a transfer result for another operation (a fault of this client)",
@@ -473,10 +474,10 @@ impl Executor<'_> {
                 return Err(StateError::Conflict("the commit failed (a test)".into()));
             }
             if let Some(row) = &current {
-                s.delete_local(row.node)?;
+                s.folder().delete_local(row.node)?;
             }
-            s.delete_parked(node)?;
-            s.put_local(&LocalRow {
+            s.folder().delete_parked(node)?;
+            s.folder().put_local(&LocalRow {
                 path: target.clone(),
                 node,
                 kind: NodeKind::File,
@@ -486,7 +487,7 @@ impl Executor<'_> {
                 tags,
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
-            settle_placement(s, &record, folder).map(Placed::at)
+            settle_placement(s.folder(), &record, folder).map(Placed::at)
         });
         // The DB failing stops the run; the record is the next sync's recovery's.
         let at = match committed {

@@ -2,7 +2,7 @@
 
 use super::*;
 
-impl Store<'_> {
+impl ReadTx<'_> {
     // ---- local observations ----
 
     /// The id of the local row at `path`; for the root, the root's id (it has no row). Walks
@@ -49,7 +49,7 @@ impl Store<'_> {
         Ok(Some(id))
     }
 
-    /// Forgets the folders [`Store::local_id_at`] and [`Store::folder_path`] found: called after
+    /// Forgets the folders [`ReadTx::local_id_at`] and [`ReadTx::folder_path`] found: called after
     /// (not before: its own lookups would find the old places again) any write that moves,
     /// removes or rekeys a folder's row.
     pub(super) fn forget_local_ids(&self) {
@@ -199,6 +199,170 @@ impl Store<'_> {
         self.with_paths(raw)
     }
 
+    /// `path` and everything below it with their ids, unsorted.
+    pub(super) fn subtree_raw(&self, path: &RelPath) -> Result<Vec<(RelPath, RawLocal)>> {
+        let Some(start) = self.local_id_at(path)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.prep(&format!(
+            "WITH RECURSIVE sub(id, path, depth) AS ( \
+                 VALUES (?1, ?2, 0) \
+                 UNION ALL \
+                 SELECT l.id, CASE WHEN sub.path = '' THEN l.name ELSE sub.path || '/' || l.name END, \
+                 sub.depth + 1 \
+                 FROM local l JOIN sub ON l.parent = sub.id \
+                 WHERE l.folder = $F AND sub.depth < ?3) \
+             SELECT {LOCAL_COLS}, sub.path, sub.depth FROM sub \
+             JOIN local l ON l.folder = $F AND l.id = sub.id JOIN nodes n ON n.id = l.id"
+        ))?;
+        let rows = stmt.query_map(params![start, path.as_str(), MAX_DEPTH as i64], |r| {
+            Ok((
+                r.get::<_, String>(LOCAL_COL_COUNT)?,
+                r.get::<_, i64>(LOCAL_COL_COUNT + 1)?,
+                RawLocal::read(r, 0)?,
+            ))
+        })?;
+        rows.map(|r| {
+            let (p, depth, raw) = r?;
+            if depth as usize >= MAX_DEPTH {
+                return Err(StateError::Corrupt(format!(
+                    "below {path}: too deep, or a cycle"
+                )));
+            }
+            Ok((codec::rel_path(&p)?, raw))
+        })
+        .collect()
+    }
+
+    /// `path` and everything below it, in walk order.
+    pub fn local_subtree(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
+        let mut rows = self
+            .subtree_raw(path)?
+            .into_iter()
+            .map(|(p, raw)| raw.into_row(p))
+            .collect::<Result<Vec<_>>>()?;
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(rows)
+    }
+
+    /// The direct children of the folder at `parent` (the root for an empty path), in walk
+    /// order.
+    pub fn local_children(&self, parent: &RelPath) -> Result<Vec<LocalRow>> {
+        match self.local_id_at(parent)? {
+            Some(id) => self.children_of(id, parent),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The direct children of `folder` (a row read in this transaction), in walk order.
+    pub fn local_children_of(&self, folder: &LocalRow) -> Result<Vec<LocalRow>> {
+        match self.key(folder.node)? {
+            Some(id) => self.children_of(id, &folder.path),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The children of the folder at `parent` whose name has sibling hash `key`, as
+    /// [`ReadTx::base_named`]: the local spelling's (the same as its remote name's).
+    pub fn local_named(&self, parent: &RelPath, key: i32) -> Result<Vec<LocalRow>> {
+        let Some(id) = self.local_id_at(parent)? else {
+            return Ok(Vec::new());
+        };
+        let raw = self.raw_local(
+            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1 AND l.name_key = ?2"),
+            params![id, key],
+        )?;
+        rows_below(parent, raw)
+    }
+
+    pub(super) fn children_of(&self, id: i64, path: &RelPath) -> Result<Vec<LocalRow>> {
+        let raw = self.raw_local(
+            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1"),
+            [id],
+        )?;
+        rows_below(path, raw)
+    }
+
+    pub fn local_count(&self) -> Result<u64> {
+        self.count("SELECT COUNT(*) FROM local WHERE folder = $F")
+    }
+}
+
+/// Rows of the folder at `path`, in walk order.
+fn rows_below(path: &RelPath, raw: Vec<RawLocal>) -> Result<Vec<LocalRow>> {
+    let mut rows = raw
+        .into_iter()
+        .map(|r| {
+            let child = path
+                .join(&r.name)
+                .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
+            r.into_row(child)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    rows.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(rows)
+}
+
+/// A local row as stored, before its path is known.
+pub(super) struct RawLocal {
+    id: i64,
+    uuid: Vec<u8>,
+    kind: i64,
+    size: i64,
+    mtime_ns: i64,
+    ctime_ns: i64,
+    volume: i64,
+    file_id: i64,
+    file_id_hi: Option<i64>,
+    executable: Option<bool>,
+    hash: Option<Vec<u8>>,
+    parent: i64,
+    name: String,
+    tags: Option<String>,
+}
+
+impl RawLocal {
+    /// Reads [`LOCAL_COLS`] starting at column `at`.
+    pub(super) fn read(r: &Row<'_>, at: usize) -> rusqlite::Result<Self> {
+        Ok(RawLocal {
+            id: r.get(at)?,
+            uuid: r.get(at + 1)?,
+            kind: r.get(at + 2)?,
+            size: r.get(at + 3)?,
+            mtime_ns: r.get(at + 4)?,
+            ctime_ns: r.get(at + 5)?,
+            volume: r.get(at + 6)?,
+            file_id: r.get(at + 7)?,
+            file_id_hi: r.get(at + 8)?,
+            executable: r.get(at + 9)?,
+            hash: r.get(at + 10)?,
+            parent: r.get(at + 11)?,
+            name: r.get(at + 12)?,
+            tags: r.get(at + 13)?,
+        })
+    }
+
+    pub(super) fn into_row(self, path: RelPath) -> Result<LocalRow> {
+        Ok(LocalRow {
+            path,
+            node: codec::node(&self.uuid)?,
+            kind: codec::kind_from(self.kind)?,
+            fingerprint: codec::fingerprint_from(
+                self.size,
+                self.mtime_ns,
+                self.ctime_ns,
+                self.volume,
+                self.file_id,
+                self.file_id_hi,
+            ),
+            executable: self.executable,
+            hash: self.hash.as_deref().map(codec::hash_from).transpose()?,
+            tags: self.tags.as_deref().map(tags_from_str),
+        })
+    }
+}
+
+impl FolderTx<'_> {
     /// Inserts or updates the row of `row.node` at `row.path`. Fails with
     /// [`StateError::Conflict`] if the node is recorded at another path (move it, or delete
     /// that row, first), if another node holds the path, or if the parent folder has no row.
@@ -278,7 +442,7 @@ impl Store<'_> {
     }
 
     /// Deletes the row of `node`. A folder's contents must go first (or use
-    /// [`Store::delete_local_subtree`]): rows below a deleted folder would have no path.
+    /// [`FolderTx::delete_local_subtree`]): rows below a deleted folder would have no path.
     pub fn delete_local(&self, node: NodeId) -> Result<bool> {
         let Some(id) = self.key(node)? else {
             return Ok(false);
@@ -320,90 +484,6 @@ impl Store<'_> {
             self.forget_local_ids();
         }
         Ok(())
-    }
-
-    /// `path` and everything below it with their ids, unsorted.
-    pub(super) fn subtree_raw(&self, path: &RelPath) -> Result<Vec<(RelPath, RawLocal)>> {
-        let Some(start) = self.local_id_at(path)? else {
-            return Ok(Vec::new());
-        };
-        let mut stmt = self.prep(&format!(
-            "WITH RECURSIVE sub(id, path, depth) AS ( \
-                 VALUES (?1, ?2, 0) \
-                 UNION ALL \
-                 SELECT l.id, CASE WHEN sub.path = '' THEN l.name ELSE sub.path || '/' || l.name END, \
-                 sub.depth + 1 \
-                 FROM local l JOIN sub ON l.parent = sub.id \
-                 WHERE l.folder = $F AND sub.depth < ?3) \
-             SELECT {LOCAL_COLS}, sub.path, sub.depth FROM sub \
-             JOIN local l ON l.folder = $F AND l.id = sub.id JOIN nodes n ON n.id = l.id"
-        ))?;
-        let rows = stmt.query_map(params![start, path.as_str(), MAX_DEPTH as i64], |r| {
-            Ok((
-                r.get::<_, String>(LOCAL_COL_COUNT)?,
-                r.get::<_, i64>(LOCAL_COL_COUNT + 1)?,
-                RawLocal::read(r, 0)?,
-            ))
-        })?;
-        rows.map(|r| {
-            let (p, depth, raw) = r?;
-            if depth as usize >= MAX_DEPTH {
-                return Err(StateError::Corrupt(format!(
-                    "below {path}: too deep, or a cycle"
-                )));
-            }
-            Ok((codec::rel_path(&p)?, raw))
-        })
-        .collect()
-    }
-
-    /// `path` and everything below it, in walk order.
-    pub fn local_subtree(&self, path: &RelPath) -> Result<Vec<LocalRow>> {
-        let mut rows = self
-            .subtree_raw(path)?
-            .into_iter()
-            .map(|(p, raw)| raw.into_row(p))
-            .collect::<Result<Vec<_>>>()?;
-        rows.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(rows)
-    }
-
-    /// The direct children of the folder at `parent` (the root for an empty path), in walk
-    /// order.
-    pub fn local_children(&self, parent: &RelPath) -> Result<Vec<LocalRow>> {
-        match self.local_id_at(parent)? {
-            Some(id) => self.children_of(id, parent),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    /// The direct children of `folder` (a row read in this transaction), in walk order.
-    pub fn local_children_of(&self, folder: &LocalRow) -> Result<Vec<LocalRow>> {
-        match self.key(folder.node)? {
-            Some(id) => self.children_of(id, &folder.path),
-            None => Ok(Vec::new()),
-        }
-    }
-
-    /// The children of the folder at `parent` whose name has sibling hash `key`, as
-    /// [`Store::base_named`]: the local spelling's (the same as its remote name's).
-    pub fn local_named(&self, parent: &RelPath, key: i32) -> Result<Vec<LocalRow>> {
-        let Some(id) = self.local_id_at(parent)? else {
-            return Ok(Vec::new());
-        };
-        let raw = self.raw_local(
-            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1 AND l.name_key = ?2"),
-            params![id, key],
-        )?;
-        rows_below(parent, raw)
-    }
-
-    pub(super) fn children_of(&self, id: i64, path: &RelPath) -> Result<Vec<LocalRow>> {
-        let raw = self.raw_local(
-            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1"),
-            [id],
-        )?;
-        rows_below(path, raw)
     }
 
     /// Moves the row at `from`, and with it everything below, to `to` (a folder was moved or
@@ -448,83 +528,5 @@ impl Store<'_> {
             .collect::<Result<Vec<_>>>()?;
         rows.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(rows)
-    }
-
-    pub fn local_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM local WHERE folder = $F")
-    }
-}
-
-/// Rows of the folder at `path`, in walk order.
-fn rows_below(path: &RelPath, raw: Vec<RawLocal>) -> Result<Vec<LocalRow>> {
-    let mut rows = raw
-        .into_iter()
-        .map(|r| {
-            let child = path
-                .join(&r.name)
-                .map_err(|e| StateError::Corrupt(format!("local name {:?}: {e}", r.name)))?;
-            r.into_row(child)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    rows.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(rows)
-}
-
-/// A local row as stored, before its path is known.
-pub(super) struct RawLocal {
-    id: i64,
-    uuid: Vec<u8>,
-    kind: i64,
-    size: i64,
-    mtime_ns: i64,
-    ctime_ns: i64,
-    volume: i64,
-    file_id: i64,
-    file_id_hi: Option<i64>,
-    executable: Option<bool>,
-    hash: Option<Vec<u8>>,
-    parent: i64,
-    name: String,
-    tags: Option<String>,
-}
-
-impl RawLocal {
-    /// Reads [`LOCAL_COLS`] starting at column `at`.
-    pub(super) fn read(r: &Row<'_>, at: usize) -> rusqlite::Result<Self> {
-        Ok(RawLocal {
-            id: r.get(at)?,
-            uuid: r.get(at + 1)?,
-            kind: r.get(at + 2)?,
-            size: r.get(at + 3)?,
-            mtime_ns: r.get(at + 4)?,
-            ctime_ns: r.get(at + 5)?,
-            volume: r.get(at + 6)?,
-            file_id: r.get(at + 7)?,
-            file_id_hi: r.get(at + 8)?,
-            executable: r.get(at + 9)?,
-            hash: r.get(at + 10)?,
-            parent: r.get(at + 11)?,
-            name: r.get(at + 12)?,
-            tags: r.get(at + 13)?,
-        })
-    }
-
-    pub(super) fn into_row(self, path: RelPath) -> Result<LocalRow> {
-        Ok(LocalRow {
-            path,
-            node: codec::node(&self.uuid)?,
-            kind: codec::kind_from(self.kind)?,
-            fingerprint: codec::fingerprint_from(
-                self.size,
-                self.mtime_ns,
-                self.ctime_ns,
-                self.volume,
-                self.file_id,
-                self.file_id_hi,
-            ),
-            executable: self.executable,
-            hash: self.hash.as_deref().map(codec::hash_from).transpose()?,
-            tags: self.tags.as_deref().map(tags_from_str),
-        })
     }
 }

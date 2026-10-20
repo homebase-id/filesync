@@ -82,11 +82,11 @@ pub(super) fn restore_parked(
     }
     let refreshed = renamed_row(root, row, to);
     db.write(|s| {
-        s.move_local_subtree(&row.path, to)?;
+        s.folder().move_local_subtree(&row.path, to)?;
         if let Some(r) = &refreshed {
-            s.put_local(r)?;
+            s.folder().put_local(r)?;
         }
-        s.delete_parked(row.node)
+        s.folder().delete_parked(row.node)
     })?;
     Ok(Ok(refreshed.unwrap_or_else(|| LocalRow {
         path: to.clone(),
@@ -107,7 +107,7 @@ pub(super) fn unpark(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateEr
             Ok(view::parked_place(s, &row)?.map(|original| (row, original)))
         })?;
         let Some((current, original)) = place else {
-            db.write(|s| s.delete_parked(node))?;
+            db.write(|s| s.folder().delete_parked(node))?;
             continue;
         };
         let is_dir = current.kind == NodeKind::Folder;

@@ -289,15 +289,15 @@ impl Engine {
             if last.as_deref() != Some(scope.as_str()) {
                 let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
                 last.union(&self.cfg.folder.scope.outside)
-                    .try_for_each(|n| s.mark_dirty(*n))?;
-                s.set_kv(keys::SCOPE, &scope)?;
+                    .try_for_each(|n| s.folder().mark_dirty(*n))?;
+                s.folder().set_kv(keys::SCOPE, &scope)?;
             }
             if s.get_kv(keys::FILTER)?.as_deref() == Some(fingerprint.as_str()) {
                 return Ok(false);
             }
-            s.delete_kv(keys::JOURNAL_CURSOR)?;
-            s.mark_synced_dirty()?;
-            s.set_kv(keys::FILTER, &fingerprint)?;
+            s.folder().delete_kv(keys::JOURNAL_CURSOR)?;
+            s.folder().mark_synced_dirty()?;
+            s.folder().set_kv(keys::FILTER, &fingerprint)?;
             Ok(true)
         })
     }
@@ -446,7 +446,7 @@ impl Engine {
             || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
         if report.ops_done > 0 || report.feed.deleted > 0 {
             // Ids of nodes gone everywhere.
-            self.db.write(|s| s.collect_nodes())?;
+            self.db.write(|s| s.account().collect_nodes())?;
         }
         // Its writes changed other folders' parts of the drive (a move across them): their
         // engines look.
@@ -535,8 +535,11 @@ impl Engine {
                 self.confirmed.remove(node);
             }
         }
-        self.db
-            .write(|s| plan.clean.iter().try_for_each(|n| s.clear_dirty(*n)))?;
+        self.db.write(|s| {
+            plan.clean
+                .iter()
+                .try_for_each(|n| s.folder().clear_dirty(*n))
+        })?;
         report.conflicts.extend(plan.conflicts);
         if plan.ops.is_empty() {
             return Ok(plan.held);
@@ -563,7 +566,8 @@ impl Engine {
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
-        self.db.write(|s| s.add_synced(&synced, activity::KEEP))?;
+        self.db
+            .write(|s| s.folder().add_synced(&synced, activity::KEEP))?;
         report.synced.extend(synced);
         if !exec.rescan.is_empty() {
             rescan_dirs(

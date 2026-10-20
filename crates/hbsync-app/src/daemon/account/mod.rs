@@ -524,11 +524,11 @@ mod tests {
         };
         let folder = NodeId::new();
         StateDb::open_account(&db)?.write(|s| {
-            s.put_removed(&RemovedRow {
+            s.account().put_removed(&RemovedRow {
                 row: row(folder, NodeId::ROOT),
                 removed_at: Some(10),
             })?;
-            s.put_mirror(&row(NodeId::new(), folder))
+            s.account().put_mirror(&row(NodeId::new(), folder))
         })?;
         let (items, summary) = account.deleted(10, Some(Path::new("/h/Homebase")));
         let summary = summary.ok_or("Recently deleted shown empty")?;

@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 
 use hbsync_remote::{ChangeRef, ChangesPage, RefsPage, Remote, RemoteError, RemoteHeader};
-use hbsync_state::{StateDb, StateError, Store, keys};
+use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
 use hbsync_types::{RemoteFileId, RemoteRef};
 
 use crate::mirror::{self, apply};
@@ -128,7 +128,7 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
         *reread = None;
     } else if reread.is_none() {
         // Asked (an upgrade), or one a new process doesn't know how far it got: from the start.
-        *reread = Some(db().write(Reread::begin)?);
+        *reread = Some(db().write(|s| Reread::begin(s.account()))?);
     }
     // Read until then, by the server's clock: what the cursor and the last day's mark say, or
     // when the re-read on its way began.
@@ -167,7 +167,7 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
         {
             *reread = Some(Reread {
                 since: Some(now),
-                ..db().write(Reread::begin)?
+                ..db().write(|s| Reread::begin(s.account()))?
             });
             slim = None;
             continue;
@@ -222,7 +222,7 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
         .server_time
         .filter(|now| read_at.is_none_or(|at| now.saturating_sub(at) > DAY_MS));
     if let Some(now) = mark {
-        db().write(|s| s.set_account_kv(keys::READ_AT, &now.to_string()))?;
+        db().write(|s| s.account().set_account_kv(keys::READ_AT, &now.to_string()))?;
     }
     Ok(report)
 }
@@ -231,7 +231,7 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
 /// holds the drive, so it doesn't for long.
 const CONFIRM_PER_PULL: usize = 100;
 
-/// A re-read of the whole feed ([`Store::start_reread`]) on its way: the files the store had
+/// A re-read of the whole feed ([`AccountTx::start_reread`]) on its way: the files the store had
 /// when it began that the feed hasn't shown yet, and when it began (the server's clock). The
 /// caller keeps it between pulls, so a pull an error cut short goes on where it stopped (unless
 /// the re-read is as old as an absence that starts one again); a new process starts it over.
@@ -244,7 +244,7 @@ pub struct Reread {
 impl Reread {
     /// Starts one: the cursor goes, and what the store has now is what the feed must show. Its
     /// time comes with the first page.
-    fn begin(s: &Store<'_>) -> Result<Reread, StateError> {
+    fn begin(s: AccountTx<'_>) -> Result<Reread, StateError> {
         s.start_reread()?;
         Ok(Reread {
             missing: s.drive_file_ids()?.into_iter().collect(),
@@ -303,7 +303,7 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
 
 /// Writes what [`ask`] found: a file gone is gone here too, one there is applied as it is
 /// (one that isn't a node this client reads stays as it is; one deleted for good since stays
-/// gone, [`Store::mark_file_gone`]). Each file answered is the re-read's no more once that is
+/// gone, [`AccountTx::mark_file_gone`]). Each file answered is the re-read's no more once that is
 /// written (a write that fails leaves them to ask again): once none is left, it ends. Returns
 /// how many went.
 fn settle<G: DerefMut<Target = StateDb>>(
@@ -321,13 +321,13 @@ fn settle<G: DerefMut<Target = StateDb>>(
     });
     db().write(|s| {
         for &file_id in &asked.gone {
-            mirror::forget(s, file_id, None)?;
+            mirror::forget(s.account(), file_id, None)?;
         }
         for header in &asked.found {
-            apply(s, header)?;
+            apply(s.account(), header)?;
         }
         if done {
-            s.end_reread()?;
+            s.account().end_reread()?;
         }
         Ok(())
     })?;
@@ -381,9 +381,9 @@ fn apply_slim<G: DerefMut<Target = StateDb>>(
             return Ok(Slim::NewAt(i));
         }
         for r in &page.refs {
-            report.count(apply_ref(s, r)?);
+            report.count(apply_ref(s.account(), r)?);
         }
-        save_cursor(s, cursor, !page.refs.is_empty(), &page.cursor)?;
+        save_cursor(s.account(), cursor, !page.refs.is_empty(), &page.cursor)?;
         Ok(Slim::Applied(page.has_more))
     })?)
 }
@@ -400,9 +400,9 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
         let nothing_new = known(s, &refs)?;
         for header in &page.entries {
-            report.count(apply(s, header)?);
+            report.count(apply(s.account(), header)?);
         }
-        save_cursor(s, cursor, !page.entries.is_empty(), &page.cursor)?;
+        save_cursor(s.account(), cursor, !page.entries.is_empty(), &page.cursor)?;
         Ok(nothing_new)
     })?;
     Ok((page.has_more, nothing_new))
@@ -419,13 +419,13 @@ impl FeedReport {
 }
 
 /// Whether the store knows every one of `refs` ([`first_unknown`]).
-fn known(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
+fn known(s: &ReadTx<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
     Ok(first_unknown(s, refs)?.is_none())
 }
 
 /// The first of `refs` the store doesn't know: a tombstone needs nothing, the rest are
 /// versions it has, in Recently deleted or else in the mirror.
-fn first_unknown(s: &Store<'_>, refs: &[ChangeRef]) -> Result<Option<usize>, StateError> {
+fn first_unknown(s: &ReadTx<'_>, refs: &[ChangeRef]) -> Result<Option<usize>, StateError> {
     let (at, versions): (Vec<usize>, Vec<(RemoteRef, bool)>) = refs
         .iter()
         .enumerate()
@@ -436,7 +436,12 @@ fn first_unknown(s: &Store<'_>, refs: &[ChangeRef]) -> Result<Option<usize>, Sta
 }
 
 /// Stores the cursor after a page; unchanged on an idle pull: no write, so nothing to sync.
-fn save_cursor(s: &Store<'_>, old: Option<&str>, rows: bool, new: &str) -> Result<(), StateError> {
+fn save_cursor(
+    s: AccountTx<'_>,
+    old: Option<&str>,
+    rows: bool,
+    new: &str,
+) -> Result<(), StateError> {
     if rows || old != Some(new) {
         s.set_account_kv(keys::REMOTE_CURSOR, new)?;
     }
@@ -447,7 +452,7 @@ fn save_cursor(s: &Store<'_>, old: Option<&str>, rows: bool, new: &str) -> Resul
 /// is gone at once (a hard delete leaves no row in the feed), and when the store knows every
 /// other version (this device's own writes coming back) they are applied as a slim page's,
 /// without reading the feed. Whether that was all; else the feed has to be read.
-pub(crate) fn announced(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
+pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
     let (refs, sure) = latest(refs);
     for r in refs.iter().filter(|r| r.deleted) {
         match r.changed_at {
@@ -457,7 +462,7 @@ pub(crate) fn announced(s: &Store<'_>, refs: &[ChangeRef]) -> Result<bool, State
             None => mirror::hard_deleted(s, r.at())?,
         }
     }
-    if !sure || !known(s, &refs)? {
+    if !sure || !known(&s, &refs)? {
         return Ok(false);
     }
     for r in refs.iter().filter(|r| !r.deleted) {
@@ -499,7 +504,7 @@ fn latest(refs: &[ChangeRef]) -> (Vec<ChangeRef>, bool) {
 
 /// Applies a known ref ([`known`]) as [`apply`] would its header: only what the server says
 /// better, its times. Returns `true` for a node in the tree.
-fn apply_ref(s: &Store<'_>, r: &ChangeRef) -> Result<bool, StateError> {
+fn apply_ref(s: AccountTx<'_>, r: &ChangeRef) -> Result<bool, StateError> {
     if r.deleted {
         mirror::tombstone(s, r.at(), r.changed_at)?;
         return Ok(false);
@@ -551,13 +556,13 @@ mod tests {
             removed_at: None,
             changed_at,
         };
-        db.write(|s| announced(s, &[deleted(Some(7))]).map(drop))?;
+        db.write(|s| announced(s.account(), &[deleted(Some(7))]).map(drop))?;
         assert_eq!(
             db.read(|s| s.tombstones_before(8))?,
             [at],
             "a tombstone on the drive"
         );
-        db.write(|s| announced(s, &[deleted(None)]).map(drop))?;
+        db.write(|s| announced(s.account(), &[deleted(None)]).map(drop))?;
         assert!(
             db.read(|s| s.tombstones_before(8))?.is_empty(),
             "deleted hard"
@@ -586,7 +591,7 @@ mod tests {
             changed_at: Some(5),
             token: None,
         };
-        db.write(|s| apply(s, &header).map(drop))?;
+        db.write(|s| apply(s.account(), &header).map(drop))?;
         let write = ChangeRef::of(&header);
         let removal = ChangeRef {
             version: VersionTag(Uuid::new_v4()),
@@ -595,10 +600,13 @@ mod tests {
             ..write
         };
         for refs in [[write, removal], [removal, write]] {
-            assert!(!db.write(|s| announced(s, &refs))?, "the feed is read");
+            assert!(
+                !db.write(|s| announced(s.account(), &refs))?,
+                "the feed is read"
+            );
         }
         assert!(
-            db.write(|s| announced(s, &[write]))?,
+            db.write(|s| announced(s.account(), &[write]))?,
             "the write alone is known"
         );
         Ok(())

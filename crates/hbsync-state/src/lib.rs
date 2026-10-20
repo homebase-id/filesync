@@ -56,8 +56,8 @@ use rusqlite::{Connection, TransactionBehavior};
 pub use coords::Coords;
 pub use reader::Reader;
 pub use store::{
-    BaseRow, DirtyCursor, FolderRow, LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing,
-    PlannedBase, Recorded, RemovedRow, Store,
+    AccountTx, BaseRow, DirtyCursor, FolderRow, FolderTx, LocalRow, MAX_DEPTH, MirrorFile,
+    MirrorRow, Placing, PlannedBase, ReadTx, Recorded, RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -347,7 +347,7 @@ impl StateDb {
     fn first(mut db: StateDb) -> Result<Self> {
         db.write(|s| {
             if s.folders()?.is_empty() {
-                s.add_folder(hbsync_types::NodeId::ROOT, "", "")?;
+                s.account().add_folder(hbsync_types::NodeId::ROOT, "", "")?;
             }
             Ok(())
         })?;
@@ -408,7 +408,7 @@ impl StateDb {
     }
 
     /// Runs `f` in a read transaction (a consistent snapshot).
-    pub fn read<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
+    pub fn read<T>(&mut self, f: impl FnOnce(&ReadTx<'_>) -> Result<T>) -> Result<T> {
         read_in(&mut self.conn, self.folder, f)
     }
 
@@ -428,7 +428,7 @@ impl StateDb {
     pub fn flush(&mut self) -> Result<()> {
         if lock(&self.shared.gate).unsynced {
             // A commit syncs only when it writes something.
-            self.commit(Kind::Flush, |s| s.count_flush())?;
+            self.commit(Kind::Flush, |s| s.account().count_flush())?;
         } else {
             self.emptied.committed.clear();
         }
@@ -456,7 +456,7 @@ impl StateDb {
     pub fn filling(&mut self, path: &Path) -> Result<()> {
         // One emptied and not recorded yet can't be helped here: its record is still to come.
         if !self.emptied.committed.is_empty() && self.emptied.committed.contains(&place_key(path)) {
-            self.commit(Kind::Flush, |s| s.count_flush())?;
+            self.commit(Kind::Flush, |s| s.account().count_flush())?;
         }
         Ok(())
     }
@@ -562,7 +562,7 @@ impl StateDb {
     }
 
     /// The folders whose dirty sets the writes since the last call marked nodes in, from
-    /// changes of the drive ([`Store::fan_out`]): the engines to wake.
+    /// changes of the drive (`fan_out`): the engines to wake.
     pub fn take_touched(&mut self) -> std::collections::BTreeSet<i64> {
         std::mem::take(&mut self.touched)
     }
@@ -582,10 +582,10 @@ impl StateDb {
 fn read_in<T>(
     conn: &mut Connection,
     folder: i64,
-    f: impl FnOnce(&Store<'_>) -> Result<T>,
+    f: impl FnOnce(&ReadTx<'_>) -> Result<T>,
 ) -> Result<T> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-    let out = f(&Store::new(&tx, folder))?;
+    let out = f(&ReadTx::new(&tx, folder))?;
     tx.finish()?;
     Ok(out)
 }
@@ -599,7 +599,7 @@ mod tests {
     }
 
     fn write(db: &mut StateDb, value: &str) -> Result<()> {
-        db.write(|s| s.set_kv(keys::FILTER, value))
+        db.write(|s| s.folder().set_kv(keys::FILTER, value))
     }
 
     /// A place emptied since the last durable commit is made durable before something is put
@@ -622,7 +622,7 @@ mod tests {
 
         // Another connection's durable commit can't vouch for a commit still to come here.
         a.emptied(&place);
-        b.write_durable(|s| s.set_kv(keys::SCOPE, "x"))?;
+        b.write_durable(|s| s.folder().set_kv(keys::SCOPE, "x"))?;
         write(&mut a, "y")?;
         a.filling(&place)?;
         assert_eq!(flushes(&mut a)?.as_deref(), Some("2"));

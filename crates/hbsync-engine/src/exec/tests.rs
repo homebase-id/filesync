@@ -54,7 +54,7 @@ impl Harness {
             hash: Some(hash_bytes(data, self.folder.algorithm)),
             tags: None,
         };
-        self.db.write(|s| s.put_local(&row))?;
+        self.db.write(|s| s.folder().put_local(&row))?;
         Ok(())
     }
 
@@ -71,7 +71,7 @@ impl Harness {
             hash: None,
             tags: None,
         };
-        self.db.write(|s| s.put_local(&row))?;
+        self.db.write(|s| s.folder().put_local(&row))?;
         Ok(())
     }
 
@@ -110,7 +110,7 @@ impl Harness {
     fn mirror(&mut self, node: NodeId, name: &str, at: RemoteRef, data: &[u8]) -> R {
         let c = self.content(data);
         self.db.write(|s| {
-            s.put_mirror(&MirrorRow {
+            s.account().put_mirror(&MirrorRow {
                 file_id: at.file_id,
                 version: at.version,
                 node,
@@ -142,7 +142,7 @@ impl Harness {
             let Some(row) = s.get_local(&path)? else {
                 return Ok(());
             };
-            s.put_local(&LocalRow {
+            s.folder().put_local(&LocalRow {
                 tags: Some(tags),
                 ..row
             })
@@ -233,7 +233,7 @@ fn recovery_writes_the_commits_base() -> R {
         base_at: PlannedBase::Absent,
         held_ms: None,
     };
-    h.db.write(|s| s.put_placing(&record))?;
+    h.db.write(|s| s.folder().put_placing(&record))?;
     recover_placements(&mut h.db, &h.folder)?;
     let base = h.base(node)?.ok_or("no base")?;
     assert_eq!(base.state.content, Some(fetched));
@@ -258,7 +258,7 @@ fn recovery_reads_the_tags_the_item_was_placed_with() -> R {
             return Ok(());
         };
         // The tag removed: the scan reads none.
-        s.put_local(&LocalRow {
+        s.folder().put_local(&LocalRow {
             tags: Some(Tags::default()),
             ..row
         })
@@ -275,7 +275,7 @@ fn recovery_reads_the_tags_the_item_was_placed_with() -> R {
         base_at: PlannedBase::Absent,
         held_ms: None,
     };
-    h.db.write(|s| s.put_placing(&record))?;
+    h.db.write(|s| s.folder().put_placing(&record))?;
     recover_placements(
         &mut h.db,
         &FolderCtx {
@@ -318,7 +318,7 @@ fn recovery_holds_a_record_of_a_deleted_node_it_cannot_settle() -> R {
     // Held long enough: it goes.
     let since = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
     h.db.write(|s| {
-        s.put_placing(&Placing {
+        s.folder().put_placing(&Placing {
             held_ms: Some(since),
             ..held
         })
@@ -349,7 +349,7 @@ fn a_record_it_cannot_settle(gone: bool) -> Result<(Harness, Placing), Box<dyn s
     };
     h.db.write(|s| {
         if !gone {
-            s.put_mirror(&MirrorRow::from_content(
+            s.account().put_mirror(&MirrorRow::from_content(
                 at,
                 node,
                 NodeId::ROOT,
@@ -358,7 +358,7 @@ fn a_record_it_cannot_settle(gone: bool) -> Result<(Harness, Placing), Box<dyn s
                 Some(fetched.hash),
             ))?;
         }
-        s.put_placing(&record)
+        s.folder().put_placing(&record)
     })?;
     Ok((h, record))
 }
@@ -395,7 +395,7 @@ fn a_folder_made_before_its_tags_keeps_them_on_the_drive() -> R {
     let mut content = NodeContent::folder("d");
     content.set_tags(&work);
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -404,7 +404,7 @@ fn a_folder_made_before_its_tags_keeps_them_on_the_drive() -> R {
             None,
         ))?;
         // Synced before (made again after a delete here lost): it gets a record.
-        s.put_base(&BaseRow::new(node, state.clone(), at))
+        s.folder().put_base(&BaseRow::new(node, state.clone(), at))
     })?;
     h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     let crashed = h.run(vec![Op::LocalMkdir {
@@ -466,7 +466,7 @@ fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
     content.set_tags(&work);
     let target = RelPath::new("d")?;
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -474,8 +474,9 @@ fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
             &content,
             None,
         ))?;
-        s.put_base(&BaseRow::new(node, state.clone(), at))?;
-        s.put_placing(&Placing {
+        s.folder()
+            .put_base(&BaseRow::new(node, state.clone(), at))?;
+        s.folder().put_placing(&Placing {
             base: BaseRow::new(node, state, at),
             target,
             placed_tags: None,
@@ -546,7 +547,7 @@ fn no_placement_takes_tags_off_the_drive_where_none_are_kept() -> R {
             };
             let hash = (!folder).then(|| h.content(b"A").hash);
             h.db.write(|s| {
-                s.put_mirror(&MirrorRow::from_content(
+                s.account().put_mirror(&MirrorRow::from_content(
                     at,
                     node,
                     NodeId::ROOT,
@@ -555,7 +556,7 @@ fn no_placement_takes_tags_off_the_drive_where_none_are_kept() -> R {
                     hash,
                 ))?;
                 // Synced before, tagged: a folder made again gets a record.
-                s.put_base(&BaseRow::new(node, state.clone(), at))
+                s.folder().put_base(&BaseRow::new(node, state.clone(), at))
             })?;
             let drive = Some(Box::new(DriveVersion {
                 state,
@@ -722,7 +723,7 @@ fn base_after_a_download(crash: bool) -> Result<Option<BaseRow>, Box<dyn std::er
     h.scanned_with("f", Tags::new(vec![Tag::new("Red", 0)]))?;
     let old = h.content(b"A");
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(old.hash),
             ..BaseRow::new(
                 node,
@@ -730,7 +731,7 @@ fn base_after_a_download(crash: bool) -> Result<Option<BaseRow>, Box<dyn std::er
                 some_version(),
             )
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -879,7 +880,7 @@ fn a_removed_tag_stays_removed_through_recovery() -> R {
     let hash = h.content(b"B").hash;
     let base = some_version();
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -887,8 +888,8 @@ fn a_removed_tag_stays_removed_through_recovery() -> R {
             &content,
             Some(hash),
         ))?;
-        s.put_base(&BaseRow::new(node, earlier, base))?;
-        s.put_placing(&Placing {
+        s.folder().put_base(&BaseRow::new(node, earlier, base))?;
+        s.folder().put_placing(&Placing {
             base: BaseRow::new(node, fetched, at),
             target: RelPath::new("f").expect("a path"),
             placed_tags: Some(Tags::default()),
@@ -933,7 +934,7 @@ fn an_untagged_folder_claims_no_tags() -> R {
     let node = NodeId::new();
     let at = some_version();
     let state = NodeState::folder(NodeId::ROOT, "d");
-    h.db.write(|s| s.put_base(&BaseRow::new(node, state.clone(), at)))?;
+    h.db.write(|s| s.folder().put_base(&BaseRow::new(node, state.clone(), at)))?;
     h.cfg.hooks.crash_at = Some(CrashPoint::AfterPlaced);
     let crashed = h.run(vec![Op::LocalMkdir {
         node,
@@ -1006,7 +1007,7 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
     let (folder, child) = (NodeId::new(), NodeId::new());
     let at = some_version();
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             folder,
             NodeId::ROOT,
@@ -1014,7 +1015,7 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
             &NodeContent::folder("d"),
             None,
         ))?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             some_version(),
             child,
             folder,
@@ -1022,7 +1023,7 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
             &NodeContent::folder("e"),
             None,
         ))?;
-        s.put_placing(&Placing {
+        s.folder().put_placing(&Placing {
             base: BaseRow::new(folder, NodeState::folder(NodeId::ROOT, "d"), at),
             target: RelPath::new("d").expect("a path"),
             placed_tags: None,
@@ -1031,7 +1032,7 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
             held_ms: None,
         })?;
         // Pulled before: nothing marked now.
-        s.clear_dirty(child)
+        s.folder().clear_dirty(child)
     })?;
     h.local_folder("d", NodeId::new())?;
     recover_placements(&mut h.db, &h.folder)?;
@@ -1185,8 +1186,8 @@ fn a_delete_while_the_download_is_in_flight_is_taken() -> R {
     };
     db.write(|s| {
         // Planned because it was dirty: nothing clears that until a plan finds it clean.
-        s.mark_dirty(node)?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.folder().mark_dirty(node)?;
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -1199,8 +1200,9 @@ fn a_delete_while_the_download_is_in_flight_is_taken() -> R {
     let remote = ReadHook {
         inner: fake,
         hook: std::sync::Mutex::new(Some(Box::new(move || {
-            let gone = StateDb::open(&hook_path)
-                .and_then(|mut other| other.write(|s| s.delete_mirror(at.file_id).map(drop)));
+            let gone = StateDb::open(&hook_path).and_then(|mut other| {
+                other.write(|s| s.account().delete_mirror(at.file_id).map(drop))
+            });
             assert!(gone.is_ok(), "{gone:?}");
         }))),
     };
@@ -1257,7 +1259,7 @@ fn a_record_stays_when_the_commit_fails_after_placing() -> R {
         executable: false,
     };
     db.write(|s| {
-        s.put_local(&LocalRow {
+        s.folder().put_local(&LocalRow {
             path: RelPath::new("d").expect("a path"),
             node: folder,
             kind: NodeKind::Folder,
@@ -1268,7 +1270,7 @@ fn a_record_stays_when_the_commit_fails_after_placing() -> R {
             hash: None,
             tags: None,
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             folder,
@@ -1282,7 +1284,7 @@ fn a_record_stays_when_the_commit_fails_after_placing() -> R {
         inner: fake,
         hook: std::sync::Mutex::new(Some(Box::new(move || {
             let gone = StateDb::open(&hook_path)
-                .and_then(|mut other| other.write(|s| s.delete_local(folder)));
+                .and_then(|mut other| other.write(|s| s.folder().delete_local(folder)));
             assert!(gone.is_ok(), "{gone:?}");
         }))),
     };
@@ -1363,11 +1365,11 @@ fn a_node_whose_drive_moved_on_stays_dirty() -> R {
     h.local_file("a", node, b"A")?;
     h.mirror(node, "a", now, b"A")?;
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(h_content_hash(b"A")),
             ..BaseRow::new(node, file.clone(), acted)
         })?;
-        s.clear_dirty(node)
+        s.folder().clear_dirty(node)
     })?;
     h.run(vec![Op::LocalMove {
         node,
@@ -1425,11 +1427,11 @@ fn red_stays_removed_after(renamed: bool, edited: bool) -> R {
     let hash = h.content(b"A").hash;
     let synced = NodeState::file(NodeId::ROOT, "a", h.content(b"A"));
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(hash),
             ..BaseRow::new(node, synced, before)
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             after,
             node,
             NodeId::ROOT,
@@ -1513,7 +1515,7 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
         },
     ];
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             folder_at,
             folder,
             NodeId::ROOT,
@@ -1521,8 +1523,9 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             &NodeContent::folder("d"),
             None,
         ))?;
-        s.put_base(&BaseRow::new(folder, folder_state.clone(), folder_at))?;
-        records.iter().try_for_each(|r| s.put_placing(r))
+        s.folder()
+            .put_base(&BaseRow::new(folder, folder_state.clone(), folder_at))?;
+        records.iter().try_for_each(|r| s.folder().put_placing(r))
     })?;
     let report = h.run(vec![
         Op::LocalDownload {
@@ -1571,7 +1574,7 @@ fn a_folder_a_round_left_is_taken_by_the_next() -> R {
     let (node, at) = (NodeId::new(), some_version());
     let state = NodeState::folder(NodeId::ROOT, "d");
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -1579,7 +1582,7 @@ fn a_folder_a_round_left_is_taken_by_the_next() -> R {
             &NodeContent::folder("d"),
             None,
         ))?;
-        s.put_base(&BaseRow::new(node, state.clone(), at))
+        s.folder().put_base(&BaseRow::new(node, state.clone(), at))
     })?;
     let mkdir = || Op::LocalMkdir {
         node,
@@ -1649,20 +1652,20 @@ fn a_tag_the_drive_removed_after_a_write_goes() -> R {
         )
     };
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(c.hash),
             ..BaseRow::new(node, file.clone(), v0)
         })?;
-        s.put_mirror(&mirror(v1, &y))
+        s.account().put_mirror(&mirror(v1, &y))
     })?;
     let ops = plan_of(&mut h, &[node])?.ops;
     assert!(matches!(ops.as_slice(), [Op::LocalTags { .. }]), "{ops:?}");
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(c.hash),
             ..BaseRow::new(node, file.clone(), v2)
         })?;
-        s.put_mirror(&mirror(v3, &Tags::default()))
+        s.account().put_mirror(&mirror(v3, &Tags::default()))
     })?;
     h.run(ops)?;
     assert_eq!(tags::read(&h.folder.root.join("f")), Some(y.clone()));
@@ -1695,7 +1698,7 @@ fn plan_after_a_move(base: &Tags, item: &Tags, drive: &Tags, acted: &Tags) -> Pl
     let mut content = NodeContent::file("b", 0, 1, false);
     content.set_tags(drive);
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(c.hash),
             ..BaseRow::new(
                 node,
@@ -1706,7 +1709,7 @@ fn plan_after_a_move(base: &Tags, item: &Tags, drive: &Tags, acted: &Tags) -> Pl
                 v2,
             )
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             v2,
             node,
             NodeId::ROOT,
@@ -1818,7 +1821,7 @@ fn a_placement_whose_commit_fails_is_settled_by_recovery() -> R {
     let (folder, folder_at) = (NodeId::new(), some_version());
     let folder_state = NodeState::folder(NodeId::ROOT, "d");
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             folder_at,
             folder,
             NodeId::ROOT,
@@ -1827,7 +1830,8 @@ fn a_placement_whose_commit_fails_is_settled_by_recovery() -> R {
             None,
         ))?;
         // Synced before: it gets a record.
-        s.put_base(&BaseRow::new(folder, folder_state.clone(), folder_at))
+        s.folder()
+            .put_base(&BaseRow::new(folder, folder_state.clone(), folder_at))
     })?;
     let ops = vec![
         Op::LocalDownload {
@@ -1885,7 +1889,7 @@ fn files_go_into_a_folder_whose_commit_failed() -> R {
     let (folder, folder_at) = (NodeId::new(), some_version());
     let folder_state = NodeState::folder(NodeId::ROOT, "d");
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             folder_at,
             folder,
             NodeId::ROOT,
@@ -1893,7 +1897,8 @@ fn files_go_into_a_folder_whose_commit_failed() -> R {
             &NodeContent::folder("d"),
             None,
         ))?;
-        s.put_base(&BaseRow::new(folder, folder_state.clone(), folder_at))
+        s.folder()
+            .put_base(&BaseRow::new(folder, folder_state.clone(), folder_at))
     })?;
     let mut ops = vec![Op::LocalMkdir {
         node: folder,
@@ -1914,7 +1919,7 @@ fn files_go_into_a_folder_whose_commit_failed() -> R {
         let c = h.content(name.as_bytes());
         let content = NodeContent::file(name, 0, 1, false);
         h.db.write(|s| {
-            s.put_mirror(&MirrorRow::from_content(
+            s.account().put_mirror(&MirrorRow::from_content(
                 at,
                 node,
                 folder,
@@ -1962,7 +1967,7 @@ fn recovery_in_the_run_leaves_a_sibling_edit_alone() -> R {
     let b0 = h.content(b"B0");
     let before = some_version();
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(b0.hash),
             ..BaseRow::new(b, NodeState::file(NodeId::ROOT, "b", b0), before)
         })
@@ -2089,7 +2094,7 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
         base_at: PlannedBase::Absent,
         held_ms: None,
     };
-    h.db.write(|s| s.put_placing(&record))?;
+    h.db.write(|s| s.folder().put_placing(&record))?;
     let row = LocalRow {
         path: RelPath::new("f")?,
         node,
@@ -2101,7 +2106,7 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
     };
     let folder = &h.folder;
     let applied =
-        h.db.write(|s| apply(s, &record, Judged::Settle(row), folder, 0))?;
+        h.db.write(|s| apply(s.folder(), &record, Judged::Settle(row), folder, 0))?;
     assert!(matches!(applied, Applied::Kept));
     assert_eq!(h.records()?, [record]);
     let path = RelPath::new("f")?;
@@ -2135,7 +2140,7 @@ fn a_record_in_an_unreadable_folder_stays() -> R {
         base_at: PlannedBase::Absent,
         held_ms: None,
     };
-    h.db.write(|s| s.put_placing(&record))?;
+    h.db.write(|s| s.folder().put_placing(&record))?;
     let p = h.folder.root.join("p");
     fs::set_permissions(&p, fs::Permissions::from_mode(0o000))?;
     let readable = fs::metadata(p.join("f")).is_ok();
@@ -2163,13 +2168,13 @@ fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
     let path = RelPath::new("f")?;
     h.db.write(|s| {
         let row = s.get_local(&path)?.expect("a row");
-        s.put_local(&LocalRow { hash: None, ..row })
+        s.folder().put_local(&LocalRow { hash: None, ..row })
     })?;
     recover_placements(&mut h.db, &h.folder)?;
     let held = h.records()?.remove(0);
     let since = held.held_ms.expect("held from the first finding") - 5_000;
     h.db.write(|s| {
-        s.put_placing(&Placing {
+        s.folder().put_placing(&Placing {
             held_ms: Some(since),
             ..held.clone()
         })
@@ -2179,7 +2184,7 @@ fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
     assert_eq!(h.records()?[0].held_ms, Some(since));
     let old = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
     h.db.write(|s| {
-        s.put_placing(&Placing {
+        s.folder().put_placing(&Placing {
             held_ms: Some(old),
             ..held
         })
@@ -2202,7 +2207,7 @@ fn a_record_whose_file_cant_be_hashed_yet_stays() -> R {
     let path = RelPath::new("f")?;
     h.db.write(|s| {
         let row = s.get_local(&path)?.expect("a row");
-        s.put_local(&LocalRow { hash: None, ..row })
+        s.folder().put_local(&LocalRow { hash: None, ..row })
     })?;
     recover_placements(&mut h.db, &h.folder)?;
     assert_eq!(h.records()?.len(), 1);
@@ -2211,7 +2216,7 @@ fn a_record_whose_file_cant_be_hashed_yet_stays() -> R {
     let hash = h.content(b"A").hash;
     h.db.write(|s| {
         let row = s.get_local(&path)?.expect("a row");
-        s.put_local(&LocalRow {
+        s.folder().put_local(&LocalRow {
             hash: Some(hash),
             ..row
         })
@@ -2248,7 +2253,7 @@ fn a_folder_taken_over_whose_tag_write_fails_claims_nothing() -> R {
     let mut content = NodeContent::folder("d");
     content.set_tags(&t);
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -2256,7 +2261,7 @@ fn a_folder_taken_over_whose_tag_write_fails_claims_nothing() -> R {
             &content,
             None,
         ))?;
-        s.put_base(&BaseRow::new(
+        s.folder().put_base(&BaseRow::new(
             node,
             NodeState::folder(NodeId::ROOT, "d"),
             at,
@@ -2303,7 +2308,7 @@ fn a_folder_taken_over_holds_its_tags_before_the_write() -> R {
     fs::create_dir(h.folder.root.join("d"))?;
     tags::write(&h.folder.root.join("d"), &t)?;
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -2311,7 +2316,7 @@ fn a_folder_taken_over_holds_its_tags_before_the_write() -> R {
             &content,
             None,
         ))?;
-        s.put_base(&BaseRow::new(
+        s.folder().put_base(&BaseRow::new(
             node,
             NodeState::folder(NodeId::ROOT, "d"),
             at,
@@ -2384,7 +2389,7 @@ fn a_failed_tag_write_removes_nothing(folder: bool, unread: bool) -> R {
     };
     let hash = (!folder).then(|| h.content(b"A").hash);
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -2394,7 +2399,8 @@ fn a_failed_tag_write_removes_nothing(folder: bool, unread: bool) -> R {
         ))?;
         // A folder synced before, deleted here: made again, with a record.
         if folder {
-            s.put_base(&BaseRow::new(node, state.clone(), at))?;
+            s.folder()
+                .put_base(&BaseRow::new(node, state.clone(), at))?;
         }
         Ok(())
     })?;
@@ -2495,11 +2501,11 @@ fn a_download_from_another_folder(
     let (a, b) = (h.content(b"A"), h.content(b"B"));
     let before = some_version();
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(a.hash),
             ..BaseRow::new(node, NodeState::file(p1, "f", a), before)
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             p2,
@@ -2577,7 +2583,7 @@ fn an_old_version_that_cant_come_back_stays_in_the_trash() -> R {
     assert_eq!(trash_entries(&h).len(), 1);
     assert_eq!(h.records()?, []);
     // The scan finds the old version gone.
-    h.db.write(|s| s.delete_local(node))?;
+    h.db.write(|s| s.folder().delete_local(node))?;
     let plan = plan_of(&mut h, &[node])?;
     h.run(plan.ops)?;
     assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
@@ -2604,7 +2610,7 @@ fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
         h.local_file(local, node, b"A")?;
         let (old, new) = (h.content(b"A"), h.content(b"B"));
         h.db.write(|s| {
-            s.put_base(&BaseRow {
+            s.folder().put_base(&BaseRow {
                 local_hash: Some(old.hash),
                 local_name: spelled.then(|| local.to_owned()),
                 ..BaseRow::new(
@@ -2613,7 +2619,7 @@ fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
                     some_version(),
                 )
             })?;
-            s.put_mirror(&MirrorRow::from_content(
+            s.account().put_mirror(&MirrorRow::from_content(
                 at,
                 node,
                 NodeId::ROOT,
@@ -2639,9 +2645,9 @@ fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
         assert!(h.run(vec![Op::Settle { node }, download]).is_err());
         // The drive deletes it: gone, or in Recently deleted.
         h.db.write(|s| {
-            let row = s.delete_mirror(at.file_id)?.expect("its row");
+            let row = s.account().delete_mirror(at.file_id)?.expect("its row");
             match removed {
-                true => s.put_removed(&RemovedRow {
+                true => s.account().put_removed(&RemovedRow {
                     row,
                     removed_at: Some(1),
                 }),
@@ -2686,16 +2692,16 @@ fn a_record_doesnt_bring_back_a_node_taken_along() -> R {
     let (old, new) = (h.content(b"A"), h.content(b"B"));
     let folder_at = some_version();
     h.db.write(|s| {
-        s.put_base(&BaseRow::new(
+        s.folder().put_base(&BaseRow::new(
             folder,
             NodeState::folder(NodeId::ROOT, "d"),
             folder_at,
         ))?;
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(old.hash),
             ..BaseRow::new(node, NodeState::file(folder, "f", old), some_version())
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             folder,
@@ -2721,7 +2727,7 @@ fn a_record_doesnt_bring_back_a_node_taken_along() -> R {
     assert!(h.run(vec![Op::Settle { node }, download]).is_err());
     // The folder goes to Recently deleted, after the file's version; the file is still live.
     h.db.write(|s| {
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&RemovedRow {
             row: MirrorRow::from_content(
                 folder_at,
                 folder,
@@ -2794,7 +2800,7 @@ fn recovery_checks_the_base_the_record_saw() -> R {
         ..BaseRow::new(node, file.clone(), since)
     };
     h.db.write(|s| {
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -2802,8 +2808,8 @@ fn recovery_checks_the_base_the_record_saw() -> R {
             &NodeContent::file("f", 0, 1, false),
             Some(h_content_hash(b"A")),
         ))?;
-        s.put_base(&base)?;
-        s.put_placing(&Placing {
+        s.folder().put_base(&base)?;
+        s.folder().put_placing(&Placing {
             base: BaseRow::new(node, file, at),
             target: RelPath::new("f").expect("a path"),
             placed_tags: None,
@@ -2811,7 +2817,7 @@ fn recovery_checks_the_base_the_record_saw() -> R {
             base_at: PlannedBase::At(planned.version),
             held_ms: None,
         })?;
-        s.clear_dirty(node)
+        s.folder().clear_dirty(node)
     })?;
     h.local_file("f", NodeId::new(), b"A")?;
     recover_placements(&mut h.db, &h.folder)?;
@@ -2839,7 +2845,7 @@ fn a_download_after_the_runs_own_tag_write(
     h.scanned_with("f", red)?;
     let old = h.content(b"A");
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(old.hash),
             ..BaseRow::new(
                 node,
@@ -2908,7 +2914,7 @@ fn a_restored_folder_made_here_keeps_a_removal_from_the_drive() -> R {
     tagged.set_tags(&work);
     let at = some_version();
     h.db.write(|s| {
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&RemovedRow {
             row: MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::Folder, &tagged, None),
             removed_at: Some(1),
         })
@@ -2923,8 +2929,8 @@ fn a_restored_folder_made_here_keeps_a_removal_from_the_drive() -> R {
     assert_eq!(report.done, 1, "{report:?}");
     // Restored elsewhere first, without work.
     h.db.write(|s| {
-        s.delete_removed(node)?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().delete_removed(node)?;
+        s.account().put_mirror(&MirrorRow::from_content(
             RemoteRef {
                 file_id: at.file_id,
                 version: some_version().version,
@@ -2976,7 +2982,7 @@ fn a_folder_made_back_whose_tag_write_fails(
     };
     let at = some_version();
     h.db.write(|s| {
-        s.put_base(&BaseRow::new(
+        s.folder().put_base(&BaseRow::new(
             node,
             NodeState {
                 tags: work.clone(),
@@ -2984,7 +2990,7 @@ fn a_folder_made_back_whose_tag_write_fails(
             },
             at,
         ))?;
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&RemovedRow {
             row: MirrorRow::from_content(
                 at,
                 node,
@@ -3009,8 +3015,8 @@ fn a_folder_made_back_whose_tag_write_fails(
     assert_eq!(row.tags, Some(Tags::default()));
     let base = h.base(node)?.expect("its base").state.tags;
     h.db.write(|s| {
-        s.delete_removed(node)?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().delete_removed(node)?;
+        s.account().put_mirror(&MirrorRow::from_content(
             RemoteRef {
                 file_id: at.file_id,
                 version: some_version().version,
@@ -3093,7 +3099,7 @@ fn a_commit_doesnt_bring_back_a_node_the_drive_deleted() -> R {
     };
     let (planned, since, acted) = (at(some_version()), at(some_version()), at(some_version()));
     h.db.write(|s| {
-        s.put_base(&BaseRow::new(
+        s.folder().put_base(&BaseRow::new(
             node,
             NodeState::folder(NodeId::ROOT, "b"),
             since,
@@ -3154,12 +3160,12 @@ fn recovery_of_a_deleted_folder_marks_what_is_in_it() -> R {
     };
     let content = h.content(b"A");
     h.db.write(|s| {
-        s.put_base(&BaseRow::new(
+        s.folder().put_base(&BaseRow::new(
             folder,
             NodeState::folder(NodeId::ROOT, "d"),
             some_version(),
         ))?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             child_at,
             child,
             folder,
@@ -3167,8 +3173,8 @@ fn recovery_of_a_deleted_folder_marks_what_is_in_it() -> R {
             &NodeContent::file("f", 0, 1, false),
             Some(content.hash),
         ))?;
-        s.put_placing(&record)?;
-        s.clear_dirty(child)
+        s.folder().put_placing(&record)?;
+        s.folder().clear_dirty(child)
     })?;
     recover_placements(&mut h.db, &h.folder)?;
     assert_eq!(h.records()?, []);
@@ -3200,11 +3206,11 @@ fn a_failed_tag_write_keeps_what_the_item_holds(unread: bool) -> R {
     let mut content = NodeContent::file("x", 0, 1, false);
     content.set_tags(&work);
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(a.hash),
             ..BaseRow::new(node, NodeState::file(NodeId::ROOT, "x", a), at)
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             NodeId::ROOT,
@@ -3328,7 +3334,7 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
         let (a, b) = (h.content(b"A"), h.content(b"B"));
         let before = some_version();
         h.db.write(|s| {
-            s.put_base(&BaseRow {
+            s.folder().put_base(&BaseRow {
                 local_hash: Some(a.hash),
                 ..BaseRow::new(
                     node,
@@ -3339,7 +3345,7 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
                     before,
                 )
             })?;
-            s.put_mirror(&MirrorRow::from_content(
+            s.account().put_mirror(&MirrorRow::from_content(
                 at,
                 node,
                 NodeId::ROOT,
@@ -3409,7 +3415,7 @@ fn a_restored_folder_made_here_settles_as_a_placement() -> R {
     tagged.set_tags(&work);
     let at = some_version();
     h.db.write(|s| {
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&RemovedRow {
             row: MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::Folder, &tagged, None),
             removed_at: Some(1),
         })
@@ -3447,7 +3453,7 @@ fn a_download_doesnt_wait_for_a_tag_the_drive_refused() -> R {
     let (a, b) = (h.content(b"A"), h.content(b"B"));
     let before = some_version();
     h.db.write(|s| {
-        s.put_base(&BaseRow {
+        s.folder().put_base(&BaseRow {
             local_hash: Some(a.hash),
             ..BaseRow::new(node, NodeState::file(NodeId::ROOT, "x", a), before)
         })
@@ -3489,7 +3495,7 @@ fn a_removed_folder_outside_this_part_takes_nothing_along() -> R {
     let (node, at) = (NodeId::new(), some_version());
     let hash = h.content(b"A").hash;
     h.db.write(|s| {
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&RemovedRow {
             row: MirrorRow::from_content(
                 some_version(),
                 role,
@@ -3500,7 +3506,7 @@ fn a_removed_folder_outside_this_part_takes_nothing_along() -> R {
             ),
             removed_at: Some(i64::MAX / 2),
         })?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             role,
@@ -3531,12 +3537,12 @@ fn a_live_folder_with_a_leftover_removal_takes_nothing_along() -> R {
     );
     let hash = h.content(b"A").hash;
     h.db.write(|s| {
-        s.put_removed(&RemovedRow {
+        s.account().put_removed(&RemovedRow {
             row: row.clone(),
             removed_at: Some(i64::MAX / 2),
         })?;
-        s.put_mirror(&row)?;
-        s.put_mirror(&MirrorRow::from_content(
+        s.account().put_mirror(&row)?;
+        s.account().put_mirror(&MirrorRow::from_content(
             at,
             node,
             folder,
@@ -3605,7 +3611,7 @@ fn a_download_takes_the_bytes_from_the_trash_unless_its_tags_fail() -> R {
         let content = h.content(b"data");
         let mtime_ms = 1_700_000_000_000;
         h.db.write(|s| {
-            s.put_mirror(&MirrorRow::from_content(
+            s.account().put_mirror(&MirrorRow::from_content(
                 at,
                 node,
                 NodeId::ROOT,

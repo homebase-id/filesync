@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use hbsync_platform::name::name_key;
 use hbsync_remote::{Answers, NodeMeta, Remote, RemoteError};
-use hbsync_state::{MirrorRow, RemovedRow, StateError, Store};
+use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{NodeId, Target};
 
 use crate::error::EngineError;
@@ -88,8 +88,9 @@ impl AccountOps<'_> {
             // write marks each dirty in the folders it comes back to.
             let (back, gone) = (std::mem::take(&mut r.back), std::mem::take(&mut r.gone));
             locked(self.account).write(|s| {
-                gone.iter().try_for_each(|f| mirror::forget(s, *f, None))?;
-                back.iter().try_for_each(|m| mirror::live(s, m))
+                gone.iter()
+                    .try_for_each(|f| mirror::forget(s.account(), *f, None))?;
+                back.iter().try_for_each(|m| mirror::live(s.account(), m))
             })?;
             restored += back.len();
         }
@@ -168,7 +169,10 @@ pub(super) struct RestorePlan {
     taken: HashMap<NodeId, HashSet<String>>,
 }
 
-pub(super) fn plan_restore(s: &Store<'_>, node: NodeId) -> Result<Option<RestorePlan>, StateError> {
+pub(super) fn plan_restore(
+    s: &ReadTx<'_>,
+    node: NodeId,
+) -> Result<Option<RestorePlan>, StateError> {
     let Some(top) = s.removed_by_node(node)? else {
         return Ok(None);
     };

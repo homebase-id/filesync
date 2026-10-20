@@ -2,13 +2,8 @@
 
 use super::*;
 
-impl Store<'_> {
+impl ReadTx<'_> {
     // ---- folders ----
-
-    /// The folder this store sees.
-    pub fn folder(&self) -> i64 {
-        self.folder
-    }
 
     /// How this store's folder sees the drive's rows (the mirror, Recently deleted): its top
     /// as the root, the rest of the drive as [`NodeId::OUTSIDE`]. The account (no folder) sees
@@ -64,22 +59,11 @@ impl Store<'_> {
         }))
     }
 
-    /// Registers a folder holding the drive's node `top`; its id.
-    pub fn add_folder(&self, top: NodeId, path: &str, marker: &str) -> Result<i64> {
-        self.folders.take();
-        self.places.borrow_mut().clear();
-        self.prep(
-            "INSERT INTO folders (top, path, marker, added_at) VALUES (?1, ?2, ?3, unixepoch())",
-        )?
-        .execute(params![top.0.as_bytes(), path, marker])?;
-        Ok(self.conn.last_insert_rowid())
-    }
-
     pub fn folders(&self) -> Result<Vec<FolderRow>> {
         Ok(self.folder_list()?.to_vec())
     }
 
-    /// [`Store::folders`], shared.
+    /// [`ReadTx::folders`], shared.
     pub(super) fn folder_list(&self) -> Result<std::rc::Rc<[FolderRow]>> {
         if let Some(known) = self.folders.borrow().as_ref() {
             return Ok(known.clone());
@@ -104,22 +88,6 @@ impl Store<'_> {
         })
         .collect::<Result<std::rc::Rc<[FolderRow]>>>()
         .inspect(|all| *self.folders.borrow_mut() = Some(all.clone()))
-    }
-
-    /// Records that folder `id` is at `path` now (it was moved).
-    pub fn set_folder_path(&self, id: i64, path: &str) -> Result<()> {
-        self.folders.take();
-        self.prep("UPDATE folders SET path = ?2 WHERE id = ?1")?
-            .execute(params![id, path])?;
-        Ok(())
-    }
-
-    /// Forgets folder `id` and every row it has (the account's stay).
-    pub fn remove_folder(&self, id: i64) -> Result<bool> {
-        self.folders.take();
-        self.places.borrow_mut().clear();
-        self.forget_local_ids();
-        self.change("DELETE FROM folders WHERE id = ?1", id)
     }
 
     // ---- node ids ----
@@ -158,6 +126,39 @@ impl Store<'_> {
         codec::node(&bytes)
     }
 
+    pub fn node_count(&self) -> Result<u64> {
+        self.count("SELECT COUNT(*) FROM nodes")
+    }
+}
+
+impl AccountTx<'_> {
+    /// Registers a folder holding the drive's node `top`; its id.
+    pub fn add_folder(&self, top: NodeId, path: &str, marker: &str) -> Result<i64> {
+        self.folders.take();
+        self.places.borrow_mut().clear();
+        self.prep(
+            "INSERT INTO folders (top, path, marker, added_at) VALUES (?1, ?2, ?3, unixepoch())",
+        )?
+        .execute(params![top.0.as_bytes(), path, marker])?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Records that folder `id` is at `path` now (it was moved).
+    pub fn set_folder_path(&self, id: i64, path: &str) -> Result<()> {
+        self.folders.take();
+        self.prep("UPDATE folders SET path = ?2 WHERE id = ?1")?
+            .execute(params![id, path])?;
+        Ok(())
+    }
+
+    /// Forgets folder `id` and every row it has (the account's stay).
+    pub fn remove_folder(&self, id: i64) -> Result<bool> {
+        self.folders.take();
+        self.places.borrow_mut().clear();
+        self.forget_local_ids();
+        self.change("DELETE FROM folders WHERE id = ?1", id)
+    }
+
     /// Forgets the ids of nodes nothing refers to any more (gone everywhere, nothing pending).
     /// Only ids that lost a reference since the last call are checked (triggers note them in
     /// `gone`). Ids are never handed out again, so an id held anywhere can't come to mean
@@ -180,9 +181,5 @@ impl Store<'_> {
             .execute([])?;
         self.prep("DELETE FROM gone")?.execute([])?;
         Ok(n)
-    }
-
-    pub fn node_count(&self) -> Result<u64> {
-        self.count("SELECT COUNT(*) FROM nodes")
     }
 }

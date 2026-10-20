@@ -26,7 +26,9 @@ use hbsync_fileio::FileIoError;
 use hbsync_platform::name::name_key;
 use hbsync_platform::{EntryKind, IoClass, Os, RelPath, classify, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, Placing, StateDb, StateError, Store};
+use hbsync_state::{
+    BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, StateDb, StateError, Store,
+};
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target};
@@ -536,7 +538,7 @@ impl<'a> Executor<'a> {
         let settled = self.db.write(|s| {
             nodes
                 .iter()
-                .map(|n| Ok((*n, settle(s, Settle::node(*n), os)?)))
+                .map(|n| Ok((*n, settle(s.folder(), Settle::node(*n), os)?)))
                 .collect::<Result<Vec<_>, StateError>>()
         })?;
         self.note(settled);
@@ -557,7 +559,7 @@ impl<'a> Executor<'a> {
             f(s)?;
             nodes
                 .iter()
-                .map(|how| Ok((how.node, settle(s, *how, os)?)))
+                .map(|how| Ok((how.node, settle(s.folder(), *how, os)?)))
                 .collect::<Result<Vec<_>, StateError>>()
         })?;
         self.note(settled);
@@ -595,7 +597,10 @@ impl<'a> Executor<'a> {
             }
         };
         let folder = self.folder;
-        match self.db.write(|s| apply(s, &record, judged, folder, now))? {
+        match self
+            .db
+            .write(|s| apply(s.folder(), &record, judged, folder, now))?
+        {
             Applied::Settled(at) => {
                 self.note([(node, at)]);
                 Ok(Outcome::Settled)
@@ -736,7 +741,7 @@ impl<'a> Executor<'a> {
             && !self.crashed
         {
             let node = op.node();
-            self.db.write(|s| s.delete_placing(node))?;
+            self.db.write(|s| s.folder().delete_placing(node))?;
         }
         if matches!(
             outcome,
@@ -775,7 +780,7 @@ impl<'a> Executor<'a> {
                     same_bytes: op.is_transfer(),
                     ..Settle::node(op.node())
                 });
-                let at = self.db.write(|s| settle(s, how, os))?;
+                let at = self.db.write(|s| settle(s.folder(), how, os))?;
                 self.note([(how.node, at)]);
             }
             Outcome::Settled => {
@@ -804,7 +809,7 @@ impl<'a> Executor<'a> {
                     // A write whose answer didn't come may have landed: not sent again blind
                     // (a large upload twice), but planned again from the feed, read first.
                     let node = op.node();
-                    self.db.write(|s| s.mark_dirty(node))?;
+                    self.db.write(|s| s.folder().mark_dirty(node))?;
                     self.report.drive_moved = true;
                     self.report.skipped.push((op, Skip::Waiting(why)));
                     return Ok(());
@@ -814,17 +819,17 @@ impl<'a> Executor<'a> {
             Outcome::Retry(why) => self.retry_or_fail(op, attempts, why),
             Outcome::Skip(why) => {
                 let node = op.node();
-                self.db.write(|s| s.mark_dirty(node))?;
+                self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.report.skipped.push((op, why));
             }
             Outcome::Stop(why) => {
                 let node = op.node();
-                self.db.write(|s| s.mark_dirty(node))?;
+                self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.report.stopped.get_or_insert(Stopped::Denied(why));
             }
             Outcome::Full => {
                 let node = op.node();
-                self.db.write(|s| s.mark_dirty(node))?;
+                self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.full = true;
                 self.report.full = true;
             }
@@ -983,9 +988,11 @@ impl<'a> Executor<'a> {
             for n in &unstarted {
                 self.records.remove(n);
             }
-            let gone = self
-                .db
-                .write(|s| unstarted.iter().try_for_each(|n| s.delete_placing(*n)));
+            let gone = self.db.write(|s| {
+                unstarted
+                    .iter()
+                    .try_for_each(|n| s.folder().delete_placing(*n))
+            });
             if first_error.is_none() {
                 gone?;
             }
@@ -1204,9 +1211,9 @@ impl<'a> Executor<'a> {
     /// happen on disk or on the drive, or a change that must not be lost.
     fn write_durable(
         &mut self,
-        f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
+        f: impl FnOnce(FolderTx<'_>) -> Result<(), StateError>,
     ) -> Result<(), StateError> {
-        self.db.write_durable(f)?;
+        self.db.write_durable(|s| f(s.folder()))?;
         self.ids_durable = true;
         Ok(())
     }
@@ -1251,7 +1258,7 @@ impl<'a> Executor<'a> {
         // reach the remote as a rename.
         self.write_durable(|s| s.put_parked(occupant.node, &occupant.path))?;
         if self.rename(&occupant.path, &parked)?.is_err() {
-            self.db.write(|s| s.delete_parked(occupant.node))?;
+            self.db.write(|s| s.folder().delete_parked(occupant.node))?;
             return Ok(false);
         }
         if self.crash_here(CrashPoint::AfterParkRename) {
@@ -1259,8 +1266,10 @@ impl<'a> Executor<'a> {
         }
         let refreshed = self.renamed(&occupant, &parked);
         self.db.write(|s| {
-            s.move_local_subtree(&occupant.path, &parked)?;
-            refreshed.as_ref().map_or(Ok(()), |r| s.put_local(r))
+            s.folder().move_local_subtree(&occupant.path, &parked)?;
+            refreshed
+                .as_ref()
+                .map_or(Ok(()), |r| s.folder().put_local(r))
         })?;
         Ok(true)
     }

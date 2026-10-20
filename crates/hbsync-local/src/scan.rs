@@ -245,7 +245,7 @@ const ENTRIES_PER_FOLDER: usize = 64;
 /// Whether `path` is the root or a folder with a row: `Some` with the folder's file id (`None`
 /// for the root), else `None`.
 fn known_folder(
-    s: &hbsync_state::Store<'_>,
+    s: &hbsync_state::ReadTx<'_>,
     path: &RelPath,
 ) -> Result<Option<Option<FileId>>, StateError> {
     if path.is_root() {
@@ -977,13 +977,13 @@ fn apply(db: &mut StateDb, mut plan: Plan, report: &mut ScanReport) -> Result<()
     plan.put_rows.sort_by(|a, b| a.path.cmp(&b.path));
     db.write(|s| {
         for (_, node) in &plan.delete {
-            s.delete_local(*node)?;
+            s.folder().delete_local(*node)?;
         }
         for row in &plan.put_rows {
-            s.put_local(row)?;
+            s.folder().put_local(row)?;
         }
         for node in &dirty {
-            s.mark_dirty(*node)?;
+            s.folder().mark_dirty(*node)?;
         }
         Ok(())
     })

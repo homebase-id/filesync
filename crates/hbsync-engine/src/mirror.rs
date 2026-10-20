@@ -2,13 +2,13 @@
 //! answers to its own writes, and from Recently deleted's operations. The one writer of the
 //! mirror (`remote`), Recently deleted (`removed`), the files deleted for good and their
 //! tombstones, mostly on the store's named operations, which keep a node live, in Recently
-//! deleted, or its file gone, never two of them ([`Store::put_live`],
-//! [`Store::move_to_removed`], [`Store::forget_file`]). The answers to this device's own
+//! deleted, or its file gone, never two of them ([`AccountTx::put_live`],
+//! [`AccountTx::move_to_removed`], [`AccountTx::forget_file`]). The answers to this device's own
 //! renames and removals are recorded as they always were ([`updated`], [`removed`]): a pull
 //! may have recorded a newer state of the node meanwhile, which they must not undo.
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
-use hbsync_state::{MirrorRow, RemovedRow, StateError, Store};
+use hbsync_state::{AccountTx, MirrorRow, RemovedRow, StateError};
 use hbsync_types::activity::removal_time;
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target};
 
@@ -16,7 +16,7 @@ use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, Remot
 
 /// Applies one header to the mirror. Returns `true` for a node in the tree, `false` for one
 /// that left it (deleted, or removed to Recently deleted).
-pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
+pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
     if header.is_deleted() {
         tombstone(s, header.at(), header.changed_at)?;
         return Ok(false);
@@ -50,7 +50,7 @@ pub fn apply(s: &Store<'_>, header: &RemoteHeader) -> Result<bool, StateError> {
 /// Recently deleted). No change of the node, so nothing to reconcile. Returns `true` for a node
 /// in the tree.
 pub(crate) fn apply_known(
-    s: &Store<'_>,
+    s: AccountTx<'_>,
     r: &ChangeRef,
     token: Option<&FileToken>,
 ) -> Result<bool, StateError> {
@@ -108,7 +108,7 @@ fn known_time(removed_at: i64) -> Option<i64> {
 /// A tombstone in the feed, written at `at` (the server's time): the file is deleted for good,
 /// and the tombstone itself goes hard once old enough ([`crate::deleted::AccountOps::purge`]).
 pub(crate) fn tombstone(
-    s: &Store<'_>,
+    s: AccountTx<'_>,
     tombstone: RemoteRef,
     at: Option<i64>,
 ) -> Result<(), StateError> {
@@ -117,17 +117,17 @@ pub(crate) fn tombstone(
 
 /// A file deleted for good with nothing left (a hard delete, announced): a tombstone this device
 /// holds at that version has nothing left to delete, and the file is forgotten ([`forget`]).
-pub(crate) fn hard_deleted(s: &Store<'_>, at: RemoteRef) -> Result<(), StateError> {
+pub(crate) fn hard_deleted(s: AccountTx<'_>, at: RemoteRef) -> Result<(), StateError> {
     s.delete_tombstone_at(at)?;
     forget(s, at.file_id, None)
 }
 
 /// File `file_id` deleted for good (a tombstone, its header not found, this device's delete):
-/// out of Recently deleted and the mirror, and never back in them ([`Store::forget_file`]);
+/// out of Recently deleted and the mirror, and never back in them ([`AccountTx::forget_file`]);
 /// gone since `at` (the server's: the tombstone a delete of this device left, by its answer;
 /// the tombstone itself, at its version, comes with the feed's row), if known.
 pub(crate) fn forget(
-    s: &Store<'_>,
+    s: AccountTx<'_>,
     file_id: RemoteFileId,
     at: Option<i64>,
 ) -> Result<(), StateError> {
@@ -137,8 +137,8 @@ pub(crate) fn forget(
 // ---- this device's own writes, from their answers ----
 
 /// A live version this device wrote (or put back), as the drive answered: out of Recently
-/// deleted, into the mirror ([`Store::put_live`]).
-pub(crate) fn live(s: &Store<'_>, row: &MirrorRow) -> Result<(), StateError> {
+/// deleted, into the mirror ([`AccountTx::put_live`]).
+pub(crate) fn live(s: AccountTx<'_>, row: &MirrorRow) -> Result<(), StateError> {
     s.put_live(row)
 }
 
@@ -146,7 +146,7 @@ pub(crate) fn live(s: &Store<'_>, row: &MirrorRow) -> Result<(), StateError> {
 /// mirror, into Recently deleted at the answer's time (open if it gave none, until the feed
 /// brings it).
 pub(crate) fn removed(
-    s: &Store<'_>,
+    s: AccountTx<'_>,
     file_id: RemoteFileId,
     row: Option<MirrorRow>,
 ) -> Result<(), StateError> {
@@ -163,7 +163,7 @@ pub(crate) fn removed(
 /// A rename, move or tag write this device made, as the drive answered: into the mirror. Unlike
 /// [`live`] it leaves Recently deleted as it is: a newer removal of the node, which another
 /// pull may have recorded since the write landed, must not go.
-pub(crate) fn updated(s: &Store<'_>, row: &MirrorRow) -> Result<(), StateError> {
+pub(crate) fn updated(s: AccountTx<'_>, row: &MirrorRow) -> Result<(), StateError> {
     s.put_mirror(row)
 }
 
@@ -191,17 +191,17 @@ pub(crate) fn meta(row: &MirrorRow, removed: bool) -> NodeMeta {
 // ---- Recently deleted's upkeep and the login ----
 
 /// A tombstone at `at` (its version) deleted hard by this device's purge: nothing left of it.
-pub(crate) fn tombstone_deleted(s: &Store<'_>, at: RemoteRef) -> Result<(), StateError> {
+pub(crate) fn tombstone_deleted(s: AccountTx<'_>, at: RemoteRef) -> Result<(), StateError> {
     s.delete_tombstone_at(at).map(drop)
 }
 
-/// Forgets the files known gone since before `before_ms` ([`Store::prune_gone`]); how many.
-pub(crate) fn prune(s: &Store<'_>, before_ms: i64, now_ms: i64) -> Result<usize, StateError> {
+/// Forgets the files known gone since before `before_ms` ([`AccountTx::prune_gone`]); how many.
+pub(crate) fn prune(s: AccountTx<'_>, before_ms: i64, now_ms: i64) -> Result<usize, StateError> {
     s.prune_gone(before_ms, now_ms)
 }
 
 /// Forgets the file tokens stored: another login seals them from now on.
-pub(crate) fn clear_tokens(s: &Store<'_>) -> Result<(), StateError> {
+pub(crate) fn clear_tokens(s: AccountTx<'_>) -> Result<(), StateError> {
     s.clear_tokens()
 }
 
@@ -263,11 +263,11 @@ mod tests {
             changed_at: None,
             token: None,
         };
-        assert!(db.write(|s| apply(s, &header))?);
+        assert!(db.write(|s| apply(s.account(), &header))?);
         if let RemoteBody::Live { payload, .. } = &mut header.body {
             *payload = None;
         }
-        assert!(db.write(|s| apply(s, &header))?);
+        assert!(db.write(|s| apply(s.account(), &header))?);
         assert_eq!(
             db.read(|s| s.mirror_count())?,
             1,
@@ -313,8 +313,8 @@ mod tests {
         };
         let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
             db.write(|s| {
-                s.clear_dirty(node)?;
-                apply(s, h)?;
+                s.folder().clear_dirty(node)?;
+                apply(s.account(), h)?;
                 s.dirty_count()
             })
         };
@@ -339,15 +339,15 @@ mod tests {
             removed_at,
             ..folder(1, 0, node, NodeId::ROOT)
         };
-        assert!(db.write(|s| apply(s, &live(None)))?);
-        assert!(!db.write(|s| apply(s, &live(Some(9))))?);
+        assert!(db.write(|s| apply(s.account(), &live(None)))?);
+        assert!(!db.write(|s| apply(s.account(), &live(Some(9))))?);
         db.read(|s| {
             assert_eq!(s.get_mirror(node)?, None);
             let at = s.removed_by_node(node)?.and_then(|r| r.removed_at);
             assert_eq!(at, Some(9));
             Ok(())
         })?;
-        assert!(db.write(|s| apply(s, &live(None)))?);
+        assert!(db.write(|s| apply(s.account(), &live(None)))?);
         db.read(|s| {
             assert!(s.get_mirror(node)?.is_some() && s.removed_by_node(node)?.is_none());
             Ok(())
@@ -367,17 +367,17 @@ mod tests {
             ..without.clone()
         };
         db.write(|s| {
-            apply(s, &without)?;
-            s.clear_dirty(node)
+            apply(s.account(), &without)?;
+            s.folder().clear_dirty(node)
         })?;
         let held =
             |db: &mut StateDb| db.read(|s| s.get_mirror(node).map(|m| m.and_then(|m| m.token)));
-        db.write(|s| apply(s, &with(0xAA)))?;
+        db.write(|s| apply(s.account(), &with(0xAA)))?;
         assert_eq!(held(&mut db)?, token(0xAA), "the token taken");
         assert!(!db.read(|s| s.is_dirty(node))?);
         // An earlier login's is replaced; none keeps the one there.
-        db.write(|s| apply(s, &with(0xEE)))?;
-        db.write(|s| apply(s, &without))?;
+        db.write(|s| apply(s.account(), &with(0xEE)))?;
+        db.write(|s| apply(s.account(), &without))?;
         assert_eq!(held(&mut db)?, token(0xEE));
 
         // In Recently deleted, the same; its time stays the one it has.
@@ -387,15 +387,15 @@ mod tests {
             ..without.clone()
         };
         db.write(|s| {
-            apply(s, &removed)?;
-            s.clear_dirty(node)
+            apply(s.account(), &removed)?;
+            s.folder().clear_dirty(node)
         })?;
         let again = RemoteHeader {
             removed_at: Some(9),
             token: token(0xAA),
             ..removed
         };
-        db.write(|s| apply(s, &again))?;
+        db.write(|s| apply(s.account(), &again))?;
         let back = db.read(|s| s.removed_by_node(node))?.expect("removed");
         assert_eq!((back.row.token, back.removed_at), (token(0xAA), Some(5)));
         assert!(!db.read(|s| s.is_dirty(node))?);
@@ -414,7 +414,7 @@ mod tests {
         db.write(|s| {
             [&top, &inner, &leaf]
                 .into_iter()
-                .try_for_each(|h| apply(s, h).map(drop))
+                .try_for_each(|h| apply(s.account(), h).map(drop))
         })?;
         let echo = RemoteHeader {
             changed_at: Some(7),
@@ -423,15 +423,15 @@ mod tests {
         let time = |db: &mut StateDb| {
             db.read(|s| s.get_mirror(node).map(|m| m.and_then(|m| m.changed_at)))
         };
-        db.write(|s| apply(s, &echo))?;
+        db.write(|s| apply(s.account(), &echo))?;
         assert_eq!(time(&mut db)?, None, "nothing it decides");
         let removed = RemoteHeader {
             version: VersionTag(Uuid::from_u128(4)),
             removed_at: Some(5),
             ..top
         };
-        db.write(|s| apply(s, &removed))?;
-        db.write(|s| apply(s, &echo))?;
+        db.write(|s| apply(s.account(), &removed))?;
+        db.write(|s| apply(s.account(), &echo))?;
         assert_eq!(
             time(&mut db)?,
             Some(7),

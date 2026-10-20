@@ -152,8 +152,8 @@ impl Executor<'_> {
         let node = meta.node;
         let row = written.map(|w| mirror::written(&meta, hash, w));
         self.finish(&[Settle::node(node)], |s| match after {
-            After::Created => row.map_or(Ok(()), |row| mirror::live(s, &row)),
-            After::Updated => row.map_or(Ok(()), |row| mirror::updated(s, &row)),
+            After::Created => row.map_or(Ok(()), |row| mirror::live(s.account(), &row)),
+            After::Updated => row.map_or(Ok(()), |row| mirror::updated(s.account(), &row)),
             After::Removed { file_id } => removed(s, node, file_id, row),
         })
     }
@@ -196,8 +196,8 @@ fn removed(
     file_id: hbsync_types::RemoteFileId,
     row: Option<MirrorRow>,
 ) -> Result<(), StateError> {
-    mirror::removed(s, file_id, row)?;
-    s.mark_dirty(node)
+    mirror::removed(s.account(), file_id, row)?;
+    s.folder().mark_dirty(node)
 }
 
 /// The job and the commit context of a metadata write; `from`: the folder the node leaves

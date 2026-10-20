@@ -36,7 +36,7 @@ impl Executor<'_> {
         // scan mistaking it for the user renaming the original.
         self.write_durable(|s| s.put_fork(node, new_node, &target))?;
         if let Err(e) = self.rename(&row.path, &target)? {
-            self.db.write(|s| s.delete_fork(node))?;
+            self.db.write(|s| s.folder().delete_fork(node))?;
             return Ok(io_outcome(e));
         }
         let moved = LocalRow {
@@ -50,7 +50,7 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
         self.finish(&[Settle::node(new_node), Settle::node(node)], |s| {
-            complete_fork(s, node, &moved)
+            complete_fork(s.folder(), node, &moved)
         })
     }
 
@@ -182,9 +182,9 @@ impl Executor<'_> {
             if fails {
                 return Err(StateError::Conflict("the commit failed (a test)".into()));
             }
-            s.put_local(&row)?;
+            s.folder().put_local(&row)?;
             match &record {
-                Some(r) => settle_placement(s, r, folder).map(Placed::at),
+                Some(r) => settle_placement(s.folder(), r, folder).map(Placed::at),
                 None => {
                     // Made from Recently deleted (its folder restored, its RemoteCreate to
                     // follow): it settles against the version there, what it was made of, as
@@ -212,16 +212,16 @@ impl Executor<'_> {
                         let tags = not_reached(&b.state.tags, held, last);
                         if tags != b.state.tags {
                             b.state.tags = tags;
-                            s.put_base(&b)?;
+                            s.folder().put_base(&b)?;
                         }
                     }
                     let removed = removed.filter(|_| !synced);
                     let at = settle(
-                        s,
+                        s.folder(),
                         Settle::placed(node, removed.as_ref(), TagWrite::Agreed),
                         os,
                     )?;
-                    mark_children(s, node)?;
+                    mark_children(s.folder(), node)?;
                     Ok(at)
                 }
             }
@@ -288,7 +288,9 @@ impl Executor<'_> {
             _ => TagWrite::Nothing,
         };
         // Tags put nothing in place: no base from the drive's place on content alone.
-        self.finish(&[Settle::acted(node, drive, wrote)], |s| s.put_local(&row))
+        self.finish(&[Settle::acted(node, drive, wrote)], |s| {
+            s.folder().put_local(&row)
+        })
     }
 
     pub(super) fn local_move(
@@ -308,7 +310,7 @@ impl Executor<'_> {
         if target == row.path {
             // Already there: nothing was put in place.
             return self.finish(&[Settle::acted(node, drive, TagWrite::Nothing)], |s| {
-                s.delete_parked(node)
+                s.folder().delete_parked(node)
             });
         }
         if target.starts_with(&row.path) {
@@ -325,9 +327,11 @@ impl Executor<'_> {
         let refreshed = self.renamed(&row, &target);
         // A move takes the item's tags along: it writes none.
         self.finish(&[Settle::placed(node, drive, TagWrite::Nothing)], |s| {
-            s.move_local_subtree(&row.path, &target)?;
-            s.delete_parked(node)?;
-            refreshed.as_ref().map_or(Ok(()), |r| s.put_local(r))
+            s.folder().move_local_subtree(&row.path, &target)?;
+            s.folder().delete_parked(node)?;
+            refreshed
+                .as_ref()
+                .map_or(Ok(()), |r| s.folder().put_local(r))
         })
     }
 
@@ -401,13 +405,13 @@ impl Executor<'_> {
                 .push(row.path.parent().unwrap_or_default());
         }
         self.finish(&[Settle::node(node)], |s| {
-            for r in s.delete_local_subtree(&row.path)? {
-                s.delete_parked(r.node)?;
+            for r in s.folder().delete_local_subtree(&row.path)? {
+                s.folder().delete_parked(r.node)?;
                 if r.node != node {
-                    s.mark_dirty(r.node)?;
+                    s.folder().mark_dirty(r.node)?;
                 }
                 if forget {
-                    s.delete_base(r.node)?;
+                    s.folder().delete_base(r.node)?;
                 }
             }
             Ok(())
@@ -472,7 +476,7 @@ impl Executor<'_> {
         if children.iter().any(|c| !self.forgetting.contains(&c.node)) {
             return Ok(Outcome::waiting("its children first"));
         }
-        self.finish(&[], |s| s.delete_base(node).map(drop))
+        self.finish(&[], |s| s.folder().delete_base(node).map(drop))
     }
 
     /// Moves a local item into `.hbsync/trash/<time>-<node>/`.

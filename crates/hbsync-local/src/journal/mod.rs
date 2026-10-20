@@ -58,7 +58,7 @@ pub fn catch_up<J: ChangeJournal + ?Sized>(
             Ok(delta) if !delta.rescan_all => {
                 let dirs = resolve_touched(db, root, &delta.touched)?;
                 let report = rescan_dirs(db, root, &dirs, opts)?;
-                db.write(|s| s.set_kv(keys::JOURNAL_CURSOR, &delta.cursor))?;
+                db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &delta.cursor))?;
                 return Ok(CatchUp {
                     tier: Tier::Journal { dirs: dirs.len() },
                     report,
@@ -72,8 +72,8 @@ pub fn catch_up<J: ChangeJournal + ?Sized>(
     let position = journal.now();
     let report = scan(db, root, opts)?;
     db.write(|s| match &position {
-        Ok(cursor) => s.set_kv(keys::JOURNAL_CURSOR, cursor),
-        Err(_) => s.delete_kv(keys::JOURNAL_CURSOR),
+        Ok(cursor) => s.folder().set_kv(keys::JOURNAL_CURSOR, cursor),
+        Err(_) => s.folder().delete_kv(keys::JOURNAL_CURSOR),
     })?;
     Ok(CatchUp {
         tier: Tier::FullWalk { reason },

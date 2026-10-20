@@ -4,7 +4,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::{BUSY_TIMEOUT, NO_FOLDER, Result, StateError, Store, migrations};
+use crate::{BUSY_TIMEOUT, NO_FOLDER, ReadTx, Result, StateError, migrations};
 
 /// A reader's page cache: 256 KiB (SQLite's negative `cache_size`).
 const READER_CACHE_KIB: i64 = -256;
@@ -56,7 +56,7 @@ impl Reader {
     }
 
     /// Runs `f` in a read transaction (a consistent snapshot), seeing no folder.
-    pub fn read<T>(&mut self, f: impl FnOnce(&Store<'_>) -> Result<T>) -> Result<T> {
+    pub fn read<T>(&mut self, f: impl FnOnce(&ReadTx<'_>) -> Result<T>) -> Result<T> {
         self.read_folder(NO_FOLDER, f)
     }
 
@@ -64,7 +64,7 @@ impl Reader {
     pub fn read_folder<T>(
         &mut self,
         folder: i64,
-        f: impl FnOnce(&Store<'_>) -> Result<T>,
+        f: impl FnOnce(&ReadTx<'_>) -> Result<T>,
     ) -> Result<T> {
         crate::read_in(&mut self.conn, folder, f)
     }
@@ -81,7 +81,8 @@ mod tests {
     fn a_reader_keeps_a_small_cache() -> Result<()> {
         let dir = tempfile::tempdir().map_err(|e| StateError::Conflict(e.to_string()))?;
         let path = dir.path().join("state.db");
-        StateDb::open_account(&path)?.write(|s| s.set_account_kv(keys::IDENTITY, "a.example"))?;
+        StateDb::open_account(&path)?
+            .write(|s| s.account().set_account_kv(keys::IDENTITY, "a.example"))?;
         let reader = Reader::open(&path)?.ok_or(StateError::Corrupt("no DB".into()))?;
         let size: i64 = reader
             .conn
@@ -107,21 +108,24 @@ mod tests {
         assert!(!path.exists(), "no DB is made");
 
         let mut db = StateDb::open_account(&path)?;
-        db.write(|s| s.set_account_kv(keys::IDENTITY, "a.example"))?;
+        db.write(|s| s.account().set_account_kv(keys::IDENTITY, "a.example"))?;
         let mut reader = Reader::open(&path)?.ok_or(StateError::Corrupt("no DB".into()))?;
         assert_eq!(
             reader.read(|s| s.account_kv(keys::IDENTITY))?.as_deref(),
             Some("a.example")
         );
         // A later commit of the writer is seen by the next read.
-        db.write(|s| s.set_account_kv(keys::IDENTITY, "b.example"))?;
+        db.write(|s| s.account().set_account_kv(keys::IDENTITY, "b.example"))?;
         assert_eq!(
             reader.read(|s| s.account_kv(keys::IDENTITY))?.as_deref(),
             Some("b.example")
         );
+        // A reader can't write: what it hands out is a `ReadTx`, which has no public write
+        // methods, and its connection is read-only.
         assert!(
             reader
-                .read(|s| s.set_account_kv(keys::IDENTITY, "c.example"))
+                .conn
+                .execute("INSERT INTO kv (key, value) VALUES ('x', 'y')", [])
                 .is_err(),
             "a reader can't write"
         );
