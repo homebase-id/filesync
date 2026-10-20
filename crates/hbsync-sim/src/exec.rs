@@ -272,6 +272,8 @@ impl Sim {
         client.plan = ops.into_iter().map(|op| (op, 0)).collect();
         client.removed_by_plan.clear();
         client.unremoved.clear();
+        // A plan made since sends what the user does from now on.
+        self.tags_unsent.retain(|(at, _, _)| *at != c);
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
         client.planned_refs = std::mem::take(&mut input.remote_refs).into_iter().collect();
@@ -477,11 +479,17 @@ impl Sim {
             {
                 for tag in tags.iter() {
                     let add = (c, node, tag.name.clone());
+                    let now = self.server.now();
                     if self.tags_added.contains(&add) {
                         // The last write carrying it: one after a removal sends it again, as
                         // this client's add (a node with no base here yet merges both sides').
-                        let now = self.server.now();
                         self.tags_sent.insert(add, now);
+                    } else if self.tags_unsent.remove(&add) {
+                        // Its item deleted here since, the plan sent it all the same: it stands
+                        // with the node.
+                        self.tags_added.insert(add.clone());
+                        self.tags_sent.insert(add.clone(), now);
+                        self.detach_add(add);
                     }
                 }
             }

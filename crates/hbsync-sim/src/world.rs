@@ -686,6 +686,7 @@ impl Sim {
                 self.detach_add(add);
             } else {
                 self.tags_added.remove(&add);
+                self.tags_unsent.insert(add);
             }
         }
     }
