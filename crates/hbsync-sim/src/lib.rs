@@ -227,15 +227,6 @@ struct Server {
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     ever: BTreeSet<NodeId>,
-    /// The first write that pointed a node at a folder the server never had.
-    dangling: Option<String>,
-    /// The last listing of Recently deleted ([`Action::ListDeleted`]): each node at its version.
-    listed: Option<BTreeSet<(NodeId, VersionTag)>>,
-    /// The first node emptying or the purge deleted for good that wasn't a removed row chosen
-    /// at that version (a live node, say), or a folder holding anything not going after it.
-    emptied_unlisted: Option<String>,
-    /// The first item emptied on its own that stayed though nothing kept it.
-    emptied_kept: Option<String>,
 }
 
 /// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed
@@ -518,18 +509,114 @@ impl Client {
     }
 }
 
+/// The oracle's bookkeeping: every blob written and the ones no longer owed, the last listing
+/// of Recently deleted, and the first breach of each rule the model saw happen (each kept
+/// once: the check behind it runs only while none is). The model feeds it through methods
+/// named for the fact they record; [`Sim::check`] reads it.
+#[derive(Debug, Default)]
+struct Ledger {
+    /// Content hash → its blob. Every edit or create writes a fresh blob.
+    blobs: HashMap<ContentHash, u64>,
+    /// Blobs ever written.
+    written: BTreeSet<u64>,
+    /// Blobs no longer owed ([`Ledger::blob_superseded`]).
+    superseded: BTreeSet<u64>,
+    /// The last listing of Recently deleted ([`Action::ListDeleted`]): each node at its version.
+    listed: Option<BTreeSet<(NodeId, VersionTag)>>,
+    /// The first write that pointed a node at a folder the server never had.
+    dangling: Option<String>,
+    /// The first plan that deleted more than the guard allows without a confirmation.
+    unguarded: Option<String>,
+    /// The first operation a client ran outside its folder's part of the drive.
+    scope_breach: Option<String>,
+    /// The first folder a plan removed after something in it (node schema, Recently deleted:
+    /// what a folder's delete takes along is removed no earlier than the folder).
+    removed_after_contents: Option<String>,
+    /// The first node emptying or the purge deleted for good that wasn't a removed row chosen
+    /// at that version (a live node, say), or a folder holding anything not going after it.
+    emptied_unlisted: Option<String>,
+    /// The first item emptied on its own that stayed though nothing kept it.
+    emptied_kept: Option<String>,
+}
+
+/// Keeps the first breach of a rule: `what` is asked only while none is kept.
+fn first(kept: &mut Option<String>, what: impl FnOnce() -> Option<String>) {
+    if kept.is_none() {
+        *kept = what();
+    }
+}
+
+impl Ledger {
+    /// Blob `blob`, with `hash`, was written.
+    fn blob_written(&mut self, blob: u64, hash: ContentHash) {
+        self.blobs.insert(hash, blob);
+        self.written.insert(blob);
+    }
+
+    /// The blob of `content`, if it is one, is no longer owed: a user replaced or deleted it
+    /// after holding it, another device wrote over it, it was junk disposed of, or it went
+    /// for good.
+    fn blob_superseded(&mut self, content: Option<FileContent>) {
+        if let Some(blob) = content.and_then(|c| self.blobs.get(&c.hash)) {
+            self.superseded.insert(*blob);
+        }
+    }
+
+    /// The blob each content hash holds, for traces.
+    fn blobs(&self) -> &HashMap<ContentHash, u64> {
+        &self.blobs
+    }
+
+    /// A user listed Recently deleted: `rows`, each node at its version.
+    fn deleted_listed(&mut self, rows: BTreeSet<(NodeId, VersionTag)>) {
+        self.listed = Some(rows);
+    }
+
+    /// The last listing of Recently deleted, if a user made one: what emptying it as listed
+    /// acts on (the model reads it here), and what the emptying is judged against.
+    fn listing(&self) -> Option<&BTreeSet<(NodeId, VersionTag)>> {
+        self.listed.as_ref()
+    }
+
+    /// A plan deleted more than the guard allows without a confirmation, if `what` names one.
+    fn unconfirmed_mass_delete(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.unguarded, what);
+    }
+
+    /// A write pointed a node at a folder the server never had, if `what` names one.
+    fn dangling_write(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.dangling, what);
+    }
+
+    /// An operation wrote outside its folder's part of the drive, if `what` names one.
+    fn wrote_outside_scope(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.scope_breach, what);
+    }
+
+    /// A plan removed a folder after something in it, if `what` names one.
+    fn folder_removed_after_contents(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.removed_after_contents, what);
+    }
+
+    /// Emptying or the purge deleted for good what it mustn't, if `what` names one.
+    fn emptied_unlisted(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.emptied_unlisted, what);
+    }
+
+    /// An item emptied on its own stayed though nothing kept it, if `what` names one.
+    fn emptied_kept(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.emptied_kept, what);
+    }
+}
+
 /// The simulation.
 #[derive(Debug)]
 pub struct Sim {
     server: Server,
     clients: Vec<Client>,
-    /// Content blob → its hash. Every edit or create writes a fresh blob.
+    /// The last blob written (blobs count up).
     next_blob: u64,
-    blobs: HashMap<ContentHash, u64>,
-    /// Blobs some client replaced or deleted after holding them locally.
-    superseded: BTreeSet<u64>,
-    /// Blobs ever written.
-    written: BTreeSet<u64>,
+    ledger: Ledger,
     pub ops_executed: usize,
     pub conflicts: usize,
     /// Items that stopped being tracked so far (each gets a new id).
@@ -549,8 +636,6 @@ pub struct Sim {
     /// The mass-delete guard, on with this minimum (the fraction 0), else off. With it on,
     /// [`Sim::quiesce`] confirms what is held, as a user eventually does.
     pub guard: Option<usize>,
-    /// The first plan that deleted more than the guard allows without a confirmation.
-    unguarded: Option<String>,
     /// Tags users added (on which client, to which node), and removed, per node; and nodes
     /// some user deleted. A tag added and never removed must be on its node in the end, unless
     /// the node was deleted. An item that gets a new id on its client takes its tags along.
@@ -572,11 +657,6 @@ pub struct Sim {
     /// elsewhere meanwhile may come back (sync semantics §8, §11: the known limit).
     tags_unproven: BTreeSet<(usize, NodeId, String)>,
     deleted: BTreeSet<NodeId>,
-    /// The first operation a client ran outside its folder's part of the drive.
-    scope_breach: Option<String>,
-    /// The first folder a plan removed after something in it (node schema, Recently deleted:
-    /// what a folder's delete takes along is removed no earlier than the folder).
-    removed_after_contents: Option<String>,
     /// Clients that are two folders of one computer (the main folder, a role folder).
     computers: Vec<(usize, usize)>,
     /// A download takes two steps: fetching, then putting in place and committing; anything
@@ -601,9 +681,7 @@ impl Sim {
                 })
                 .collect(),
             next_blob: 0,
-            blobs: HashMap::new(),
-            superseded: BTreeSet::new(),
-            written: BTreeSet::new(),
+            ledger: Ledger::default(),
             ops_executed: 0,
             conflicts: 0,
             released: 0,
@@ -614,7 +692,6 @@ impl Sim {
             verbose: false,
             trace: Vec::new(),
             guard: None,
-            unguarded: None,
             tags_added: BTreeSet::new(),
             tags_forked: BTreeSet::new(),
             tags_sent: BTreeSet::new(),
@@ -622,8 +699,6 @@ impl Sim {
             tags_unproven: BTreeSet::new(),
             tags_cleared: BTreeSet::new(),
             deleted: BTreeSet::new(),
-            scope_breach: None,
-            removed_after_contents: None,
             computers: Vec::new(),
             split_downloads: false,
             placed_from: None,
@@ -855,7 +930,7 @@ impl Sim {
             (1, Some(file)) => {
                 let content = self.new_blob();
                 let old = self.server.live.get(&file).and_then(|n| n.state.content);
-                self.supersede(old);
+                self.ledger.blob_superseded(old);
                 if let Some(n) = self.server.live.get_mut(&file) {
                     n.state.content = Some(content);
                     n.remote.version = version;
@@ -883,8 +958,7 @@ impl Sim {
         self.next_blob += 1;
         let blob = self.next_blob;
         let hash = hash_bytes(&blob.to_le_bytes(), HashAlgorithm::Blake3);
-        self.blobs.insert(hash, blob);
-        self.written.insert(blob);
+        self.ledger.blob_written(blob, hash);
         FileContent {
             hash,
             size: 8,
@@ -902,7 +976,7 @@ impl Sim {
                     if self.verbose {
                         self.trace.push(format!(
                             "act c{c} {action:?} -> {:?}",
-                            view_with(&self.clients[c].local, &self.blobs)
+                            view_with(&self.clients[c].local, self.ledger.blobs())
                         ));
                     }
                 }
@@ -1418,7 +1492,8 @@ impl Sim {
                 }
             }
             Action::ListDeleted => {
-                self.server.listed = Some(self.server.removed.iter().map(Server::at).collect());
+                let rows = self.server.removed.iter().map(Server::at).collect();
+                self.ledger.deleted_listed(rows);
             }
             Action::EmptyListed => self.empty_listed(),
             Action::EmptyItem { pick } => self.empty_item(pick),
@@ -1435,7 +1510,7 @@ impl Sim {
                 let content = self.new_blob();
                 let version = VersionTag(self.server.uuid());
                 let old = self.server.live.get(&file).and_then(|n| n.state.content);
-                self.supersede(old);
+                self.ledger.blob_superseded(old);
                 if let Some(n) = self.server.live.get_mut(&file) {
                     n.state.content = Some(content);
                     n.remote.version = version;
@@ -1490,7 +1565,7 @@ impl Sim {
                 }
                 let node = files[file % files.len()];
                 let mut state = local.get(node).cloned().unwrap_or_else(|| unreachable!());
-                self.supersede(state.content);
+                self.ledger.blob_superseded(state.content);
                 state.content = Some(self.new_blob());
                 self.clients[c].local.insert(node, state);
             }
@@ -1523,7 +1598,7 @@ impl Sim {
                         .get(&n)
                         .is_some_and(|s| s.state.content == content);
                     if !on_server {
-                        self.supersede(content);
+                        self.ledger.blob_superseded(content);
                     }
                 }
                 for n in self.clients[c].local.subtree(node) {
@@ -1670,14 +1745,14 @@ impl Sim {
 
     /// [`Action::EmptyListed`].
     fn empty_listed(&mut self) {
-        if let Some(listed) = self.server.listed.clone() {
+        if let Some(listed) = self.ledger.listing().cloned() {
             self.delete_for_good(&listed, &listed);
         }
     }
 
     /// [`Action::EmptyItem`].
     fn empty_item(&mut self, pick: usize) {
-        let Some(listed) = self.server.listed.clone() else {
+        let Some(listed) = self.ledger.listing().cloned() else {
             return;
         };
         let rows: Vec<(NodeId, VersionTag)> = listed.iter().copied().collect();
@@ -1720,9 +1795,9 @@ impl Sim {
                 .values()
                 .any(|n| inside.contains(&n.state.parent));
         self.delete_for_good(&chosen, &listed);
-        if !kept && self.server.removed.contains_key(&item) && self.server.emptied_kept.is_none() {
-            self.server.emptied_kept = Some(format!("{item:?}"));
-        }
+        let stayed = !kept && self.server.removed.contains_key(&item);
+        self.ledger
+            .emptied_kept(|| stayed.then(|| format!("{item:?}")));
     }
 
     /// Deletes for good the rows of Recently deleted still at a version in `chosen`, as the
@@ -1792,22 +1867,16 @@ impl Sim {
                     .chain(&self.server.removed)
                     .find(|(c, s)| s.state.parent == n && !pending.contains(*c))
                     .map(|(c, _)| *c);
-                if (!was_chosen || held.is_some()) && self.server.emptied_unlisted.is_none() {
-                    self.server.emptied_unlisted = Some(format!("{n:?} (holding {held:?})"));
-                }
+                let wrong = !was_chosen || held.is_some();
+                self.ledger
+                    .emptied_unlisted(|| wrong.then(|| format!("{n:?} (holding {held:?})")));
                 self.server.removed_at.remove(&n);
                 self.server.tags_at_removal.remove(&n);
                 if let Some(gone) = self.server.removed.remove(&n) {
                     self.deleted_now(n);
-                    self.supersede(gone.state.content);
+                    self.ledger.blob_superseded(gone.state.content);
                 }
             }
-        }
-    }
-
-    fn supersede(&mut self, content: Option<FileContent>) {
-        if let Some(blob) = content.and_then(|c| self.blobs.get(&c.hash)) {
-            self.superseded.insert(*blob);
         }
     }
 
@@ -1947,43 +2016,44 @@ impl Sim {
         });
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
-        if let Some(min) = self.guard
-            && self.unguarded.is_none()
-        {
-            let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
-            let files_under = |tree: &Tree, node: NodeId| {
-                tree.subtree(node)
-                    .into_iter()
-                    .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
-                    .count()
-            };
-            let (mut deleted, mut trashed) = (0, 0);
-            for op in plan.ops.iter().filter(|op| !confirmed.contains(&op.node())) {
-                match op {
-                    Op::RemoteDelete { node, .. }
-                        if remote.get(*node).is_some_and(|s| s.kind == NodeKind::File) =>
-                    {
-                        deleted += 1;
+        if let Some(min) = self.guard {
+            // Counted only until the first breach is kept.
+            self.ledger.unconfirmed_mass_delete(|| {
+                let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
+                let files_under = |tree: &Tree, node: NodeId| {
+                    tree.subtree(node)
+                        .into_iter()
+                        .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
+                        .count()
+                };
+                let (mut deleted, mut trashed) = (0, 0);
+                for op in plan.ops.iter().filter(|op| !confirmed.contains(&op.node())) {
+                    match op {
+                        Op::RemoteDelete { node, .. }
+                            if remote.get(*node).is_some_and(|s| s.kind == NodeKind::File) =>
+                        {
+                            deleted += 1;
+                        }
+                        _ => trashed += op.trashes().map_or(0, |n| files_under(&input.local, n)),
                     }
-                    _ => trashed += op.trashes().map_or(0, |n| files_under(&input.local, n)),
                 }
-            }
-            if trips(deleted) || trips(trashed) {
-                self.unguarded = Some(format!(
-                    "{} deletes {deleted} remote and trashes {trashed} local files unconfirmed \
-                     (limit {min}, {synced_files} synced): {:?}",
-                    client.name, plan.ops
-                ));
-            }
+                (trips(deleted) || trips(trashed)).then(|| {
+                    format!(
+                        "{} deletes {deleted} remote and trashes {trashed} local files \
+                         unconfirmed (limit {min}, {synced_files} synced): {:?}",
+                        client.name, plan.ops
+                    )
+                })
+            });
         }
         if self.verbose && !plan.ops.is_empty() {
             self.trace
                 .push(format!("plan {}: {:?}", client.name, plan.ops));
             self.trace.push(format!(
                 "  local:  {:?}\n  base:   {:?}\n  remote: {:?}",
-                view_with(&client.local, &self.blobs),
-                view_with(&client.base, &self.blobs),
-                view_with(&remote, &self.blobs)
+                view_with(&client.local, self.ledger.blobs()),
+                view_with(&client.base, self.ledger.blobs()),
+                view_with(&remote, self.ledger.blobs())
             ));
         }
         self.conflicts += plan.conflicts.len();
@@ -2101,16 +2171,17 @@ impl Sim {
         let outcome = self.execute(c, &op);
         let landed = outcome == Outcome::Landed;
         let outcome = if landed { Outcome::Done } else { outcome };
-        if outcome == Outcome::Done && breach && self.scope_breach.is_none() {
-            self.scope_breach = Some(format!("{} {op:?}", self.clients[c].name));
-        }
-        if outcome == Outcome::Done && self.server.dangling.is_none() {
-            let parent_unknown = self.server.live.get(&node).is_some_and(|n| {
-                !n.state.parent.is_root() && !self.server.ever.contains(&n.state.parent)
+        if outcome == Outcome::Done {
+            let name = &self.clients[c].name;
+            self.ledger
+                .wrote_outside_scope(|| breach.then(|| format!("{name} {op:?}")));
+            let server = &self.server;
+            self.ledger.dangling_write(|| {
+                let parent_unknown = server.live.get(&node).is_some_and(|n| {
+                    !n.state.parent.is_root() && !server.ever.contains(&n.state.parent)
+                });
+                parent_unknown.then(|| format!("c{c} {op:?}"))
             });
-            if parent_unknown {
-                self.server.dangling = Some(format!("c{c} {op:?}"));
-            }
         }
         if self.verbose && outcome != Outcome::Done {
             self.trace.push(format!("  {outcome:?} {op:?}"));
@@ -2751,12 +2822,9 @@ impl Sim {
                                 .get(r)
                                 .is_some_and(|n| n.state.parent == node)
                         });
-                        if let Some(r) = after
-                            && self.removed_after_contents.is_none()
-                        {
-                            self.removed_after_contents =
-                                Some(format!("{} removed {node} after {r} in it", client.name));
-                        }
+                        self.ledger.folder_removed_after_contents(|| {
+                            after.map(|r| format!("{} removed {node} after {r} in it", client.name))
+                        });
                         client.removed_by_plan.insert(node);
                     }
                     self.clients[c].planned_remote.remove(node);
@@ -2910,7 +2978,7 @@ impl Sim {
         for n in gone {
             if hidden.contains(&n) {
                 let content = self.clients[c].local.get(n).and_then(|s| s.content);
-                self.supersede(content); // junk, disposed of by design
+                self.ledger.blob_superseded(content); // junk, disposed of by design
             }
             let client = &mut self.clients[c];
             client.local.remove(n);
@@ -3204,10 +3272,11 @@ impl Sim {
     /// Checks convergence, invariants and no data loss. Returns a description of the first
     /// failure.
     pub fn check(&self) -> Result<(), String> {
-        if let Some(op) = &self.server.dangling {
+        let ledger = &self.ledger;
+        if let Some(op) = &ledger.dangling {
             return Err(format!("created under a folder the server never had: {op}"));
         }
-        if let Some(plan) = &self.unguarded {
+        if let Some(plan) = &ledger.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
         }
         // A record recovery keeps holds its node off placements until settled: never for good.
@@ -3234,7 +3303,7 @@ impl Sim {
                 if let Some(blob) = visible
                     .remove(*n)
                     .and_then(|s| s.content)
-                    .and_then(|c| self.blobs.get(&c.hash))
+                    .and_then(|c| ledger.blobs.get(&c.hash))
                 {
                     kept_here.insert(*blob);
                 }
@@ -3280,19 +3349,19 @@ impl Sim {
         if !broken.is_empty() {
             return Err(format!("server: {broken:?}"));
         }
-        if let Some(what) = &self.removed_after_contents {
+        if let Some(what) = &ledger.removed_after_contents {
             return Err(format!("a folder was removed after what is in it: {what}"));
         }
-        if let Some(what) = &self.server.emptied_unlisted {
+        if let Some(what) = &ledger.emptied_unlisted {
             return Err(format!("deleting for good took what it mustn't: {what}"));
         }
-        if let Some(what) = &self.server.emptied_kept {
+        if let Some(what) = &ledger.emptied_kept {
             return Err(format!(
                 "an item emptied stayed, though nothing kept it: {what}"
             ));
         }
         // No folder wrote outside its part of the drive.
-        if let Some(op) = &self.scope_breach {
+        if let Some(op) = &ledger.scope_breach {
             return Err(format!(
                 "a folder wrote outside its part of the drive: {op}"
             ));
@@ -3320,20 +3389,20 @@ impl Sim {
         }
         let mut present: BTreeSet<u64> = server
             .iter()
-            .filter_map(|(_, s)| s.content.and_then(|c| self.blobs.get(&c.hash).copied()))
+            .filter_map(|(_, s)| s.content.and_then(|c| ledger.blobs.get(&c.hash).copied()))
             .collect();
         // Recently deleted keeps what was deleted, until the purge.
         let taken = taken.iter().filter_map(|n| self.server.live.get(n));
         present.extend(self.server.removed.values().chain(taken).filter_map(|n| {
             n.state
                 .content
-                .and_then(|c| self.blobs.get(&c.hash).copied())
+                .and_then(|c| ledger.blobs.get(&c.hash).copied())
         }));
         // Filtered items are kept on their client only.
         present.extend(kept_here);
-        let lost: Vec<u64> = self
+        let lost: Vec<u64> = ledger
             .written
-            .difference(&self.superseded)
+            .difference(&ledger.superseded)
             .filter(|b| !present.contains(b))
             .copied()
             .collect();
