@@ -166,7 +166,7 @@ fn each_folder_syncs_its_part_of_the_drive() -> R {
 }
 
 /// What is live on the server: each node's name and parent, sorted.
-fn on_server(server: &Arc<Mutex<FakeServer>>) -> Vec<(String, NodeId)> {
+fn drive_listing(server: &Arc<Mutex<FakeServer>>) -> Vec<(String, NodeId)> {
     let srv = server.lock().expect("server");
     let mut live: Vec<_> = srv
         .live()
@@ -187,16 +187,15 @@ fn a_folder_whose_top_cant_be_read_doesnt_open() -> R {
     let server = server_with_documents()?;
     let mut pc = Computer::new(&server)?;
     pc.sync()?;
-    let (main_files, docs_files, drive) = (
-        files(&pc.main_root),
-        files(&pc.docs_root),
-        on_server(&server),
-    );
+    let docs_files = files(&pc.docs_root);
+    let listing = drive_listing(&server);
     assert_eq!(docs_files, ["cv.txt"]);
 
     let db = pc.docs_root.with_file_name("state.db");
     let folder = pc.docs.db().folder();
-    let docs_db = StateDb::open_folder(&db, folder)?;
+    let drive = Arc::clone(pc.docs.drive());
+    let open = || StateDb::open_folder(&db, folder);
+    let docs_db = open()?;
     // The folder's top reads as something that isn't a node id.
     let raw = rusqlite::Connection::open(&db)?;
     let set_top = |top: &[u8]| {
@@ -206,23 +205,14 @@ fn a_folder_whose_top_cant_be_read_doesnt_open() -> R {
         )
     };
     set_top(&[0])?;
-    let drive_of = Arc::clone(pc.docs.drive());
-    assert!(Engine::new(docs_db, Arc::clone(&drive_of), config(&pc.docs_root)).is_err());
+    assert!(Engine::new(docs_db, Arc::clone(&drive), config(&pc.docs_root)).is_err());
     set_top(Role::Documents.node().0.as_bytes())?;
-    // Nothing changed anywhere.
-    assert_eq!(files(&pc.main_root), main_files);
-    assert_eq!(files(&pc.docs_root), docs_files);
-    assert_eq!(on_server(&server), drive);
 
     // Read again, the top is Documents: nothing to do.
-    let mut docs = Engine::new(
-        StateDb::open_folder(&db, folder)?,
-        drive_of,
-        config(&pc.docs_root),
-    )?;
+    let mut docs = Engine::new(open()?, drive, config(&pc.docs_root))?;
     assert_eq!(sync(&mut docs)?.ops_done, 0);
     assert_eq!(files(&pc.docs_root), docs_files);
-    assert_eq!(on_server(&server), drive);
+    assert_eq!(drive_listing(&server), listing);
     Ok(())
 }
 

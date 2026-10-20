@@ -16,14 +16,13 @@ impl ReadTx<'_> {
         let c = if self.folder == crate::NO_FOLDER {
             Coords::MAIN
         } else {
-            let folders = self.folder_list()?;
-            let folder = folders
+            self.folder_list()?
                 .iter()
                 .find(|f| f.id == self.folder)
+                .map(|f| Coords { top: f.top })
                 .ok_or_else(|| {
                     StateError::Conflict(format!("no folder {} in this DB", self.folder))
-                })?;
-            Coords { top: folder.top }
+                })?
         };
         self.coords.set(Some(c));
         Ok(c)
