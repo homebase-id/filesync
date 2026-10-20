@@ -93,10 +93,12 @@ HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync --test live_daemon -- --igno
 Every `Remote` must pass `hbsync_remote::contract` (the fake in CI, Homebase live).
 
 The toolchain is pinned in `rust-toolchain.toml`. CI (`.github/workflows/ci.yml`) runs fmt,
-clippy and tests on Ubuntu, Windows and macOS, and cargo-deny (`deny.toml`: licences that
-fit the AGPL-3.0, duplicate crates, sources; known advisories, which block the daily run on
-main). Crates without SQLite can also be checked for the other OSes locally: `cargo clippy -p hbsync-platform --target x86_64-pc-windows-msvc`
-(set `CARGO_FEATURE_PURE=1` so blake3 doesn't need a cross assembler).
+clippy and tests on Ubuntu, Windows and macOS, and cargo-deny (`deny.toml`): licences that fit
+the AGPL-3.0, wildcards and sources block; duplicate crates are shown; known advisories block
+a change to `Cargo.lock` or `deny.toml` and a daily run on main (its failure mails whoever
+last changed the cron line). Crates without SQLite can also be checked for the other OSes
+locally: `cargo clippy -p hbsync-platform --target x86_64-pc-windows-msvc` (set
+`CARGO_FEATURE_PURE=1` so blake3 doesn't need a cross assembler).
 
 Releases (`RELEASING.md`, `.github/workflows/release.yml`, `docs/spec/packaging.md`): installers
 made with Conveyor (`packaging/conveyor.conf`) for Intel and ARM: an MSIX for Windows, a Mac app per architecture

@@ -2,10 +2,9 @@
 # AGPL-3.0, duplicate crates, and where crates come from.
 
 [graph]
-# What CI and the release (`.github/workflows/release.yml`) build for.
+# What CI (x86_64 gnu) and the release (`.github/workflows/release.yml`) build for.
 targets = [
   "x86_64-unknown-linux-gnu",
-  "aarch64-unknown-linux-gnu",
   "x86_64-unknown-linux-musl",
   "aarch64-unknown-linux-musl",
   "x86_64-pc-windows-msvc",
@@ -41,6 +40,7 @@ allow = [
 ignore = true
 
 [bans]
+# Duplicate versions are shown (cargo-deny's default), not refused: most come with other crates.
 wildcards = "deny"
 allow-wildcard-paths = true
 
