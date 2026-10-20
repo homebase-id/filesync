@@ -121,7 +121,7 @@ impl Harness {
                 file: Some(MirrorFile {
                     hash: c.hash,
                     size: c.size,
-                    mtime_ms: 0,
+                    mtime_ms: Some(0),
                     executable: false,
                 }),
                 content_extra: Default::default(),

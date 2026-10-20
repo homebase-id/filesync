@@ -207,3 +207,6 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     must never delete a live node for good instead.
 - **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.
 - **Every write sends `archivalStatus`:** the server replaces the whole header and takes a missing one for 0.
+- **Only the header fields of the node schema last:** a computer's next write of the node resets the rest
+  (an ACL that shares it, `appData.tags`, `userDate`, a preview, an `archivalStatus` other than 0 or 2).
+  Don't build on them.

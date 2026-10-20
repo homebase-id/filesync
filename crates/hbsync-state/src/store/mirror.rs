@@ -264,7 +264,7 @@ impl AccountTx<'_> {
             row.name,
             f.map(|f| codec::hash_to(&f.hash)),
             f.map(|f| f.size as i64),
-            f.map(|f| f.mtime_ms),
+            f.and_then(|f| f.mtime_ms),
             f.is_some_and(|f| f.executable),
             row.content_extra,
             row.token.as_ref().map(|t| &t.0[..]),

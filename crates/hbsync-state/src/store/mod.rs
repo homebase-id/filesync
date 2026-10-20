@@ -173,7 +173,9 @@ impl RemovedRow {
 pub struct MirrorFile {
     pub hash: hbsync_types::ContentHash,
     pub size: u64,
-    pub mtime_ms: i64,
+    /// `None` for a file another writer left without one (node schema: a reader keeps it, as a
+    /// file with no date): written back without one, never as 1970.
+    pub mtime_ms: Option<i64>,
     pub executable: bool,
 }
 
@@ -221,10 +223,10 @@ impl MirrorRow {
                 .map(|hash| MirrorFile {
                     hash,
                     size: content.size.unwrap_or(0),
-                    mtime_ms: content.mtime.unwrap_or(0),
+                    mtime_ms: content.mtime,
                     executable: content.x,
                 }),
-            content_extra: content.carried_json(),
+            content_extra: content.carried_json(kind),
             token: None,
             changed_at: None,
         }
@@ -233,7 +235,12 @@ impl MirrorRow {
     /// The node's content as this row has it, under `name`, with the keys sync carries along.
     pub fn content(&self, name: &str) -> NodeContent {
         let mut content = match &self.file {
-            Some(f) => NodeContent::file(name, f.mtime_ms, f.size, f.executable),
+            Some(f) => NodeContent {
+                mtime: f.mtime_ms,
+                size: Some(f.size),
+                x: f.executable,
+                ..NodeContent::folder(name)
+            },
             None => NodeContent::folder(name),
         };
         content.unknown = self.carried_keys();
@@ -284,7 +291,8 @@ impl MirrorRow {
             (NodeKind::File, Some(f)) => Some(FileContent {
                 hash: f.hash,
                 size: f.size,
-                mtime_ms: f.mtime_ms,
+                // No date reads as 0 (node schema).
+                mtime_ms: f.mtime_ms.unwrap_or(0),
                 executable: f.executable,
             }),
             (NodeKind::File, None) => return None,
@@ -584,7 +592,8 @@ fn mirror_row(r: &Row<'_>) -> Result<MirrorRow> {
         NodeKind::File => Some(MirrorFile {
             hash: codec::hash_from(&r.get::<_, Vec<u8>>(6)?)?,
             size: r.get::<_, Option<i64>>(7)?.unwrap_or(0) as u64,
-            mtime_ms: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
+            // An earlier version of this client stored a missing one as 0, which reads the same.
+            mtime_ms: r.get::<_, Option<i64>>(8)?.filter(|&ms| ms != 0),
             executable: r.get(9)?,
         }),
     };

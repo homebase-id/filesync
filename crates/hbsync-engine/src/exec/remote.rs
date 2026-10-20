@@ -51,7 +51,8 @@ impl Executor<'_> {
             Some(r) => {
                 content.unknown = r.row.carried_keys();
                 let base = self.db.read(|s| s.get_base(node))?;
-                content.set_tags(&self.merged_with_drive(base.as_ref(), tags, &r.row.tags()));
+                let drive = r.row.tags();
+                content.set_tags_over(&self.merged_with_drive(base.as_ref(), tags, &drive), &drive);
             }
             None => {
                 content.set_created_ms(ops::created_ms(&self.disk.abs(&row.path)));
@@ -89,7 +90,8 @@ impl Executor<'_> {
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
         let mut content = mirror.content(name);
         let base = self.db.read(|s| s.get_base(node))?;
-        content.set_tags(&self.merged_with_drive(base.as_ref(), tags, &mirror.tags()));
+        let drive = mirror.tags();
+        content.set_tags_over(&self.merged_with_drive(base.as_ref(), tags, &drive), &drive);
         // A node from before creation times, or from a client that sends none.
         if content.created_ms().is_none()
             && let Some(row) = self.db.read(|s| s.local_by_node(node))?

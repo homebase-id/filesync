@@ -770,7 +770,7 @@ mod mirror {
             Some(MirrorFile {
                 hash: c.hash,
                 size: c.size,
-                mtime_ms: c.mtime_ms,
+                mtime_ms: Some(c.mtime_ms),
                 executable: true,
             }),
         );
@@ -812,7 +812,7 @@ mod mirror {
             Some(MirrorFile {
                 hash: c.hash,
                 size: c.size,
-                mtime_ms: c.mtime_ms,
+                mtime_ms: Some(c.mtime_ms),
                 executable: false,
             }),
         );
@@ -1432,5 +1432,65 @@ fn local_paths_found_in_a_transaction_follow_its_writes() -> R {
         );
         Ok(())
     })?;
+    Ok(())
+}
+
+/// What another writer put in a node and this client doesn't act on is written back as read:
+/// a file without `mtime` stays without one (never 1970), a folder keeps its `mtime`, `size` and
+/// `x`, and tags keep their form while the set is the same.
+#[test]
+fn a_rewrite_keeps_what_another_writer_wrote() -> R {
+    use hbsync_state::MirrorRow;
+    use hbsync_types::schema::NodeContent;
+    let mut db = StateDb::open_in_memory()?;
+    // Another writer's entry with a key of its own (written back with its keys sorted).
+    let raw_tags = r#""tags":[{"by":"phone","c":6,"n":"Red"}]"#;
+    let file = NodeContent::from_json(&format!(r#"{{"v":1,"name":"f","size":1,{raw_tags}}}"#))
+        .expect("content");
+    let folder = NodeContent::from_json(r#"{"v":1,"name":"d","mtime":5,"size":0,"x":true}"#)
+        .expect("content");
+    let hash = content(b"f").hash;
+    let rows = [
+        MirrorRow::from_content(
+            remote(),
+            NodeId::new(),
+            NodeId::ROOT,
+            NodeKind::File,
+            &file,
+            Some(hash),
+        ),
+        MirrorRow::from_content(
+            remote(),
+            NodeId::new(),
+            NodeId::ROOT,
+            NodeKind::Folder,
+            &folder,
+            None,
+        ),
+    ];
+    db.write(|s| rows.iter().try_for_each(|r| s.account().put_live(r)))?;
+    let back = db.read(|s| {
+        rows.iter()
+            .map(|r| s.get_mirror(r.node).map(|m| m.expect("stored")))
+            .collect::<Result<Vec<_>, _>>()
+    })?;
+    // A rename writes the content again, with the tags it holds.
+    let renamed = |row: &MirrorRow| {
+        let mut c = row.content("new");
+        c.set_tags_over(&row.tags(), &row.tags());
+        c.to_json()
+    };
+    assert_eq!(
+        renamed(&back[0]),
+        format!(r#"{{"v":1,"name":"new","size":1,{raw_tags}}}"#)
+    );
+    assert_eq!(
+        back[0].state().and_then(|s| s.content).map(|c| c.mtime_ms),
+        Some(0)
+    );
+    assert_eq!(
+        renamed(&back[1]),
+        r#"{"v":1,"name":"new","mtime":5,"size":0,"x":true}"#
+    );
     Ok(())
 }
