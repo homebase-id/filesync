@@ -389,6 +389,30 @@ expected fingerprint is treated as done.
   again as after a crash. The engine's randomized crash test cuts the power too, keeping any commits
   since the last durable one.
 
+## 8b. Gone for good
+
+A file deleted for good is forgotten here (out of the mirror and Recently deleted) and its id
+kept 30 days, so no stale row brings it back; what this device holds of it is then deleted
+here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`):
+- **Proof on its own:** a tombstone (a 4002 answer, a header that says deleted, a tombstone in
+  the feed), and a hard delete the feed or the notifications announced.
+- **The identity's "not there"** (its own 404 for the file: a header read after a write, a
+  restore, a delete for good or a re-read found it not there) is a suspicion, kept in the state
+  DB (`gone_suspects`, so a restart keeps it) with the version this device knew and the time
+  (this device's clock). The file counts as gone only once the identity says so again, a minute
+  to an hour on, at that version; one later than that, or one by a clock set back, is a first
+  again. Meanwhile the operation is skipped (stale) and the file stays; a restore of it fails,
+  to try again, and emptying Recently deleted leaves it listed until emptied again a minute on
+  (or the next purge). A new row of the file (the feed, a write's answer) or a header that says
+  it is there clears the suspicion. One wrong 404 for a moment (a server's hiccup) then never
+  deletes a live file here, nor hides it for 30 days. Costs, per file deleted for good without
+  a trace that this device finds by a request: a header read more, a minute's delay, and the
+  syncs within that minute asking again (each the write, a header read and a feed read); and
+  one indexed delete per new feed row (none for a row the mirror has).
+- **Only from the identity:** a 404, a 410 or a "not there" or "tombstone" error code counts only
+  when the identity itself sent it (`X-Odin-Version` and a sealed or ProblemDetails body of its
+  status, homebase-api-notes): a proxy's or a captive portal's is a failed request, asked again.
+
 ## 9. Properties the simulator checks
 1. **Convergence:** after edits stop and every client syncs twice, all local trees and the
    remote are equal (names, structure, content hashes).
@@ -402,6 +426,9 @@ expected fingerprint is treated as done.
    like macOS, Linux and Windows); a tag some user added and no user removed is on its node in
    the end, unless the node was deleted, or the item it was added to went to the trash or got
    a new id on that device (then it went along).
+6. **Gone for good** (section 8b): with the drive saying now and then that a live file isn't
+   there, once of each, no client takes a file the drive holds as gone for good, nor deletes
+   it here; the clients converge without loss.
 
 ## 10. Filters
 

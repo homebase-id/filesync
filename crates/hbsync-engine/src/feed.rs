@@ -15,7 +15,7 @@ use hbsync_remote::{
 use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
 use hbsync_types::{RemoteFileId, RemoteRef};
 
-use crate::mirror::{self, apply};
+use crate::mirror::{self, Said, apply};
 use crate::time::{DAY_MS, REREAD_MS};
 
 #[derive(Debug, thiserror::Error)]
@@ -278,20 +278,29 @@ impl Reread {
 #[derive(Debug, Default)]
 struct Asked {
     gone: Vec<RemoteFileId>,
+    /// The identity said aren't there: gone only the second time ([`mirror::not_there`]), till
+    /// then asked again at the next pull.
+    not_there: Vec<RemoteFileId>,
     found: Vec<RemoteHeader>,
     answered: Vec<RemoteFileId>,
 }
 
 /// Asks the server about `files`, which the feed didn't show (it leaves out rows it has: one
-/// changed in its last second, homebase-api-notes): gone only if it says not found (for this
-/// app, the file isn't there); one it has is applied as it is ([`settle`]). One it can't
-/// tell about now (a broken connection) stops the asking: it and the rest are asked again
-/// later. What it found is written by [`settle`], in the same pull.
+/// changed in its last second, homebase-api-notes): gone if it says it is a tombstone, or not
+/// found (for this app, the file isn't there) a second time a minute on (sync semantics §8b;
+/// till then it is asked again at each pull); one it has is applied as it is ([`settle`]). One
+/// it can't tell about now (a broken connection) stops the asking: it and the rest are asked
+/// again later. What it found is written by [`settle`], in the same pull.
 fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
     let mut asked = Asked::default();
     for &file_id in files {
         match remote.header(file_id) {
-            Err(RemoteError::NotFound) => asked.gone.push(file_id),
+            Err(RemoteError::Deleted) => asked.gone.push(file_id),
+            // Not answered yet: judged in [`settle`].
+            Err(RemoteError::NotFound) => {
+                asked.not_there.push(file_id);
+                continue;
+            }
             Ok(header) => asked.found.push(header),
             Err(e) if e.class() == ErrorClass::Refused => {
                 tracing::warn!("{file_id:?} isn't in the feed and doesn't read: {e}");
@@ -314,28 +323,29 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
 fn settle<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     reread: &mut Option<Reread>,
-    asked: Asked,
+    mut asked: Asked,
 ) -> Result<usize, FeedError> {
-    let done = reread.as_ref().is_some_and(|r| {
-        let answered = asked
-            .answered
-            .iter()
-            .filter(|f| r.missing.contains(f))
-            .count();
-        answered == r.missing.len()
-    });
-    db().write(|s| {
+    let confirmed = db().write(|s| {
+        let mut confirmed = Vec::new();
+        for &file_id in &asked.not_there {
+            if mirror::heard(s.account(), file_id, Said::NotThere)? {
+                confirmed.push(file_id);
+            }
+        }
         for &file_id in &asked.gone {
             mirror::forget(s.account(), file_id, None)?;
         }
         for header in &asked.found {
             apply(s.account(), header)?;
         }
-        if done {
+        if answers_all(reread, asked.answered.iter().chain(&confirmed)) {
             s.account().end_reread()?;
         }
-        Ok(())
+        Ok(confirmed)
     })?;
+    asked.answered.extend(&confirmed);
+    asked.gone.extend(confirmed);
+    let done = answers_all(reread, asked.answered.iter());
     if let Some(r) = reread.as_mut() {
         for file_id in &asked.answered {
             r.missing.remove(file_id);
@@ -345,6 +355,17 @@ fn settle<G: DerefMut<Target = StateDb>>(
         *reread = None;
     }
     Ok(asked.gone.len())
+}
+
+/// Whether `answered` is every file the re-read has left.
+fn answers_all<'a>(
+    reread: &Option<Reread>,
+    answered: impl Iterator<Item = &'a RemoteFileId>,
+) -> bool {
+    reread.as_ref().is_some_and(|r| {
+        let answered: HashSet<&RemoteFileId> = answered.filter(|f| r.missing.contains(f)).collect();
+        answered.len() == r.missing.len()
+    })
 }
 
 /// A page of the feed as read: slim, or whole.

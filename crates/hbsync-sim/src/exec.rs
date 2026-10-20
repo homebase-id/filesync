@@ -64,7 +64,8 @@ impl Sim {
         }
         self.unpark(c);
         self.release_filtered(c);
-        let remote = self.server_view(c);
+        self.hear_not_theres(c);
+        let remote = self.drive_seen(c);
         let client = &self.clients[c];
         // A parked node is reported at its original place ([`at_place`]): the temporary name
         // is the executor's business and must never reach the remote.
@@ -105,7 +106,9 @@ impl Sim {
             .server
             .live
             .iter()
-            .filter(|(id, _)| !client.coords.hides(**id))
+            .filter(|(id, n)| {
+                !client.coords.hides(**id) && !client.gone.contains(&n.remote.file_id)
+            })
             .map(|(id, n)| (*id, n.remote))
             .collect();
         // The folders in Recently deleted that live nodes are in, and the removed ones above

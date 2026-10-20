@@ -11,6 +11,7 @@ mod error;
 pub mod exec;
 pub mod feed;
 mod folder;
+pub mod gone;
 mod id;
 pub mod mask;
 pub mod mirror;

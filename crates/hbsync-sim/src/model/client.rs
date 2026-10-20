@@ -80,6 +80,11 @@ pub(crate) struct Client {
     pub(crate) run_settled: HashMap<NodeId, VersionTag>,
     /// Files the last recovery found unhashed (their record kept): the plan defers them.
     pub(crate) unhashed: HashSet<NodeId>,
+    /// The identity's "not there" heard once, per file ([`crate::gone`]), the files taken as
+    /// gone for good (`gone_files`: never seen again), and the client's syncs, its clock.
+    pub(crate) suspects: BTreeMap<crate::gone::File, hbsync_state::GoneSuspect>,
+    pub(crate) gone: BTreeSet<hbsync_types::RemoteFileId>,
+    pub(crate) syncs: i64,
 }
 
 impl Client {
@@ -112,6 +117,9 @@ impl Client {
             planned_changed: HashMap::new(),
             run_settled: HashMap::new(),
             unhashed: HashSet::new(),
+            suspects: BTreeMap::new(),
+            gone: BTreeSet::new(),
+            syncs: 0,
         }
     }
 

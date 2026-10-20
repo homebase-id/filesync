@@ -210,6 +210,53 @@ fn randomized_two_client_convergence() -> R {
     Ok(())
 }
 
+/// The identity says now and then, for one sync of a client, that the files it asks about
+/// aren't there (its own 404 to writes and header reads, a hiccup; sync semantics §8b), once per
+/// client, while the users work and time goes on between syncs: a file the identity said gone
+/// once but is live is never forgotten nor deleted here, and the clients converge without loss.
+#[test]
+fn randomized_wrong_not_theres() -> R {
+    let seeds = seeds();
+    let mut heard = 0;
+    for seed in 0..seeds {
+        let server = server();
+        let mut clients = pair(&server)?;
+        let mut rng = Rng(seed);
+        let mut ledger = Ledger::default();
+        let mut lied = [false; 2];
+        for _ in 0..30 {
+            let i = rng.below(2);
+            match rng.below(4) {
+                0 | 1 => act(&clients[i].root, &mut rng, &mut ledger)?,
+                2 if !lied[i] => {
+                    lied[i] = true;
+                    set_not_there(&clients[i], true);
+                    let before = clients[i].remote.faults().headers;
+                    clients[i].sync()?;
+                    heard += clients[i].remote.faults().headers - before;
+                    set_not_there(&clients[i], false);
+                }
+                _ => {
+                    // A minute or more since the last sync.
+                    clients[i].a_minute_on()?;
+                    clients[i].sync()?;
+                }
+            }
+        }
+        let [mut a, mut b] = clients;
+        converged(seed, &mut a, &mut b, &ledger, &server)?;
+    }
+    assert!(heard > 0 || seeds < 4, "no wrong \"not there\" was heard");
+    Ok(())
+}
+
+/// The identity answers `client`'s writes and header reads not found (`on`), or not.
+fn set_not_there(client: &Client, on: bool) {
+    let mut faults = client.remote.faults();
+    faults.not_found_writes = on;
+    faults.not_found_headers = on;
+}
+
 /// Settles both clients, then checks that they and the server hold the same tree, that no
 /// content was lost that a user didn't replace or delete, and none is there twice.
 fn converged(

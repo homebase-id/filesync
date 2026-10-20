@@ -110,7 +110,8 @@ folders sync it at the resume), and the file id is never let back in (`gone_file
 still miss one: a crash between the notification and that commit (moments), a commit that keeps
 failing until the daemon stops (kept and retried meanwhile, 10,000 at most), and a hard delete
 made while the client wasn't connected. Each leaves the file's row stale until it is next
-written to (a file deleted for good answers not found, which forgets the row), or until the
+written to (a file deleted for good answers not found, which forgets the row once its header
+is not found twice, a minute apart: sync semantics §8b), or until the
 client reads the whole feed again after a long absence (node schema, Recently deleted).
 
 `POST /api/v2/drives/{d}/files/hard-delete-batch` (odin-core #1968) **[verified]**
@@ -258,7 +259,8 @@ of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in h
   CallerHasPermission` admits the owner to every file. A header read for that app is 404 only
   for a file that isn't there (deleted for good, or a TTL due; our nodes have none): an ACL
   denial throws (`GetServerFileHeaderInternal`, `AssertCallerHasPermission`), not a 404. So
-  a re-read takes a file it had as gone only on a 404 for its header.
+  a re-read takes a file it had as gone only on a 404 for its header, and that only once it is
+  answered again a minute on (sync semantics §8b).
 - **What is in some folders**, any app's files too: `queryParams` `{groupId: [folders...],
   fileState: ["active"]}`, minimal rows, paged while `hasMoreRows` (a page may be empty with
   more to come) (`HomebaseRemote::holding`); `groupId`, `fileState` and
@@ -354,8 +356,9 @@ read: `NotFound()`, or 410 for a payload whose bytes are missing, through `[ApiC
 client-error mapping, which odin-core leaves at its default; an exception through
 `ExceptionHandlingMiddleware`). A path with no endpoint answers 404 with the header and no body;
 a proxy's or load balancer's own 404 has no header. The client takes a 404 or 410 (and
-`fileNotFound`) as "not there" only with the header and one of the two; anything else is passing
-(`ApiError::read`). Live: frodo's header and payload reads of a missing file are both "not there"
+`fileNotFound`, and `cannotUpdateNonActiveFile` as "a tombstone") as "not there" only with the
+header and one of the two; anything else is passing (`ApiError::read`). Even then a file not
+there is gone for good only once it is not there again a minute on (sync semantics §8b). Live: frodo's header and payload reads of a missing file are both "not there"
 (`hbsync-dev` live test `a_missing_file_is_not_found`).
 
 | Code | Name |
