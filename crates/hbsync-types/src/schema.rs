@@ -13,7 +13,7 @@ pub const FILE_TYPE_FILE: i32 = 7102;
 /// The one payload key of a file node.
 pub const PAYLOAD_KEY: &str = "sync_data";
 /// The current schema version.
-pub const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 1;
 /// The content key of the creation time ([`NodeContent::created_ms`]).
 const CREATED: &str = "ct";
 /// The content key of the Finder tags ([`NodeContent::tags`]).

@@ -1623,9 +1623,9 @@ dependencies = [
 name = "hbsync-fileio"
 version = "0.7.1"
 dependencies = [
- "base64",
  "blake3",
  "hbsync-platform",
+ "hbsync-types",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
@@ -1678,7 +1678,6 @@ dependencies = [
 name = "hbsync-namemap"
 version = "0.7.1"
 dependencies = [
- "hbsync-fileio",
  "hbsync-platform",
  "proptest",
 ]
@@ -1755,10 +1754,11 @@ dependencies = [
 name = "hbsync-types"
 version = "0.7.1"
 dependencies = [
- "hbsync-fileio",
+ "base64",
  "hbsync-platform",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "uuid",
 ]
 

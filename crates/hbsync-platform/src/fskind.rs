@@ -42,7 +42,7 @@ impl FsFamily {
     }
 
     /// `true` if an OS change journal (USN / FSEvents) can be trusted on this file system.
-    pub fn supports_journal(self) -> bool {
+    pub(crate) fn supports_journal(self) -> bool {
         matches!(
             self,
             FsFamily::Ntfs | FsFamily::ReFs | FsFamily::Apfs | FsFamily::HfsPlus

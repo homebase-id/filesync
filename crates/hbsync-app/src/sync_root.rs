@@ -31,7 +31,7 @@ fn io(e: windows::core::Error) -> std::io::Error {
 /// `icon` (an ICO file). Ours that are stale go: this one's id at another folder or with another
 /// icon, or another of ours at this folder (an earlier identity). True when it registered, false
 /// when it already was.
-pub fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<bool> {
+pub(crate) fn register(folder: &Path, identity: &str, icon: &Path) -> std::io::Result<bool> {
     if !StorageProviderSyncRootManager::IsSupported().map_err(io)? {
         return Err(std::io::Error::other(
             "Windows doesn't support Cloud Files here",
@@ -86,7 +86,7 @@ fn root_info(
 
 /// Unregisters the sync root of `identity` at `folder`, found by its id: it goes even when the
 /// folder was moved or deleted.
-pub fn unregister(folder: &Path, identity: &str) -> std::io::Result<()> {
+pub(crate) fn unregister(folder: &Path, identity: &str) -> std::io::Result<()> {
     let prefix = prefix()?;
     let id = id(&prefix, folder, identity);
     if ours(&prefix)?.iter().any(|(other, ..)| *other == id) {

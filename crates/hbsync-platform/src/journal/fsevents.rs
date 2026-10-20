@@ -104,13 +104,13 @@ const LOST_DETAIL: u32 =
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug)]
-pub struct FsEventsJournal {
+pub(crate) struct FsEventsJournal {
     root: PathBuf,
     dev: libc::dev_t,
 }
 
 impl FsEventsJournal {
-    pub fn open(root: &Path) -> io::Result<Self> {
+    pub(crate) fn open(root: &Path) -> io::Result<Self> {
         let root = root.canonicalize()?;
         let dev = crate::stat(&root)?.file_id.volume as libc::dev_t;
         let journal = FsEventsJournal { root, dev };

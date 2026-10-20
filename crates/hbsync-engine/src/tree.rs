@@ -86,7 +86,7 @@ impl Tree {
     }
 
     /// The folders nodes are in that aren't in the tree themselves (the root aside).
-    pub fn missing_parents(&self) -> HashSet<NodeId> {
+    pub(crate) fn missing_parents(&self) -> HashSet<NodeId> {
         self.iter()
             .map(|(_, state)| state.parent)
             .filter(|p| !p.is_root() && !self.contains(*p))
@@ -214,7 +214,7 @@ impl Tree {
     }
 
     /// The nodes on the cycle reachable from `node` (empty if none).
-    pub fn cycle_members(&self, node: NodeId) -> Vec<NodeId> {
+    pub(crate) fn cycle_members(&self, node: NodeId) -> Vec<NodeId> {
         let mut order = Vec::new();
         let mut current = node;
         loop {
@@ -270,7 +270,7 @@ pub fn restored_names(name: &str) -> impl Iterator<Item = String> + '_ {
 
 /// `"report (restored).pdf"`, then `"report (restored 2).pdf"`: a restored item whose name
 /// was taken meanwhile.
-pub fn restored_name(name: &str, n: usize) -> String {
+pub(crate) fn restored_name(name: &str, n: usize) -> String {
     match n {
         0 | 1 => with_tag(name, " (restored)"),
         n => with_tag(name, &format!(" (restored {n})")),

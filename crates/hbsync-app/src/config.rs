@@ -146,7 +146,7 @@ impl Config {
     }
 
     /// Writes the config to `path` in one step: a crash leaves the old file or the new one.
-    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+    pub(crate) fn save(&self, path: &Path) -> Result<(), ConfigError> {
         let text = toml::to_string_pretty(self)?;
         hbsync_fileio::write_atomic(path, text.as_bytes())
             .map_err(|e| ConfigError::Io(path.to_owned(), e))
@@ -215,7 +215,7 @@ impl Config {
         (self.paused && self.paused_until.is_none_or(|t| t > now)).then_some(self.paused_until)
     }
 
-    pub fn set_pause(&mut self, pause: Option<Until>) {
+    pub(crate) fn set_pause(&mut self, pause: Option<Until>) {
         self.paused = pause.is_some();
         self.paused_until = pause.flatten();
     }

@@ -35,7 +35,7 @@ impl std::fmt::Debug for Part<'_> {
 }
 
 impl<'a> Part<'a> {
-    pub fn bytes(name: &'static str, content_type: &'static str, bytes: Vec<u8>) -> Self {
+    pub(crate) fn bytes(name: &'static str, content_type: &'static str, bytes: Vec<u8>) -> Self {
         Part {
             name,
             filename: None,
@@ -45,7 +45,7 @@ impl<'a> Part<'a> {
     }
 
     /// A part streamed from `reader`, which must yield `size` bytes.
-    pub fn reader(
+    pub(crate) fn reader(
         name: &'static str,
         filename: &'static str,
         content_type: &'static str,
@@ -62,7 +62,7 @@ impl<'a> Part<'a> {
 
     /// A part made by `make` when the body reaches it, after the parts before it were read
     /// (a hash of what they sent). It must make `size` bytes: the length is sent first.
-    pub fn later(
+    pub(crate) fn later(
         name: &'static str,
         filename: &'static str,
         content_type: &'static str,
@@ -113,12 +113,12 @@ impl<'a> Multipart<'a> {
         Multipart { boundary, parts }
     }
 
-    pub fn content_type(&self) -> String {
+    pub(crate) fn content_type(&self) -> String {
         format!("multipart/form-data; boundary={}", self.boundary)
     }
 
     /// The exact length of the body.
-    pub fn content_length(&self) -> u64 {
+    pub(crate) fn content_length(&self) -> u64 {
         let parts: u64 = self
             .parts
             .iter()
@@ -133,7 +133,7 @@ impl<'a> Multipart<'a> {
 
     /// The body as one reader. A streamed part that ends early is an error ([`SourceEnded`]);
     /// one that has more is cut at its size.
-    pub fn into_reader(self) -> impl Read + 'a {
+    pub(crate) fn into_reader(self) -> impl Read + 'a {
         let tail = Cursor::new(self.tail());
         let mut body: Box<dyn Read + 'a> = Box::new(io::empty());
         for part in self.parts {
@@ -185,7 +185,7 @@ impl Read for Later<'_> {
 
 /// A streamed part's source ended before its announced size: it changed since then.
 #[derive(Debug)]
-pub struct SourceEnded {
+pub(crate) struct SourceEnded {
     pub missing: u64,
 }
 

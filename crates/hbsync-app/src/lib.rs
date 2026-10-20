@@ -3,20 +3,20 @@
 //! the one-daemon lock, and starting the daemon at logon.
 
 pub mod autostart;
-pub mod config;
+mod config;
 pub mod control;
 pub mod daemon;
 pub mod folders;
 pub mod install;
-pub mod ipc;
+mod ipc;
 pub mod local_http;
 pub mod lock;
 pub mod logging;
-pub mod login;
+mod login;
 pub mod paths;
 pub mod protocol;
 pub mod runner;
-pub mod secrets;
+mod secrets;
 pub mod setup;
 pub mod shell;
 #[cfg(windows)]

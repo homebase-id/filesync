@@ -16,7 +16,7 @@ use hbsync_types::NodeId;
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Result<T> = std::result::Result<T, Error>;
 
-pub fn ask(paths: &Paths, what: Ask) -> std::result::Result<Reply, IpcError> {
+pub(crate) fn ask(paths: &Paths, what: Ask) -> std::result::Result<Reply, IpcError> {
     ipc::call(paths, &Request::new(what))
 }
 
@@ -115,7 +115,7 @@ fn unexpected<T>(answer: std::result::Result<Reply, IpcError>) -> Result<Option<
 }
 
 /// Sends `c`; the daemon's refusal is an error.
-pub fn control(paths: &Paths, c: Control) -> Result<()> {
+pub(crate) fn control(paths: &Paths, c: Control) -> Result<()> {
     done(ask(paths, Ask::Control(c)))
 }
 
@@ -277,7 +277,7 @@ pub fn add_folder(
 }
 
 /// Has the daemon stop syncing the folder at `path`; its files and state stay.
-pub fn remove_folder(paths: &Paths, path: &std::path::Path) -> Result<()> {
+pub(crate) fn remove_folder(paths: &Paths, path: &std::path::Path) -> Result<()> {
     done(ask(
         paths,
         Ask::RemoveFolder {
@@ -405,7 +405,7 @@ pub fn stop(paths: &Paths) -> Result<bool> {
 }
 
 /// Turns starting at logon off, unless this is a private instance. True when it was on.
-pub fn autostart_off_unless_dev() -> Result<bool> {
+pub(crate) fn autostart_off_unless_dev() -> Result<bool> {
     if !dev_home() && autostart::installed()? {
         autostart::uninstall()?;
         return Ok(true);

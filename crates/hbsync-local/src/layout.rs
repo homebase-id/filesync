@@ -10,7 +10,7 @@ pub fn state_dir(root: &Path) -> PathBuf {
 }
 
 /// The folder's marker ([`crate::Marker`]).
-pub fn marker_file(root: &Path) -> PathBuf {
+pub(crate) fn marker_file(root: &Path) -> PathBuf {
     state_dir(root).join("folder")
 }
 

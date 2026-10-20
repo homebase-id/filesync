@@ -168,7 +168,7 @@ pub fn refuse_folder(folder: &Path, home: Option<&Path>) -> Option<String> {
 
 /// Why `folder` must not be set up for syncing, if another app syncs it (OneDrive, iCloud): two
 /// apps syncing one folder fight over every change. A folder synced already stays so.
-pub fn other_app(folder: &Path) -> Option<String> {
+pub(crate) fn other_app(folder: &Path) -> Option<String> {
     hbsync_platform::user_dirs::owner(folder).map(|owner| {
         format!(
             "{} syncs {} already: two apps syncing one folder fight over every change",

@@ -27,7 +27,7 @@ use crate::scope::Scope;
 
 /// The local state of one node, as the reconciler sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalNode {
+pub(crate) struct LocalNode {
     pub row: LocalRow,
     /// `None` if the parent path isn't known in the DB (the scan hasn't caught up).
     pub state: Option<NodeState>,
@@ -35,7 +35,7 @@ pub struct LocalNode {
 
 /// Reads one node's local state. `remote_tags`: the drive's tags of the node, if it is there
 /// (what this device can't hold of them stands).
-pub fn local_node(
+pub(crate) fn local_node(
     s: &Store<'_>,
     node: NodeId,
     os: Os,
@@ -91,7 +91,7 @@ fn local_state(
 
 /// The synced content of a local file: `None` for folders and files not hashed yet. Where the
 /// OS has no x bit, the base's value is kept.
-pub fn local_content(row: &LocalRow, base: Option<&BaseRow>) -> Option<FileContent> {
+pub(crate) fn local_content(row: &LocalRow, base: Option<&BaseRow>) -> Option<FileContent> {
     if row.kind != NodeKind::File {
         return None;
     }
@@ -110,7 +110,7 @@ pub fn local_content(row: &LocalRow, base: Option<&BaseRow>) -> Option<FileConte
 /// was parked. `None` if it isn't parked: no record, or it no longer carries its temporary
 /// name (the user renamed it, and the record is void). Parking never leaves the folder, so the
 /// place follows the folder (or the item) wherever it is moved meanwhile.
-pub fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
+pub(crate) fn parked_place(s: &Store<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
     let Some(name) = s.get_parked(row.node)? else {
         return Ok(None);
     };
@@ -135,7 +135,7 @@ pub fn build_input(
 /// [`build_input`] with only the children the rules may need, except in the folders in `full`
 /// ([`Input::listed`]): planning a change in a large folder reads a few rows, not the folder.
 /// A plan that needs more says so ([`crate::plan::Plan::unlisted`]).
-pub fn build_narrow(
+pub(crate) fn build_narrow(
     s: &Store<'_>,
     dirty: &[NodeId],
     os: Os,

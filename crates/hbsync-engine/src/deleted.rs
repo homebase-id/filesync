@@ -88,7 +88,7 @@ pub fn listed_now(s: &Store<'_>) -> Result<Listed, StateError> {
 
 /// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, each
 /// with how many items are in it: only those rows are read, and walked up and down from.
-pub fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, StateError> {
+pub(crate) fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::lazy(s)?;
     let mut found = Vec::new();
     for &node in nodes {
@@ -102,7 +102,7 @@ pub fn find(s: &Store<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, St
 /// The items of Recently deleted named `names` (deletes, or items a delete took along), each
 /// with how many items are in it: to pick by their places, which end in those names. Only
 /// those rows are read whole, and walked up from.
-pub fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
+pub(crate) fn named(s: &Store<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
     let names: HashSet<&str> = names.iter().map(String::as_str).collect();
     let names: Vec<&str> = names.into_iter().collect();
     find(s, &s.removed_named(&names)?)
@@ -959,7 +959,7 @@ pub struct Holdings {
 /// (one its delete took along, or one written since) or a removed node not chosen stays, and
 /// so do the folders it is in. Files first, then each folder after the folders in it (a cycle
 /// of them in some order), by the links among the chosen alone, however deep.
-pub fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
+pub(crate) fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
     passes(chosen, holdings).into_iter().flatten().collect()
 }
 

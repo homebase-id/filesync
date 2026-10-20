@@ -198,7 +198,7 @@ impl Account {
     }
 
     /// Passes `command` to every runner. False while it isn't running yet.
-    pub fn send_all(&self, command: &Command) -> bool {
+    pub(crate) fn send_all(&self, command: &Command) -> bool {
         match &*lock(&self.phase) {
             Phase::Running(runners) => {
                 for (_, h) in runners {

@@ -115,7 +115,7 @@ pub fn remove_synced(paths: &Paths, path: &Path) -> Result<Taken, Error> {
 
 /// Takes the folder at `path` off the config; its files and its state stay (setting it up again
 /// picks up where it was). The folder it was; `None` if it wasn't listed.
-pub fn remove(paths: &Paths, path: &Path) -> Result<Option<Root>, Error> {
+pub(crate) fn remove(paths: &Paths, path: &Path) -> Result<Option<Root>, Error> {
     Ok(Config::update(&paths.config_file(), |config| {
         let at = config.roots.iter().position(|r| r.folder == path)?;
         Some(config.roots.remove(at))

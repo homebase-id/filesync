@@ -11,10 +11,10 @@ use hbsync_types::{NodeId, NodeKind};
 use crate::reconcile::Op;
 
 /// More than this many changes of one kind in one folder, in one run, become one entry.
-pub const GROUP_OVER: usize = 10;
+pub(crate) const GROUP_OVER: usize = 10;
 
 /// Entries kept in the state DB.
-pub const KEEP: usize = 500;
+pub(crate) const KEEP: usize = 500;
 
 /// How far a sync is, counted as it goes ([`Progress`] when read). Shared with whoever shows
 /// it; started over at each sync.
@@ -68,7 +68,7 @@ pub(crate) fn kind_of(op: &Op) -> Option<SyncedKind> {
 
 /// Where `node` is, for people: its local path, or else the path it had when last synced (a
 /// node deleted here). `None` for a node this device never had.
-pub fn path_of(s: &Store<'_>, node: NodeId) -> Result<Option<String>, StateError> {
+pub(crate) fn path_of(s: &Store<'_>, node: NodeId) -> Result<Option<String>, StateError> {
     if let Some(row) = s.local_by_node(node)? {
         return Ok(Some(row.path.as_str().to_owned()));
     }
@@ -91,7 +91,7 @@ fn folder_of(path: &str) -> &str {
 
 /// Takes the changes of one kind in one folder together when there are more than `over`:
 /// one entry for the folder, at the place of the first, with their count and sizes added up.
-pub fn group(entries: Vec<Synced>, over: usize) -> Vec<Synced> {
+pub(crate) fn group(entries: Vec<Synced>, over: usize) -> Vec<Synced> {
     let key = |e: &Synced| (e.kind, folder_of(&e.path).to_owned());
     let mut counts: HashMap<(SyncedKind, String), usize> = HashMap::new();
     for e in &entries {

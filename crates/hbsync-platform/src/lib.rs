@@ -3,7 +3,8 @@
 //! Pure rules (name legality, comparison keys, long paths) take the target [`Os`] as a
 //! parameter so they are tested on every OS; code that calls into the OS is `cfg`-gated.
 
-pub mod errors;
+mod errors;
+pub mod fnv;
 pub mod fskind;
 pub mod host;
 pub mod journal;
@@ -11,7 +12,7 @@ pub mod listdir;
 pub mod meta;
 pub mod name;
 pub mod ops;
-pub mod relpath;
+mod relpath;
 pub mod tags;
 pub mod user_dirs;
 pub mod winpath;

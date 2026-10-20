@@ -3,13 +3,13 @@
 //! All sources (the tier-C walk now; journals, watchers and File Provider later) end in the same
 //! place: `local` rows in the state DB plus the dirty set.
 
-pub mod filter;
+mod filter;
 pub mod journal;
 pub mod layout;
-pub mod marker;
+mod marker;
 pub mod scan;
-pub mod walk;
-pub mod watch;
+mod walk;
+mod watch;
 
 pub use filter::{Filter, FilterError, Verdict, is_junk};
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};

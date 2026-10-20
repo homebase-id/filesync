@@ -20,9 +20,9 @@ use crate::HomebaseError;
 use crate::drive::{HomebaseRemote, TargetDrive};
 
 /// The app's id on every identity. Never change it: it is how an identity recognises the app.
-pub const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
+pub(crate) const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
 pub const APP_NAME: &str = "Homebase Filesync";
-pub const APP_SLUG: &str = "filesync";
+pub(crate) const APP_SLUG: &str = "filesync";
 
 /// The identity's files in the browser: chat's web app on the identity, opened on its Filesync
 /// mini-app.
@@ -32,7 +32,7 @@ pub fn files_online(identity: &str) -> String {
 
 /// A drive the app asks for at registration.
 #[derive(Debug, Clone, Copy)]
-pub struct DriveSpec {
+pub(crate) struct DriveSpec {
     pub alias: Uuid,
     pub drive_type: Uuid,
     pub name: &'static str,
@@ -44,7 +44,7 @@ pub struct DriveSpec {
 }
 
 /// The drive the sync folder mirrors.
-pub const SYNC_DRIVE: DriveSpec = DriveSpec {
+pub(crate) const SYNC_DRIVE: DriveSpec = DriveSpec {
     alias: uuid!("cfceb937-b868-496b-91cb-3402f18320f8"),
     drive_type: uuid!("5da48122-e946-487a-8b9d-589642f3c91d"),
     name: "Filesync",
@@ -78,7 +78,7 @@ pub const CIRCLE: CircleSpec = CircleSpec {
 };
 
 /// The drive request entry (`d`) for `drive`, in the keys the owner app reads.
-pub fn drive_request(drive: &DriveSpec) -> serde_json::Value {
+pub(crate) fn drive_request(drive: &DriveSpec) -> serde_json::Value {
     json!({
         "a": drive.alias.to_string(),
         "t": drive.drive_type.to_string(),
@@ -94,7 +94,7 @@ pub fn drive_request(drive: &DriveSpec) -> serde_json::Value {
 /// (odin-js `AppCircleAuthorizationParams`, verified in `util.ts`): `s` slug, `n` name, `d`
 /// description, `e` emoji, `g` drive grants (`a` alias, `t` type, `p` permission). It may grant
 /// only what the registration grants the app (`AssertDeclaredCirclesAsync`): Read on its drive.
-pub fn circle_declaration() -> serde_json::Value {
+pub(crate) fn circle_declaration() -> serde_json::Value {
     json!({
         "s": CIRCLE.slug,
         "n": CIRCLE.name,
@@ -110,7 +110,7 @@ pub fn circle_declaration() -> serde_json::Value {
 
 /// [`CIRCLE`] as `circles/create` asks for it, by its slug, on `drive`: the sync drive this
 /// device found (at install, [`circle_declaration`] can only name the one it asks for).
-pub fn circle_request(drive: TargetDrive) -> serde_json::Value {
+pub(crate) fn circle_request(drive: TargetDrive) -> serde_json::Value {
     json!({
         "name": CIRCLE.name,
         "slug": CIRCLE.slug,
@@ -131,7 +131,7 @@ pub fn circle_request(drive: TargetDrive) -> serde_json::Value {
 
 /// The YouAuth `permission_request` for registering the app (or authorizing a new device).
 /// `friendly_name` names this device in the owner's list of the app's clients.
-pub fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::Value {
+pub(crate) fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::Value {
     json!({
         "n": APP_NAME,
         "appId": APP_ID.simple().to_string(),

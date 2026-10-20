@@ -42,7 +42,7 @@ pub enum IpcError {
 }
 
 /// Asks the daemon `request` and waits for its reply.
-pub fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
+pub(crate) fn call(paths: &Paths, request: &Request) -> Result<Reply, IpcError> {
     let mut stream = open(paths, request)?;
     read_reply(&mut stream)?.ok_or(IpcError::Protocol("no answer".into()))
 }
@@ -236,7 +236,7 @@ const MAX_SOCKET_PATH: usize = 100;
 /// The socket file (Unix): in the runtime folder or, when that path is too long for a socket
 /// address (a deep `HBSYNC_HOME`), in a private folder of the temp folder named after it.
 #[cfg(unix)]
-pub fn socket_path(paths: &Paths) -> PathBuf {
+pub(crate) fn socket_path(paths: &Paths) -> PathBuf {
     const SOCKET: &str = "hbsyncd.sock";
     let path = paths.runtime.join(SOCKET);
     if path.as_os_str().len() <= MAX_SOCKET_PATH {

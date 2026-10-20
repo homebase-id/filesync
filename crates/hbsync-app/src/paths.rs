@@ -31,7 +31,7 @@ pub struct Paths {
 }
 
 /// Removes the file at `path`; already gone is fine.
-pub fn remove_if_exists(path: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
@@ -49,7 +49,7 @@ pub fn home() -> Option<PathBuf> {
 
 /// An XDG base folder: `$var` when it is absolute (the spec ignores relative ones), else
 /// `default` in the home folder (`XDG_CONFIG_HOME`, `.config`).
-pub fn xdg_dir(var: &str, default: &str) -> Option<PathBuf> {
+pub(crate) fn xdg_dir(var: &str, default: &str) -> Option<PathBuf> {
     std::env::var_os(var)
         .map(PathBuf::from)
         .filter(|p| p.has_root())

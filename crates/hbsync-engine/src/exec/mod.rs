@@ -86,7 +86,7 @@ struct TagsLeft {
 /// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
 /// (a leading dot hides it elsewhere). Done at every start, so folders from before are hidden
 /// too.
-pub fn ensure_state_dir(root: &Path) -> PathBuf {
+pub(crate) fn ensure_state_dir(root: &Path) -> PathBuf {
     let dir = layout::state_dir(root);
     let _ = fs::create_dir_all(&dir);
     // Only looks: a folder that can't be hidden still works.
@@ -96,7 +96,7 @@ pub fn ensure_state_dir(root: &Path) -> PathBuf {
 
 /// Probes the volume of the sync root, inside the client's own state folder so nothing shows
 /// up in the user's tree. Falls back to the OS default.
-pub fn probe_case_insensitive(root: &Path) -> bool {
+pub(crate) fn probe_case_insensitive(root: &Path) -> bool {
     let dir = ensure_state_dir(root);
     match hbsync_platform::fskind::probe_case_sensitive(&dir) {
         Ok(sensitive) => !sensitive,
@@ -106,7 +106,7 @@ pub fn probe_case_insensitive(root: &Path) -> bool {
 
 /// What a run did.
 #[derive(Debug, Default)]
-pub struct ExecReport {
+pub(crate) struct ExecReport {
     pub done: usize,
     /// Left for the next plan, and why.
     pub skipped: Vec<(Op, Skip)>,
@@ -210,7 +210,7 @@ impl From<StateError> for Outcome {
 /// An operation's result. `Err` ends it early: a guard that stopped it, or a DB error.
 type Step<T = Outcome> = Result<T, Outcome>;
 
-pub struct Executor<'a> {
+pub(crate) struct Executor<'a> {
     db: &'a mut StateDb,
     remote: &'a dyn Remote,
     cfg: &'a ExecConfig,
@@ -391,7 +391,7 @@ impl<'a> Executor<'a> {
 
     /// Stops the run between operations once `stop` is set: each operation is done or not
     /// started, as at a crash, and the rest stays dirty. Transfers in flight finish first.
-    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+    pub(crate) fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
         self.stop = Some(stop);
         self
     }
@@ -410,19 +410,19 @@ impl<'a> Executor<'a> {
     }
 
     /// Counts what the run does (and, for transfers, the bytes) into `progress`.
-    pub fn with_progress(mut self, progress: Arc<Counters>) -> Self {
+    pub(crate) fn with_progress(mut self, progress: Arc<Counters>) -> Self {
         self.progress = progress;
         self
     }
 
     /// Holds every upload: the drive was full lately ([`ExecReport::full`] of an earlier run).
-    pub fn with_full(mut self, full: bool) -> Self {
+    pub(crate) fn with_full(mut self, full: bool) -> Self {
         self.full = full;
         self
     }
 
     /// Runs a plan's operations, in order.
-    pub fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
+    pub(crate) fn run(mut self, ops: Vec<Op>) -> Result<ExecReport, StateError> {
         self.run_ops(ops)?;
         Ok(self.report)
     }

@@ -37,7 +37,7 @@ impl Scope {
     }
 
     /// A folder holding the drive's node `top` (a role folder), and nothing else.
-    pub fn below(top: NodeId) -> Scope {
+    pub(crate) fn below(top: NodeId) -> Scope {
         Scope {
             top,
             outside: BTreeSet::from([NodeId::OUTSIDE]),
@@ -53,7 +53,7 @@ impl Scope {
     }
 
     /// `remote` as this engine writes to it: a node at its root is at its top.
-    pub fn remote(&self, remote: Arc<dyn Remote>) -> Arc<dyn Remote> {
+    pub(crate) fn remote(&self, remote: Arc<dyn Remote>) -> Arc<dyn Remote> {
         if self.top.is_root() {
             return remote;
         }
@@ -64,13 +64,13 @@ impl Scope {
     }
 
     /// Stored with the state DB: tells a later run which folders were left out.
-    pub fn fingerprint(&self) -> String {
+    pub(crate) fn fingerprint(&self) -> String {
         let outside: Vec<String> = self.outside.iter().map(|n| n.0.to_string()).collect();
         outside.join(",")
     }
 
     /// The folders a [`Scope::fingerprint`] left out.
-    pub fn outside_of(fingerprint: &str) -> BTreeSet<NodeId> {
+    pub(crate) fn outside_of(fingerprint: &str) -> BTreeSet<NodeId> {
         fingerprint
             .split(',')
             .filter_map(|id| id.parse().ok().map(NodeId))

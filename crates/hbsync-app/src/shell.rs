@@ -130,7 +130,7 @@ pub fn file_uri(path: &Path) -> String {
 
 /// GTK's bookmarks (`gtk-3.0/bookmarks`): one `URI label` per line. With `uri`, labelled.
 #[cfg(any(target_os = "linux", test))]
-pub fn gtk_bookmarks_with(text: &str, uri: &str, label: &str) -> Option<String> {
+pub(crate) fn gtk_bookmarks_with(text: &str, uri: &str, label: &str) -> Option<String> {
     if text.lines().any(|l| l.split(' ').next() == Some(uri)) {
         return None;
     }
@@ -154,7 +154,7 @@ pub fn gtk_bookmarks_without(text: &str, uri: &str) -> Option<String> {
 
 /// KDE's places (`user-places.xbel`) with a bookmark for `uri`, before the closing tag.
 #[cfg(any(target_os = "linux", test))]
-pub fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
+pub(crate) fn kde_places_with(xbel: &str, uri: &str, title: &str) -> Option<String> {
     if xbel.contains(&format!("href=\"{uri}\"")) {
         return None;
     }

@@ -26,11 +26,11 @@ pub const LABEL: &str = "id.homebase.filesync";
 pub const TRAY: &str = "homebase-filesync";
 /// The tray's desktop entry (Linux): in the session's autostart folder to start at logon, and
 /// in the applications folder as its launcher. Named after the app ID, as the package's is.
-pub const DESKTOP_ENTRY: &str = "id.homebase.filesync.desktop";
+pub(crate) const DESKTOP_ENTRY: &str = "id.homebase.filesync.desktop";
 /// The tray's icon name in the icon theme (Linux).
 pub const ICON: &str = "homebase-filesync";
 /// The systemd unit.
-pub const UNIT: &str = "hbsync.service";
+pub(crate) const UNIT: &str = "hbsync.service";
 /// The `Run` value's name.
 pub const RUN_VALUE: &str = "Homebase Filesync";
 
@@ -38,7 +38,7 @@ pub const RUN_VALUE: &str = "Homebase Filesync";
 /// They decide where the daemon keeps its files ([`crate::Paths`]): the daemon must use the
 /// same files as the command line that set it up. (`XDG_RUNTIME_DIR` is the session's own,
 /// set by systemd.)
-pub fn passed_env() -> Vec<(String, String)> {
+pub(crate) fn passed_env() -> Vec<(String, String)> {
     [
         "HBSYNC_HOME",
         "HBSYNC_CREDENTIALS",
@@ -199,13 +199,13 @@ pub fn run_value(daemon: &Path) -> String {
 }
 
 /// The program `name` of this installation ([`crate::install::Install::program`]).
-pub fn program_of(name: &str) -> io::Result<PathBuf> {
+pub(crate) fn program_of(name: &str) -> io::Result<PathBuf> {
     let exe = crate::install::current_exe()?;
     Ok(crate::install::Install::current().program(name, exe))
 }
 
 /// Where the daemon is ([`program_of`]).
-pub fn daemon_exe() -> io::Result<PathBuf> {
+pub(crate) fn daemon_exe() -> io::Result<PathBuf> {
     program_of(crate::lock::DAEMON)
 }
 

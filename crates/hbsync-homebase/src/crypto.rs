@@ -15,9 +15,9 @@ use serde::{Deserialize, Serialize};
 use crate::HomebaseError;
 
 /// A 16-byte AES key: the YouAuth exchange key, or the shared secret of a client.
-pub type Key = [u8; 16];
+pub(crate) type Key = [u8; 16];
 
-pub fn random<const N: usize>() -> Result<[u8; N], HomebaseError> {
+pub(crate) fn random<const N: usize>() -> Result<[u8; N], HomebaseError> {
     let mut out = [0u8; N];
     getrandom::fill(&mut out).map_err(|e| HomebaseError::Crypto(format!("no randomness: {e}")))?;
     Ok(out)
@@ -54,7 +54,7 @@ impl Exchange {
 
     /// The public key as YouAuth sends it: a JWK `{kty, crv, x, y}`, base64url (no padding)
     /// as a whole.
-    pub fn public_jwk_base64url(&self) -> String {
+    pub(crate) fn public_jwk_base64url(&self) -> String {
         let point = self.secret.public_key().to_sec1_point(false);
         let (x, y) = (point.x(), point.y());
         let jwk = Jwk {
@@ -103,11 +103,11 @@ impl Exchange {
     }
 }
 
-pub fn aes_cbc_encrypt(key: &Key, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+pub(crate) fn aes_cbc_encrypt(key: &Key, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     cbc::Encryptor::<Aes128>::new(key.into(), iv.into()).encrypt_padded_vec::<Pkcs7>(data)
 }
 
-pub fn aes_cbc_decrypt(key: &Key, iv: &[u8], data: &[u8]) -> Result<Vec<u8>, HomebaseError> {
+pub(crate) fn aes_cbc_decrypt(key: &Key, iv: &[u8], data: &[u8]) -> Result<Vec<u8>, HomebaseError> {
     let iv: [u8; 16] = iv
         .try_into()
         .map_err(|_| HomebaseError::Crypto("IV must be 16 bytes".into()))?;
@@ -125,7 +125,7 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    pub fn seal(key: &Key, plaintext: &[u8]) -> Result<Self, HomebaseError> {
+    pub(crate) fn seal(key: &Key, plaintext: &[u8]) -> Result<Self, HomebaseError> {
         let iv = random::<16>()?;
         Ok(Envelope {
             iv: STANDARD.encode(iv),
@@ -133,7 +133,7 @@ impl Envelope {
         })
     }
 
-    pub fn open(&self, key: &Key) -> Result<Vec<u8>, HomebaseError> {
+    pub(crate) fn open(&self, key: &Key) -> Result<Vec<u8>, HomebaseError> {
         let bad = |_| HomebaseError::Crypto("envelope: not base64".into());
         aes_cbc_decrypt(
             key,

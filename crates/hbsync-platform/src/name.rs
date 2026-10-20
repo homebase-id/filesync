@@ -12,7 +12,7 @@ use unicode_normalization::UnicodeNormalization;
 pub const MAX_NAME_BYTES: usize = 255;
 
 /// Maximum length of a name on NTFS, in UTF-16 code units.
-pub const MAX_WINDOWS_NAME_UNITS: usize = 255;
+pub(crate) const MAX_WINDOWS_NAME_UNITS: usize = 255;
 
 /// The operating systems a sync root can live on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,7 +41,7 @@ pub fn nfc(name: &str) -> String {
 }
 
 /// Returns `true` if `name` is already in NFC.
-pub fn is_nfc(name: &str) -> bool {
+pub(crate) fn is_nfc(name: &str) -> bool {
     unicode_normalization::is_nfc(name)
 }
 
@@ -139,7 +139,7 @@ pub fn check_local_name(name: &str, os: Os) -> Result<(), NameIssue> {
 }
 
 /// Characters Win32 refuses in a file name component.
-pub fn is_windows_illegal(c: char) -> bool {
+pub(crate) fn is_windows_illegal(c: char) -> bool {
     matches!(c, '<' | '>' | ':' | '"' | '\\' | '|' | '?' | '*') || (c as u32) < 0x20
 }
 
