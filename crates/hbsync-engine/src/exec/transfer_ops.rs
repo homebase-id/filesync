@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::mirror;
+use crate::plan::Acts;
 
 impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
@@ -116,17 +117,19 @@ impl Executor<'_> {
         // folder's engine pulled the next version), the next plan decides on that. Its commit
         // settles against it; kept until then, its tags not known until written.
         let ours = self.settled.get(&node).copied();
-        let own = |d: &DriveVersion| {
-            ours == Some(mirror.remote_ref())
-                && base_at == ours.map(|o| o.version)
-                && d.state.content.map(|c| c.hash) == Some(expected)
-        };
-        let acted = match drive {
-            Some(d) if d.at == mirror.remote_ref() => d.clone(),
-            Some(d) if !own(d) => {
-                return Err(Outcome::stale("changed on the drive since the plan"));
+        let acts = DriveVersion::acted_by_download(
+            drive,
+            mirror.remote_ref(),
+            Some(expected),
+            ours,
+            base_at,
+        );
+        let acted = match acts {
+            Acts::Plan(d) => d.clone(),
+            Acts::Stale => return Err(Outcome::stale("changed on the drive since the plan")),
+            Acts::Mirror => {
+                DriveVersion::of(&mirror, base_at).ok_or_else(|| Outcome::stale("not a file"))?
             }
-            _ => DriveVersion::of(&mirror, base_at).ok_or_else(|| Outcome::stale("not a file"))?,
         };
         // It claims the tags it is to write (the empty set too), as they read back once
         // written: where the volume keeps none, not known.

@@ -105,6 +105,10 @@ pub struct Sim {
     /// server's time of the last such write: they stand once the item goes from it; a restore
     /// keeps an add only if it holds it, or the add is still to go up ([`Sim::restored`]).
     tags_sent: BTreeMap<(usize, NodeId, String), i64>,
+    /// Tag adds a client's user made to an item they then deleted there before the add was
+    /// sent up, while the pending plan may still send it: one that goes up stands with the node,
+    /// as any add sent up does ([`Sim::detach_add`]).
+    tags_unsent: BTreeSet<(usize, NodeId, String)>,
     /// Tags a download wrote on a client's item whose record recovery dropped (the item
     /// changed since: it can't be told from the file there before), that the item still
     /// holds: read against the old base, they are that client's adds, and a removal made
@@ -160,6 +164,7 @@ impl Sim {
             tags_added: BTreeSet::new(),
             tags_forked: BTreeSet::new(),
             tags_sent: BTreeMap::new(),
+            tags_unsent: BTreeSet::new(),
             tags_removed: BTreeSet::new(),
             tags_unproven: BTreeSet::new(),
             tags_cleared: BTreeMap::new(),

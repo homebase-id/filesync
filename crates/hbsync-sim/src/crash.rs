@@ -80,8 +80,9 @@ impl Sim {
     /// write-ahead record stays, claiming tags as the engine's does: a download those it wrote
     /// as the OS holds them, the empty set too (not known where the OS keeps none); a folder,
     /// made without tags and lost before they are written, holds none only if it is to hold
-    /// none (not known otherwise). `prior`: what the item there held before; `fresh`: the node
-    /// had no item here before (the scan finds the one put in place as new).
+    /// none (not known otherwise, nor where the OS keeps none). `prior`: what the item there held
+    /// before; `fresh`: the node had no item here before (the scan finds the one put in place
+    /// as new).
     fn lose_commit(
         &mut self,
         c: usize,
@@ -112,9 +113,10 @@ impl Sim {
         // The parking record goes with the commit, void now anyway.
         client.parked.remove(node);
         let held = tags.held_by(client.os);
+        let kept = client.os != Os::Windows;
         let tags = match op {
-            Op::LocalDownload { .. } => (client.os != Os::Windows).then_some(held),
-            _ => held.is_empty().then_some(held),
+            Op::LocalDownload { .. } => kept.then_some(held),
+            _ => (kept && held.is_empty()).then_some(held),
         };
         // Every other crash (the first too) leaves its file unhashed for a sync.
         let unhashed = matches!(op, Op::LocalDownload { .. }) && self.crashes % 2 == 1;
@@ -212,6 +214,10 @@ impl Sim {
                 let new = self.ids.fresh();
                 rekey_client(&mut self.clients[c], node, new);
                 self.retrack(c, node, new);
+                // The node's item here is gone with it: what the user did to the item (a move,
+                // a change) made it another, and the node's removal from the drive is theirs,
+                // as a delete's (the item lives on as the new one).
+                self.user_removed(c, node);
             }
         }
     }

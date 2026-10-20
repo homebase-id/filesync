@@ -3945,3 +3945,88 @@ fn regression_a_folder_moved_into_a_file_is_recovered() {
         "{paths:?}"
     );
 }
+
+/// Client 0 deletes folder b with b/a in it; before its plan runs, client 1 renames b. The
+/// folder's removal is stale, so it ends without removing b, and b/a's removal waits for the
+/// next plan (nothing is removed before its folder): b/a is still live once the plan ran. The
+/// next plans settle the rename against the delete.
+#[test]
+fn regression_a_skipped_folder_removal_holds_back_what_is_in_it() {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let act = |client, action| Event::Act { client, action };
+    sim.run(&[act(0, CreateFolder { parent: 0, name: 1 })]); // NAMES: "b"
+    let b = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, b, true).expect("b");
+    sim.run(&[act(0, CreateFile { parent, name: 0 })]); // NAMES: "a"
+    assert!(sim.quiesce(30), "no convergence");
+    let node = sim.pick(0, b, false).expect("b");
+    sim.run(&[act(0, Delete { node }), Event::Plan { client: 0 }]);
+    assert_eq!(sim.planned(0), ["RemoteDelete", "RemoteDelete"]);
+    let node = sim.pick(1, b, false).expect("b");
+    let parent = sim.pick(1, NodeId::ROOT, true).expect("the top");
+    sim.run(&[
+        act(
+            1,
+            Move {
+                node,
+                parent,
+                name: 3,
+            },
+        ), // NAMES: "c.txt"
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    assert!(sim.planned(0).is_empty());
+    assert_eq!(sim.server_paths(), ["c.txt", "c.txt/a"], "b/a waits for b");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+}
+
+/// Seed 58230c9c (it failed on main): c2 deletes the folder a it was making again, a crash
+/// loses the commit of a, made again since, and the user moves it into another folder before
+/// the next sync. Recovery takes the moved item for a new one; the drive's a, no longer held
+/// here, is removed from there as the user's doing (the oracle took it for a removal no one
+/// asked for).
+#[test]
+fn regression_a_folder_moved_after_a_lost_commit_leaves_as_the_users() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 1 },
+        act(2, CreateFolder { parent: 0, name: 0 }),
+        Event::Step { client: 1 },
+        act(1, CreateFolder { parent: 8, name: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(2, Delete { node: 8 }),
+        Event::Plan { client: 2 },
+        Event::Crash { client: 2 },
+        act(
+            1,
+            Move {
+                node: 5,
+                parent: 8,
+                name: 3,
+            },
+        ),
+        act(
+            2,
+            Move {
+                node: 8,
+                parent: 4,
+                name: 0,
+            },
+        ),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_split_downloads, &events) {
+        panic!("{e}");
+    }
+}

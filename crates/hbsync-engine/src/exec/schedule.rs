@@ -9,7 +9,8 @@ use hbsync_state::StateError;
 use hbsync_types::NodeId;
 
 use super::{Outcome, Step};
-use crate::reconcile::{Op, Requirement};
+use crate::plan::Met;
+use crate::reconcile::Op;
 
 /// Transient remote errors in a row after which a run gives up (with the pauses between them
 /// doubling from `retry_pause`, 0.5 s by default: about 15 s in all).
@@ -125,18 +126,18 @@ impl Schedule {
         op: &Op,
         on_drive: impl FnOnce(NodeId) -> Result<bool, StateError>,
     ) -> Step<()> {
-        let met = match op.requires() {
-            None => true,
-            Some(Requirement::RemoteFolder(folder)) => on_drive(folder)?,
-            Some(Requirement::FolderFirst(folder)) if self.unremoved.contains(&folder) => {
-                return Err(Outcome::waiting("its folder wasn't removed"));
-            }
-            Some(Requirement::FolderFirst(folder)) => !self.removing.contains(&folder),
+        let Some(requires) = op.requires() else {
+            return Ok(());
         };
-        if met {
-            Ok(())
-        } else {
-            Err(Outcome::Retry(format!("waiting for {:?}", op.requires())))
+        let met = requires.met(
+            on_drive,
+            |f| self.removing.contains(&f),
+            |f| self.unremoved.contains(&f),
+        )?;
+        match met {
+            Met::Yes => Ok(()),
+            Met::Later => Err(Outcome::Retry(format!("waiting for {:?}", Some(requires)))),
+            Met::NextPlan => Err(Outcome::waiting("its folder wasn't removed")),
         }
     }
 

@@ -1,15 +1,17 @@
 //! What the users, other devices and the server do, and how each folder sees the drive.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use hbsync_engine::deleted;
 use hbsync_engine::mask::masked;
-use hbsync_engine::tree::{Tree, restored_names};
+use hbsync_engine::tree::Tree;
 use hbsync_engine::walk::End;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::Filter;
 use hbsync_platform::Os;
+use hbsync_platform::name::name_key;
 use hbsync_platform::tags::express;
 use hbsync_state::Coords;
 use hbsync_types::{
@@ -548,53 +550,84 @@ impl Sim {
         self.restore_with(node);
     }
 
-    /// Brings `node` back from Recently deleted with what was deleted with it, folders before
-    /// what is in them; what doesn't come back keeps what is in it there. As the engine's
-    /// restore: the folders above it in Recently deleted first (just those, outermost first).
+    /// Brings `node` back from Recently deleted with what was deleted with it, and the folders
+    /// above it in Recently deleted first (just those, outermost first), as the engine's restore
+    /// does: in waves, each after the folders it comes back into, by the engine's own rule
+    /// ([`deleted::restore_wave`]): first what takes its own name, free in its folder, then the
+    /// rest under the first free restored name (it stays deleted if none is). One whose folder
+    /// is gone for good comes back as it was (an orphan, for Recovered files); one whose folder
+    /// didn't come back stays, with what is in it. It plans from the drive as it is: a device
+    /// plans from its store, which may lag (a stale device's restore isn't simulated).
     pub(crate) fn restore_with(&mut self, node: NodeId) {
-        let mut above = Vec::new();
-        let mut at = self.server.removed.get(&node).map(|n| n.state.parent);
-        while let Some(f) = at.filter(|f| self.is_removed(*f) && !above.contains(f)) {
-            above.push(f);
-            at = self.server.removed.get(&f).map(|n| n.state.parent);
+        let removed = &self.server.removed;
+        let Some(top) = removed.get(&node) else {
+            return;
+        };
+        // The folders above it in Recently deleted, outermost first (past any depth a path may
+        // have, nothing comes back: above is still a removed folder, as the engine's).
+        let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(top.state.parent, |at| {
+            Ok(removed.get(&at).map(|f| (at, f.state.parent)))
+        });
+        if up.end == End::Deep {
+            return;
         }
-        for f in above.into_iter().rev() {
-            self.restore_node(f);
-            if !self.server.live.contains_key(&f) {
-                return;
+        let mut nodes = up.items;
+        nodes.reverse();
+        // Then it and what was deleted with it ([`Server::group`]), each once.
+        let mut seen: HashSet<NodeId> = nodes.iter().copied().collect();
+        let group = self.server.group(node);
+        nodes.extend(group.into_iter().filter(|n| seen.insert(*n)));
+        let rows: Vec<Row> = nodes
+            .iter()
+            .map(|n| Row {
+                node: *n,
+                parent: removed[n].state.parent,
+                name: removed[n].state.name.clone(),
+            })
+            .collect();
+        // The folders in the tree the rows may go into, and the names taken in those and in
+        // the folders coming back (one that is neither went for good: no name is taken there).
+        let tree = self.server.tree();
+        let mut live = HashSet::from([NodeId::ROOT]);
+        let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
+        for parent in rows.iter().map(|r| r.parent).chain([NodeId::ROOT]) {
+            if taken.contains_key(&parent) {
+                continue;
             }
+            if self.server.live.contains_key(&parent) {
+                live.insert(parent);
+            } else if !parent.is_root() && !seen.contains(&parent) {
+                continue;
+            }
+            let names = tree.children(parent).filter_map(|c| tree.get(c));
+            taken.insert(parent, names.map(|c| name_key(&c.name)).collect());
         }
-        let mut queue = VecDeque::from([node]);
-        while let Some(n) = queue.pop_front() {
-            let with = self.server.deleted_with(n);
-            self.restore_node(n);
-            if self.server.live.contains_key(&n) {
-                queue.extend(with);
+        let mut left: Vec<&Row> = rows.iter().collect();
+        while let Some(wave) =
+            deleted::restore_wave(left, |r| (r.parent, &r.name), &live, &seen, &mut taken)
+        {
+            left = wave.later;
+            for row in wave.asked {
+                self.restore_as(row.node, row.name.clone());
+                live.insert(row.node);
+            }
+            for row in wave.rest {
+                let Some(name) = deleted::take_restored_name(&mut taken, row.parent, &row.name)
+                else {
+                    continue; // no free name: it stays deleted
+                };
+                self.restore_as(row.node, name);
+                live.insert(row.node);
             }
         }
     }
 
-    /// Brings `node` back from Recently deleted: into its folder if that is live, under a free
-    /// name (it stays deleted if none is); as it was if its folder is gone for good (an orphan,
-    /// for Recovered files); not while its folder is removed.
-    fn restore_node(&mut self, node: NodeId) {
+    /// Brings `node` back from Recently deleted, named `name`: a write.
+    fn restore_as(&mut self, node: NodeId, name: String) {
         let Some(mut n) = self.server.removed.remove(&node) else {
             return;
         };
-        let parent = n.state.parent;
-        if parent.is_root() || self.server.live.contains_key(&parent) {
-            let tree = self.server.tree();
-            let Some(name) = restored_names(&n.state.name)
-                .find(|name| tree.child_named(parent, name, None).is_none())
-            else {
-                self.server.removed.insert(node, n); // no free name: it stays deleted
-                return;
-            };
-            n.state.name = name;
-        } else if self.is_removed(parent) {
-            self.server.removed.insert(node, n); // its folder didn't come back
-            return;
-        }
+        n.state.name = name;
         n.remote.version = VersionTag(self.server.uuid());
         self.server.live.insert(node, n);
         self.restored_on_drive(node);
@@ -655,6 +688,7 @@ impl Sim {
                 self.detach_add(add);
             } else {
                 self.tags_added.remove(&add);
+                self.tags_unsent.insert(add);
             }
         }
     }
@@ -915,11 +949,46 @@ impl Sim {
     }
 }
 
+/// A row of Recently deleted a restore brings back: its node, folder and name.
+struct Row {
+    node: NodeId,
+    parent: NodeId,
+    name: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::action::{Event, act};
     use hbsync_types::Tag;
+
+    /// A restore names as the engine's does: what takes its own name first, then the rest. F
+    /// comes back holding `x` and `x (restored)`, beside a live `x` its delete took along: `x
+    /// (restored)` keeps its name, and the removed `x` takes the next free one.
+    #[test]
+    fn a_restore_names_its_own_first() {
+        let mut sim = Sim::new(1);
+        let f = sim.ids.fresh();
+        sim.server.put(f, NodeState::folder(NodeId::ROOT, "F"));
+        let put = |sim: &mut Sim, name: &str| {
+            let node = sim.ids.fresh();
+            let blob = sim.new_blob();
+            sim.server.put(node, NodeState::file(f, name, blob));
+            node
+        };
+        let (x, restored) = (put(&mut sim, "x"), put(&mut sim, "x (restored)"));
+        // F and what is in it go to Recently deleted; then another x, live, in removed F.
+        for node in [f, x, restored] {
+            let n = sim.server.live.remove(&node).expect("live");
+            sim.remove_on_drive(node, n, true);
+        }
+        let live = put(&mut sim, "x");
+        sim.restore_with(f);
+        let name = |node: NodeId| sim.server.live[&node].state.name.clone();
+        assert_eq!(name(live), "x");
+        assert_eq!(name(restored), "x (restored)");
+        assert_eq!(name(x), "x (restored 2)");
+    }
 
     /// A delete here that loses (another device edited the file) settles nothing of what other
     /// clients did to its tags: a removal and an addition client 1 hasn't synced yet still

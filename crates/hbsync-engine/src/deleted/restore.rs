@@ -10,11 +10,10 @@ use hbsync_types::{NodeId, Target};
 
 use crate::error::EngineError;
 use crate::mirror::{self, Said, gone_after, meta_at};
-use crate::tree::restored_names;
 use crate::walk::End;
 
 use super::listing::group;
-use super::rules::{RestoreWave, restore_wave};
+use super::rules::{RestoreWave, restore_wave, take_restored_name};
 use super::{AccountOps, locked};
 
 impl AccountOps<'_> {
@@ -43,9 +42,13 @@ impl AccountOps<'_> {
         // In waves, each after the folders it comes back into ([`restore_wave`]). One that was to
         // come back into a folder that didn't stays in Recently deleted.
         while r.failed.is_none() {
-            let Some(RestoreWave { asked, rest, later }) =
-                restore_wave(left, &r.live, &r.in_plan, &mut r.taken)
-            else {
+            let Some(RestoreWave { asked, rest, later }) = restore_wave(
+                left,
+                |row| (row.parent, &row.name),
+                &r.live,
+                &r.in_plan,
+                &mut r.taken,
+            ) else {
                 break;
             };
             left = later;
@@ -74,12 +77,9 @@ impl AccountOps<'_> {
                 if r.failed.is_some() {
                     break;
                 }
-                let names = r.taken.entry(row.parent).or_default();
-                let Some(name) = restored_names(&row.name).find(|n| !names.contains(&name_key(n)))
-                else {
+                let Some(name) = take_restored_name(&mut r.taken, row.parent, &row.name) else {
                     continue; // no free name: it stays in Recently deleted
                 };
-                names.insert(name_key(&name));
                 let meta = meta_at(row, row.parent, &name, false);
                 let answer = self.remote.update(&row.target(), &meta, None);
                 r.settle(row, &meta, answer);

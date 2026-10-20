@@ -9,18 +9,16 @@ use std::sync::Arc;
 
 use hbsync_engine::Against;
 use hbsync_engine::mask::masked;
-use hbsync_engine::plan::{TagWrite, not_reached};
+use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached, tags_written};
 use hbsync_engine::reconcile::{
-    Agreement, BaseExtra, DriveVersion, Input, Masking, Op, Options, Removed, Requirement,
-    reconcile_with_known,
+    Agreement, BaseExtra, DriveVersion, Input, Masking, Op, Options, Removed, reconcile_with_known,
 };
 use hbsync_engine::tree::{Tree, first_free, numbered_names};
 use hbsync_local::Verdict;
 use hbsync_local::layout::parked_name;
 use hbsync_platform::Os;
-use hbsync_platform::tags::express;
 use hbsync_types::{
-    ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tag, Tags, VersionTag,
+    ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tags, VersionTag,
 };
 
 use crate::Sim;
@@ -273,6 +271,9 @@ impl Sim {
         }
         client.plan = ops.into_iter().map(|op| (op, 0)).collect();
         client.removed_by_plan.clear();
+        client.unremoved.clear();
+        // A plan made since sends what the user does from now on.
+        self.tags_unsent.retain(|(at, _, _)| *at != c);
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
         client.planned_refs = std::mem::take(&mut input.remote_refs).into_iter().collect();
@@ -354,8 +355,14 @@ impl Sim {
         if outcome != Outcome::Done {
             self.note(|_| format!("  {outcome:?} {op:?}"));
         }
-        if outcome == Outcome::Retry && attempts < 3 {
+        let retried = outcome == Outcome::Retry && attempts < 3;
+        if retried {
             self.clients[c].plan.push_back((op.clone(), attempts + 1));
+        }
+        // A folder's removal that ended without removing it holds back what is in it until
+        // the next plan (the executor's `Schedule`).
+        if matches!(op, Op::RemoteDelete { .. }) && outcome != Outcome::Done && !retried {
+            self.clients[c].unremoved.insert(node);
         }
         if outcome == Outcome::Fetched {
             // Put in place and committed by the next step, whatever happens meanwhile.
@@ -433,9 +440,10 @@ impl Sim {
                 let client = &self.clients[c];
                 let windows = client.os == Os::Windows;
                 let written = client.local.get(node).map(|l| l.tags.held_by(client.os));
+                // Where the volume keeps no tags, the record claims none (the executor's
+                // `placed_tags`), a folder's as a file's.
                 let tags = match &op {
-                    _ if tag_failed => None,
-                    Op::LocalDownload { .. } if windows => None,
+                    _ if tag_failed || windows => None,
                     _ => written,
                 };
                 let prior = match &op {
@@ -472,11 +480,17 @@ impl Sim {
             {
                 for tag in tags.iter() {
                     let add = (c, node, tag.name.clone());
+                    let now = self.server.now();
                     if self.tags_added.contains(&add) {
                         // The last write carrying it: one after a removal sends it again, as
                         // this client's add (a node with no base here yet merges both sides').
-                        let now = self.server.now();
                         self.tags_sent.insert(add, now);
+                    } else if self.tags_unsent.remove(&add) {
+                        // Its item deleted here since, the plan sent it all the same: it stands
+                        // with the node.
+                        self.tags_added.insert(add.clone());
+                        self.tags_sent.insert(add.clone(), now);
+                        self.detach_add(add);
                     }
                 }
             }
@@ -547,7 +561,9 @@ impl Sim {
                 Op::LocalTags { .. } if windows => TagWrite::Nothing,
                 Op::LocalDownload { .. } if windows => TagWrite::Unknown,
                 Op::LocalMkdir { drive: None, .. } => TagWrite::Agreed,
-                Op::LocalMkdir { .. } if windows => TagWrite::Nothing,
+                // Where the volume keeps no tags, the record claims none it wrote, and recovery
+                // reads that so: not known (the executor's `placed_tags`, from its record).
+                Op::LocalMkdir { .. } if windows => TagWrite::Unknown,
                 Op::LocalTags { .. } | Op::LocalDownload { .. } | Op::LocalMkdir { .. } => wrote,
                 Op::LocalMove { .. } => TagWrite::Nothing,
                 _ => TagWrite::Agreed,
@@ -655,8 +671,10 @@ impl Sim {
             client.local.get(node) == client.planned_local.get(node)
         };
         // The executor's server-side order guards, against the client's mirror.
-        if !ready(&self.clients[c], op) {
-            return Retry;
+        match ready(&self.clients[c], op) {
+            Met::Yes => {}
+            Met::Later => return Retry,
+            Met::NextPlan => return Skip,
         }
         // The drive refuses it as it is: recorded, the operation isn't sent again as it is (a
         // download once its bytes didn't match twice: the first time the drive is read again).
@@ -771,38 +789,48 @@ impl Sim {
                 let record = match self.clients[c].fetched.remove(&node) {
                     Some(record) => record,
                     None => {
-                        // The bytes fetched are the server's current ones; they must be what
-                        // was planned. The record: the version the plan saw, with them.
-                        let (Some(server), Some(now)) =
-                            (self.server.live.get(&node), self.server_state(c, node))
-                        else {
+                        // The bytes fetched are the server's current ones; they must be the
+                        // mirror's (the executor checks the hash it expects).
+                        let client = &self.clients[c];
+                        let (Some(server), Some(mirror), Some(&mirror_at)) = (
+                            self.server.live.get(&node),
+                            client.planned_remote.get(node),
+                            client.planned_refs.get(&node),
+                        ) else {
                             return Skip;
                         };
                         let content = server.state.content;
-                        let planned = self.clients[c].planned_remote.get(node);
-                        if planned.map(|s| s.content) != Some(content) {
+                        if mirror.content != content {
                             return Skip;
                         }
-                        // Where this run's own write made the version (the base there), it acts
-                        // on that one, as the executor does.
-                        let client = &self.clients[c];
-                        let own = client.run_settled.get(&node) == Some(&server.remote.version)
-                            && client.extra.get(&node).and_then(|e| e.version)
-                                == Some(server.remote.version);
-                        let record = match op.drive() {
-                            Some(_) if own => DriveVersion {
-                                state: now,
-                                at: server.remote,
-                                base_at: Some(server.remote.version),
+                        // What it acts on, as the executor decides it: the version the plan
+                        // saw while the mirror holds it, or the one this run's own write made
+                        // of it since.
+                        let ours = client.run_settled.get(&node).map(|v| RemoteRef {
+                            version: *v,
+                            ..mirror_at
+                        });
+                        let base_at = client
+                            .extra
+                            .get(&node)
+                            .and_then(|e| e.version)
+                            .filter(|_| client.base.contains(node));
+                        let expected = content.map(|c| c.hash);
+                        let acts = DriveVersion::acted_by_download(
+                            op.drive(),
+                            mirror_at,
+                            expected,
+                            ours,
+                            base_at,
+                        );
+                        let record = match acts {
+                            Acts::Plan(d) => d.clone(),
+                            Acts::Mirror => DriveVersion {
+                                state: mirror.clone(),
+                                at: mirror_at,
+                                base_at,
                             },
-                            _ => DriveVersion {
-                                state: NodeState {
-                                    content,
-                                    ..op.drive().map_or(now, |d| d.state.clone())
-                                },
-                                at: server.remote,
-                                base_at: op.drive().and_then(|d| d.base_at),
-                            },
+                            Acts::Stale => return Skip,
                         };
                         if self.split_downloads {
                             self.clients[c].fetched.insert(node, record);
@@ -1221,6 +1249,7 @@ impl Sim {
             };
             // A filtered original name may be held by an item the scanner never tracks: the
             // first free numbered name instead (as the executor does).
+            let original = name.clone();
             let mut name = name;
             if !syncs_at(client, parent, &name, is_dir)
                 && let Some(n) = release_name(client, node, parent, &name, is_dir)
@@ -1240,7 +1269,9 @@ impl Sim {
                     },
                 );
             } else {
-                client.parked.insert(node, (parent, name));
+                // Still parked: the record keeps the name it came from (the executor's
+                // `restore_parked` keeps the record as it was), not the numbered one.
+                client.parked.insert(node, (parent, original));
             }
         }
     }
@@ -1262,6 +1293,11 @@ impl Sim {
     /// alone (the next plan decides); where the plan's own remote write moved the node past the
     /// version it acted on, the rest settles against that write's version while the server
     /// holds it. Returns the version it put the base at, if it did.
+    ///
+    /// Which version it settles against and how the written tags read come from the engine
+    /// ([`DriveVersion::settles_against`], [`tags_written`]); the rest stays a copy of the
+    /// executor's `settle`: there it is woven through its store's reads (the local row and its
+    /// spelling, an online-only base), which the sim's trees stand for.
     pub(crate) fn settle_against(
         &mut self,
         c: usize,
@@ -1272,7 +1308,8 @@ impl Sim {
         ours: Option<VersionTag>,
     ) -> Option<VersionTag> {
         let server = self.server_state(c, node);
-        let live = self.server.live.get(&node).map(|n| n.remote.version);
+        let remote_ref = self.server.live.get(&node).map(|n| n.remote);
+        let live = remote_ref.map(|r| r.version);
         let client = &self.clients[c];
         let base_at = client
             .extra
@@ -1281,17 +1318,16 @@ impl Sim {
             .filter(|_| client.base.contains(node));
         let ours = ours.filter(|o| base_at == Some(*o));
         let drive = against.drive();
+        // The executor's compare and set. The mirror it reads here is the drive as it is now
+        // (another folder's engine may have pulled it), where the run's downloads and order
+        // guards read the plan's snapshot with its own writes (no pull mid-run): both happen in
+        // the engine, though not mixed in one run as here.
         let acted = drive.map(|d| {
-            let state = match ours {
-                _ if base_at == d.base_at => Some((d.state.clone(), d.at.version)),
-                Some(o) if o == d.at.version => Some((d.state.clone(), d.at.version)),
-                Some(o) => server.clone().filter(|_| live == Some(o)).map(|r| (r, o)),
-                None => None,
-            };
-            state.map(|(r, v)| {
-                let tags = d.state.tags.clone();
-                (NodeState { tags, ..r }, v)
-            })
+            // The node's file id is the version's: ours is at another version of it.
+            let ours = ours.map(|version| RemoteRef { version, ..d.at });
+            let mirror = |o| server.clone().zip(remote_ref).filter(|(_, at)| *at == o);
+            d.settles_against(base_at, ours, mirror)
+                .map(|(r, at)| (r, at.version))
         });
         let base_moved = matches!(acted, Some(None));
         // What the local tags are read against: the drive's version a local write acted on.
@@ -1318,18 +1354,9 @@ impl Sim {
         // the executor's.
         let filled = match tags {
             TagWrite::Wrote { before, written } => {
-                let written = filled_tags(client, reference.as_ref(), node, Some(written));
-                let reference = reference
-                    .as_ref()
-                    .map(|s| s.tags.clone())
-                    .unwrap_or_default();
-                let holdable: Vec<Tag> = reference
-                    .iter()
-                    .filter(|t| express(t, client.os).is_some())
-                    .cloned()
-                    .collect();
-                let before = Tags::fill(Some(before), &Tags::new(holdable), client.os);
-                Some((before, written))
+                let reference = reference.as_ref().map(|s| s.tags.clone());
+                let reference = reference.unwrap_or_default();
+                Some(tags_written(before, written, &reference, client.os))
             }
             _ => None,
         };
@@ -1502,16 +1529,24 @@ fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
 }
 
 /// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
-/// from, plus its own writes since) and its plan, as the executor checks them.
-fn ready(client: &Client, op: &Op) -> bool {
-    match op.requires() {
-        None => true,
-        Some(Requirement::RemoteFolder(folder)) => client.planned_remote.contains(folder),
-        Some(Requirement::FolderFirst(folder)) => !client
+/// from, plus its own writes since) and its run, by the executor's rule
+/// ([`hbsync_engine::reconcile::Requirement::met`]).
+fn ready(client: &Client, op: &Op) -> Met {
+    let Some(requires) = op.requires() else {
+        return Met::Yes;
+    };
+    let removing = |folder| {
+        client
             .plan
             .iter()
-            .any(|(o, _)| matches!(o, Op::RemoteDelete { node, .. } if *node == folder)),
-    }
+            .any(|(o, _)| matches!(o, Op::RemoteDelete { node, .. } if *node == folder))
+    };
+    let Ok(met) = requires.met::<Infallible>(
+        |folder| Ok(client.planned_remote.contains(folder)),
+        removing,
+        |folder| client.unremoved.contains(&folder),
+    );
+    met
 }
 
 /// What happened to one operation.

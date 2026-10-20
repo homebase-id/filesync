@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use hbsync_local::Filter;
+use hbsync_platform::Os;
 use hbsync_types::{
     ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Tags,
     VersionTag,
@@ -382,6 +383,39 @@ pub enum Requirement {
     FolderFirst(NodeId),
 }
 
+/// Whether an operation's [`Requirement`] is met, as the executor's order guards judge it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Met {
+    /// It may run.
+    Yes,
+    /// Not yet: later in this run (what it waits for may still happen).
+    Later,
+    /// Not in this run: its folder's removal ended without removing it, so what is in it waits
+    /// for the next plan (nothing is removed before its folder: node schema, Recently deleted).
+    NextPlan,
+}
+
+impl Requirement {
+    /// Whether the requirement is met: `on_drive` says whether the mirror has a folder,
+    /// `removing` whether a folder's removal is still to run in this run (or to retry), and
+    /// `unremoved` whether one ended in this run without removing it. The executor and the
+    /// simulator both judge by it.
+    pub fn met<E>(
+        self,
+        on_drive: impl FnOnce(NodeId) -> Result<bool, E>,
+        removing: impl FnOnce(NodeId) -> bool,
+        unremoved: impl FnOnce(NodeId) -> bool,
+    ) -> Result<Met, E> {
+        Ok(match self {
+            Requirement::RemoteFolder(folder) if on_drive(folder)? => Met::Yes,
+            Requirement::RemoteFolder(_) => Met::Later,
+            Requirement::FolderFirst(folder) if unremoved(folder) => Met::NextPlan,
+            Requirement::FolderFirst(folder) if removing(folder) => Met::Later,
+            Requirement::FolderFirst(_) => Met::Yes,
+        })
+    }
+}
+
 /// A version of a node on the drive: what it holds, and which version it is; for a local
 /// write, also the version of the base the plan saw (`None`: none), which its commit checks
 /// the base is still at.
@@ -401,6 +435,85 @@ impl DriveVersion {
             base_at,
         })
     }
+
+    /// What a download acts on, with the mirror at `mirror_at` holding bytes `expected`: the
+    /// drive's version its plan saw (`plan`), only while the mirror still holds it; else, where
+    /// this run's own write made the mirror's version since (`ours`, the base there: `base_at`),
+    /// the bytes the same (a tag write, a move), or the plan saw none, the mirror's. Where the
+    /// drive moved on otherwise (another folder's engine pulled the next version), it is stale:
+    /// the next plan decides on that. The executor and the simulator both decide by it.
+    pub fn acted_by_download(
+        plan: Option<&DriveVersion>,
+        mirror_at: RemoteRef,
+        expected: Option<ContentHash>,
+        ours: Option<RemoteRef>,
+        base_at: Option<VersionTag>,
+    ) -> Acts<'_> {
+        let own = |d: &DriveVersion| {
+            ours == Some(mirror_at)
+                && base_at == ours.map(|o| o.version)
+                && d.state.content.map(|c| c.hash) == expected
+        };
+        match plan {
+            Some(d) if d.at == mirror_at => Acts::Plan(d),
+            Some(d) if !own(d) => Acts::Stale,
+            _ => Acts::Mirror,
+        }
+    }
+
+    /// What a local write that acted on this version settles its content, place and version
+    /// against (sync semantics §8: compare and set), with this version's tags: this version,
+    /// where the base is still at the version the write's plan saw (`base_at`, the base's now),
+    /// or where this run's own operations settled it (`ours`) at this version; the mirror's
+    /// where they settled it at the version the mirror holds (this run's own remote write moved
+    /// it past this one: `mirror` of that version, read only then, `None` where it holds
+    /// another). `None`: the base moved otherwise, and only the tags settle. The executor's
+    /// settle and the simulator's decide by it.
+    pub fn settles_against(
+        &self,
+        base_at: Option<VersionTag>,
+        ours: Option<RemoteRef>,
+        mirror: impl FnOnce(RemoteRef) -> Option<(NodeState, RemoteRef)>,
+    ) -> Option<(NodeState, RemoteRef)> {
+        match ours {
+            _ if base_at == self.base_at => Some((self.state.clone(), self.at)),
+            Some(o) if o == self.at => Some((self.state.clone(), self.at)),
+            Some(o) => mirror(o).map(|(r, at)| {
+                let tags = self.state.tags.clone();
+                (NodeState { tags, ..r }, at)
+            }),
+            None => None,
+        }
+    }
+}
+
+/// What a download acts on ([`DriveVersion::acted_by_download`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Acts<'a> {
+    /// The version its plan saw.
+    Plan(&'a DriveVersion),
+    /// The mirror's version.
+    Mirror,
+    /// Neither: the drive moved on since the plan.
+    Stale,
+}
+
+/// What a tag write left (`written`) and what the item held before it (`before`), read as the
+/// executor's settle reads them against the drive's tags (`reference`): what `os` can't hold is
+/// the drive's, and of what was there, a tag `os` can't hold at all is left out (the item never
+/// held it: the write leaves the drive's value of it). The executor's settle and the
+/// simulator's read them alike.
+pub fn tags_written(before: &Tags, written: &Tags, reference: &Tags, os: Os) -> (Tags, Tags) {
+    let holdable = Tags::new(
+        reference
+            .iter()
+            .filter(|t| hbsync_platform::tags::express(t, os).is_some())
+            .cloned(),
+    );
+    (
+        Tags::fill(Some(before), &holdable, os),
+        Tags::fill(Some(written), reference, os),
+    )
 }
 
 /// What an operation did to its item's tags, for the base's (sync semantics §11). The base
