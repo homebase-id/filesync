@@ -34,6 +34,7 @@ mod exec;
 mod gone;
 mod ids;
 mod model;
+mod narrow;
 mod oracle;
 mod trace;
 mod world;
@@ -126,6 +127,10 @@ pub struct Sim {
     /// each request it was sent, by everything the request sends.
     refusing: bool,
     judged: BTreeMap<String, bool>,
+    /// Every plan is checked against the engine's own planning path ([`Sim::with_narrow_check`]),
+    /// in rounds counted here.
+    narrow_check: bool,
+    narrow_rounds: usize,
     /// The drive answers a wrong "not there" now and then ([`Sim::with_wrong_not_theres`]):
     /// the plans heard so far, the files it said it of, and a client that took one as gone
     /// for good while the drive held it.
@@ -173,6 +178,8 @@ impl Sim {
             split_downloads: false,
             refusing: false,
             judged: BTreeMap::new(),
+            narrow_check: false,
+            narrow_rounds: 0,
             lying: false,
             plans_heard: 0,
             lied: BTreeSet::new(),
@@ -186,6 +193,15 @@ impl Sim {
     /// commit of a file already in place, for recovery to settle.
     pub fn with_split_downloads(mut self) -> Self {
         self.split_downloads = true;
+        self
+    }
+
+    /// Every fourth plan a main folder makes is checked against the engine's own planning path: its
+    /// planning input filled into a state DB as the engine's store holds it, planned from
+    /// narrow views as the engine does (`view::plan_narrow`), against whole folders for the
+    /// same dirty nodes, and the whole one against the sim's plan.
+    pub fn with_narrow_check(mut self) -> Self {
+        self.narrow_check = true;
         self
     }
 

@@ -54,6 +54,8 @@ pub(crate) struct Ledger {
     plan_taken: BTreeMap<usize, BTreeSet<(NodeId, VersionTag)>>,
     /// The first node that went to Recently deleted though no one deleted it.
     wrongly_removed: Option<String>,
+    /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
+    narrow_differs: Option<String>,
 }
 
 /// An item as a user saw it on the drive, but for its tags (a tag change loses to a delete):
@@ -133,6 +135,16 @@ impl Ledger {
     /// (through live folders) each at its version: what its removal took along, as it happened.
     pub(crate) fn folder_removed(&mut self, folder: NodeId, below: BTreeMap<NodeId, VersionTag>) {
         self.took.insert(folder, below);
+    }
+
+    /// Whether the engine's planning path was found planning otherwise than the sim.
+    pub(crate) fn found_narrow_differs(&self) -> bool {
+        self.narrow_differs.is_some()
+    }
+
+    /// The engine's planning path planned otherwise than the sim, if `what` says how.
+    pub(crate) fn narrow_differs(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.narrow_differs, what);
     }
 
     /// Client `c` made a plan while a delete had taken `taken` along (each at its version).
@@ -243,6 +255,9 @@ impl Sim {
         let ledger = &self.ledger;
         if let Some(op) = &ledger.dangling {
             return Err(format!("created under a folder the server never had: {op}"));
+        }
+        if let Some(what) = &ledger.narrow_differs {
+            return Err(what.clone());
         }
         if let Some(plan) = &ledger.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
@@ -358,6 +373,11 @@ impl Sim {
             .into_iter()
             .filter(|v| !matches!(v, Violation::DuplicateName { .. }))
             .filter(|v| !matches!(v, Violation::Orphan { node, .. } if refused_here.contains(node)))
+            // What is in a folder no client reads waits for it, in Recently deleted too.
+            .filter(|v| {
+                !matches!(v, Violation::Orphan { parent, .. }
+                    if self.server.unreadable_on_drive().any(|(n, _)| n == parent))
+            })
             .filter(|v| {
                 !matches!(v, Violation::ParentNotFolder { node, .. }
                     if !synced_somewhere.contains(node))

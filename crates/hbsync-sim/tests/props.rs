@@ -269,12 +269,50 @@ proptest! {
 /// A simulation's setup, and the mass-delete guard's minimum if it is on.
 type Setup = (fn(Sim) -> Sim, Option<usize>);
 
+proptest! {
+    // A hundredth of the cases, at least one: every fourth plan is planned three more times,
+    // over a state DB it fills (about 0.5 s a case in release: 20 at the default, 1500 at
+    // 150000).
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 100).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// The engine plans from its store, from narrow views of what is dirty (`view::plan_narrow`);
+    /// the sim plans from whole trees. Every fourth plan a main folder makes, its input filled into a
+    /// state DB as the engine's store holds it, plans the same through the engine's views, and
+    /// from narrow views the same as from whole folders for some of its nodes dirty.
+    #[test]
+    fn the_engines_planning_path_plans_as_the_sim(
+        setup in 0..NARROW_SETUPS.len(),
+        events in proptest::collection::vec(any_event(5), 0..80),
+    ) {
+        let (prepare, guard) = NARROW_SETUPS[setup];
+        let mut sim = prepare(Sim::new(3)).with_narrow_check();
+        sim.guard = guard;
+        sim.run(&events);
+        prop_assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            prop_assert!(false, "{}", e);
+        }
+    }
+}
+
 /// The setups [`a_run_replays_the_same`] picks from, each with the mass-delete guard (its
 /// minimum) or not: every kind of run a property makes.
 const SETUPS: &[Setup] = &[
     (Sim::with_split_downloads, None),
     (Sim::with_refusals, None),
     (Sim::with_wrong_not_theres, None),
+    (Sim::with_role_device, None),
+    (Sim::with_new_role_devices, Some(1)),
+    (|sim| sim, Some(2)),
+];
+
+/// The setups [`the_engines_planning_path_plans_as_the_sim`] picks from: those that settle
+/// (refusals and wrong "not there"s leave things held, judged by properties of their own).
+const NARROW_SETUPS: &[Setup] = &[
+    (Sim::with_split_downloads, None),
     (Sim::with_role_device, None),
     (Sim::with_new_role_devices, Some(1)),
     (|sim| sim, Some(2)),
