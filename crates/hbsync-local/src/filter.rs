@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use hbsync_platform::RelPath;
+use hbsync_platform::name::name_key;
 
 /// Bumped whenever the built-in junk list changes, so a changed list counts as a rule change.
 const JUNK_VERSION: u32 = 3;
@@ -75,6 +76,14 @@ fn starts(name: &str, p: &str) -> bool {
 fn ends(name: &str, s: &str) -> bool {
     name.len() >= s.len()
         && name.as_bytes()[name.len() - s.len()..].eq_ignore_ascii_case(s.as_bytes())
+}
+
+/// Whether `name` is the state folder's ([`crate::STATE_DIR`]) in any case or spelling: caseless
+/// and normalization-insensitive (`name_key`), as a volume that ignores case compares names.
+fn is_state_dir(name: &str) -> bool {
+    use std::sync::LazyLock;
+    static KEY: LazyLock<String> = LazyLock::new(|| name_key(crate::STATE_DIR));
+    name.len() <= crate::STATE_DIR.len() * 4 && name_key(name) == *KEY
 }
 
 /// Whether `name` is on the built-in junk list (at any depth, in any case).
@@ -230,9 +239,12 @@ impl Filter {
             .unwrap_or_else(|| self.by_rules(path, is_dir))
     }
 
-    /// The verdict the name alone gives (the state folder, junk), if any.
+    /// The verdict the name alone gives (the state folder, junk), if any. The state folder in
+    /// any case or spelling a volume may take for it (one that ignores case is most): another
+    /// writer's `.HBSYNC` there would be this client's own folder, and what is in it would land
+    /// in it (an `ignore` file setting this device's rules).
     fn by_name(&self, name: &str, at_root: bool) -> Option<Verdict> {
-        if at_root && name == crate::STATE_DIR {
+        if at_root && is_state_dir(name) {
             Some(Verdict::Excluded)
         } else if is_junk(name) {
             Some(Verdict::Junk)
@@ -260,6 +272,18 @@ mod tests {
 
     fn rules(text: &str) -> Filter {
         Filter::from_rules(text, false).expect("valid rules")
+    }
+
+    /// The state folder at the top in any case or spelling (`.HBSYNC`, a long s) is excluded
+    /// as the state folder: on a volume that ignores case, it is. Not deeper, nor a name near it.
+    #[test]
+    fn the_state_folder_is_excluded_in_any_case() {
+        let filter = Filter::default();
+        for name in [".hbsync", ".HBSYNC", ".HbSync", ".hb\u{17f}ync"] {
+            assert_eq!(filter.names([name], true), Verdict::Excluded, "{name}");
+        }
+        assert!(filter.names(["a", ".HBSYNC"], true).is_sync());
+        assert!(filter.names([".hbsync2"], true).is_sync());
     }
 
     #[test]

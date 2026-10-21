@@ -1006,3 +1006,61 @@ fn executable_bit_syncs() -> R {
     );
     Ok(())
 }
+
+/// Another writer's folder named as this client's state folder in another case (`.HBSYNC`), at
+/// the top, with an `ignore` file in it: on a volume that ignores case, that is the state
+/// folder itself. The client never takes it for the drive's folder, nor puts what is in it
+/// there (an ignore file would set this device's rules). It did on macOS and Windows (CI).
+#[test]
+fn a_folder_named_as_the_state_folder_in_another_case_stays_out_of_it() -> R {
+    use hbsync_remote::NodeMeta;
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeId, NodeKind};
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let state = a.root.join(hbsync_local::STATE_DIR);
+    let listing = |dir: &Path| -> BTreeSet<String> {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    let before = listing(&state);
+    let folder = NodeId::new();
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        srv.create(
+            &NodeMeta {
+                node: folder,
+                parent: NodeId::ROOT,
+                kind: NodeKind::Folder,
+                content: NodeContent::folder(".HBSYNC"),
+                removed: false,
+            },
+            None,
+        )?;
+        srv.seed_file(
+            folder,
+            "ignore",
+            b"*\n",
+            hbsync_fileio::HashAlgorithm::Blake3,
+        )?;
+    }
+    a.sync()?;
+    a.sync()?;
+    let after = listing(&state);
+    assert!(
+        !after.contains("ignore") || before.contains("ignore"),
+        "an ignore file came into the state folder: {after:?}"
+    );
+    // Nothing of the drive's in it (its own `tmp` may come).
+    let new: Vec<&String> = after.difference(&before).filter(|n| *n != "tmp").collect();
+    assert!(
+        new.is_empty(),
+        "the drive's {new:?} came into the state folder"
+    );
+    Ok(())
+}

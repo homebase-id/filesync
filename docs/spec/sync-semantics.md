@@ -454,7 +454,9 @@ item is invisible to this device's sync, locally and remotely. Ignoring never de
 on its own.
 
 **Classes** (`hbsync-local/src/filter.rs`):
-- **Excluded**: the client's own `.hbsync` folder at the top of the sync root.
+- **Excluded**: the client's own `.hbsync` folder at the top of the sync root, in any case or
+  spelling a volume that ignores case takes for it (`.HBSYNC`): another writer's folder so named
+  would be this client's own there, and what is in it would land in it.
 - **Junk**: a built-in list of names the OS or an application creates by itself, matched in any
   case at any depth: macOS `.DS_Store`, `._*`, `Icon\r`, `.Spotlight-V100`, `.Trashes`,
   `.fseventsd`, `.TemporaryItems`, `.DocumentRevisions-V100`, `.apdisk`; Windows `Thumbs.db`,
