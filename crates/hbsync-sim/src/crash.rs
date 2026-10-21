@@ -21,7 +21,7 @@ impl Sim {
     ///
     /// [`Event::Crash`]: crate::Event::Crash
     pub(crate) fn crash(&mut self, c: usize) {
-        self.crashes += 1;
+        self.faults.crashes += 1;
         let front = self.clients[c].plan.front().map(|(op, _)| op.clone());
         match front {
             Some(op @ Op::LocalDownload { node, .. })
@@ -119,7 +119,7 @@ impl Sim {
             _ => (kept && held.is_empty()).then_some(held),
         };
         // Every other crash (the first too) leaves its file unhashed for a sync.
-        let unhashed = matches!(op, Op::LocalDownload { .. }) && self.crashes % 2 == 1;
+        let unhashed = matches!(op, Op::LocalDownload { .. }) && self.faults.crashes % 2 == 1;
         let placement = Placement {
             record,
             parent: *parent,

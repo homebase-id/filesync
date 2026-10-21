@@ -13,7 +13,7 @@ use crate::tagbook::TagBook;
 
 /// The oracle's bookkeeping: every blob written and the ones no longer owed, the last listing
 /// of Recently deleted, and the first breach of each rule the model saw happen (each kept
-/// once: the check behind it runs only while none is). The model feeds it through methods
+/// once: the check behind it runs only while none is, its message built only then). The model feeds it through methods
 /// named for the fact they record; [`Sim::check`] reads it.
 #[derive(Debug, Default)]
 pub(crate) struct Ledger {
@@ -44,6 +44,9 @@ pub(crate) struct Ledger {
     emptied_unlisted: Option<String>,
     /// The first item emptied on its own that stayed though nothing kept it.
     emptied_kept: Option<String>,
+    /// The first client that took a file the drive holds as gone for good (a wrong "not
+    /// there" believed: [`crate::Sim::with_wrong_not_theres`]).
+    gone_while_there: Option<String>,
     /// For each folder in Recently deleted, what its last rightful removal took along as it
     /// happened: the live nodes in it then, through live folders, each at its version then.
     took: BTreeMap<NodeId, BTreeMap<NodeId, VersionTag>>,
@@ -113,6 +116,16 @@ impl Ledger {
     /// A plan deleted more than the guard allows without a confirmation, if `what` names one.
     pub(crate) fn unconfirmed_mass_delete(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.unguarded, what);
+    }
+
+    /// A client took a file the drive holds as gone for good, if `what` says which.
+    pub(crate) fn took_as_gone(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.gone_while_there, what);
+    }
+
+    /// Whether a client took a file the drive holds as gone for good.
+    pub(crate) fn took_a_live_file_as_gone(&self) -> bool {
+        self.gone_while_there.is_some()
     }
 
     /// A write pointed a node at a folder the server never had, if `what` names one.
@@ -285,7 +298,7 @@ impl Sim {
         if let Some(plan) = &ledger.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
         }
-        if let Some(gone) = &self.gone_while_there {
+        if let Some(gone) = &ledger.gone_while_there {
             return Err(gone.clone());
         }
         // A record recovery keeps holds its node off placements until settled: never for good.
@@ -343,7 +356,11 @@ impl Sim {
             }
             // A parked item waits for its name, which a folder held back may keep.
             let left = client.held_back.iter().map(|(op, _)| op.node());
-            let parked = client.parked.keys().copied().filter(|_| self.refusing);
+            let parked = client
+                .parked
+                .keys()
+                .copied()
+                .filter(|_| self.faults.refusing);
             let nodes: Vec<NodeId> = left
                 .chain(client.last_plan.iter().map(|op| op.node()))
                 .chain(parked)
@@ -824,8 +841,9 @@ mod tests {
     fn the_oracle_reaches_no_further_into_the_engine() {
         // Of the engine, `Tree` and its `Violation`s only: what a delete took along, a folder's
         // part of the drive and what a filter leaves out are the oracle's own walks. (What it
-        // reads of the model, through `Sim`, is the model's state, and `drive_refused`, the
-        // drive's own judgement; it calls no engine rule through them.)
+        // reads of the model, through `Sim`, is the model's state, and the drive's own judgement:
+        // whether it refuses requests and what it judged each (`Faults::refusing`, `judged`, by
+        // `drive_refused`); it calls no engine rule through them.)
         let paths = |source: &str| -> Vec<String> {
             // Up to a test module (`lines` reads a Windows checkout's line ends too).
             source
