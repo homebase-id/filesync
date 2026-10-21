@@ -8,7 +8,9 @@ use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop};
 use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Taken};
-use hbsync_app::protocol::{DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Pause};
+use hbsync_app::protocol::{
+    DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause,
+};
 use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
@@ -521,6 +523,8 @@ fn print_status(status: &DaemonStatus) {
         if let Some(w) = &a.credentials_warning {
             println!("  credentials: {w}");
         }
+        // The account's own: Recently deleted's requests, files on the drive that don't read.
+        print_notes(&format!("{} recently", a.identity), &a.recent);
     }
 }
 
@@ -574,11 +578,17 @@ fn print_folder(s: &FolderStatus) {
             hbsync_local::IGNORE_FILE
         );
     }
-    if !s.recent.is_empty() {
-        println!("  recently:");
-        for note in s.recent.iter().rev().take(10) {
-            println!("    {} {}", when(note.at), note.text);
-        }
+    print_notes("recently", &s.recent);
+}
+
+/// The newest of `notes` (newest last) under `heading`, if any.
+fn print_notes(heading: &str, notes: &[Note]) {
+    if notes.is_empty() {
+        return;
+    }
+    println!("  {heading}:");
+    for note in notes.iter().rev().take(10) {
+        println!("    {} {}", when(note.at), note.text);
     }
 }
 

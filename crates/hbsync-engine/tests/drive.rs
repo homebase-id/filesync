@@ -970,3 +970,24 @@ fn a_restore_of_more_than_a_request_takes() -> R {
     assert_eq!(remote.server().removed().count(), 0);
     Ok(())
 }
+
+/// A row of the feed the client can't read is told as the pull finds it, typed: its file and
+/// version, and why. A pull that finds none tells nothing.
+#[test]
+fn rows_that_dont_read_are_told_as_pulled() -> R {
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&told);
+    drive.tell_skipped(move |rows| sink.lock().unwrap_or_else(|e| e.into_inner()).extend(rows));
+    let newer = remote.create(&folder("newer"), None)?.at();
+    remote.server().set_unreadable(newer.file_id, true);
+    drive.pull(None)?;
+    let rows = std::mem::take(&mut *told.lock().unwrap_or_else(|e| e.into_inner()));
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].at, Some(newer));
+    assert!(rows[0].why.contains("unreadable"), "{rows:?}");
+    drive.pull(None)?;
+    assert!(told.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    Ok(())
+}

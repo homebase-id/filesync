@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hbsync_app::protocol::RecentItem;
+use hbsync_app::protocol::{AccountStatus, Note, RecentItem};
 use hbsync_app::words;
 use hbsync_app::{DaemonStatus, FolderStatus, State};
 use hbsync_types::activity::{Synced, SyncedKind};
@@ -45,6 +45,14 @@ impl Daemon {
             .filter(|f| f.held_deletes.is_some())
             .max_by_key(|f| f.role.is_none())
             .or_else(|| s.main_folder())
+    }
+
+    /// The status of the account `identity`.
+    pub fn account(&self, identity: &hbsync_app::Identity) -> Option<&AccountStatus> {
+        let Daemon::Running(s) = self else {
+            return None;
+        };
+        s.accounts.iter().find(|a| a.identity == *identity)
     }
 
     /// The status of the folder that most needs the user (the main folder among equals): what
@@ -196,12 +204,13 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             "Browse files online".into(),
         ));
         items.push(recently_synced(view.recent, view.now));
-        let problems = problems(s, view.now);
+        // The main folder's, and its account's own (Recently deleted's, the drive's).
+        let account = view.daemon.account(&s.identity).map(|a| &a.recent[..]);
+        let notes = [&s.recent[..], account.unwrap_or_default()];
+        let problems = problems(&notes, view.now);
         if !problems.is_empty() {
-            items.push(Item::Submenu(
-                format!("Problems ({})", s.recent.len()),
-                problems,
-            ));
+            let count: usize = notes.iter().map(|n| n.len()).sum();
+            items.push(Item::Submenu(format!("Problems ({count})"), problems));
         }
         if let Some(h) = view
             .daemon
@@ -300,9 +309,12 @@ pub(crate) fn recent_line(s: &Synced, now: u64) -> String {
     )
 }
 
-fn problems(s: &FolderStatus, now: u64) -> Vec<Item> {
-    s.recent
-        .iter()
+/// The newest of `notes`' lists (each newest last), newest first.
+fn problems(notes: &[&[Note]], now: u64) -> Vec<Item> {
+    let mut all: Vec<&Note> = notes.iter().flat_map(|n| n.iter()).collect();
+    // Stable: notes of one time keep their order.
+    all.sort_by_key(|n| n.at);
+    all.into_iter()
         .rev()
         .take(PROBLEMS_SHOWN)
         .map(|n| Item::Label(cut(&format!("{} · {}", n.text, words::when(n.at, now)))))
@@ -500,6 +512,27 @@ mod tests {
         assert!(m.iter().any(
             |i| matches!(i, Item::Submenu(t, inner) if t == "Problems (1)" && inner.len() == 1)
         ));
+        // The account's own notes too, newest first.
+        let Daemon::Running(mut both) = d else {
+            panic!("running");
+        };
+        let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
+        account.recent = vec![Note {
+            at: NOW - 30,
+            text: "Restoring from Recently deleted failed".into(),
+        }];
+        both.accounts.push(account);
+        let d = Daemon::Running(both);
+        let m = menu(&view(&d, &[]));
+        let problems = m.iter().find_map(|i| match i {
+            Item::Submenu(t, inner) if t == "Problems (2)" => Some(inner.clone()),
+            _ => None,
+        });
+        let first = problems.and_then(|p| p.first().cloned());
+        assert!(
+            matches!(&first, Some(Item::Label(l)) if l.starts_with("Restoring")),
+            "{first:?}"
+        );
 
         let d = running(status(State::Denied));
         let v = view(&d, &[]);

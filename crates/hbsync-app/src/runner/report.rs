@@ -13,7 +13,7 @@ use hbsync_types::NodeId;
 
 use crate::protocol::{FolderStatus, HeldDeletes, LastSync, Note, State};
 
-/// Entries kept in [`FolderStatus::recent`].
+/// Entries kept in [`FolderStatus::recent`] and [`crate::protocol::AccountStatus::recent`].
 const RECENT: usize = 50;
 /// Paths shown for held deletes.
 const EXAMPLES: usize = 10;
@@ -24,13 +24,12 @@ const STALLED_FOR: Duration = Duration::from_secs(600);
 /// ...and at least this often within that time.
 const STALLED_SKIPS: u32 = 3;
 
-/// Each conflict, failure and told skip of `report` (`skips`, [`Stalled::told`]), and the
-/// drive's rows the client couldn't read (`rows`), worded for people.
+/// Each conflict, failure and told skip of `report` (`skips`, [`Stalled::told`]), worded for
+/// people.
 pub(super) fn notes(
     engine: &mut Engine,
     report: &SyncReport,
     skips: &[&(Op, Skip)],
-    rows: Vec<String>,
 ) -> Result<Vec<String>, StateError> {
     let mut notes = Vec::new();
     for c in &report.conflicts {
@@ -48,10 +47,6 @@ pub(super) fn notes(
         notes.push(
             "Homebase is out of storage: new and changed files wait until there is room".into(),
         );
-    }
-    // Drive rows the client can't read (not encrypted, another key, not a sync node).
-    for why in rows {
-        notes.push(format!("a file on Homebase can't be synced: {why}"));
     }
     Ok(notes)
 }
@@ -194,17 +189,17 @@ pub(super) fn record(
         downloaded_changes: report.feed.live + report.feed.deleted,
         adopted: report.adopted,
     });
-    add_notes(s, notes, at);
+    add_notes(&mut s.recent, &mut s.notes_added, notes, at);
     s.synced_added += report.synced.len() as u64;
 }
 
-/// Adds `notes`, made at `at` (Unix seconds), to the folder's recent ones.
-pub(super) fn add_notes(s: &mut FolderStatus, notes: Vec<String>, at: u64) {
-    s.notes_added += notes.len() as u64;
-    s.recent
-        .extend(notes.into_iter().map(|text| Note { at, text }));
-    let excess = s.recent.len().saturating_sub(RECENT);
-    s.recent.drain(..excess);
+/// Adds `notes`, made at `at` (Unix seconds), to a folder's or an account's `recent` ones,
+/// counting them in `added`.
+pub(crate) fn add_notes(recent: &mut Vec<Note>, added: &mut u64, notes: Vec<String>, at: u64) {
+    *added += notes.len() as u64;
+    recent.extend(notes.into_iter().map(|text| Note { at, text }));
+    let excess = recent.len().saturating_sub(RECENT);
+    recent.drain(..excess);
 }
 
 /// What `scan` skipped that the user may want to know, each item once (`told`, a hash of its

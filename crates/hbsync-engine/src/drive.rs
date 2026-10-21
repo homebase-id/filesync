@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hbsync_remote::{ChangeRef, ErrorClass, NodeMeta, Remote, RemoteError};
+use hbsync_remote::{ChangeRef, ErrorClass, NodeMeta, Remote, RemoteError, Skipped};
 use hbsync_state::{StateDb, StateError, keys};
 
 use hbsync_types::schema::NodeContent;
@@ -29,8 +29,11 @@ pub const FEED_PAGES: feed::Pages = feed::Pages {
     whole: 500,
     slim: 2000,
 };
-/// Skipped feed rows kept until a folder's runner reports them, at most.
+/// Skipped feed rows one pull tells, at most.
 const MAX_SKIPPED: usize = 1000;
+
+/// Where the feed rows the client can't read go ([`Drive::tell_skipped`]).
+type SkippedTo = Arc<dyn Fn(Vec<Skipped>) + Send + Sync>;
 
 pub struct Drive {
     /// The account's connection (it sees no folder: a change fans out to those it concerns).
@@ -42,8 +45,8 @@ pub struct Drive {
     answered: Mutex<u64>,
     /// Folders to wake when the drive changed.
     wakes: Wakes,
-    /// Feed rows the client can't read, whoever pulled them, until taken.
-    skipped: Mutex<Vec<String>>,
+    /// Told the feed rows the client can't read, whoever pulled them; logged without it.
+    skipped_to: Mutex<Option<SkippedTo>>,
     /// The drive refused an upload, out of storage: until when uploads are held.
     full: Mutex<Option<Instant>>,
     /// The identity refused this computer (401, 403), and why: nothing asks it again until
@@ -165,7 +168,7 @@ impl Drive {
             asked: AtomicU64::new(0),
             answered: Mutex::new(0),
             wakes: Wakes::default(),
-            skipped: Mutex::default(),
+            skipped_to: Mutex::default(),
             full: Mutex::default(),
             denied: Mutex::default(),
             freshness: Freshness::default(),
@@ -334,9 +337,20 @@ impl Drive {
         self.wake_touched(&mut self.account(), from);
         drop(answered);
         let mut report = pulled?;
-        let mut skipped = lock(&self.skipped);
-        let room = MAX_SKIPPED.saturating_sub(skipped.len());
-        skipped.extend(std::mem::take(&mut report.skipped).into_iter().take(room));
+        let mut skipped = std::mem::take(&mut report.skipped);
+        if !skipped.is_empty() {
+            skipped.truncate(MAX_SKIPPED);
+            // Told without the lock: pulls on other threads don't wait for it.
+            let tell = lock(&self.skipped_to).clone();
+            match tell {
+                Some(tell) => tell(skipped),
+                None => {
+                    for row in &skipped {
+                        tracing::warn!("a row of the drive can't be read: {}", row.why);
+                    }
+                }
+            }
+        }
         Ok(report)
     }
 
@@ -356,10 +370,11 @@ impl Drive {
         Ok(all)
     }
 
-    /// The feed rows the client couldn't read (not encrypted, another key, not a sync node)
-    /// since the last call, each with why; a thousand at most.
-    pub fn take_skipped(&self) -> Vec<String> {
-        std::mem::take(&mut *lock(&self.skipped))
+    /// Tells `tell` the feed rows the client can't read (not encrypted, another key, not a sync
+    /// node), each with why, as a pull (anyone's) finds them: a thousand a pull at most. Told on
+    /// the pulling thread.
+    pub fn tell_skipped(&self, tell: impl Fn(Vec<Skipped>) + Send + Sync + 'static) {
+        *lock(&self.skipped_to) = Some(Arc::new(tell));
     }
 
     /// A channel woken when the drive changed for `folder`'s engine (another engine's pull, or

@@ -20,7 +20,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub(crate) const PROTOCOL: u32 = 8;
+pub(crate) const PROTOCOL: u32 = 9;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -294,6 +294,11 @@ pub struct AccountStatus {
     pub hints: Hints,
     /// Why the credentials aren't in the keychain.
     pub credentials_warning: Option<String>,
+    /// The account's own notes, newest last: a request of Recently deleted that failed, a file
+    /// on the drive this client can't read. Its folders' are theirs ([`FolderStatus::recent`]).
+    pub recent: Vec<Note>,
+    /// Notes added since the daemon started, as [`FolderStatus::notes_added`].
+    pub notes_added: u64,
 }
 
 impl AccountStatus {
@@ -302,6 +307,8 @@ impl AccountStatus {
             identity: identity.clone(),
             hints: Hints::Off,
             credentials_warning: None,
+            recent: Vec::new(),
+            notes_added: 0,
         }
     }
 }

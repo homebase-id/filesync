@@ -76,7 +76,7 @@ impl Account {
     /// Connects and syncs its folders until it should stop, then stops them; a folder's runner
     /// that fails starts again after a pause. An error: a runner that couldn't start.
     pub(in crate::daemon) fn run(
-        &self,
+        self: &Arc<Self>,
         paths: &Paths,
         config: &Config,
         requests: &Receiver<Msg>,
@@ -137,8 +137,20 @@ impl Account {
                 None
             }
         };
-        let to_account = self.requests.clone();
-        let tell = Arc::new(move |note| drop(to_account.send(Msg::Note(note))));
+        // The account's notes go on its status, from the thread that has them (a weak handle:
+        // the drive and the keeper don't keep the account).
+        let account = Arc::downgrade(self);
+        let unreadable = account.clone();
+        drive.tell_skipped(move |rows| {
+            if let Some(a) = unreadable.upgrade() {
+                a.note_unreadable(rows);
+            }
+        });
+        let tell = Arc::new(move |note| {
+            if let Some(a) = account.upgrade() {
+                a.note(vec![note]);
+            }
+        });
         let mut keeper = Keeper::spawn(Arc::clone(&drive), tell);
         // A runner that couldn't start: the account stops its runners and ends with it, the
         // daemon with it (restarted whole). One that ended with an error is started again after a
@@ -207,7 +219,6 @@ impl Account {
                         }
                         changed = true;
                     }
-                    Msg::Note(note) => lock(&self.shown).send_one(Command::Note(note)),
                     // Looked at below.
                     Msg::Wake => {}
                 }

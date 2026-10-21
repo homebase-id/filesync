@@ -464,8 +464,8 @@ impl App {
     }
 }
 
-/// Notifications for what changed and needs the user, in any folder: a new conflict or
-/// failure, held deletes, a refused login.
+/// Notifications for what changed and needs the user, in any folder or account: a new
+/// conflict or failure, held deletes, a refused login.
 fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, String)> {
     let (Daemon::Running(before), Daemon::Running(now)) = (before, next) else {
         return Vec::new();
@@ -476,7 +476,33 @@ fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, S
             out.extend(folder_notices(before, now));
         }
     }
+    for now in &now.accounts {
+        if let Some(before) = before.accounts.iter().find(|a| a.identity == now.identity) {
+            out.extend(problem_notice(
+                before.notes_added,
+                now.notes_added,
+                &now.recent,
+            ));
+        }
+    }
     out
+}
+
+/// The notice for the notes added since the last look (`before` and `now` counted so far,
+/// `recent` newest last), if any.
+fn problem_notice(
+    before: u64,
+    now: u64,
+    recent: &[hbsync_app::protocol::Note],
+) -> Option<(&'static str, &'static str, String)> {
+    let added = now.saturating_sub(before) as usize;
+    let fresh = &recent[recent.len().saturating_sub(added)..];
+    let first = fresh.first()?;
+    let body = match fresh.len() {
+        1 => first.text.clone(),
+        n => format!("{} (and {} more)", first.text, n - 1),
+    };
+    Some(("problem", "Something needs a look", body))
 }
 
 fn folder_notices(
@@ -484,16 +510,11 @@ fn folder_notices(
     now: &FolderStatus,
 ) -> Vec<(&'static str, &'static str, String)> {
     let mut out = Vec::new();
-    // The notes added since the last look (the newest are last).
-    let added = now.notes_added.saturating_sub(before.notes_added) as usize;
-    let fresh = &now.recent[now.recent.len().saturating_sub(added)..];
-    if let Some(first) = fresh.first() {
-        let body = match fresh.len() {
-            1 => first.text.clone(),
-            n => format!("{} (and {} more)", first.text, n - 1),
-        };
-        out.push(("problem", "Something needs a look", body));
-    }
+    out.extend(problem_notice(
+        before.notes_added,
+        now.notes_added,
+        &now.recent,
+    ));
     let token = |s: &FolderStatus| s.held_deletes.as_ref().map(|h| h.token.clone());
     if let Some(held) = &now.held_deletes
         && token(before) != token(now)
@@ -676,5 +697,34 @@ mod tests {
         );
         assert!(!same_shape(&a, &b), "an action changed");
         assert_eq!(flatten(&a).len(), 3);
+    }
+
+    /// An account's new notes are noticed as a folder's are: the oldest new one, and how many
+    /// more.
+    #[test]
+    fn an_accounts_new_notes_are_noticed() {
+        use hbsync_app::protocol::{AccountStatus, Note};
+        let daemon = |added: u64, texts: &[&str]| {
+            let mut account = AccountStatus::new(&"anna.example.com".into());
+            account.notes_added = added;
+            account.recent = texts
+                .iter()
+                .map(|t| Note {
+                    at: 1,
+                    text: (*t).into(),
+                })
+                .collect();
+            Daemon::Running(Box::new(hbsync_app::DaemonStatus {
+                version: hbsync_app::VERSION.into(),
+                accounts: vec![account],
+                folders: Vec::new(),
+            }))
+        };
+        let before = daemon(1, &["old"]);
+        let now = daemon(3, &["old", "Restoring failed", "a file can't be synced"]);
+        let told = notices(&before, &now);
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].2, "Restoring failed (and 1 more)");
+        assert!(notices(&now, &now).is_empty(), "nothing new");
     }
 }

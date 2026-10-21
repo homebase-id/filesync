@@ -125,6 +125,12 @@ impl Client {
     /// line that synced, and each step that failed with its error.
     #[track_caller]
     fn sync(&mut self) -> Res<SyncReport> {
+        // The feed rows it can't read, as the daemon's account is told them.
+        let skipped = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let told = Arc::clone(&skipped);
+        self.0.engine.drive().tell_skipped(move |rows| {
+            told.lock().unwrap_or_else(|e| e.into_inner()).extend(rows);
+        });
         // Homebase holds back feed rows of the current millisecond.
         let total = self.0.sync_until_idle(&hbsync_app::today(), true, || {
             std::thread::sleep(Duration::from_millis(20));
@@ -142,7 +148,7 @@ impl Client {
                 steps.join("\n")
             );
         }
-        let skipped = self.0.engine.drive().take_skipped();
+        let skipped = std::mem::take(&mut *skipped.lock().unwrap_or_else(|e| e.into_inner()));
         assert!(
             skipped.is_empty(),
             "{}: feed rows skipped {skipped:?}",

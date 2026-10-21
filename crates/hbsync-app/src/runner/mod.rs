@@ -43,6 +43,7 @@ use crate::{Identity, MassDelete};
 mod report;
 mod schedule;
 
+pub(crate) use report::add_notes;
 pub(crate) use schedule::{Backoff, shown};
 use schedule::{Schedule, Synced};
 
@@ -144,8 +145,6 @@ pub enum Command {
     ConfirmDeletes { token: String },
     /// The machine woke up: sync now, the backoff forgotten.
     Woke,
-    /// Tell the user `text` (the account's work: restoring, emptying Recently deleted).
-    Note(String),
     /// Stop the runner (between operations).
     Stop,
 }
@@ -724,7 +723,6 @@ impl Runner {
                 *confirmed = Some(self.held.clone());
                 schedule.asked(Instant::now());
             }
-            Command::Note(text) => self.tell(vec![text]),
             Command::Stop => {}
         }
     }
@@ -762,7 +760,7 @@ impl Runner {
         for note in &notes {
             tracing::warn!("{note}");
         }
-        self.set(|s| report::add_notes(s, notes, unix_now()));
+        self.set(|s| report::add_notes(&mut s.recent, &mut s.notes_added, notes, unix_now()));
     }
 
     /// Tells what a scan skipped and the user may want to know (a folder it can't read, a
@@ -781,21 +779,20 @@ impl Runner {
         partial: &SyncReport,
     ) -> Result<(), StateError> {
         // Told once, the notes told so far kept: a part of a sync doesn't say what went away.
-        let notes = self.notes_of(engine, partial, Vec::new())?;
+        let notes = self.notes_of(engine, partial)?;
         let notes = self.told.unseen(notes);
         self.tell(notes);
         Ok(())
     }
 
-    /// `report`'s notes, with the drive's unreadable `rows`.
+    /// `report`'s notes.
     fn notes_of(
         &mut self,
         engine: &mut Engine,
         report: &SyncReport,
-        rows: Vec<String>,
     ) -> Result<Vec<String>, StateError> {
         let skips = self.stalled.told(&report.skipped, Instant::now());
-        report::notes(engine, report, &skips, rows)
+        report::notes(engine, report, &skips)
     }
 
     /// Publishes a finished sync.
@@ -805,8 +802,7 @@ impl Runner {
         report: &SyncReport,
         took: Duration,
     ) -> Result<(), StateError> {
-        let rows = self.drive.take_skipped();
-        let notes = self.notes_of(engine, report, rows)?;
+        let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
         self.held = report.held.iter().map(|op| op.node()).collect();
         let held = report::held(engine, report, &self.held)?;
