@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use hbsync_fileio::hash_bytes;
-use hbsync_state::{ReadTx, Refused, StateError};
-use hbsync_types::{FileContent, HashAlgorithm, NodeId};
+use hbsync_state::{ReadTx, Refused, StateDb, StateError};
+use hbsync_types::{FileContent, HashAlgorithm, NodeId, unix_now_ms};
 
 use crate::reconcile::{Op, Requirement};
 
@@ -175,7 +175,129 @@ impl Held {
     }
 }
 
-/// A folder's refusals, by node and operation kind.
+/// A folder's refusals as its engine keeps them between runs: whether it has none (found so,
+/// and none written since: not read again then), and reading, pruning, applying and clearing
+/// them. A run holds the ones that hold ([`Refusals`]).
+#[derive(Debug, Default)]
+pub(crate) struct FolderRefusals {
+    none: bool,
+    /// [`FolderRefusals::none`] when the run under way started.
+    none_before_run: bool,
+}
+
+impl FolderRefusals {
+    /// The folder's refusals that still hold ([`REFUSED_FOR`]; older ones are forgotten), and
+    /// the operations of `ops` refused as they are taken out, with what waits for them
+    /// ([`hold_back`]; names compared as the folder does, `case_insensitive`): the refusals,
+    /// for the run, and the refused, with why.
+    pub(crate) fn take(
+        &mut self,
+        db: &mut StateDb,
+        ops: &mut Vec<Op>,
+        case_insensitive: bool,
+    ) -> Result<(Refusals, Vec<(Op, String)>), StateError> {
+        let refusals = self.load(db)?;
+        if refusals.is_empty() {
+            return Ok((refusals, Vec::new()));
+        }
+        let (kept, out) = db.read(|s| {
+            hold_back(
+                std::mem::take(ops),
+                |op| match refusals.get(op) {
+                    Some(r) if r.refused => Ok(key_of(s, op)? == r.key),
+                    _ => Ok(false),
+                },
+                |node| place_of(s, node),
+                case_insensitive,
+            )
+        })?;
+        *ops = kept;
+        let out = out
+            .into_iter()
+            .map(|op| {
+                let why = refusals
+                    .get(&op)
+                    .map_or_else(String::new, |r| r.why.clone());
+                (op, why)
+            })
+            .collect();
+        Ok((refusals, out))
+    }
+
+    /// The folder's refusals that still hold; older ones are forgotten.
+    fn load(&mut self, db: &mut StateDb) -> Result<Refusals, StateError> {
+        if self.none {
+            return Ok(Refusals::default());
+        }
+        let rows = db.read(|s| s.all_refused())?;
+        if rows.is_empty() {
+            self.none = true;
+            return Ok(Refusals::default());
+        }
+        let since = unix_now_ms().saturating_sub(REFUSED_FOR.as_millis() as i64);
+        let (live, old): (Vec<_>, Vec<_>) = rows.into_iter().partition(|r| r.at >= since);
+        if !old.is_empty() {
+            db.write(|s| s.folder().prune_refused(since).map(drop))?;
+        }
+        Ok(Refusals::new(live))
+    }
+
+    /// Forgets the folder's refusals (Sync now): each refused operation is sent once more.
+    pub(crate) fn clear(&mut self, db: &mut StateDb) -> Result<(), StateError> {
+        db.write(|s| s.folder().prune_refused(i64::MAX).map(drop))?;
+        self.none = true;
+        Ok(())
+    }
+
+    /// A run starts, which may record refusals: the folder isn't known to have none until it
+    /// says it wrote none ([`FolderRefusals::ran`]; a run that fails may have).
+    pub(crate) fn running(&mut self) {
+        self.none_before_run = std::mem::replace(&mut self.none, false);
+    }
+
+    /// The run ended; `wrote`: it recorded a refusal (or a strike).
+    pub(crate) fn ran(&mut self, wrote: bool) {
+        self.none = self.none_before_run && !wrote;
+    }
+}
+
+/// Where `node` is ([`Place`]): its local item's folder and name, and the folders it is in
+/// here, in the base and on the drive.
+fn place_of(s: &ReadTx<'_>, node: NodeId) -> Result<Place, StateError> {
+    let mut place = Place::default();
+    if let Some(row) = s.local_by_node(node)?
+        && let Some(name) = row.path.name()
+        && let Some(parent) = s.local_parent(node)?
+    {
+        place.local = Some((parent, name.to_owned()));
+        place.folders.push(parent);
+    }
+    place
+        .folders
+        .extend(s.get_base(node)?.map(|b| b.state.parent));
+    place.folders.extend(s.get_mirror(node)?.map(|m| m.parent));
+    Ok(place)
+}
+
+/// The record of `op`'s refusal (`refused`; else its first strike, a download whose bytes
+/// didn't match once), with `why`, now.
+pub(crate) fn record(
+    s: &ReadTx<'_>,
+    op: &Op,
+    why: &str,
+    refused: bool,
+) -> Result<Refused, StateError> {
+    Ok(Refused {
+        node: op.node(),
+        op: op.kind().to_owned(),
+        key: key_of(s, op)?,
+        refused,
+        why: why.to_owned(),
+        at: unix_now_ms(),
+    })
+}
+
+/// A run's refusals of the operations planned, by node and operation kind.
 #[derive(Debug, Default)]
 pub(crate) struct Refusals(HashMap<(NodeId, &'static str), Refused>);
 
@@ -193,9 +315,17 @@ impl Refusals {
         self.0.get(&(op.node(), op.kind()))
     }
 
-    /// Takes `op`'s refusal out.
-    pub(crate) fn take(&mut self, op: &Op) -> Option<Refused> {
-        self.0.remove(&(op.node(), op.kind()))
+    /// `op` is done: whether it had a refusal (or a strike), which is over now (its row to
+    /// delete).
+    pub(crate) fn done(&mut self, op: &Op) -> bool {
+        self.0.remove(&(op.node(), op.kind())).is_some()
+    }
+
+    /// Whether `strike` of `op` (a download's bytes not matching) is its second at the same
+    /// key: refused then.
+    pub(crate) fn twice(&self, op: &Op, strike: &Refused) -> bool {
+        self.get(op)
+            .is_some_and(|r| !r.refused && r.key == strike.key)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

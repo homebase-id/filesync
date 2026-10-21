@@ -559,31 +559,27 @@ impl<'a> Executor<'a> {
         gone: Option<String>,
     ) -> Result<(), StateError> {
         // A download whose bytes didn't match: its strike, or a second time at one version,
-        // refused.
-        let (outcome, strike) = match outcome {
+        // refused. (The record either way: one refused carries the strike's key.)
+        let (outcome, mut record) = match outcome {
             Outcome::Mismatch(why) => {
                 let strike = self.refusal(&op, &why, false)?;
-                let twice = self
-                    .refusals
-                    .get(&op)
-                    .is_some_and(|r| !r.refused && r.key == strike.key);
-                match twice {
-                    true => (
-                        Outcome::Skip(Skip::Refused(format!(
-                            "{why}, twice: the drive holds other bytes than it says"
-                        ))),
-                        None,
-                    ),
+                match self.refusals.twice(&op, &strike) {
+                    true => {
+                        let why = format!("{why}, twice: the drive holds other bytes than it says");
+                        let refused = Refused {
+                            refused: true,
+                            why: why.clone(),
+                            ..strike
+                        };
+                        (Outcome::Skip(Skip::Refused(why)), Some(refused))
+                    }
                     false => (Outcome::Mismatch(why), Some(strike)),
                 }
             }
             outcome => (outcome, None),
         };
         // Done: a refusal of it is over.
-        if matches!(outcome, Outcome::Done | Outcome::Settled)
-            && !self.refusals.is_empty()
-            && self.refusals.take(&op).is_some()
-        {
+        if matches!(outcome, Outcome::Done | Outcome::Settled) && self.refusals.done(&op) {
             let (node, kind) = (op.node(), op.kind());
             self.db.write(|s| s.folder().delete_refused(node, kind))?;
         }
@@ -628,8 +624,9 @@ impl<'a> Executor<'a> {
             Outcome::Retry(why) => self.retried(op, attempts, false, why)?,
             Outcome::Skip(why) => {
                 let node = op.node();
-                let refused = match &why {
-                    Skip::Refused(why) => Some(self.refusal(&op, why, true)?),
+                let refused = match (&why, record.take()) {
+                    (Skip::Refused(_), Some(refused)) => Some(refused),
+                    (Skip::Refused(why), None) => Some(self.refusal(&op, why, true)?),
                     _ => None,
                 };
                 self.db.write(|s| {
@@ -644,7 +641,7 @@ impl<'a> Executor<'a> {
             Outcome::Mismatch(why) => {
                 // The first time at this version: the drive is read again (it may have been
                 // written meanwhile), and the strike recorded.
-                let Some(strike) = strike else {
+                let Some(strike) = record else {
                     unreachable!("a mismatch has its strike");
                 };
                 let node = op.node();
@@ -679,15 +676,8 @@ impl<'a> Executor<'a> {
 
     /// The record of `op`'s refusal (`refused`; else its first strike), with `why`, now.
     fn refusal(&mut self, op: &Op, why: &str, refused: bool) -> Result<Refused, StateError> {
-        let key = self.db.read(|s| crate::refused::key_of(s, op))?;
-        Ok(Refused {
-            node: op.node(),
-            op: op.kind().to_owned(),
-            key,
-            refused,
-            why: why.to_owned(),
-            at: hbsync_types::unix_now_ms(),
-        })
+        self.db
+            .read(|s| crate::refused::record(s, op, why, refused))
     }
 
     /// Takes `op`, which failed for now ([`Schedule::retry`]), with `why`.
