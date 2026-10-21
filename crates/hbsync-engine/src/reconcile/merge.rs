@@ -85,6 +85,22 @@ impl Reconciler<'_> {
         }
     }
 
+    /// Whether `node`'s merge would make a conflict copy: a file edited on both sides, not
+    /// alike ([`Reconciler::merge_both`]).
+    fn would_fork(&self, node: NodeId) -> bool {
+        let (Some(l), Some(r)) = (self.local_state(node), self.input.remote.get(node)) else {
+            return false;
+        };
+        let same = match (&l.content, &r.content) {
+            (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
+            _ => false,
+        };
+        l.kind == NodeKind::File
+            && content_changed(self.local_change(node))
+            && content_changed(self.remote_change(node))
+            && !same
+    }
+
     /// Whether held folder `node` may go to `target` ([`super::held`]): it stays where it is
     /// on each side it is on, and isn't gone from one it was on (a delete, or its undoing).
     /// Making it where it isn't yet, and its tags, may go.
@@ -181,8 +197,8 @@ impl Reconciler<'_> {
     pub(super) fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
         if self.held_as_is(node) {
-            // Its conflict copy waited for a held name: it waits, told so.
-            if self.copies.contains(&node) {
+            // Waiting for a name, and it would fork: its conflict copy waits, told so.
+            if self.waits.contains(&node) && self.would_fork(node) {
                 self.plan.conflicts.push(Conflict::CopyWaits { node });
             }
             self.hold(node);

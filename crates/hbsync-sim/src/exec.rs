@@ -216,36 +216,41 @@ impl Sim {
                 _ => None,
             })
             .collect();
-        // What waits for a hash, checked independently (sync semantics §6.3): no plan touches a
-        // file here not hashed yet, or moves, renames or deletes a folder it is in, on any side
-        // (on the drive as this device sees it: what its filter leaves out is out of view).
-        self.ledger.moved_what_waits(|| {
-            let out_of_view = masked(&remote, &client.filter);
-            let mut held: HashSet<NodeId> = HashSet::new();
-            let mut queue: Vec<(NodeId, bool)> = unhashed
-                .iter()
-                .map(|n| (*n, !detached.contains_key(n)))
-                .collect();
-            while let Some((n, synced)) = queue.pop() {
-                // A detached item is a new one here: held where it is here only.
-                let trees: &[&Tree] = match synced {
-                    true => &[&input.local, &remote, &input.base],
-                    false => &[&input.local],
-                };
-                for tree in trees {
-                    let on_drive = std::ptr::eq(*tree, &remote);
-                    if on_drive && out_of_view.contains(&n) {
-                        continue;
-                    }
-                    if let Some(s) = tree.get(n)
-                        && !s.parent.is_root()
-                        && !(on_drive && out_of_view.contains(&s.parent))
-                        && held.insert(s.parent)
-                    {
-                        queue.push((s.parent, true));
-                    }
+        // What waits for a hash, worked out on its own (sync semantics §6.3): every folder a
+        // file here not hashed yet is in, on any side, and every folder those are in, on the
+        // drive as this device sees it (what its filter leaves out is out of view); a detached
+        // item is a new one here, held where it is here only, under its new id.
+        let out_of_view = masked(&remote, &client.filter);
+        let mut held: HashSet<NodeId> = HashSet::new();
+        let mut queue: Vec<(NodeId, bool)> = unhashed
+            .iter()
+            .map(|n| (*n, !detached.contains_key(n)))
+            .collect();
+        while let Some((n, synced)) = queue.pop() {
+            let sides: &[(&Tree, bool)] = match synced {
+                true => &[(&input.local, false), (&remote, true), (&input.base, false)],
+                false => &[(&input.local, false)],
+            };
+            for (tree, on_drive) in sides {
+                if *on_drive && out_of_view.contains(&n) {
+                    continue;
+                }
+                if let Some(s) = tree.get(n)
+                    && !s.parent.is_root()
+                    && !(*on_drive && out_of_view.contains(&s.parent))
+                    && held.insert(s.parent)
+                {
+                    queue.push((s.parent, !detached.contains_key(&s.parent)));
                 }
             }
+        }
+        let held: HashSet<NodeId> = held
+            .into_iter()
+            .map(|n| detached.get(&n).copied().unwrap_or(n))
+            .collect();
+        // No plan touches a file here not hashed yet, or moves, renames or deletes what holds
+        // it, on any side.
+        self.ledger.moved_what_waits(|| {
             let touched: HashSet<NodeId> = unhashed
                 .iter()
                 .map(|n| detached.get(n).copied().unwrap_or(*n))
@@ -296,14 +301,10 @@ impl Sim {
                     .iter()
                     .copied()
                     .filter(|f| {
-                        let gone = !input.local.contains(*f) || remote.path(*f).is_none();
-                        input.base.contains(*f)
-                            && gone
-                            && unhashed.iter().any(|u| {
-                                [&input.local, &remote, &input.base]
-                                    .iter()
-                                    .any(|t| t.ancestors(*u).contains(f))
-                            })
+                        let gone = !input.local.contains(*f)
+                            || remote.path(*f).is_none()
+                            || out_of_view.contains(f);
+                        input.base.contains(*f) && gone && held.contains(f)
                     })
                     .collect();
                 let unconfirmed = |op: &&Op| {

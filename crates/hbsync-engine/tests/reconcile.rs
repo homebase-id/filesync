@@ -2319,3 +2319,34 @@ fn a_detached_file_waits_by_its_stored_id() {
     );
     assert_eq!(plan.waiting, [x]);
 }
+
+/// A file in a folder that waits for a held name, edited unlike on both sides: its conflict
+/// copy waits with it, and the user is told so.
+#[test]
+fn a_fork_in_a_waiting_folder_is_told() {
+    let [u, wfold, x] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(u, file(ROOT, "u", "1"))
+        .synced(wfold, folder(ROOT, "w"))
+        .synced(x, file(wfold, "x", "1"));
+    w.local(
+        u,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "v", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(u);
+    w.local(wfold, Some(folder(ROOT, "u")));
+    w.local(x, Some(file(wfold, "x", "mine")));
+    w.remote(x, Some(file(wfold, "x", "theirs")));
+    let plan = w.plan();
+    assert_eq!(
+        plan.conflicts,
+        [Conflict::CopyWaits { node: x }],
+        "{plan:#?}"
+    );
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+}

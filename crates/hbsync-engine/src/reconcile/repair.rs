@@ -285,7 +285,6 @@ impl Reconciler<'_> {
             self.drop_fork(n);
             if let Some(original) = self.forked_into(n) {
                 self.merged.remove(n);
-                self.copy_waits.insert(original);
                 self.fork_waits(original);
             } else {
                 self.hold(n);
