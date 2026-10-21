@@ -5395,7 +5395,6 @@ fn putting_back_many_loose_files_takes_few_requests() -> R {
     let before = b.remote.faults().requests;
     assert_eq!(b.engine.put_back(&held)?, 300);
     let requests = b.remote.faults().requests - before;
-    eprintln!("put back 300 loose files: {requests} requests");
     assert!(requests <= 3, "{requests} requests");
     b.sync()?;
     a.sync()?;
@@ -5420,13 +5419,13 @@ fn two_items_of_one_name_restored_together_both_come_back() -> R {
     assert_eq!(nodes.len(), 2, "{nodes:?}");
     assert_eq!(a.engine.drive().restore(&nodes)?, 2);
     a.sync()?;
-    let mut texts: Vec<String> = a
-        .tree_text("")
-        .into_iter()
-        .map(|l| l.split(" = ").nth(1).unwrap_or_default().to_owned())
+    let tree = a.tree_text("");
+    let mut texts: Vec<&str> = tree
+        .iter()
+        .map(|l| l.split(" = ").nth(1).unwrap_or_default())
         .collect();
     texts.sort();
-    assert_eq!(texts, ["one", "two"], "{:?}", a.tree_text(""));
-    assert!(a.tree_text("").iter().any(|l| l.starts_with("x.txt = ")));
+    assert_eq!(texts, ["one", "two"], "{tree:?}");
+    assert!(tree.iter().any(|l| l.starts_with("x.txt = ")), "{tree:?}");
     Ok(())
 }

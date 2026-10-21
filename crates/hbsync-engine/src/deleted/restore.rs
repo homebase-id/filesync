@@ -26,19 +26,9 @@ impl AccountOps<'_> {
     /// Leaves the account behind ([`AccountOps::run`]) when the drive refused a write for its
     /// state (changed or deleted for good meanwhile), or a write may have landed unanswered.
     pub fn restore(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        let plan = lock(self.account).read(|s| {
-            let mut all: Option<RestorePlan> = None;
-            for &node in nodes {
-                if let Some(plan) = plan_restore(s, node)? {
-                    match &mut all {
-                        Some(all) => all.merge(plan),
-                        None => all = Some(plan),
-                    }
-                }
-            }
-            Ok(all)
-        })?;
-        let Some(RestorePlan { rows, live, taken }) = plan else {
+        let Some(RestorePlan { rows, live, taken }) =
+            lock(self.account).read(|s| plan_restore(s, nodes))?
+        else {
             return Ok(0);
         };
         let mut r = Restoring {
@@ -232,53 +222,54 @@ pub(super) struct RestorePlan {
     taken: HashMap<NodeId, HashSet<String>>,
 }
 
-impl RestorePlan {
-    /// Takes in `other`, a restore of another node planned from the same read: its rows after
-    /// these, each node once, its folders and their names with these.
-    fn merge(&mut self, other: RestorePlan) {
-        let mut seen: HashSet<NodeId> = self.rows.iter().map(|r| r.row.node).collect();
-        self.rows
-            .extend(other.rows.into_iter().filter(|r| seen.insert(r.row.node)));
-        self.live.extend(other.live);
-        for (folder, names) in other.taken {
-            self.taken.entry(folder).or_default().extend(names);
-        }
-    }
-}
-
 pub(super) fn plan_restore(
     s: &ReadTx<'_>,
-    node: NodeId,
+    nodes: &[NodeId],
 ) -> Result<Option<RestorePlan>, StateError> {
-    let Some(top) = s.removed_by_node(node)? else {
-        return Ok(None);
-    };
-    // The folders above, as far as they are in Recently deleted (then in the tree, or deleted
-    // for good: the item comes back as an orphan, for Recovered files). A chain past any depth
-    // a path may have (only a malicious drive makes one) stays where it is: above its top is
-    // still a removed folder, not one gone for good.
-    let up = crate::walk::up::<_, StateError>(top.row.parent, |at| {
-        Ok(s.removed_by_node(at)?.map(|f| {
-            let parent = f.row.parent;
-            (f, parent)
-        }))
-    })?;
-    if matches!(up.end, End::Deep) {
-        return Ok(None);
-    }
-    let mut chain = up.items;
-    chain.reverse();
-    // Then the node and what was deleted with it, each after its folder; each node once. What
-    // is live still comes back with its folder by itself.
+    // Each node and what was deleted with it once, whichever of `nodes` takes it in.
     let mut seen = HashSet::new();
     let mut rows = Vec::new();
-    for r in chain.into_iter().chain(group(s, top)?) {
-        if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
-            rows.push(r);
+    let mut any = false;
+    for &node in nodes {
+        if seen.contains(&node) {
+            continue; // in what another of them takes along
+        }
+        let Some(top) = s.removed_by_node(node)? else {
+            continue;
+        };
+        // The folders above, as far as they are in Recently deleted (then in the tree, or
+        // deleted for good: the item comes back as an orphan, for Recovered files). A chain
+        // past any depth a path may have (only a malicious drive makes one) stays where it is:
+        // above its top is still a removed folder, not one gone for good.
+        let up = crate::walk::up::<_, StateError>(top.row.parent, |at| {
+            if seen.contains(&at) {
+                return Ok(None); // planned already, with what is above it
+            }
+            Ok(s.removed_by_node(at)?.map(|f| {
+                let parent = f.row.parent;
+                (f, parent)
+            }))
+        })?;
+        if matches!(up.end, End::Deep) {
+            continue;
+        }
+        any = true;
+        let mut chain = up.items;
+        chain.reverse();
+        // Then the node and what was deleted with it, each after its folder. What is live
+        // still comes back with its folder by itself.
+        for r in chain.into_iter().chain(group(s, top)?) {
+            if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
+                rows.push(r);
+            }
         }
     }
-    // The folders in the tree the rows may go into, and the folders coming back: their names.
-    // (One that is neither went for good: what was in it takes no name there.)
+    if !any {
+        return Ok(None);
+    }
+    // The folders in the tree the rows may go into, and the folders coming back: their names,
+    // each folder read once. (One that is neither went for good: what was in it takes no name
+    // there.)
     let mut live = HashSet::from([NodeId::ROOT]);
     let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
     for parent in rows.iter().map(|r| r.row.parent).chain([NodeId::ROOT]) {

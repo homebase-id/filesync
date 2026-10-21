@@ -77,7 +77,7 @@ fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
         s.account().put_removed(&removed(a, b, 1))?;
         s.account().put_removed(&removed(b, a, 1))
     })?;
-    let plan = db.read(|s| plan_restore(s, a))?.map(|p| p.rows.len());
+    let plan = db.read(|s| plan_restore(s, &[a]))?.map(|p| p.rows.len());
     assert_eq!(plan, Some(2));
     // One of them is the item, the same one whichever row a walk starts from: the listing
     // and a lookup of either row agree on it and on its count.
@@ -499,7 +499,7 @@ fn what_went_before_its_folder_stays() -> Result<(), StateError> {
         s.account().put_removed(&removed(deeper, with, 12))
     })?;
     let plan: Option<Vec<NodeId>> = db
-        .read(|s| plan_restore(s, f))?
+        .read(|s| plan_restore(s, &[f]))?
         .map(|p| p.rows.iter().map(|r| r.row.node).collect());
     assert_eq!(plan, Some(vec![f, with, deeper]));
     let tops: HashMap<NodeId, NodeId> = db
