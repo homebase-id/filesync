@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use hbsync_local::{
     CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan,
 };
+use hbsync_platform::RelPath;
 use hbsync_remote::Remote;
 use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
 use hbsync_types::NodeId;
@@ -66,6 +67,22 @@ impl EngineConfig {
             after_plan: None,
         }
     }
+}
+
+/// The rows of `nodes` here, each with the path the user knows it by (a parked item's
+/// original one).
+fn waiting_rows(
+    s: &ReadTx<'_>,
+    nodes: &[NodeId],
+) -> Result<Vec<(hbsync_state::LocalRow, RelPath)>, StateError> {
+    let mut rows = Vec::new();
+    for &node in nodes {
+        if let Some(row) = s.local_by_node(node)? {
+            let shown = view::parked_place(s, &row)?.unwrap_or_else(|| row.path.clone());
+            rows.push((row, shown));
+        }
+    }
+    Ok(rows)
 }
 
 /// What start-up did.
@@ -486,8 +503,10 @@ impl Engine {
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
         self.sweep_after = after;
         report.pending = self.db.read(|s| s.dirty_count())?;
+        // A file something waits for is read again then: an app letting go of it tells no one.
         report.unfinished = !swept
-            || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
+            || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()))
+            || !report.waiting.is_empty();
         if report.ops_done > 0 || report.feed.deleted > 0 {
             // Ids of nodes gone everywhere.
             self.db.write(|s| s.account().collect_nodes())?;
@@ -521,6 +540,58 @@ impl Engine {
             rescan_dirs(&mut self.db, &self.cfg.folder.root, &dirs, &self.scan_opts)?;
         }
         Ok(())
+    }
+
+    /// Something in `plan` waits for files here not hashed yet (sync semantics §6.3): those
+    /// unchanged since the scan that couldn't read them (locked, unreadable: one still changing
+    /// is read by the scan its change brings) are read now, and `dirty` planned again if that
+    /// recorded anything. What still waits is told, by name. Costs nothing unless something
+    /// waits; then a row and a stat a file, a read of each unchanged one, and one more plan.
+    fn read_waiting(
+        &mut self,
+        plan: Plan,
+        dirty: &[NodeId],
+        opts: &Options,
+        report: &mut SyncReport,
+    ) -> Result<Plan, EngineError> {
+        if plan.waiting.is_empty() {
+            return Ok(plan);
+        }
+        let root = &self.cfg.folder.root;
+        let rows = self.db.read(|s| waiting_rows(s, &plan.waiting))?;
+        let unchanged: Vec<RelPath> = rows
+            .iter()
+            .filter(|(row, _)| {
+                // Its bytes as the scan saw them: size and mtime (a lock, or a mode change,
+                // moves ctime at most).
+                hbsync_platform::meta::stat(&row.path.to_native(root))
+                    .is_ok_and(|m| row.fingerprint.same_after_rename(&m))
+            })
+            .map(|(row, _)| row.path.clone())
+            .collect();
+        let mut plan = plan;
+        let mut why = std::collections::HashMap::new();
+        if !unchanged.is_empty() {
+            let scan = rescan_entries(&mut self.db, root, &[], &unchanged, &self.scan_opts)?;
+            if scan.hashed > 0 || scan.dirty > 0 {
+                plan = self.plan(dirty, opts)?;
+            }
+            why.extend(scan.unhashed);
+        }
+        if !plan.waiting.is_empty() {
+            let rows = self.db.read(|s| waiting_rows(s, &plan.waiting))?;
+            for (row, shown) in rows {
+                let why = why.remove(&row.path);
+                let told = (
+                    shown.to_string(),
+                    why.unwrap_or_else(|| "being written".into()),
+                );
+                if !report.waiting.contains(&told) {
+                    report.waiting.push(told);
+                }
+            }
+        }
+        Ok(plan)
     }
 
     /// Plans `dirty` from a view of what the rules may need ([`view::build_narrow`]), again
@@ -571,40 +642,8 @@ impl Engine {
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
         recover_placements(&mut self.db, &self.cfg.folder)?;
-        let mut plan = self.plan(&dirty, opts)?;
-        // Something waits for files here not hashed yet (sync semantics §6.3): read them now,
-        // and plan again if that hashed any. What still can't be read is told.
-        if !plan.waiting.is_empty() {
-            let paths: Vec<(NodeId, hbsync_platform::RelPath)> = self.db.read(|s| {
-                let mut paths = Vec::new();
-                for &node in &plan.waiting {
-                    paths.extend(s.local_by_node(node)?.map(|r| (node, r.path)));
-                }
-                Ok(paths)
-            })?;
-            let entries: Vec<_> = paths.iter().map(|(_, p)| p.clone()).collect();
-            let scan = rescan_entries(
-                &mut self.db,
-                &self.cfg.folder.root,
-                &[],
-                &entries,
-                &self.scan_opts,
-            )?;
-            if scan.hashed > 0 {
-                plan = self.plan(&dirty, opts)?;
-            }
-            let still: std::collections::HashSet<NodeId> = plan.waiting.iter().copied().collect();
-            report.waiting.extend(
-                paths
-                    .into_iter()
-                    .filter(|(node, _)| still.contains(node))
-                    .map(|(_, path)| {
-                        let why = scan.unhashed.iter().find(|(p, _)| *p == path);
-                        let why = why.map_or_else(|| "not read yet".to_owned(), |(_, w)| w.clone());
-                        (path.to_string(), why)
-                    }),
-            );
-        }
+        let plan = self.plan(&dirty, opts)?;
+        let plan = self.read_waiting(plan, &dirty, opts, report)?;
         #[cfg(feature = "testkit")]
         if let Some(after) = &self.cfg.after_plan {
             (after.0)();

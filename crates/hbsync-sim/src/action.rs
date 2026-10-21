@@ -21,8 +21,9 @@ pub enum Action {
     EditWriting {
         file: usize,
     },
-    /// Another app holds a file locked: no plan finds it hashed (its merge deferred, and what
-    /// waits for it waits) till the clients settle, when it lets go.
+    /// The user edits a file in an app that holds it locked: no plan finds it hashed (its
+    /// merge deferred, and what waits for it waits) till the clients settle, when it lets go.
+    /// (A lock alone keeps the hash of an unchanged file.)
     Lock {
         file: usize,
     },

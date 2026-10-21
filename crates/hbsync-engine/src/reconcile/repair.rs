@@ -122,8 +122,6 @@ impl Reconciler<'_> {
                 // There, in a version this device can't read (a folder it doesn't read, a file
                 // that is a folder now, maybe): what is in it stays in it.
                 _ if self.input.unreadable.contains(&parent) => Parent::Wait,
-                // Left as it is till an item here is hashed: never an orphan to adopt.
-                _ if self.holding.contains(&node) => Parent::Wait,
                 // A file: another writer put the node in it (§6.3).
                 Some(_) => self.recover_or_wait(node),
                 None if withdrawn.contains(&parent) => Parent::Wait,
@@ -136,6 +134,11 @@ impl Reconciler<'_> {
                     _ if self.input.remote_complete => self.recover_or_wait(node),
                     _ => Parent::Wait,
                 },
+            };
+            // Left as it is till an item here is hashed: never an orphan to adopt.
+            let decided = match decided {
+                Parent::Recover if self.holding.contains(&node) => Parent::Wait,
+                decided => decided,
             };
             match decided {
                 Parent::Folder(state) => {
@@ -254,9 +257,18 @@ impl Reconciler<'_> {
             .unwrap_or(folder)
     }
 
-    /// Scoped `node` and what is below it wait for a hash ([`super::held`]): it would take a
-    /// name what waits holds. Nothing is done to them; a fork's copy waits with its original.
-    /// Whether any did.
+    /// The fork of `node`, if any, is undone: its copy isn't made.
+    pub(super) fn drop_fork(&mut self, node: NodeId) {
+        if let Some(copy) = self.forks.remove(&node) {
+            self.scope.remove(&copy);
+            self.origin.remove(&copy);
+            self.merged.remove(copy);
+        }
+    }
+
+    /// Scoped `node` and what is below it wait for a hash ([`super::held_from`]): it would take
+    /// a name what waits holds. Left as they are (a conflict copy isn't made); the plan is made
+    /// again holding them with their folders ([`reconcile`]). Whether any did.
     fn wait_for_hash(&mut self, node: NodeId) -> bool {
         let mut any = false;
         for n in self.merged.subtree(node) {
@@ -264,19 +276,16 @@ impl Reconciler<'_> {
                 continue;
             }
             any = true;
+            self.waiters.push(n);
             self.origin.remove(&n);
             self.adopted.remove(&n);
             self.plan.conflicts.retain(|c| c.node() != n);
-            if let Some(copy) = self.forks.remove(&n) {
-                self.scope.remove(&copy);
-                self.origin.remove(&copy);
-                self.merged.remove(copy);
-            }
+            self.drop_fork(n);
             if let Some(original) = self.forked_into(n) {
+                self.merged.remove(n);
                 self.fork_waits(original);
-            }
-            if self.input.dirty.contains(&n) {
-                self.deferred.insert(n);
+            } else {
+                self.hold(n);
             }
         }
         any
@@ -289,20 +298,21 @@ impl Reconciler<'_> {
             .filter_map(|n| self.merged.get(*n).map(|s| s.parent))
             .collect();
         // The drive's names of what waits for a hash elsewhere here (`held`): held for it.
-        let drive_held: HashMap<(NodeId, String), NodeId> = self
-            .holding
-            .iter()
-            .filter_map(|n| {
-                let r = self
-                    .input
-                    .remote
-                    .get(*n)
-                    .filter(|_| !self.taken.contains(n))?;
-                let here = self.merged.get(*n);
-                let elsewhere = here.is_none_or(|h| !h.same_place(r));
-                elsewhere.then(|| ((r.parent, name_key(&r.name)), *n))
-            })
-            .collect();
+        let mut drive_held: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
+        for &n in &self.holding {
+            let Some(r) = self
+                .input
+                .remote
+                .get(n)
+                .filter(|_| !self.taken.contains(&n))
+            else {
+                continue;
+            };
+            if self.merged.get(n).is_none_or(|h| !h.same_place(r)) {
+                let key = (r.parent, name_key(&r.name));
+                drive_held.entry(key).or_default().push(n);
+            }
+        }
         for parent in parents {
             let mut by_key: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
             for child in self.merged.children(parent) {
@@ -337,11 +347,13 @@ impl Reconciler<'_> {
                 let holders: Vec<NodeId> = drive_held
                     .get(&(parent, key.clone()))
                     .into_iter()
+                    .flatten()
                     .copied()
                     .chain(group.iter().copied().filter(|n| self.holding.contains(n)))
                     .collect();
                 if !holders.is_empty() {
-                    let mut waited = false;
+                    // What waits for the name: this plan's, or an earlier one's (`waits`).
+                    let mut waited = group.iter().any(|n| self.waits.contains(n));
                     for n in group {
                         waited |= self.wait_for_hash(n);
                     }

@@ -181,7 +181,7 @@ impl Reconciler<'_> {
 
     pub(super) fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
-        if i.local_unhashed.contains(&node) {
+        if self.waits_for_hash(node) {
             self.hold(node);
             return;
         }
@@ -252,11 +252,7 @@ impl Reconciler<'_> {
         }
         if self.held.contains(&node) && !self.stays_put(node, target.as_ref()) {
             self.plan.conflicts.retain(|c| c.node() != node);
-            if let Some(copy) = self.forks.remove(&node) {
-                self.scope.remove(&copy);
-                self.origin.remove(&copy);
-                self.merged.remove(copy);
-            }
+            self.drop_fork(node);
             self.hold(node);
             return;
         }

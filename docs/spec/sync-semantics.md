@@ -159,15 +159,19 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    is hashed (below); then it keeps a folder alive as any live child does.
 
    **What waits for a hash.** A file here not hashed yet (being written, locked, unreadable, a
-   placement a crash left unread) can't be judged: until it is hashed it, and every folder on
-   its path here, on the drive and in the base, stay as they are on both sides, whatever the
-   drive did meanwhile. Nothing is done to the file; such a folder is not deleted, restored
-   or moved on either side (made where it isn't yet, and its tags, may go): the delete or
-   move waits, it isn't undone. A node that would take the file's name or such a folder's,
-   here or on the drive, waits too, never renamed. Once hashed, all of it merges as ever (an
+   placement a crash left unread) can't be judged: until it is hashed it, and every folder it
+   is in here, on the drive or in the base, and every folder those are in on any side, stay
+   as they are on both sides, whatever the drive did meanwhile. Nothing is done to the file;
+   such a folder is not deleted, restored or moved on either side (made where it isn't yet,
+   and its tags, may go): the delete or move waits, it isn't undone. A node that would take
+   the file's name or such a folder's, here or on the drive, waits too, never renamed, where
+   it is, holding its own folders the same way. Once hashed, all of it merges as ever (an
    edit keeps a deleted folder alive as above, an unchanged file follows the drive). The
-   round that finds something waiting reads those files first and plans again; one that
-   still can't be read is told, by name.
+   round that finds something waiting reads those of the files that haven't changed since
+   the scan couldn't (locked, unreadable; one still being written is read by the scan its
+   change brings) and plans again; one that still can't be read is told, by name, and read
+   again at the next try of unfinished work (5 s, backing off to 5 min). A file that can
+   never be read holds what waits for it for as long.
 
    **Orphans go into Recovered files.** A live node whose folder is nowhere on the drive
    (deleted for good: a stale plan's create racing a delete and an emptied Recently deleted,

@@ -474,14 +474,11 @@ impl Sim {
         false
     }
 
-    /// The apps holding files locked let go ([`Action::Lock`]): the scan hashes them, and that
-    /// asks for a sync.
+    /// The apps holding files locked let go ([`Action::Lock`]): the next plans find them
+    /// hashed (each settling starts with every client asked to sync).
     fn let_go(&mut self) {
         for client in &mut self.clients {
-            if !client.locked.is_empty() {
-                client.locked.clear();
-                client.hashing = true;
-            }
+            client.locked.clear();
         }
     }
 

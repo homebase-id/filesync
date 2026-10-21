@@ -1748,3 +1748,146 @@ fn a_new_folder_goes_up_while_a_file_in_it_is_written() {
     );
     assert_eq!(plan.deferred, [d]);
 }
+
+/// A file being written in folder b, which the user moved here out of r into x, and r deleted
+/// here: b's move waits (b holds the file), and so does r's delete, b's folder on the drive. r
+/// deleted on the drive took b and what else is in it along (f1, never deleted by anyone).
+#[test]
+fn a_folder_that_holds_a_waiting_folder_on_the_drive_waits_too() {
+    let [r, b, f1, x, wf] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(r, folder(ROOT, "r"))
+        .synced(b, folder(r, "b"))
+        .synced(f1, file(b, "f1", "1"))
+        .synced(x, folder(ROOT, "x"))
+        .synced(wf, file(ROOT, "w", "w"));
+    w.local(b, Some(folder(x, "b")));
+    w.local(r, None);
+    w.local(
+        wf,
+        Some(NodeState {
+            content: None,
+            ..file(b, "w", "w2")
+        }),
+    );
+    w.input.local_unhashed.insert(wf);
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteDelete { .. } | Op::LocalTrash { .. })),
+        "{:#?}",
+        plan.ops
+    );
+}
+
+/// The drive moved folder b into c, a file being written here into b, and deleted b's old
+/// folder d; here a file in b has an edit. b waits where it is here (it holds the file), and
+/// so does d: never trashed here with b and the edit in it.
+#[test]
+fn a_folder_that_holds_a_waiting_folder_here_waits_too() {
+    let [d, b, e, a, c, wf] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(d, folder(ROOT, "d"))
+        .synced(b, folder(d, "b"))
+        .synced(e, file(b, "e", "1"))
+        .synced(a, folder(ROOT, "a"))
+        .synced(c, folder(ROOT, "c"))
+        .synced(wf, file(a, "w", "w"));
+    w.remote(b, Some(folder(c, "b")));
+    w.remote(wf, Some(file(b, "w", "w")));
+    w.remote(d, None);
+    w.local(e, Some(file(b, "e", "2")));
+    w.local(
+        wf,
+        Some(NodeState {
+            content: None,
+            ..file(a, "w", "w2")
+        }),
+    );
+    w.input.local_unhashed.insert(wf);
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+        "{:#?}",
+        plan.ops
+    );
+}
+
+/// The drive moved n out of g to the top as x.txt and deleted g; here n has an edit, and a new
+/// x.txt at the top is being written. n waits for the name where it is, and g, which holds it,
+/// waits too: never trashed with n's edit in it.
+#[test]
+fn a_node_waiting_for_a_name_keeps_its_folder_here() {
+    let [g, n, hh] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(g, folder(ROOT, "g"))
+        .synced(n, file(g, "x.txt", "1"));
+    w.remote(n, Some(file(ROOT, "x.txt", "1")));
+    w.remote(g, None);
+    w.local(n, Some(file(g, "x.txt", "2")));
+    w.local(
+        hh,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "x.txt", "h")
+        }),
+    );
+    w.input.local_unhashed.insert(hh);
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(plan.deferred.contains(&n), "{:?}", plan.deferred);
+    assert_eq!(plan.waiting, [hh]);
+}
+
+/// Here n moved out of r to the top as x.txt, with an edit, and r deleted; the drive renamed h,
+/// being written here, to x.txt. n waits for the drive's name, and r, its folder on the drive,
+/// waits too: its delete took n along there.
+#[test]
+fn a_node_waiting_for_a_name_keeps_its_folder_on_the_drive() {
+    let [r, n, hh] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(r, folder(ROOT, "r"))
+        .synced(n, file(r, "n", "1"))
+        .synced(hh, file(ROOT, "h", "h"));
+    w.remote(hh, Some(file(ROOT, "x.txt", "h")));
+    w.local(n, Some(file(ROOT, "x.txt", "2")));
+    w.local(r, None);
+    w.local(
+        hh,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "h", "h2")
+        }),
+    );
+    w.input.local_unhashed.insert(hh);
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(plan.deferred.contains(&n), "{:?}", plan.deferred);
+}
