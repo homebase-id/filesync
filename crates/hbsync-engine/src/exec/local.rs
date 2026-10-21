@@ -71,11 +71,15 @@ impl Executor<'_> {
         }
         let target = self.target_path(parent, name)?;
         let abs = self.disk.abs(&target);
-        let (mirror, base_at) = self.db.read(|s| {
-            Ok((
-                s.get_mirror(node)?,
-                s.get_base(node)?.map(|b| b.remote.version),
-            ))
+        // Never synced here and no version of the drive live when planned: made from Recently
+        // deleted (its folder restored, its RemoteCreate to follow).
+        let (mirror, base_at, removed) = self.db.read(|s| {
+            let base_at = s.get_base(node)?.map(|b| b.remote.version);
+            let removed = match drive.is_none() && base_at.is_none() {
+                true => s.removed_by_node(node)?,
+                false => None,
+            };
+            Ok((s.get_mirror(node)?, base_at, removed))
         })?;
         let synced_before = base_at.is_some();
         let created_ms = if ops::CAN_SET_CREATED {
@@ -111,6 +115,22 @@ impl Executor<'_> {
         // it claims none, as a download does.
         let kept_tags = self.disk.tags_kept();
         let none = tags.held_by(self.folder.os).is_empty();
+        // Made from Recently deleted, it settles against the version there (the commit's), what
+        // the tags it writes come from. Restored, changed or purged since the plan, that version
+        // may no longer hold them: it waits for the next plan, which decides on the drive as it
+        // is now. Settled against a version without a tag it wrote, the tag read as this device
+        // adding it, and a tag removed on the drive since came back. One with none to write
+        // (Recovered files, made here), or a folder left by an interrupted run (taken over as
+        // before), goes ahead.
+        if acted.is_none() && !synced_before && !adopt && kept_tags && !none {
+            let version = removed.and_then(|r| r.row.state());
+            let held = tags.held_by(self.folder.os);
+            let holds =
+                |v: &hbsync_types::NodeState| held.iter().all(|t| v.tags.get(&t.name) == Some(t));
+            if !version.as_ref().is_some_and(holds) {
+                return Ok(Outcome::stale("not as planned in Recently deleted"));
+            }
+        }
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
             target: target.clone(),

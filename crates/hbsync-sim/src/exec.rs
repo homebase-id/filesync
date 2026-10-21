@@ -749,25 +749,9 @@ impl Sim {
             if let Some(at) = at {
                 self.clients[c].run_settled.insert(node, at);
             }
-            // A new item (none was there) whose base keeps a tag neither it nor the version it
-            // came from holds: the known limit (`Limit::NewItemKeepsBaseTag`).
             if fresh && matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. }) {
-                let client = &self.clients[c];
-                let lacks = |s: Option<&NodeState>, name: &str| {
-                    s.is_none_or(|s| s.tags.get(name).is_none())
-                };
-                let (item, drive) = (client.local.get(node), op.drive().map(|d| &d.state));
-                let kept: Vec<String> = client
-                    .base
-                    .get(node)
-                    .iter()
-                    .flat_map(|b| b.tags.iter())
-                    .map(|t| t.name.clone())
-                    .filter(|name| lacks(item, name) && lacks(drive, name))
-                    .collect();
-                for name in kept {
-                    self.ledger.tags.kept_on_new_item(c, node, &name);
-                }
+                let from = restored.as_ref().or(op.drive());
+                self.new_item_settled(c, node, from.map(|d| &d.state));
             }
         }
         if remote_write && let Some(pick) = self.clients[c].meanwhile.take() {
@@ -780,6 +764,27 @@ impl Sim {
             }
         }
         true
+    }
+
+    /// Client `c` settled `node`'s base once it put a new item there (none was there before),
+    /// from `drive` (the version it came from, if known): a tag the base keeps that neither the
+    /// item nor that version holds is the known limit (`Limit::NewItemKeepsBaseTag`).
+    pub(crate) fn new_item_settled(&mut self, c: usize, node: NodeId, drive: Option<&NodeState>) {
+        let client = &self.clients[c];
+        let lacks =
+            |s: Option<&NodeState>, name: &str| s.is_none_or(|s| s.tags.get(name).is_none());
+        let item = client.local.get(node);
+        let kept: Vec<String> = client
+            .base
+            .get(node)
+            .iter()
+            .flat_map(|b| b.tags.iter())
+            .map(|t| t.name.clone())
+            .filter(|name| lacks(item, name) && lacks(drive, name))
+            .collect();
+        for name in kept {
+            self.ledger.tags.kept_on_new_item(c, node, &name);
+        }
     }
 
     /// Another device changes `node`, which client `c`'s remote write over `replaced` (the
@@ -1007,16 +1012,31 @@ impl Sim {
                 parent,
                 name,
                 tags,
-                ..
+                drive,
             } => {
                 let client = &mut self.clients[c];
                 if client.local.contains(node) {
                     return Skip;
                 }
-                if !client.local.exists(parent) || !park_occupant(client, parent, &name, None) {
+                if !client.local.exists(parent) {
                     return Retry;
                 }
                 let tags = tags.held_by(client.os);
+                // Made from Recently deleted, never synced here, with tags to write: restored,
+                // changed or purged since the plan, the version there may no longer hold them
+                // (the executor's).
+                let holds =
+                    |r: &ServerNode| tags.iter().all(|t| r.state.tags.get(&t.name) == Some(t));
+                if drive.is_none()
+                    && !client.base.contains(node)
+                    && !tags.is_empty()
+                    && !self.server.removed.get(&node).is_some_and(holds)
+                {
+                    return Skip;
+                }
+                if !park_occupant(client, parent, &name, None) {
+                    return Retry;
+                }
                 client.local.insert(
                     node,
                     NodeState {
