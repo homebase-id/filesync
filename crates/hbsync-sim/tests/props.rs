@@ -4343,13 +4343,12 @@ fn known_limits_narrow(events: &[Event]) -> Vec<String> {
     sim.tags_lost_to_known_limits()
 }
 
-/// Seeds d856d284 and fc58ff8f, a known limit (the fix, design A+, waits on the user): a file
-/// here not hashed yet (a placement a crash left unread) that the user tagged Red, whose node
-/// another writer put in a file, is adopted into Recovered files from the drive's state, and
-/// the plan writes the drive's tags over it. The oracle names it rather than passing it
-/// silently.
+/// Seeds d856d284 and fc58ff8f: a file here not hashed yet (a placement a crash left unread)
+/// that the user tagged Red, whose node another writer put in a file, waits for its hash, then
+/// goes into Recovered files with Red. It was adopted from the drive's state, the drive's tags
+/// written over it (a known limit till what waits for a hash waited).
 #[test]
-fn regression_an_unhashed_orphan_adopted_from_the_drives_tags_is_a_known_limit() {
+fn regression_an_unhashed_orphan_keeps_its_tags() {
     use Action::*;
     use Event::*;
     for events in [
@@ -4558,12 +4557,7 @@ fn regression_an_unhashed_orphan_adopted_from_the_drives_tags_is_a_known_limit()
         ],
     ] {
         let limits = known_limits_narrow(&events);
-        // That case alone.
-        assert_eq!(limits.len(), 1, "{limits:?}");
-        assert!(
-            limits[0].starts_with("UnhashedOrphanAdopted") && limits[0].ends_with(" Red"),
-            "{limits:?}"
-        );
+        assert!(limits.is_empty(), "{limits:?}");
     }
 }
 
