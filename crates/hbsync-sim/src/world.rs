@@ -692,7 +692,9 @@ impl Sim {
             client.base.remove(n);
             client.extra.remove(&n);
         }
-        // One at a time (the engine groups them by removal: the same in the end).
+        // One at a time (the engine restores the items of their removals together, in one set
+        // of waves: the same rows come back; a restored name can differ where one item's
+        // restored name is another's own).
         for n in restore {
             if !self.server.live.contains_key(&n) {
                 self.restore_with(n);

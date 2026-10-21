@@ -305,7 +305,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   a held item stays held while a removal elsewhere is still to be followed in it, or below it
   once it is back on the drive, and a trash of anything held or taking held items along is
   held. **Delete**, or **Put them back**: kept here, and each synced item in them the drive
-  no longer has is restored from Recently deleted (one restore per removal: what was removed
+  no longer has is restored from Recently deleted (each removal as an item: what was removed
   with its folder comes back with it; what was removed apart, before, on its own), or, gone
   for good there, uploaded again from here as it is; a folder already back has what is in it
   looked at. Every device then has them back. Cost: a feed read, then one restore of all the

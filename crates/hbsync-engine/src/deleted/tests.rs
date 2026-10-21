@@ -126,6 +126,31 @@ fn an_item_is_found_up_from_the_folder_here() -> Result<(), StateError> {
     Ok(())
 }
 
+/// Restoring an item together with the folder whose delete took it along plans the folder's
+/// whole group once, whichever comes first: the item doesn't stand for the folder.
+#[test]
+fn a_restore_of_a_folder_and_an_item_in_it_takes_the_whole_folder() -> Result<(), StateError> {
+    let db = Db::new()?;
+    let (f, x, y) = (NodeId::new(), NodeId::new(), NodeId::new());
+    db.write(|s| {
+        s.account().put_removed(&removed(f, NodeId::ROOT, 1))?;
+        s.account().put_removed(&removed(x, f, 1))?;
+        s.account().put_removed(&removed(y, f, 1))
+    })?;
+    for nodes in [[x, f], [f, x]] {
+        let plan = db.read(|s| plan_restore(s, &nodes))?;
+        let mut rows: Vec<NodeId> = plan
+            .map(|p| p.rows.iter().map(|r| r.row.node).collect())
+            .unwrap_or_default();
+        assert_eq!(rows.first(), Some(&f), "the folder first: {nodes:?}");
+        rows.sort();
+        let mut all = vec![f, x, y];
+        all.sort();
+        assert_eq!(rows, all, "{nodes:?}");
+    }
+    Ok(())
+}
+
 fn fake() -> hbsync_remote::fake::FakeRemote {
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
     // The drive has none of the files: each delete for good finds it not there, which is done

@@ -4938,7 +4938,7 @@ fn a_hold_of_every_file_paged_holds_the_whole_trash() -> R {
 /// Put back of a removal held file by file (plans in pages) brings back what it does held as
 /// one folder. Held whole it costs one restore (what was removed with the folder comes back
 /// with it); file by file, the folders were kept on the drive meanwhile (they hold what is
-/// held), so each file is a removal of its own: a restore each.
+/// held), so each file is a removal of its own, restored with the others in one go.
 #[test]
 fn put_back_held_file_by_file_comes_back_alike() -> R {
     let requests = |batch: usize| -> hbsync_engine::testkit::Res<(usize, Vec<String>)> {
@@ -5404,7 +5404,7 @@ fn putting_back_many_loose_files_takes_few_requests() -> R {
 }
 
 /// Two items of one name in one folder restored together come back as when restored one after
-/// the other: the first under its name, the other under a free restored one.
+/// the other: the first asked for under its name, the other under a free restored one.
 #[test]
 fn two_items_of_one_name_restored_together_both_come_back() -> R {
     let server = server();
@@ -5426,6 +5426,7 @@ fn two_items_of_one_name_restored_together_both_come_back() -> R {
         .collect();
     texts.sort();
     assert_eq!(texts, ["one", "two"], "{tree:?}");
-    assert!(tree.iter().any(|l| l.starts_with("x.txt = ")), "{tree:?}");
+    // The newest first, as listed: it keeps the name.
+    assert!(tree.iter().any(|l| l == "x.txt = two"), "{tree:?}");
     Ok(())
 }

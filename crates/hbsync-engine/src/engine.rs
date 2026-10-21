@@ -349,8 +349,8 @@ impl Engine {
         self.drive.pull(None)?;
         // What loses its base.
         let mut forget = Vec::new();
-        // One restore per item of Recently deleted, the outermost first: what was removed with
-        // its folder comes back with it.
+        // Each removal's item, the outermost first, restored together: what was removed with its
+        // folder comes back with it.
         let mut tops: Vec<(usize, NodeId)> = Vec::new();
         // Each once: a folder's held with what is in it.
         let mut seen = std::collections::HashSet::new();
