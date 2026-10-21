@@ -79,9 +79,12 @@ impl Reconciler<'_> {
         let ops = std::mem::take(&mut self.plan.ops);
         for op in ops {
             let held = !confirmed(&op)
-                && match op {
+                && match &op {
                     Op::RemoteDelete { .. } => hold_remote,
-                    Op::LocalTrash { node, .. } => hold_local || was_wiped(node),
+                    // Itself, a folder it is in, or anything it takes along.
+                    Op::LocalTrash { node, subtree } => {
+                        hold_local || was_wiped(*node) || subtree.iter().any(|n| wiped.contains(n))
+                    }
                     _ => false,
                 };
             if held {

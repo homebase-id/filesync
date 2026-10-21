@@ -623,7 +623,11 @@ impl Runner {
                 Some(Answer::Delete(seen)) => p.engine.confirm_deletes(seen),
                 Some(Answer::PutBack(seen)) => {
                     if let Err(e) = p.engine.put_back(&seen) {
-                        tracing::warn!("can't put the held deletes back: {e}");
+                        // What it didn't put back is still held, and shown again.
+                        self.tell(vec![format!(
+                            "The held deletes couldn't all be put back ({e}): what is still \
+                             held is shown again, to answer again"
+                        )]);
                     }
                 }
                 None => {}

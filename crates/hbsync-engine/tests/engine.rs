@@ -4722,3 +4722,164 @@ fn every_file_moved_out_of_view_elsewhere_is_followed() -> R {
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     Ok(())
 }
+
+/// A folder held as every synced file; another device restores one file of it, and the sync
+/// that sees it fails after its plan (an upload refused): the rest is still held next time.
+#[test]
+fn a_hold_of_every_file_outlasts_a_failed_sync() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..8 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    let f3 = a
+        .recently_deleted(20)?
+        .into_iter()
+        .find(|i| i.path == "d/f3.txt")
+        .ok_or("f3")?
+        .node;
+    assert_eq!(a.engine.drive().restore(&[f3])?, 2, "f3 and its folder");
+    b.write("x.txt", "x")?;
+    b.remote.faults().deny_writes = true;
+    b.engine.scan_local()?;
+    assert!(b.engine.sync_once("2026-10-09").is_err());
+    b.remote.faults().deny_writes = false;
+    for _ in 0..2 {
+        let report = b.sync()?;
+        assert!(!report.held.is_empty(), "{report:?}");
+        assert_eq!(b.read_text("d/f5.txt")?, "5", "held: {:?}", b.tree_text(""));
+    }
+    Ok(())
+}
+
+/// A folder held as every synced file; one file of it back on the drive meanwhile, and a
+/// subfolder's trash waiting for a file in it not hashed yet: once it's read, the subfolder's
+/// trash (taking held files along) is held too.
+#[cfg(unix)]
+#[test]
+fn a_hold_of_every_file_holds_a_trash_taking_it_along() -> R {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/s/f{i}.txt"), format!("{i}"))?;
+        a.write(&format!("d/g{i}.txt"), format!("g{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    let g0 = a
+        .recently_deleted(20)?
+        .into_iter()
+        .find(|i| i.path == "d/g0.txt")
+        .ok_or("g0")?
+        .node;
+    a.engine.drive().restore(&[g0])?;
+    let f1 = b.root.join("d/s/f1.txt");
+    fs::set_permissions(&f1, fs::Permissions::from_mode(0o000))?;
+    if fs::read(&f1).is_ok() {
+        return Ok(()); // root reads anything: nothing to test
+    }
+    b.sync()?;
+    fs::set_permissions(&f1, fs::Permissions::from_mode(0o644))?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    assert_eq!(
+        b.read_text("d/s/f2.txt")?,
+        "2",
+        "held: {:?}",
+        b.tree_text("")
+    );
+    Ok(())
+}
+
+/// Held file by file (plans in pages), then a restart plans the folder's trash whole, one file
+/// back on the drive: still held.
+#[test]
+fn a_hold_of_every_file_paged_holds_the_whole_trash() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        cfg.guard.min = 2;
+        cfg.batch = 2;
+        cfg.max_rounds = 1000;
+    })?;
+    for i in 0..12 {
+        a.write(&format!("d/s{}/f{i}.txt", i % 3), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    let f0 = a
+        .recently_deleted(20)?
+        .into_iter()
+        .find(|i| i.path == "d/s0/f0.txt")
+        .ok_or("f0")?
+        .node;
+    a.engine.drive().restore(&[f0])?;
+    let remote = b.remote.clone();
+    b.restart_with(Box::new(remote), |cfg| cfg.batch = 20_000)?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    assert_eq!(
+        b.read_text("d/s1/f1.txt")?,
+        "1",
+        "held: {:?}",
+        b.tree_text("")
+    );
+    Ok(())
+}
+
+/// Put back of a removal held file by file (plans in pages) brings back what it does held as
+/// one folder. Held whole it costs one restore (what was removed with the folder comes back
+/// with it); file by file, the folders were kept on the drive meanwhile (they hold what is
+/// held), so each file is a removal of its own: a restore each.
+#[test]
+fn put_back_held_file_by_file_comes_back_alike() -> R {
+    let requests = |batch: usize| -> hbsync_engine::testkit::Res<(usize, Vec<String>)> {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+            cfg.max_rounds = 1000;
+        })?;
+        for i in 0..12 {
+            a.write(&format!("d/s{}/f{i}.txt", i % 3), format!("{i}"))?;
+        }
+        a.sync()?;
+        b.sync()?;
+        fs::remove_dir_all(a.root.join("d"))?;
+        a.sync()?;
+        let report = b.sync()?;
+        assert!(!report.held.is_empty(), "{report:?}");
+        let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+        let before = b.remote.faults().requests;
+        b.engine.put_back(&held)?;
+        let requests = b.remote.faults().requests - before;
+        b.sync()?;
+        a.sync()?;
+        Ok((requests, a.tree_text("")))
+    };
+    let (whole, tree) = requests(20_000)?;
+    let (_, paged_tree) = requests(2)?;
+    assert_eq!(tree, paged_tree);
+    assert_eq!(tree.len(), 16, "{tree:?}");
+    assert!(whole <= 4, "one feed read, one restore: {whole} requests");
+    Ok(())
+}

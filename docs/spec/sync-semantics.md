@@ -269,11 +269,17 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held
   (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). Once
   held so, they stay held until answered, whatever the count says since (one of them back on
-  the drive, a put back half done), across restarts (`guard.wiped`): **Delete**, or **Put
-  them back**: kept here and restored on the drive from Recently deleted, with what in them
-  was removed apart before (a feed read, then a restore per item), or, gone for good there,
-  uploaded again from here as they are. Every device then has them back. What a failure
-  leaves is still held, and shown again.
+  the drive, a put back half done), across restarts (`guard.wiped`, kept as soon as planned):
+  a held item stays held while a removal elsewhere is still to be followed in it, or below it
+  once it is back on the drive, and a trash of anything held or taking held items along is
+  held. **Delete**, or **Put them back**: kept here, and each synced item in them the drive
+  no longer has is restored from Recently deleted (one restore per removal: what was removed
+  with its folder comes back with it; what was removed apart, before, on its own), or, gone
+  for good there, uploaded again from here as it is; a folder already back has what is in it
+  looked at. Every device then has them back. Cost: a feed read, then a restore (a read and a
+  write or more) per removal; held file by file (plans in pages, the folders kept on the drive
+  meanwhile), that is a restore per file. What a failure leaves is still held, and shown
+  again, with a note.
 
   A confirmation lasts while its removal is pending, or waits for a file in it not hashed yet
   (§6.3: what was in such a folder, sent apart meanwhile, goes with it); done or undone, it is

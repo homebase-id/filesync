@@ -183,11 +183,11 @@ pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
         ));
     }
     if held.remotely > 0 {
-        out.push(format!(
-            "Another device removed everything here ({} items). Remove them here too? Put them \
-             back keeps them here and restores them on Homebase, for every device.",
-            held.remotely
-        ));
+        out.push(
+            "Everything here was removed on another device. Remove it here too? Put them back \
+             keeps it here and restores it on Homebase, for every device."
+                .to_owned(),
+        );
     }
     out
 }

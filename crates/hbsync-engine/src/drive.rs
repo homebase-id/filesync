@@ -495,6 +495,11 @@ impl Drive {
     /// behind.
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.pull(None)?;
+        self.restore_read(nodes)
+    }
+
+    /// [`Drive::restore`] for a caller that has just read the feed itself.
+    pub(crate) fn restore_read(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         let restored = self.with_ops(|ops| {
             nodes
                 .iter()

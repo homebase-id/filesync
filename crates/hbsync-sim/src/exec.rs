@@ -162,7 +162,10 @@ impl Sim {
             .chain(remote.ids())
             .collect();
         let confirmed = Arc::new(client.confirmed.clone());
-        // Held as every synced file: until answered, each while its removal is pending.
+        // Held as every synced file: until answered, each while a removal elsewhere is still
+        // to be followed in it: it, or (back on the drive) what is below it in the base. As
+        // the engine keeps `guard.wiped`.
+        let pending = |n: NodeId| client.local.contains(n) && remote.path(n).is_none();
         let wiped: HashSet<NodeId> = client
             .wiped
             .iter()
@@ -170,8 +173,10 @@ impl Sim {
             .filter(|n| {
                 !confirmed.contains(n)
                     && client.base.contains(*n)
-                    && client.local.contains(*n)
-                    && remote.path(*n).is_none()
+                    && match remote.path(*n).is_some() {
+                        false => client.local.contains(*n),
+                        true => client.base.subtree(*n).into_iter().any(pending),
+                    }
             })
             .collect();
         let synced_files = client
@@ -362,12 +367,10 @@ impl Sim {
                     })
                     .sum();
                 // And what was held so stays held till answered.
-                if let Some(op) = plan
-                    .ops
-                    .iter()
-                    .filter(unconfirmed)
-                    .find(|op| matches!(op, Op::LocalTrash { node, .. } if was_wiped(*node)))
-                {
+                if let Some(op) = plan.ops.iter().filter(unconfirmed).find(|op| {
+                    matches!(op, Op::LocalTrash { node, subtree }
+                            if was_wiped(*node) || subtree.iter().any(|n| wiped.contains(n)))
+                }) {
                     return Some(format!(
                         "{} trashes what was held as every synced file, unanswered: {op:?}",
                         client.name
