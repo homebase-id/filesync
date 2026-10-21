@@ -470,3 +470,55 @@ fn regression_a_file_being_written_keeps_its_folder() {
         panic!("{e}");
     }
 }
+
+/// Client 0 makes a folder, tags it (macOS) and deletes it here; client 1 writes a folder into
+/// it, so client 0's next plan makes it again from Recently deleted (synced before, no version
+/// of the drive live: its RemoteCreate to follow). It dies once the folder is made, before its
+/// tags are written. Its write-ahead record, on the version in Recently deleted, lets recovery
+/// take the folder without the tags, not known: the next plan writes them here. Without a
+/// record (none was kept without a live version), the base kept the tag the folder didn't hold,
+/// which read as the user removing it, and the plan removed it from the drive (seed e7972f95,
+/// shrunk on Linux).
+#[test]
+fn regression_a_folder_made_from_recently_deleted_keeps_its_tags_through_a_crash() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(
+            0,
+            CreateFolder {
+                parent: 13,
+                name: 11,
+            },
+        ),
+        plan(0),
+        step(0),
+        plan(1),
+        act(0, Tag { node: 12, tag: 10 }),
+        act(1, Meanwhile { op: 2 }),
+        act(0, Meanwhile { op: 4 }),
+        step(1),
+        act(
+            1,
+            CreateFolder {
+                parent: 14,
+                name: 7,
+            },
+        ),
+        plan(0),
+        step(0),
+        act(0, Delete { node: 11 }),
+        plan(1),
+        step(1),
+        step(1),
+        plan(0),
+        Event::Crash { client: 0 },
+    ];
+    run_with(3, None, Sim::with_split_downloads, &events)
+        .map_err(|e| e.to_string())
+        .unwrap_or_else(|e| panic!("{e}"));
+}

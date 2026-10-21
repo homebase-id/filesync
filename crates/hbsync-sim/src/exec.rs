@@ -30,6 +30,37 @@ use crate::model::server::{ServerNode, time};
 use crate::oracle::view_with;
 
 impl Sim {
+    /// The version a folder made here by `op` of client `c` acts on, which a folder synced
+    /// before keeps a write-ahead record of (the executor's): the plan's, else the mirror's,
+    /// else, nowhere live, the one in Recently deleted it is made again from (for recovery
+    /// only: its commit keeps its base).
+    pub(crate) fn mkdir_acts_on(&self, c: usize, node: NodeId, op: &Op) -> Option<DriveVersion> {
+        if let Some(d) = op.drive() {
+            return Some(d.clone());
+        }
+        let client = &self.clients[c];
+        if !client.base.contains(node) {
+            return None;
+        }
+        let base_at = client.extra.get(&node).and_then(|e| e.version);
+        if let Some(state) = client.planned_remote.get(node) {
+            return Some(DriveVersion {
+                state: state.clone(),
+                at: *client.planned_refs.get(&node)?,
+                base_at,
+            });
+        }
+        let coords = client.coords;
+        self.server.removed.get(&node).map(|r| DriveVersion {
+            state: NodeState {
+                parent: coords.from_drive(r.state.parent),
+                ..r.state.clone()
+            },
+            at: r.remote,
+            base_at,
+        })
+    }
+
     /// What client `c`'s executor records after writing `node`: the server's state as its
     /// folder sees it.
     fn record_remote(&mut self, c: usize, node: NodeId) {

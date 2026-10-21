@@ -97,9 +97,12 @@ impl Executor<'_> {
             .or_else(|| DriveVersion::of(mirror.as_ref().filter(|_| synced_before)?, base_at));
         // Its write-ahead record, kept for a folder this device synced before: with the commit
         // lost, the scan would find it as a new folder, which adoption doesn't pair with a node
-        // that has a base (`recover_placements` does, by this record). Its base is the version
-        // it acts on. Made without tags, it holds none as soon as it is made: so it claims, if
-        // it is to hold none; tags to write are not known until written.
+        // that has a base (`recover_placements` does, by this record), and the node read as
+        // deleted here. Its base is the version it acts on; one made again from Recently
+        // deleted (nowhere live: its RemoteCreate to follow), the version there, for recovery
+        // only (its commit keeps its base, below). Made without tags, it holds none as soon as
+        // it is made: so it claims, if it is to hold none; tags to write are not known until
+        // written.
         //
         // Idempotent: a folder left by an interrupted run, unknown to the DB (under any case),
         // is adopted, with the tags it holds (what was there before the write). One the DB
@@ -134,7 +137,11 @@ impl Executor<'_> {
                 return Ok(Outcome::stale("not as planned in Recently deleted"));
             }
         }
-        let mut record = acted.as_ref().map(|a| Placing {
+        let recorded_on = acted.clone().or_else(|| {
+            let from = removed.clone().filter(|_| synced_before)?;
+            Some(DriveVersion { base_at, ..from })
+        });
+        let mut record = recorded_on.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
             target: target.clone(),
             placed_tags: (none && kept_tags).then(Tags::default),
@@ -143,6 +150,8 @@ impl Executor<'_> {
             held_ms: None,
         });
         let kept = !adopt && synced_before;
+        // Its record is for recovery only: written ahead, gone with the commit.
+        let recovery_only = kept && acted.is_none() && record.is_some();
         if !adopt {
             if !self.free_target(&target, None)? {
                 return Ok(Outcome::Retry("name taken".into()));
@@ -183,9 +192,12 @@ impl Executor<'_> {
             Ok(m) => m,
             Err(e) => {
                 let outcome = io_outcome(e);
+                // Made again from Recently deleted, its record waits for the next round's
+                // recovery and plan: the RemoteCreate planned with it (on the base as it was)
+                // finds no folder of the node here, and doesn't run.
                 return match outcome {
                     Outcome::Skip(Skip::Unsyncable(_)) => Ok(outcome),
-                    _ if kept => self.placed_not_committed(node),
+                    _ if kept && !recovery_only => self.placed_not_committed(node),
                     _ => Ok(outcome),
                 };
             }
@@ -208,8 +220,13 @@ impl Executor<'_> {
             }
             s.folder().put_local(&row)?;
             match &record {
-                Some(r) => settle_placement(s.folder(), r, folder).map(Placed::at),
-                None => {
+                Some(r) if !recovery_only => {
+                    settle_placement(s.folder(), r, folder).map(Placed::at)
+                }
+                _ => {
+                    if recovery_only {
+                        s.folder().delete_placing(node)?;
+                    }
                     // Made from Recently deleted (its folder restored, its RemoteCreate to
                     // follow): it settles against the version there, what it was made of, as
                     // any placement does: the base until the restore settles. Without one, a
