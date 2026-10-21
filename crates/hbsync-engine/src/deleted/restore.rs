@@ -9,7 +9,8 @@ use hbsync_state::{Answer, MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{NodeId, Target, Written};
 
 use crate::error::EngineError;
-use crate::mirror::{self, Said, gone_after, meta_at};
+use crate::gone::{self, Said, gone_after};
+use crate::mirror::{self, meta_at};
 use crate::walk::End;
 
 use super::listing::group;
@@ -91,7 +92,7 @@ impl AccountOps<'_> {
             let (gone, superseded) = locked(self.account).write(|s| {
                 let gone = heard
                     .iter()
-                    .map(|&(f, _, said)| mirror::heard(s.account(), f, said))
+                    .map(|&(f, _, said)| gone::heard(s.account(), f, said))
                     .collect::<Result<Vec<bool>, _>>()?;
                 let superseded = mirror::answered(s.account(), &back)?;
                 Ok((gone, superseded))
@@ -127,7 +128,7 @@ struct Restoring<'a> {
     behind: &'a mut bool,
     /// Written back, to record.
     back: Vec<Answer>,
-    /// What the drive said of files not found, to take ([`mirror::heard`]).
+    /// What the drive said of files not found, to take ([`gone::heard`]).
     heard: Vec<(hbsync_types::RemoteFileId, NodeId, Said)>,
     /// What stops the restore.
     failed: Option<RemoteError>,

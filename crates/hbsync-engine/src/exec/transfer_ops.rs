@@ -2,7 +2,7 @@
 //! what the remote writes of `remote.rs` did).
 
 use super::*;
-use crate::mirror;
+use crate::gone;
 use crate::settle::rules::Acts;
 
 impl Executor<'_> {
@@ -348,7 +348,7 @@ impl Executor<'_> {
                     e @ (RemoteError::NotFound | RemoteError::Deleted),
                 )),
             ) if let Some(file_id) = job.file_id() => {
-                let said = match mirror::gone_after(self.remote, &e, file_id) {
+                let said = match gone::gone_after(self.remote, &e, file_id) {
                     Ok(said) => said,
                     Err(e) => return Ok(remote_outcome(e)),
                 };
@@ -365,8 +365,8 @@ impl Executor<'_> {
                     )
                 );
                 let gone = self.db.write(|s| match removal {
-                    true => mirror::judged(s.account(), file_id, said),
-                    false => mirror::heard(s.account(), file_id, said),
+                    true => gone::judged(s.account(), file_id, said),
+                    false => gone::heard(s.account(), file_id, said),
                 })?;
                 match (ctx, job) {
                     (
@@ -384,7 +384,7 @@ impl Executor<'_> {
                         })
                     }
                     _ if gone => Ok(Outcome::stale("deleted for good remotely")),
-                    _ if said == mirror::Said::There => Ok(Outcome::stale("not found, but there")),
+                    _ if said == gone::Said::There => Ok(Outcome::stale("not found, but there")),
                     _ => Ok(Outcome::stale(
                         "the identity says it isn't there: asked again at the next sync",
                     )),
