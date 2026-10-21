@@ -17,13 +17,14 @@ use std::collections::{BTreeSet, HashSet, VecDeque};
 use hbsync_local::layout::parked_name;
 use hbsync_namemap::to_remote;
 use hbsync_platform::{Os, RelPath};
-use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateError};
+use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateDb, StateError};
 use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
 use crate::folder::FolderCtx;
-use crate::plan::Coverage;
+use crate::plan::{Coverage, Plan};
 use crate::reconcile::{BaseExtra, Input, Removed};
 use crate::scope::Scope;
+use crate::walk::End;
 
 /// The local state of one node, as the reconciler sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +137,29 @@ pub(crate) fn build_narrow(
     full: &HashSet<NodeId>,
 ) -> Result<Input, StateError> {
     build(s, dirty, ctx, Some(full))
+}
+
+/// Plans `dirty` from narrow views ([`build_narrow`]) with `reconcile`: each plan that needs more
+/// of a folder than its view held ([`crate::plan::Plan::uncovered`]) is made again with those
+/// folders whole. The engine plans so; the simulator, over a store it fills, checks it against
+/// whole folders.
+pub fn plan_narrow(
+    db: &mut StateDb,
+    dirty: &[NodeId],
+    folder: &FolderCtx,
+    mut reconcile: impl FnMut(&Input, &mut StateDb) -> Plan,
+) -> Result<Plan, StateError> {
+    let mut full: HashSet<NodeId> = HashSet::new();
+    loop {
+        let input = db.read(|s| build_narrow(s, dirty, folder, &full))?;
+        let plan = reconcile(&input, db);
+        // Each round covers at least one more folder whole: it ends.
+        let before = full.len();
+        full.extend(&plan.uncovered);
+        if full.len() == before {
+            return Ok(plan);
+        }
+    }
 }
 
 /// Past this many names to look up in one folder, it is listed whole: one query instead.
@@ -341,27 +365,111 @@ fn build(
     }
     // The folders in Recently deleted that remote nodes are in, and the removed ones above them
     // in this folder's part of the drive: what a folder's delete took along goes by their times
-    // (node schema, Recently deleted).
-    for mut folder in missing {
-        while !b.input.removed.contains_key(&folder)
-            && !scope.outside.contains(&folder)
-            && let Some(r) = s.removed_by_node(folder)?
-            && let Some(state) = r.row.state()
-        {
-            b.input.removed.insert(
-                folder,
-                Removed {
-                    at: r.time(),
-                    state,
-                },
-            );
-            folder = r.row.parent;
+    // (node schema, Recently deleted). And the live folder each such chain reaches, where it
+    // reaches this folder's top through live folders none of which it leaves out: without it a
+    // narrow view read the removed folder as gone for good, and what was written into it since
+    // as an orphan (for Recovered files); with the names in it the removed one may take back.
+    // That folder's own folders may be in Recently deleted too: until none new is missing.
+    let mut looked: HashSet<NodeId> = HashSet::new();
+    let mut left_out: HashSet<NodeId> = HashSet::new();
+    let mut missing = missing;
+    while !missing.is_empty() {
+        looked.extend(missing.iter().copied());
+        for start in missing {
+            let mut folder = start;
+            let mut coming = None;
+            while !b.input.removed.contains_key(&folder)
+                && !scope.outside.contains(&folder)
+                && let Some(r) = s.removed_by_node(folder)?
+                && let Some(state) = r.row.state()
+            {
+                coming = Some(hbsync_namemap::sibling_hash(&state.name));
+                b.input.removed.insert(
+                    folder,
+                    Removed {
+                        at: r.time(),
+                        state,
+                    },
+                );
+                folder = r.row.parent;
+            }
+            let Some(coming) = coming else {
+                continue;
+            };
+            match reach(s, folder, scope)? {
+                Reach::Top if !folder.is_root() => {
+                    b.load(folder)?;
+                    if full.is_some()
+                        && !coverage.full.contains(&folder)
+                        && coverage.named.entry(folder).or_default().insert(coming)
+                    {
+                        b.load_named(folder, &[coming])?;
+                    }
+                }
+                Reach::Top | Reach::Gone => {}
+                Reach::Outside => {
+                    left_out.insert(start);
+                }
+            }
+        }
+        missing = looked_up_removed(&b.input.remote, scope.top)
+            .into_iter()
+            .filter(|m| !looked.contains(m))
+            .collect();
+    }
+    // What lies in a removed folder in a part of the drive this folder leaves out (a role
+    // folder's) isn't the plan's, as a role folder this device holds nothing of isn't: unless
+    // it holds some of it, which stays as it was.
+    let held = |n: &NodeId| b.input.base.contains(*n) || b.input.local.contains(*n);
+    let below: Vec<NodeId> = b
+        .input
+        .remote
+        .iter()
+        .filter(|(_, st)| left_out.contains(&st.parent))
+        .map(|(n, _)| n)
+        .collect();
+    for node in below {
+        let subtree = b.input.remote.subtree(node);
+        if !subtree.iter().any(held) {
+            for n in subtree {
+                b.input.remote.remove(n);
+            }
         }
     }
     if full.is_some() {
         b.input.coverage = Some(coverage);
     }
     Ok(b.input)
+}
+
+/// Where a walk up from `folder` through the drive's folders, live or in Recently deleted, ends.
+enum Reach {
+    /// At this folder's top.
+    Top,
+    /// At a folder this folder leaves out (a role folder's, for the main folder).
+    Outside,
+    /// At a folder gone for good, or nowhere (a cycle, too deep).
+    Gone,
+}
+
+/// [`Reach`] of `folder`.
+fn reach(s: &ReadTx<'_>, folder: NodeId, scope: &Scope) -> Result<Reach, StateError> {
+    let mut outside = false;
+    let up = crate::walk::up::<_, StateError>(folder, |at| {
+        if scope.outside.contains(&at) {
+            outside = true;
+            return Ok(None);
+        }
+        if let Some(m) = s.get_mirror(at)? {
+            return Ok(Some(((), m.parent)));
+        }
+        Ok(s.removed_by_node(at)?.map(|r| ((), r.row.parent)))
+    })?;
+    Ok(match up.end {
+        End::Top => Reach::Top,
+        _ if outside => Reach::Outside,
+        _ => Reach::Gone,
+    })
 }
 
 /// The folders whose rows in Recently deleted a plan of `remote` looks up, in the folder whose

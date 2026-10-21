@@ -1,6 +1,5 @@
 //! The sync loop for one sync root.
 
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -526,27 +525,17 @@ impl Engine {
                 db.read(|s| s.knows_node(id)).unwrap_or(true)
             })
         };
-        let mut full: HashSet<NodeId> = HashSet::new();
-        loop {
-            let input = db.read(|s| view::build_narrow(s, dirty, folder, &full))?;
-            let plan = reconcile(&input, db);
-            // Each round covers at least one more folder whole: it ends.
-            let before = full.len();
-            full.extend(&plan.uncovered);
-            if full.len() > before {
-                continue;
-            }
-            #[cfg(feature = "testkit")]
-            if self.cfg.check_narrow {
-                let input = db.read(|s| view::build_input(s, dirty, folder))?;
-                assert_eq!(
-                    plan,
-                    reconcile(&input, db),
-                    "the narrow view plans as the whole one"
-                );
-            }
-            return Ok(plan);
+        let plan = view::plan_narrow(db, dirty, folder, &reconcile)?;
+        #[cfg(feature = "testkit")]
+        if self.cfg.check_narrow {
+            let input = db.read(|s| view::build_input(s, dirty, folder))?;
+            assert_eq!(
+                plan,
+                reconcile(&input, db),
+                "the narrow view plans as the whole one"
+            );
         }
+        Ok(plan)
     }
 
     /// The folder's refusals that still hold ([`REFUSED_FOR`]); older ones are forgotten.
