@@ -262,7 +262,15 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
     it is: that folder's disk use twice, until the user removes one.
   While they are held, their names on the drive stay taken: a new item here of such a name
   syncs under a numbered one (`Projects (conflict 1)`, the dialog says so). Nothing held
-  expires: the status and the tray show it until answered.
+  expires: the status and the tray show it until answered. Meanwhile what is held isn't planned
+  again at every sync: its nodes leave the dirty set (the state DB's `held_deletes`), and the
+  guard still counts their files with every plan, so a later delete is judged with them. They
+  are planned again, all of them, when a plan's view reaches one of them (a change in, above
+  or beside them), on an answer, at each start, and once the guard would let this device's
+  own removals through (more files synced since). Cost while held: a sync with nothing else to
+  do reads two counts (5,051 held: about 1 ms, against 80 ms when they were planned each
+  time). Simulator: `held_deletes_out_of_the_dirty_set_plan_alike` (a plan without them plans
+  as one with them, unless its view reaches them).
 
   Removals made elsewhere (another computer, the phone, the file browser, another app) are
   followed here without asking: into `.hbsync/trash`, and the drive keeps them in Recently
@@ -388,8 +396,8 @@ expected fingerprint is treated as done.
   batch. A remote outage starts no further writes; those failing together count as one
   failure, and the rest run again after the pause.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after
-  round and across syncs, so nodes that stay dirty (held, deferred, failing) can't keep the
-  rest waiting. A sync ends after a full sweep in which nothing was done. A round clears only
+  round and across syncs, so nodes that stay dirty (deferred, failing) can't keep the rest
+  waiting; held deletes leave it till answered (§7). A sync ends after a full sweep in which nothing was done. A round clears only
   the marks it read with its page (a change of the drive's picture moves a mark's version on):
   a node another engine's pull or an announcement marks again meanwhile stays dirty, though it
   was dirty already, and the change it brought is planned at the next sweep.

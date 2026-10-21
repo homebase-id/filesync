@@ -122,18 +122,35 @@ impl ReadTx<'_> {
     }
 
     /// Synced files among the dirty nodes that are gone locally (and would be deleted
-    /// remotely), and those gone remotely (would be trashed locally). Online-only files have
-    /// no local copy by design and don't count. Used by the mass-delete guard, which must see
-    /// the whole delete, not one planning batch.
+    /// remotely), and those gone remotely (would be trashed locally); the nodes of held deletes
+    /// out of the dirty set ([`FolderTx::hold_delete`]) left out, counted by
+    /// [`ReadTx::held_file_deletes`]. Online-only files have no local copy by design and don't
+    /// count. Used by the mass-delete guard, which must see the whole delete, not one planning
+    /// batch.
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
-        let gone = |predicate: &str| {
-            self.count(&format!(
-                // From the dirty set (CROSS JOIN keeps it outer): not a scan of every base row.
-                "SELECT COUNT(*) FROM dirty d CROSS JOIN base b ON b.folder = d.folder AND b.id = d.id \
-                 WHERE d.folder = $F AND {predicate}"
-            ))
-        };
-        Ok((gone(GONE_LOCALLY)?, gone(GONE_REMOTELY)?))
+        // From the dirty set (CROSS JOIN keeps it outer): not a scan of every base row.
+        self.file_deletes(
+            "dirty d WHERE d.folder = $F AND NOT EXISTS \
+             (SELECT 1 FROM held_deletes h WHERE h.folder = $F AND h.id = d.id)",
+        )
+    }
+
+    /// [`ReadTx::pending_file_deletes`] of the nodes of held deletes out of the dirty set.
+    pub fn held_file_deletes(&self) -> Result<(u64, u64)> {
+        self.file_deletes("held_deletes d WHERE d.folder = $F")
+    }
+
+    /// Synced files among the nodes `from` (`<table> d WHERE ...`) that are gone locally, and
+    /// those gone remotely, in one pass.
+    fn file_deletes(&self, from: &str) -> Result<(u64, u64)> {
+        let sql = format!(
+            "SELECT coalesce(sum({GONE_LOCALLY}), 0), coalesce(sum({GONE_REMOTELY}), 0) \
+             FROM (SELECT d.id FROM {from}) d \
+             CROSS JOIN base b ON b.folder = $F AND b.id = d.id"
+        );
+        Ok(self.prep(&sql)?.query_row([], |r| {
+            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+        })?)
     }
 
     /// What a confirmed delete of dirty `node` covers of the
@@ -179,6 +196,20 @@ impl ReadTx<'_> {
     pub fn dirty_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM dirty WHERE folder = $F")
     }
+
+    /// The dirty nodes and the held deletes, each once: what is still to do or to answer.
+    pub fn pending_count(&self) -> Result<u64> {
+        Ok(self.dirty_count()?
+            + self.count(
+                "SELECT COUNT(*) FROM held_deletes h WHERE h.folder = $F AND NOT EXISTS \
+                 (SELECT 1 FROM dirty d WHERE d.folder = $F AND d.id = h.id)",
+            )?)
+    }
+
+    /// How many nodes of held deletes are out of the dirty set ([`FolderTx::hold_delete`]).
+    pub fn held_delete_count(&self) -> Result<u64> {
+        self.count("SELECT COUNT(*) FROM held_deletes WHERE folder = $F")
+    }
 }
 
 impl FolderTx<'_> {
@@ -215,6 +246,29 @@ impl FolderTx<'_> {
         self.prep("DELETE FROM dirty WHERE folder = $F AND id = ?1 AND seq = ?2")?
             .execute(params![mark.id, mark.version as i64])?;
         Ok(())
+    }
+
+    /// Takes `mark`'s node, whose delete the mass-delete guard holds for the user (sync
+    /// semantics §7), out of the dirty set until [`FolderTx::unhold_deletes`]: not planned
+    /// again meanwhile. Unless the mark moved on since ([`FolderTx::clear_mark`]): then it is
+    /// both, and planned.
+    pub fn hold_delete(&self, mark: Mark) -> Result<()> {
+        self.prep("INSERT OR IGNORE INTO held_deletes (folder, id) VALUES ($F, ?1)")?
+            .execute([mark.id])?;
+        self.clear_mark(mark)
+    }
+
+    /// Puts every held delete's node back into the dirty set, to be planned again. Returns how
+    /// many there were.
+    pub fn unhold_deletes(&self) -> Result<usize> {
+        self.prep(
+            "INSERT OR IGNORE INTO dirty (folder, id) SELECT folder, id FROM held_deletes \
+             WHERE folder = $F",
+        )?
+        .execute([])?;
+        Ok(self
+            .prep("DELETE FROM held_deletes WHERE folder = $F")?
+            .execute([])?)
     }
 
     pub fn clear_dirty(&self, node: NodeId) -> Result<()> {

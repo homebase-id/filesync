@@ -206,6 +206,52 @@ fn dirty_and_kv() -> R {
     Ok(())
 }
 
+/// A held delete's node leaves the dirty set (still pending) until all come back at once; one
+/// whose mark moved on since its round read it (a change of the drive's picture) stays dirty
+/// too, to be planned.
+#[test]
+fn held_deletes_leave_the_dirty_set_till_they_come_back() -> R {
+    use hbsync_state::MirrorRow;
+    let mut db = StateDb::open_in_memory()?;
+    let (a, b) = (NodeId::new(), NodeId::new());
+    let at = |v: u128| MirrorRow {
+        file_id: RemoteFileId(Uuid::from_u128(7)),
+        version: VersionTag(Uuid::from_u128(v)),
+        node: a,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+        token: None,
+        changed_at: None,
+    };
+    db.write(|s| {
+        s.account().put_live(&at(1))?;
+        s.folder().mark_dirty(b)
+    })?;
+    let (read, _) = db.read(|s| s.dirty_marks(None, 10))?;
+    db.write(|s| s.account().put_live(&at(2)))?;
+    db.write(|s| read.iter().try_for_each(|m| s.folder().hold_delete(*m)))?;
+    let counts = |db: &mut StateDb| {
+        db.read(|s| {
+            Ok((
+                s.dirty_nodes(10)?,
+                s.held_delete_count()?,
+                s.pending_count()?,
+            ))
+        })
+    };
+    assert_eq!(counts(&mut db)?, (vec![a], 2, 2), "a changed since");
+    assert_eq!(db.write(|s| s.folder().unhold_deletes())?, 2);
+    let (mut dirty, held, pending) = counts(&mut db)?;
+    dirty.sort();
+    let mut both = vec![a, b];
+    both.sort();
+    assert_eq!((dirty, held, pending), (both, 0, 2));
+    Ok(())
+}
+
 /// A round clears only the dirty marks it read: a node whose drive state changes after the
 /// round read its mark (another engine's pull) stays dirty, though it was dirty already; one
 /// the folder marked itself, or not marked since, is cleared.
@@ -284,7 +330,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 19);
+    assert_eq!(db.schema_version()?, 20);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1154,7 +1200,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 19);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 20);
     Ok(())
 }
 

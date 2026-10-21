@@ -7,11 +7,12 @@
 //!
 //! [`Sim::with_narrow_check`]: crate::Sim::with_narrow_check
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use hbsync_engine::FolderCtx;
-use hbsync_engine::reconcile::{Input, Options, Plan, reconcile_with_known};
+use hbsync_engine::held;
+use hbsync_engine::reconcile::{Input, Op, Options, Plan, reconcile_with_known};
 use hbsync_engine::view;
 use hbsync_fileio::HashAlgorithm;
 use hbsync_platform::{FileId, Fingerprint, Os, RelPath};
@@ -41,15 +42,7 @@ impl Sim {
         if !client.coords.top.is_root() {
             return None; // the main folder only: a role folder's coordinates aren't filled in
         }
-        let folder = FolderCtx {
-            root: std::path::PathBuf::from("/sim"),
-            os: client.os,
-            algorithm: HashAlgorithm::Blake3,
-            case_insensitive: client.os != Os::Linux,
-            filter: Arc::clone(&client.filter),
-            scope: Arc::new(client.scope()),
-            tags_kept: Arc::default(),
-        };
+        let folder = self.folder_ctx(c);
         let checked = (|| -> Result<Option<String>, StateError> {
             let mut db = self.fill(c, input)?;
             let reconcile =
@@ -63,33 +56,14 @@ impl Sim {
                     "c{c}: the engine's view plans otherwise than the sim's input:\n  engine: {whole:?}\n  sim:    {plan:?}\n  inputs (sim, then engine): {differ}"
                 )));
             }
-            // The nodes whose sides differ dirty, as the engine keeps them (its scan and feed
-            // mark every change; what a delete took along reads as gone), and those the plan has
-            // work for (a node a plan didn't settle stays dirty), and every other one of the
-            // rest, by the planning round.
-            let taken = hbsync_engine::along::taken_along(
-                input.remote.iter().map(|(n, s)| (n, s.parent)),
-                |f| input.removed.get(&f).map(|r| r.at),
-                |n| input.changed_at.get(&n).copied(),
-            );
-            let work: BTreeSet<NodeId> = plan
-                .ops
-                .iter()
-                .map(|op| op.node())
-                .chain(plan.conflicts.iter().map(|c| c.node()))
-                .chain(plan.deferred.iter().copied())
-                .chain(plan.held.iter().map(|op| op.node()))
-                .collect();
-            let differs = |n: &NodeId| {
-                let base = input.base.get(*n);
-                let remote = input.remote.get(*n).filter(|_| !taken.contains(n));
-                base != input.local.get(*n) || base != remote || work.contains(n)
-            };
+            // The nodes whose sides differ dirty, as the engine keeps them, and every other
+            // one of the rest, by the planning round.
+            let differs = engine_dirty(input, plan);
             let some: Vec<NodeId> = all
                 .iter()
                 .copied()
                 .enumerate()
-                .filter(|(i, n)| differs(n) || (i + round).is_multiple_of(2))
+                .filter(|(i, n)| differs.contains(n) || (i + round).is_multiple_of(2))
                 .map(|(_, n)| n)
                 .collect();
             if some.is_empty() {
@@ -110,6 +84,99 @@ impl Sim {
             }))
         })();
         checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
+    }
+
+    /// Client `c`'s plan `plan` holds deletes (the guard's, §7): planned through the engine's
+    /// views, then again with what the engine takes out of the dirty set till the user answers
+    /// ([`hbsync_engine::held`]) out of it, it plans the same but those, unless its view
+    /// reaches them (the engine then plans them again too): what differs, if anything.
+    pub(crate) fn check_held(
+        &self,
+        c: usize,
+        input: &Input,
+        opts: &Options,
+        known: &dyn Fn(NodeId) -> bool,
+        plan: &Plan,
+    ) -> Option<String> {
+        let client = &self.clients[c];
+        if plan.held.is_empty() || !client.coords.top.is_root() {
+            return None;
+        }
+        let folder = self.folder_ctx(c);
+        let checked = (|| -> Result<Option<String>, StateError> {
+            let mut db = self.fill(c, input)?;
+            // The nodes whose sides differ dirty, and those the plan has work for, as the engine
+            // keeps them.
+            let dirty: Vec<NodeId> = engine_dirty(input, plan).into_iter().collect();
+            let folder = &folder;
+            let with = |opts: &Options| {
+                let opts = opts.clone();
+                move |i: &Input, _: &mut StateDb| -> Plan {
+                    reconcile_with_known(i, &opts, folder.masking(), known)
+                }
+            };
+            let all = view::plan_narrow(&mut db, &dirty, folder, with(opts))?;
+            let (out, nodes) = held::parked(&all, &dirty);
+            if out.is_empty() {
+                return Ok(None);
+            }
+            let nodes: HashSet<NodeId> = nodes.into_iter().collect();
+            let rest: Vec<NodeId> = dirty
+                .iter()
+                .copied()
+                .filter(|n| !nodes.contains(n))
+                .collect();
+            let opts = Options {
+                held_files: held::files(&all, out.iter().copied()),
+                ..opts.clone()
+            };
+            let reached = std::cell::Cell::new(false);
+            let reconcile = with(&opts);
+            let without =
+                view::plan_narrow(&mut db, &rest, folder, |i: &Input, db: &mut StateDb| {
+                    reached.set(reached.get() || held::touches(i, &nodes));
+                    reconcile(i, db)
+                })?;
+            if reached.get() {
+                return Ok(None);
+            }
+            let mut held_all = all.held.clone();
+            let mut held_without: Vec<Op> = without.held.clone();
+            held_without.extend(out.iter().map(|op| (*op).clone()));
+            held_all.sort_by_key(Op::node);
+            held_without.sort_by_key(Op::node);
+            let alike = all.ops == without.ops
+                && all.conflicts == without.conflicts
+                && all.deferred == without.deferred
+                && all.waiting == without.waiting
+                && all.delete_waits == without.delete_waits
+                && held_all == held_without
+                && all
+                    .clean
+                    .iter()
+                    .filter(|n| !nodes.contains(n))
+                    .eq(without.clean.iter());
+            Ok((!alike).then(|| {
+                format!(
+                    "c{c}: with the held deletes {nodes:?} out of the dirty set, it plans otherwise:\n  all:     {all:?}\n  without: {without:?}"
+                )
+            }))
+        })();
+        checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
+    }
+
+    /// The folder client `c`'s main folder plans in, as the engine's.
+    fn folder_ctx(&self, c: usize) -> FolderCtx {
+        let client = &self.clients[c];
+        FolderCtx {
+            root: std::path::PathBuf::from("/sim"),
+            os: client.os,
+            algorithm: HashAlgorithm::Blake3,
+            case_insensitive: client.os != Os::Linux,
+            filter: Arc::clone(&client.filter),
+            scope: Arc::new(client.scope()),
+            tags_kept: Arc::default(),
+        }
     }
 
     /// A state DB holding what client `c` plans from (`input`), as the engine's store has it.
@@ -281,4 +348,33 @@ pub(crate) fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> Mirr
         &content,
         state.content.map(|c| c.hash),
     )
+}
+
+/// The nodes of `input` dirty as the engine keeps them, `plan` made from it: those whose sides
+/// differ (its scan and feed mark every change; what a delete took along reads as gone), and
+/// those the plan has work for (a node a plan didn't settle stays dirty).
+fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
+    let taken = hbsync_engine::along::taken_along(
+        input.remote.iter().map(|(n, s)| (n, s.parent)),
+        |f| input.removed.get(&f).map(|r| r.at),
+        |n| input.changed_at.get(&n).copied(),
+    );
+    let work: BTreeSet<NodeId> = plan
+        .ops
+        .iter()
+        .map(|op| op.node())
+        .chain(plan.conflicts.iter().map(|c| c.node()))
+        .chain(plan.deferred.iter().copied())
+        .chain(plan.held.iter().map(|op| op.node()))
+        .collect();
+    input
+        .dirty
+        .iter()
+        .copied()
+        .filter(|n| {
+            let base = input.base.get(*n);
+            let remote = input.remote.get(*n).filter(|_| !taken.contains(n));
+            base != input.local.get(*n) || base != remote || work.contains(n)
+        })
+        .collect()
 }

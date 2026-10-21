@@ -876,7 +876,12 @@ fn a_confirmation_lets_through_exactly_the_deletes_the_user_saw() -> R {
     gone(&a, 0..60)?;
     let report = a.sync()?;
     assert_eq!(report.held.len(), 60);
-    assert_eq!(a.engine.db().read(|s| s.pending_file_deletes())?, (60, 0));
+    // Held, out of the dirty set: counted apart.
+    let counts = a
+        .engine
+        .db()
+        .read(|s| Ok((s.pending_file_deletes()?, s.held_file_deletes()?)))?;
+    assert_eq!(counts, ((0, 0), (60, 0)));
     let seen: Vec<_> = report.held.iter().map(|op| op.node()).collect();
 
     // 55 more deletes after the user looked: not part of what they confirm. Alone they are
