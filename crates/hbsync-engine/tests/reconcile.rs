@@ -2046,7 +2046,7 @@ fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
     let v = ids(8);
     let (f, wf, files) = (v[0], v[1], &v[2..]);
     let mut w = World::default();
-    w.opts.mass_delete_min = 2;
+    w.opts.guard.min = 2;
     w.synced(f, folder(ROOT, "f"));
     for (i, n) in files.iter().enumerate() {
         w.synced(*n, file(f, &format!("x{i}"), "1"));
@@ -2227,4 +2227,95 @@ fn a_held_folder_on_a_masked_name_is_never_renamed() {
     w.input.local_unhashed.insert(wf);
     let plan = w.plan();
     assert!(!plan.ops.iter().any(|op| op.node() == b), "{:#?}", plan.ops);
+}
+
+/// A new folder here holding a file being written, alone under a name a node this device
+/// doesn't sync holds on the drive (§10): it waits, never made beside it under that name.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_new_held_folder_on_a_masked_name_waits() {
+    let [b, wf, masked] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("/Build\n"),
+        ..World::default()
+    };
+    w.local(b, Some(folder(ROOT, "build")));
+    w.local(
+        wf,
+        Some(NodeState {
+            content: None,
+            ..file(b, "w", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(wf);
+    w.remote(masked, Some(file(ROOT, "Build", "x")));
+    let plan = w.plan();
+    assert!(!plan.ops.iter().any(|op| op.node() == b), "{:#?}", plan.ops);
+}
+
+/// A file inside a folder that waits for a held name, edited alike on both sides: no conflict
+/// copy waits, none is told (only a fork's copy that waited is).
+#[test]
+fn the_same_edit_in_a_waiting_folder_tells_no_conflict() {
+    let [u, wfold, x] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(u, file(ROOT, "u", "1"))
+        .synced(wfold, folder(ROOT, "w"))
+        .synced(x, file(wfold, "x", "1"));
+    // u renamed here to v, not hashed yet: its drive name u is held; w renamed here to u.
+    w.local(
+        u,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "v", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(u);
+    w.local(wfold, Some(folder(ROOT, "u")));
+    w.local(x, Some(file(wfold, "x", "2")));
+    w.remote(x, Some(file(wfold, "x", "2")));
+    let plan = w.plan();
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+}
+
+/// A file being written here in folder p, which the drive moved into a folder this device
+/// ignores, and then deleted p: the item here is detached (a new id, §10) and holds p, and
+/// what waits for it is told by the id the store knows it by, so it is read early.
+#[test]
+fn a_detached_file_waits_by_its_stored_id() {
+    let [p, b, x] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("build/\n"),
+        ..World::default()
+    };
+    w.synced(p, folder(ROOT, "p")).synced(x, file(p, "x", "1"));
+    w.remote(b, Some(folder(ROOT, "build")));
+    w.remote(x, Some(file(b, "x", "1")));
+    w.remote(p, None);
+    w.local(
+        x,
+        Some(NodeState {
+            content: None,
+            ..file(p, "x", "2")
+        }),
+    );
+    w.input.local_unhashed.insert(x);
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDetach { node, .. } if *node == x)),
+        "{plan:#?}"
+    );
+    assert!(
+        !plan.ops.iter().any(|op| op.node() == p),
+        "p's delete waits: {plan:#?}"
+    );
+    assert_eq!(plan.waiting, [x]);
 }

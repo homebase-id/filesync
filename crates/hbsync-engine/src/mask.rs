@@ -65,6 +65,17 @@ pub(crate) struct Masks {
 }
 
 impl Masks {
+    /// The id the store knows `node` by: a detached item's old id (§10), else its own.
+    pub(crate) fn store_id(&self, node: NodeId) -> NodeId {
+        if self.detached.is_empty() {
+            return node;
+        }
+        self.detached
+            .iter()
+            .find_map(|(&old, &new)| (new == node).then_some(old))
+            .unwrap_or(node)
+    }
+
     pub(crate) fn of(
         input: &Input,
         masking: Masking<'_>,

@@ -4333,7 +4333,7 @@ fn a_confirmation_lasts_while_its_delete_waits_for_a_file() -> R {
 
     let server = server();
     let mut a = Client::new(&server, "a")?;
-    let mut b = Client::with_config(&server, "b", |cfg| cfg.mass_delete_min = 2)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
     for i in 0..6 {
         a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
     }

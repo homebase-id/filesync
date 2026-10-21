@@ -250,11 +250,7 @@ impl Reconciler<'_> {
     /// The folder whose coverage holds `folder`'s children: a detached folder's are its old
     /// node's.
     fn covered_as(&self, folder: NodeId) -> NodeId {
-        self.masks
-            .detached
-            .iter()
-            .find_map(|(&old, &new)| (new == folder).then_some(old))
-            .unwrap_or(folder)
+        self.masks.store_id(folder)
     }
 
     /// Whether `node` holds its name as it is: held, or waiting for a name in this plan.
@@ -289,6 +285,7 @@ impl Reconciler<'_> {
             self.drop_fork(n);
             if let Some(original) = self.forked_into(n) {
                 self.merged.remove(n);
+                self.copy_waits.insert(original);
                 self.fork_waits(original);
             } else {
                 self.hold(n);
@@ -306,8 +303,7 @@ impl Reconciler<'_> {
         // The drive's names of what waits for a hash elsewhere here (`held`, and this plan's
         // waiters): held for it.
         let mut drive_held: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
-        let holding: Vec<NodeId> = self.held.iter().chain(&self.waiters).copied().collect();
-        for n in holding {
+        for &n in self.held.iter().chain(&self.waiters) {
             let Some(r) = self
                 .input
                 .remote
@@ -396,8 +392,7 @@ impl Reconciler<'_> {
                             .filter(|_| !self.taken.contains(&n));
                         let mut names = Vec::new();
                         if let Some(held) = self.merged.get(n) {
-                            if remote.is_some_and(|r| !r.same_place(held)) {
-                                let r = remote.unwrap_or(held);
+                            if let Some(r) = remote.filter(|r| !r.same_place(held)) {
                                 drive_held
                                     .entry((r.parent, name_key(&r.name)))
                                     .or_default()
@@ -438,8 +433,11 @@ impl Reconciler<'_> {
                     (!self.deferred.contains(n), arriving, *n)
                 });
                 for loser in group.into_iter().skip(keep) {
-                    // Never what waits for a hash, or for a name (§6.3).
+                    // Never what waits for a hash, or for a name (§6.3): planned, it waits.
                     if self.deferred.contains(&loser) || self.holds_name(loser) {
+                        if self.scope.contains(&loser) {
+                            self.wait_for_name(loser);
+                        }
                         continue;
                     }
                     let Some(mut state) = self.merged.get(loser).cloned() else {

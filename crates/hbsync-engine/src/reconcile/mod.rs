@@ -72,8 +72,9 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     let mut holds = Holds::of(view);
     let mut plan = loop {
         let r = Reconciler::new(view, opts, masking, &masks, &holds, taken.clone());
-        let (plan, waiters, named) = r.run();
+        let (plan, waiters, named, copies) = r.run();
         holds.named = named;
+        holds.copies.extend(copies);
         let new: Vec<NodeId> = waiters
             .into_iter()
             .filter(|n| !holds.waits.contains(n))
@@ -142,6 +143,10 @@ struct Reconciler<'a> {
     held_by: &'a [(NodeId, Vec<NodeId>)],
     /// What waited for a name this plan, with what is below it ([`Reconciler::fix_names`]).
     waiters: BTreeSet<NodeId>,
+    /// Originals of forks whose copies waited for a name this plan.
+    copy_waits: BTreeSet<NodeId>,
+    /// Those of an earlier plan ([`Holds::copies`]).
+    copies: &'a BTreeSet<NodeId>,
     /// Held nodes whose names something else waits for ([`Reconciler::fix_names`]).
     name_waits: HashSet<NodeId>,
     plan: Plan,
@@ -183,6 +188,9 @@ struct Holds {
     held: HashSet<NodeId>,
     /// What holds the names waited for.
     named: HashSet<NodeId>,
+    /// Of `waits`, the originals of forks whose copies waited for a name: their conflict
+    /// copies wait, told so (`Conflict::CopyWaits`).
+    copies: BTreeSet<NodeId>,
 }
 
 impl Holds {
@@ -203,6 +211,7 @@ impl Holds {
             waits: BTreeSet::new(),
             held,
             named: HashSet::new(),
+            copies: BTreeSet::new(),
         }
     }
 }
@@ -232,13 +241,16 @@ impl<'a> Reconciler<'a> {
             held: &holds.held,
             held_by: &holds.by_file,
             waiters: BTreeSet::new(),
+            copy_waits: BTreeSet::new(),
+            copies: &holds.copies,
             name_waits: holds.named.clone(),
             plan: Plan::default(),
         }
     }
 
-    /// The plan, what waited for a name in it, and what held the names (with an earlier plan's).
-    fn run(mut self) -> (Plan, BTreeSet<NodeId>, HashSet<NodeId>) {
+    /// The plan, what waited for a name in it, what held the names (with an earlier plan's),
+    /// and the forks whose copies waited.
+    fn run(mut self) -> (Plan, BTreeSet<NodeId>, HashSet<NodeId>, BTreeSet<NodeId>) {
         self.build_context();
         let dirty: Vec<NodeId> = self.input.dirty.iter().copied().collect();
         for node in dirty {
@@ -277,7 +289,7 @@ impl<'a> Reconciler<'a> {
         self.guard_mass_delete();
         self.plan.waiting = self.waiting();
         self.plan.deferred = self.deferred.into_iter().collect();
-        (self.plan, self.waiters, self.name_waits)
+        (self.plan, self.waiters, self.name_waits, self.copy_waits)
     }
 
     /// Whether `node` waits for a hash as it is, whatever its plan: a file not hashed yet, or
@@ -298,10 +310,7 @@ impl<'a> Reconciler<'a> {
                     || on_paths.iter().any(waits)
             })
             // As the store knows it: a detached item's old id (§10).
-            .map(|(node, _)| {
-                let old = self.masks.detached.iter().find(|(_, new)| **new == *node);
-                old.map_or(*node, |(old, _)| *old)
-            })
+            .map(|(node, _)| self.masks.store_id(*node))
             .collect()
     }
 }

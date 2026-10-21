@@ -3,7 +3,7 @@
 //! for the scope check (`breaches`, `planned_writable`), which the oracle records: it reads the
 //! engine's `Op`, which the oracle may not import.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -200,31 +200,55 @@ impl Sim {
                 self.ledger.narrow_differs(|| what);
             }
         }
+        // The files here not hashed yet (as the engine's view holds them: a row without a state
+        // only waits), and the new ids of those the plan detaches (§10).
+        let unhashed: HashSet<NodeId> = input
+            .local_unhashed
+            .iter()
+            .copied()
+            .filter(|n| input.local.contains(*n))
+            .collect();
+        let detached: HashMap<NodeId, NodeId> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::LocalDetach { node, new_node } => Some((*node, *new_node)),
+                _ => None,
+            })
+            .collect();
         // What waits for a hash, checked independently (sync semantics §6.3): no plan touches a
-        // file here not hashed yet, or moves, renames or deletes a folder it is in, on any side.
+        // file here not hashed yet, or moves, renames or deletes a folder it is in, on any side
+        // (on the drive as this device sees it: what its filter leaves out is out of view).
         self.ledger.moved_what_waits(|| {
+            let out_of_view = masked(&remote, &client.filter);
             let mut held: HashSet<NodeId> = HashSet::new();
-            let mut queue: Vec<NodeId> = input
-                .local_unhashed
+            let mut queue: Vec<(NodeId, bool)> = unhashed
                 .iter()
-                .copied()
-                .filter(|n| input.local.contains(*n))
+                .map(|n| (*n, !detached.contains_key(n)))
                 .collect();
-            while let Some(n) = queue.pop() {
-                for tree in [&input.local, &remote, &input.base] {
+            while let Some((n, synced)) = queue.pop() {
+                // A detached item is a new one here: held where it is here only.
+                let trees: &[&Tree] = match synced {
+                    true => &[&input.local, &remote, &input.base],
+                    false => &[&input.local],
+                };
+                for tree in trees {
+                    let on_drive = std::ptr::eq(*tree, &remote);
+                    if on_drive && out_of_view.contains(&n) {
+                        continue;
+                    }
                     if let Some(s) = tree.get(n)
                         && !s.parent.is_root()
+                        && !(on_drive && out_of_view.contains(&s.parent))
                         && held.insert(s.parent)
                     {
-                        queue.push(s.parent);
+                        queue.push((s.parent, true));
                     }
                 }
             }
-            let unhashed: HashSet<NodeId> = input
-                .local_unhashed
+            let touched: HashSet<NodeId> = unhashed
                 .iter()
-                .copied()
-                .filter(|n| input.local.contains(*n))
+                .map(|n| detached.get(n).copied().unwrap_or(*n))
                 .collect();
             plan.ops
                 .iter()
@@ -235,10 +259,12 @@ impl Sim {
                             .is_some_and(|s| s.parent != *parent || s.name != name)
                     };
                     // A detach only gives the item here another id (§10): it stays as it is.
-                    (unhashed.contains(&node) && !matches!(op, Op::LocalDetach { .. }))
+                    let detach = matches!(op, Op::LocalDetach { .. });
+                    ((touched.contains(&node) || unhashed.contains(&node)) && !detach)
                         || (held.contains(&node)
                             && match op {
-                                Op::LocalTrash { .. } | Op::RemoteDelete { .. } => true,
+                                Op::RemoteDelete { .. } => true,
+                                _ if op.trashes().is_some() => true,
                                 Op::LocalMove { parent, name, .. } => {
                                     moved(&input.local, parent, name)
                                 }
@@ -264,22 +290,19 @@ impl Sim {
                 };
                 let (mut deleted, mut trashed) = (0, 0);
                 // What was in a confirmed folder whose delete waits for a hash is confirmed:
-                // one synced, gone on a side, holding a file here not hashed yet.
-                let unhashed: Vec<NodeId> = input
-                    .local_unhashed
-                    .iter()
-                    .copied()
-                    .filter(|n| input.local.contains(*n))
-                    .collect();
+                // one synced, gone on a side (or taken along by a folder gone on the drive),
+                // holding a file here not hashed yet on any side.
                 let waits: HashSet<NodeId> = confirmed
                     .iter()
                     .copied()
                     .filter(|f| {
+                        let gone = !input.local.contains(*f) || remote.path(*f).is_none();
                         input.base.contains(*f)
-                            && !(input.local.contains(*f) && remote.contains(*f))
+                            && gone
                             && unhashed.iter().any(|u| {
-                                input.local.ancestors(*u).contains(f)
-                                    || input.base.ancestors(*u).contains(f)
+                                [&input.local, &remote, &input.base]
+                                    .iter()
+                                    .any(|t| t.ancestors(*u).contains(f))
                             })
                     })
                     .collect();

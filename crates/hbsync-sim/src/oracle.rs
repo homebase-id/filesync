@@ -120,12 +120,12 @@ impl Ledger {
         first(&mut self.dangling, what);
     }
 
-    /// An operation wrote outside its folder's part of the drive, if `what` names one.
     /// A plan moved, renamed or deleted what waits for a hash, if `what` names one.
     pub(crate) fn moved_what_waits(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.moved_waiting, what);
     }
 
+    /// An operation wrote outside its folder's part of the drive, if `what` names one.
     pub(crate) fn wrote_outside_scope(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.scope_breach, what);
     }
@@ -425,10 +425,11 @@ impl Sim {
                 "an item emptied stayed, though nothing kept it: {what}"
             ));
         }
-        // No folder wrote outside its part of the drive.
+        // Nothing moved what waits for a hash.
         if let Some(what) = &ledger.moved_waiting {
             return Err(what.clone());
         }
+        // No folder wrote outside its part of the drive.
         if let Some(op) = &ledger.scope_breach {
             return Err(format!(
                 "a folder wrote outside its part of the drive: {op}"
