@@ -209,12 +209,16 @@ impl Handle {
     /// Passes `control` on. Pause and stop also interrupt a sync in progress. False when the
     /// runner has ended.
     pub fn send(&self, control: Command) -> bool {
-        if matches!(control, Command::Pause(_) | Command::Stop) {
+        let interrupts = matches!(control, Command::Pause(_) | Command::Stop);
+        let sent = self.control.0.send(Msg::Command(control)).is_ok();
+        // Raised once queued: a Resume the runner takes meanwhile lowers it, but then the
+        // runner takes this command right after it, which raises it again.
+        if interrupts {
             self.stop.store(true, Ordering::Relaxed);
             // Shown as paused at once.
             self.changed.raise();
         }
-        self.control.0.send(Msg::Command(control)).is_ok()
+        sent
     }
 
     /// How often the runner's loop has woken up (tests: none while idle).
@@ -719,6 +723,9 @@ impl Runner {
                 schedule.woke(Instant::now());
             }
             Command::Pause(pause) => {
+                // Raised again: a Resume taken before it lowered the flag `Handle::send`
+                // raised, and the folder must show paused while it is.
+                self.stop.store(true, Ordering::Relaxed);
                 schedule.pause();
                 self.set(|s| s.paused_until = pause.until);
                 match pause.until {

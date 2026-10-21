@@ -601,6 +601,16 @@ fn spawn_at(
     )
 }
 
+/// The runner of `root` on `server`, its transfers at 300 kB/s: 600 kB take two seconds.
+fn spawn_slow(
+    server: &Arc<Mutex<FakeServer>>,
+    root: &Path,
+) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
+    let mut cfg = RunnerConfig::new(root, &db_of(root), &"test.example".into(), "a");
+    cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
+    spawn(cfg, server)
+}
+
 /// The runner of `cfg`, on its account's drive on `server`, without notifications.
 fn spawn(
     cfg: RunnerConfig,
@@ -787,6 +797,37 @@ fn a_timed_pause_holds_until_resumed() -> R {
     Ok(())
 }
 
+/// Pause, Resume, Pause queued while a sync runs: the last one holds, and the folder shows it
+/// (the Resume lowered the flag the second Pause raised when it was sent).
+#[test]
+fn pause_resume_pause_queued_during_a_sync_shows_paused() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
+    // The runner is busy for two seconds, and the commands queue.
+    let (handle, _thread) = spawn_slow(&server, &root)?;
+    std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
+    wait_until("the transfer runs", || {
+        handle.status().progress.is_some_and(|p| p.bytes_done > 0)
+    })?;
+    // The last one timed, so its end shows once the runner took it.
+    let until = hbsync_types::unix_now() + 3600;
+    handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    handle.send(Command::Resume);
+    handle.send(Command::Pause(Pause::ending_at(until)));
+    wait_until("the runner took the three", || {
+        handle.status().paused_until == Some(until)
+    })?;
+    assert_eq!(handle.status().state, State::Paused);
+    std::fs::write(root.join("later.txt"), "x")?;
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!on_server(&server, "later.txt"), "synced while paused");
+    handle.send(Command::Resume);
+    wait_until("later.txt is up", || on_server(&server, "later.txt"))?;
+    handle.send(Command::Stop);
+    Ok(())
+}
+
 #[test]
 fn the_recently_synced_list_follows_the_syncs() -> R {
     let server = server();
@@ -819,9 +860,7 @@ fn progress_shows_during_the_first_sync() -> R {
     let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
     // There before the daemon starts: uploaded by start-up's first sync.
     std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
-    let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
-    cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
-    let (handle, _thread) = spawn(cfg, &server)?;
+    let (handle, _thread) = spawn_slow(&server, &root)?;
     let mut seen = None;
     wait_until("progress shows", || {
         let status = handle.status();
@@ -840,10 +879,8 @@ fn progress_shows_while_a_transfer_runs() -> R {
     let server = server();
     let dir = tempfile::tempdir()?;
     let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
-    let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
-    // 600 kB at 300 kB/s: two seconds to watch.
-    cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
-    let (handle, _thread) = spawn(cfg, &server)?;
+    // Two seconds to watch.
+    let (handle, _thread) = spawn_slow(&server, &root)?;
     std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
     let mut seen = None;
     wait_until("progress shows", || {
