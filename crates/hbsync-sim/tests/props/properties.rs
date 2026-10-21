@@ -160,6 +160,28 @@ proptest! {
 }
 
 proptest! {
+    // A twentieth of the cases, at least one: a plan that holds deletes is planned twice more,
+    // over a state DB it fills.
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 20).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// The engine takes held deletes out of the dirty set till the user answers
+    /// (`hbsync_engine::held`), so they aren't planned again every sync: a plan without them
+    /// plans as one with them (their deletes held), unless its view reaches them, and then the
+    /// engine plans them again with it. Checked on every plan that holds deletes, with the
+    /// guard tripping often; the clients converge without loss whatever the users answer.
+    #[test]
+    fn held_deletes_out_of_the_dirty_set_plan_alike(
+        events in proptest::collection::vec(guarded_event(2), 0..80),
+        min in 1usize..3,
+    ) {
+        run_with(2, Some(min), Sim::with_held_check, &events)?;
+    }
+}
+
+proptest! {
     /// A file still being written when its device plans (not hashed yet, its merge left for
     /// later) is where it is there, whatever the drive did with its node meanwhile: it keeps
     /// its folder alive against another device's delete of it, outright or not (its edits

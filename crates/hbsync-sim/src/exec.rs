@@ -249,6 +249,10 @@ impl Sim {
                 self.ledger.narrow_differs(|| what);
             }
         }
+        if self.faults.held_check && !self.ledger.found_narrow_differs() {
+            let what = self.check_held(c, &input, &opts, &known, &plan);
+            self.ledger.narrow_differs(|| what);
+        }
         // The files here not hashed yet (as the engine's view holds them: a row without a state
         // only waits), and the new ids of those the plan detaches (§10).
         let unhashed: HashSet<NodeId> = input

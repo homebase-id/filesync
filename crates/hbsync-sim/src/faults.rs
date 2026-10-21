@@ -31,6 +31,10 @@ pub(crate) struct Faults {
     /// path ([`crate::Sim::with_narrow_check`]), in rounds counted here.
     pub(crate) narrow_check: bool,
     pub(crate) narrow_rounds: usize,
+    /// Every plan a main folder makes that holds deletes is planned again through the engine's
+    /// views without what the engine takes out of the dirty set till answered
+    /// ([`crate::Sim::with_held_check`]).
+    pub(crate) held_check: bool,
     /// The drive answers a wrong "not there" now and then
     /// ([`crate::Sim::with_wrong_not_theres`]): the plans heard so far, and the files it said
     /// it of.

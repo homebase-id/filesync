@@ -4973,3 +4973,180 @@ fn put_back_held_file_by_file_comes_back_alike() -> R {
     assert!(whole <= 4, "one feed read, one restore: {whole} requests");
     Ok(())
 }
+
+/// Held deletes leave the dirty set till the user answers (sync semantics §7): a sync with
+/// nothing new plans nothing, one with an edit elsewhere plans that only, and each still shows
+/// what is held, with it pending. A new engine (a restart) plans them again, still held; a
+/// later delete here is held with them (the guard counts them); Delete lets them all through.
+#[test]
+fn held_deletes_are_planned_again_only_when_needed() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.write("other/o.txt", "o")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    let held_db = |a: &mut Client| a.engine.db().read(|s| s.held_delete_count());
+    assert_eq!(held_db(&mut a)?, 5, "out of the dirty set");
+    // Nothing new: nothing planned, the same shown.
+    let report = a.engine.sync("2026-10-08", false)?;
+    assert_eq!((report.rounds, report.held.len()), (0, 5), "{report:?}");
+    assert_eq!(report.pending, 5);
+    // An edit elsewhere: that alone is dirty, and planned.
+    a.write("other/o.txt", "o2")?;
+    a.engine.scan_local()?;
+    assert_eq!(a.engine.db().read(|s| s.dirty_count())?, 1);
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    assert_eq!(held_db(&mut a)?, 5);
+    // A new engine plans them again, still held.
+    a.restart()?;
+    let report = a.sync()?;
+    assert!(report.rounds > 0, "{report:?}");
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    // One file more deleted here: held with them (5 files, over the limit of 2).
+    fs::remove_file(a.root.join("keep.txt"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 6, "{report:?}");
+    b.sync()?;
+    assert_eq!(b.read_text("keep.txt")?, "k", "nothing sent");
+    assert_eq!(b.read_text("Projects/f0.txt")?, "0", "nothing sent");
+    // Delete: all of them go.
+    let nodes: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    a.engine.confirm_deletes(nodes);
+    let report = a.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(held_db(&mut a)?, 0);
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["other/", "other/o.txt = o2"]);
+    Ok(())
+}
+
+/// A change to a held item plans every held delete again, with it (its view reaches them):
+/// as when they stayed dirty. Here a file of a held folder is edited elsewhere, so the folder
+/// comes back here with it, and that delete is no longer held.
+#[test]
+fn a_change_to_a_held_item_plans_them_again() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    b.write("Projects/f1.txt", "edited")?;
+    b.sync()?;
+    let report = a.sync()?;
+    assert!(report.rounds > 0, "{report:?}");
+    assert_eq!(
+        a.read_text("Projects/f1.txt")?,
+        "edited",
+        "{:?}",
+        a.tree_text("")
+    );
+    b.sync()?;
+    assert_eq!(b.read_text("Projects/f1.txt")?, "edited");
+    Ok(())
+}
+
+/// This device's own removals held out of the dirty set go through once the guard would let
+/// them (more files synced since: the limit is a share of them), as they would have had they
+/// stayed dirty.
+#[test]
+fn held_deletes_here_go_once_the_limit_lets_them() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| {
+        cfg.guard.min = 2;
+        cfg.guard.fraction = 0.25;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    for i in 0..4 {
+        a.write(&format!("keep/k{i}.txt"), "k")?;
+    }
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    // 24 more: 32 synced, a limit of 8 for 4 files.
+    for i in 0..24 {
+        a.write(&format!("more/m{i}.txt"), "m")?;
+    }
+    a.sync()?;
+    let report = a.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    let live = server.lock().map_err(|_| "poisoned")?.live().count();
+    assert_eq!(live, 1 + 4 + 1 + 24, "keep, its files, more, its files");
+    Ok(())
+}
+
+/// A held delete planned over several pages leaves the dirty set whole at the end of the sync
+/// (each page sees the others' nodes as context, as before), and stays out. (Loose files: a
+/// folder's delete over several pages is review 14's R1, apart.)
+#[test]
+fn a_held_delete_over_several_pages_stays_out() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| {
+        cfg.guard.min = 2;
+        cfg.batch = 2;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    for i in 0..4 {
+        fs::remove_file(a.root.join(format!("f{i}.txt")))?;
+    }
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 4, "{report:?}");
+    assert_eq!(a.engine.db().read(|s| s.held_delete_count())?, 4);
+    for _ in 0..2 {
+        let report = a.engine.sync("2026-10-08", false)?;
+        assert_eq!((report.rounds, report.held.len()), (0, 4), "{report:?}");
+    }
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 5);
+    Ok(())
+}
+
+/// Something else left dirty (a file that can't be read yet) keeps held deletes in the dirty
+/// set only if its view reaches them: planned alone at the end of the sync, this one doesn't,
+/// so they leave it, and it stays dirty, planned every sync.
+#[cfg(unix)]
+#[test]
+fn held_deletes_leave_the_dirty_set_beside_a_file_that_waits() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("other/locked.txt", "l")?;
+    a.sync()?;
+    let locked = a.root.join("other/locked.txt");
+    a.write("other/locked.txt", "changed")?;
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    let counts = a
+        .engine
+        .db()
+        .read(|s| Ok((s.held_delete_count()?, s.dirty_count()?)))?;
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644))?;
+    assert_eq!(counts, (5, 1), "the held ones out, the locked file dirty");
+    Ok(())
+}

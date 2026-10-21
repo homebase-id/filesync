@@ -1,7 +1,7 @@
 //! A plan of operations and what goes into making one: the reconciler's input and options,
 //! the operations, conflicts, and what an operation needs before it may run.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use hbsync_local::Filter;
@@ -62,6 +62,10 @@ pub struct Options {
     /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
     /// totals too, so a large delete split over several batches is still held.
     pub pending_deletes: (usize, usize),
+    /// The files the held deletes out of the dirty set take ([`crate::held`]): (removed from
+    /// the drive, trashed here). The guard counts them with each plan's own, as it would if
+    /// they were planned with it.
+    pub held_files: (usize, usize),
     /// Ids a detach must not give: already known here (an earlier detach of the same node).
     pub taken: Arc<HashSet<NodeId>>,
 }
@@ -73,6 +77,26 @@ pub struct DeleteGuard {
     pub min: usize,
     pub fraction: f64,
     pub allow: bool,
+}
+
+impl DeleteGuard {
+    /// The limit with `synced` files synced: `max(min, fraction × synced)`.
+    pub fn limit(&self, synced: usize) -> usize {
+        self.min.max((synced as f64 * self.fraction) as usize)
+    }
+
+    /// Whether removing `n` files from the drive (deleted here, or newly ignored, §10 rule 1)
+    /// is held: over the limit, or every synced file.
+    pub fn trips(&self, n: usize, synced: usize) -> bool {
+        n > self.limit(synced) || (synced > 0 && n >= synced && n > 1)
+    }
+
+    /// Whether removals elsewhere of `n` files are held: what another device removed is
+    /// followed here (into `.hbsync/trash`, and Recently deleted on the drive keeps it), but
+    /// every synced file at once over the limit: a broken device or a wiped drive.
+    pub fn every(&self, n: usize, synced: usize) -> bool {
+        synced > 0 && n >= synced && n > self.limit(synced)
+    }
 }
 
 impl Default for DeleteGuard {
@@ -96,6 +120,7 @@ impl Default for Options {
             confirmed: Arc::default(),
             wiped: Arc::default(),
             pending_deletes: (0, 0),
+            held_files: (0, 0),
             taken: Arc::default(),
         }
     }
@@ -483,6 +508,9 @@ pub struct Plan {
     pub ops: Vec<Op>,
     /// Deletes held by the mass-delete guard.
     pub held: Vec<Op>,
+    /// The files each of `held` takes, by its node, as the guard counted them: (removed from
+    /// the drive, trashed here).
+    pub held_takes: BTreeMap<NodeId, (usize, usize)>,
     pub conflicts: Vec<Conflict>,
     /// Dirty nodes that need nothing (both sides and the base agree): the dirty flag can go.
     pub clean: Vec<NodeId>,

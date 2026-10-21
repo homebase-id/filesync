@@ -154,6 +154,55 @@ impl SyncReport {
     }
 }
 
+/// The guard's held deletes out of the dirty set ([`crate::held`]), as this engine took them
+/// out (the store keeps which nodes; a new engine plans them again).
+#[derive(Debug, Default)]
+struct HeldOut {
+    /// The deletes, shown with every sync's report.
+    ops: Vec<Op>,
+    /// Their nodes out of the dirty set.
+    nodes: std::collections::HashSet<NodeId>,
+    /// The files they take ([`Options::held_files`]).
+    files: (usize, usize),
+    /// Their part of the guard's totals ([`ReadTx::held_file_deletes`]), once read: what
+    /// changes them marks a node of theirs dirty, and the plan that reaches it plans them all
+    /// again.
+    pending: Option<(u64, u64)>,
+    /// A plan's view reached one of `nodes` ([`crate::held::touches`]): set by
+    /// [`Engine::plan`], taken by the page's round.
+    reached: bool,
+    /// To plan again at the next sync: an answer came, or this engine is new.
+    plan_again: bool,
+}
+
+/// The held deletes of a sweep's pages that may leave the dirty set at its end
+/// ([`crate::held::out_of_dirty`]): the deletes, the marks of the nodes they cover as each
+/// page read them, and the files they take.
+#[derive(Debug, Default)]
+struct HoldOut {
+    ops: Vec<Op>,
+    marks: Vec<Mark>,
+    files: (usize, usize),
+}
+
+impl HoldOut {
+    fn add(&mut self, ops: impl IntoIterator<Item = Op>, (here, there): (usize, usize)) {
+        self.ops.extend(ops);
+        self.files = (self.files.0 + here, self.files.1 + there);
+    }
+}
+
+impl HeldOut {
+    fn add(&mut self, ops: impl IntoIterator<Item = Op>, (here, there): (usize, usize)) {
+        self.ops.extend(ops);
+        self.files = (self.files.0 + here, self.files.1 + there);
+    }
+}
+
+/// What else may stay dirty, at most, for held deletes to leave the dirty set: it is planned
+/// alone once more at the end of the sync, to see that its view doesn't reach them.
+const LEFTOVERS_MAX: usize = 1_000;
+
 pub struct Engine {
     db: StateDb,
     drive: Arc<Drive>,
@@ -170,6 +219,8 @@ pub struct Engine {
     /// Nodes whose removal elsewhere the guard held as every synced file, till answered
     /// ([`keys::WIPED`]).
     wiped: std::collections::HashSet<NodeId>,
+    /// The guard's held deletes out of the dirty set ([`crate::held`]).
+    held: HeldOut,
     /// How far the current sync is.
     progress: Arc<Counters>,
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
@@ -235,6 +286,11 @@ impl Engine {
             stop: Arc::default(),
             confirmed: Default::default(),
             wiped: Default::default(),
+            // What an earlier run held out is planned again at the first sync.
+            held: HeldOut {
+                plan_again: true,
+                ..HeldOut::default()
+            },
             progress: Arc::default(),
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
@@ -266,6 +322,7 @@ impl Engine {
     /// other nodes are judged as before: one the user didn't see is never let through by a
     /// confirmation.
     pub fn confirm_deletes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
+        self.held.plan_again = true;
         self.confirmed.extend(nodes);
     }
 
@@ -282,6 +339,8 @@ impl Engine {
     /// Costs a feed read, and a restore (a read and a write or more) per item restored.
     /// Returns how many it put back.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        // Whatever it puts back, the held deletes are planned again at the next sync.
+        self.held.plan_again = true;
         self.drive.pull(None)?;
         // What loses its base.
         let mut forget = Vec::new();
@@ -534,13 +593,67 @@ impl Engine {
             self.drive.ensure_role(role)?;
         }
         report.adopted = adopt(&mut self.db, &self.cfg.folder)?;
+        // What an earlier run held, or one the user answered since, is planned again.
+        if std::mem::take(&mut self.held.plan_again) {
+            self.plan_held_again()?;
+        }
+        // Once more if a plan reached the held deletes out of the dirty set: then they are
+        // dirty again (and none out, so it ends).
+        let (swept, after) = loop {
+            if let Some(after) = self.sweep(date, report)? {
+                break after;
+            }
+        };
+        // A sync cut short by the round limit leaves the rest of the sweep to the next one (the
+        // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
+        self.sweep_after = after;
+        report.pending = self.db.read(|s| s.pending_count())?;
+        report.unfinished = !swept
+            || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
+        if report.ops_done > 0 || report.feed.deleted > 0 {
+            // Ids of nodes gone everywhere.
+            self.db.write(|s| s.account().collect_nodes())?;
+        }
+        // Its writes changed other folders' parts of the drive (a move across them): their
+        // engines look.
+        let folder = self.db.folder();
+        self.drive.wake_touched(&mut self.db, Some(folder));
+        // Also when nothing ran: the drive is still full for this folder.
+        report.full = self.drive.full();
+        Ok(())
+    }
 
+    /// Plans and executes the dirty set, round after round, into `report`. Returns whether a
+    /// sweep ended and where the last one stopped; `None` when a plan reached the held deletes
+    /// out of the dirty set: then they are dirty again, and all is to be planned again. A sync
+    /// that ends with nothing dirty but held deletes takes those out of the dirty set
+    /// ([`crate::held`]).
+    fn sweep(
+        &mut self,
+        date: &str,
+        report: &mut SyncReport,
+    ) -> Result<Option<(bool, Option<DirtyCursor>)>, EngineError> {
+        self.held.reached = false;
         // The guard must judge the whole delete, even when it is planned in several batches;
         // confirmed deletes don't count. Confirmations of nodes with nothing left to do are
         // dropped (those whose plan no longer deletes them, in plan_and_execute).
         let confirmed = std::mem::take(&mut self.confirmed);
+        // This device's own removals held out of the dirty set: weighed against the totals.
+        let own = self
+            .held
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteDelete { .. }));
+        let held_pending = match self.held.pending {
+            Some(p) => p,
+            None => {
+                let p = self.db.read(|s| s.held_file_deletes())?;
+                *self.held.pending.insert(p)
+            }
+        };
         let (pending_deletes, synced_files, confirmed, computer, saved) = self.db.read(|s| {
             let (here, there) = s.pending_file_deletes()?;
+            let (here, there) = (here + held_pending.0, there + held_pending.1);
             // Held as every synced file: until answered, each while its removal is pending.
             let saved: std::collections::HashSet<NodeId> =
                 read_wiped(s.get_kv(keys::WIPED)?.as_deref())
@@ -561,9 +674,9 @@ impl Engine {
                 there.saturating_sub(confirmed_there.len() as u64),
             );
             // Nothing dirty, nothing to plan: the guard has nothing to weigh against them.
-            let synced = match s.dirty_count()? {
-                0 => 0,
-                _ => s.base_file_count()?,
+            let synced = match s.dirty_count()? == 0 && self.held.ops.is_empty() {
+                true => 0,
+                false => s.base_file_count()?,
             };
             // This computer's id for the account ([`Options::computer`]): every open gives the
             // DB one, so none is a fault, never a reason to plan without.
@@ -574,18 +687,35 @@ impl Engine {
             Ok((pending, synced, still, computer, saved))
         })?;
         self.confirmed = confirmed;
+        let guard = self.cfg.guard;
+        // This device's own removals held out are planned again once the guard would let them
+        // through (more files synced since, say), as it would if they had stayed dirty.
+        // Before the hold of removals elsewhere is looked at: that of one out of the dirty set
+        // is kept as it was.
+        let (here, _) = self.held.files;
+        // And all of them with the guard off.
+        if !self.held.ops.is_empty() && guard.allow
+            || own
+                && !guard.trips(pending_deletes.0 as usize, synced_files as usize)
+                && !guard.trips(here, synced_files as usize)
+        {
+            self.plan_held_again()?;
+        }
         // Held as every synced file: until answered (Delete, or put back), each while a
         // removal elsewhere is still to be followed in it: it, or (back on the drive) what is
         // below it. A row lookup or two each; a subtree walk only for one back on the drive.
+        // One held out of the dirty set is as it was then: anything that changed it marked it
+        // dirty, and the plan that reaches it plans all of them again, from here.
         let mut wiped = std::collections::HashSet::new();
         self.db.read(|s| {
             for &node in &saved {
-                let keep = !self.confirmed.contains(&node)
-                    && s.get_base(node)?.is_some()
-                    && match s.get_mirror(node)?.is_some() {
-                        false => s.local_by_node(node)?.is_some(),
-                        true => s.removal_pending_under(node)?,
-                    };
+                let keep = self.held.nodes.contains(&node)
+                    || !self.confirmed.contains(&node)
+                        && s.get_base(node)?.is_some()
+                        && match s.get_mirror(node)?.is_some() {
+                            false => s.local_by_node(node)?.is_some(),
+                            true => s.removal_pending_under(node)?,
+                        };
                 if keep {
                     wiped.insert(node);
                 }
@@ -600,19 +730,26 @@ impl Engine {
             device: self.cfg.device.clone(),
             computer,
             date: date.to_owned(),
-            guard: self.cfg.guard,
+            guard,
             synced_files: synced_files as usize,
             confirmed: Arc::new(self.confirmed.clone()),
-            wiped: Arc::new(wiped.clone()),
+            wiped: Arc::new(wiped),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
+            held_files: self.held.files,
             taken: Arc::default(),
         };
         // The dirty set is planned page by page in node id order and swept round after
-        // round, across syncs, so nodes that stay dirty (held, deferred, failing) can't starve
-        // the rest. A sync stops after a full sweep in which nothing was done.
+        // round, across syncs, so nodes that stay dirty (deferred, failing) can't starve the
+        // rest; held deletes leave it once nothing else is (`hold_out`). A sync stops after a
+        // full sweep in which nothing was done.
         let mut after = self.sweep_after.take();
         let mut progress = false;
         let mut held: Vec<Op> = Vec::new();
+        // What this sweep's pages hold, and of the last sweep, which ended with nothing done.
+        let (mut hold_out, mut settled) = (HoldOut::default(), None);
+        // Whether the sweep under way started at the first page (not the rest of the last
+        // sync's): only such a one settles what is held.
+        let mut whole = after.is_none();
         let mut swept = false;
         for _ in 0..self.cfg.max_rounds {
             if report.stopped || self.stop.load(Ordering::Relaxed) {
@@ -623,42 +760,112 @@ impl Engine {
             if !dirty.is_empty() {
                 report.rounds += 1;
                 let done_before = report.ops_done;
-                held.extend(self.plan_and_execute(&dirty, &opts, report)?);
+                match self.plan_and_execute(&dirty, &opts, &mut hold_out, report)? {
+                    Some(page) => held.extend(page),
+                    None => return Ok(None),
+                }
                 progress |= report.ops_done > done_before;
             }
             after = next;
             if dirty.len() < self.cfg.batch {
                 // End of a sweep: what it held, and what waits now.
-                report.held = std::mem::take(&mut held);
+                report.held = self.with_held_out(std::mem::take(&mut held));
                 report.waiting = std::mem::take(&mut self.waiting);
                 swept = true;
                 after = None;
+                let page = std::mem::take(&mut hold_out);
                 if !progress {
+                    settled = whole.then_some(page);
                     break;
                 }
                 progress = false;
+                whole = true;
             }
         }
         if !swept {
-            report.held = held;
+            report.held = self.with_held_out(held);
             report.waiting.append(&mut self.waiting);
         }
-        // A sync cut short by the round limit leaves the rest of the sweep to the next one (the
-        // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
-        self.sweep_after = after;
-        report.pending = self.db.read(|s| s.dirty_count())?;
-        report.unfinished = !swept
-            || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
-        if report.ops_done > 0 || report.feed.deleted > 0 {
-            // Ids of nodes gone everywhere.
-            self.db.write(|s| s.account().collect_nodes())?;
+        if let Some(page) = settled
+            && !report.stopped
+        {
+            self.hold_out(page, &opts)?;
         }
-        // Its writes changed other folders' parts of the drive (a move across them): their
-        // engines look.
-        let folder = self.db.folder();
-        self.drive.wake_touched(&mut self.db, Some(folder));
-        // Also when nothing ran: the drive is still full for this folder.
-        report.full = self.drive.full();
+        Ok(Some((swept, after)))
+    }
+
+    /// Takes the held deletes of a sweep that did nothing out of the dirty set: unless what
+    /// else stays dirty (refused, failing, waiting for a hash) is more than
+    /// [`LEFTOVERS_MAX`], or its view, planned alone with them out, reaches them (then they
+    /// are planned with it every sync, as before). Checked and written against the same dirty
+    /// set: a mark that came meanwhile leaves them dirty.
+    fn hold_out(&mut self, page: HoldOut, opts: &Options) -> Result<(), EngineError> {
+        if page.marks.is_empty() {
+            return Ok(());
+        }
+        let out: std::collections::HashSet<NodeId> = page.marks.iter().map(|m| m.node).collect();
+        let limit = out.len() + LEFTOVERS_MAX;
+        let (dirty, _) = self.db.read(|s| s.dirty_marks(None, limit + 1))?;
+        if dirty.len() > limit {
+            return Ok(());
+        }
+        let rest: Vec<NodeId> = dirty
+            .iter()
+            .map(|m| m.node)
+            .filter(|n| !out.contains(n))
+            .collect();
+        if !rest.is_empty() {
+            let before = self.held.nodes.clone();
+            self.held.nodes.extend(&out);
+            let planned = self.plan(&rest, opts);
+            self.held.nodes = before;
+            planned?;
+            if std::mem::take(&mut self.held.reached) {
+                return Ok(());
+            }
+        }
+        let dirty = dirty.len() as u64;
+        let held = self.db.write(|s| {
+            if s.dirty_count()? != dirty {
+                return Ok(false);
+            }
+            page.marks
+                .iter()
+                .try_for_each(|m| s.folder().hold_delete(*m))?;
+            Ok(true)
+        })?;
+        if held {
+            self.held.add(page.ops, page.files);
+            self.held.nodes.extend(out);
+            self.held.pending = None;
+        }
+        Ok(())
+    }
+
+    /// `held`, the deletes a sweep held, with those held out of the dirty set
+    /// ([`crate::held`]): what the user is shown.
+    fn with_held_out(&self, mut held: Vec<Op>) -> Vec<Op> {
+        if self.held.ops.is_empty() {
+            return held;
+        }
+        let mut nodes: std::collections::HashSet<NodeId> = held.iter().map(Op::node).collect();
+        held.extend(
+            self.held
+                .ops
+                .iter()
+                .filter(|op| nodes.insert(op.node()))
+                .cloned(),
+        );
+        held
+    }
+
+    /// Puts the held deletes out of the dirty set back into it ([`crate::held`]): planned
+    /// again, all of them.
+    fn plan_held_again(&mut self) -> Result<(), StateError> {
+        // Should the write fail: at the next sync.
+        self.held.plan_again = true;
+        self.db.write(|s| s.folder().unhold_deletes().map(drop))?;
+        self.held = HeldOut::default();
         Ok(())
     }
 
@@ -761,7 +968,19 @@ impl Engine {
                 db.read(|s| s.knows_node(id)).unwrap_or(true)
             })
         };
-        let plan = view::plan_narrow(db, dirty, folder, &reconcile)?;
+        // Whether a view reached the held deletes out of the dirty set.
+        let held = &self.held.nodes;
+        let reached = std::cell::Cell::new(false);
+        let plan = view::plan_narrow(
+            db,
+            dirty,
+            folder,
+            |input: &crate::reconcile::Input, db: &mut StateDb| {
+                reached.set(reached.get() || crate::held::touches(input, held));
+                reconcile(input, db)
+            },
+        )?;
+        self.held.reached |= reached.get();
         #[cfg(feature = "testkit")]
         if self.cfg.check_narrow {
             let input = db.read(|s| view::build_input(s, dirty, folder))?;
@@ -787,13 +1006,17 @@ impl Engine {
 
     /// Plans one page of dirty nodes and executes the plan. No feed read after it: each write
     /// is recorded from its answer (version, token, the server's time), and the notifications
-    /// leave this device's own writes out. Returns the deletes the mass-delete guard held.
+    /// leave this device's own writes out. Returns the deletes the mass-delete guard held (into
+    /// `hold_out`, those that may leave the dirty set at the end of the sync: [`crate::held`]).
+    /// `None` when the plan reached the held deletes out of it: they are dirty again, nothing
+    /// ran.
     fn plan_and_execute(
         &mut self,
         marks: &[Mark],
         opts: &Options,
+        hold_out: &mut HoldOut,
         report: &mut SyncReport,
-    ) -> Result<Vec<Op>, EngineError> {
+    ) -> Result<Option<Vec<Op>>, EngineError> {
         let dirty: Vec<NodeId> = marks.iter().map(|m| m.node).collect();
         // What an earlier round left placed (its operation failed after), as at the start of a
         // sync: no round places over a record it didn't write. One query when there is none.
@@ -801,6 +1024,10 @@ impl Engine {
         recover_placements(&mut self.db, &self.cfg.folder)?;
         let plan = self.plan(&dirty, opts)?;
         let plan = self.read_waiting(plan, &dirty, opts)?;
+        if std::mem::take(&mut self.held.reached) {
+            self.plan_held_again()?;
+            return Ok(None);
+        }
         // What the guard holds of removals elsewhere stays held till answered (§7): only the
         // every-file rule holds those. Kept before anything of this page runs or goes clean.
         let before = self.wiped.len();
@@ -839,6 +1066,13 @@ impl Engine {
                 .filter(|m| clean.contains(&m.node))
                 .try_for_each(|m| s.folder().clear_mark(*m))
         })?;
+        // Held till answered: out of the dirty set at the end of the sync, if that is all.
+        let (out, nodes) = crate::held::out_of_dirty(&plan, &dirty);
+        let files = crate::held::files(&plan, out.iter().copied());
+        hold_out.add(out.into_iter().cloned(), files);
+        hold_out
+            .marks
+            .extend(marks.iter().filter(|m| nodes.contains(&m.node)));
         report.conflicts.extend(plan.conflicts);
         let mut ops = plan.ops;
         let case_insensitive = self.cfg.folder.case_insensitive;
@@ -847,7 +1081,7 @@ impl Engine {
             .take(&mut self.db, &mut ops, case_insensitive)?;
         report.refused.extend(refused);
         if ops.is_empty() {
-            return Ok(plan.held);
+            return Ok(Some(plan.held));
         }
         let exec = Executor::new(
             &mut self.db,
@@ -884,7 +1118,7 @@ impl Engine {
             None => {}
             Some(Stopped::Requested) => {
                 report.stopped = true;
-                return Ok(plan.held);
+                return Ok(Some(plan.held));
             }
             Some(stopped) => return Err(stopped.into()),
         }
@@ -893,7 +1127,7 @@ impl Engine {
         if exec.news.behind {
             report.feed += self.drive.catch_up(Some(self.db.folder()))?;
         }
-        Ok(plan.held)
+        Ok(Some(plan.held))
     }
 }
 

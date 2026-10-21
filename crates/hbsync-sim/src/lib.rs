@@ -135,6 +135,16 @@ impl Sim {
         self
     }
 
+    /// Every plan a main folder makes that holds deletes (the guard's, §7) is planned again
+    /// through the engine's views: once with its dirty nodes as the engine keeps them, once
+    /// with what the engine takes out of the dirty set till the user answers
+    /// ([`hbsync_engine::held`]) out of it. Unless that view reaches them, the two plan alike
+    /// but those deletes.
+    pub fn with_held_check(mut self) -> Self {
+        self.faults.held_check = true;
+        self
+    }
+
     /// For scripted tests: the tag adds [`Sim::check`] found lost to a known limit of the
     /// engine, as `"Limit node tag"`.
     pub fn tags_lost_to_known_limits(&self) -> Vec<String> {

@@ -35,35 +35,36 @@ impl Reconciler<'_> {
                 || (!waiting.is_empty()
                     && i.base.ancestors(node).iter().any(|a| waiting.contains(a)))
         };
-        let (mut local_files, mut remote_files) = (0usize, 0usize);
-        for op in self.plan.ops.iter().filter(|op| !confirmed(op)) {
-            match op {
-                Op::RemoteDelete { node, .. }
-                    if i.remote
-                        .get(*node)
-                        .is_some_and(|s| s.kind == NodeKind::File) =>
-                {
-                    remote_files += 1
-                }
-                // A removal elsewhere: a move out of view (`Forget`) keeps the files live on
-                // the drive, so it isn't one.
-                Op::LocalTrash { node, .. } => local_files += files_under(&i.local, *node),
-                _ => {}
+        // The files each delete takes: a file removed from the drive, what a trash takes here.
+        let takes = |op: &Op| match op {
+            Op::RemoteDelete { node, .. }
+                if i.remote
+                    .get(*node)
+                    .is_some_and(|s| s.kind == NodeKind::File) =>
+            {
+                Some((1, 0))
             }
+            // A removal elsewhere: a move out of view (`Forget`) keeps the files live on
+            // the drive, so it isn't one.
+            Op::LocalTrash { node, .. } => Some((0, files_under(&i.local, *node))),
+            _ => None,
+        };
+        // With the held deletes out of the dirty set: counted as if planned with this one.
+        let (mut remote_files, mut local_files) = self.opts.held_files;
+        for (here, there) in self
+            .plan
+            .ops
+            .iter()
+            .filter(|op| !confirmed(op))
+            .filter_map(takes)
+        {
+            remote_files += here;
+            local_files += there;
         }
         let synced = self.opts.synced_files;
-        let limit = self
-            .opts
-            .guard
-            .min
-            .max((synced as f64 * self.opts.guard.fraction) as usize);
-        // What this device would remove from the drive (deleted here, or newly ignored, §10
-        // rule 1): held over the limit, or every synced file.
-        let trips = |n: usize| n > limit || (synced > 0 && n >= synced && n > 1);
-        // What another device removed is followed here (into `.hbsync/trash`, and Recently
-        // deleted on the drive keeps it), but every synced file at once over the limit: a
-        // broken device or a wiped drive, held for the user.
-        let every = |n: usize| synced > 0 && n >= synced && n > limit;
+        let guard = self.opts.guard;
+        let trips = |n: usize| guard.trips(n, synced);
+        let every = |n: usize| guard.every(n, synced);
         let (gone_locally, gone_remotely) = self.opts.pending_deletes;
         let hold_local = every(local_files) || every(gone_remotely);
         let hold_remote = trips(remote_files) || trips(gone_locally);
@@ -88,6 +89,9 @@ impl Reconciler<'_> {
                     _ => false,
                 };
             if held {
+                if let Some(takes) = takes(&op) {
+                    self.plan.held_takes.insert(op.node(), takes);
+                }
                 self.plan.held.push(op);
             } else {
                 self.plan.ops.push(op);

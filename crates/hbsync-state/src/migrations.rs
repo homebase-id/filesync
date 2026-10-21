@@ -304,6 +304,17 @@ const SCHEMA: &str = r#"
         node        BLOB,                             -- its uniqueId and groupId, where they read
         parent      BLOB
     ) WITHOUT ROWID;
+
+    -- Per folder: nodes of deletes the mass-delete guard holds for the user (sync semantics
+    -- §7), out of the dirty set until answered: not planned again every sync. Back in it, all
+    -- of them, when a plan's view reaches one, on an answer, and at each engine's first sync.
+    -- No trigger into `gone`: a node leaves only back into the dirty set (or with its folder,
+    -- its base going too).
+    CREATE TABLE held_deletes (
+        folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id     INTEGER NOT NULL,
+        PRIMARY KEY (id, folder)
+    ) WITHOUT ROWID;
 "#;
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
@@ -354,6 +365,12 @@ const MIGRATIONS: &[&str] = &[
     "ALTER TABLE dirty ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;",
     // 19: the files not hashed yet, which every plan holds what they are in for.
     "CREATE INDEX local_unhashed ON local(folder) WHERE hash IS NULL AND kind = 0;",
+    // 20: the guard's held deletes, out of the dirty set until answered.
+    "CREATE TABLE held_deletes (
+        folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id     INTEGER NOT NULL,
+        PRIMARY KEY (id, folder)
+    ) WITHOUT ROWID;",
 ];
 
 /// The version this client makes and reads.
