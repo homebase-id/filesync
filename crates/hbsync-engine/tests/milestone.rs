@@ -173,15 +173,25 @@ fn name_free(root: &Path, dir: &Path, name: &str) -> bool {
 /// are fixed (`0..`), the same every run; the rest are new every run, from a random base printed
 /// once (`MILESTONE_SEED_BASE` replays a run: a failure names its seed).
 fn seeds() -> Vec<u64> {
+    seeds_with(true)
+}
+
+/// [`seeds`], or without `random`, the second half fixed too (`0..MILESTONE_SEEDS`, the same
+/// every run) unless `MILESTONE_SEED_BASE` is set: a replay runs the same seeds as [`seeds`].
+fn seeds_with(random: bool) -> Vec<u64> {
     let n: u64 = std::env::var("MILESTONE_SEEDS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(12);
     let fixed = n / 2;
-    let base = std::env::var("MILESTONE_SEED_BASE")
+    let base: Option<u64> = std::env::var("MILESTONE_SEED_BASE")
         .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(random_base);
+        .and_then(|s| s.parse().ok());
+    let base = match base {
+        Some(base) => base,
+        None if random => random_base(),
+        None => fixed,
+    };
     eprintln!(
         "milestone: {fixed} fixed seeds, {} from base {base}",
         n - fixed
@@ -1532,19 +1542,14 @@ fn randomized_hostile_writer() -> R {
     // TODO(r6-hostile-random): the fixed seeds only, for now. #195's random base finds the
     // odd seed where the writer's disturbances combine so that the excuses here miss some
     // (a node tampered, then a user's file moved over it): to close in a follow-up PR that
-    // switches this back to `seeds()`.
-    let n: u64 = std::env::var("MILESTONE_SEEDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(12);
-    let seeds: Vec<u64> = (0..n).collect();
-    let n = seeds.len() as u64;
-    let (mut writes, mut disturbed) = (0, 0);
-    for seed in seeds {
-        let did = hostile_seed(seed)?;
-        writes += did.writes;
-        disturbed += u64::from(!did.excused.is_empty() || !did.overwritten.is_empty());
-    }
+    // switches this to `seeds()`.
+    let dids = each_seed(seeds_with(false), hostile_seed)?;
+    let n = dids.len();
+    let writes: u64 = dids.iter().map(|did| did.writes).sum();
+    let disturbed = dids
+        .iter()
+        .filter(|did| !did.excused.is_empty() || !did.overwritten.is_empty())
+        .count();
     assert!(writes > 0 || n < 4, "no hostile write");
     assert!(
         disturbed < n || n < 4,
@@ -1555,9 +1560,6 @@ fn randomized_hostile_writer() -> R {
 
 /// One seed of [`randomized_hostile_writer`]: what the writer did.
 fn hostile_seed(seed: u64) -> Res<Hostile> {
-    let at = |e: Box<dyn std::error::Error>| -> Box<dyn std::error::Error> {
-        format!("seed {seed}: {e}").into()
-    };
     let server = server();
     let [mut a, mut b] = pair(&server)?;
     let around: Vec<BTreeSet<String>> = [&a, &b].iter().map(|c| beside(&c.root)).collect();
@@ -1627,16 +1629,16 @@ fn hostile_seed(seed: u64) -> Res<Hostile> {
         held_apart(&mut a, &mut did);
         held_apart(&mut b, &mut did);
         match rng.below(5) {
-            0 => act(&a.root, &mut rng, &mut ledger).map_err(|e| at(e.into()))?,
-            1 => act(&b.root, &mut rng, &mut ledger).map_err(|e| at(e.into()))?,
-            2 => hostile(&server, &mut rng, &mut did).map_err(at)?,
+            0 => act(&a.root, &mut rng, &mut ledger).map_err(|e| format!("a: {e}"))?,
+            1 => act(&b.root, &mut rng, &mut ledger).map_err(|e| format!("b: {e}"))?,
+            2 => hostile(&server, &mut rng, &mut did)?,
             3 => {
-                a.sync().map_err(|e| at(format!("a: {e}").into()))?;
-                untampered(&a, &did).map_err(at)?;
+                a.sync().map_err(|e| format!("a: {e}"))?;
+                untampered(&a, &did)?;
             }
             _ => {
-                b.sync().map_err(|e| at(format!("b: {e}").into()))?;
-                untampered(&b, &did).map_err(at)?;
+                b.sync().map_err(|e| format!("b: {e}"))?;
+                untampered(&b, &did)?;
             }
         }
     }
@@ -1645,12 +1647,11 @@ fn hostile_seed(seed: u64) -> Res<Hostile> {
     match did.replans {
         true => settle_still(&mut a, &mut b, &server),
         false => settle_all(&mut a, &mut b),
-    }
-    .map_err(at)?;
+    }?;
     held_apart(&mut a, &mut did);
     held_apart(&mut b, &mut did);
     for c in [&a, &b] {
-        untampered(c, &did).map_err(at)?;
+        untampered(c, &did)?;
     }
     for (c, around) in [&a, &b].iter().zip(&around) {
         assert_eq!(
