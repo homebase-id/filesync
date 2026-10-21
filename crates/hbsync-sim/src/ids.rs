@@ -33,7 +33,7 @@ mod tests {
     use super::*;
 
     /// The ids a run hands out stay what they are: the saved seeds
-    /// (`tests/props.proptest-regressions`) replay the runs they were saved for only while
+    /// (`tests/proptest-regressions/properties.txt`) replay the runs they were saved for only while
     /// they do.
     #[test]
     fn the_ids_stay_the_same() {

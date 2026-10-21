@@ -1,0 +1,233 @@
+//! The properties: random runs of every kind, each judged by the oracle.
+
+use crate::common::*;
+use hbsync_sim::Sim;
+use proptest::prelude::*;
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: cases(),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn two_clients_converge_without_loss(events in proptest::collection::vec(event(2), 0..80)) {
+        run(2, &events)?;
+    }
+
+    #[test]
+    fn three_clients_converge_without_loss(events in proptest::collection::vec(event(3), 0..120)) {
+        run(3, &events)?;
+    }
+
+    /// The drive refuses some requests as they are, for good (a write it won't take, a
+    /// download whose bytes don't match at a version): each client records a refusal and
+    /// doesn't send the same operation again (`hbsync_engine::refused`). The record never hides
+    /// a later change: whatever a client holds back is refused by the drive as it is now (a
+    /// local edit, a new version on the drive, a rename or a delete is another request), and
+    /// everything else converges without loss.
+    #[test]
+    fn refusals_never_hide_a_later_change(
+        events in proptest::collection::vec(event(2), 0..80),
+    ) {
+        run_settled(2, None, |sim| sim.with_refusals(), |sim| sim.quiesce_still(30), &events)?;
+    }
+
+    /// The identity says now and then that a live file isn't there (its own 404, a hiccup;
+    /// sync semantics §8b): a file the identity said gone once but is live is never taken as
+    /// gone for good, nor deleted here, while files deleted for good still go; the clients
+    /// converge without loss.
+    #[test]
+    fn a_live_file_said_gone_once_is_never_deleted(
+        events in proptest::collection::vec(event(2), 0..80),
+    ) {
+        // Checked also when they don't settle: a file taken as gone keeps them from it.
+        let settle = |sim: &mut Sim| sim.quiesce(30) || sim.took_a_live_file_as_gone();
+        run_settled(2, None, |sim| sim.with_wrong_not_theres(), settle, &events)?;
+    }
+
+    /// No poll (daemon.md): clients that sync only when asked (at start, when another changed
+    /// the drive, when the user confirms what the guard held) converge without loss, and then
+    /// a sync nobody asked for finds nothing to do: a timer never would.
+    #[test]
+    fn clients_converge_when_asked_only(
+        events in proptest::collection::vec(guarded_event(3), 0..120),
+        min in 1usize..4,
+    ) {
+        run_settled(3, Some(min), |sim| sim, |sim| sim.quiesce_announced(300), &events)?;
+    }
+
+    /// With the mass-delete guard on (a low limit, so it trips often), no plan removes more from
+    /// the drive than it allows unless the user confirmed those very removals, none holds a
+    /// removal from elsewhere short of every synced file, and whether the user confirms what is
+    /// held or puts it back (sync semantics §7), the clients still converge without loss.
+    #[test]
+    fn guarded_clients_delete_only_what_was_confirmed(
+        events in proptest::collection::vec(guarded_event(2), 0..80),
+        min in 1usize..3,
+    ) {
+        run_with(2, Some(min), |sim| sim, &events)?;
+    }
+
+    /// The main folders leave a role folder another device made alone (§12): never synced
+    /// here, never changed, whatever the users do around it.
+    #[test]
+    fn main_folders_leave_role_folders_alone(events in proptest::collection::vec(event(3), 0..120)) {
+        run_with(3, None, Sim::with_role_folder, &events)?;
+    }
+
+    /// One computer syncs the main folder and the role folder, each in its own coordinates,
+    /// beside two computers with the main folder only, while the phone works in the role
+    /// folder (§12): each folder converges to its part of the drive and writes nowhere else,
+    /// a node is in one folder of a computer at most, files moved between the folders and
+    /// between the parts are never lost.
+    #[test]
+    fn role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(4), 0..120)) {
+        run_with(3, None, Sim::with_role_device, &events)?;
+    }
+
+    /// Two computers add Documents, which the drive doesn't have yet: the first to sync makes
+    /// it, the other joins it, merging what both hold, while the users work in both folders of
+    /// both computers and the phone works in it once it is there (plan E1).
+    #[test]
+    fn new_role_folder_devices_converge_without_loss(events in proptest::collection::vec(event(5), 0..120)) {
+        run_with(3, None, Sim::with_new_role_devices, &events)?;
+    }
+
+    /// Another device deletes a folder and stops half way, never to come back (any folder,
+    /// Documents and what is in it too, beside a computer syncing it), while the users work and
+    /// the daily purge runs: the purge removes what the delete took along, once the folder is
+    /// kept long enough, and deletes it for good 30 days on, never a live node, never what was
+    /// written after the delete. The clients converge without loss.
+    #[test]
+    fn stopped_deletes_and_the_purge_converge_without_loss(
+        events in proptest::collection::vec(events_of(4, stopped_delete_action()), 0..120)
+    ) {
+        run_with(3, None, Sim::with_role_device, &events)?;
+    }
+
+    /// Another app deletes folders outright, leaving what is in them with no folder, or moves a
+    /// node into a file, while the users work (in the role folder too) and the purge runs: the
+    /// main folders put what is left, and what is in a file, into Recovered files, made by the
+    /// first and joined by the others, and the clients converge without loss.
+    #[test]
+    fn orphans_are_recovered_without_loss(
+        events in proptest::collection::vec(events_of(4, orphaning_action()), 0..120)
+    ) {
+        run_with(3, None, Sim::with_role_device, &events)?;
+    }
+
+    /// A download fetches, then puts in place and commits a step later: meanwhile the drive
+    /// moves on or removes the node, the users work, the folder's other device syncs; and a
+    /// client dies between a download put in place and its commit, recovering at its next
+    /// sync. Each commit, and each recovered one, settles against the version it acted on with
+    /// the bytes it fetched: the clients converge without loss.
+    #[test]
+    fn downloads_that_race_the_drive_or_crash_converge_without_loss(
+        events in proptest::collection::vec(crashing_event(3), 0..120),
+    ) {
+        run_with(3, None, Sim::with_split_downloads, &events)?;
+    }
+}
+
+proptest! {
+    // A hundredth of the cases, at least one: every fourth plan is planned three more times,
+    // over a state DB it fills (about 0.5 s a case in release: 20 at the default, 1500 at
+    // 150000).
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 100).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// The engine plans from its store, from narrow views of what is dirty (`view::plan_narrow`);
+    /// the sim plans from whole trees. Every fourth plan a main folder makes, its input filled into a
+    /// state DB as the engine's store holds it, plans the same through the engine's views, and
+    /// from narrow views the same as from whole folders for some of its nodes dirty.
+    #[test]
+    fn the_engines_planning_path_plans_as_the_sim(
+        setup in 0..NARROW_SETUPS.len(),
+        events in proptest::collection::vec(any_event(5), 0..80),
+    ) {
+        let (prepare, guard) = NARROW_SETUPS[setup];
+        let mut sim = prepare(Sim::new(3)).with_narrow_check();
+        sim.guard = guard;
+        sim.run(&events);
+        prop_assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            prop_assert!(false, "{}", e);
+        }
+    }
+}
+
+proptest! {
+    /// A file still being written when its device plans (not hashed yet, its merge left for
+    /// later) is where it is there, whatever the drive did with its node meanwhile: it keeps
+    /// its folder alive against another device's delete of it, outright or not (its edits
+    /// win), and keeps its name and tags; once hashed it syncs. Nothing is lost.
+    #[test]
+    fn a_file_being_written_keeps_its_folder(
+        events in proptest::collection::vec(writing_event(3), 0..80),
+    ) {
+        run(3, &events)?;
+    }
+}
+
+proptest! {
+    // A hundredth of the cases, at least one, as the narrow property's.
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 100).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// [`a_file_being_written_keeps_its_folder`] on every setup, and its plans made through the
+    /// engine's views as well ([`the_engines_planning_path_plans_as_the_sim`]): what waits for
+    /// a file not hashed yet waits there as here, the role folders' too.
+    #[test]
+    fn a_file_being_written_waits_alike_on_the_engines_path(
+        setup in 0..NARROW_SETUPS.len(),
+        events in proptest::collection::vec(writing_event(5), 0..80),
+    ) {
+        let (prepare, guard) = NARROW_SETUPS[setup];
+        let mut sim = prepare(Sim::new(3)).with_narrow_check();
+        sim.guard = guard;
+        sim.run(&events);
+        prop_assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            prop_assert!(false, "{}", e);
+        }
+    }
+}
+
+proptest! {
+    // A twentieth of the cases, at least one: each runs twice with the trace on.
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 20).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// A run is the same every time: the same events make the same trace and leave the same
+    /// drive, whatever the setup (the ids are counted, and nothing hangs on the order a hash
+    /// map holds things in), so a saved seed replays the run it was saved for.
+    #[test]
+    fn a_run_replays_the_same(
+        setup in 0..SETUPS.len(),
+        events in proptest::collection::vec(any_event(5), 0..120),
+    ) {
+        let replay = || {
+            let (prepare, guard) = SETUPS[setup];
+            let mut sim = prepare(Sim::new(3));
+            sim.guard = guard;
+            sim.verbose = true;
+            sim.run(&events);
+            let settled = sim.quiesce(30);
+            let paths = sim.server_paths();
+            (settled, sim.trace, paths)
+        };
+        let ((settled, trace, paths), (again, retrace, repaths)) = (replay(), replay());
+        // Where the two runs part, not both traces whole.
+        if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i)) {
+            prop_assert!(false, "the runs part at trace line {at}:\n{:?}\n{:?}", trace.get(at), retrace.get(at));
+        }
+        prop_assert_eq!((settled, paths), (again, repaths));
+    }
+}
