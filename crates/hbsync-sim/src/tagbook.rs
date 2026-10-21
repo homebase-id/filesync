@@ -25,6 +25,10 @@ pub(crate) enum Limit {
     /// tag neither side holds any more reads as that client's removal, and is sent over a later
     /// add (sync semantics §1; branch r6-fresh-tags, seed 0a9df7c6).
     NewItemKeepsBaseTag,
+    /// A removal made while the remover's own plan still writes the tag (onto the item, or up
+    /// with a remote write): the write, planned before, lands over it, and the tag comes back
+    /// (sync semantics §1; the in-flight undo design, seed f9ca4128).
+    OwnTagWriteInFlight,
 }
 
 /// When an add was made, among the users' tag changes, and whether a removal of the tag was
@@ -55,6 +59,9 @@ pub(crate) struct TagBook {
     /// wasn't on the drive yet (a merge keeps either side's add; a removal made after the add
     /// was sent up goes up after it, and wins).
     cleared: BTreeMap<Add, i64>,
+    /// Of `cleared`, the removals made while the remover's own plan still wrote the tag
+    /// ([`Limit::OwnTagWriteInFlight`]).
+    cleared_in_flight: BTreeSet<Add>,
     /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
     /// them to the original too, as that client's add.
     forked: BTreeSet<Add>,
@@ -118,11 +125,24 @@ impl TagBook {
 
     /// The user of client `c` removed tag `name` from `node`; `synced`: the server's time,
     /// where the client's base had it.
-    pub(crate) fn remove(&mut self, c: usize, node: NodeId, name: &str, synced: Option<i64>) {
+    /// `in_flight`: the client's own plan still writes the tag ([`Limit::OwnTagWriteInFlight`]).
+    pub(crate) fn remove(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        name: &str,
+        synced: Option<i64>,
+        in_flight: bool,
+    ) {
         let at = self.next();
-        self.removed.insert((c, node, name.to_owned()), at);
+        let add = (c, node, name.to_owned());
+        self.removed.insert(add.clone(), at);
         if let Some(now) = synced {
-            self.cleared.insert((c, node, name.to_owned()), now);
+            self.cleared.insert(add.clone(), now);
+            match in_flight {
+                true => self.cleared_in_flight.insert(add),
+                false => self.cleared_in_flight.remove(&add),
+            };
         }
     }
 
@@ -357,7 +377,8 @@ impl TagBook {
             return Err(format!("lost tag {name:?} of {node:?}: {held:?}"));
         }
         let adds: Vec<_> = self.adds().collect();
-        for ((by, node, name), removed) in &self.cleared {
+        for (cleared, removed) in &self.cleared {
+            let (by, node, name) = cleared;
             let elsewhere = |(c, n, t): &Add| c != by && n == node && t == name;
             let added_elsewhere = adds
                 .iter()
@@ -368,6 +389,11 @@ impl TagBook {
                 && !refused.contains(node)
                 && s.tags.get(name).is_some()
             {
+                if self.cleared_in_flight.contains(cleared) {
+                    let limit = (Limit::OwnTagWriteInFlight, cleared.clone());
+                    self.excused.borrow_mut().push(limit);
+                    continue;
+                }
                 return Err(format!(
                     "removed tag {name:?} of {node:?} came back: {:?}",
                     s.tags
@@ -442,11 +468,11 @@ mod tests {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
         book.add(0, node, "Work", false, None);
-        book.remove(0, node, "Work", Some(1));
+        book.remove(0, node, "Work", Some(1), false);
         book.add(1, node, "Work", false, None);
         assert!(check(&book, &drive(node, &[])).is_err(), "c1's add lost");
         assert!(check(&book, &drive(node, &["Work"])).is_ok());
-        book.remove(0, node, "Work", None);
+        book.remove(0, node, "Work", None, false);
         assert!(check(&book, &drive(node, &[])).is_ok(), "removed after");
     }
 
@@ -455,7 +481,7 @@ mod tests {
     fn an_add_racing_a_removal_may_lose() {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
-        book.remove(1, node, "Work", Some(1));
+        book.remove(1, node, "Work", Some(1), false);
         book.add(0, node, "Work", true, None);
         assert!(check(&book, &drive(node, &[])).is_ok());
     }
@@ -468,7 +494,7 @@ mod tests {
         let mut book = TagBook::default();
         book.add(0, node, "Red", false, None);
         book.detach((0, node, "Red".into())); // a download refused it: not sent
-        book.remove(0, node, "Red", Some(5));
+        book.remove(0, node, "Red", Some(5), false);
         assert!(
             check(&book, &drive(node, &["Red"])).is_err(),
             "c0's removal came back"

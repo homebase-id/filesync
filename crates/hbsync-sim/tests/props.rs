@@ -4211,3 +4211,50 @@ fn regression_a_file_being_written_keeps_its_folder() {
         panic!("{e}");
     }
 }
+
+/// Seed f9ca4128, a known limit (the in-flight family, the user's call: not now): c1's plan
+/// writes Red (c0's add) onto its folder and up; before it runs, c1's user adds Red and
+/// removes it again. The plan's writes, made before, land over the removal, and Red is back.
+/// The oracle names it rather than passing it silently.
+#[test]
+fn regression_a_removal_under_its_own_tag_write_is_a_known_limit() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(0, Tag { node: 0, tag: 0 }),
+        act(
+            1,
+            Move {
+                node: 0,
+                parent: 1,
+                name: 1,
+            },
+        ),
+        act(1, CreateJunk { parent: 14 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        act(1, Delete { node: 7 }),
+        act(1, Tag { node: 0, tag: 4 }),
+        Event::Step { client: 1 },
+        act(1, Tag { node: 0, tag: 0 }),
+        Event::Step { client: 1 },
+    ];
+    let mut sim = Sim::new(2);
+    sim.guard = Some(1);
+    sim.run(&events);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    let limits = sim.tags_lost_to_known_limits();
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(
+        limits[0].starts_with("OwnTagWriteInFlight") && limits[0].ends_with(" Red"),
+        "{limits:?}"
+    );
+}
