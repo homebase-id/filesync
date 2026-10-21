@@ -1038,7 +1038,7 @@ fn purge(
     behind: &mut bool,
 ) -> Result<usize, hbsync_engine::EngineError> {
     let (gone, was) = deleted::AccountOps::run(account, remote, |ops| ops.purge(keep_ms, now));
-    *behind |= was;
+    *behind |= was.behind;
     gone
 }
 
@@ -1147,9 +1147,14 @@ fn a_purge_cut_short_keeps_what_went() -> common::Res<()> {
             assert!(account.read(|s| s.file_gone(went[0]))?, "recorded gone");
             assert!(!account.read(|s| s.file_gone(left[0]))?, "{why:?}");
         }
-        assert!(!moved, "nothing refused: {why:?}");
+        // Nothing refused for the drive's state; cut short by a request that failed on the way
+        // (it may have landed), behind.
+        let on_the_way = hbsync_engine::policy::policy(why.class()).in_run
+            == hbsync_engine::policy::InRun::Backoff;
+        assert_eq!(moved, on_the_way, "{why:?}");
 
         remote.cut = None;
+        let mut moved = false;
         assert_eq!(purge(&account, &remote, TRACE_MS, now, &mut moved)?, 1);
         assert!(files.iter().all(gone));
         assert!(!moved);

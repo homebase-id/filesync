@@ -25,7 +25,7 @@ use std::time::Duration;
 use hbsync_fileio::FileIoError;
 use hbsync_platform::name::name_key;
 use hbsync_platform::{EntryKind, Os, RelPath, ops, tags};
-use hbsync_remote::{ErrorClass, NodeMeta, Remote, RemoteError};
+use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{
     Answer, Answered, BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, Refused, StateDb,
     StateError, Store,
@@ -36,7 +36,6 @@ use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target, Written};
 
 use crate::activity::{self, Counters};
 use crate::folder::FolderCtx;
-use crate::policy::{InRun, policy};
 use crate::reconcile::{Op, Requirement};
 use crate::refused::Refusals;
 use crate::settle::rules::{DriveVersion, TagWrite, not_reached};
@@ -70,161 +69,6 @@ impl Default for ExecConfig {
         }
     }
 }
-
-/// What a run did.
-#[derive(Debug, Default)]
-pub(crate) struct ExecReport {
-    pub done: usize,
-    /// Left for the next plan, and why.
-    pub skipped: Vec<(Op, Skip)>,
-    /// Gave up after retries (transient errors, locked files, ordering).
-    pub failed: Vec<(Op, String)>,
-    /// Local folders whose contents differ from the DB: rescan them before planning again.
-    pub rescan: Vec<RelPath>,
-    /// Why the run stopped early, leaving the rest dirty for a later sync.
-    pub stopped: Option<Stopped>,
-    /// The drive refused an upload, out of storage: the run's uploads from then on were held
-    /// (left dirty), and are held on the account this long.
-    pub full: Option<Duration>,
-    /// A refusal (or a download's strike) was recorded ([`crate::refused`]).
-    pub refused: bool,
-    /// What was done, for people (one entry per file or item).
-    pub synced: Vec<Synced>,
-    /// A remote write was refused for the drive's state, an earlier try of it had landed
-    /// unanswered, or one's answer didn't come: the account's picture may lack something, so
-    /// the feed is to be read.
-    pub drive_moved: bool,
-}
-
-/// Why a run stopped before its plan was done.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum Stopped {
-    /// The remote refused access: nothing else can succeed until the user authorizes again.
-    #[error("access denied: {0}")]
-    Denied(String),
-    /// Transient remote errors kept coming: the network or the server is down.
-    #[error("remote unreachable: {0}")]
-    Unreachable(String),
-    /// The server is busy or paused, and said when to ask again.
-    #[error("the server asks to come back in {secs}s: {0}", secs = .1.as_secs())]
-    Later(String, Duration),
-    /// The caller asked the run to stop (pause, shutdown).
-    #[error("stopped on request")]
-    Requested,
-}
-
-#[derive(Debug)]
-enum Outcome {
-    /// Done; the node still needs settling.
-    Done,
-    /// Done, and settled in the operation's own transaction.
-    Settled,
-    Retry(String),
-    /// A transient remote error: retry after a pause.
-    Backoff(String),
-    /// Left for the next plan.
-    Skip(Skip),
-    /// Stop the run: the remote refused access, or is busy and said when to ask again.
-    Stop(Stopped),
-    /// The drive is out of storage: hold this and every later upload of the run (and on the
-    /// account: for the time the drive said, if it did).
-    Full(Option<Duration>),
-    /// A download's bytes didn't match what the drive said they are: the first time at a
-    /// version, the drive is read again; the second, it is refused.
-    Mismatch(String),
-    /// The state DB failed (a placement's commit, say): the run stops, as at a crash.
-    Fatal(StateError),
-}
-
-impl Outcome {
-    /// What the run does about an error of `class` ([`policy`]); `why`: the error; `after`:
-    /// when the server said to ask again.
-    fn of(class: ErrorClass, why: String, after: Option<Duration>) -> Outcome {
-        match policy(class).in_run {
-            // A server that said when to ask again isn't asked before: the run stops.
-            InRun::Backoff => match after {
-                Some(after) => Outcome::Stop(Stopped::Later(why, after)),
-                None => Outcome::Backoff(why),
-            },
-            InRun::Retry => Outcome::Retry(why),
-            InRun::Stop => Outcome::Stop(Stopped::Denied(why)),
-            InRun::HoldUploads => Outcome::Full(after),
-            // Only the state DB's errors end a run, and they come as themselves
-            // (`From<StateError>`).
-            InRun::End => {
-                debug_assert!(false, "{class:?} ends a run: {why}");
-                Outcome::Retry(why)
-            }
-            // Told only once it keeps coming back (the runner's stalled skips).
-            InRun::Stale => Outcome::Skip(Skip::Stale(why)),
-            InRun::Unsyncable => Outcome::Skip(Skip::Unsyncable(why)),
-            InRun::Refuse => Outcome::Skip(Skip::Refused(why)),
-        }
-    }
-
-    fn stale(why: impl Into<String>) -> Outcome {
-        Outcome::Skip(Skip::Stale(why.into()))
-    }
-
-    fn waiting(why: impl Into<String>) -> Outcome {
-        Outcome::Skip(Skip::Waiting(why.into()))
-    }
-
-    fn unsyncable(why: impl Into<String>) -> Outcome {
-        Outcome::Skip(Skip::Unsyncable(why.into()))
-    }
-}
-
-/// Why an operation was left for the next plan.
-#[derive(Debug)]
-pub enum Skip {
-    /// The world moved on since the plan (an item changed or went, on either side, or what the
-    /// operation needed isn't so any more): the next plan decides again.
-    Stale(String),
-    /// Another operation of the plan must go first and didn't (held or failed: that one says
-    /// why).
-    Waiting(String),
-    /// This device can't do it as planned: a name or path it can't hold, access denied, a
-    /// fault of its own.
-    Unsyncable(String),
-    /// The drive won't take it as it is (or gave other bytes than it said, twice): recorded, it
-    /// isn't sent again while it is the same ([`crate::refused`]).
-    Refused(String),
-}
-
-impl Stopped {
-    /// What it means ([`ErrorClass`]).
-    pub fn class(&self) -> ErrorClass {
-        match self {
-            Stopped::Denied(_) => ErrorClass::Denied,
-            Stopped::Unreachable(_) => ErrorClass::Transient,
-            Stopped::Later(..) => ErrorClass::RateLimited,
-            // Not an error: a run stopped on request ends well.
-            Stopped::Requested => ErrorClass::Bug,
-        }
-    }
-}
-
-impl Skip {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Skip::Stale(why) | Skip::Waiting(why) | Skip::Unsyncable(why) | Skip::Refused(why) => {
-                why
-            }
-        }
-    }
-}
-
-/// A DB error inside an operation ends the run, as one in a placement's commit does: tried
-/// again, it would most likely fail the same way (a busy DB after its timeout, a broken one).
-impl From<StateError> for Outcome {
-    fn from(e: StateError) -> Self {
-        Outcome::Fatal(e)
-    }
-}
-
-/// An operation's result. `Err` ends it early: a guard that stopped it, or a DB error.
-type Step<T = Outcome> = Result<T, Outcome>;
 
 pub(crate) struct Executor<'a> {
     db: &'a mut StateDb,
@@ -426,7 +270,8 @@ impl<'a> Executor<'a> {
         self
     }
 
-    /// Holds every upload: the drive was full lately ([`ExecReport::full`] of an earlier run).
+    /// Holds every upload: the drive was full lately (an earlier run's
+    /// [`DriveNews::full`](crate::drive::DriveNews::full)).
     pub(crate) fn with_full(mut self, full: bool) -> Self {
         self.full = full;
         self
@@ -619,7 +464,7 @@ impl<'a> Executor<'a> {
             Ok((settled, superseded))
         })?;
         if superseded {
-            self.report.drive_moved = true;
+            self.report.news.behind = true;
         }
         self.note(settled);
         Ok(Outcome::Settled)
@@ -808,7 +653,7 @@ impl<'a> Executor<'a> {
                     s.folder().put_refused(&strike)
                 })?;
                 self.report.refused = true;
-                self.report.drive_moved = true;
+                self.report.news.behind = true;
                 self.report.skipped.push((op, Skip::Stale(why)));
             }
             Outcome::Stop(stopped) => {
@@ -817,7 +662,7 @@ impl<'a> Executor<'a> {
                 // A write the server answered busy may have landed before (a 5xx): planned
                 // again from the feed, read first.
                 if matches!(stopped, Stopped::Later(..)) && op.writes_remote() {
-                    self.report.drive_moved = true;
+                    self.report.news.behind = true;
                 }
                 self.report.stopped.get_or_insert(stopped);
             }
@@ -825,7 +670,7 @@ impl<'a> Executor<'a> {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
                 self.full = true;
-                self.report.full = Some(crate::time::full_hold(after));
+                self.report.news.full = Some(crate::time::full_hold(after));
             }
             Outcome::Fatal(e) => return Err(e),
         }
@@ -859,7 +704,7 @@ impl<'a> Executor<'a> {
             Retried::Replan { op, stop } => {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
-                self.report.drive_moved = true;
+                self.report.news.behind = true;
                 if stop {
                     let stopped = Stopped::Unreachable(why.clone());
                     self.report.stopped.get_or_insert(stopped);
@@ -1256,6 +1101,7 @@ impl<'a> Executor<'a> {
 mod disk;
 mod hooks;
 mod local;
+mod outcome;
 mod park;
 mod recover;
 mod remote;
@@ -1269,6 +1115,9 @@ use disk::Disk;
 #[cfg(feature = "testkit")]
 pub use hooks::Faults;
 pub use hooks::{CrashPoint, FailPoint, Hooks};
+pub(crate) use outcome::ExecReport;
+use outcome::{Outcome, Step, io_outcome, remote_outcome, rescan};
+pub use outcome::{Skip, Stopped};
 use park::{numbered_place, occupant, release_place, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
@@ -1283,23 +1132,6 @@ fn matches_row(row: &LocalRow, meta: &hbsync_platform::LocalMeta) -> bool {
         NodeKind::Folder => meta.kind == EntryKind::Dir && meta.file_id == row.fingerprint.file_id,
         NodeKind::File => meta.kind == EntryKind::File && meta.fingerprint() == row.fingerprint,
     }
-}
-
-fn rescan(report: &mut ExecReport, path: &RelPath) -> Outcome {
-    report.rescan.push(path.parent().unwrap_or_default());
-    Outcome::stale(format!("{path} changed on disk"))
-}
-
-fn io_outcome(e: io::Error) -> Outcome {
-    let why = match hbsync_platform::classify(&e) {
-        hbsync_platform::IoClass::Raced => format!("raced: {e}"),
-        _ => e.to_string(),
-    };
-    Outcome::of(ErrorClass::of_io(&e), why, None)
-}
-
-fn remote_outcome(e: RemoteError) -> Outcome {
-    Outcome::of(e.class(), e.to_string(), e.retry_after())
 }
 
 /// A rename changes ctime on most systems: the row of a file renamed from `old` to `path`,

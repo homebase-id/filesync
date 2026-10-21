@@ -18,7 +18,6 @@ use crate::deleted;
 use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
 use crate::mirror;
-use crate::policy::InRun;
 use crate::root::{RootError, SyncRoot};
 
 /// Rows of the change feed read per request, at most: whole pages (decrypted headers), and slim
@@ -58,6 +57,18 @@ pub struct Drive {
     server_time: AtomicI64,
     /// A re-read of the whole feed on its way, between pulls ([`feed::Reread`]).
     reread: Mutex<Option<feed::Reread>>,
+}
+
+/// What a folder's run or an operation of Recently deleted learned of the drive, for the
+/// account to take in ([`Drive::absorb`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[must_use = "what the drive said must be taken in"]
+pub struct DriveNews {
+    /// The account's picture may lack something: a write was refused for the drive's state,
+    /// an earlier try of it had landed unanswered, or an answer didn't come. The feed is read.
+    pub behind: bool,
+    /// The drive refused an upload, out of storage: uploads are held on the account this long.
+    pub full: Option<Duration>,
 }
 
 /// Wakes a folder's engine ([`Drive::subscribe_with`]).
@@ -200,12 +211,14 @@ impl Drive {
         self.freshness.doubt();
     }
 
-    /// Behind after deleting for good when the drive refused something for its state
-    /// (`moved`), or a request failed on the way.
-    fn behind_if<T>(&self, moved: bool, done: &Result<T, EngineError>) {
-        let failed = |e: &RemoteError| crate::policy::policy(e.class()).in_run == InRun::Backoff;
-        if moved || matches!(done, Err(EngineError::Remote(e)) if failed(e)) {
+    /// Takes in what a folder's run or an operation of Recently deleted learned of the drive
+    /// ([`DriveNews`]): behind, and uploads held while it is full.
+    pub(crate) fn absorb(&self, news: DriveNews) {
+        if news.behind {
             self.set_behind();
+        }
+        if let Some(hold) = news.full {
+            self.set_full(hold);
         }
     }
 
@@ -297,14 +310,15 @@ impl Drive {
         lock(&self.account)
     }
 
-    /// Runs `op`, one of Recently deleted's operations on the account's DB and the drive; the
-    /// account is behind if the drive refused a write for its state or an answer was lost.
+    /// Runs `op`, one of Recently deleted's operations on the account's DB and the drive, and
+    /// takes in what it learned of the drive ([`deleted::AccountOps::run`]); a failure the
+    /// identity refused latches the account.
     fn with_ops<T>(
         &self,
         op: impl FnOnce(&mut deleted::AccountOps<'_>) -> Result<T, EngineError>,
     ) -> Result<T, EngineError> {
-        let (done, behind) = deleted::AccountOps::run(&self.account, self.remote(), op);
-        self.behind_if(behind, &done);
+        let (done, news) = deleted::AccountOps::run(&self.account, self.remote(), op);
+        self.absorb(news);
         if let Err(e) = &done {
             self.latch(e.class(), e);
         }
