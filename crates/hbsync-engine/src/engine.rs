@@ -283,14 +283,16 @@ impl Engine {
     /// Returns how many it put back.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.drive.pull(None)?;
-        // Each to restore, with its folder and its row of Recently deleted.
-        let (mut forget, mut restore) = (Vec::new(), Vec::new());
-        // One restore per removal, the outermost first: what was removed with its folder comes
-        // back with it.
+        // What loses its base.
+        let mut forget = Vec::new();
+        // One restore per item of Recently deleted, the outermost first: what was removed with
+        // its folder comes back with it.
         let mut tops: Vec<(usize, NodeId)> = Vec::new();
         // Each once: a folder's held with what is in it.
         let mut seen = std::collections::HashSet::new();
-        self.db.read(|s| {
+        let restored = self.db.read(|s| {
+            // What to restore from Recently deleted, each with its folder here.
+            let mut restore = Vec::new();
             let here = |n: NodeId| s.local_by_node(n);
             let live = |n: NodeId| Ok::<_, StateError>(s.get_mirror(n)?.is_some());
             let base = |n: NodeId| s.get_base(n);
@@ -327,7 +329,7 @@ impl Engine {
                                 && !live(row.node)?
                             {
                                 match s.removed_by_node(row.node)? {
-                                    Some(r) => restore.push((row.node, b.state.parent, r)),
+                                    Some(r) => restore.push((r, b.state.parent)),
                                     None => forget.push(row.node),
                                 }
                             }
@@ -340,27 +342,15 @@ impl Engine {
                     (None, false) => {}
                 }
             }
-            let mut topped = std::collections::HashSet::new();
-            for (node, parent, removed) in &restore {
-                // Up through the folders it was deleted with (Recently deleted's own rule).
-                let (mut top, mut parent, mut at) = (*node, *parent, removed.time());
-                while let Some(folder) = s.removed_by_node(parent)?
-                    && crate::deleted::deleted_with(at, &folder)
-                {
-                    top = parent;
-                    at = folder.time();
-                    parent = folder.row.parent;
-                }
-                if topped.insert(top) {
-                    let (mut depth, mut up) = (0, top);
-                    while let Some(b) = base(up)? {
-                        depth += 1;
-                        up = b.state.parent;
-                    }
-                    tops.push((depth, top));
-                }
+            // Up through the folders each was deleted with, from its folder here.
+            let restored = restore.len();
+            for top in crate::deleted::items_of(s, restore)? {
+                let up = crate::walk::up::<_, StateError>(top, |at| {
+                    Ok(base(at)?.map(|b| ((), b.state.parent)))
+                })?;
+                tops.push((up.items.len(), top));
             }
-            Ok(())
+            Ok(restored)
         })?;
         self.db.write(|s| {
             for &node in &forget {
@@ -374,7 +364,7 @@ impl Engine {
         if !tops.is_empty() {
             self.drive.restore_read(&tops)?;
         }
-        Ok(forget.len() + restore.len())
+        Ok(forget.len() + restored)
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records

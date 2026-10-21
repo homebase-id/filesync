@@ -4441,6 +4441,96 @@ fn every_file_removed_elsewhere_is_held_and_put_back_restores_it() -> R {
     Ok(())
 }
 
+/// Removed folders in a cycle, each deleted with the other (two open removals, both the
+/// newest): "Put them back" walks up to the item their delete took along and ends, as Recently
+/// deleted's listing does, instead of walking round the cycle for good.
+#[test]
+fn put_back_ends_at_a_cycle_of_removed_folders() -> R {
+    use hbsync_state::testkit::RawPicture;
+    use hbsync_types::{Uuid, VersionTag};
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    // `d` now in a removed folder `q` that is in `d`; `d`, `q` and what `d` held all removed
+    // open, so each counts as deleted with its folder.
+    let d = b
+        .engine
+        .db()
+        .read(|s| match s.removed_named(&["d"])?.first() {
+            Some(&n) => s.removed_by_node(n),
+            None => Ok(None),
+        })?
+        .ok_or("d in Recently deleted")?
+        .row;
+    let q = NodeId::new();
+    b.engine.db().write(|s| {
+        let open = |row: &hbsync_state::MirrorRow| hbsync_state::RemovedRow {
+            row: hbsync_state::MirrorRow {
+                version: VersionTag(Uuid::new_v4()),
+                ..row.clone()
+            },
+            removed_at: None,
+        };
+        let q_row = hbsync_state::MirrorRow {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            node: q,
+            parent: d.node,
+            name: "q".into(),
+            ..d.clone()
+        };
+        s.account().put_removed(&open(&q_row))?;
+        s.account().put_removed(&open(&hbsync_state::MirrorRow {
+            parent: q,
+            ..d.clone()
+        }))?;
+        for row in s.removed_children(d.node)? {
+            s.account().put_removed(&open(&row.row))?;
+        }
+        Ok(())
+    })?;
+    let cycle = b.engine.db().read(|s| {
+        let parent =
+            |n| Ok::<_, hbsync_state::StateError>(s.removed_by_node(n)?.map(|r| r.row.parent));
+        Ok((parent(d.node)?, parent(q)?))
+    })?;
+    assert_eq!(
+        cycle,
+        (Some(q), Some(d.node)),
+        "a cycle in Recently deleted"
+    );
+    // A walk round the cycle never returns: the test process ends instead. Set however
+    // put_back ends.
+    struct Done(Arc<AtomicBool>);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let done = Done(Arc::new(AtomicBool::new(false)));
+    let watched = done.0.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(300));
+        if !watched.load(Ordering::SeqCst) {
+            eprintln!("put back walked round the cycle");
+            std::process::exit(1);
+        }
+    });
+    let put = b.engine.put_back(&held);
+    drop(done);
+    assert!(put? > 0);
+    Ok(())
+}
+
 /// Removals elsewhere short of every synced file are followed unasked, however many (§7):
 /// the drive keeps them in Recently deleted.
 #[test]
