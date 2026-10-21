@@ -188,8 +188,31 @@ impl Sim {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
+        // The known limit: an item not hashed yet adopted from the drive's state, its tags
+        // written over (`Limit::UnhashedOrphanAdopted`).
+        let adopted: Vec<(NodeId, String)> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::LocalTags { node, tags, .. } if input.local_unhashed.contains(node) => {
+                    let held = client.local.get(*node)?;
+                    Some(
+                        held.tags
+                            .iter()
+                            .filter(|t| tags.get(&t.name).is_none())
+                            .map(|t| (*node, t.name.clone()))
+                            .collect::<Vec<_>>(),
+                    )
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
+        for (n, name) in &adopted {
+            self.ledger.tags.adopted_over(c, *n, name);
+        }
         if self.narrow_check && !self.ledger.found_narrow_differs() {
             self.narrow_rounds += 1;
             if self.narrow_rounds.is_multiple_of(4) {

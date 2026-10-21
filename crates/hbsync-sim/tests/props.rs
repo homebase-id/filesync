@@ -4278,3 +4278,238 @@ fn regression_a_removal_under_its_own_tag_write_is_a_known_limit() {
         "{limits:?}"
     );
 }
+
+/// The narrow property's setup (split downloads, plans checked against the engine's path):
+/// the tag adds `events` lose to a known limit, as [`Sim::tags_lost_to_known_limits`] names
+/// them.
+fn known_limits_narrow(events: &[Event]) -> Vec<String> {
+    let mut sim = Sim::with_split_downloads(Sim::new(3)).with_narrow_check();
+    sim.run(events);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    sim.tags_lost_to_known_limits()
+}
+
+/// Seeds d856d284 and fc58ff8f, a known limit (the fix, design A+, waits on the user): a file
+/// here not hashed yet (a placement a crash left unread) that the user tagged Red, whose node
+/// another writer put in a file, is adopted into Recovered files from the drive's state, and
+/// the plan writes the drive's tags over it. The oracle names it rather than passing it
+/// silently.
+#[test]
+fn regression_an_unhashed_orphan_adopted_from_the_drives_tags_is_a_known_limit() {
+    use Action::*;
+    use Event::*;
+    for events in [
+        vec![
+            Act {
+                client: 4,
+                action: CreateFile {
+                    parent: 10,
+                    name: 1,
+                },
+            },
+            Step { client: 4 },
+            Act {
+                client: 1,
+                action: Edit { file: 6 },
+            },
+            Act {
+                client: 3,
+                action: DeleteOutright { pick: 8 },
+            },
+            Act {
+                client: 1,
+                action: CreateFile {
+                    parent: 4,
+                    name: 13,
+                },
+            },
+            Act {
+                client: 1,
+                action: Move {
+                    node: 5,
+                    parent: 8,
+                    name: 3,
+                },
+            },
+            Act {
+                client: 4,
+                action: NewerFolder { name: 0 },
+            },
+            Plan { client: 2 },
+            Step { client: 1 },
+            Plan { client: 4 },
+            Act {
+                client: 0,
+                action: DeleteStopped { pick: 11, done: 10 },
+            },
+            Act {
+                client: 3,
+                action: Edit { file: 5 },
+            },
+            Step { client: 0 },
+            Plan { client: 4 },
+            Step { client: 2 },
+            Act {
+                client: 4,
+                action: Purge,
+            },
+            Confirm { client: 1 },
+            Step { client: 2 },
+            Step { client: 1 },
+            Confirm { client: 4 },
+            Step { client: 1 },
+            Plan { client: 2 },
+            Act {
+                client: 0,
+                action: EmptyItem { pick: 4 },
+            },
+            Step { client: 0 },
+            Step { client: 3 },
+            Act {
+                client: 1,
+                action: DeleteRoleFolder,
+            },
+            Act {
+                client: 4,
+                action: IntoFile { pick: 15, file: 13 },
+            },
+            Plan { client: 3 },
+            Act {
+                client: 0,
+                action: CreateFile { parent: 1, name: 2 },
+            },
+            Confirm { client: 0 },
+            Act {
+                client: 0,
+                action: Purge,
+            },
+            Step { client: 4 },
+            Step { client: 2 },
+            Step { client: 3 },
+            Step { client: 2 },
+            Act {
+                client: 2,
+                action: Tag { node: 1, tag: 0 },
+            },
+            Step { client: 2 },
+            Plan { client: 4 },
+            Act {
+                client: 0,
+                action: Tag { node: 7, tag: 13 },
+            },
+            Crash { client: 3 },
+            Step { client: 0 },
+            Confirm { client: 4 },
+            Step { client: 4 },
+            Step { client: 2 },
+            Confirm { client: 2 },
+            Act {
+                client: 2,
+                action: DeleteOutright { pick: 3 },
+            },
+            Crash { client: 2 },
+            Step { client: 4 },
+            Plan { client: 4 },
+            Act {
+                client: 1,
+                action: DeleteOutright { pick: 8 },
+            },
+            Step { client: 2 },
+            Act {
+                client: 3,
+                action: Tag { node: 12, tag: 12 },
+            },
+            Step { client: 1 },
+            Act {
+                client: 4,
+                action: DeleteStopped { pick: 14, done: 10 },
+            },
+            Act {
+                client: 1,
+                action: DeleteRoleFolder,
+            },
+            Step { client: 4 },
+            Act {
+                client: 0,
+                action: Purge,
+            },
+            Confirm { client: 1 },
+            Plan { client: 4 },
+            Act {
+                client: 0,
+                action: EmptyItem { pick: 5 },
+            },
+            Step { client: 4 },
+            Act {
+                client: 0,
+                action: Move {
+                    node: 7,
+                    parent: 15,
+                    name: 8,
+                },
+            },
+            Crash { client: 1 },
+            Step { client: 1 },
+            Act {
+                client: 1,
+                action: IntoFile { pick: 2, file: 7 },
+            },
+            Act {
+                client: 3,
+                action: NewerFolder { name: 5 },
+            },
+            Act {
+                client: 0,
+                action: Move {
+                    node: 3,
+                    parent: 10,
+                    name: 14,
+                },
+            },
+            Act {
+                client: 4,
+                action: IntoFile { pick: 5, file: 6 },
+            },
+        ],
+        vec![
+            Crash { client: 0 },
+            Act {
+                client: 4,
+                action: CreateFile { parent: 0, name: 3 },
+            },
+            Act {
+                client: 4,
+                action: CreateFile { parent: 0, name: 6 },
+            },
+            Crash { client: 0 },
+            Act {
+                client: 3,
+                action: CreateFile { parent: 0, name: 5 },
+            },
+            Plan { client: 1 },
+            Step { client: 4 },
+            Plan { client: 3 },
+            Step { client: 0 },
+            Step { client: 0 },
+            Crash { client: 0 },
+            Step { client: 1 },
+            Act {
+                client: 0,
+                action: IntoFile { pick: 15, file: 1 },
+            },
+            Act {
+                client: 0,
+                action: Tag { node: 2, tag: 4 },
+            },
+        ],
+    ] {
+        let limits = known_limits_narrow(&events);
+        // That case alone.
+        assert_eq!(limits.len(), 1, "{limits:?}");
+        assert!(
+            limits[0].starts_with("UnhashedOrphanAdopted") && limits[0].ends_with(" Red"),
+            "{limits:?}"
+        );
+    }
+}

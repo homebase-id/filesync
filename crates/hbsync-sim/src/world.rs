@@ -385,7 +385,9 @@ impl Sim {
                             Op::LocalTags { node: n, tags, .. }
                             | Op::RemoteTags { node: n, tags, .. }
                             | Op::RemoteUpdate { node: n, tags, .. }
-                            | Op::RemoteCreate { node: n, tags, .. } => *n == node && carries(tags),
+                            | Op::RemoteCreate { node: n, tags, .. }
+                            | Op::LocalDownload { node: n, tags, .. }
+                            | Op::LocalMkdir { node: n, tags, .. } => *n == node && carries(tags),
                             _ => false,
                         });
                         self.ledger.tags.remove(c, node, name, now, in_flight);

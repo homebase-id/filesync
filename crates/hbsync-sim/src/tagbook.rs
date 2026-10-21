@@ -29,6 +29,11 @@ pub(crate) enum Limit {
     /// with a remote write): the write, planned before, lands over it, and the tag comes back
     /// (sync semantics §1; the in-flight undo design, seed f9ca4128).
     OwnTagWriteInFlight,
+    /// A file here not hashed yet (its merge deferred), whose node the drive put in a file or
+    /// a folder gone for good, is adopted as an orphan from the drive's state: the plan writes
+    /// the drive's tags over the item, and the user's add goes (seeds d856d284, fc58ff8f; the
+    /// fix waits on the user's call on design A+).
+    UnhashedOrphanAdopted,
 }
 
 /// When an add was made, among the users' tag changes, and whether a removal of the tag was
@@ -59,6 +64,10 @@ pub(crate) struct TagBook {
     /// wasn't on the drive yet (a merge keeps either side's add; a removal made after the add
     /// was sent up goes up after it, and wins).
     cleared: BTreeMap<Add, i64>,
+    /// Tags of a client's items a plan wrote the drive's tags over while the item wasn't hashed
+    /// yet ([`Limit::UnhashedOrphanAdopted`]), with when: they excuse that client's adds
+    /// made before.
+    adopted_over: BTreeMap<Add, u64>,
     /// Of `cleared`, the removals made while the remover's own plan still wrote the tag
     /// ([`Limit::OwnTagWriteInFlight`]).
     cleared_in_flight: BTreeSet<Add>,
@@ -248,7 +257,13 @@ impl TagBook {
         }
         for add in mine(&self.cleared, c, node) {
             // The item's removal is the new id's now: the old node no longer has it.
+            if self.cleared_in_flight.remove(&add) {
+                self.cleared_in_flight.insert((c, new, add.2.clone()));
+            }
             move_key(&mut self.cleared, &add, (c, new, add.2.clone()));
+        }
+        for add in mine(&self.adopted_over, c, node) {
+            move_key(&mut self.adopted_over, &add, (c, new, add.2.clone()));
         }
         // Any client's removal on the node counts for the item after (it may have been merged
         // into it before the new id).
@@ -299,6 +314,13 @@ impl TagBook {
             .insert((c, node, name.to_owned()), self.seq);
     }
 
+    /// Client `c`'s plan writes the drive's tags over its item `node`, not hashed yet, without
+    /// tag `name` it holds ([`Limit::UnhashedOrphanAdopted`]).
+    pub(crate) fn adopted_over(&mut self, c: usize, node: NodeId, name: &str) {
+        self.adopted_over
+            .insert((c, node, name.to_owned()), self.seq);
+    }
+
     /// A download wrote tag `name` on client `c`'s item `node`, which its record recovery
     /// dropped ([`TagBook::unproven`]).
     pub(crate) fn unproven(&mut self, c: usize, node: NodeId, name: &str) {
@@ -334,9 +356,14 @@ impl TagBook {
                     .kept_on_new_item
                     .iter()
                     .any(|((by, n, t), at)| by != c && n == node && t == name && made.at <= *at);
+                let adopted = self
+                    .adopted_over
+                    .get(&(*c, *node, name.clone()))
+                    .is_some_and(|at| made.at <= *at);
                 let limit = made
                     .limit
-                    .or(new_item.then_some(Limit::NewItemKeepsBaseTag));
+                    .or(new_item.then_some(Limit::NewItemKeepsBaseTag))
+                    .or(adopted.then_some(Limit::UnhashedOrphanAdopted));
                 lost.push(((*c, *node, name.clone()), limit));
             }
         }
