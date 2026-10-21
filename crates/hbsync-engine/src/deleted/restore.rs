@@ -18,16 +18,29 @@ use super::rules::{RestoreWave, restore_wave, take_restored_name, taken_in};
 use super::{AccountOps, lock};
 
 impl AccountOps<'_> {
-    /// Restores `node` with what was deleted with it, and the folders it was in that are in
-    /// Recently deleted too (just those, not their other contents). Returns how many items came
-    /// back; 0 when `node` isn't in Recently deleted (any more).
+    /// Restores each of `nodes` with what was deleted with it, and the folders it was in that
+    /// are in Recently deleted too (just those, not their other contents), all together: one
+    /// read, then each wave's rows (of all of them) in as few requests as the drive takes and
+    /// one write. What two of them hold comes back once. Returns how many items came back; 0
+    /// for a node not in Recently deleted (any more).
     /// Leaves the account behind ([`AccountOps::run`]) when the drive refused a write for its
     /// state (changed or deleted for good meanwhile), or a write may have landed unanswered.
-    pub fn restore(&mut self, node: NodeId) -> Result<usize, EngineError> {
-        let Some(plan) = lock(self.account).read(|s| plan_restore(s, node))? else {
+    pub fn restore(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        let plan = lock(self.account).read(|s| {
+            let mut all: Option<RestorePlan> = None;
+            for &node in nodes {
+                if let Some(plan) = plan_restore(s, node)? {
+                    match &mut all {
+                        Some(all) => all.merge(plan),
+                        None => all = Some(plan),
+                    }
+                }
+            }
+            Ok(all)
+        })?;
+        let Some(RestorePlan { rows, live, taken }) = plan else {
             return Ok(0);
         };
-        let RestorePlan { rows, live, taken } = plan;
         let mut r = Restoring {
             remote: self.remote,
             in_plan: rows.iter().map(|r| r.row.node).collect(),
@@ -217,6 +230,20 @@ pub(super) struct RestorePlan {
     live: HashSet<NodeId>,
     /// The name keys taken in each of those folders.
     taken: HashMap<NodeId, HashSet<String>>,
+}
+
+impl RestorePlan {
+    /// Takes in `other`, a restore of another node planned from the same read: its rows after
+    /// these, each node once, its folders and their names with these.
+    fn merge(&mut self, other: RestorePlan) {
+        let mut seen: HashSet<NodeId> = self.rows.iter().map(|r| r.row.node).collect();
+        self.rows
+            .extend(other.rows.into_iter().filter(|r| seen.insert(r.row.node)));
+        self.live.extend(other.live);
+        for (folder, names) in other.taken {
+            self.taken.entry(folder).or_default().extend(names);
+        }
+    }
 }
 
 pub(super) fn plan_restore(
