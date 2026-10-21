@@ -10,6 +10,7 @@ use hbsync_types::NodeId;
 use super::Daemon;
 use super::account::Account;
 use crate::Root;
+use crate::protocol::HeldAnswer;
 use crate::protocol::{
     Ask, Control, DaemonControl, DaemonStatus, DeletedItem, DeletedList, FolderControl, Reply,
     Request,
@@ -206,22 +207,14 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
                 Some(Err(why)) => return Reply::Refused(why),
                 Some(Ok(runner)) => runner,
             };
-            let (token, command) = match control {
-                FolderControl::ConfirmDeletes { token } => {
-                    (token.clone(), Command::ConfirmDeletes { token })
-                }
-                FolderControl::PutBack { token } => (token.clone(), Command::PutBack { token }),
+            let (answer, token) = match &control {
+                FolderControl::ConfirmDeletes { token } => (HeldAnswer::Delete, token),
+                FolderControl::PutBack { token } => (HeldAnswer::PutBack, token),
             };
-            if runner.status().held_deletes.map(|held| held.token) != Some(token) {
-                return Reply::Refused(
-                    "the held deletes changed since you looked (or the folder is gone): look \
-                     at them again"
-                        .into(),
-                );
-            }
-            match runner.send(command) {
-                true => Reply::Done,
-                false => Reply::Refused("the sync has stopped".into()),
+            // Checked by the runner, against what it holds: Done means it was taken.
+            match runner.answer(answer, token) {
+                Ok(()) => Reply::Done,
+                Err(why) => Reply::Refused(why),
             }
         }
     }

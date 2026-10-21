@@ -1,6 +1,7 @@
 //! Reviewing held deletes, and Recently deleted: its items, restoring and emptying them.
 
 use hbsync_app::protocol::{DeletedAccount, DeletedList};
+use hbsync_app::{HeldAnswer, State};
 
 use super::*;
 
@@ -16,7 +17,7 @@ impl Server {
         let Some(held) = &status.held_deletes else {
             return "<h1>Deletions</h1><p>No deletions are waiting.</p>".into();
         };
-        let what: String = words::held_deletes(held)
+        let what: String = words::held_deletes(held, "Delete", "Put them back")
             .iter()
             .map(|line| format!("<p>{}</p>", escape(line)))
             .collect();
@@ -39,8 +40,8 @@ impl Server {
              <input type=hidden name=token value=\"{token}\">\
              <button name=answer value=delete>Delete</button> \
              <button name=answer value=put_back>Put them back</button></form>\
-             <p class=small>Not sure? Leave this page: nothing is deleted, and the files stay \
-             as they are on Homebase until you answer. Filesync reminds you while they wait.</p>",
+             <p class=small>Not sure? Leave this page. Nothing changes, here or on Homebase, \
+             until you answer. Filesync reminds you while they wait.</p>",
             held.total(),
             folder = escape(&status.path.display().to_string()),
             url = self.pages.url("deletions"),
@@ -194,33 +195,33 @@ impl Server {
     }
 
     pub(super) fn confirm_deletes(&self, form: &HashMap<String, String>) -> String {
-        let path = lock(&self.pages.shared)
+        let folder = lock(&self.pages.shared)
             .status
             .as_ref()
-            .map(|s| s.path.clone());
-        let (Some(token), Some(path)) = (form.get("token"), path) else {
+            .map(|s| (s.path.clone(), s.state == State::Paused));
+        let (Some(token), Some((path, paused))) = (form.get("token"), folder) else {
             return "Nothing was confirmed.".into();
         };
         // Each answer by name: a form without one (a page from an older build) does nothing.
-        match form.get("answer").map(String::as_str) {
-            Some("put_back") => {
-                return match control::put_back(&self.paths, &path, token.clone()) {
-                    Ok(()) => {
-                        (self.send)(Event::Wake);
-                        "They are being put back.".into()
-                    }
-                    Err(e) => format!("Not put back: {e}"),
-                };
-            }
-            Some("delete") => {}
+        let (answer, done, not) = match form.get("answer").map(String::as_str) {
+            Some("put_back") => (
+                HeldAnswer::PutBack,
+                control::put_back(&self.paths, &path, token.clone()),
+                "Not put back",
+            ),
+            Some("delete") => (
+                HeldAnswer::Delete,
+                control::confirm_deletes(&self.paths, &path, token.clone()),
+                "Not confirmed",
+            ),
             _ => return "Nothing was done: answer again from the page.".into(),
-        }
-        match control::confirm_deletes(&self.paths, &path, token.clone()) {
+        };
+        match done {
             Ok(()) => {
                 (self.send)(Event::Wake);
-                "Confirmed: the deletions go through now.".into()
+                words::held_answered(answer, paused).into()
             }
-            Err(e) => format!("Not confirmed: {e}"),
+            Err(e) => format!("{not}: {e}"),
         }
     }
 }

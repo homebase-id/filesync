@@ -250,7 +250,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   the user, or newly ignored, §10 rule 1), or every synced file, those removals are held, sent
   nowhere: the drive and every other device keep them. The rest of the plan proceeds. The user
   answers, about exactly what was shown (a token names the held items; an answer to a set that
-  changed since is refused, the new one shown):
+  changed since is refused, the new one shown; one taken goes with the next sync, for the
+  items it named, and any held since stay held):
   - **Delete**: they go to the drive's Recently deleted, as any delete does.
   - **Put them back**: the delete here is undone, as the drive has them now: each node's base
     goes (with what is below it in the base), so the drive's live node comes down again

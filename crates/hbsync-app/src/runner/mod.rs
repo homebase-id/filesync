@@ -36,7 +36,7 @@ use hbsync_state::StateError;
 use hbsync_types::NodeId;
 use hbsync_types::unix_now;
 
-use crate::protocol::{FolderStatus, Pause, State};
+use crate::protocol::{FolderStatus, HeldAnswer, Pause, State};
 use crate::sync::{OnDrop, Wakeup, lock, wait_for};
 use crate::{Identity, MassDelete};
 
@@ -49,6 +49,12 @@ use schedule::{Schedule, Synced};
 
 /// While the identity refuses this computer, how often a folder asks again (one sync).
 const DENIED_LOOK: Duration = Duration::from_secs(3600);
+
+/// Told when an answer to held deletes that was taken can't be used: what it named is no
+/// longer held there.
+const ANSWER_DROPPED_GONE: &str = "Your answer to the held deletes wasn't used: the folder is gone. Once it is back, answer again.";
+const ANSWER_DROPPED_SET_UP: &str =
+    "Your answer to the held deletes wasn't used: the folder was set up again. Answer again.";
 
 /// The ignore rules are read this long after their file was last touched: not half written.
 const RULES_QUIET: Duration = Duration::from_secs(1);
@@ -126,12 +132,25 @@ impl RunnerConfig {
     }
 }
 
-/// The user's answer to held deletes, for the next sync.
-pub(crate) enum Answer {
-    /// Let them through.
-    Delete(Vec<NodeId>),
-    /// Put them back (sync semantics §7).
-    PutBack(Vec<NodeId>),
+/// The deletes held in the last sync, as the status shows them, and the user's answer to them
+/// for the next sync: one lock, so an answer is checked against what it answers and kept with
+/// the nodes it named.
+#[derive(Debug, Default)]
+struct Held {
+    nodes: Arc<[NodeId]>,
+    /// Their token ([`report::held_token`]).
+    token: String,
+    /// What the next sync does with the nodes the user answered for (the ones shown then).
+    answer: Option<(HeldAnswer, Arc<[NodeId]>)>,
+    /// They were answered: another answer is refused until a sync shows them again.
+    answered: bool,
+}
+
+impl Held {
+    /// Nothing held, and no answer kept: whether an answer was dropped.
+    fn clear(&mut self) -> bool {
+        std::mem::take(self).answer.is_some()
+    }
 }
 
 /// Requests to the runner.
@@ -148,12 +167,6 @@ pub enum Command {
     Resume,
     /// A timed pause ran out (the daemon's timer): syncing goes on as it was.
     PauseEnded,
-    /// Let the held deletes the user was shown through: `token` is
-    /// [`crate::protocol::HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
-    ConfirmDeletes { token: String },
-    /// Put the held deletes the user was shown back (sync semantics §7): `token` as for
-    /// `ConfirmDeletes`.
-    PutBack { token: String },
     /// The machine woke up: sync now, the backoff forgotten.
     Woke,
     /// Stop the runner (between operations).
@@ -168,6 +181,8 @@ enum Msg {
     Drive,
     /// The watcher has changes to record, or the ignore rules' file was touched.
     Local,
+    /// The user answered the held deletes ([`Handle::answer`]): a sync is asked for.
+    Answered,
     /// Every [`Handle`] is gone: it stops.
     Orphaned,
 }
@@ -188,6 +203,7 @@ pub struct Handle {
     control: Arc<Owner>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<FolderStatus>>,
+    held: Arc<Mutex<Held>>,
     progress: Arc<Counters>,
     #[cfg(feature = "testkit")]
     woken: crate::TestCount,
@@ -215,6 +231,33 @@ impl Handle {
             self.changed.raise();
         }
         self.control.0.send(Msg::Command(control)).is_ok()
+    }
+
+    /// Answers the held deletes named by `token` (as the user saw them) with `answer`. Checked
+    /// against what the runner holds now: refused when they changed since, or the folder is
+    /// gone (nothing is held there). Taken, it goes with the next sync (after one in progress;
+    /// paused, once syncing resumes), for exactly the deletes it named: any held since stay
+    /// held, shown again.
+    pub fn answer(&self, answer: HeldAnswer, token: &str) -> Result<(), String> {
+        {
+            let mut held = lock(&self.held);
+            if held.nodes.is_empty() || held.token != token {
+                return Err(
+                    "the held deletes changed since you looked (or the folder is gone): \
+                            look at them again"
+                        .into(),
+                );
+            }
+            if held.answered {
+                return Err(
+                    "they were answered already: look at them again after the next sync".into(),
+                );
+            }
+            tracing::info!("{} held deletes answered: {answer:?}", held.nodes.len());
+            held.answer = Some((answer, Arc::clone(&held.nodes)));
+            held.answered = true;
+        }
+        (self.control.0.send(Msg::Answered)).map_err(|_| "the sync has stopped".to_owned())
     }
 
     /// How often the runner's loop has woken up (tests: none while idle).
@@ -248,10 +291,8 @@ pub struct Runner {
     progress: Arc<Counters>,
     /// How often its loop woke up (`Handle::woken`).
     woken: crate::TestCount,
-    /// The nodes of the deletes held in the last sync (what the status shows).
-    held: Vec<NodeId>,
-    /// Their token ([`report::held_token`]).
-    held_token: String,
+    /// The deletes held in the last sync, and the answer to them.
+    held: Arc<Mutex<Held>>,
     /// The conflicts and failures of the last sync, to tell each one only once.
     told: report::Told,
     /// Stale skips sync after sync: one that keeps coming back is told after all.
@@ -275,9 +316,6 @@ impl std::fmt::Debug for Runner {
 /// The engine and the local observer, rebuilt when the ignore rules change.
 struct Parts {
     engine: Engine,
-    /// The folder's marker when it was opened: another one means it was set up again (a new
-    /// folder in the DB, the engine's gone).
-    marker: String,
     observer: LocalObserver,
     /// Set when the drive changed for the folder ([`Drive::subscribe_with`], which wakes the
     /// runner while this lives).
@@ -317,12 +355,14 @@ impl Runner {
         status.role = cfg.role;
         status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
+        let held = Arc::new(Mutex::new(Held::default()));
         let progress = Arc::new(Counters::default());
         let woken = crate::TestCount::default();
         let handle = Handle {
             control: Arc::new(Owner(tx.clone())),
             stop: Arc::clone(&stop),
             status: Arc::clone(&status),
+            held: Arc::clone(&held),
             progress: Arc::clone(&progress),
             #[cfg(feature = "testkit")]
             woken: woken.clone(),
@@ -337,8 +377,7 @@ impl Runner {
             status,
             progress,
             woken,
-            held: Vec::new(),
-            held_token: String::new(),
+            held,
             told: Default::default(),
             stalled: Default::default(),
             scan_told: Default::default(),
@@ -383,7 +422,7 @@ impl Runner {
 
     /// The engine and observer for the folder, which must have been set up (its marker names
     /// it): an unmounted disk's empty mount point must not become a new sync folder.
-    fn open(&self, marker: String) -> Result<Parts, RunnerError> {
+    fn open(&self) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.guard.min = self.cfg.mass_delete.min_files;
@@ -421,7 +460,6 @@ impl Runner {
         });
         Ok(Parts {
             engine,
-            marker,
             observer,
             drive_changed,
         })
@@ -431,7 +469,9 @@ impl Runner {
         // Opened when there is something to sync and the folder is there; dropped when the
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
-        let mut confirmed = None;
+        // The folder's marker when it was last opened: another one means it was set up again
+        // (a new folder in the DB, the engine's gone), also while nothing is open.
+        let mut opened: Option<String> = None;
         let mut schedule = Schedule::new(Instant::now(), self.cfg.look, self.cfg.paused.is_some());
         let mut started = false;
         let mut check_rules = false;
@@ -467,9 +507,8 @@ impl Runner {
                         tracing::info!("stopped");
                         return Ok(());
                     }
-                    Msg::Command(command) => {
-                        self.command(command, &mut schedule, &mut confirmed, &mut check_rules)
-                    }
+                    Msg::Command(command) => self.command(command, &mut schedule, &mut check_rules),
+                    Msg::Answered => schedule.asked(Instant::now()),
                     // Taken below.
                     Msg::Drive | Msg::Local => {}
                 }
@@ -581,10 +620,11 @@ impl Runner {
                         tracing::warn!("{GONE}: waiting for it to come back");
                     }
                     parts = None;
-                    // Nothing is held, sent or put back there meanwhile: an answer is refused.
-                    self.held.clear();
-                    self.held_token.clear();
-                    confirmed.take();
+                    // Nothing is held, sent or put back there meanwhile: an answer is refused,
+                    // and one taken is dropped.
+                    if lock(&self.held).clear() {
+                        self.tell(vec![ANSWER_DROPPED_GONE.into()]);
+                    }
                     self.set(|s| s.held_deletes = None);
                     self.failing(State::Failing, GONE.into(), schedule.later(Instant::now()));
                     continue;
@@ -593,17 +633,21 @@ impl Runner {
             };
             // Set up again meanwhile (a new folder in the DB, the open one removed): the
             // engine would only fail now. Start over with the new one.
-            if parts.as_ref().is_some_and(|p| p.marker != marker) {
+            if opened.as_ref().is_some_and(|m| *m != marker) {
                 tracing::info!("the folder was set up again: starting over");
                 parts = None;
-                // An answer was about the old one's nodes.
-                confirmed.take();
+                // What is held, and an answer, were about the old one's nodes.
+                if lock(&self.held).clear() {
+                    self.tell(vec![ANSWER_DROPPED_SET_UP.into()]);
+                }
+                self.set(|s| s.held_deletes = None);
             }
             let p = match &mut parts {
                 Some(p) => p,
-                None => match self.open(marker) {
+                None => match self.open() {
                     Ok(p) => {
                         started = false;
+                        opened = Some(marker);
                         parts.insert(p)
                     }
                     // Rules that don't parse: say so, and look again at the next look.
@@ -619,9 +663,10 @@ impl Runner {
                     Err(e) => return Err(e),
                 },
             };
-            match confirmed.take() {
-                Some(Answer::Delete(seen)) => p.engine.confirm_deletes(seen),
-                Some(Answer::PutBack(seen)) => {
+            let answer = lock(&self.held).answer.take();
+            match answer {
+                Some((HeldAnswer::Delete, seen)) => p.engine.confirm_deletes(seen.iter().copied()),
+                Some((HeldAnswer::PutBack, seen)) => {
                     if let Err(e) = p.engine.put_back(&seen) {
                         // What it didn't put back is still held, and shown again.
                         self.tell(vec![format!(
@@ -696,13 +741,7 @@ impl Runner {
     }
 
     /// Takes `command` (but a stop).
-    fn command(
-        &mut self,
-        command: Command,
-        schedule: &mut Schedule,
-        confirmed: &mut Option<Answer>,
-        check_rules: &mut bool,
-    ) {
+    fn command(&mut self, command: Command, schedule: &mut Schedule, check_rules: &mut bool) {
         match command {
             Command::SyncNow => {
                 schedule.asked(Instant::now());
@@ -740,24 +779,6 @@ impl Runner {
                     tracing::info!("the pause is over: resuming");
                     self.resume();
                 }
-            }
-            Command::ConfirmDeletes { token } => {
-                if self.held.is_empty() || token != self.held_token {
-                    tracing::warn!("a confirmation of deletes that changed since: ignored");
-                    return;
-                }
-                tracing::info!("{} held deletes confirmed", self.held.len());
-                *confirmed = Some(Answer::Delete(self.held.clone()));
-                schedule.asked(Instant::now());
-            }
-            Command::PutBack { token } => {
-                if self.held.is_empty() || token != self.held_token {
-                    tracing::warn!("a put-back of deletes that changed since: ignored");
-                    return;
-                }
-                tracing::info!("{} held deletes put back", self.held.len());
-                *confirmed = Some(Answer::PutBack(self.held.clone()));
-                schedule.asked(Instant::now());
             }
             Command::Stop => {}
         }
@@ -840,9 +861,17 @@ impl Runner {
     ) -> Result<(), StateError> {
         let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
-        self.held = report.held.iter().map(|op| op.node()).collect();
-        self.held_token = report::held_token(&report.held);
-        let held = report::held(engine, report, &self.held_token)?;
+        let token = report::held_token(&report.held);
+        let held = report::held(engine, report, &token)?;
+        // Before the status shows the new token, so no answer can name it before it is held.
+        // An answer taken during this sync stays for the next: it names what the user saw.
+        {
+            let mut kept = lock(&self.held);
+            kept.nodes = report.held.iter().map(|op| op.node()).collect();
+            kept.token = token;
+            // Shown again: one answer each time, but one taken during this sync still waits.
+            kept.answered = kept.answer.is_some();
+        }
         if report.ops_done > 0 || !notes.is_empty() {
             tracing::info!(
                 "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",

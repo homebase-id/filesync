@@ -11,7 +11,7 @@ use hbsync_app::folders::{self, Taken};
 use hbsync_app::protocol::{
     DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause,
 };
-use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, words};
+use hbsync_app::{Config, HeldAnswer, Paths, State, autostart, control as daemon, setup, words};
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
 
@@ -327,8 +327,8 @@ fn run(command: Command) -> Res<ExitCode> {
             daemon::empty_listed(&paths, &list.accounts)?;
             println!("{}", emptied(list.staying()));
         }
-        Command::ConfirmDeletes { yes } => answer_held(&paths, yes, Held::Delete)?,
-        Command::PutBack { yes } => answer_held(&paths, yes, Held::PutBack)?,
+        Command::ConfirmDeletes { yes } => answer_held(&paths, yes, HeldAnswer::Delete)?,
+        Command::PutBack { yes } => answer_held(&paths, yes, HeldAnswer::PutBack)?,
         Command::Start => {
             if running(&paths)? {
                 println!("The daemon is already running.");
@@ -476,29 +476,23 @@ fn ask_yes(question: &str) -> Res<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
-/// An answer to held deletes.
-#[derive(Clone, Copy, PartialEq)]
-enum Held {
-    Delete,
-    PutBack,
-}
-
-fn answer_held(paths: &Paths, yes: bool, answer: Held) -> Res<()> {
+fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
         return Err("the daemon isn't running (`hbsync start` starts it)".into());
     };
     let held: Vec<_> = status
         .folders
         .into_iter()
-        .filter_map(|f| Some((f.path, f.held_deletes?)))
+        .filter_map(|f| Some((f.path, f.state == State::Paused, f.held_deletes?)))
         .collect();
     if held.is_empty() {
         println!("No deletes are waiting for confirmation.");
         return Ok(());
     }
-    for (path, held) in held {
+    for (path, paused, held) in held {
         println!("{}:", path.display());
-        for line in words::held_deletes(&held) {
+        let (delete, put_back) = ("`hbsync confirm-deletes`", "`hbsync put-back`");
+        for line in words::held_deletes(&held, delete, put_back) {
             println!("{line}");
         }
         for example in &held.examples {
@@ -508,8 +502,8 @@ fn answer_held(paths: &Paths, yes: bool, answer: Held) -> Res<()> {
             println!("  ...");
         }
         let question = match answer {
-            Held::Delete => "Delete them?",
-            Held::PutBack => "Put them back?",
+            HeldAnswer::Delete => "Delete them?",
+            HeldAnswer::PutBack => "Put them back?",
         };
         if !yes && !ask_yes(question)? {
             println!("Nothing done; they stay held.");
@@ -517,15 +511,10 @@ fn answer_held(paths: &Paths, yes: bool, answer: Held) -> Res<()> {
         }
         // Exactly these: any delete since is held again, for another look.
         match answer {
-            Held::Delete => {
-                daemon::confirm_deletes(paths, &path, held.token)?;
-                println!("Confirmed.");
-            }
-            Held::PutBack => {
-                daemon::put_back(paths, &path, held.token)?;
-                println!("Putting them back.");
-            }
+            HeldAnswer::Delete => daemon::confirm_deletes(paths, &path, held.token)?,
+            HeldAnswer::PutBack => daemon::put_back(paths, &path, held.token)?,
         }
+        println!("{}", words::held_answered(answer, paused));
     }
     Ok(())
 }
@@ -535,23 +524,31 @@ fn print_status(status: &DaemonStatus) {
         print_folder(s);
     }
     for a in &status.accounts {
-        match &a.hints {
-            Hints::Off | Hints::Connected => {}
-            Hints::Connecting => println!("  notifications: connecting"),
-            Hints::Lost(why) => println!(
-                "  notifications: lost ({why}), reconnecting; meanwhile the drive is read every {} min",
-                UNANNOUNCED_READ.as_secs() / 60
-            ),
-            Hints::Refused(why) => println!(
-                "  notifications: refused ({why}), asked again later; meanwhile the drive is read every {} min",
-                UNANNOUNCED_READ.as_secs() / 60
-            ),
+        let every = UNANNOUNCED_READ.as_secs() / 60;
+        let hints = match &a.hints {
+            Hints::Off | Hints::Connected => None,
+            Hints::Connecting => Some("notifications: connecting".to_owned()),
+            Hints::Lost(why) => Some(format!(
+                "notifications: lost ({why}), reconnecting; meanwhile the drive is read every {every} min"
+            )),
+            Hints::Refused(why) => Some(format!(
+                "notifications: refused ({why}), asked again later; meanwhile the drive is read every {every} min"
+            )),
+        };
+        let credentials = a
+            .credentials_warning
+            .as_ref()
+            .map(|w| format!("credentials: {w}"));
+        if hints.is_none() && credentials.is_none() && a.recent.is_empty() {
+            continue;
         }
-        if let Some(w) = &a.credentials_warning {
-            println!("  credentials: {w}");
+        // Under its own heading: not read as the last folder's.
+        println!("Account {}:", a.identity);
+        for line in hints.iter().chain(&credentials) {
+            println!("  {line}");
         }
         // The account's own: Recently deleted's requests, files on the drive that don't read.
-        print_notes(&format!("{} recently", a.identity), &a.recent);
+        print_notes("recently", &a.recent);
     }
 }
 
