@@ -80,15 +80,10 @@ impl Sim {
             local_view.remove(n);
         }
         // A file not hashed yet is reported without content: the plan defers it.
-        for n in client
-            .unhashed
-            .iter()
-            .chain(&client.writing)
-            .chain(&client.locked)
-        {
-            if let Some(state) = local_view.get(*n).cloned() {
+        for n in client.unhashed_now() {
+            if let Some(state) = local_view.get(n).cloned() {
                 local_view.insert(
-                    *n,
+                    n,
                     NodeState {
                         content: None,
                         ..state
@@ -100,11 +95,7 @@ impl Sim {
         see_held_tags(client, &mut local_view, &remote);
         // Of the items the scan reports (as the engine's view marks its rows).
         let local_unhashed = client
-            .unhashed
-            .iter()
-            .chain(&client.writing)
-            .chain(&client.locked)
-            .copied()
+            .unhashed_now()
             .filter(|n| local_view.contains(*n))
             .collect();
         let mut input = Input {

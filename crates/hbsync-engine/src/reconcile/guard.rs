@@ -16,8 +16,15 @@ impl Reconciler<'_> {
                 .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
                 .count()
         };
-        // Deletes the user confirmed are theirs: only the others are judged.
-        let confirmed = |op: &Op| self.opts.confirmed.contains(&op.node());
+        // Deletes the user confirmed are theirs, and so is each of what was in a folder whose
+        // delete they confirmed (planned apart while the folder's waits for a hash, §6.3):
+        // only the others are judged.
+        let yes = &self.opts.confirmed;
+        let confirmed = |op: &Op| {
+            let node = op.node();
+            yes.contains(&node)
+                || (!yes.is_empty() && i.base.ancestors(node).iter().any(|a| yes.contains(a)))
+        };
         let (mut local_files, mut remote_files) = (0usize, 0usize);
         for op in self.plan.ops.iter().filter(|op| !confirmed(op)) {
             match op {

@@ -1891,3 +1891,103 @@ fn a_node_waiting_for_a_name_keeps_its_folder_on_the_drive() {
     );
     assert!(plan.deferred.contains(&n), "{:?}", plan.deferred);
 }
+
+/// A chain of name waits five long: n1 would take the name of a file being written, n2 n1's,
+/// and so on, and the drive deleted n5's folder, where n5 has an edit here. Each plan again
+/// finds the next waiter (the folders judged before the top: ids below the root's), till none
+/// is new: n5's folder is held, never trashed with its edit (a cap on the plans did).
+#[test]
+fn a_chain_of_name_waits_holds_its_last_folder() {
+    let id = |n: u128| NodeId(Uuid::from_u128(n));
+    let [g1, g2, g3, g4, g5] =
+        [5, 4, 3, 2, 1].map(|k| id(0x1000_0000_0000_4000_8000_0000_0000_0000 + k));
+    let [n1, n2, n3, n4, n5, hh] =
+        [1, 2, 3, 4, 5, 6].map(|k| id(0xf000_0000_0000_4000_8000_0000_0000_0000 + k));
+    let mut w = World::default();
+    for (g, name) in [(g1, "g1"), (g2, "g2"), (g3, "g3"), (g4, "g4"), (g5, "g5")] {
+        w.synced(g, folder(ROOT, name));
+    }
+    let names = [
+        (n1, g1, "a1"),
+        (n2, g2, "b2"),
+        (n3, g3, "c3"),
+        (n4, g4, "d4"),
+        (n5, g5, "e5"),
+    ];
+    for (n, g, name) in names {
+        w.synced(n, file(g, name, "1"));
+    }
+    // Each onto the place of the one before; n1 onto x0 at the top.
+    w.remote(n1, Some(file(ROOT, "x0", "1")));
+    for pair in names.windows(2) {
+        let [(_, g, name), (n, _, _)] = pair else {
+            unreachable!()
+        };
+        w.remote(*n, Some(file(*g, name, "1")));
+    }
+    w.remote(g5, None);
+    w.local(n5, Some(file(g5, "e5", "2")));
+    w.local(
+        hh,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "x0", "h")
+        }),
+    );
+    w.input.local_unhashed.insert(hh);
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(plan.deferred.contains(&n5), "{:?}", plan.deferred);
+    assert_eq!(plan.waiting, [hh]);
+}
+
+/// A folder holding a file being written, planned all the same (the drive tagged it: it stays
+/// put), keeps its name: a new file here whose name clashes with it waits, never the folder
+/// renamed on both sides with the file in it.
+#[test]
+fn a_held_folder_planned_keeps_its_name() {
+    let [x, g, wf] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(g, folder(ROOT, "g")).synced(wf, file(g, "w", "w"));
+    let red = Tags::new([Tag::new("Red", 6)]);
+    w.remote(
+        g,
+        Some(NodeState {
+            tags: red,
+            ..folder(ROOT, "g")
+        }),
+    );
+    w.local(
+        wf,
+        Some(NodeState {
+            content: None,
+            ..file(g, "w", "w2")
+        }),
+    );
+    w.input.local_unhashed.insert(wf);
+    w.local(x, Some(file(ROOT, "G", "x")));
+    let plan = w.plan();
+    assert!(
+        !plan.ops.iter().any(|op| matches!(op,
+            Op::LocalMove { node, .. } | Op::RemoteUpdate { node, .. } if *node == g)),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(plan.deferred.contains(&x), "{:?}", plan.deferred);
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTags { node, .. } if *node == g)),
+        "the tag comes down: {:#?}",
+        plan.ops
+    );
+}

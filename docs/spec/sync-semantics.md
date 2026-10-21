@@ -170,7 +170,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    round that finds something waiting reads those of the files that haven't changed since
    the scan couldn't (locked, unreadable; one still being written is read by the scan its
    change brings) and plans again; one that still can't be read is told, by name, and read
-   again at the next try of unfinished work (5 s, backing off to 5 min). A file that can
+   again at the next sync (no poll: on Windows an app letting go of a file it didn't change
+   tells no one, and the wait lasts till the next sync for another reason). A file that can
    never be read holds what waits for it for as long.
 
    **Orphans go into Recovered files.** A live node whose folder is nowhere on the drive

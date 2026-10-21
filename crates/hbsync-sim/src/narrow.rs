@@ -258,11 +258,7 @@ fn local_row(client: &Client, node: NodeId, state: &NodeState, path: RelPath) ->
         },
         executable: content.map(|c| c.executable),
         hash: content
-            .filter(|_| {
-                ![&client.unhashed, &client.writing, &client.locked]
-                    .iter()
-                    .any(|set| set.contains(&node))
-            })
+            .filter(|_| !client.unhashed_now().any(|n| n == node))
             .map(|c| c.hash),
         tags: (client.os != Os::Windows).then(|| state.tags.clone()),
     }

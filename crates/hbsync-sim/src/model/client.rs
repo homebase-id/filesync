@@ -105,6 +105,16 @@ pub(crate) struct Client {
 }
 
 impl Client {
+    /// The files no plan now finds hashed: a record recovery kept, one still being written,
+    /// one held locked.
+    pub(crate) fn unhashed_now(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.unhashed
+            .iter()
+            .chain(&self.writing)
+            .chain(&self.locked)
+            .copied()
+    }
+
     pub(crate) fn new(name: String, os: Os, filter: Filter, coords: Coords) -> Self {
         Client {
             computer: name.clone(),

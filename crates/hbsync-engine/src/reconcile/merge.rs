@@ -76,7 +76,6 @@ impl Reconciler<'_> {
         if i.dirty.contains(&node) {
             self.deferred.insert(node);
         }
-        self.holding.insert(node);
         let state = self
             .local_state(node)
             .or_else(|| i.base.get(node).cloned())
@@ -181,7 +180,7 @@ impl Reconciler<'_> {
 
     pub(super) fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
-        if self.waits_for_hash(node) {
+        if self.held_as_is(node) {
             self.hold(node);
             return;
         }

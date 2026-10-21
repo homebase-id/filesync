@@ -95,6 +95,9 @@ const SCHEMA: &str = r#"
     ) WITHOUT ROWID;
     CREATE INDEX local_file_id ON local(file_id, folder);
     CREATE INDEX local_key ON local(parent, name_key, folder);
+    -- The files not hashed yet (being written, locked, unreadable): every plan holds what they
+    -- are in (sync semantics §6.3). Few, and only they in it.
+    CREATE INDEX local_unhashed ON local(folder) WHERE hash IS NULL AND kind = 0;
 
     -- The client's copy of the live remote nodes (the remote side of the merge), the drive's
     -- whole tree.
@@ -347,6 +350,8 @@ const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;",
     // 18: each dirty mark's version: a plan clears only the marks it read.
     "ALTER TABLE dirty ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;",
+    // 19: the files not hashed yet, which every plan holds what they are in for.
+    "CREATE INDEX local_unhashed ON local(folder) WHERE hash IS NULL AND kind = 0;",
 ];
 
 /// The version this client makes and reads.

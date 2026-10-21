@@ -1921,3 +1921,35 @@ fn a_round_reads_what_its_plan_waits_for_first() -> R {
     assert_eq!(b.read("p/new")?, b"new", "the folder came back with it");
     Ok(())
 }
+
+/// A folder the drive renamed, holding a file here that can't be read, planned in a page of
+/// its own (more dirty than a page holds): every view loads the files not hashed yet, so the
+/// narrow view holds the folder as the whole one does (the testkit compares them on every
+/// plan), and the rename waits; readable again, it comes down with the file's edit.
+#[cfg(unix)]
+#[test]
+fn a_page_without_the_unread_file_holds_its_folder_too() -> R {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.batch = 1)?;
+    let mut b = Client::new(&server, "b")?;
+    fs::create_dir(a.root.join("p"))?;
+    fs::write(a.root.join("p/w"), b"w1")?;
+    settle_all(&mut a, &mut b)?;
+    fs::rename(b.root.join("p"), b.root.join("q"))?;
+    b.sync()?;
+    fs::write(a.root.join("p/w"), b"w2")?;
+    fs::set_permissions(a.root.join("p/w"), fs::Permissions::from_mode(0o000))?;
+    if fs::read(a.root.join("p/w")).is_ok() {
+        return Ok(()); // root reads anything: nothing to test
+    }
+    let waiting = a.sync()?.waiting;
+    assert!(a.root.join("p").is_dir(), "the rename waits");
+    assert!(waiting.iter().any(|(p, _)| p == "p/w"), "{waiting:?}");
+    fs::set_permissions(a.root.join("p/w"), fs::Permissions::from_mode(0o644))?;
+    settle_all(&mut a, &mut b)?;
+    assert_eq!(a.read("q/w")?, b"w2");
+    assert_eq!(b.read("q/w")?, b"w2");
+    Ok(())
+}

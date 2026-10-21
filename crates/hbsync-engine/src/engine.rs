@@ -10,7 +10,7 @@ use hbsync_local::{
 };
 use hbsync_platform::RelPath;
 use hbsync_remote::Remote;
-use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
+use hbsync_state::{DirtyCursor, Mark, ReadTx, StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -172,6 +172,9 @@ pub struct Engine {
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
     /// that can't be hashed yet isn't read again every round).
     rescanned: std::collections::HashSet<NodeId>,
+    /// The files the current sweep found something waiting for, that couldn't be read
+    /// ([`SyncReport::waiting`]).
+    waiting: Vec<(String, String)>,
     /// What a sync that failed had done before ([`Engine::take_unreported`]).
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
@@ -228,6 +231,7 @@ impl Engine {
             progress: Arc::default(),
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
+            waiting: Vec::new(),
             unreported: None,
         })
     }
@@ -383,6 +387,7 @@ impl Engine {
         let mut report = SyncReport::default();
         self.progress.reset();
         self.rescanned.clear();
+        self.waiting.clear();
         self.unreported = None;
         match self.sync_into(date, pulled, &mut report) {
             Ok(()) => Ok(report),
@@ -486,8 +491,9 @@ impl Engine {
             }
             after = next;
             if dirty.len() < self.cfg.batch {
-                // End of a sweep.
+                // End of a sweep: what it held, and what waits now.
                 report.held = std::mem::take(&mut held);
+                report.waiting = std::mem::take(&mut self.waiting);
                 swept = true;
                 after = None;
                 if !progress {
@@ -498,15 +504,14 @@ impl Engine {
         }
         if !swept {
             report.held = held;
+            report.waiting.append(&mut self.waiting);
         }
         // A sync cut short by the round limit leaves the rest of the sweep to the next one (the
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
         self.sweep_after = after;
         report.pending = self.db.read(|s| s.dirty_count())?;
-        // A file something waits for is read again then: an app letting go of it tells no one.
         report.unfinished = !swept
-            || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()))
-            || !report.waiting.is_empty();
+            || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
         if report.ops_done > 0 || report.feed.deleted > 0 {
             // Ids of nodes gone everywhere.
             self.db.write(|s| s.account().collect_nodes())?;
@@ -545,14 +550,14 @@ impl Engine {
     /// Something in `plan` waits for files here not hashed yet (sync semantics §6.3): those
     /// unchanged since the scan that couldn't read them (locked, unreadable: one still changing
     /// is read by the scan its change brings) are read now, and `dirty` planned again if that
-    /// recorded anything. What still waits is told, by name. Costs nothing unless something
-    /// waits; then a row and a stat a file, a read of each unchanged one, and one more plan.
+    /// recorded anything. What still waits is told, by name (`waiting`). Costs nothing unless
+    /// something waits; then a row and a stat a file, an open (or a read) and a small write of
+    /// each unchanged one, and, if that hashed or found a change, one more plan.
     fn read_waiting(
         &mut self,
         plan: Plan,
         dirty: &[NodeId],
         opts: &Options,
-        report: &mut SyncReport,
     ) -> Result<Plan, EngineError> {
         if plan.waiting.is_empty() {
             return Ok(plan);
@@ -573,7 +578,8 @@ impl Engine {
         let mut why = std::collections::HashMap::new();
         if !unchanged.is_empty() {
             let scan = rescan_entries(&mut self.db, root, &[], &unchanged, &self.scan_opts)?;
-            if scan.hashed > 0 || scan.dirty > 0 {
+            // A read that failed again records nothing new: no plan again for that.
+            if scan.hashed + scan.moved + scan.added + scan.removed > 0 {
                 plan = self.plan(dirty, opts)?;
             }
             why.extend(scan.unhashed);
@@ -586,8 +592,8 @@ impl Engine {
                     shown.to_string(),
                     why.unwrap_or_else(|| "being written".into()),
                 );
-                if !report.waiting.contains(&told) {
-                    report.waiting.push(told);
+                if !self.waiting.contains(&told) {
+                    self.waiting.push(told);
                 }
             }
         }
@@ -643,15 +649,20 @@ impl Engine {
         self.rescan_records()?;
         recover_placements(&mut self.db, &self.cfg.folder)?;
         let plan = self.plan(&dirty, opts)?;
-        let plan = self.read_waiting(plan, &dirty, opts, report)?;
+        let plan = self.read_waiting(plan, &dirty, opts)?;
         #[cfg(feature = "testkit")]
         if let Some(after) = &self.cfg.after_plan {
             (after.0)();
         }
-        // A confirmation lasts while its node's plan deletes it: one whose delete was undone
-        // (the file back) is forgotten, so a later delete is judged anew.
-        let deleting: std::collections::HashSet<NodeId> =
-            plan.ops.iter().filter_map(Op::deletes).collect();
+        // A confirmation lasts while its node's plan deletes it, or its delete waits for a
+        // file not hashed yet (§6.3): one whose delete was undone (the file back) is forgotten,
+        // so a later delete is judged anew.
+        let deleting: std::collections::HashSet<NodeId> = plan
+            .ops
+            .iter()
+            .filter_map(Op::deletes)
+            .chain(plan.deferred.iter().copied())
+            .collect();
         for node in &dirty {
             if !deleting.contains(node) {
                 self.confirmed.remove(node);

@@ -137,7 +137,7 @@ impl Reconciler<'_> {
             };
             // Left as it is till an item here is hashed: never an orphan to adopt.
             let decided = match decided {
-                Parent::Recover if self.holding.contains(&node) => Parent::Wait,
+                Parent::Recover if self.held.contains(&node) => Parent::Wait,
                 decided => decided,
             };
             match decided {
@@ -215,11 +215,11 @@ impl Reconciler<'_> {
                             .is_some_and(|(r, t)| !r.same_place(t))
                 });
                 // What waits for a hash stays as it is (`held`).
-                let local_moved = local_moved.filter(|m| !self.holding.contains(m));
+                let local_moved = local_moved.filter(|m| !self.held.contains(m));
                 let victim = local_moved.unwrap_or_else(|| {
                     *members
                         .iter()
-                        .filter(|m| !self.holding.contains(m))
+                        .filter(|m| !self.held.contains(m))
                         .min()
                         .unwrap_or(&node)
                 });
@@ -269,7 +269,7 @@ impl Reconciler<'_> {
     /// Scoped `node` and what is below it wait for a hash ([`super::held_from`]): it would take
     /// a name what waits holds. Left as they are (a conflict copy isn't made); the plan is made
     /// again holding them with their folders ([`reconcile`]). Whether any did.
-    fn wait_for_hash(&mut self, node: NodeId) -> bool {
+    fn wait_for_name(&mut self, node: NodeId) -> bool {
         let mut any = false;
         for n in self.merged.subtree(node) {
             if !self.scope.remove(&n) {
@@ -299,7 +299,7 @@ impl Reconciler<'_> {
             .collect();
         // The drive's names of what waits for a hash elsewhere here (`held`): held for it.
         let mut drive_held: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
-        for &n in &self.holding {
+        for &n in self.held {
             let Some(r) = self
                 .input
                 .remote
@@ -349,13 +349,13 @@ impl Reconciler<'_> {
                     .into_iter()
                     .flatten()
                     .copied()
-                    .chain(group.iter().copied().filter(|n| self.holding.contains(n)))
+                    .chain(group.iter().copied().filter(|n| self.held.contains(n)))
                     .collect();
                 if !holders.is_empty() {
                     // What waits for the name: this plan's, or an earlier one's (`waits`).
                     let mut waited = group.iter().any(|n| self.waits.contains(n));
-                    for n in group {
-                        waited |= self.wait_for_hash(n);
+                    for n in group.into_iter().filter(|n| !self.held.contains(n)) {
+                        waited |= self.wait_for_name(n);
                     }
                     if waited {
                         self.name_waits.extend(holders);

@@ -245,6 +245,17 @@ impl ReadTx<'_> {
         Ok(rows)
     }
 
+    /// The files here not hashed yet (being written, locked, unreadable; their own index):
+    /// what they are in waits for them (sync semantics §6.3).
+    pub fn unhashed_files(&self) -> Result<Vec<NodeId>> {
+        let mut stmt = self.prep(
+            "SELECT n.uuid FROM local l JOIN nodes n ON n.id = l.id \
+             WHERE l.folder = $F AND l.hash IS NULL AND l.kind = 0",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
+        rows.map(|r| codec::node(&r?)).collect()
+    }
+
     /// The direct children of the folder at `parent` (the root for an empty path), in walk
     /// order.
     pub fn local_children(&self, parent: &RelPath) -> Result<Vec<LocalRow>> {
