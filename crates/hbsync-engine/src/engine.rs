@@ -364,6 +364,8 @@ impl Engine {
             // What it did before is told all the same (its conflicts: their copies are made):
             // [`Engine::take_unreported`]. Kept only when there is something to tell.
             Err(e) => {
+                // Refused: the account asks nothing more until the user acts ([`Drive::deny`]).
+                self.drive.latch(e.class(), &e);
                 let tell = !(report.conflicts.is_empty()
                     && report.failed.is_empty()
                     && report.skipped.is_empty());

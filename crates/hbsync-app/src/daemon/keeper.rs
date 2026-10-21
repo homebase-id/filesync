@@ -177,13 +177,8 @@ fn run_request(drive: &Drive, control: AccountControl, tell: &dyn Fn(String)) {
     };
     match result {
         Ok(n) => tracing::info!("{what}: {n} items {done}"),
-        Err(e) => {
-            // Refused: the account asks nothing more ([`Drive::deny`]).
-            if e.class() == hbsync_remote::ErrorClass::Denied {
-                drive.deny(&e.to_string());
-            }
-            tell(failed(what, &e))
-        }
+        // Refused, the drive latched it: the account asks nothing more ([`Drive::deny`]).
+        Err(e) => tell(failed(what, &e)),
     }
 }
 
@@ -280,7 +275,7 @@ mod tests {
     }
 
     /// A request that fails is told to the user (it was answered before it ran), with what to
-    /// do: a refused one, log in again.
+    /// do: a refused one, log in again (the drive latched it: the account asks no more).
     #[test]
     fn a_failed_request_is_told() -> R {
         let home = tempfile::tempdir()?;
@@ -291,13 +286,14 @@ mod tests {
         let notes = Arc::clone(&told);
         let tell: Tell =
             Arc::new(move |note| notes.lock().unwrap_or_else(|e| e.into_inner()).push(note));
-        let mut keeper = Keeper::spawn(drive, tell);
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell);
         remote.faults().denied = true;
         keeper.request(AccountControl::EmptyListed {
             db: "x".into(),
             seq: 0,
         });
         keeper.finish();
+        assert!(drive.is_denied(), "the drive latched the refusal");
         let told = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert_eq!(told.len(), 1, "{told:?}");
         assert!(
