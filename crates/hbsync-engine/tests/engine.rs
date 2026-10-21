@@ -4246,3 +4246,79 @@ fn a_change_pulled_between_plan_and_clear_is_planned() -> R {
     assert!(!a.root.join("f.txt").exists(), "{:?}", a.tree_text(""));
     Ok(())
 }
+
+/// Another writer's `.HBSYNC` at the top of the drive, and a `.hbsync` at the top of a role
+/// folder (each computer's state folder there, in any case), deleted into Recently deleted,
+/// the role folder with it: restored, the role folder first, each comes back under another
+/// name (`.HBSYNC (restored)`), never as the state folder no computer syncs; here too.
+#[test]
+fn a_restore_numbers_around_the_state_folder_name_at_a_sync_roots_top() -> R {
+    use hbsync_remote::NodeMeta;
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeKind, Role};
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let docs = Role::Documents.node();
+    let folder = |node, parent, name: &str| NodeMeta {
+        node,
+        parent,
+        kind: NodeKind::Folder,
+        content: NodeContent::folder(name),
+        removed: false,
+    };
+    let (top, in_docs) = (NodeId::new(), NodeId::new());
+    a.sync()?; // reading the feed from here: removals come in as such
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        // Into Recently deleted (`archivalStatus` 2), as a client removes them: Documents
+        // too, after what is in it.
+        let names = [
+            (top, NodeId::ROOT, ".HBSYNC"),
+            (in_docs, docs, ".hbsync"),
+            (docs, NodeId::ROOT, "Documents"),
+        ];
+        let made: Vec<_> = names
+            .iter()
+            .map(|(node, parent, name)| srv.create(&folder(*node, *parent, name), None))
+            .collect::<Result<_, _>>()?;
+        for ((node, parent, name), at) in names.iter().zip(made) {
+            let removed = NodeMeta {
+                removed: true,
+                ..folder(*node, *parent, name)
+            };
+            srv.update(at.file_id, at.version, &removed, None)?;
+        }
+    }
+    a.sync()?;
+    // Documents comes back with what is in it, first.
+    assert_eq!(a.engine.drive().restore(&[top, in_docs])?, 3);
+    a.sync()?;
+    assert!(
+        a.root.join(".HBSYNC (restored)").is_dir(),
+        "{:?}",
+        a.tree_text("")
+    );
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let names: Vec<(NodeId, String)> = srv
+        .live()
+        .filter_map(|h| match &h.body {
+            hbsync_remote::RemoteBody::Live { node, content, .. } => {
+                Some((*node, content.name.clone()))
+            }
+            hbsync_remote::RemoteBody::Deleted => None,
+        })
+        .collect();
+    for (node, want) in [
+        (top, ".HBSYNC (restored)"),
+        (in_docs, ".hbsync (restored)"),
+        (docs, "Documents"),
+    ] {
+        let name = names
+            .iter()
+            .find(|(n, _)| *n == node)
+            .map(|(_, name)| name.as_str());
+        assert_eq!(name, Some(want), "{names:?}");
+    }
+    Ok(())
+}

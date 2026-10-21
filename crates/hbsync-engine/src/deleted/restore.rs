@@ -13,7 +13,7 @@ use crate::mirror::{self, Said, gone_after, meta_at};
 use crate::walk::End;
 
 use super::listing::group;
-use super::rules::{RestoreWave, restore_wave, take_restored_name};
+use super::rules::{RestoreWave, restore_wave, take_restored_name, taken_in};
 use super::{AccountOps, locked};
 
 impl AccountOps<'_> {
@@ -230,11 +230,8 @@ pub(super) fn plan_restore(
         } else if !parent.is_root() && !seen.contains(&parent) {
             continue;
         }
-        let names = s
-            .mirror_children(parent)?
-            .iter()
-            .map(|m| name_key(&m.name))
-            .collect();
+        let children = s.mirror_children(parent)?;
+        let names = taken_in(parent, children.iter().map(|m| m.name.as_str()));
         taken.insert(parent, names);
     }
     Ok(Some(RestorePlan { rows, live, taken }))

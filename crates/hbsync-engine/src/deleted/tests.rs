@@ -10,7 +10,7 @@ use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
 
 use super::listing::{RemovedRows, all, deleted_by_item, find, named};
 use super::restore::plan_restore;
-use super::rules::{RestoreWave, restore_wave, select};
+use super::rules::{RestoreWave, restore_wave, select, take_restored_name, taken_in};
 use super::*;
 
 /// The account's DB as the drive holds it, read and written by a test as by the drive.
@@ -782,5 +782,52 @@ fn a_restore_comes_back_folder_first_and_by_free_names() {
             &mut taken
         ),
         None
+    );
+}
+
+/// At the top of a sync root (the drive's, a role folder's) the state folder's name is taken in
+/// any case: each computer's own `.hbsync` is there. Elsewhere it is a name as any.
+#[test]
+fn the_state_folder_name_is_taken_at_a_sync_roots_top() {
+    let docs = hbsync_types::Role::Documents.node();
+    let folder = NodeId::new();
+    for top in [NodeId::ROOT, docs] {
+        let mut taken = HashMap::from([(top, taken_in(top, ["a"]))]);
+        assert_eq!(
+            take_restored_name(&mut taken, top, ".HBSYNC"),
+            Some(".HBSYNC (restored)".to_owned())
+        );
+    }
+    let mut taken = HashMap::from([(folder, taken_in(folder, ["a"]))]);
+    assert_eq!(
+        take_restored_name(&mut taken, folder, ".hbsync"),
+        Some(".hbsync".to_owned())
+    );
+    // In a role folder gone for good, which may be made again under its id: still taken, and
+    // asked for under its own name, it comes back under another.
+    let row = MirrorRow {
+        name: ".Hbsync".to_owned(),
+        ..removed(NodeId::new(), docs, 1).row
+    };
+    let (live, in_plan) = (HashSet::from([NodeId::ROOT]), HashSet::from([row.node]));
+    let mut taken = HashMap::new();
+    let wave = restore_wave(
+        vec![&row],
+        |r| (r.parent, &r.name),
+        &live,
+        &in_plan,
+        &mut taken,
+    );
+    assert_eq!(
+        wave,
+        Some(RestoreWave {
+            asked: vec![],
+            rest: vec![&row],
+            later: vec![],
+        })
+    );
+    assert_eq!(
+        take_restored_name(&mut taken, docs, ".Hbsync"),
+        Some(".Hbsync (restored)".to_owned())
     );
 }

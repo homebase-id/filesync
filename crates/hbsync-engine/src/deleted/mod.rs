@@ -27,7 +27,7 @@ mod tests;
 pub use listing::{DeletedSummary, Listed, deletes, listed_here, listed_now};
 pub use rules::{
     Chosen, Holdings, RestoreWave, before_folders_go, inside, passes, restore_wave,
-    take_restored_name,
+    take_restored_name, taken_in,
 };
 
 /// The account's DB, held only while it is read or written: never while the server answers.

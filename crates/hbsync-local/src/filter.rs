@@ -78,12 +78,18 @@ fn ends(name: &str, s: &str) -> bool {
         && name.as_bytes()[name.len() - s.len()..].eq_ignore_ascii_case(s.as_bytes())
 }
 
+/// The state folder's ([`crate::STATE_DIR`]) name key (`name_key`): its name in any case or
+/// spelling.
+pub fn state_dir_key() -> &'static str {
+    use std::sync::LazyLock;
+    static KEY: LazyLock<String> = LazyLock::new(|| name_key(crate::STATE_DIR));
+    &KEY
+}
+
 /// Whether `name` is the state folder's ([`crate::STATE_DIR`]) in any case or spelling: caseless
 /// and normalization-insensitive (`name_key`), as a volume that ignores case compares names.
 fn is_state_dir(name: &str) -> bool {
-    use std::sync::LazyLock;
-    static KEY: LazyLock<String> = LazyLock::new(|| name_key(crate::STATE_DIR));
-    name.len() <= crate::STATE_DIR.len() * 4 && name_key(name) == *KEY
+    name.len() <= crate::STATE_DIR.len() * 4 && name_key(name) == state_dir_key()
 }
 
 /// Whether `name` is on the built-in junk list (at any depth, in any case).

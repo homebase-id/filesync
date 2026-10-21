@@ -12,7 +12,6 @@ use hbsync_engine::walk::End;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_local::Filter;
 use hbsync_platform::Os;
-use hbsync_platform::name::name_key;
 use hbsync_platform::tags::express;
 use hbsync_state::Coords;
 use hbsync_types::{
@@ -633,7 +632,8 @@ impl Sim {
                 continue;
             }
             let names = tree.children(parent).filter_map(|c| tree.get(c));
-            taken.insert(parent, names.map(|c| name_key(&c.name)).collect());
+            let names = deleted::taken_in(parent, names.map(|c| c.name.as_str()));
+            taken.insert(parent, names);
         }
         let mut left: Vec<&Row> = rows.iter().collect();
         while let Some(wave) =
@@ -990,6 +990,31 @@ mod tests {
         assert_eq!(name(live), "x");
         assert_eq!(name(restored), "x (restored)");
         assert_eq!(name(x), "x (restored 2)");
+    }
+
+    /// A `.HBSYNC` removed at the drive's top, and one in Documents removed with it, restored
+    /// together: each comes back under a numbered name (each computer's state folder is there,
+    /// unsynced), as the engine's restore does.
+    #[test]
+    fn a_restore_numbers_around_the_state_folder_name() {
+        let mut sim = Sim::new(1);
+        let docs = Role::Documents.node();
+        sim.server
+            .put(docs, NodeState::folder(NodeId::ROOT, "Documents"));
+        let (top, inside) = (sim.ids.fresh(), sim.ids.fresh());
+        sim.server
+            .put(top, NodeState::folder(NodeId::ROOT, ".HBSYNC"));
+        sim.server.put(inside, NodeState::folder(docs, ".hbsync"));
+        for node in [top, docs, inside] {
+            let n = sim.server.live.remove(&node).expect("live");
+            sim.remove_on_drive(node, n, true);
+        }
+        sim.restore_with(top);
+        sim.restore_with(inside);
+        let name = |node: NodeId| sim.server.live[&node].state.name.clone();
+        assert_eq!(name(top), ".HBSYNC (restored)");
+        assert_eq!(name(docs), "Documents");
+        assert_eq!(name(inside), ".hbsync (restored)");
     }
 
     /// A delete here that loses (another device edited the file) settles nothing of what other
