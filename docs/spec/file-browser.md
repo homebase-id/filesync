@@ -111,8 +111,9 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   time.
 - Names: Unicode NFC, at most 255 UTF-8 bytes, no `/` or NUL, not `.` or `..`.
 - `.hbsync` at the top, in any case (`.HBSYNC`, `.HbSync`), is reserved: it is each computer's
-  own state folder there, which the computers never sync. Don't create or rename anything to it
-  at the top, and don't list one that exists.
+  own state folder there, which the computers never sync. Don't create, rename, upload or restore
+  anything to it at the top: number around it (`.hbsync (1)`, `.hbsync (restored)`). One that
+  already exists (another writer's) is listed with a note that it won't sync to computers.
   - Unique within the folder, ignoring case and Unicode form (as on macOS and Windows): add
     `(1)`, `(2)` and so on if needed.
 - Rename or move: a header-only update of `content.name` and/or `groupId`, guarded by the
