@@ -735,12 +735,15 @@ fn a_folder_set_up_again_while_it_runs_is_opened_again() -> R {
     a.stop()
 }
 
+/// A timed pause shows its end, and holds past it until it is ended: the daemon's one timer
+/// sends [`Command::PauseEnded`], not a timer of each folder's.
 #[test]
-fn a_timed_pause_ends_by_itself() -> R {
+fn a_timed_pause_holds_until_resumed() -> R {
     let server = server();
     let a = Device::start(&server, "a")?;
     wait_until("a is idle", || a.status().state == State::Idle)?;
-    let until = hbsync_types::unix_now() + 2;
+    // Its end already passed.
+    let until = hbsync_types::unix_now() - 1;
     a.handle.send(Command::Pause(Pause::ending_at(until)));
     assert_eq!(a.status().state, State::Paused);
     wait_until("the pause shows its end", || {
@@ -749,7 +752,8 @@ fn a_timed_pause_ends_by_itself() -> R {
     a.write("later.txt", "x")?;
     std::thread::sleep(Duration::from_millis(500));
     assert!(!on_server(&server, "later.txt"), "synced while paused");
-    // Over by itself, and what waited goes up.
+    assert_eq!(a.status().state, State::Paused, "past its end");
+    a.handle.send(Command::PauseEnded);
     wait_until("later.txt is up", || on_server(&server, "later.txt"))?;
     let status = a.status();
     assert_ne!(status.state, State::Paused);

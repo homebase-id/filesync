@@ -3,7 +3,8 @@
 //! It takes the one-daemon lock, reads the config, answers on the control socket
 //! ([`answer`]), and runs each account ([`account`]: its credentials, connection, drive and
 //! folders) until a stop request or signal. Its threads block until there is something to do:
-//! nothing wakes it on a timer while nothing happens (but [`sleep`]'s poll off Linux).
+//! nothing wakes it on a timer while nothing happens (but [`sleep`]'s poll off Linux). It holds
+//! the pause, every account's, and ends a timed one: the one timer for it.
 
 mod account;
 mod answer;
@@ -16,6 +17,7 @@ pub use account::{AccountParts, Notifications, Puller, UNANNOUNCED_READ};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use hbsync_homebase::HomebaseError;
 use hbsync_remote::ErrorClass;
@@ -24,8 +26,9 @@ use hbsync_types::unix_now;
 use crate::config::ConfigLock;
 use crate::ipc;
 use crate::lock::{InstanceLock, LockError};
+use crate::protocol::Pause;
 use crate::runner::{Command, RunnerError};
-use crate::sync::{OnDrop, WAIT_AT_MOST, Wakeup, lock};
+use crate::sync::{OnDrop, Wakeup, lock, wait_for};
 use crate::{Config, ConfigError, CredentialError, Identity, Paths, Root};
 use account::Account;
 
@@ -101,6 +104,9 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
     let daemon = Arc::new(Daemon {
         paths: paths.clone(),
         stop,
+        // A pause that ended while the daemon wasn't running is over.
+        pause: Mutex::new(config.pause(unix_now())),
+        pausing: Mutex::default(),
         accounts: Mutex::default(),
         starting_over: AtomicUsize::new(0),
         changed: Arc::default(),
@@ -116,6 +122,11 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
                     };
                     tracing::info!("the machine woke up");
                     daemon.accounts().iter().for_each(|a| a.woke());
+                    // A timed pause's end may have passed meanwhile (a wait doesn't count
+                    // the sleep).
+                    if lock(&daemon.pause).is_some() {
+                        daemon.stop.wakeup.raise();
+                    }
                     true
                 })
             })
@@ -172,7 +183,13 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
         if left == 0 && daemon.starting_over.load(Ordering::SeqCst) == 0 {
             break;
         }
-        rung = daemon.stop.wakeup.wait(rung, WAIT_AT_MOST);
+        let now = Instant::now();
+        // Stopping, the pause no longer changes.
+        let pause_end = match stopping {
+            true => None,
+            false => daemon.end_pause_when_due(now),
+        };
+        rung = daemon.stop.wakeup.wait(rung, wait_for(now, pause_end));
     }
     tracing::info!("daemon stopped");
     result
@@ -208,8 +225,14 @@ fn claim(
 /// it runs.
 pub(crate) struct Daemon {
     paths: Paths,
-    /// Set to stop; its wakeup is raised when an account ends too.
+    /// Set to stop; its wakeup is raised when an account ends too, or the pause changes.
     stop: Stop,
+    /// Every account's pause (kept in the config too); an account starts with it. Held only
+    /// to read or set it, never while taking another lock.
+    pause: Mutex<Option<Pause>>,
+    /// One change of the pause at a time, in the config, here and in every account: the
+    /// accounts are told the changes in their order.
+    pausing: Mutex<()>,
     accounts: Mutex<Vec<(Arc<Account>, AccountThread)>>,
     /// Accounts starting over ([`Daemon::start_over`]): the daemon doesn't end meanwhile.
     starting_over: AtomicUsize,
@@ -241,14 +264,11 @@ impl Daemon {
             account.add_folder(root);
             return Ok(());
         }
-        // A pause that ended while the daemon wasn't running is over.
         let config = Config::load(&self.paths.config_file())?.unwrap_or_default();
-        let (account, requests) = Account::new(
-            &self.paths,
-            root,
-            config.pause(unix_now()),
-            Arc::clone(&self.changed),
-        );
+        // Read holding `accounts`: a pause set meanwhile tells this account too
+        // ([`Daemon::set_pause`] sets it before it looks at the accounts).
+        let pause = *lock(&self.pause);
+        let (account, requests) = Account::new(&self.paths, root, pause, Arc::clone(&self.changed));
         let thread = {
             let (account, paths, stop) =
                 (Arc::clone(&account), self.paths.clone(), self.stop.clone());
@@ -267,6 +287,44 @@ impl Daemon {
         accounts.push((account, thread));
         self.changed.raise();
         Ok(())
+    }
+
+    /// Pauses (`Some`) or resumes every account, also those started later; kept in the config
+    /// first, so it survives a restart. Refused when the config can't be written.
+    fn set_pause(&self, pause: Option<Pause>) -> Result<(), ConfigError> {
+        {
+            let _one = lock(&self.pausing);
+            Config::update(&self.paths.config_file(), |c| c.set_pause(pause))?;
+            *lock(&self.pause) = pause;
+            for a in self.accounts() {
+                a.pause(pause);
+            }
+        }
+        // Its end, if timed, is looked at from now; rung once the change is done, so a look
+        // that found it being changed looks again.
+        self.stop.wakeup.raise();
+        Ok(())
+    }
+
+    /// Ends a timed pause that has run out at `now`: every account syncs again (the config
+    /// keeps it, read as over). Returns when the pause in effect runs out (`None`: not paused,
+    /// or until resumed). While the pause is being changed, it isn't looked at (the main loop
+    /// never waits for the config's lock): the change rings once done.
+    fn end_pause_when_due(&self, now: Instant) -> Option<Instant> {
+        let _one = match self.pausing.try_lock() {
+            Ok(one) => one,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let unix = unix_now();
+        let ended = lock(&self.pause).take_if(|p| p.ran_out(unix)).is_some();
+        if ended {
+            tracing::info!("the pause is over");
+            for a in self.accounts() {
+                a.pause_ended();
+            }
+        }
+        lock(&self.pause).and_then(|p| p.end_at(now, unix))
     }
 
     /// Starts the account `identity` over (its credentials changed): it stops its folders
@@ -341,6 +399,8 @@ pub(crate) fn join_finished<T, E: From<RunnerError>>(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use hbsync_engine::root::RootError;
     use hbsync_state::StateError;
 
@@ -366,6 +426,49 @@ mod tests {
             DaemonError::Runner(RunnerError::Panicked).class(),
             ErrorClass::Bug
         );
+    }
+
+    /// The daemon's pause: kept in the config as set; a timed one ends once its time has come
+    /// (its end the one deadline until then), one until resumed never; while the pause is being
+    /// changed, its end isn't looked at.
+    #[test]
+    fn the_daemon_ends_a_timed_pause() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        std::fs::create_dir_all(&paths.config)?;
+        let daemon = Daemon {
+            paths: paths.clone(),
+            stop: Stop::default(),
+            pause: Mutex::default(),
+            pausing: Mutex::default(),
+            accounts: Mutex::default(),
+            starting_over: AtomicUsize::new(0),
+            changed: Arc::default(),
+        };
+        let (now, unix) = (Instant::now(), unix_now());
+        let saved = || Config::load(&paths.config_file()).map(|c| c.and_then(|c| c.pause(unix)));
+
+        daemon.set_pause(Some(Pause::ending_at(unix + 60)))?;
+        assert_eq!(saved()?, Some(Pause::ending_at(unix + 60)));
+        let end = daemon.end_pause_when_due(now).ok_or("no deadline")?;
+        assert!(end > now + Duration::from_secs(58), "{:?}", end - now);
+        assert!(lock(&daemon.pause).is_some(), "not over yet");
+
+        // Being changed: not looked at.
+        daemon.set_pause(Some(Pause::ending_at(unix)))?;
+        let changing = lock(&daemon.pausing);
+        assert_eq!(daemon.end_pause_when_due(now), None);
+        assert!(lock(&daemon.pause).is_some());
+        drop(changing);
+        assert_eq!(daemon.end_pause_when_due(now), None);
+        assert_eq!(*lock(&daemon.pause), None, "ran out: over");
+
+        daemon.set_pause(Some(Pause::UNTIL_RESUMED))?;
+        assert_eq!(daemon.end_pause_when_due(now), None);
+        assert_eq!(*lock(&daemon.pause), Some(Pause::UNTIL_RESUMED));
+        daemon.set_pause(None)?;
+        assert_eq!(saved()?, None);
+        Ok(())
     }
 
     /// A daemon starting with nothing to sync lets its lock go while it still holds the

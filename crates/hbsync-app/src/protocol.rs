@@ -98,8 +98,8 @@ pub enum Reply {
 }
 
 /// A pause of syncing: until then (Unix seconds), or until resumed (`until: None`). The
-/// config keeps it, and the account and each folder hold it while paused; when it runs out is
-/// decided here alone.
+/// config and the daemon keep it, which resumes every account when it runs out (decided here
+/// alone); the accounts and folders hold it, without a timer, while paused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pause {
     pub until: Option<u64>,
@@ -440,7 +440,7 @@ pub struct Note {
 mod tests {
     use super::*;
 
-    /// A timed pause runs out when its time comes (the account and each folder go by this);
+    /// A timed pause runs out when its time comes (the daemon goes by this, and the config);
     /// one until resumed never does.
     #[test]
     fn a_timed_pause_runs_out_when_its_time_comes() {

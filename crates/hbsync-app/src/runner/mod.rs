@@ -7,7 +7,8 @@
 //! up to five minutes. It is controlled through a [`Handle`] and publishes a [`FolderStatus`].
 //!
 //! - **Pause** stops a running sync between operations (and before the next transfer) and
-//!   syncs nothing until **resume**; the watcher keeps recording changes meanwhile.
+//!   syncs nothing until **resume**; the watcher keeps recording changes meanwhile. A timed
+//!   pause shows its end, and ends with a resume too: the daemon's one timer sends it.
 //! - **Sleep**: told by its account ([`Command::Woke`]), the runner syncs at once and forgets
 //!   its backoff.
 //! - **Ignore rules** (`.hbsync/ignore`) are checked for changes when the watcher sees the file
@@ -132,14 +133,15 @@ pub enum Command {
     /// The drive can be reached again (the notifications connected): a sync waiting for a
     /// backoff or to try unfinished work again goes now.
     Online,
-    /// Pause syncing.
+    /// Pause syncing: until `Resume` or `PauseEnded`, also a timed pause (its end is shown).
     Pause(Pause),
+    /// The user resumed: what the drive refused is asked again too.
     Resume,
+    /// A timed pause ran out (the daemon's timer): syncing goes on as it was.
+    PauseEnded,
     /// Let the held deletes the user was shown through: `token` is
     /// [`crate::protocol::HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
-    ConfirmDeletes {
-        token: String,
-    },
+    ConfirmDeletes { token: String },
     /// The machine woke up: sync now, the backoff forgotten.
     Woke,
     /// Tell the user `text` (the account's work: restoring, emptying Recently deleted).
@@ -181,6 +183,16 @@ pub struct Handle {
     woken: crate::TestCount,
     /// Raised when its status may have changed.
     changed: Arc<Wakeup>,
+}
+
+impl Command {
+    /// What pauses (`Some`) or resumes a folder.
+    pub fn pausing(pause: Option<Pause>) -> Command {
+        match pause {
+            Some(pause) => Command::Pause(pause),
+            None => Command::Resume,
+        }
+    }
 }
 
 impl Handle {
@@ -407,7 +419,7 @@ impl Runner {
         // folder goes away or the ignore rules change.
         let mut parts: Option<Parts> = None;
         let mut confirmed = None;
-        let mut schedule = Schedule::new(Instant::now(), self.cfg.look, self.cfg.paused);
+        let mut schedule = Schedule::new(Instant::now(), self.cfg.look, self.cfg.paused.is_some());
         let mut started = false;
         let mut check_rules = false;
         // When to read the ignore rules, touched a moment ago.
@@ -418,11 +430,7 @@ impl Runner {
             "syncing {} with {}{}",
             self.cfg.folder.display(),
             self.cfg.identity,
-            if schedule.paused().is_some() {
-                " (paused)"
-            } else {
-                ""
-            }
+            if schedule.paused() { " (paused)" } else { "" }
         );
         loop {
             // Until something happens, or time alone changes something.
@@ -434,13 +442,9 @@ impl Runner {
             };
             let wait = wait_for(
                 now,
-                [
-                    schedule.next_wake(now, unix_now(), looking),
-                    observer,
-                    rules_at,
-                ]
-                .into_iter()
-                .flatten(),
+                [schedule.next_wake(now, looking), observer, rules_at]
+                    .into_iter()
+                    .flatten(),
             );
             let mut first = self.control.recv_timeout(wait).ok();
             self.woken.add();
@@ -510,15 +514,11 @@ impl Runner {
                 rules_at = None;
                 check_rules = true;
             }
-            if schedule.pause_over(now, unix_now()) {
-                tracing::info!("the pause is over: resuming");
-                self.resume();
-            }
             if schedule.look_due(now) {
                 check_rules = true;
                 // Without a watcher, the folder's changes are found by scanning it.
                 if let Some(p) = &mut parts
-                    && schedule.paused().is_none()
+                    && !schedule.paused()
                     && !p.observer.has_watcher()
                 {
                     match p.engine.scan_local() {
@@ -693,7 +693,7 @@ impl Runner {
                 schedule.woke(Instant::now());
             }
             Command::Pause(pause) => {
-                schedule.pause(pause);
+                schedule.pause();
                 self.set(|s| s.paused_until = pause.until);
                 match pause.until {
                     Some(t) => {
@@ -708,6 +708,12 @@ impl Runner {
                     tracing::info!("resumed");
                 }
                 self.resume();
+            }
+            Command::PauseEnded => {
+                if schedule.resume(Instant::now()) {
+                    tracing::info!("the pause is over: resuming");
+                    self.resume();
+                }
             }
             Command::ConfirmDeletes { token } => {
                 if token != report::held_token(&self.held) {

@@ -141,6 +141,23 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     assert!(config.contains("paused = true"), "{config}");
     let out = home.hbsync(&["resume"])?;
     assert!(out.status.success(), "{}", text(&out));
+    // A timed pause ends by itself, also while the account can't connect: the daemon's timer.
+    let out = home.hbsync(&["pause", "--for", "2"])?;
+    assert!(out.status.success(), "{}", text(&out));
+    let main = || crate::status(&home).map(|s| s["folders"][0].clone());
+    let paused = main()?;
+    assert_eq!(paused["state"], "paused", "{paused}");
+    assert!(paused["paused_until"].is_u64(), "{paused}");
+    let until = Instant::now() + Duration::from_secs(30);
+    let resumed = loop {
+        let folder = main()?;
+        if folder["state"] != "paused" || Instant::now() > until {
+            break folder;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert_eq!(resumed["state"], "offline", "{resumed}");
+    assert!(resumed["paused_until"].is_null(), "{resumed}");
 
     let out = home.hbsync(&["stop"])?;
     assert!(out.status.success(), "{}", text(&out));
