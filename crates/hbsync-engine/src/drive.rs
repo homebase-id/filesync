@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hbsync_remote::{ChangeRef, ErrorClass, NodeMeta, Remote, RemoteError, Skipped};
-use hbsync_state::{StateDb, StateError, keys};
+use hbsync_state::{Answer, StateDb, StateError, keys};
 
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Role};
@@ -438,10 +438,12 @@ impl Drive {
             match self.remote().create(&meta, None) {
                 // Recorded from the answer, as the executor records its writes.
                 Ok(written) => {
-                    let row = mirror::written(&meta, None, written);
+                    let answer = Answer::live(None, mirror::written(&meta, None, written));
                     let mut db = self.account();
                     // As the executor records a folder it made.
-                    db.write(|s| mirror::live(s.account(), &row))?;
+                    if db.write(|s| mirror::answered(s.account(), &[answer]))? {
+                        self.set_behind();
+                    }
                     self.wake_touched(&mut db, None);
                 }
                 // Another device made it (or deleted it) meanwhile: read it.

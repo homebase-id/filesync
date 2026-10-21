@@ -23,6 +23,7 @@ fn action() -> impl Strategy<Value = Action> + Clone {
         1 => (i(), i()).prop_map(|(op, pick)| Action::Phone { op, pick }),
         1 => Just(Action::DeleteRoleFolder),
         1 => i().prop_map(|file| Action::MoveAcross { file }),
+        1 => i().prop_map(|op| Action::Meanwhile { op }),
     ]
 }
 
@@ -4163,4 +4164,70 @@ fn regression_a_new_item_keeping_a_base_tag_is_a_known_limit() {
         limits[0].starts_with("NewItemKeepsBaseTag") && limits[0].ends_with(" Red"),
         "{limits:?}"
     );
+}
+
+/// A write's answer and another device's change that a pull recorded before it ([`Action::Meanwhile`]):
+/// the change stands, everywhere. A rename's answer and a removal after it: the file goes to
+/// Recently deleted on every client. A removal's answer and a restore after it: the file is back
+/// on every client.
+#[test]
+fn regression_a_change_pulled_before_an_answer_stands() {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    sim.run(&[
+        Event::Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 0 },
+        },
+        Event::Act {
+            client: 0,
+            action: CreateFile { parent: 0, name: 1 },
+        },
+    ]);
+    assert!(sim.quiesce(10));
+    let file = sim.item(0, "a").expect("a");
+    let pick = sim.pick(0, file, false).expect("a pick");
+    // Renamed to "c.txt", removed meanwhile by another device.
+    sim.run(&[
+        Event::Act {
+            client: 0,
+            action: Move {
+                node: pick,
+                parent: 0,
+                name: 3,
+            },
+        },
+        Event::Act {
+            client: 0,
+            action: Meanwhile { op: 0 },
+        },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    assert!(sim.is_removed(file), "{:?}", sim.server_paths());
+    assert!(sim.quiesce(10));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.item(0, "c.txt"), None, "the removal stands");
+    assert_eq!(sim.item(1, "c.txt"), None);
+
+    // Deleted here, restored meanwhile by another device.
+    let other = sim.item(0, "b").expect("b");
+    let pick = sim.pick(0, other, false).expect("b pick");
+    sim.run(&[
+        Event::Act {
+            client: 0,
+            action: Delete { node: pick },
+        },
+        Event::Act {
+            client: 0,
+            action: Meanwhile { op: 0 },
+        },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    assert!(!sim.is_removed(other), "restored: {:?}", sim.server_paths());
+    assert!(sim.quiesce(10));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.item(0, "b"), Some(other), "the restore stands");
+    assert_eq!(sim.item(1, "b"), Some(other));
 }

@@ -260,6 +260,21 @@ expected fingerprint is treated as done.
 - **Settling.** After each successful operation the base takes each attribute (location,
   content) that both sides now hold; never a value only one side has. A plan that stops half
   way can therefore never make the next round revert what did succeed.
+- **Answers.** A remote write (create, upload, rename, move, tags, removal; and outside plans
+  a restore, the purge's removals and put-backs, the role folder made again) is recorded from
+  its answer, over the version of the file it replaced. Another engine or an announcement may
+  pull a newer state of the file after the write landed and before its answer is recorded (a
+  file's versions follow each other: anything but the replaced version or the answer's came
+  after the write, as a header's write is conditional on its version tag, verified in
+  odin-core; a delete for good, or a version this client can't read, count as newer too). The
+  answer then stays out of the picture of the drive, which keeps the
+  newer state, and the node settles against the answer, as if that pull came after it: the
+  next plan reads the newer state as any device's change (another device's removal of a file
+  just renamed here takes it to the trash here too; a restore after a removal here brings it
+  back here). The check and the write of the answer, and the settle, are one transaction,
+  which no pull's commit comes into: writes to the state DB take turns (its process's gate,
+  and SQLite's write lock across processes). The account reads the feed again at the next
+  sync then (a page fetched before the write landed may be what came first).
 - **Refused.** An operation the drive refuses for good (a request it won't take as it is: a
   bad request, a content it won't hold, a hash it won't have; a file whose bytes don't match
   what the drive says they are, twice at one version) is recorded, keyed by its node, its kind

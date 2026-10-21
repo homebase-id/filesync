@@ -73,6 +73,23 @@ impl Client {
     }
 }
 
+/// The header of the file named `name` on the server, live or removed.
+pub(crate) fn header_named(
+    server: &Arc<Mutex<FakeServer>>,
+    name: &str,
+) -> hbsync_remote::RemoteHeader {
+    let server = server.lock().expect("server");
+    server
+        .live()
+        .chain(server.removed())
+        .find(|h| match &h.body {
+            hbsync_remote::RemoteBody::Live { content, .. } => content.name == name,
+            hbsync_remote::RemoteBody::Deleted => false,
+        })
+        .cloned()
+        .expect("on the server")
+}
+
 /// The panic that crashes a client.
 struct Crash;
 

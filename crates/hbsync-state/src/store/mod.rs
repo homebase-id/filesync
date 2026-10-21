@@ -31,6 +31,7 @@ mod local;
 mod mirror;
 mod parked;
 mod picture;
+pub use picture::{Answer, Answered, Left};
 mod refused;
 pub use refused::Refused;
 mod suspects;

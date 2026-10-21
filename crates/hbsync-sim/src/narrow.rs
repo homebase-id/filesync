@@ -175,7 +175,7 @@ impl Sim {
             }
             // What the drive holds in a version no client reads.
             for node in &input.unreadable {
-                let Some(n) = self.server.live.get(node).or(self.server.removed.get(node)) else {
+                let Some((n, _)) = self.server.node(*node) else {
                     continue;
                 };
                 s.account()
@@ -199,12 +199,9 @@ impl Sim {
     /// `node`'s file id on the drive (live or removed); one of its own where it has none there
     /// any more (gone for good: file ids are unique in the store).
     fn file_id(&self, node: NodeId) -> RemoteFileId {
-        let server = &self.server;
-        server
-            .live
-            .get(&node)
-            .or(server.removed.get(&node))
-            .map_or(RemoteFileId(node.0), |n| n.remote.file_id)
+        self.server
+            .node(node)
+            .map_or(RemoteFileId(node.0), |(n, _)| n.remote.file_id)
     }
 }
 
@@ -268,7 +265,7 @@ fn local_row(client: &Client, node: NodeId, state: &NodeState, path: RelPath) ->
 }
 
 /// The drive's row of `node`, `state` at `at`, as the feed records it.
-fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> MirrorRow {
+pub(crate) fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> MirrorRow {
     let mut content = match (state.kind, state.content) {
         (NodeKind::File, Some(c)) => {
             NodeContent::file(&state.name, c.mtime_ms, c.size, c.executable)

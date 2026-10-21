@@ -30,6 +30,19 @@ impl ReadTx<'_> {
             .exists([at.file_id.0.as_bytes(), at.version.0.as_bytes()])?)
     }
 
+    /// The version of file `file_id` this client recorded it can't read, if any (none, mostly:
+    /// no query then).
+    pub fn unreadable_version(&self, file_id: RemoteFileId) -> Result<Option<VersionTag>> {
+        if self.none_unreadable()? {
+            return Ok(None);
+        }
+        self.one(
+            "SELECT version_tag FROM unreadable WHERE file_id = ?1",
+            file_id.0.as_bytes(),
+            |r| codec::version(&r.get::<_, Vec<u8>>(0)?),
+        )
+    }
+
     /// The files the drive has in a version this client can't read (held, where it knows an
     /// older one).
     pub fn held_files(&self) -> Result<std::collections::HashSet<RemoteFileId>> {

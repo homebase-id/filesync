@@ -142,22 +142,18 @@ impl Executor<'_> {
         ))
     }
 
-    /// Records a metadata write that landed (`written`), or a removal the drive no longer
-    /// needed (`None`: deleted for good meanwhile).
+    /// Records a metadata write that landed over `target`, as written (`w`).
     pub(super) fn commit_meta(
         &mut self,
         meta: NodeMeta,
         hash: Option<hbsync_types::ContentHash>,
         after: After,
-        written: Option<Written>,
+        target: Option<&Target>,
+        w: Written,
     ) -> Step {
-        let node = meta.node;
-        let row = written.map(|w| mirror::written(&meta, hash, w));
-        self.finish(&[Settle::node(node)], |s| match after {
-            After::Created => row.map_or(Ok(()), |row| mirror::live(s.account(), &row)),
-            After::Updated => row.map_or(Ok(()), |row| mirror::updated(s.account(), &row)),
-            After::Removed { file_id } => removed(s, node, file_id, row),
-        })
+        let removed = matches!(after, After::Removed { .. });
+        let answer = answer(&meta, hash, target, w, removed);
+        self.finish_answered(&[(Settle::node(meta.node), answer)])
     }
 
     /// Records removals that landed together (one request's answers) as
@@ -165,41 +161,30 @@ impl Executor<'_> {
     /// not one per file. They change nothing on disk: a crash before it loses only their
     /// answers, as one before the first commit did (the nodes stay dirty, planned again from
     /// the feed).
-    pub(super) fn commit_removed(&mut self, landed: Vec<Landed>) -> Step {
-        let nodes: Vec<Settle<'_>> = landed.iter().map(|l| Settle::node(l.meta.node)).collect();
-        let rows: Vec<(NodeId, hbsync_types::RemoteFileId, MirrorRow)> = landed
+    pub(super) fn commit_removed(&mut self, answers: Vec<Answer>) -> Step {
+        let answers: Vec<(Settle<'_>, Answer)> = answers
             .into_iter()
-            .map(|l| {
-                let row = mirror::written(&l.meta, l.hash, l.written);
-                (l.meta.node, l.file_id, row)
-            })
+            .map(|a| (Settle::node(a.row().node), a))
             .collect();
-        self.finish(&nodes, |s| {
-            rows.into_iter()
-                .try_for_each(|(node, file_id, row)| removed(s, node, file_id, Some(row)))
-        })
+        self.finish_answered(&answers)
     }
 }
 
-/// A removal the drive answered, as written.
-pub(super) struct Landed {
-    pub meta: NodeMeta,
-    pub hash: Option<hbsync_types::ContentHash>,
-    pub file_id: hbsync_types::RemoteFileId,
-    pub written: Written,
-}
-
-/// `node` out of the tree (its mirror row `file_id`), into Recently deleted at the server's time
-/// of the write, which its answer `row` has (`updated`, odin-core #1971; `None`: the drive no
-/// longer had the file). Never this device's clock.
-fn removed(
-    s: &Store<'_>,
-    node: NodeId,
-    file_id: hbsync_types::RemoteFileId,
-    row: Option<MirrorRow>,
-) -> Result<(), StateError> {
-    mirror::removed(s.account(), file_id, row)?;
-    s.folder().mark_dirty(node)
+/// The drive's answer to a write of `meta` over `target`, as written (`w`): a removal where
+/// `removed`.
+pub(super) fn answer(
+    meta: &NodeMeta,
+    hash: Option<hbsync_types::ContentHash>,
+    target: Option<&Target>,
+    w: Written,
+    removed: bool,
+) -> Answer {
+    let expected = target.map(|t| t.at.version);
+    let row = mirror::written(meta, hash, w);
+    match removed {
+        true => Answer::removal(expected, row),
+        false => Answer::live(expected, row),
+    }
 }
 
 /// The job and the commit context of a metadata write; `from`: the folder the node leaves
