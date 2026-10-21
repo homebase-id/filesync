@@ -33,6 +33,9 @@ pub(crate) struct Ledger {
     unguarded: Option<String>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
+    /// The first operation that moved, renamed or deleted a folder a file not hashed yet is
+    /// in (sync semantics §6.3).
+    moved_waiting: Option<String>,
     /// The first folder a plan removed after something in it (node schema, Recently deleted:
     /// what a folder's delete takes along is removed no earlier than the folder).
     removed_after_contents: Option<String>,
@@ -115,6 +118,11 @@ impl Ledger {
     /// A write pointed a node at a folder the server never had, if `what` names one.
     pub(crate) fn dangling_write(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.dangling, what);
+    }
+
+    /// A plan moved, renamed or deleted what waits for a hash, if `what` names one.
+    pub(crate) fn moved_what_waits(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.moved_waiting, what);
     }
 
     /// An operation wrote outside its folder's part of the drive, if `what` names one.
@@ -416,6 +424,10 @@ impl Sim {
             return Err(format!(
                 "an item emptied stayed, though nothing kept it: {what}"
             ));
+        }
+        // Nothing moved what waits for a hash.
+        if let Some(what) = &ledger.moved_waiting {
+            return Err(what.clone());
         }
         // No folder wrote outside its part of the drive.
         if let Some(op) = &ledger.scope_breach {

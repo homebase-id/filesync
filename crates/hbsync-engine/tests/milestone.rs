@@ -1775,3 +1775,181 @@ fn beside(root: &Path) -> BTreeSet<String> {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect()
 }
+
+/// A file this device can't read (no permission: never hashed, its merge deferred every round)
+/// whose node another writer puts into a file: it waits in place, told by name, and the rest
+/// of the folder plans and converges around it (a new file comes down, another orphan goes
+/// into Recovered files). Readable again, it is adopted into Recovered files with what it
+/// holds.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_moved_into_a_file_waits_and_the_rest_converges() -> R {
+    use hbsync_remote::{NodeMeta, RemoteBody};
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    let [mut a, mut b] = pair(&server)?;
+    fs::write(a.root.join("x"), b"x1")?;
+    fs::write(a.root.join("o"), b"o1")?;
+    fs::write(a.root.join("keep"), b"keep")?;
+    // Tagged Red, where this volume keeps tags.
+    let red = hbsync_types::Tags::new([hbsync_types::Tag::new("Red", 6)]);
+    let tagged = hbsync_platform::tags::write(&a.root.join("x"), &red).is_ok_and(|w| w.is_some());
+    settle_all(&mut a, &mut b)?;
+    // a's x changes, and can't be read: a has nothing to hash it with.
+    fs::write(a.root.join("x"), b"x2")?;
+    fs::set_permissions(a.root.join("x"), fs::Permissions::from_mode(0o000))?;
+    if fs::read(a.root.join("x")).is_ok() {
+        fs::set_permissions(a.root.join("x"), fs::Permissions::from_mode(0o644))?;
+        return Ok(()); // root reads anything: nothing to test
+    }
+    // Another writer moves x and o into the file `keep`.
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let headers: Vec<_> = srv.live().cloned().collect();
+        let node_of = |name: &str| {
+            headers.iter().find_map(|h| match &h.body {
+                RemoteBody::Live { node, content, .. } if content.name == name => {
+                    Some((*node, h.clone()))
+                }
+                _ => None,
+            })
+        };
+        let (keep, _) = node_of("keep").ok_or("no keep")?;
+        for name in ["x", "o"] {
+            let (node, h) = node_of(name).ok_or("no file")?;
+            let RemoteBody::Live { content, .. } = &h.body else {
+                continue;
+            };
+            let meta = NodeMeta {
+                node,
+                parent: keep,
+                kind: h.kind,
+                content: content.clone(),
+                removed: false,
+            };
+            srv.update(h.file_id, h.version, &meta, None)?;
+        }
+    }
+    fs::write(b.root.join("n"), b"n1")?;
+    let mut waiting = Vec::new();
+    for _ in 0..3 {
+        waiting.extend(a.sync()?.waiting);
+        b.sync()?;
+    }
+    // Told, by name: what waits for it is the drive's move.
+    assert!(waiting.iter().any(|(p, _)| p == "x"), "{waiting:?}");
+    let names = |c: &Client| -> Vec<String> { c.entries("").into_iter().map(|(p, _)| p).collect() };
+    let (ta, tb) = (names(&a), names(&b));
+    assert!(
+        ta.contains(&"x".to_owned()),
+        "x waits in place on a: {ta:?}"
+    );
+    assert!(
+        ta.contains(&"n".to_owned()),
+        "the new file came down: {ta:?}"
+    );
+    for t in [&ta, &tb] {
+        assert!(
+            t.contains(&"Recovered files/o".to_owned()),
+            "o is recovered: {t:?}"
+        );
+    }
+    // Readable again: adopted, with what it holds, everywhere.
+    fs::set_permissions(a.root.join("x"), fs::Permissions::from_mode(0o644))?;
+    settle_all(&mut a, &mut b)?;
+    let (ea, eb) = (a.entries(""), b.entries(""));
+    assert_eq!(ea, eb, "converged");
+    assert!(
+        ea.iter()
+            .any(|(p, c)| p == "Recovered files/x" && c == b"x2"),
+        "{ea:?}"
+    );
+    if tagged {
+        // Its tags went along, never the drive's written over them.
+        // By name: a volume may keep no colour.
+        let names = |t: &hbsync_types::Tags| t.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+        let held = hbsync_platform::tags::read(&b.root.join("Recovered files/x"));
+        assert_eq!(
+            held.as_ref().map(names),
+            Some(vec!["Red".to_owned()]),
+            "b's x holds Red"
+        );
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        let on_drive = srv.live().find_map(|h| match &h.body {
+            RemoteBody::Live { content, .. } if content.name == "x" => Some(content.tags()),
+            _ => None,
+        });
+        assert_eq!(
+            on_drive.as_ref().map(names),
+            Some(vec!["Red".to_owned()]),
+            "Red on the drive"
+        );
+    }
+    Ok(())
+}
+
+/// A file the scan couldn't read (locked then), in a folder the drive deleted: the round that
+/// finds the delete waiting for it reads it first, and plans again in the same sync: readable
+/// now, the new file keeps the folder, which comes back on the drive with it. Without that read
+/// the delete waited for the next scan of that folder, maybe long.
+#[cfg(unix)]
+#[test]
+fn a_round_reads_what_its_plan_waits_for_first() -> R {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    let [mut a, mut b] = pair(&server)?;
+    fs::create_dir(a.root.join("p"))?;
+    fs::write(a.root.join("p/keep"), b"k")?;
+    settle_all(&mut a, &mut b)?;
+    // A new file a can't read when it scans.
+    fs::write(a.root.join("p/new"), b"new")?;
+    fs::set_permissions(a.root.join("p/new"), fs::Permissions::from_mode(0o000))?;
+    if fs::read(a.root.join("p/new")).is_ok() {
+        return Ok(()); // root reads anything: nothing to test
+    }
+    a.engine.scan_local()?;
+    fs::set_permissions(a.root.join("p/new"), fs::Permissions::from_mode(0o644))?;
+    // b deletes p.
+    fs::remove_dir_all(b.root.join("p"))?;
+    b.sync()?;
+    // One sync of a, no scan before it.
+    let report = a.engine.sync("2026-10-08", true)?;
+    assert!(report.waiting.is_empty(), "{report:?}");
+    b.sync()?;
+    assert_eq!(b.read("p/new")?, b"new", "the folder came back with it");
+    Ok(())
+}
+
+/// A folder the drive renamed, holding a file here that can't be read, planned in a page of
+/// its own (more dirty than a page holds): every view loads the files not hashed yet, so the
+/// narrow view holds the folder as the whole one does (the testkit compares them on every
+/// plan), and the rename waits; readable again, it comes down with the file's edit.
+#[cfg(unix)]
+#[test]
+fn a_page_without_the_unread_file_holds_its_folder_too() -> R {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.batch = 1)?;
+    let mut b = Client::new(&server, "b")?;
+    fs::create_dir(a.root.join("p"))?;
+    fs::write(a.root.join("p/w"), b"w1")?;
+    settle_all(&mut a, &mut b)?;
+    fs::rename(b.root.join("p"), b.root.join("q"))?;
+    b.sync()?;
+    fs::write(a.root.join("p/w"), b"w2")?;
+    fs::set_permissions(a.root.join("p/w"), fs::Permissions::from_mode(0o000))?;
+    if fs::read(a.root.join("p/w")).is_ok() {
+        return Ok(()); // root reads anything: nothing to test
+    }
+    let waiting = a.sync()?.waiting;
+    assert!(a.root.join("p").is_dir(), "the rename waits");
+    assert!(waiting.iter().any(|(p, _)| p == "p/w"), "{waiting:?}");
+    fs::set_permissions(a.root.join("p/w"), fs::Permissions::from_mode(0o644))?;
+    settle_all(&mut a, &mut b)?;
+    assert_eq!(a.read("q/w")?, b"w2");
+    assert_eq!(b.read("q/w")?, b"w2");
+    Ok(())
+}

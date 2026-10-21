@@ -382,6 +382,7 @@ impl Sim {
     /// Plans and executes every client until nothing changes. Returns `false` if it doesn't
     /// settle within `max_rounds`.
     pub fn quiesce(&mut self, max_rounds: usize) -> bool {
+        self.let_go();
         for _ in 0..max_rounds {
             let before = self.ops_executed;
             // A sync may change the drive without an operation (a role folder brought back, as
@@ -400,7 +401,8 @@ impl Sim {
                 let client = &self.clients[c];
                 any_planned |= !client.plan.is_empty()
                     || !client.held.is_empty()
-                    || !client.placing.is_empty();
+                    || !client.placing.is_empty()
+                    || client.hashing;
                 while self.step(c) {}
             }
             let unchanged = !self.server.changed_since(&server);
@@ -415,6 +417,7 @@ impl Sim {
     /// and the drive doesn't change, whatever plans are left (an operation that waits for one
     /// the drive refused waits for good). Returns whether that came within `max_rounds`.
     pub fn quiesce_still(&mut self, max_rounds: usize) -> bool {
+        self.let_go();
         for _ in 0..max_rounds {
             let before = self.ops_executed;
             let server = self.server.snapshot();
@@ -439,6 +442,7 @@ impl Sim {
     /// then settled (planning one unasked finds nothing: a timer would have nothing to do)
     /// within `max_syncs` syncs.
     pub fn quiesce_announced(&mut self, max_syncs: usize) -> bool {
+        self.let_go();
         let mut asked = vec![true; self.clients.len()];
         for _ in 0..max_syncs {
             let Some(c) = asked.iter().position(|a| *a) else {
@@ -465,9 +469,17 @@ impl Sim {
                 }
             }
             // The scan, once it hashed the file of a record recovery kept, asks for a sync.
-            asked[c] |= !self.clients[c].placing.is_empty();
+            asked[c] |= !self.clients[c].placing.is_empty() || self.clients[c].hashing;
         }
         false
+    }
+
+    /// The apps holding files locked let go ([`Action::Lock`]): the next plans find them
+    /// hashed (each settling starts with every client asked to sync).
+    fn let_go(&mut self) {
+        for client in &mut self.clients {
+            client.locked.clear();
+        }
     }
 
     fn all_settled(&mut self) -> bool {

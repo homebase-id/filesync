@@ -334,6 +334,59 @@ fn any_event(clients: usize) -> impl Strategy<Value = Event> {
     ]
 }
 
+/// Events with files still being written at a plan ([`Action::EditWriting`]), and folders
+/// deleted on other devices, outright and by delete.
+fn writing_event(clients: usize) -> impl Strategy<Value = Event> {
+    let i = || 0usize..16;
+    let actions = prop_oneof![
+        4 => action(),
+        2 => i().prop_map(|file| Action::EditWriting { file }),
+        1 => i().prop_map(|file| Action::Lock { file }),
+        1 => i().prop_map(|pick| Action::DeleteOutright { pick }),
+        1 => (i(), i()).prop_map(|(pick, file)| Action::IntoFile { pick, file }),
+    ];
+    events_of(clients, actions)
+}
+
+proptest! {
+    /// A file still being written when its device plans (not hashed yet, its merge left for
+    /// later) is where it is there, whatever the drive did with its node meanwhile: it keeps
+    /// its folder alive against another device's delete of it, outright or not (its edits
+    /// win), and keeps its name and tags; once hashed it syncs. Nothing is lost.
+    #[test]
+    fn a_file_being_written_keeps_its_folder(
+        events in proptest::collection::vec(writing_event(3), 0..80),
+    ) {
+        run(3, &events)?;
+    }
+}
+
+proptest! {
+    // A hundredth of the cases, at least one, as the narrow property's.
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 100).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// [`a_file_being_written_keeps_its_folder`] on every setup, and its plans made through the
+    /// engine's views as well ([`the_engines_planning_path_plans_as_the_sim`]): what waits for
+    /// a file not hashed yet waits there as here, the role folders' too.
+    #[test]
+    fn a_file_being_written_waits_alike_on_the_engines_path(
+        setup in 0..NARROW_SETUPS.len(),
+        events in proptest::collection::vec(writing_event(5), 0..80),
+    ) {
+        let (prepare, guard) = NARROW_SETUPS[setup];
+        let mut sim = prepare(Sim::new(3)).with_narrow_check();
+        sim.guard = guard;
+        sim.run(&events);
+        prop_assert!(sim.quiesce(30), "no convergence");
+        if let Err(e) = sim.check() {
+            prop_assert!(false, "{}", e);
+        }
+    }
+}
+
 proptest! {
     // A twentieth of the cases, at least one: each runs twice with the trace on.
     #![proptest_config(ProptestConfig {
@@ -4290,13 +4343,12 @@ fn known_limits_narrow(events: &[Event]) -> Vec<String> {
     sim.tags_lost_to_known_limits()
 }
 
-/// Seeds d856d284 and fc58ff8f, a known limit (the fix, design A+, waits on the user): a file
-/// here not hashed yet (a placement a crash left unread) that the user tagged Red, whose node
-/// another writer put in a file, is adopted into Recovered files from the drive's state, and
-/// the plan writes the drive's tags over it. The oracle names it rather than passing it
-/// silently.
+/// Seeds d856d284 and fc58ff8f: a file here not hashed yet (a placement a crash left unread)
+/// that the user tagged Red, whose node another writer put in a file, waits for its hash, then
+/// goes into Recovered files with Red. It was adopted from the drive's state, the drive's tags
+/// written over it (a known limit till what waits for a hash waited).
 #[test]
-fn regression_an_unhashed_orphan_adopted_from_the_drives_tags_is_a_known_limit() {
+fn regression_an_unhashed_orphan_keeps_its_tags() {
     use Action::*;
     use Event::*;
     for events in [
@@ -4505,12 +4557,7 @@ fn regression_an_unhashed_orphan_adopted_from_the_drives_tags_is_a_known_limit()
         ],
     ] {
         let limits = known_limits_narrow(&events);
-        // That case alone.
-        assert_eq!(limits.len(), 1, "{limits:?}");
-        assert!(
-            limits[0].starts_with("UnhashedOrphanAdopted") && limits[0].ends_with(" Red"),
-            "{limits:?}"
-        );
+        assert!(limits.is_empty(), "{limits:?}");
     }
 }
 
@@ -4660,4 +4707,25 @@ fn regression_an_add_whose_answer_was_superseded_is_a_known_limit() {
         limits[0].starts_with("AnswerSuperseded") && limits[0].ends_with(" Red"),
         "{limits:?}"
     );
+}
+
+/// A file being written (not hashed at the next plan) in a folder another app deletes
+/// outright: the folder isn't trashed with it, the file's edit comes up, and the folder comes
+/// back with it (its edits win). It was trashed here, and the edit lost.
+#[test]
+fn regression_a_file_being_written_keeps_its_folder() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(2, CreateFolder { parent: 0, name: 0 }),
+        act(2, CreateFile { parent: 6, name: 0 }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+        act(2, EditWriting { file: 0 }),
+        act(0, DeleteOutright { pick: 0 }),
+    ];
+    if let Err(e) = run(3, &events) {
+        panic!("{e}");
+    }
 }

@@ -4322,3 +4322,48 @@ fn a_restore_numbers_around_the_state_folder_name_at_a_sync_roots_top() -> R {
     }
     Ok(())
 }
+
+/// A confirmed delete of a folder that holds a file this device can't read yet: the folder's
+/// delete waits for it (sync semantics §6.3), and the confirmation lasts while it does, so
+/// once the file is read the delete goes through without asking again.
+#[cfg(unix)]
+#[test]
+fn a_confirmation_lasts_while_its_delete_waits_for_a_file() -> R {
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..6 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    b.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    // Three of b's files can't be read now, unchanged (a mode change): the folder's delete
+    // waits for them, and after, their trashes alone trip the guard.
+    let unread: Vec<_> = (0..3).map(|i| b.root.join(format!("d/f{i}.txt"))).collect();
+    for f in &unread {
+        fs::set_permissions(f, fs::Permissions::from_mode(0o000))?;
+    }
+    if fs::read(&unread[0]).is_ok() {
+        return Ok(()); // root reads anything: nothing to test
+    }
+    b.engine.scan_local()?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert!(report.held.is_empty(), "nothing held again: {report:?}");
+    assert!(b.root.join("d").is_dir(), "the folder's delete waits");
+    for f in &unread {
+        fs::set_permissions(f, fs::Permissions::from_mode(0o644))?;
+    }
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "not asked again: {report:?}");
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
+    Ok(())
+}

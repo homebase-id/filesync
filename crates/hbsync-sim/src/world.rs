@@ -519,7 +519,7 @@ impl Sim {
                 };
                 self.clients[c].local.insert(self.ids.fresh(), state);
             }
-            Action::Edit { file } => {
+            Action::Edit { file } | Action::EditWriting { file } | Action::Lock { file } => {
                 if files.is_empty() {
                     return;
                 }
@@ -528,6 +528,11 @@ impl Sim {
                 self.ledger.blob_superseded(state.content);
                 state.content = Some(self.new_blob());
                 self.clients[c].local.insert(node, state);
+                match action {
+                    Action::EditWriting { .. } => self.clients[c].writing.insert(node),
+                    Action::Lock { .. } => self.clients[c].locked.insert(node),
+                    _ => false,
+                };
             }
             Action::Move { node, parent, name } => {
                 if all.is_empty() {

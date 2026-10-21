@@ -23,7 +23,9 @@ const BASE: u32 = 13;
 /// `removed`, `kv`) is the account's; each synced folder has its rows in the other tables,
 /// with `folder` last in every key and index: a node's rows are found by id, a folder's listings
 /// by parent or file id, and a folder alone matches no index, so the planner (which has no
-/// statistics) never scans a whole folder for a lookup.
+/// statistics) never scans a whole folder for a lookup. The one exception is partial:
+/// `local_unhashed` holds a folder's files not hashed yet alone, and only a query with its
+/// condition reads it.
 const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
@@ -95,6 +97,9 @@ const SCHEMA: &str = r#"
     ) WITHOUT ROWID;
     CREATE INDEX local_file_id ON local(file_id, folder);
     CREATE INDEX local_key ON local(parent, name_key, folder);
+    -- The files not hashed yet (being written, locked, unreadable): every plan holds what they
+    -- are in (sync semantics §6.3). Few, and only they in it.
+    CREATE INDEX local_unhashed ON local(folder) WHERE hash IS NULL AND kind = 0;
 
     -- The client's copy of the live remote nodes (the remote side of the merge), the drive's
     -- whole tree.
@@ -347,6 +352,8 @@ const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;",
     // 18: each dirty mark's version: a plan clears only the marks it read.
     "ALTER TABLE dirty ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;",
+    // 19: the files not hashed yet, which every plan holds what they are in for.
+    "CREATE INDEX local_unhashed ON local(folder) WHERE hash IS NULL AND kind = 0;",
 ];
 
 /// The version this client makes and reads.
@@ -554,8 +561,11 @@ mod tests {
                 ));
             }
         }
-        // Without comments or layout.
-        for sql in names("SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name")? {
+        // Without comments or layout; a partial index's condition too.
+        let partial = "SELECT sql FROM sqlite_master WHERE type = 'index' AND sql LIKE '%WHERE%' \
+             ORDER BY name";
+        let triggers = "SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name";
+        for sql in names(partial)?.into_iter().chain(names(triggers)?) {
             let code = sql
                 .lines()
                 .map(|l| l.split("--").next().unwrap_or_default());

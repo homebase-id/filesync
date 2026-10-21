@@ -194,6 +194,11 @@ fn build(
     for &node in dirty {
         b.load(node)?;
     }
+    // The files not hashed yet, dirty or not, with what they are in on every side: what waits
+    // for them waits in every view alike (sync semantics §6.3). Hardly ever any.
+    for node in s.unhashed_files()? {
+        b.load(node)?;
+    }
     let mut coverage = Coverage::default();
     match full {
         None => {

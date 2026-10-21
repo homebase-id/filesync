@@ -3,7 +3,7 @@
 //! for the scope check (`breaches`, `planned_writable`), which the oracle records: it reads the
 //! engine's `Op`, which the oracle may not import.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -80,10 +80,10 @@ impl Sim {
             local_view.remove(n);
         }
         // A file not hashed yet is reported without content: the plan defers it.
-        for n in &client.unhashed {
-            if let Some(state) = local_view.get(*n).cloned() {
+        for n in client.unhashed_now() {
+            if let Some(state) = local_view.get(n).cloned() {
                 local_view.insert(
-                    *n,
+                    n,
                     NodeState {
                         content: None,
                         ..state
@@ -93,19 +93,18 @@ impl Sim {
         }
         // What the client can't hold of the tags is the drive's, as the engine's view has it.
         see_held_tags(client, &mut local_view, &remote);
+        // Of the items the scan reports (as the engine's view marks its rows).
+        let local_unhashed = client
+            .unhashed_now()
+            .filter(|n| local_view.contains(*n))
+            .collect();
         let mut input = Input {
             base: client.base.clone(),
             local: local_view,
             remote: remote.clone(),
             base_extra: client.extra.clone(),
             remote_complete: true,
-            // Of the items it holds (as the engine's view marks its rows).
-            local_unhashed: client
-                .unhashed
-                .iter()
-                .copied()
-                .filter(|n| client.local.contains(*n))
-                .collect(),
+            local_unhashed,
             ..Default::default()
         };
         // On the drive, in a version no client reads ([`Action::NewerFolder`]).
@@ -191,31 +190,8 @@ impl Sim {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
-        // The known limit: an item not hashed yet adopted from the drive's state, its tags
-        // written over (`Limit::UnhashedOrphanAdopted`).
-        let adopted: Vec<(NodeId, String)> = plan
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                Op::LocalTags { node, tags, .. } if input.local_unhashed.contains(node) => {
-                    let held = client.local.get(*node)?;
-                    Some(
-                        held.tags
-                            .iter()
-                            .filter(|t| tags.get(&t.name).is_none())
-                            .map(|t| (*node, t.name.clone()))
-                            .collect::<Vec<_>>(),
-                    )
-                }
-                _ => None,
-            })
-            .flatten()
-            .collect();
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
-        for (n, name) in &adopted {
-            self.ledger.tags.adopted_over(c, *n, name);
-        }
         if self.narrow_check && !self.ledger.found_narrow_differs() {
             self.narrow_rounds += 1;
             if self.narrow_rounds.is_multiple_of(4) {
@@ -224,6 +200,96 @@ impl Sim {
                 self.ledger.narrow_differs(|| what);
             }
         }
+        // The files here not hashed yet (as the engine's view holds them: a row without a state
+        // only waits), and the new ids of those the plan detaches (§10).
+        let unhashed: HashSet<NodeId> = input
+            .local_unhashed
+            .iter()
+            .copied()
+            .filter(|n| input.local.contains(*n))
+            .collect();
+        let detached: HashMap<NodeId, NodeId> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::LocalDetach { node, new_node } => Some((*node, *new_node)),
+                _ => None,
+            })
+            .collect();
+        // What waits for a hash, worked out on its own (sync semantics §6.3): every folder a
+        // file here not hashed yet is in, on any side, and every folder those are in, on the
+        // drive as this device sees it (what its filter leaves out is out of view); a detached
+        // item is a new one here, held where it is here only, under its new id.
+        let out_of_view = masked(&remote, &client.filter);
+        let mut held: HashSet<NodeId> = HashSet::new();
+        let mut queue: Vec<(NodeId, bool)> = unhashed
+            .iter()
+            .map(|n| (*n, !detached.contains_key(n)))
+            .collect();
+        while let Some((n, synced)) = queue.pop() {
+            let sides: &[(&Tree, bool)] = match synced {
+                true => &[(&input.local, false), (&remote, true), (&input.base, false)],
+                false => &[(&input.local, false)],
+            };
+            for (i, (tree, on_drive)) in sides.iter().enumerate() {
+                if *on_drive && out_of_view.contains(&n) {
+                    continue;
+                }
+                if let Some(s) = tree.get(n)
+                    && !s.parent.is_root()
+                    && !(*on_drive && out_of_view.contains(&s.parent))
+                    && held.insert(s.parent)
+                {
+                    // Reached here, a detached folder is its new item, here only; reached
+                    // through the drive or the base, its old node, on every side.
+                    let here = i == 0;
+                    queue.push((s.parent, !(here && detached.contains_key(&s.parent))));
+                }
+            }
+        }
+        // A detached folder held under both its ids.
+        let held: HashSet<NodeId> = held
+            .iter()
+            .filter_map(|n| detached.get(n).copied())
+            .chain(held.iter().copied())
+            .collect();
+        let old_of: HashMap<NodeId, NodeId> =
+            detached.iter().map(|(old, new)| (*new, *old)).collect();
+        // No plan touches a file here not hashed yet, or moves, renames or deletes what holds
+        // it, on any side.
+        self.ledger.moved_what_waits(|| {
+            let touched: HashSet<NodeId> = unhashed
+                .iter()
+                .map(|n| detached.get(n).copied().unwrap_or(*n))
+                .collect();
+            plan.ops
+                .iter()
+                .find(|op| {
+                    let node = op.node();
+                    // A detached item's place here is its old node's.
+                    let at = old_of.get(&node).copied().unwrap_or(node);
+                    let moved = |t: &Tree, parent: &NodeId, name: &str| {
+                        t.get(at)
+                            .is_some_and(|s| s.parent != *parent || s.name != name)
+                    };
+                    // A detach only gives the item here another id (§10): it stays as it is.
+                    let detach = matches!(op, Op::LocalDetach { .. });
+                    ((touched.contains(&node) || unhashed.contains(&node)) && !detach)
+                        || (held.contains(&node)
+                            && match op {
+                                Op::RemoteDelete { .. } => true,
+                                _ if op.trashes().is_some() => true,
+                                Op::LocalMove { parent, name, .. } => {
+                                    moved(&input.local, parent, name)
+                                }
+                                Op::RemoteUpdate { parent, name, .. } => {
+                                    moved(&remote, parent, name)
+                                }
+                                _ => false,
+                            })
+                })
+                .map(|op| format!("{}: {op:?} moves what waits for a hash", client.name))
+        });
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         if let Some(min) = self.guard {
@@ -237,7 +303,25 @@ impl Sim {
                         .count()
                 };
                 let (mut deleted, mut trashed) = (0, 0);
-                for op in plan.ops.iter().filter(|op| !confirmed.contains(&op.node())) {
+                // What was in a confirmed folder whose delete waits for a hash is confirmed:
+                // one synced, gone on a side (or taken along by a folder gone on the drive),
+                // holding a file here not hashed yet on any side.
+                let waits: HashSet<NodeId> = confirmed
+                    .iter()
+                    .copied()
+                    .filter(|f| {
+                        let gone = !input.local.contains(*f)
+                            || remote.path(*f).is_none()
+                            || out_of_view.contains(f);
+                        input.base.contains(*f) && gone && held.contains(f)
+                    })
+                    .collect();
+                let unconfirmed = |op: &&Op| {
+                    let node = op.node();
+                    !confirmed.contains(&node)
+                        && !input.base.ancestors(node).iter().any(|a| waits.contains(a))
+                };
+                for op in plan.ops.iter().filter(unconfirmed) {
                     match op {
                         Op::RemoteDelete { node, .. }
                             if remote.get(*node).is_some_and(|s| s.kind == NodeKind::File) =>
@@ -318,14 +402,22 @@ impl Sim {
             .map(|op| (op, true))
             .chain(waiting.into_iter().map(|op| (op, false)))
             .collect();
-        // A confirmation lasts while the plan deletes its node.
-        let deleting: HashSet<NodeId> = plan.ops.iter().filter_map(Op::deletes).collect();
+        // A confirmation lasts while the plan deletes its node, or its delete waits for a hash.
+        let deleting: HashSet<NodeId> = plan
+            .ops
+            .iter()
+            .filter_map(Op::deletes)
+            .chain(plan.delete_waits.iter().copied())
+            .collect();
         client.confirmed = confirmed.intersection(&deleting).copied().collect();
         client.held = plan.held.iter().map(Op::node).collect();
         if self.refusing {
             client.last_plan = ops.clone();
         }
         client.plan = ops.into_iter().map(|op| (op, 0)).collect();
+        // Written by the next plan (hashed then): the scan asks for it.
+        client.hashing = !client.writing.is_empty();
+        client.writing.clear();
         client.removed_by_plan.clear();
         client.unremoved.clear();
         // A plan made since sends what the user does from now on.

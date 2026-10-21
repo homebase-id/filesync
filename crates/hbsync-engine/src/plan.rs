@@ -484,6 +484,16 @@ pub struct Plan {
     pub clean: Vec<NodeId>,
     /// Dirty nodes that can't be decided yet (unhashed, unknown parent): keep them dirty.
     pub deferred: Vec<NodeId>,
+    /// Files here not hashed yet that something else waits for (a change the drive has of
+    /// them, or a folder they are in, or their name; sync semantics §6.3): read them, and plan
+    /// again. By the ids the store knows them by (a detached item's old one, unlike
+    /// `deferred`).
+    pub waiting: Vec<NodeId>,
+    /// Nodes whose delete (or trash) waits for a file in them not hashed yet (§6.3): a
+    /// confirmation of it lasts ([`Engine::confirm_deletes`]).
+    ///
+    /// [`Engine::confirm_deletes`]: crate::Engine::confirm_deletes
+    pub delete_waits: Vec<NodeId>,
     /// Folders whose names the plan judged without all their children in the input
     /// ([`Input::coverage`]): plan again with them covered in full.
     pub uncovered: BTreeSet<NodeId>,

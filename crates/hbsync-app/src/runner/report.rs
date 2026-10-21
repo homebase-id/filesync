@@ -43,6 +43,12 @@ pub(super) fn notes(
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
+    // A file that can't be read yet, which other changes wait for (sync semantics §6.3).
+    for (path, why) in &report.waiting {
+        notes.push(format!(
+            "{path}: can't be read yet ({why}), so changes around it wait till it can"
+        ));
+    }
     if report.full {
         notes.push(
             "Homebase is out of storage: new and changed files wait until there is room".into(),
@@ -283,7 +289,7 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
             path(*node)?
         ),
         Conflict::CopyWaits { node } => format!(
-            "{}: edited on two devices; a conflict copy is waiting for its folder",
+            "{}: edited on two devices; a conflict copy is waiting to be made",
             path(*node)?
         ),
     })

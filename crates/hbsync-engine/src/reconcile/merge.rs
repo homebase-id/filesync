@@ -50,9 +50,13 @@ impl Reconciler<'_> {
             .ids()
             .chain(i.local.ids())
             .chain(i.remote.ids())
-            .filter(|n| !i.dirty.contains(n) && !self.taken.contains(n))
+            .filter(|n| !i.dirty.contains(n) && (!self.taken.contains(n) || self.held.contains(n)))
             .collect();
         for node in ids {
+            if self.held.contains(&node) {
+                self.hold(node);
+                continue;
+            }
             if let Some(state) = i
                 .remote
                 .get(node)
@@ -62,6 +66,55 @@ impl Reconciler<'_> {
                 self.merged.insert(node, state.clone());
             }
         }
+    }
+
+    /// Leaves held `node` ([`super::held`]) as it is on both sides: out of the plan's scope
+    /// (nothing done to it, dirty still), where it is here (else as the base has it, else the
+    /// drive), so that its folder here stays and its name is taken.
+    pub(super) fn hold(&mut self, node: NodeId) {
+        let i = self.input;
+        if i.dirty.contains(&node) {
+            self.deferred.insert(node);
+        }
+        let state = self
+            .local_state(node)
+            .or_else(|| i.base.get(node).cloned())
+            .or_else(|| i.remote.get(node).cloned());
+        if let Some(state) = state {
+            self.merged.insert(node, state);
+        }
+    }
+
+    /// Whether `node`'s merge would make a conflict copy: a file edited on both sides, not
+    /// alike, as [`Reconciler::merge_both`] decides.
+    fn would_fork(&self, node: NodeId) -> bool {
+        let (Some(l), Some(r)) = (self.local_state(node), self.input.remote.get(node)) else {
+            return false;
+        };
+        let edited = |c: Change| match c {
+            Change::Changed { edited, .. } => edited,
+            Change::Created => true,
+            _ => false,
+        };
+        l.kind == NodeKind::File
+            && edited(self.local_change(node))
+            && edited(self.remote_change(node))
+            && !same_edit(&l, r)
+    }
+
+    /// Whether held folder `node` may go to `target` ([`super::held`]): it stays where it is
+    /// on each side it is on, and isn't gone from one it was on (a delete, or its undoing).
+    /// Making it where it isn't yet, and its tags, may go.
+    fn stays_put(&self, node: NodeId, target: Option<&NodeState>) -> bool {
+        let i = self.input;
+        let Some(t) = target else {
+            return false;
+        };
+        let remote = i.remote.get(node).filter(|_| !self.taken.contains(&node));
+        let gone = i.base.contains(node) || i.removed.contains_key(&node);
+        [self.local_state(node).as_ref(), remote]
+            .into_iter()
+            .all(|side| side.map_or(!gone, |s| s.same_place(t)))
     }
 
     pub(super) fn content_state(&self, node: NodeId) -> ContentState {
@@ -144,6 +197,14 @@ impl Reconciler<'_> {
 
     pub(super) fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
+        if self.held_as_is(node) {
+            // Waiting for a name, and it would fork: its conflict copy waits, told so.
+            if self.waits.contains(&node) && self.would_fork(node) {
+                self.plan.conflicts.push(Conflict::CopyWaits { node });
+            }
+            self.hold(node);
+            return;
+        }
         if i.local_unhashed.contains(&node) {
             self.defer(node);
             return;
@@ -213,6 +274,15 @@ impl Reconciler<'_> {
                 r.tags.clone()
             };
         }
+        if self.held.contains(&node) && !self.stays_put(node, target.as_ref()) {
+            if target.is_none() {
+                self.plan.delete_waits.push(node);
+            }
+            self.plan.conflicts.retain(|c| c.node() != node);
+            self.drop_fork(node);
+            self.hold(node);
+            return;
+        }
         self.scope.insert(node);
         self.origin.insert(node, origin);
         match target {
@@ -253,10 +323,7 @@ impl Reconciler<'_> {
         }
         let mut origin = Origin::Remote;
         if l.kind == NodeKind::File {
-            let same_edit = match (&l.content, &r.content) {
-                (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
-                _ => false,
-            };
+            let same_edit = same_edit(l, r);
             if l_edited && r_edited && !same_edit {
                 // Keep both: the remote version keeps the node, the local bytes become a copy.
                 let base_version = self.input.base_extra.get(&node).and_then(|e| e.version);
@@ -281,5 +348,14 @@ impl Reconciler<'_> {
             }
         }
         (Some(target), origin)
+    }
+}
+
+/// Whether both sides hold the same bytes, executable alike: an edit on both sides that isn't a
+/// conflict.
+fn same_edit(l: &NodeState, r: &NodeState) -> bool {
+    match (&l.content, &r.content) {
+        (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
+        _ => false,
     }
 }

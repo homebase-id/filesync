@@ -58,6 +58,8 @@ pub(crate) struct Masks {
     pub names: HashMap<NodeId, HashSet<String>>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
+    /// `detached` the other way round: a new id's old one.
+    stored: HashMap<NodeId, NodeId>,
     /// The input as the merge sees it, if anything is masked: masked nodes left out of the
     /// remote tree, detached items under their new ids (and dirty), every masked node with a
     /// base or a local item dirty.
@@ -65,6 +67,11 @@ pub(crate) struct Masks {
 }
 
 impl Masks {
+    /// The id the store knows `node` by: a detached item's old id (§10), else its own.
+    pub(crate) fn store_id(&self, node: NodeId) -> NodeId {
+        self.stored.get(&node).copied().unwrap_or(node)
+    }
+
     pub(crate) fn of(
         input: &Input,
         masking: Masking<'_>,
@@ -235,6 +242,7 @@ impl Masks {
             keep_alive,
             brought_back,
             names,
+            stored: detached.iter().map(|(old, new)| (*new, *old)).collect(),
             detached,
             input: Some(view),
         }

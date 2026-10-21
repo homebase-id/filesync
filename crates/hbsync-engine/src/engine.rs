@@ -5,9 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
+use hbsync_local::{
+    CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan,
+};
+use hbsync_platform::RelPath;
 use hbsync_remote::Remote;
-use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
+use hbsync_state::{DirtyCursor, Mark, ReadTx, StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -66,6 +69,22 @@ impl EngineConfig {
     }
 }
 
+/// The rows of `nodes` here, each with the path the user knows it by (a parked item's
+/// original one).
+fn waiting_rows(
+    s: &ReadTx<'_>,
+    nodes: &[NodeId],
+) -> Result<Vec<(hbsync_state::LocalRow, RelPath)>, StateError> {
+    let mut rows = Vec::new();
+    for &node in nodes {
+        if let Some(row) = s.local_by_node(node)? {
+            let shown = view::parked_place(s, &row)?.unwrap_or_else(|| row.path.clone());
+            rows.push((row, shown));
+        }
+    }
+    Ok(rows)
+}
+
 /// What start-up did.
 #[derive(Debug)]
 pub struct StartupReport {
@@ -100,6 +119,9 @@ pub struct SyncReport {
     /// Operations not sent because the drive refused them as they are ([`crate::refused`]),
     /// with why: they wait for a change, an hour, or Sync now.
     pub refused: Vec<(Op, String)>,
+    /// Files here not hashed yet (locked, being written, unreadable) that other changes wait
+    /// for (sync semantics §6.3), as paths, with why they couldn't be read.
+    pub waiting: Vec<(String, String)>,
     /// Work is left that another try may do: the sweep was cut short by the round limit, or
     /// operations were skipped or failed with nodes still pending. Deletes held for a
     /// confirmation never count: another try doesn't let them through.
@@ -127,6 +149,7 @@ impl SyncReport {
         self.synced.extend(later.synced);
         self.full = later.full;
         self.refused.extend(later.refused);
+        self.waiting.extend(later.waiting);
         self.unfinished = later.unfinished;
     }
 }
@@ -149,6 +172,12 @@ pub struct Engine {
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
     /// that can't be hashed yet isn't read again every round).
     rescanned: std::collections::HashSet<NodeId>,
+    /// The files the current sweep found something waiting for, that couldn't be read
+    /// ([`SyncReport::waiting`]).
+    waiting: Vec<(String, String)>,
+    /// The files waited for that this sync pass read already, and why those it couldn't read
+    /// couldn't: each read once a pass.
+    read_once: std::collections::HashMap<NodeId, Option<String>>,
     /// What a sync that failed had done before ([`Engine::take_unreported`]).
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
@@ -205,6 +234,8 @@ impl Engine {
             progress: Arc::default(),
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
+            waiting: Vec::new(),
+            read_once: Default::default(),
             unreported: None,
         })
     }
@@ -226,8 +257,10 @@ impl Engine {
     }
 
     /// Lets the held deletes of `nodes` (those of [`SyncReport::held`] the user was shown)
-    /// through, until they are done or undone. Deletes of other nodes are judged as before:
-    /// one the user didn't see is never let through by a confirmation.
+    /// through, until they are done or undone (a delete waiting for a file not hashed yet
+    /// lasts, and what was in such a folder goes with it: [`Plan::delete_waits`]). Deletes of
+    /// other nodes are judged as before: one the user didn't see is never let through by a
+    /// confirmation.
     pub fn confirm_deletes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
         self.confirmed.extend(nodes);
     }
@@ -360,6 +393,8 @@ impl Engine {
         let mut report = SyncReport::default();
         self.progress.reset();
         self.rescanned.clear();
+        self.waiting.clear();
+        self.read_once.clear();
         self.unreported = None;
         match self.sync_into(date, pulled, &mut report) {
             Ok(()) => Ok(report),
@@ -463,8 +498,9 @@ impl Engine {
             }
             after = next;
             if dirty.len() < self.cfg.batch {
-                // End of a sweep.
+                // End of a sweep: what it held, and what waits now.
                 report.held = std::mem::take(&mut held);
+                report.waiting = std::mem::take(&mut self.waiting);
                 swept = true;
                 after = None;
                 if !progress {
@@ -475,6 +511,7 @@ impl Engine {
         }
         if !swept {
             report.held = held;
+            report.waiting.append(&mut self.waiting);
         }
         // A sync cut short by the round limit leaves the rest of the sweep to the next one (the
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
@@ -515,6 +552,73 @@ impl Engine {
             rescan_dirs(&mut self.db, &self.cfg.folder.root, &dirs, &self.scan_opts)?;
         }
         Ok(())
+    }
+
+    /// Something in `plan` waits for files here not hashed yet (sync semantics §6.3): those
+    /// unchanged since the scan that couldn't read them (locked, unreadable: one still changing
+    /// is read by the scan its change brings) are read now, each once a sync pass, and `dirty`
+    /// planned again if that hashed one or found another change. What still waits is told, by name (`waiting`). Costs nothing unless
+    /// something waits; then a row and a stat a file, an open (or a read) and a small write of
+    /// each unchanged one, and, if that hashed or found a change, one more plan.
+    fn read_waiting(
+        &mut self,
+        plan: Plan,
+        dirty: &[NodeId],
+        opts: &Options,
+    ) -> Result<Plan, EngineError> {
+        if plan.waiting.is_empty() {
+            return Ok(plan);
+        }
+        let root = &self.cfg.folder.root;
+        let fresh: Vec<NodeId> = plan
+            .waiting
+            .iter()
+            .copied()
+            .filter(|n| !self.read_once.contains_key(n))
+            .collect();
+        let rows = self.db.read(|s| waiting_rows(s, &fresh))?;
+        let unchanged: Vec<(NodeId, RelPath)> = rows
+            .into_iter()
+            .filter(|(row, _)| {
+                // Its bytes as the scan saw them: size and mtime (a lock, or a mode change,
+                // moves ctime at most).
+                hbsync_platform::meta::stat(&row.path.to_native(root))
+                    .is_ok_and(|m| row.fingerprint.same_after_rename(&m))
+            })
+            .map(|(row, _)| (row.node, row.path))
+            .collect();
+        for node in fresh {
+            self.read_once.insert(node, None);
+        }
+        let mut plan = plan;
+        if !unchanged.is_empty() {
+            let paths: Vec<RelPath> = unchanged.iter().map(|(_, p)| p.clone()).collect();
+            let scan = rescan_entries(&mut self.db, root, &[], &paths, &self.scan_opts)?;
+            // A read that failed again marks its node dirty again and records nothing new:
+            // planned again only for a hash or another change found.
+            if scan.hashed > 0 || scan.dirty > scan.unhashed.len() {
+                plan = self.plan(dirty, opts)?;
+            }
+            for (path, why) in scan.unhashed {
+                if let Some((node, _)) = unchanged.iter().find(|(_, p)| *p == path) {
+                    self.read_once.insert(*node, Some(why));
+                }
+            }
+        }
+        if !plan.waiting.is_empty() {
+            let rows = self.db.read(|s| waiting_rows(s, &plan.waiting))?;
+            for (row, shown) in rows {
+                let why = self.read_once.get(&row.node).cloned().flatten();
+                let told = (
+                    shown.to_string(),
+                    why.unwrap_or_else(|| "being written".into()),
+                );
+                if !self.waiting.contains(&told) {
+                    self.waiting.push(told);
+                }
+            }
+        }
+        Ok(plan)
     }
 
     /// Plans `dirty` from a view of what the rules may need ([`view::build_narrow`]), again
@@ -566,14 +670,20 @@ impl Engine {
         self.rescan_records()?;
         recover_placements(&mut self.db, &self.cfg.folder)?;
         let plan = self.plan(&dirty, opts)?;
+        let plan = self.read_waiting(plan, &dirty, opts)?;
         #[cfg(feature = "testkit")]
         if let Some(after) = &self.cfg.after_plan {
             (after.0)();
         }
-        // A confirmation lasts while its node's plan deletes it: one whose delete was undone
-        // (the file back) is forgotten, so a later delete is judged anew.
-        let deleting: std::collections::HashSet<NodeId> =
-            plan.ops.iter().filter_map(Op::deletes).collect();
+        // A confirmation lasts while its node's plan deletes it, or its delete waits for a
+        // file in it not hashed yet (§6.3): one whose delete was undone (the file back) is
+        // forgotten, so a later delete is judged anew.
+        let deleting: std::collections::HashSet<NodeId> = plan
+            .ops
+            .iter()
+            .filter_map(Op::deletes)
+            .chain(plan.delete_waits.iter().copied())
+            .collect();
         for node in &dirty {
             if !deleting.contains(node) {
                 self.confirmed.remove(node);
