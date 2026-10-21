@@ -196,7 +196,8 @@ of this schema may define some of them.)
   parent back first, and one whose parent is gone for good comes back as it was, an orphan
   the computers move into Recovered files (see above). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
-  meanwhile gets ` (restored)`.
+  meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive or of a
+  role folder (each computer's own state folder there, never synced).
 - **The purge**, the one rule for deleting for good (a user emptying Recently deleted follows
   it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
   rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.
@@ -341,6 +342,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-21: a restore never brings a node back as `.hbsync` (any case) at the top of the
+  drive or of a role folder: it takes ` (restored)` there, as a name taken.
 - 2026-10-21: a computer keeps a row it can't read (one that doesn't decrypt, a newer
   writer's, a change of `fileType`, now not read) as there: what is in such a folder is no
   longer moved into Recovered files, and an edit of a node whose newer version it can't read
