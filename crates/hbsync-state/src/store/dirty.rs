@@ -122,22 +122,21 @@ impl ReadTx<'_> {
     }
 
     /// Synced files among the dirty nodes that are gone locally (and would be deleted
-    /// remotely), and those gone remotely (would be trashed locally); the nodes of held deletes
-    /// out of the dirty set ([`FolderTx::hold_delete`]) left out, counted by
-    /// [`ReadTx::held_file_deletes`]. Online-only files have no local copy by design and don't
-    /// count. Used by the mass-delete guard, which must see the whole delete, not one planning
-    /// batch.
+    /// remotely), and those gone remotely (would be trashed locally). Online-only files have
+    /// no local copy by design and don't count. Used by the mass-delete guard, which must see
+    /// the whole delete, not one planning batch: with [`ReadTx::held_file_deletes`].
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
         // From the dirty set (CROSS JOIN keeps it outer): not a scan of every base row.
-        self.file_deletes(
-            "dirty d WHERE d.folder = $F AND NOT EXISTS \
-             (SELECT 1 FROM held_deletes h WHERE h.folder = $F AND h.id = d.id)",
-        )
+        self.file_deletes("dirty d WHERE d.folder = $F")
     }
 
-    /// [`ReadTx::pending_file_deletes`] of the nodes of held deletes out of the dirty set.
+    /// [`ReadTx::pending_file_deletes`] of the nodes of held deletes out of the dirty set
+    /// ([`FolderTx::hold_delete`]), but those dirty again.
     pub fn held_file_deletes(&self) -> Result<(u64, u64)> {
-        self.file_deletes("held_deletes d WHERE d.folder = $F")
+        self.file_deletes(
+            "held_deletes d WHERE d.folder = $F AND NOT EXISTS \
+             (SELECT 1 FROM dirty k WHERE k.folder = $F AND k.id = d.id)",
+        )
     }
 
     /// Synced files among the nodes `from` (`<table> d WHERE ...`) that are gone locally, and

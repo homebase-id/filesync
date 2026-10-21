@@ -308,13 +308,13 @@ const SCHEMA: &str = r#"
     -- Per folder: nodes of deletes the mass-delete guard holds for the user (sync semantics
     -- §7), out of the dirty set until answered: not planned again every sync. Back in it, all
     -- of them, when a plan's view reaches one, on an answer, and at each engine's first sync.
+    -- No trigger into `gone`: a node leaves only back into the dirty set (or with its folder,
+    -- its base going too).
     CREATE TABLE held_deletes (
         folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
         id     INTEGER NOT NULL,
         PRIMARY KEY (id, folder)
     ) WITHOUT ROWID;
-    CREATE TRIGGER held_deletes_gone AFTER DELETE ON held_deletes
-        BEGIN INSERT INTO gone VALUES (old.id); END;
 "#;
 
 /// Migrations after [`BASE`]: the first takes a DB from `BASE` to `BASE + 1`.
@@ -370,9 +370,7 @@ const MIGRATIONS: &[&str] = &[
         folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
         id     INTEGER NOT NULL,
         PRIMARY KEY (id, folder)
-    ) WITHOUT ROWID;
-    CREATE TRIGGER held_deletes_gone AFTER DELETE ON held_deletes
-        BEGIN INSERT INTO gone VALUES (old.id); END;",
+    ) WITHOUT ROWID;",
 ];
 
 /// The version this client makes and reads.

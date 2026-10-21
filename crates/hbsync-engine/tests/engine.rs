@@ -5002,3 +5002,32 @@ fn held_deletes_here_go_once_the_limit_lets_them() -> R {
     assert_eq!(live, 1 + 4 + 1 + 24, "keep, its files, more, its files");
     Ok(())
 }
+
+/// A held delete planned over several pages leaves the dirty set whole at the end of the sync
+/// (each page sees the others' nodes as context, as before), and stays out. (Loose files: a
+/// folder's delete over several pages is review 14's R1, apart.)
+#[test]
+fn a_held_delete_over_several_pages_stays_out() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| {
+        cfg.guard.min = 2;
+        cfg.batch = 2;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    for i in 0..4 {
+        fs::remove_file(a.root.join(format!("f{i}.txt")))?;
+    }
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 4, "{report:?}");
+    assert_eq!(a.engine.db().read(|s| s.held_delete_count())?, 4);
+    for _ in 0..2 {
+        let report = a.engine.sync("2026-10-08", false)?;
+        assert_eq!((report.rounds, report.held.len()), (0, 4), "{report:?}");
+    }
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 5);
+    Ok(())
+}

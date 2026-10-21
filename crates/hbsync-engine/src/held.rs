@@ -1,7 +1,8 @@
 //! The guard's held deletes out of the dirty set (sync semantics §7). A hold lasts until the
-//! user answers, so what it holds isn't planned again every sync: those nodes are kept in the
-//! store's held deletes ([`hbsync_state::FolderTx::hold_delete`]), the deletes in memory, shown
-//! with every sync's report, and their files counted by the guard as if planned with each plan
+//! user answers, so what it holds isn't planned again every sync: a sync that ends with nothing
+//! dirty but held deletes keeps those nodes in the store's held deletes
+//! ([`hbsync_state::FolderTx::hold_delete`]), the deletes in memory, shown with every sync's
+//! report, and their files counted by the guard as if planned with each plan
 //! ([`crate::Options::held_files`]). They are planned again, all of them, when a plan's view
 //! reaches one of them (something changed in, above or beside them: planned together, as
 //! before), on an answer, at the engine's first sync (a restart, a new setting), and once the
@@ -60,13 +61,14 @@ pub fn files<'p>(plan: &Plan, ops: impl IntoIterator<Item = &'p Op>) -> (usize, 
         .fold((0, 0), |(here, there), (h, t)| (here + h, there + t))
 }
 
-/// Whether `input` (a plan's view) holds any of `out`, the nodes out of the dirty set: what
-/// is planned from it may depend on them, so they are planned with it. A view that holds none
-/// of them plans as one with them dirty would (their deletes held, counted through
-/// [`crate::Options::held_files`]).
+/// Whether `input` (a plan's view) holds any of `out`, the nodes out of the dirty set, or plans
+/// one dirty again (whatever is left of it): what is planned from it may depend on them, so
+/// they are planned with it. A view that holds none of them plans as one with them dirty would
+/// (their deletes held, counted through [`crate::Options::held_files`]).
 pub fn touches(input: &Input, out: &HashSet<NodeId>) -> bool {
     let has = |n: &NodeId| {
-        input.base.contains(*n)
+        input.dirty.contains(n)
+            || input.base.contains(*n)
             || input.local.contains(*n)
             || input.remote.contains(*n)
             || input.removed.contains_key(n)
@@ -75,8 +77,10 @@ pub fn touches(input: &Input, out: &HashSet<NodeId>) -> bool {
     match out.len() < input.dirty.len() {
         true => out.iter().any(has),
         false => input
-            .base
-            .ids()
+            .dirty
+            .iter()
+            .copied()
+            .chain(input.base.ids())
             .chain(input.local.ids())
             .chain(input.remote.ids())
             .chain(input.removed.keys().copied())
