@@ -2,13 +2,39 @@
 
 use super::*;
 
+/// A dirty node as a round read it with its page ([`ReadTx::dirty_marks`]): its mark's version.
+/// A change of the drive's picture moves the version of a node dirty already
+/// ([`ReadTx::mark_changed_in`]): another engine's pull or an announcement may record one while
+/// a folder's round plans, and the round clears only the mark it read ([`FolderTx::clear_mark`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark {
+    pub node: NodeId,
+    /// `nodes.id`.
+    id: i64,
+    pub version: u64,
+}
+
 impl ReadTx<'_> {
     // ---- dirty set ----
 
-    /// Marks the node with integer id `id` dirty in folder `folder`.
+    /// Marks the node with integer id `id` dirty in folder `folder`, as the folder's own engine
+    /// does (its scan, its runs): never while its own round plans, so a node dirty already stays
+    /// as it is (no write).
     pub(super) fn mark_dirty_in(&self, folder: i64, id: i64) -> Result<()> {
         self.prep("INSERT OR IGNORE INTO dirty (folder, id) VALUES (?1, ?2)")?
             .execute([folder, id])?;
+        Ok(())
+    }
+
+    /// [`ReadTx::mark_dirty_in`] for a change of the drive's picture (`fan_out`), which may
+    /// come while the folder's round plans: a node dirty already has its mark's version moved
+    /// on (a row written), so that round doesn't clear it.
+    pub(super) fn mark_changed_in(&self, folder: i64, id: i64) -> Result<()> {
+        self.prep(
+            "INSERT INTO dirty (folder, id) VALUES (?1, ?2) \
+             ON CONFLICT (id, folder) DO UPDATE SET seq = seq + 1",
+        )?
+        .execute([folder, id])?;
         Ok(())
     }
 
@@ -22,30 +48,37 @@ impl ReadTx<'_> {
             .is_some())
     }
 
-    /// Up to `limit` dirty nodes in id order, starting after `after`, and the cursor for the
-    /// next page: successive pages visit the whole set, so nodes that stay dirty can't keep the
-    /// others waiting. Ids are never reused, so a cursor stays valid whatever happens to its
-    /// node.
-    pub fn dirty_page(
+    /// Up to `limit` dirty nodes in id order, starting after `after`, each with its [`Mark`],
+    /// and the cursor for the next page: successive pages visit the whole set, so nodes that
+    /// stay dirty can't keep the others waiting. Ids are never reused, so a cursor stays valid
+    /// whatever happens to its node.
+    pub fn dirty_marks(
         &self,
         after: Option<DirtyCursor>,
         limit: usize,
-    ) -> Result<(Vec<NodeId>, Option<DirtyCursor>)> {
+    ) -> Result<(Vec<Mark>, Option<DirtyCursor>)> {
         let mut stmt = self.prep(
-            "SELECT d.id, n.uuid FROM dirty d JOIN nodes n ON n.id = d.id \
+            "SELECT d.id, n.uuid, d.seq FROM dirty d JOIN nodes n ON n.id = d.id \
              WHERE d.folder = $F AND d.id > ?1 ORDER BY d.id LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![after.map_or(0, |c| c.0), limit as i64], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Vec<u8>>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?;
-        let mut nodes = Vec::new();
-        let mut last = None;
+        let mut marks = Vec::new();
         for row in rows {
-            let (id, uuid) = row?;
-            nodes.push(codec::node(&uuid)?);
-            last = Some(DirtyCursor(id));
+            let (id, uuid, seq) = row?;
+            marks.push(Mark {
+                node: codec::node(&uuid)?,
+                id,
+                version: seq as u64,
+            });
         }
-        Ok((nodes, last))
+        let last = marks.last().map(|m| DirtyCursor(m.id));
+        Ok((marks, last))
     }
 
     /// Local rows of dirty nodes that have neither a base nor a mirror row: what adoption may
@@ -156,6 +189,14 @@ impl FolderTx<'_> {
             ))?
             .execute([top.0.as_bytes()])?;
         }
+        Ok(())
+    }
+
+    /// Clears `mark`, its node's dirty mark as a round read it, unless the mark moved on since
+    /// (a change of the drive's picture recorded meanwhile): that one stays, for the next.
+    pub fn clear_mark(&self, mark: Mark) -> Result<()> {
+        self.prep("DELETE FROM dirty WHERE folder = $F AND id = ?1 AND seq = ?2")?
+            .execute(params![mark.id, mark.version as i64])?;
         Ok(())
     }
 

@@ -4148,3 +4148,73 @@ fn a_trash_that_stops_half_way_drops_the_bases_of_what_went() -> R {
     );
     Ok(())
 }
+
+/// A pull that commits between a round's plan and its clearing of the marks the plan found
+/// clean (another folder's engine, or an announcement) marks a node again that is dirty
+/// already: the clear leaves that mark, so the change it brought is planned.
+#[test]
+fn a_change_pulled_between_plan_and_clear_is_planned() -> R {
+    use hbsync_engine::testkit::AfterPlan;
+
+    type Then = Box<dyn FnOnce() + Send>;
+    // f.txt's header on the drive, live.
+    fn f_txt(server: &Mutex<hbsync_remote::fake::FakeServer>) -> RemoteHeader {
+        let server = server.lock().expect("server");
+        let live = server.live().find(|h| {
+            matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. }
+                if content.name == "f.txt")
+        });
+        live.cloned().expect("f.txt")
+    }
+
+    let server = server();
+    // What runs once, after the next plan.
+    let then: Arc<Mutex<Option<Then>>> = Arc::default();
+    let hook = {
+        let then = Arc::clone(&then);
+        AfterPlan(Arc::new(move || {
+            let then = then.lock().ok().and_then(|mut t| t.take());
+            if let Some(then) = then {
+                then();
+            }
+        }))
+    };
+    let mut a = Client::with_config(&server, "a", move |cfg| {
+        cfg.after_plan = Some(hook.clone());
+        // The pull lands between the narrow plan and the whole one too.
+        cfg.check_narrow = false;
+    })?;
+    a.write("keep.txt", "k")?;
+    a.write("f.txt", "one")?;
+    a.sync()?;
+    // f.txt dirty, with nothing to do: the plan finds it clean.
+    let node = f_txt(&server).node().ok_or("removed")?;
+    a.engine.db().write(|s| s.folder().mark_dirty(node))?;
+    // Then another computer moves f.txt to Recently deleted, and this account pulls that.
+    let (b, drive, at) = (
+        FakeRemote::new(server.clone()),
+        Arc::clone(a.engine.drive()),
+        f_txt(&server),
+    );
+    *then.lock().map_err(|_| "poisoned")? = Some(Box::new(move || {
+        let target = Target {
+            at: at.at(),
+            token: at.token.clone(),
+        };
+        b.set_removed(&[target], true).expect("b removes it");
+        drive.pull(None).expect("the pull");
+    }));
+    a.sync_unasked()?;
+    assert!(
+        then.lock().map_err(|_| "poisoned")?.is_none(),
+        "the pull came"
+    );
+    assert!(
+        a.engine.db().read(|s| s.is_dirty(node))?,
+        "the pull's mark stays"
+    );
+    // Planned at the next sweep of the dirty set.
+    a.sync_unasked()?;
+    assert!(!a.root.join("f.txt").exists(), "{:?}", a.tree_text(""));
+    Ok(())
+}

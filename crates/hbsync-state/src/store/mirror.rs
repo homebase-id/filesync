@@ -133,7 +133,7 @@ impl ReadTx<'_> {
         let id = self.key_or_insert(node)?;
         let marked: std::collections::BTreeSet<i64> = match &*folders {
             [only] => {
-                self.mark_dirty_in(only.id, id)?;
+                self.mark_changed_in(only.id, id)?;
                 self.touched.borrow_mut().insert(only.id);
                 return Ok(());
             }
@@ -157,7 +157,7 @@ impl ReadTx<'_> {
             }
         };
         for &folder in &marked {
-            self.mark_dirty_in(folder, id)?;
+            self.mark_changed_in(folder, id)?;
         }
         self.touched.borrow_mut().extend(marked);
         Ok(())
