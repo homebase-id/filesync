@@ -2289,9 +2289,8 @@ fn a_folder_taken_over_whose_tag_write_fails_claims_nothing() -> R {
 }
 
 /// A folder made again finds one there unknown to the sync, tagged t, and takes it: what it
-/// held before the write is t, not nothing. Its write leaves t (the drive holds t too): t didn't
-/// change, so the base keeps its own (none) rather than take t for the write's; the next plan
-/// finds both sides holding it.
+/// held before the write is t, not nothing. Its write leaves t, and the drive holds t too: both
+/// sides hold it, and the base records it (the write changed it or not).
 #[test]
 fn a_folder_taken_over_holds_its_tags_before_the_write() -> R {
     let mut h = Harness::new()?;
@@ -2335,7 +2334,7 @@ fn a_folder_taken_over_holds_its_tags_before_the_write() -> R {
         })),
     }])?;
     assert_eq!(report.done, 1, "{report:?}");
-    assert_eq!(h.base(node)?.map(|b| b.state.tags), Some(Tags::default()));
+    assert_eq!(h.base(node)?.map(|b| b.state.tags), Some(t));
     Ok(())
 }
 
@@ -3937,5 +3936,45 @@ fn a_narrow_view_leaves_a_removed_folder_in_the_role_folder_alone() -> R {
         "{:?}",
         plan.ops
     );
+    Ok(())
+}
+
+/// A download put where no item is (the node's item went: forked into a conflict copy, say)
+/// is a new item: its base's tags start afresh, from what it was given and the version holds.
+/// The old base kept a tag the version dropped (Red, which the item never held), and the next
+/// plan read the item's lack of it as this user's removal: sent up, it removed another
+/// device's add of Red made since.
+#[test]
+fn a_download_where_no_item_is_starts_its_tags_afresh() -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.folder.root) {
+        return Ok(()); // no tags here
+    }
+    let (node, at) = h.seed("f", b"B")?;
+    let red = Tags::new(vec![Tag::new("Red", 6)]);
+    let synced = NodeState {
+        tags: red,
+        ..NodeState::file(NodeId::ROOT, "f", h.content(b"A"))
+    };
+    h.db.write(|s| {
+        s.folder()
+            .put_base(&BaseRow::new(node, synced, some_version()))
+    })?;
+    let drive = DriveVersion {
+        state: NodeState::file(NodeId::ROOT, "f", h.content(b"B")),
+        at,
+        base_at: None,
+    };
+    h.run(vec![Op::LocalDownload {
+        node,
+        parent: NodeId::ROOT,
+        name: "f".into(),
+        replace: false,
+        tags: Tags::default(),
+        drive: Some(Box::new(drive)),
+    }])?;
+    assert_eq!(fs::read(h.folder.root.join("f"))?, b"B");
+    let base = h.base(node)?.ok_or("no base")?;
+    assert_eq!(base.state.tags, Tags::default(), "Red isn't the new item's");
     Ok(())
 }

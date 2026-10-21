@@ -651,24 +651,25 @@ mod tests {
         })
     }
 
-    /// A write's tags go into the base as written, tag by tag: what it changed that the version
-    /// it acted on holds so (work added, blue removed); not what it changed that the version
-    /// holds otherwise (red, in another colour), nor what it didn't change (old stays as the
-    /// base has it, though the version dropped it).
+    /// A write's tags go into the base where the version it acted on holds them as written,
+    /// tag by tag, whether the write changed them or not: work added, blue removed, same (held
+    /// before, and by the version); gone, which the base had and neither side holds (the item
+    /// placed where none was never held it). Not what the version holds otherwise (red, in
+    /// another colour): old stays as the base has it, though the version dropped it.
     #[test]
     fn the_base_records_what_a_write_changed() {
         let tag = |n: &str, c: u8| hbsync_types::Tag::new(n, c);
-        let base = Tags::new([tag("Blue", 0), tag("Old", 0)]);
-        let before = Tags::new([tag("Blue", 0), tag("Old", 0)]);
-        let written = Tags::new([tag("Old", 0), tag("Red", 1), tag("Work", 0)]);
-        let acted = Tags::new([tag("Red", 2), tag("Work", 0)]);
+        let base = Tags::new([tag("Blue", 0), tag("Gone", 0), tag("Old", 0)]);
+        let before = Tags::new([tag("Blue", 0), tag("Old", 0), tag("Same", 0)]);
+        let written = Tags::new([tag("Old", 0), tag("Red", 1), tag("Same", 0), tag("Work", 0)]);
+        let acted = Tags::new([tag("Red", 2), tag("Same", 0), tag("Work", 0)]);
         let wrote = TagWrite::Wrote {
             before: &before,
             written: &written,
         };
         assert_eq!(
             wrote.settle(&base, &written, &acted),
-            Tags::new([tag("Old", 0), tag("Work", 0)])
+            Tags::new([tag("Old", 0), tag("Same", 0), tag("Work", 0)])
         );
         assert_eq!(TagWrite::Nothing.settle(&base, &written, &acted), base);
     }

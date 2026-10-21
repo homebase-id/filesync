@@ -542,8 +542,8 @@ pub enum TagWrite<'a> {
 impl TagWrite<'_> {
     /// The base's tags after the write, from the base's `base` (none without one), the item
     /// read as `local`, against the drive's version it acted on (`acted`). A tag the write
-    /// changed takes the written value where the version holds it (both sides do then); every
-    /// other tag keeps the base's.
+    /// left as the version holds it takes that value, held or not (both sides hold it so
+    /// then); every other tag keeps the base's.
     pub fn settle(self, base: &Tags, local: &Tags, acted: &Tags) -> Tags {
         match self {
             TagWrite::Agreed => Tags::agreed(base, local, acted),
@@ -557,7 +557,10 @@ impl TagWrite<'_> {
                     .collect();
                 Tags::new(names.into_iter().filter_map(|name| {
                     let w = written.get(name);
-                    let recorded = before.get(name) != w && w == acted.get(name);
+                    // Whether the write changed it or not: an item placed where none was (the
+                    // node's went) never held the base's tags, and a tag the base keeps that
+                    // neither side holds reads as a change of the side that lacks it.
+                    let recorded = w == acted.get(name);
                     if recorded { w } else { base.get(name) }.cloned()
                 }))
             }
